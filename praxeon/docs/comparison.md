@@ -28,7 +28,7 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 | **Filesystem for agents** | — | — | pluggable local/sandboxed/remote |
 | **Evals** | **—** | built in | — |
 | **Observability** | `aion/log` structured fields only | tracing/metrics as a product surface | LangSmith-adjacent |
-| **Cost / rate / auth ceiling** | **per-session cost + call cap, Ed25519-signed grants, metering** (#172); rate limiting and injection posture still open | — | — |
+| **Cost / rate / auth ceiling** | **per-session cost + call cap, Ed25519-signed grants, metering** (pre-publication issue 172), **capability-scoped tool assembly** (#90); rate limiting still open, and each agent has to opt in to the injection mitigation | — | — |
 | **Streaming to the browser** | polling; SSE blocked on #117 M2 | streaming | streaming |
 | **Typed core** | **Coalton, Hindley–Milner** | TypeScript types | Python type hints |
 | **Ships with a web framework** | **hyperion** | bring Next.js/React | bring your own |
@@ -40,12 +40,12 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 
 ## Weaknesses, in the order I would fix them
 
-**1. Cost ceiling: done. Rate limiting and injection posture: not (#172).** This was the only
-*blocker* on the list, and the expensive half of it now exists — a per-session token and call
-cap carried in an Ed25519-signed grant the application mints, enforced as an **enter stage**
-so a refusal happens *before* the model call rather than being discovered after paying for
-it, with usage metered per model per *(user, group)* and returned in-band so the agent needs
-no database credential.
+**1. Cost ceiling: done. Capability-scoped tools: done (#90). Rate limiting: not
+(pre-publication issue 172).** This was the only *blocker* on the list, and the expensive half
+of it now exists — a per-session token and call cap carried in an Ed25519-signed grant the
+application mints, enforced as an **enter stage** so a refusal happens *before* the model call
+rather than being discovered after paying for it, with usage metered per model per *(user,
+group)* and returned in-band so the agent needs no database credential.
 
 Two things are deliberately still missing, and the honest thing is to keep naming them:
 
