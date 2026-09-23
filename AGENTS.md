@@ -110,6 +110,19 @@ define it.
   The signature of a deletion is a **doubled space** where the span closed up, which is greppable
   in published text; the absence itself is not. Three symbol names were removed from a #160
   comment this way and the paragraph still scanned as prose.
+- **A closing keyword closes the issue number right after it, whatever the rest of the
+  sentence says, and only that one.** When a pull request merges, GitHub closes every issue
+  whose number directly follows `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
+  `resolve`, `resolves` or `resolved` in the pull-request body or in a merged commit message.
+  It does not read the words around them. "This does not close #161" in #179's body closed
+  #161 when #179 merged, and #161 had to be reopened. The keyword also covers only the first
+  number of a list: a body reading "Closes #A and #B" closes A and leaves B open, which kept
+  pre-publication issue 448 open for a month after its fix merged. To mention an issue without
+  closing it, write "part of #N" or "step one of #N". To close several, repeat the keyword
+  for each one. Before merging, `gh pr view <N> --json closingIssuesReferences` lists the
+  issues GitHub has linked for closing; compare it with what the pull request is meant to
+  close. After the merge, read the state of every issue the pull request names, because a
+  keyword in a commit message can close an issue that list did not show.
 
 ## The board
 
