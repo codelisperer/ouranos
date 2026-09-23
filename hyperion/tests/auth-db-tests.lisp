@@ -185,7 +185,7 @@ disagree on result-key case, so match the column name case-insensitively."
                               (bt:make-thread (lambda () (auth:grant-role a id r :actor "test"))
                                               :name (format nil "grant-~A" r)))
                             roles)))
-      (mapc #'bt:join-thread threads)
+      (aion/test-threads:join-all threads)
       (let ((final (%roles-of a id)))
         (is (= (length roles) (length final)) "every grant must survive: got ~S" final)
         (dolist (r roles)

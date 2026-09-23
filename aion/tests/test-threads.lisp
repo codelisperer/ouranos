@@ -1,0 +1,48 @@
+;;;; test-threads.lisp --- waiting for a thread a test started, with a deadline.
+;;;;
+;;;; A plain join waits forever, so a thread that never finished would hold the whole test
+;;;; run until CI killed the job, and the log would not say which test was waiting (#178).
+;;;; These wait at most a deadline and then signal an error that names the thread, so the
+;;;; test that started it fails by name and the run continues.
+;;;;
+;;;; In aion because aion is the one framework every other may depend on: the test systems
+;;;; of aion, hyperion and praxeon all wait for threads, and each used to do it without a
+;;;; deadline (or, in hyperion's server-uv suite, with a private copy of this).
+
+(cl:defpackage #:aion/test-threads
+  (:use #:cl)
+  (:export #:join #:join-all #:+default-timeout+))
+
+(in-package #:aion/test-threads)
+
+(defparameter +default-timeout+ 20
+  "Seconds JOIN and JOIN-ALL wait by default. Longer than any single request or operation
+a test is expected to make, so a thread that is merely slow finishes first.")
+
+(defun %join-by (thread deadline timeout)
+  (let ((left (max 0 (/ (- deadline (get-internal-real-time))
+                        internal-time-units-per-second))))
+    (multiple-value-bind (value outcome)
+        (sb-thread:join-thread thread :timeout left :default nil)
+      (case outcome
+        (:timeout (error "the thread ~A did not finish within ~D seconds"
+                         (sb-thread:thread-name thread) timeout))
+        ;; An aborted thread has no value to return. A plain join signals an error here too.
+        (:abort (error "the thread ~A ended without returning a value"
+                       (sb-thread:thread-name thread)))
+        (t value)))))
+
+(defun join (thread &key (timeout +default-timeout+))
+  "Wait for THREAD and return its value. Signal an error naming it if it has not finished
+after TIMEOUT seconds, or if it ended without returning a value."
+  (%join-by thread
+            (+ (get-internal-real-time) (* timeout internal-time-units-per-second))
+            timeout))
+
+(defun join-all (threads &key (timeout +default-timeout+))
+  "Wait for every thread in THREADS and return their values in order. TIMEOUT is one
+deadline for the whole group, not one per thread, so fifty threads still give up after
+TIMEOUT seconds. Signal an error naming the first thread that has not finished by then, or
+that ended without returning a value."
+  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+    (mapcar (lambda (thread) (%join-by thread deadline timeout)) threads)))

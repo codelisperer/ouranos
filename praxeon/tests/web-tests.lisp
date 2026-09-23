@@ -154,7 +154,7 @@ would hide behind a poll."
                :responder (lambda (agent message locale)
                             (declare (ignore agent message locale))
                             "hello"))))
-    (sb-thread:join-thread (web::%run-turn-async conv "hi" nil))
+    (aion/test-threads:join (web::%run-turn-async conv "hi" nil))
     (format nil "~{~A~}" (web::%drain-bubbles conv))))
 
 (test starting-the-surface-does-not-change-the-image-s-output-style

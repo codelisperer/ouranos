@@ -171,7 +171,7 @@
   ;; precisely the seam BETWEEN them -- hyperion/server:start choosing and starting this
   ;; backend. A suite that could not load both could not test the join.
   :depends-on ("hyperion/server-uv" "hyperion" "aion/pool" "aion/uv"  ; server-uv-tests.lisp calls pool: and uv:
-               "fiveam" (:require "sb-bsd-sockets"))
+               "fiveam" "aion/test-threads" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/server-uv-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/server-uv/tests :run-tests)))
@@ -354,7 +354,7 @@
   :description "Integration tests for the identity store (in-memory SQLite)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/auth-db" "mnemosyne" "fiveam" "bordeaux-threads")  ; auth-db-tests.lisp calls mnemosyne: directly
+  :depends-on ("hyperion/auth-db" "mnemosyne" "fiveam" "bordeaux-threads" "aion/test-threads")  ; auth-db-tests.lisp calls mnemosyne: directly
   :serial t
   :components ((:file "tests/auth-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/auth-db/tests :run-tests)))
@@ -421,7 +421,7 @@
 (defsystem "hyperion/tests"
   :description "Test suite for Hyperion."
   :depends-on ("hyperion" "hyperion/import" "aion/log"   ; suite, csrf and logging tests call log:
-               "fiveam"
+               "fiveam" "aion/test-threads"
                "sb-bsd-sockets"    ; server-tests: a free port, and "is it listening?"
                ;; TEST-ONLY: an in-memory octet input stream, to hand BODY-STRING a body
                ;; without a socket (pre-publication issue 211). Already present transitively via clack --

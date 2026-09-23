@@ -503,9 +503,17 @@
                              (:file "clock"))))
   :in-order-to ((test-op (test-op "aion/clock/tests"))))
 
+(defsystem "aion/test-threads"
+  :description "Test support: wait for a thread a test started, with a deadline that fails the test by name."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; No dependencies: sb-thread ships with SBCL. Used by the test systems of aion, hyperion
+  ;; and praxeon (#178); aion is the one framework all of them may depend on.
+  :components ((:file "tests/test-threads")))
+
 (defsystem "aion/clock/tests"
   :description "Tests for aion/clock: id shape, strict monotonicity under concurrency, and v6 lexical sort order."
-  :depends-on ("aion/clock" "fiveam")
+  :depends-on ("aion/clock" "fiveam" "aion/test-threads")
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -578,7 +586,7 @@
 
 (defsystem "aion/dynamic/tests"
   :description "Tests for aion/dynamic, and the tree-wide thread-spawn sweep (#158)."
-  :depends-on ("aion/dynamic" "aion/log" "fiveam")
+  :depends-on ("aion/dynamic" "aion/log" "fiveam" "aion/test-threads")
   :serial t
   :components ((:module "tests"
                 :serial t
