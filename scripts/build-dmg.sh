@@ -217,7 +217,18 @@ ln -s /Applications "$STAGE/Applications"
 
 mkdir -p "$OUT"
 rm -f "$DMG"
-hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+# -size is explicit. The first run of this script on the GitHub macos-14 runner failed with
+# "create failed - No space left on device" (desktop-release run 35933536980). Without
+# -size, hdiutil sizes the image itself from -srcfolder, and too small an estimate is one
+# cause of that error; a full disk is the other. The size given is a quarter over the
+# staged size, plus 20 MB for the filesystem's own structures. If creation still fails, the
+# free space is printed, so that a full disk shows up as one.
+SIZE_MB=$(( $(du -sm "$STAGE" | cut -f1) * 5 / 4 + 20 ))
+hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$STAGE" -size "${SIZE_MB}m" -ov -format UDZO "$DMG" >/dev/null || {
+  echo "build-dmg: hdiutil create failed for a ${SIZE_MB} MB image; free space:" >&2
+  df -h "$OUT" "$STAGE" >&2
+  exit 1
+}
 
 echo "build-dmg: $DMG"
 echo "build-dmg: $(du -h "$DMG" | cut -f1)"
