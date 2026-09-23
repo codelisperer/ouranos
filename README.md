@@ -197,13 +197,13 @@ this page and the tree, stated rather than left to be discovered.
 | **cons** | **alpha** — the bootstrap seed and the per-project task runner work; the full `build/test/serve/run` CLI *(in progress)* | 629 |
 | **mnemosyne** | **alpha** — DDL-as-data, a CL-DBI shell over the typed backend, exercised against **both SQLite and a real Postgres**. Six design questions still open | 852 |
 | **hermes** | **alpha** — email + SMS with signature-verified inbound, a content-addressed blob store, and payments behind a neutral protocol with a Stripe backend | 440 |
-| **praxeon** | **alpha** — actor loop, provider-neutral LLM, translator, per-agent models, a web/REST surface, and cost/rate/auth ceilings (`budget-guard`, `meter`, `capability-guard`) | 485 |
+| **praxeon** | **alpha** — actor loop, provider-neutral LLM, translator, per-agent models, a web/REST surface, and cost/rate/auth ceilings (`budget-guard`, `meter`, `capability-guard`) | 489 |
 | **elenchon** | **design only** — the typed CEG ADT and five ADRs exist; the reasoning engine *(in progress)* | 46 |
 | **klio** | **scaffold** *(in progress)* — a satellite the site program instantiates; the system loads and the suite guards that, and nothing else is built yet | 169 |
 | **hades** | **planned** *(in progress)* — a charter ADR and nothing else; blocked on `aion/windows/service`, which does not exist yet | 0 |
 | **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 109 |
 
-Counts above are from the Linux CI leg at `065bb44`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `a75f77c`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.

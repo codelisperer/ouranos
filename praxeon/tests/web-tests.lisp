@@ -24,7 +24,8 @@
   (:local-nicknames (#:web #:praxeon/web)
                     (#:srv #:hyperion/server)
                     (#:out #:hyperion/output)
-                    (#:actor #:praxeon/actor))
+                    (#:actor #:praxeon/actor)
+                    (#:llm #:praxeon/llm))
   (:export #:praxeon-web))
 
 (cl:in-package #:praxeon/web/tests)
@@ -199,3 +200,54 @@ than as an error."
           "a :compact app renders elements adjacent ON THE TURN THREAD: ~S" compact)
       (is (not (search "><div" pretty))
           "and a :pretty app separates them, so the first is not merely always-true: ~S" pretty))))
+
+;;; --------------------------------------------------------------------------
+;;; The token counter counts all four token counts (part of #161)
+;;; --------------------------------------------------------------------------
+;;;
+;;; Driven through a real turn: `%run-turn-async' installs the counter as the turn's observer,
+;;; the default responder runs `actor:run-turn', and a provider answers with a completion that
+;;; carries the counts. So the numbers reach the counter by the same route as in the app.
+
+(defclass counted-provider (llm:provider)
+  ((completion :initarg :completion :reader counted-provider-completion))
+  (:documentation "A provider that answers with a completion the test built, counts and all."))
+
+(defmethod llm:complete ((p counted-provider) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (counted-provider-completion p))
+
+(defun %tokens-after-turn (completion)
+  "Run one web turn whose provider answers with COMPLETION. Return the conversation's total
+and this turn's count, as the page would show them."
+  (let ((conv (web::make-conversation
+               :agent (actor:make-agent
+                       :name "counted"
+                       :provider (make-instance 'counted-provider :completion completion)))))
+    ;; Bounded, with no :default, so a hung turn signals JOIN-THREAD-ERROR and fails the
+    ;; test that ran it by name, instead of hanging the whole gate (the bound #177 uses).
+    (sb-thread:join-thread (web::%run-turn-async conv "hi" nil) :timeout 20)
+    (values (web::%get-tokens conv) (web::%get-turn-tokens conv))))
+
+(test the-counter-includes-cache-tokens
+  "A turn that reported 100 input, 20 output, 900 cache-read and 7 cache-write tokens processed
+1027 tokens. Before this change the counter showed 120, so a turn served mostly from the cache
+looked nearly free."
+  (multiple-value-bind (total turn)
+      (%tokens-after-turn (llm:make-completion :text "ok" :stop-reason :end
+                                               :input-tokens 100 :output-tokens 20
+                                               :cache-read-tokens 900 :cache-write-tokens 7))
+    (is (= 1027 total) "the conversation total counted ~D tokens, not 1027" total)
+    (is (= 1027 turn) "this turn counted ~D tokens, not 1027" turn)))
+
+(test a-turn-reporting-only-cache-tokens-is-counted
+  "A completion that reports only cache counts emits a :usage event since #179. The counter
+used to add nothing for it, so the page showed no count at all."
+  (is (= 512 (%tokens-after-turn (llm:make-completion :text "ok" :stop-reason :end
+                                                      :cache-read-tokens 512)))))
+
+(test a-turn-without-cache-tokens-counts-as-before
+  "The control: with no cache counts reported, the counter is input plus output, as it was."
+  (is (= 120 (%tokens-after-turn (llm:make-completion :text "ok" :stop-reason :end
+                                                      :input-tokens 100 :output-tokens 20)))))
