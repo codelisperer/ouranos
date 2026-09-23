@@ -52,7 +52,28 @@ inheriting the original's source."
 (def-suite memory-db :description "Observational memory in a database, with similarity.")
 (in-suite memory-db)
 
-(defun run-tests () (run! 'memory-db))
+(defun run-tests ()
+  "Run the suite, report its Postgres coverage for the gate, and return T on success.
+
+Every test here uses Postgres, through WITH-STORE. Without MNEMOSYNE_TEST_PG_URL they all
+skip, and a suite whose checks skip reports no failures, which reads as a pass. So this
+prints a BACKEND-CHECKS line, the format scripts/verify-tree.lisp reads from mnemosyne's
+suite: the number of checks that ran, or SKIPPED with the reason. The gate then fails the
+run, or lists the gap under NOT COVERED when OURANOS_ALLOW_NO_PG excuses it (#171).
+
+The number is every check that ran while Postgres was configured. That includes one check
+that does not need it (that the in-memory store has no RECALL-SIMILAR method), so it is one
+more than the checks that touched the database. The gate only asks whether it is above zero.
+FIVEAM::TEST-SKIPPED is internal; FiveAM exports no way to tell a skip from a result."
+  (let* ((url (%pg-url))
+         (results (run 'memory-db)))
+    (explain! results)
+    (if url
+        (format t "~&BACKEND-CHECKS postgres ~D~%"
+                (count-if-not (lambda (r) (typep r 'fiveam::test-skipped)) results))
+        (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
+    (finish-output)
+    (results-status results)))
 
 ;;; --- a deterministic embedder ----------------------------------------------
 
@@ -106,8 +127,11 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
 
 The store's width comes from the injected provider, so a 4-wide test embedder produces a
 4-wide column. A DEFSCHEMA could not have expressed that without knowing the deployment."
-  (let ((store-ddl (with-store (store) (mdb::store-ddl store))))
-    (when store-ddl
+  ;; The checks are INSIDE WITH-STORE. When Postgres is absent it skips and returns FiveAM's
+  ;; skip object; bound outside, that object was tested for truth and then passed to SOME,
+  ;; which is how the suite errored instead of skipping (#171).
+  (with-store (store)
+    (let ((store-ddl (mdb::store-ddl store)))
       (is (some (lambda (s) (search "vector(4)" s)) store-ddl)
           "the CREATE TABLE must size the column from the embedder, got:~%~{~A~%~}" store-ddl)
       (is (some (lambda (s) (search "vector_cosine_ops" s)) store-ddl)
