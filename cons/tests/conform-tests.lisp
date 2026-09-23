@@ -5,6 +5,17 @@
 (def-suite conform :description "The AI-conformance pack installer." :in all)
 (in-suite conform)
 
+(defun %clear-read-only (dir)
+  "On Windows, clear the read-only attribute on everything under DIR.
+
+Git writes its object files read-only, and Windows refuses to delete a read-only file, so a
+temp directory in which a test made a commit could not be removed. Elsewhere a read-only file
+in a writable directory can be deleted, so there is nothing to do."
+  (when (uiop:os-windows-p)
+    (uiop:run-program (list "attrib" "-R" (concatenate 'string (uiop:native-namestring dir) "*")
+                            "/S" "/D")
+                      :output nil :error-output nil :ignore-error-status t)))
+
 (defmacro with-temp-dir ((var) &body body)
   "Bind VAR to a fresh, uniquely-named temp directory pathname; remove it after."
   (let ((name (gensym)))
@@ -12,6 +23,7 @@
             (,var (ensure-directories-exist
                    (merge-pathnames ,name (uiop:temporary-directory)))))
        (unwind-protect (progn ,@body)
+         (%clear-read-only ,var)
          (uiop:delete-directory-tree ,var :validate t :if-does-not-exist :ignore)))))
 
 (defun %exists (root rel) (probe-file (merge-pathnames rel root)))
@@ -67,21 +79,41 @@
 ;;; exercised in BOTH directions -- one that refuses everything and one that refuses
 ;;; nothing are indistinguishable if you only ever run the failing case.
 ;;;
-;;; `uiop:os-unix-p' is a RUNTIME test on purpose. A reader conditional would be fine here,
-;;; but the executable bit is checked by running `test -x' rather than by naming an
-;;; sb-posix symbol, for the reason packages.lisp gives: a literal sb-posix symbol is
-;;; resolved by the READER and takes the whole test system with it on a build without it.
+;;; THE HOOK IS RUN BY GIT, THROUGH A REAL COMMIT, on every platform (#143). These tests used
+;;; to run the file directly and skipped on Windows, on the grounds that that needs a POSIX sh
+;;; and an executable bit. Git for Windows runs hooks through its own sh, so the rule was
+;;; enforced on Windows and tested only on Linux and macOS. Committing in a temporary
+;;; repository is also how the hook runs in real use, which running the file directly was not.
 
-(defun %hook-path (root) (merge-pathnames ".githooks/commit-msg" root))
+(defun %git-checked (root &rest args)
+  "Run git in ROOT for fixture setup and signal if it fails, so a broken fixture cannot pass
+for a working one."
+  (let ((code (nth-value 2 (uiop:run-program
+                            (list* "git" "-C" (uiop:native-namestring root) args)
+                            :output nil :error-output nil :ignore-error-status t))))
+    (unless (zerop code)
+      (error "fixture setup failed: git ~{~a~^ ~} exited ~a" args code))))
 
-(defun %run-hook (root message)
-  "Run the installed commit-msg hook over MESSAGE; return its exit code."
-  (let ((msg-file (merge-pathnames "COMMIT_EDITMSG" root)))
+(defun %conform-repo (root)
+  "Make ROOT a repository with its own identity, then install the pack into it, so the
+installer arms the hook and stages it the way it does for a real project."
+  (%git-checked root "init" "-q")
+  (%git-checked root "config" "user.name" "Hook Test")
+  (%git-checked root "config" "user.email" "hook-test@example.invalid")
+  (%git-checked root "config" "commit.gpgsign" "false")
+  (cons/conform:install-conformance root)
+  root)
+
+(defun %commit-exit (root message)
+  "Commit MESSAGE in ROOT with `git commit --allow-empty' and return git's exit code: 0 when
+the commit-msg hook accepts it, 1 when the hook refuses it."
+  (let ((msg-file (merge-pathnames "commit-message.txt" root)))
     (with-open-file (s msg-file :direction :output :if-exists :supersede
                                 :if-does-not-exist :create)
       (write-string message s))
-    (nth-value 2 (uiop:run-program (list (uiop:native-namestring (%hook-path root))
-                                         (uiop:native-namestring msg-file))
+    (nth-value 2 (uiop:run-program (list "git" "-C" (uiop:native-namestring root)
+                                         "commit" "--allow-empty" "-q"
+                                         "-F" (uiop:native-namestring msg-file))
                                    :ignore-error-status t
                                    :output nil :error-output nil))))
 
@@ -95,28 +127,33 @@
       (is (search "even when your" agents)))))
 
 (test the-commit-msg-hook-ships-with-the-spec-and-is-executable
+  ;; The mode that matters is the one git RECORDS, because that is what a clone checks out.
+  ;; On Windows `git add' records a new file as 100644 whatever the disk says, and a clone
+  ;; then skips the hook in silence (#143). Reading the index checks the same thing on every
+  ;; platform, where `test -x' only checked this machine's disk.
   (with-temp-dir (root)
-    (cons/conform:install-conformance root)
+    (%conform-repo root)
     (is (%exists root ".githooks/commit-msg"))
-    (if (uiop:os-unix-p)
-        (is (= 0 (nth-value 2 (uiop:run-program
-                               (list "test" "-x" (uiop:native-namestring (%hook-path root)))
-                               :ignore-error-status t)))
-            "a hook without the executable bit is skipped by git in silence: no hook at all")
-        (skip "the executable bit is a POSIX notion; Git for Windows runs hooks through sh"))))
+    ;; What a user does next. On Windows a plain `git add' of a new file records 100644, and
+    ;; it keeps whatever mode an already-staged file has, so this checks that the mode the
+    ;; installer staged survives the user's own add.
+    (%git-checked root "add" "-A")
+    (let* ((staged (%git-in root "ls-files" "-s" ".githooks/commit-msg"))
+           (mode (subseq staged 0 (min 6 (length staged)))))
+      (is (string= "100755" mode)
+          "the hook must be recorded as 100755 so a clone runs it; git ls-files -s says: ~S"
+          staged))))
 
 (test the-hook-refuses-an-ai-trailer-and-passes-everything-else
-  (if (not (uiop:os-unix-p))
-      (skip "running the hook needs a POSIX sh and an executable bit")
-      (with-temp-dir (root)
-        (cons/conform:install-conformance root)
-        ;; Passes: an ordinary message.
-        (is (= 0 (%run-hook root (format nil "feat: a clean message~%"))))
-        ;; Refuses: whatever the assistant is called, in whatever case.
-        (is (= 1 (%run-hook root (format nil "feat: work~%~%Co-Authored-By: Claude <x@anthropic.com>~%"))))
-        (is (= 1 (%run-hook root (format nil "fix: work~%~%co-authored-by: GPT-5 <x@openai.com>~%"))))
-        ;; The `^' anchor earns its keep: prose ABOUT the rule is not a trailer.
-        (is (= 0 (%run-hook root (format nil "docs: say why we add no Co-Authored-By trailer~%")))))))
+  (with-temp-dir (root)
+    (%conform-repo root)
+    ;; Passes: an ordinary message.
+    (is (= 0 (%commit-exit root (format nil "feat: a clean message~%"))))
+    ;; Refuses: whatever the assistant is called, in whatever case.
+    (is (= 1 (%commit-exit root (format nil "feat: work~%~%Co-Authored-By: Claude <x@anthropic.com>~%"))))
+    (is (= 1 (%commit-exit root (format nil "fix: work~%~%co-authored-by: GPT-5 <x@openai.com>~%"))))
+    ;; The `^' anchor earns its keep: prose ABOUT the rule is not a trailer.
+    (is (= 0 (%commit-exit root (format nil "docs: say why we add no Co-Authored-By trailer~%"))))))
 
 
 ;;; --- arming (#the hook that refuses nothing) --------------------------------
@@ -224,26 +261,22 @@ asserting the old answer. The fixture has to match the real caller's order."
   ;; The footer pattern was unanchored, so the commit introducing the hook was refused by
   ;; the hook, for saying what it refuses. A guard that cannot tell description from
   ;; violation punishes exactly the people who write the documentation.
-  (if (uiop:os-windows-p)
-      (skip "running the hook needs a POSIX sh and an executable bit")
-      (with-temp-dir (root)
-        (cons/conform:install-conformance root)
-        (is (= 0 (%run-hook root (format nil "docs: explain why we strip the Generated with [Claude Code] footer~%"))))
-        (is (= 0 (%run-hook root (format nil "docs: a commit must not carry Co-Authored-By for an AI~%"))))
-        ;; ...and the real footer, at the start of a line, still refused.
-        (is (= 1 (%run-hook root (format nil "feat: work~%~%Generated with [Claude Code](https://claude.com/claude-code)~%")))))))
+  (with-temp-dir (root)
+    (%conform-repo root)
+    (is (= 0 (%commit-exit root (format nil "docs: explain why we strip the Generated with [Claude Code] footer~%"))))
+    (is (= 0 (%commit-exit root (format nil "docs: a commit must not carry Co-Authored-By for an AI~%"))))
+    ;; ...and the real footer, at the start of a line, still refused.
+    (is (= 1 (%commit-exit root (format nil "feat: work~%~%Generated with [Claude Code](https://claude.com/claude-code)~%"))))))
 
 (test the-hook-refuses-the-harness-pull-request-boilerplate-too
   ;; The trailer is not the only thing a harness injects; it also appends a `Generated
   ;; with Claude Code' line to pull-request bodies, which lands in a commit message
   ;; whenever someone squash-merges with the PR body as the message.
-  (if (uiop:os-windows-p)
-      (skip "running the hook needs a POSIX sh and an executable bit")
-      (with-temp-dir (root)
-        (cons/conform:install-conformance root)
-        (is (= 1 (%run-hook root (format nil "feat: work~%~%Generated with [Claude Code](https://claude.com/claude-code)~%"))))
-        ;; Both directions: a human co-author is not an AI, and must still commit.
-        (is (= 0 (%run-hook root (format nil "feat: work~%~%Co-Authored-By: Bob Calco <bob@example.com>~%")))))))
+  (with-temp-dir (root)
+    (%conform-repo root)
+    (is (= 1 (%commit-exit root (format nil "feat: work~%~%Generated with [Claude Code](https://claude.com/claude-code)~%"))))
+    ;; Both directions: a human co-author is not an AI, and must still commit.
+    (is (= 0 (%commit-exit root (format nil "feat: work~%~%Co-Authored-By: Bob Calco <bob@example.com>~%"))))))
 
 (test claude-md-stays-light-and-defers-to-agents-md
   ;; CLAUDE.md is always loaded, so it carries pointers rather than a second copy of the

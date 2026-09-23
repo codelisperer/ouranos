@@ -27,9 +27,10 @@
 A git hook without it is not a weaker hook, it is NO hook: git skips a non-executable file
 silently, so the mode is the wiring rather than a cosmetic detail.
 
-Windows: Git for Windows ignores the mode and runs hooks through sh, so there is nothing to
-set -- and naming sb-posix:chmod there would be a READ error rather than a run-time one, the
-same platform axis as %CREATE-EXCLUSIVELY in tempdir.lisp."
+Windows: Git for Windows ignores the mode on disk and runs hooks through sh, so there is
+nothing to set here -- and naming sb-posix:chmod there would be a READ error rather than a
+run-time one, the same platform axis as %CREATE-EXCLUSIVELY in tempdir.lisp. The mode a
+CLONE receives is a separate matter, recorded in the index; see %STAGE-HOOK-EXECUTABLE."
   (declare (ignorable path))
   #+unix (sb-posix:chmod (uiop:native-namestring path) #o755)
   nil)
@@ -84,6 +85,21 @@ was told to run the config command as step 1 and correctly refused."
              ((string/= configured "") (values :foreign configured))
              (t (git "config" "core.hooksPath" ".githooks")
                 (values :armed ".githooks")))))))))
+
+(defun %stage-hook-executable (root)
+  "Stage .githooks/commit-msg in ROOT's repository with mode 100755. Returns T on success.
+
+The executable bit on disk is not what a clone receives: git records a mode in the index,
+and a clone checks the hook out with that mode. On Windows, where Git for Windows defaults to
+core.fileMode=false, `git add' records a new file as 100644 whatever the disk says, so a
+project generated there committed its hook as non-executable and every Linux or macOS clone
+skipped it without a word (#143, measured on Windows 11). `--chmod=+x' sets the recorded mode
+directly and behaves the same on every platform. Call it only where %ARM-HOOKS found that ROOT
+is the top of its own repository."
+  (zerop (nth-value 2 (uiop:run-program
+                       (list "git" "-C" (uiop:native-namestring root)
+                             "update-index" "--add" "--chmod=+x" ".githooks/commit-msg")
+                       :output nil :error-output nil :ignore-error-status t))))
 
 (defun %emit (root relpath content &key force executable)
   "Write CONTENT to ROOT/RELPATH, creating dirs. Skip (and report) if it exists and not
@@ -445,6 +461,12 @@ Existing files are skipped unless FORCE. Returns ROOT."
       ;; and a hook that never runs is worse than none -- it reads as enforcement.
       (when (%emit root ".githooks/commit-msg" *commit-msg-hook* :force force :executable t)
         (multiple-value-bind (status detail) (%arm-hooks root)
+          ;; Whenever ROOT is its own repository, record the hook as executable, including
+          ;; when another hook manager owns core.hooksPath: the mode is what a clone gets.
+          (when (member status '(:armed :already :foreign))
+            (if (%stage-hook-executable root)
+                (format t "         staged .githooks/commit-msg as executable (mode 100755)~%")
+                (format t "         could not stage .githooks/commit-msg; run: git add --chmod=+x .githooks/commit-msg~%")))
           (ecase status
             (:armed   (format t "         armed: core.hooksPath=~a~%" detail))
             (:already (format t "         already armed (core.hooksPath=~a)~%" detail))
@@ -453,6 +475,8 @@ Existing files are skipped unless FORCE. Returns ROOT."
             (:no-hook (format t "         NOT ARMED: ~a.~%" detail))
             (:no-repo (format t "         NOT ARMED: ~a.~%" detail)
                       (format t "         After git init: git config core.hooksPath .githooks~%")
+                      (format t "         and: git add --chmod=+x .githooks/commit-msg (on Windows a plain~%")
+                      (format t "         git add records the hook as non-executable, and clones skip it).~%")
                       (format t "         Arm it only once .githooks/commit-msg exists -- git does not~%")
                       (format t "         check the path, and an empty one also bypasses .git/hooks.~%"))))))
     (when (member :cursor tools)
