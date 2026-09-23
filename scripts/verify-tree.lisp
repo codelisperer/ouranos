@@ -111,6 +111,11 @@
 (load (merge-pathnames "fiveam-report.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; The NOT COVERED section (#182). Split out for the same reason as the two above, so a test
+;;; can hand the printer known inputs; REPORT-NOT-COVERED below passes it this run's state.
+(load (merge-pathnames "not-covered.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; Building the native webview launcher (pre-publication issue 410, #13). Shared with bootstrap.lisp, which builds
 ;;; the launcher too, so there is one copy of how it is built and where the binary goes.
 (load (merge-pathnames "view-launcher.lisp"
@@ -416,34 +421,10 @@ directly is what every other line of this file already does."
 OURANOS_ALLOW_NO_PG. Filled while the suites run; REPORT-NOT-COVERED lists them.")
 
 (defun report-not-covered ()
-  "What this run could have covered and did not.
-
-Printed ALWAYS, including when nothing was declined -- on the PLATFORM block's principle.
-A block that appears only when there is bad news teaches readers that its absence means
-nothing happened, and absence is precisely what they cannot distinguish from silence.
-
-NOT \"caller's choice\" ANY MORE, which was the heading until pre-publication issue 410. `uv' is off only when
-somebody chooses; `view' is off when a host has no C++ toolchain, when the 9 MB SDK fetch had
-no network, or when the caller said skip -- three causes, one of them a choice. A heading
-that named the cause was fine while there was one cause. Each entry now says its own.
-
-A SKIPPED POSTGRES IS LISTED HERE TOO, when OURANOS_ALLOW_NO_PG excused it (#171). Without
-the excuse the run fails, so this only happens on a run that passed. Until this was added,
-such a run printed \"nothing declined\" here while suites that need Postgres had skipped
-their checks, and the only sign was one NOTE line in the summary."
-  (format t "~%========== NOT COVERED ==========~%")
-  (let ((declined (axes-declined)))
-    (if (null declined)
-        (if *postgres-excused*
-            (format t "  every optional axis ran (~a), but Postgres did not:~%" (axes-tag))
-            (format t "  nothing declined -- every optional axis ran (~a)~%" (axes-tag)))
-        (dolist (entry declined)
-          (destructuring-bind (name pred disclose) entry
-            (declare (ignore pred))
-            (funcall disclose name)))))
-  (dolist (cell (reverse *postgres-excused*))
-    (format t "  off     postgres in ~a~34t~a~%" (car cell) (cdr cell))
-    (format t "          OURANOS_ALLOW_NO_PG excused it. Its Postgres checks did not run and are NOT in the total below.~%")))
+  "What this run could have covered and did not: this run's state, printed by
+OURANOS-NOT-COVERED:PRINT-NOT-COVERED (scripts/not-covered.lisp), whose docstring says what
+the section reports and why."
+  (ouranos-not-covered:print-not-covered (axes-declined) (reverse *postgres-excused*) (axes-tag)))
 
 (defun report-uv-declined (name)
   "The uv axis is off. One cause only: the caller did not ask for it."
