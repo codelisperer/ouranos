@@ -124,6 +124,25 @@ To check it took, ask a plain REPL — with no `CL_SOURCE_REGISTRY` set — wher
 (asdf:system-source-file (asdf:find-system :aion))   ;; => your checkout's aion/aion.asd
 ```
 
+Bootstrap also builds the native webview launcher, which a desktop app needs to open its
+window. It is gitignored, so a fresh clone does not have it. When the machine has a C++
+toolchain, bootstrap builds it and prints:
+
+```
+bootstrap: launcher built -> .../hyperion/hyperion-view/hyperion-view
+```
+
+When the machine lacks a prerequisite, bootstrap prints the build script's report of what is
+missing, then `bootstrap: launcher NOT built`, then the command to run once it is installed:
+
+```sh
+cd hyperion/hyperion-view && ./build.sh --check     # Windows: .\build.ps1 -Check
+./build.sh                                          # Windows: .\build.ps1
+```
+
+Nothing else depends on the launcher, so bootstrap carries on without it. Set
+`OURANOS_SKIP_VIEW_BUILD=1` to skip the step.
+
 ## 3. Create your app
 
 The one-liner is `cons init my-site --template web` (or `--template agent`), and it

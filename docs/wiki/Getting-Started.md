@@ -78,7 +78,7 @@ sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 ```
 
 That is the seed. It is **identical on Linux, macOS, and Windows** — no shell-specific
-variants, no platform branches for you to get wrong. It does four things in one pass:
+variants, no platform branches for you to get wrong. It does these things in one pass:
 
 1. **Points ASDF at the whole tree** for this run, so it can find every framework.
 2. **Builds `bin/cons`** — the project tool, dumped as a self-contained warm image via
@@ -92,6 +92,13 @@ variants, no platform branches for you to get wrong. It does four things in one 
 4. **Warms the stack** — compiles the six core frameworks in DAG order plus hermes, in a
    throwaway SBCL, so your first `cons build` or editor load is instant instead of a cold,
    multi-minute Coalton compile.
+5. **Builds the native webview launcher** (`hyperion/hyperion-view/hyperion-view`, `.exe`
+   on Windows), which a desktop app needs to open its window. It is gitignored build output,
+   so a fresh clone does not have it. Bootstrap runs `build.sh` (`build.ps1` on Windows)
+   when the machine has a C++ toolchain. When it does not, bootstrap prints which
+   prerequisite is missing and the command to run once you have installed it, and carries
+   on: everything except desktop windows works without the launcher.
+   `OURANOS_SKIP_VIEW_BUILD=1` skips this step.
 
 The warm is the part people are tempted to skip. Don't, usually. It's cheap once the fasls
 exist, and compiling everything up front is the surest way to surface a build problem

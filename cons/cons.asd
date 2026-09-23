@@ -101,7 +101,8 @@
                              (:file "spec-tests")
                              (:file "platform-tests")
                              (:file "failure-origin-tests")
-                             (:file "fiveam-report-tests"))))
+                             (:file "fiveam-report-tests")
+                             (:file "view-launcher-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :cons/tests :run-tests)))
 
 ;;; Tests for the OPT-IN Coalton REPL engine, kept out of `cons/tests` for the same reason
