@@ -412,9 +412,16 @@ client's post-processing (Elise's crisis guardrail) is reflected."
                                  (format nil "→ using ~A" name)))))
         ;; :tool-result -- leave the `→ tool` status up (the next :deliberating
         ;; switches it to `reviewing …`); a bare "reading…" would be microseconds.
+        ;; ALL FOUR COUNTS (part of #161). The display is a token count, not a price, so a
+        ;; token the model processed counts whether or not it came from the prompt cache.
+        ;; Anthropic reports cached input separately from `input_tokens', so summing only
+        ;; :input and :output showed a turn served mostly from the cache as nearly free.
+        ;; A count the provider did not report adds nothing, as before.
         (:usage
          (let ((n (+ (or (evt:event-get event :input) 0)
-                     (or (evt:event-get event :output) 0))))
+                     (or (evt:event-get event :output) 0)
+                     (or (evt:event-get event :cache-read) 0)
+                     (or (evt:event-get event :cache-write) 0))))
            (incf turn-sum n)
            (%add-tokens conv n turn-sum)))))))
 

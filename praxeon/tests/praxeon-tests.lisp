@@ -2921,14 +2921,14 @@ Both directions: an item built outside memory has NIL, and no memory path produc
 ;;; #161: the :usage event carries what the ledger can accept.
 ;;;
 ;;; `ceiling:meter' has taken four counts since pre-publication PR 419. This event is the ONLY
-;;; programmatic route by which usage escapes a turn -- `run-turn' returns text, and the completion is appended to
-;;; history as messages and then dropped -- so until it carried four, a caller wiring the spend
-;;; guard had no source at all for two of them.
+;;; programmatic route by which usage escapes a turn -- `run-turn' returns text, and the
+;;; completion is appended to history as messages and then dropped -- so until it carried
+;;; four, a caller wiring the spend guard had no source at all for two of them.
 ;;;
-;;; Driven through the REAL path: a provider returning a real completion with counts on it,
-;;; `run-turn' doing the turn, and an observer reading the event. Not a lambda returning a
-;;; constant, which is what #161 asks for and what the ceiling's own tests do -- correctly for
-;;; what they test, and it is why nothing discovered the seam.
+;;; Driven through the REAL path, as #161 asks: a provider returning a real completion with
+;;; counts on it, `run-turn' doing the turn, and an observer reading the event. The ceiling's
+;;; own tests use a lambda returning a constant instead, which is correct for what they test
+;;; and is why nothing discovered the seam.
 ;;; --------------------------------------------------------------------------
 
 (defclass counted (llm:provider)
@@ -2966,8 +2966,8 @@ pre-publication PR 419 and this seam did not carry."
 
 (test a-provider-that-reports-no-cache-counts-sends-nil-not-zero
   "THE CONTROL, and it is the pre-publication issue 401 distinction rather than a formality.
-NIL means the provider did not report; 0 means it reported a miss. Collapsing them would make a cache breakpoint one
-message too late indistinguishable from a provider with no cache at all -- and a reader summing
+NIL means the provider did not report; 0 means it reported a miss. Collapsing them would make
+a cache breakpoint one message too late indistinguishable from a provider with no cache at all -- and a reader summing
 the event would see a cached turn as a free one either way, which is the failure `completion's
 own docstring exists to prevent."
   (let ((e (%usage-event-for
