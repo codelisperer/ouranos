@@ -12,7 +12,7 @@ to decide is before the first stream API hardens, not after."* That is the whole
 ADR is written now rather than discovered later: a stream API acquires a back-pressure
 policy whether or not anyone chooses one, and the one you get by not choosing is the bad one.
 
-**The measurements are a consuming app's, not ours.** #210 carries that app's numbers from a live
+**The measurements are a consuming app's, not ours.** Pre-publication issue 210 carries that app's numbers from a live
 market feed: **1,644 msg/sec burst, 424/sec sustained, ~10M messages/day across 30 symbols**,
 sent to a webview that drowns if given them wholesale. What that app hand-rolled, none of
 which is about its domain:
