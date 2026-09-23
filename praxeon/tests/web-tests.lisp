@@ -225,7 +225,9 @@ and this turn's count, as the page would show them."
                :agent (actor:make-agent
                        :name "counted"
                        :provider (make-instance 'counted-provider :completion completion)))))
-    (sb-thread:join-thread (web::%run-turn-async conv "hi" nil))
+    ;; Bounded, with no :default, so a hung turn signals JOIN-THREAD-ERROR and fails the
+    ;; test that ran it by name, instead of hanging the whole gate (the bound #177 uses).
+    (sb-thread:join-thread (web::%run-turn-async conv "hi" nil) :timeout 20)
     (values (web::%get-tokens conv) (web::%get-turn-tokens conv))))
 
 (test the-counter-includes-cache-tokens

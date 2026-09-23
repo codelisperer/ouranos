@@ -2967,9 +2967,9 @@ pre-publication PR 419 and this seam did not carry."
 (test a-provider-that-reports-no-cache-counts-sends-nil-not-zero
   "THE CONTROL, and it is the pre-publication issue 401 distinction rather than a formality.
 NIL means the provider did not report; 0 means it reported a miss. Collapsing them would make
-a cache breakpoint one message too late indistinguishable from a provider with no cache at all -- and a reader summing
-the event would see a cached turn as a free one either way, which is the failure `completion's
-own docstring exists to prevent."
+a cache breakpoint one message too late indistinguishable from a provider with no cache at
+all -- and a reader summing the event would see a cached turn as a free one either way, which
+is the failure `completion's own docstring exists to prevent."
   (let ((e (%usage-event-for
             (llm:make-completion :text "ok" :stop-reason :end
                                  :input-tokens 100 :output-tokens 20))))
