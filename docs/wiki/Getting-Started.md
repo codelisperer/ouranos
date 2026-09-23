@@ -24,15 +24,20 @@ without hedging.
 
 ### The pins
 
-The toolchain is pinned in **one place**, `scripts/versions.env`, which is deliberately
-plain `KEY=VALUE` so that `sh`, PowerShell, and GitHub Actions YAML can all parse it
-trivially. It pins three things:
+The toolchain is pinned in two files. `scripts/versions.env` is deliberately plain
+`KEY=VALUE` so that `sh`, PowerShell, and GitHub Actions YAML can all parse it trivially.
+It pins these:
 
 | Pin | What it controls |
 |---|---|
 | `SBCL_VERSION` | the compiler itself |
 | `QUICKLISP_DIST` | a dated dist snapshot — this is what actually pins every external library version |
-| `COALTON_REF` | Coalton is a git checkout, not a Quicklisp system, so it pins a commit |
+| `APPIMAGETOOL_VERSION` | the tool that packages the Linux desktop build, with its checksum |
+| `SQLITE_VERSION`, `SQLITE_YEAR` | the SQLite DLL that `setup.ps1` installs on Windows, with its checksums |
+
+Coalton is a git checkout, not a Quicklisp system, so its commit is pinned separately, in
+`coalton.pin` at the repository root. `setup.sh` and `setup.ps1` read it from there. To
+change the Coalton version, edit `coalton.pin`; `versions.env` has no Coalton setting.
 
 **A macOS caveat worth internalizing:** upstream SBCL publishes binaries for Linux
 (tarball) and Windows (MSI) only — there are **no macOS binaries**. So on macOS the
