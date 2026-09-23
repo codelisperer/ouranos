@@ -81,12 +81,21 @@
     (is (= 2000 (length (remove-duplicates ids :test #'string=)))
         "128-bit ids must not repeat")))
 
-(test successive-values-differ-across-every-width
+(test draws-are-not-all-one-value-at-any-width
   ;; Guards the degenerate implementation that returns a constant, which every test above
-  ;; except the last would happily pass.
+  ;; except the last would happily pass. A constant generator fails this at every width,
+  ;; every run.
+  ;;
+  ;; SIXTY-FOUR DRAWS, NOT TWO (#136). This asserted that two successive draws differ, and at
+  ;; one octet a correct generator repeats a byte with probability 1/256, so the test failed
+  ;; about one run in 256 and turned CI legs red for changes that could not reach this
+  ;; file. Now it asserts that 64 draws are not all identical. For a correct generator all 64
+  ;; match with probability 256^-63 = 2^-504 at one octet, 2^-2016 at four and 2^-8064 at
+  ;; sixteen: no run will ever fail by chance.
   (dolist (n '(1 4 16))
-    (let ((a (rnd:random-octets n)) (b (rnd:random-octets n)))
-      (is-false (equalp a b) "two draws of ~D octets were identical" n))))
+    (let ((draws (loop repeat 64 collect (rnd:random-octets n))))
+      (is-false (= 1 (length (remove-duplicates draws :test #'equalp)))
+                "64 draws of ~D octets were all identical" n))))
 
 (test the-weak-generator-is-unavailable-not-merely-unused
   ;; pre-publication issue 95's second requirement. Inside aion/random, `random' is shadowed and signals, so the
