@@ -111,6 +111,11 @@
 (load (merge-pathnames "fiveam-report.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; Building the native webview launcher (pre-publication issue 410, #13). Shared with bootstrap.lisp, which builds
+;;; the launcher too, so there is one copy of how it is built and where the binary goes.
+(load (merge-pathnames "view-launcher.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 (defparameter +systems+
   '(;; core
     :aion :aion/csv :aion/platform :aion/clock :aion/log :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
@@ -860,17 +865,11 @@ code we do not own, and a gate that cries wolf gets switched off."
 ;;; one axis over: a gate whose VERDICT depends on whether a C++ toolchain happens to be
 ;;; installed would gate two checkouts of one commit differently. It is disclosed instead.
 
-(defparameter +view-launcher-name+
-  (if (uiop:os-windows-p) "hyperion-view.exe" "hyperion-view")
-  "The launcher's file name.
-
-STATED IN THREE PLACES -- here, `build.{sh,ps1}'s default output, and
-`hyperion/desktop:default-launcher' -- and this file cannot load hyperion to ask, because the
-whole point of the gate is that it loads each system in a child. So the duplication is turned
-into a CHECKED invariant rather than a hoped-for one: when the build reports success and this
-path does not then exist, the gate FAILS and says the two disagree (see
-`build-view-launcher'). A producer and a consumer that disagree about where a file goes is
-the defect this tree keeps finding; here at least it is loud on the first run.")
+;;; The launcher's name is stated in three places -- scripts/view-launcher.lisp,
+;;; build.{sh,ps1}'s default output, and `hyperion/desktop:default-launcher' -- and this file
+;;; cannot load hyperion to ask, because the gate loads each system in a child. So the
+;;; duplication is a CHECKED invariant: when the build reports success and the path does not
+;;; then exist, `ouranos-view:run-build' returns :misplaced and the gate FAILS.
 
 (defparameter *view-state* :not-attempted
   "What happened to the launcher build: :built, :skipped, :unavailable, :failed, or
@@ -880,7 +879,7 @@ the defect this tree keeps finding; here at least it is loud on the first run.")
   "Why `*view-state*' is not :built -- the sentence the NOT COVERED block prints.")
 
 (defun view-launcher-path ()
-  (merge-pathnames (format nil "hyperion/hyperion-view/~a" +view-launcher-name+) *root*))
+  (ouranos-view:launcher-path *root*))
 
 (defun view-covered-p ()
   "Does the launcher exist, so the five launcher assertions can run?
@@ -893,14 +892,6 @@ This axis reports itself either way, in the tag, in NOT COVERED, and on the mach
 assertions run if and only if the binary is present, whatever anyone intended: a flag would
 let this run claim `view' while the five assertions skipped."
   (and (probe-file (view-launcher-path)) t))
-
-(defun skip-view-build-p ()
-  "True only when OURANOS_SKIP_VIEW_BUILD affirmatively says so.
-
-Affirmative-only, as every other override in this tree is: `0' and `false' are what somebody
-types meaning to turn a thing OFF, and a check written as \"is it set\" reads them as ON."
-  (let ((v (uiop:getenv "OURANOS_SKIP_VIEW_BUILD")))
-    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
 
 (defun report-view-uncovered (name)
   "The view axis is off. THREE possible causes, and the reader is told which one."
@@ -918,67 +909,35 @@ types meaning to turn a thing OFF, and a check written as \"is it set\" reads th
 (defun build-view-launcher ()
   "Build the native webview launcher, best effort, recording WHY when it does not happen."
   (format t "~%========== NATIVE LAUNCHER (#410) ==========~%")
-  (let* ((dir (merge-pathnames "hyperion/hyperion-view/" *root*))
-         (windows (uiop:os-windows-p))
-         (shell (when windows
-                  (or (ignore-errors
-                       (and (zerop (nth-value 2 (uiop:run-program '("pwsh" "-NoProfile" "-Command" "exit 0")
-                                                                  :output nil :error-output nil
-                                                                  :ignore-error-status t)))
-                            "pwsh"))
-                      "powershell")))
-         (base (if windows
-                   (list shell "-NoProfile" "-ExecutionPolicy" "Bypass" "-File"
-                         (uiop:native-namestring (merge-pathnames "build.ps1" dir)))
-                   (list "/bin/sh"
-                         (uiop:native-namestring (merge-pathnames "build.sh" dir)))))
-         (check-flag (if windows "-Check" "--check")))
-    (cond
-      ((skip-view-build-p)
-       (setf *view-state* :skipped
-             *view-reason* "OURANOS_SKIP_VIEW_BUILD is set -- the caller declined the build")
-       (format t "  off     skipped: OURANOS_SKIP_VIEW_BUILD is set~%"))
-      (t
-       ;; PREREQUISITES FIRST, so a host with no C++ toolchain DECLINES the axis instead of
-       ;; failing the gate. That host is measured, not hypothetical (#382).
-       (let ((check (nth-value 2 (uiop:run-program (append base (list check-flag))
-                                                   :output nil :error-output nil
-                                                   :ignore-error-status t))))
-         (if (not (zerop check))
-             (progn
-               (setf *view-state* :unavailable
-                     *view-reason* (format nil "this host lacks the prerequisites -- run hyperion/hyperion-view/build.~a ~a to see which"
-                                           (if windows "ps1" "sh") check-flag))
-               (format t "  off     prerequisites missing on this host (exit ~D)~%" check))
-             (let ((start (get-internal-real-time)))
-               (multiple-value-bind (out err code)
-                   (uiop:run-program base :output '(:string :stripped t)
-                                          :error-output '(:string :stripped t)
-                                          :ignore-error-status t)
-                 (cond
-                   ((not (zerop code))
-                    (setf *view-state* :failed
-                          *view-reason* (format nil "the launcher build FAILED (exit ~D)" code))
-                    ;; STDERR *AND* STDOUT. build.ps1 prints cl.exe's diagnostics on STDOUT,
-                    ;; so an excerpt taken from stderr alone came back EMPTY -- measured, by
-                    ;; corrupting hyperion-view.cc and watching this branch report a failure
-                    ;; with nothing under it. A failure whose excerpt is blank is the reason
-                    ;; someone re-runs the build by hand to find out what happened.
-                    (format t "  off     build FAILED (exit ~D)~%~a~%" code
-                            (let ((text (if (plusp (length (or err ""))) err out)))
-                              (failure-excerpt (or text "") 6))))
-                   (t
-                    (setf *view-state* :built)
-                    (format t "  ok      built in ~,1F s~%" (seconds-since start))
-                    ;; THE CHECKED INVARIANT from +view-launcher-name+. A build that reports
-                    ;; success while the path this file probes stays empty means the gate and
-                    ;; the build script disagree about where the binary goes -- and the
-                    ;; symptom would otherwise be a silently declined axis, i.e. ten missing
-                    ;; checks reported as a disclosure rather than as the defect it is.
-                    (unless (view-covered-p)
-                      (fail "the launcher build reported success but ~a does not exist -- verify-tree.lisp and hyperion-view/build.~a disagree about where the binary goes"
-                            (uiop:native-namestring (view-launcher-path))
-                            (if windows "ps1" "sh"))))))))))))
+  ;; PREREQUISITES FIRST, inside run-build, so a host with no C++ toolchain DECLINES the axis
+  ;; instead of failing the gate. That host is measured, not hypothetical (#382).
+  (let ((start (get-internal-real-time)))
+    (multiple-value-bind (state reason out err)
+        (ouranos-view:run-build *root* :output '(:string :stripped t))
+      (setf *view-state* state
+            *view-reason* reason)
+      (ecase state
+        (:skipped
+         (format t "  off     skipped: OURANOS_SKIP_VIEW_BUILD is set~%"))
+        (:unavailable
+         (format t "  off     prerequisites missing on this host~%"))
+        (:failed
+         ;; STDERR *AND* STDOUT. build.ps1 prints cl.exe's diagnostics on STDOUT, so an
+         ;; excerpt taken from stderr alone came back EMPTY -- measured, by corrupting
+         ;; hyperion-view.cc and watching this branch report a failure with nothing under it.
+         ;; A failure whose excerpt is blank is the reason someone re-runs the build by hand
+         ;; to find out what happened.
+         (format t "  off     ~a~%~a~%" reason
+                 (let ((text (if (plusp (length (or err ""))) err out)))
+                   (failure-excerpt (or text "") 6))))
+        (:misplaced
+         ;; A build that reports success while the path this file probes stays empty means
+         ;; the gate and the build script disagree about where the binary goes. Without this
+         ;; the symptom would be a silently declined axis: ten missing checks reported as a
+         ;; disclosure rather than as the defect it is.
+         (fail "~a" reason))
+        (:built
+         (format t "  ok      built in ~,1F s~%" (seconds-since start))))))
   *view-state*)
 (defun seconds-since (start)
   (/ (float (- (get-internal-real-time) start)) internal-time-units-per-second))

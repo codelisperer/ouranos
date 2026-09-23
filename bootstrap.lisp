@@ -200,6 +200,47 @@
                  (uiop:quit 1))
                (format t "~&bootstrap: ~A ok.~%" system))))))))
 
+;;; --- the native webview launcher (#13) -------------------------------------
+;;; A desktop app opens its window through hyperion-view, a small C++ program that is build
+;;; output and gitignored, so a fresh clone does not have it. Before this step nothing said
+;;; so until a window failed to open. Build it here when the host has the toolchain; when it
+;;; does not, show the build script's prerequisite report and the command to run later.
+;;;
+;;; NOT FATAL, unlike a platform package above. Only desktop apps need the launcher, and a
+;;; machine without a C++ toolchain can still build and serve everything else. Skip it with
+;;; OURANOS_SKIP_VIEW_BUILD=1, the same variable scripts/verify-tree.lisp reads.
+;;;
+;;; The build is scripts/view-launcher.lisp, shared with verify-tree.lisp. It runs as a child
+;;; process, so nothing from it enters the bin/cons image. Measured on Windows (MSVC): about
+;;; 5 s cold, including a 45 MB WebView2 SDK fetch, and about 3 s once the SDK is cached.
+(load (merge-pathnames "scripts/view-launcher.lisp" *root*))
+
+(let ((windows (uiop:os-windows-p)))
+  (format t "~&bootstrap: building the native webview launcher (hyperion-view)~%")
+  (finish-output)
+  ;; The check runs quietly because the build script repeats the same report before it
+  ;; compiles. When the check fails, it runs again with its output shown, so the report
+  ;; saying which prerequisite is missing, and how to install it, is printed here.
+  (multiple-value-bind (state reason)
+      (funcall (read-from-string "ouranos-view:run-build") *root* :output :interactive)
+    (let ((path (uiop:native-namestring
+                 (funcall (read-from-string "ouranos-view:launcher-path") *root*))))
+      (case state
+        (:built
+         (format t "~&bootstrap: launcher built -> ~A~%" path))
+        (:skipped
+         (format t "~&bootstrap: launcher skipped (OURANOS_SKIP_VIEW_BUILD is set).~%"))
+        (t
+         (when (eq state :unavailable)
+           (uiop:run-program (funcall (read-from-string "ouranos-view:build-command") *root*
+                                      :check t
+                                      :shell (funcall (read-from-string "ouranos-view:powershell")))
+                             :output :interactive :error-output :interactive
+                             :ignore-error-status t))
+         (format t "~&bootstrap: launcher NOT built: ~A~%" reason)
+         (format t "~&bootstrap: desktop windows will not open until it is. From the tree root: ~A~%"
+                 (funcall (read-from-string "ouranos-view:build-hint") windows)))))))
+
 ;;; Dump the tool image. When cons/cli:main returns, SBCL exits -- so the binary
 ;;; runs `cons`, not a REPL. `:save-runtime-options t` is essential: without it the
 ;;; executable still parses SBCL's OWN runtime flags first, so `bin/cons --help` /
