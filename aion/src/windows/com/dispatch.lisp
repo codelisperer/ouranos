@@ -127,7 +127,7 @@ Runs in the apartment, so the object belongs to the STA thread from the moment i
   "OBJECT-FROM-PROG-ID, under the name the rest of the world uses for it."
   (object-from-prog-id prog-id))
 
-;;; --- is this class actually here? (#306) --------------------------------------------
+;;; --- is this class actually here? (pre-publication issue 306) --------------------------------------------
 ;;;
 ;;; A platform-scoped package is supposed to answer "is this capability present?" BEFORE an
 ;;; interface offers it. The hades charter says such packages must fail loudly off-platform
@@ -147,7 +147,7 @@ Runs in the apartment, so the object belongs to the STA thread from the moment i
 ;;;
 ;;; and telling someone to install Access while Access is on their machine is the single
 ;;; most expensive error in this space. So the registry supplies the distinction the HRESULT
-;;; cannot make, and aion/windows/registry (#319) exists for exactly that.
+;;; cannot make, and aion/windows/registry (#132) exists for exactly that.
 ;;;
 ;;; NOT A HYPOTHETICAL. Microsoft.Jet.OLEDB.4.0 on any ordinary 64-bit Windows: the ProgID
 ;;; resolves, the CLSID resolves, and there is no InprocServer32 in the 64-bit view because
@@ -160,7 +160,7 @@ Runs in the apartment, so the object belongs to the STA thread from the moment i
 ;;; AND IT REPORTS THE PATH ON SUCCESS, not only on failure. That is the case nobody asks
 ;;; for and exactly why it matters: mnemosyne reported a green SQLite backend for months on
 ;;; a DLL an unrelated installation supplied, and every layer that could inspect the check
-;;; was honest -- the dishonesty was one level below, in WHICH FILE the loader found (#308).
+;;; was honest -- the dishonesty was one level below, in WHICH FILE the loader found (#129).
 ;;; :PRESENT is a claim about a state; "present at <path>" is a claim someone can check.
 
 (defun %this-view ()
@@ -286,7 +286,7 @@ accept for an object-valued property."
 (defun %invoke (object name flags args)
   "GetIDsOfNames then Invoke. Runs on the caller's thread -- callers wrap in the apartment.
 
-BY-REF ARGUMENTS (#304). An argument that is a BY-REF cell is passed as VT_VARIANT|VT_BYREF
+BY-REF ARGUMENTS (pre-publication issue 304). An argument that is a BY-REF cell is passed as VT_VARIANT|VT_BYREF
 pointing at a referent VARIANT this function owns for the duration of the call; whatever the
 server leaves there is read back into the cell before the referents are cleared.
 
@@ -335,7 +335,7 @@ folded into the cleanup form."
                      (cffi:foreign-slot-value params '(:struct ffi:dispparams) 'ffi::c-args)
                      n)
                ;; A PROPERTY PUT IS NOT AN ORDINARY CALL, and this is the whole of why
-               ;; setting one never worked (#306). IDispatch requires the new value to be
+               ;; setting one never worked (pre-publication issue 306). IDispatch requires the new value to be
                ;; passed as a NAMED argument: rgdispidNamedArgs[0] = DISPID_PROPERTYPUT and
                ;; cNamedArgs = 1. A server handed the value positionally with cNamedArgs 0
                ;; rejects the call -- so the two constants being defined and exported was
@@ -411,7 +411,7 @@ folded into the cleanup form."
   (com:set-property dict \"Item\" \"k\" \"v\")          ; indexed: index first, value last
 
 Value-last rather than value-first because that is the order the interface wants once
-rgvarg's reversal is accounted for, and because it reads as an assignment. #306: there was
+rgvarg's reversal is accounted for, and because it reads as an assignment. pre-publication issue 306: there was
 no setter at all, so any Automation object configured through properties rather than
 arguments -- which is most of Office, ADO's Connection, and every WMI object -- was only
 half usable.

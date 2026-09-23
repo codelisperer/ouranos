@@ -1,4 +1,4 @@
-;;;; tempdir.lisp --- scratch directories that are created, not chosen (#204).
+;;;; tempdir.lisp --- scratch directories that are created, not chosen (pre-publication issue 204).
 ;;;;
 ;;;; The idiom this replaces appeared in cons/src/template.lisp and four times in
 ;;;; cons/tests: build a name from (random 100000000), hand it to ENSURE-DIRECTORIES-EXIST,

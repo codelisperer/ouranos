@@ -76,7 +76,7 @@ Not needed for the landing page (static copy), but auth/emails will need it.
 
 ## 5. Pluralization
 
-**Decided and implemented (2026-08, #135)** — a real plural string appeared, which was the
+**Decided and implemented (2026-08, pre-publication issue 135)** — a real plural string appeared, which was the
 trigger this section was waiting for. `~:P` pluralizes in English regardless of locale, so
 every non-English dictionary either read wrong at most counts or had to be reworded around
 the construction.
@@ -234,7 +234,7 @@ Settled and built into `hyperion/i18n` (supersedes the first cut in ADR-0006):
 - **Interpolation (§4):** **`{named}` placeholders** — `(t* locale :key :name "Bob")`
   → `interpolate`. Implemented.
 - **Pluralization (§5):** CLDR categories over a generated, sha256-pinned rule set;
-  `translate-plural` with `key.<category>` suffixes. Implemented (#135). The gettext
+  `translate-plural` with `key.<category>` suffixes. Implemented (pre-publication issue 135). The gettext
   question this section reserved is closed — JSON + CLDR, no gettext.
 - **Missing keys (§7):** visible `"[section/key]"` marker + default-locale fallback
   (implemented); a build-time parity check is still a **[lean]**, not yet built.

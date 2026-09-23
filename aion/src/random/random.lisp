@@ -1,11 +1,11 @@
-;;;; random.lisp --- the CSPRNG, in the CL shell because entropy is IO (#95).
+;;;; random.lisp --- the CSPRNG, in the CL shell because entropy is IO (pre-publication issue 95).
 
 (in-package #:aion/random)
 
 (defun random (&rest args)
   "Shadows CL:RANDOM inside this package, and refuses.
 
-Not a joke and not defensive programming: #95 was a placeholder that a comment promised to
+Not a joke and not defensive programming: pre-publication issue 95 was a placeholder that a comment promised to
 replace, and the comment did not stop anyone for months. A name that ERRORS stops the next
 person at the moment they reach for it, and says what to use instead in the same breath."
   (declare (ignore args))

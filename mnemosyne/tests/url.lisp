@@ -288,7 +288,7 @@ A path or an sslmode that is correctly encoded still arrives decoded."
     (is (string= "no" (mnemosyne/backend:backend-pg-ssl-driver b)))
     (is (not (mnemosyne/backend:backend-pg-ssl-guaranteed? b)))))
 
-;;; --- #209: the password must not be printable ------------------------------
+;;; --- pre-publication issue 209: the password must not be printable ------------------------------
 ;;;
 ;;; The reported defect: PG-CONFIG is a Coalton DEFINE-TYPE, whose generated printer
 ;;; renders every field, so a String password was written out in full by anything that

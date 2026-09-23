@@ -21,15 +21,15 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 | **Explicit workflows** | `praxeon/workflow` — workflow/step/parallel over a blackboard. Unit-tested; **no application uses it.** | the core abstraction | — |
 | **Failure / approval** | **condition-system restarts**: `retry-action`, `substitute-result`, `abandon-action` | suspend/resume with persisted state | HITL approval hooks |
 | **Context economy** | `praxeon/context`, budgeted, bitemporal | context management + Observational Memory | summarise threads, **offload tool outputs to disk** |
-| **Memory** | — (#60 open, Kairos #56 unbuilt) | Observational Memory | persistent, pluggable backends |
+| **Memory** | — (pre-publication issue 60 open, Kairos #60 unbuilt) | Observational Memory | persistent, pluggable backends |
 | **Provider neutrality** | `complete` generic; anthropic + openai-compatible | model routing, 40+ providers | LangChain's model layer |
 | **Tools** | `Means`, provider-neutral `tool-spec` | `createTool()` with schemas | tools + a **Skills** system |
-| **MCP** | — (#62) | authors MCP servers | consumes MCP tools |
+| **MCP** | — (#64) | authors MCP servers | consumes MCP tools |
 | **Filesystem for agents** | — | — | pluggable local/sandboxed/remote |
 | **Evals** | **—** | built in | — |
 | **Observability** | `aion/log` structured fields only | tracing/metrics as a product surface | LangSmith-adjacent |
 | **Cost / rate / auth ceiling** | **per-session cost + call cap, Ed25519-signed grants, metering** (pre-publication issue 172), **capability-scoped tool assembly** (#90); rate limiting still open, and each agent has to opt in to the injection mitigation | — | — |
-| **Streaming to the browser** | polling; SSE blocked on #117 M2 | streaming | streaming |
+| **Streaming to the browser** | polling; SSE blocked on pre-publication issue 117 M2 | streaming | streaming |
 | **Typed core** | **Coalton, Hindley–Milner** | TypeScript types | Python type hints |
 | **Ships with a web framework** | **hyperion** | bring Next.js/React | bring your own |
 | **Ships with a data layer** | **mnemosyne** | — | — |
@@ -53,7 +53,7 @@ Two things are deliberately still missing, and the honest thing is to keep namin
   and immediately obtain another, because stopping *that* is the minting decision, which
   belongs to the application.
 - **A prompt-injection posture, fully adopted.** Any public agent reads untrusted text. The
-  load-bearing mitigation is #122's property — tools assembled *from* the viewer's
+  load-bearing mitigation is #90's property — tools assembled *from* the viewer's
   capabilities, so a tool they may not use is absent from the table rather than filtered by
   prompt — and that mechanism is built: `register-means` takes a `:capability`,
   `means-permitted-p` fails closed, and `agent-means-for` assembles the table from the
@@ -63,14 +63,14 @@ Two things are deliberately still missing, and the honest thing is to keep namin
   kept existing agents working — but it means an agent is protected only once its means carry
   capabilities **and its callers carry permits**.
 
-  **That last clause was not achievable until #400, and the correction is worth keeping rather
+  **That last clause was not achievable until pre-publication issue 400, and the correction is worth keeping rather
   than smoothing over.** An earlier version of this bullet said the remaining work was
   *adoption*, which presumed a caller could carry a permit. Through `run-turn` — the path every
   reader uses — it could not: the turn loop took no `:permit` and passed none to `deliberate` or
   `act`, so a capability-bearing means was invisible to the model and refused if named. So the
   gap was **reachability**, not uptake, and it was invisible to a reader of `run-turn` or
   `register-means` alone. `run-turn`, `run-turn-through` and delegated sub-agents now carry a
-  permit (#400, ADR-0002 §"One thing did need building"), which makes the clause true and leaves
+  permit (pre-publication issue 400, ADR-0002 §"One thing did need building"), which makes the clause true and leaves
   the genuine remainder: each agent still has to choose to use it.
 
 So: praxeon can now be given a hard, legible spend ceiling, and the tool-assembly mitigation
@@ -90,23 +90,23 @@ are both implemented and both have network-free unit tests. Neither is called by
 ChatRBT, or anything else in the tree — `chat-rbt.lisp` names both in a header comment
 describing what it *would* do. A green unit test proves the function does what its author
 expected; it does not prove the design survives a real workload, and every framework defect
-this project has found came from something real trying to use the code (#134, #136, #143,
-#146, #165 …). Shipping an unexercised subsystem as a headline is how a framework loses trust
-on first contact. **#149 would be the first application consumer of both.**
+this project has found came from something real trying to use the code (pre-publication issue 134, pre-publication issue 136, pre-publication issue 143,
+pre-publication issue 146, pre-publication issue 165 …). Shipping an unexercised subsystem as a headline is how a framework loses trust
+on first contact. **#100 would be the first application consumer of both.**
 
 **4. `Plan` is a type the loop ignores.** Praxeon *named* long-horizon planning in its
 ontology and then built only step-by-step improvisation. Deliberate-once-then-execute is a
 different control flow from ReAct, not a refinement of it, and DeepAgents targets exactly the
 case praxeon left empty.
 
-**5. No MCP (#62).** Rapidly becoming table stakes; both references have it in some form.
+**5. No MCP (#64).** Rapidly becoming table stakes; both references have it in some form.
 Being provider-neutral and *protocol*-absent is an odd combination to defend.
 
 **6. Context offload.** The most on-thesis idea in DeepAgents, and praxeon has the disk for
 it (`hermes/blob`). See the DAG note below — the obvious implementation is illegal.
 
 **7. Streaming.** Polling is a deliberate, documented choice made because Woo's event loop
-could not be blocked; it becomes a limitation rather than a decision once #117 lands.
+could not be blocked; it becomes a limitation rather than a decision once pre-publication issue 117 lands.
 
 ---
 
@@ -149,7 +149,7 @@ with a position is easier to disagree with and much easier to remember.
 Praxeon is **inside** the dependency line; `hermes` is a satellite that nothing in the line may
 depend on. So context offload (to `hermes/blob`), any email an agent sends, and any blob an
 agent writes must reach praxeon as an **injected seam** the application fills — never a direct
-dependency. This is the same inversion #173 must avoid for magic-link delivery. It is now the
+dependency. This is the same inversion #104 must avoid for magic-link delivery. It is now the
 third place the obvious implementation is the wrong one, which is enough repetitions to be
 worth stating once, here.
 

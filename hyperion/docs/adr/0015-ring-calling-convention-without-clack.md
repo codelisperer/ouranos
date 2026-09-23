@@ -10,10 +10,10 @@ Hunchentoot and then left one question open on purpose:
 > **An open question falls out of it:** does **Clack** survive? Routing already yields a Clack
 > handler (`to-app`, ADR-0012), so today the abstraction is load-bearing. A native libuv server
 > could implement a Clack handler — keeping every existing app working — or bypass Clack
-> entirely. Those are different amounts of work and different amounts of freedom, and #117
+> entirely. Those are different amounts of work and different amounts of freedom, and pre-publication issue 117
 > should answer it deliberately rather than by accident.
 
-[#117](https://github.com/codelisperer/ouranos/issues/117) is now framed by the maintainer as
+pre-publication issue 117 is now framed by the maintainer as
 removing third-party HTTP servers *as a dependency entirely* — "third-party servers are an
 application choice, never a framework dependency." **If that is the aim, Clack is a third-party
 dependency too**, and it is reached only so that hyperion can talk to itself.
@@ -75,7 +75,7 @@ whoever next wonders why the parser is a separate system.
 - **We own the socket, which is the point.** `TCP_NODELAY` on every accepted connection addresses
   the residual **p99 ~40 ms** straggler ADR-0011 recorded and explicitly could not reach through
   Clack ("it may argue for setting `TCP_NODELAY` on the listening socket as well").
-- **M4's removal is larger than #117's proposal stated, and this is the correction.** That
+- **M4's removal is larger than pre-publication issue 117's proposal stated, and this is the correction.** That
   proposal said "Clack appears in exactly three files." The *API* surface is one file, but the
   **dependency** surface is six declarations across six systems — `hyperion` (`clack`), plus
   `clack-handler-hunchentoot` in `hyperion/tests`, `hyperion/assets/tests`, and three example
@@ -85,14 +85,14 @@ whoever next wonders why the parser is a separate system.
   itself in terms of a dependency it no longer has.
 - **We inherit HTTP as a security surface permanently.** ADR-0002's standing obligation now has
   a named owner. The parser-level floor (smuggling, splitting, header limits) is specified in
-  #117 §4 and is not optional.
+  pre-publication issue 117 §4 and is not optional.
 
 ## Alternatives considered
 
 **Implement a real `clack.handler.uv`.** Every existing app keeps working with zero risk, and
 the native server slots in behind an abstraction that already exists. Rejected because it keeps
 a third-party dependency in the framework *in order for the framework to talk to itself* — the
-exact thing #117 exists to stop — and because Clack's handler protocol would then constrain the
+exact thing pre-publication issue 117 exists to stop — and because Clack's handler protocol would then constrain the
 streaming and concurrency decisions M2 has to make freely.
 
 **Keep Clack and add the native server beside it, indefinitely.** Cheapest, and dishonest: it
@@ -108,7 +108,7 @@ one file.** The decision felt large while it was described as "does Clack surviv
 easy once the code was counted rather than remembered.
 
 The counter-check mattered more than the check. Writing this ADR, the claim inherited from
-#117's approved proposal — *"Clack appears in exactly three files"* — was re-run against the
+pre-publication issue 117's approved proposal — *"Clack appears in exactly three files"* — was re-run against the
 tree and **did not hold**. It conflated the API surface with the dependency surface: one file
 calls Clack, but six systems declare it. The decision is unchanged and slightly strengthened;
 what changed is M4's cost, which would otherwise have been discovered mid-removal. Recorded

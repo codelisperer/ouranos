@@ -1,4 +1,4 @@
-;;;; csrf-tests.lisp --- hyperion/csrf: the refusal half (#280, ADR-0019).
+;;;; csrf-tests.lisp --- hyperion/csrf: the refusal half (pre-publication issue 280, ADR-0019).
 ;;;;
 ;;;; EVERY REQUEST IN THIS FILE IS BUILT BY HAND. There is no injector in the image and no
 ;;;; request builder that could quietly attach a token: a refusal reachable only through the
@@ -379,7 +379,7 @@ spent, so this can only have come from the cache"))))
         (is-false (csrf:constant-time-string= tok other)
                   "a difference at position ~D must be caught" i)))))
 
-;;; --- rotation at the privilege change (#282 + ADR-0019 decision 6) --------
+;;; --- rotation at the privilege change (#120 + ADR-0019 decision 6) --------
 
 (test the-csrf-package-registers-its-key-as-privilege-scoped
   ;; The wiring itself, asserted. If this registration is ever lost the token stops

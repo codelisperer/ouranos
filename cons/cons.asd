@@ -7,7 +7,7 @@
 ;;;; bootstrapping tool). See docs/roadmap.md and docs/cons-vision.md.
 
 ;;; The .env loader, as its OWN system. A scaffolded app must load its .env as the first
-;;; act of every entry point (#120), which means depending on the loader -- and depending on
+;;; act of every entry point (pre-publication issue 120), which means depending on the loader -- and depending on
 ;;; all of `cons` to get it would make the build tool a runtime dependency of every app it
 ;;; ever generates. This is uiop-only and holds one file, so an app pays almost nothing.
 ;;; cargo is not a runtime dependency of your crate either.
@@ -28,12 +28,12 @@
   :license "MIT"
   :version "0.0.0"
   ;; sb-posix, on Unix only and for one reason: MKDIR is the atomic create-or-fail this
-  ;; tree needs for a scratch directory (#204), and CL has no portable equivalent. The
+  ;; tree needs for a scratch directory (pre-publication issue 204), and CL has no portable equivalent. The
   ;; :feature guard is on the PLATFORM rather than on :sbcl, because SBCL's Windows
   ;; sb-posix does not carry the same surface -- the same axis mistake that once made
   ;; hyperion/server fail to READ on Windows.
   ;; aion/secret is DEPENDENCY-FREE and Coalton-free by construction, which is what makes
-  ;; it admissible here: cons's core stays trivial to install (#209).
+  ;; it admissible here: cons's core stays trivial to install (pre-publication issue 209).
   :depends-on ("alexandria" "cons/env" "aion/secret"
                (:feature :unix (:require :sb-posix)))
   :serial t
@@ -41,7 +41,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "tempdir")  ; private scratch dirs, created not chosen
-                             (:file "upstream") ; is the framework checkout behind? (#240)
+                             (:file "upstream") ; is the framework checkout behind? (pre-publication issue 240)
                              (:file "db")       ; db-repl/db-url: a session per environment
                              (:file "toolchain"); is the Lisp under us the one we think it is?
                              (:file "env-scan") ; which config keys does this project need?

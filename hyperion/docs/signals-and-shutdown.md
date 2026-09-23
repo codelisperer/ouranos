@@ -1,12 +1,12 @@
 # Signals and shutdown — what works, what does not, and which backend loses SIGTERM
 
-Written while implementing `serve-forever` ([#124](https://github.com/codelisperer/ouranos/issues/124)),
+Written while implementing `serve-forever` (pre-publication issue 124),
 because the SIGTERM half did **not** work on the current server and the evidence is worth
 more than the attempt. Read this before implementing signal handling in
-[#117](https://github.com/codelisperer/ouranos/issues/117) (the native libuv server) or
-[#25](https://github.com/codelisperer/ouranos/issues/25) (the `service` target).
+pre-publication issue 117 (the native libuv server) or
+[#37](https://github.com/codelisperer/ouranos/issues/37) (the `service` target).
 
-**Updated 2026-08-29 (#117):** the open question is closed. The matrix is complete, the cause
+**Updated 2026-08-29 (pre-publication issue 117):** the open question is closed. The matrix is complete, the cause
 is located, and the fix this file used to prescribe is no longer needed. The harness that
 settled it is in the tree:
 
@@ -14,7 +14,7 @@ settled it is in the tree:
 hyperion/bench/signals/run.sh 3     # every backend, both modes, 3 runs each
 ```
 
-One cell remains unmeasured — Windows. macOS was filled by #218 (see below); that script is
+One cell remains unmeasured — Windows. macOS was filled by pre-publication issue 218 (see below); that script is
 how to fill the last one.
 
 ## The short version
@@ -76,7 +76,7 @@ Three things follow, and the first is the one this file was waiting for:
 3. **The native server does not have the problem** — under the *existing* POSIX installer,
    with no new mechanism. Both rows FIRED.
 
-### macOS, the same probe (#218)
+### macOS, the same probe (pre-publication issue 218)
 
 macOS 15 / Apple silicon, SBCL 2.6.5, 2026-09-02. Same script, three runs of every cell,
 **all 21 agreed, and the matrix is identical to Linux's**:
@@ -91,7 +91,7 @@ macOS 15 / Apple silicon, SBCL 2.6.5, 2026-09-02. Same script, three runs of eve
 So the macOS *outside-`serve-forever`* cell that this section was waiting on is filled, and
 the native rows are now measured on macOS too. **The fault is not platform-specific**: it
 travels with Woo, on both Unixes, in both modes. Windows remains unmeasured — it has no
-POSIX signals at all and is a separate question (#25).
+POSIX signals at all and is a separate question (#37).
 
 ## Hypotheses ruled out
 
@@ -115,7 +115,7 @@ deliver it to. The probe confirms the *location* (the transport, not `serve-fore
 mere presence of a server) rather than the mechanism inside libev, which we have no need to
 establish: the remedy is the same either way, and it is not to fix libev.
 
-## What #117 turned out to need: nothing
+## What pre-publication issue 117 turned out to need: nothing
 
 **This section previously prescribed a `uv_signal_t` installer. The evidence retires it.**
 Recorded rather than deleted, because a plan that was abandoned for a measured reason is
@@ -127,7 +127,7 @@ be the one in front of us. **`SIGTERM` already works on the native server under 
 POSIX installer**, in both rows of the probe. Building the installer would add a second
 signal mechanism to maintain, in order to fix a defect that mechanism does not have.
 
-So the fix for a Hyperion app is a **backend choice**, and #117 delivered it in commit 5:
+So the fix for a Hyperion app is a **backend choice**, and pre-publication issue 117 delivered it in commit 5:
 
 ```lisp
 ;; the app's system, :depends-on
@@ -149,8 +149,8 @@ was broken.
 prefers Woo when it is loaded. **So a praxeon web app deployed on Linux or macOS could not
 be stopped by its supervisor** — precisely the situation `serve-forever` exists to handle.
 
-**Fixed in #218, and not by swapping one handler for another.** The deeper fault was that a
-*framework* was choosing the *application's* HTTP server at all — the thing #139 / ADR-0011
+**Fixed in pre-publication issue 218, and not by swapping one handler for another.** The deeper fault was that a
+*framework* was choosing the *application's* HTTP server at all — the thing pre-publication issue 139 / ADR-0011
 decided against and removed from `hyperion.asd`, which `praxeon/web` was simply missed by.
 So `praxeon/web` now declares **no** backend, and `praxeon/elise` — a real deployable, and
 the layer where the choice belongs — declares `clack-handler-hunchentoot` for itself. An
@@ -161,7 +161,7 @@ system pulling a `clack-handler-*`, on any platform, fails the suite. It had bee
 documented and undefended, which is how one system went on violating it while the tree
 stayed green.
 
-## Note for #25 (`service`)
+## Note for #37 (`service`)
 
 **Unblocked, with a constraint.** A `service` target could not ship while every deployed app
 lost `SIGTERM`; it can ship now, provided the app does not run on Woo. A supervised process

@@ -41,7 +41,7 @@ explains the failure) or a transport error."))
   (:documentation "Signalled when a provider is asked to deliver a message on a channel it
 does not implement (e.g. an SMS to an email-only provider)."))
 
-;;; --- the boundary with aion/http-client (#202) ----------------------------
+;;; --- the boundary with aion/http-client (pre-publication issue 202) ----------------------------
 ;;;
 ;;; The HTTP client used to signal DELIVERY-FAILURE directly, which is exactly why it could
 ;;; not be reused: a general client has no business asserting that a *delivery* failed. It

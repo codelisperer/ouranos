@@ -26,7 +26,7 @@ dir, naming it from the project's .asd."
 ;;; Windows cannot create the symlink this one needs, so it does not run there -- and now
 ;;; SAYS so. It used to wrap the whole body in `unless`, which executed ZERO checks and still
 ;;; reported `ok`, so the missing coverage appeared only as an unexplained two-check
-;;; difference between platforms and took a three-run reconciliation to account for (#168).
+;;; difference between platforms and took a three-run reconciliation to account for (pre-publication issue 168).
 ;;; A SKIP is a result: counted, reasoned, and visible as `Skip: N`. The coverage gap is
 ;;; legitimate; being unable to see it was not.
 ;;;

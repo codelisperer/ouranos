@@ -28,11 +28,11 @@
 (defpackage #:cldr-plurals (:use #:cl))
 (in-package #:cldr-plurals)
 
-;;; THE TREE IS THE CALLER'S, NOT THIS FILE'S (#480). This was
+;;; THE TREE IS THE CALLER'S, NOT THIS FILE'S (pre-publication issue 480). This was
 ;;; `(pathname-parent-directory-pathname (pathname-directory-pathname *load-truename*))',
 ;;; so one checkout's copy run from another regenerated the OTHER checkout's vendored rules
 ;;; and pin -- two writes, both into a tree the operator was not looking at. Same defect as
-;;; #450 in check-readme-counts, same resolver.
+;;; pre-publication issue 450 in check-readme-counts, same resolver.
 (defparameter *script* (or *load-truename* *load-pathname*))
 (load (merge-pathnames "tree-root.lisp" (uiop:pathname-directory-pathname *script*)))
 

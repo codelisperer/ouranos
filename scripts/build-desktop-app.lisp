@@ -128,7 +128,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
       (warn "build-desktop-app: could not patch the runtime (~A); the image will keep its build-machine library paths." (type-of e))
       nil)))
 
-;;; --- the heap this bundle is born with (#88) ---------------------------------
+;;; --- the heap this bundle is born with (pre-publication issue 88) ---------------------------------
 ;;;
 ;;; A SHIPPED artifact, which is what makes this worse here than in bootstrap.lisp. The
 ;;; dumped app inherits the heap of the process that dumped it and cannot be given another
@@ -193,7 +193,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
         (format t "~&build-desktop-app: continuing UNPATCHED -- this bundle will not run on a Mac without those libraries.~%"))))
 
 
-;;; --- the platform key, from the library that also serves the client (#206) -------
+;;; --- the platform key, from the library that also serves the client (pre-publication issue 206) -------
 ;;;
 ;;; NOT DEFINED HERE. The key names the artifact this script produces and the update client
 ;;; looks that name up; the two must agree exactly or no update is ever delivered. When this
@@ -213,7 +213,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
  `(:source-registry (:tree ,*root*) :inherit-configuration))
 (asdf:load-system "aion/platform")
 
-;;; --- refusing an unverified platform (#145) -------------------------------------
+;;; --- refusing an unverified platform (pre-publication issue 145) -------------------------------------
 ;;;
 ;;; THE ALLOW-LIST IS NOT DEFINED HERE ANY MORE. It lives beside the key generator, in
 ;;;
@@ -221,7 +221,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
 ;;;
 ;;; and that is the ONLY place to edit it. The binding below is a local alias, so the rest
 ;;; of this script reads as it always did; editing it HERE would move this build's answer
-;;; without moving the client's, which is precisely the split #206 exists to close -- the
+;;; without moving the client's, which is precisely the split pre-publication issue 206 exists to close -- the
 ;;; builder and the updater disagreeing about what a platform is called, silently, with the
 ;;; client concluding it is up to date forever.
 ;;;
@@ -248,7 +248,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
 ;;; linux-arm64 and macos-x86-64 are in the same position and refused for the same reason.
 ;;;
 ;;; The escape hatch is for the person doing the verifying, not a way to ship past this:
-;;; set OURANOS_ALLOW_UNVERIFIED_PLATFORM=1, work the checklist in issue #145, and then
+;;; set OURANOS_ALLOW_UNVERIFIED_PLATFORM=1, work the checklist in pre-publication issue 145, and then
 ;;; MOVE THE KEY INTO *verified-platforms* so the next person does not need the override.
 (defun die-unverified-platform (key)
   (let ((*standard-output* *error-output*))
@@ -260,7 +260,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
     (format t "libuv, not hyperion-view, not signing. A bundle built here would carry a~%")
     (format t "platform key that the update manifest treats exactly like a tested one.~%~%")
     (format t "If you are the one verifying it: set OURANOS_ALLOW_UNVERIFIED_PLATFORM=1,~%")
-    (format t "work the checklist in issue #145, then add ~S to *verified-platforms* in~%" key)
+    (format t "work the checklist in pre-publication issue 145, then add ~S to *verified-platforms* in~%" key)
     (format t "scripts/build-desktop-app.lisp so the next person needs no override.~%")
     (finish-output))
   (sb-ext:exit :code 2))
@@ -375,13 +375,13 @@ does not load aion/uv at all.")
 (defun wake-lazy-natives ()
   "Resolve every lazily-loaded native library, so the inventory below is real.
 
-A FAILURE HERE IS FATAL, and it did not used to be (#274). The old text said a library that
+A FAILURE HERE IS FATAL, and it did not used to be (pre-publication issue 274). The old text said a library that
 will not load \"means this build machine cannot carry it, and the report says so\" -- true,
 and the wrong conclusion drawn from it. The IMAGE still needs the library: the package is
 present, so something in this app loads aion/uv, so the running app WILL call into libuv and
 signal on the user's machine. Dumping that bundle produces an artifact that works on every
 developer box and fails on every user's -- ADR-0011's libev story verbatim, and the reason
-#274 exists.
+pre-publication issue 274 exists.
 
 THE DISTINCTION THE OLD CODE COULD NOT MAKE, and this one does: a waker whose PACKAGE IS
 ABSENT is an app that does not use the library at all, and that is silence, not a warning. A
@@ -398,7 +398,7 @@ be built. Those are two different right answers and they shared a code path."
                    (format t "This image LOADS ~A, so the app calls into that library at run~%" package)
                    (format t "time -- and the bundle cannot carry what will not resolve here.~%")
                    (format t "Shipping it would produce an artifact that works on every build~%")
-                   (format t "machine and fails on every user's (ADR-0011, #74, #94).~%~%")
+                   (format t "machine and fails on every user's (ADR-0011, #72, #78).~%~%")
                    (format t "Build the library first:  sbcl --script scripts/build-libuv.lisp~%")
                    (finish-output))
                  (sb-ext:exit :code 3)))
@@ -434,7 +434,7 @@ with the library that got loaded."
 Read from each module's OWN exported list rather than restated here. A second copy of
 `*library-names*' in this script would be a list to keep in sync with the one that decides
 what the shipped app searches for -- and the copy that drifts is discovered by an app that
-does not start, on a machine that is not ours (#329)."
+does not start, on a machine that is not ours (pre-publication issue 329)."
   (loop for (package loader nil path-var names-var) in *lazy-natives*
         for present = (and (find-package package) (%fn package loader))
         for path = (and present path-var (%var package path-var))
@@ -466,7 +466,7 @@ shows up as an app that cannot start on a machine without its own copy."
         (format t "The shipped app looks beside its own executable for those names. A file~%")
         (format t "under any other name is not found, the search falls through to the OS~%")
         (format t "loader, and the bundle runs only on a machine that already has its own~%")
-        (format t "copy -- which is every developer's and no user's (#329, ADR-0011).~%"))
+        (format t "copy -- which is every developer's and no user's (pre-publication issue 329, ADR-0011).~%"))
       (sb-ext:exit :code 3))))
 
 (defun verify-natives-will-be-carried ()
@@ -476,7 +476,7 @@ A SEPARATE PASS FROM WAKE-LAZY-NATIVES, and the separation is the fix rather tha
 Waking asks \"does this resolve on the build machine\". Shipping asks \"will the bundle carry
 it\". Those are the same question only on a host with no system copy installed -- which is
 every Windows box and every CI runner we verify on, and is exactly why this hole survived
-#310's three-direction check and shipped (#325).
+pre-publication PR 310's three-direction check and shipped (pre-publication issue 325).
 
 What it cost: with vendor/libuv absent and Homebrew's libuv present, the waker fell through
 to the bare soname, the OS loader found Homebrew's copy, CARRY-NATIVE-LIBRARIES had no path
@@ -502,7 +502,7 @@ natives, so they never reach this pass."
              ;; refusing is the safe reading, since we cannot show the library will travel.
              (let ((*standard-output* *error-output*))
                (format t "~&build-desktop-app: ~A woke but recorded no library path.~%" package)
-               (format t "Cannot show the bundle will carry it, so refusing (#325).~%"))
+               (format t "Cannot show the bundle will carry it, so refusing (pre-publication issue 325).~%"))
              (sb-ext:exit :code 3))
             ((and resolved (uiop:subpathp resolved vendor))
              (format t "~&  will carry  ~A  <- ~A~%" package path))
@@ -515,7 +515,7 @@ natives, so they never reach this pass."
                    (format t "That is a bare soname: the OS loader found a copy of its own and never~%said where, so CARRY-NATIVE-LIBRARIES has no path to copy.~%"))
                (format t "~%The bundle would ship without the library and run only on machines~%")
                (format t "that happen to have their own copy. It works on this build machine~%")
-               (format t "and fails on every user's (ADR-0011, #74, #94).~%~%")
+               (format t "and fails on every user's (ADR-0011, #72, #78).~%~%")
                (format t "Build the vendored library first:~%")
                (format t "  sbcl --script scripts/build-libuv.lisp~%")
                (format t "~%Then rebuild. The tree's search prefers vendor/ over the system copy,~%")
@@ -561,7 +561,7 @@ be missing from a step named for waking."
             (let ((truename (and path (probe-file path))))
               (cond
                 ((and truename (uiop:subpathp truename *vendor*))
-                 ;; NAME FROM `path', NOT `truename' (#329). PATH is what the tree's own
+                 ;; NAME FROM `path', NOT `truename' (pre-publication issue 329). PATH is what the tree's own
                  ;; search order accepted -- the name the consumer will ask for. TRUENAME is
                  ;; where the bytes live, which on a conventional install is a versioned file
                  ;; behind a soname symlink: libuv.1.dylib -> libuv.1.0.0.dylib. Naming from
@@ -640,7 +640,7 @@ nothing."
 ;; wake -> verify -> carry, each step named for the one thing it does. The verify pass is
 ;; separate because a step called `wake-lazy-natives' is a step about waking, and hanging
 ;; the shipping gate off it is how the missing check hid inside a step named for the check
-;; we wanted (#325).
+;; we wanted (pre-publication issue 325).
 (wake-lazy-natives)
 (verify-natives-will-be-carried)
 (carry-native-libraries)

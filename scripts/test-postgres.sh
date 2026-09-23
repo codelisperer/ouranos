@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# test-postgres.sh --- the Postgres the verification gate needs (#176).
+# test-postgres.sh --- the Postgres the verification gate needs (pre-publication issue 176).
 #
 #   scripts/test-postgres.sh up      start it and wait until it actually answers
 #   scripts/test-postgres.sh down    stop and remove it

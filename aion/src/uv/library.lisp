@@ -63,7 +63,7 @@ startup. SBCL-only, which this stack already is.
 
 This duplicates hyperion/desktop:image-directory, deliberately and not by oversight:
 aion/uv sits far to the left of hyperion in the DAG and does not depend even on aion core,
-so it cannot call it. Recorded in ADR-0013; the shared home is issue #125's runtime module."
+so it cannot call it. Recorded in ADR-0013; the shared home is issue #91's runtime module."
   (flet ((dir-of (p)
            (when p
              (uiop:pathname-directory-pathname

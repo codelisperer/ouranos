@@ -1,4 +1,4 @@
-;;;; memory-db.lisp --- observational memory in a database, with similarity recall (#372).
+;;;; memory-db.lisp --- observational memory in a database, with similarity recall (#138).
 ;;;;
 ;;;; AN AUX SYSTEM, AND THE DAG IS NOT THE REASON. mnemosyne sits to praxeon's LEFT, so
 ;;;; `praxeon -> mnemosyne' is a leftward dependency the DAG permits outright. Recording
@@ -6,7 +6,7 @@
 ;;;; would find the dependency legal and reasonably reopen a decision that was right for a
 ;;;; different reason.
 ;;;;
-;;;; What forbids it is the design rule, stated twice in places that already bind. #258's
+;;;; What forbids it is the design rule, stated twice in places that already bind. pre-publication issue 258's
 ;;;; deliverable 2, which this work descends from: "a praxeon-side seam for storing and
 ;;;; querying embeddings inside a workflow, WITHOUT PRAXEON GROWING A DATASTORE OF ITS OWN."
 ;;;; And praxeon/CLAUDE.md: "anything an agent sends or stores externally reaches praxeon as
@@ -15,7 +15,7 @@
 ;;;; is the hermes shape -- something an agent stores externally, reaching praxeon through a
 ;;;; protocol praxeon owns.
 ;;;;
-;;;; THE SCHEMA IS BUILT AT RUNTIME, WHICH IS THE POINT RATHER THAN AN INCONVENIENCE (#415).
+;;;; THE SCHEMA IS BUILT AT RUNTIME, WHICH IS THE POINT RATHER THAN AN INCONVENIENCE (#150).
 ;;;; A vector column carries its width in its type, and that width follows from which
 ;;;; embedding model an operator configured. A literal `(:embedding :vector :dimensions
 ;;;; 1536)' in a DEFSCHEMA has hard-coded OpenAI's text-embedding-3-small into the schema.
@@ -28,7 +28,7 @@
 ;;;; stored rows protects the search argument with the same code.
 ;;;;
 ;;;; THE INDEX MATCHES THE OPERATOR IT SERVES. `<=>' is cosine distance, so the HNSW index
-;;;; is built with `vector_cosine_ops'. #258's named trap is that an index built for one
+;;;; is built with `vector_cosine_ops'. pre-publication issue 258's named trap is that an index built for one
 ;;;; distance operator does not serve a query written with another -- no error, correct
 ;;;; rows, and a sequential scan over the whole table. Choosing both in one file is how they
 ;;;; are kept in agreement.
@@ -74,7 +74,7 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     (:supersedes   :string)
     (:superseded_by :string)
     (:superseded_at :integer)
-    ;; PROVENANCE AS REAL COLUMNS (#415), not a blob: "which conversation" has to be
+    ;; PROVENANCE AS REAL COLUMNS (#150), not a blob: "which conversation" has to be
     ;; answerable as a query -- show me everything this conversation put in the store, so a
     ;; member disputing one claim can see the rest from the same turn.
     (:source_conversation :string)
@@ -100,7 +100,7 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
   "A store over CONNECTION. EMBEDDER is an LLM:EMBEDDING-PROVIDER and decides the width.
 
 EMBEDDER IS INJECTED, NOT RESOLVED HERE. `make-embedding-provider-from-env' reads
-`*provider-role*', and #430 records that resolving across a thread boundary falls through to
+`*provider-role*', and #158 records that resolving across a thread boundary falls through to
 the shared level without erroring -- the wrong model, quietly. Resolve it where the role is
 bound and hand it in; then no path through this store can resolve one."
   (check-type table string)
@@ -121,7 +121,7 @@ bound and hand it in; then no path through this store can resolve one."
   "Every statement this store's table needs, in order. Returns a list of SQL strings."
   (let ((table (store-table store)))
     (append
-     ;; The extension is a deployment fact and a migration has to state it (#258). Postgres
+     ;; The extension is a deployment fact and a migration has to state it (pre-publication issue 258). Postgres
      ;; only: SQLite has no extension registry, and mnemosyne/ddl refuses it there rather
      ;; than emitting nothing.
      (when (eq (store-dialect store) :postgres)
@@ -129,7 +129,7 @@ bound and hand it in; then no path through this store can resolve one."
      (list (schema:schema-ddl (store-schema store) :dialect (store-dialect store)))
      ;; THE INDEX IS BUILT FOR THE OPERATOR THIS STORE QUERIES WITH. `<=>' is cosine, so
      ;; vector_cosine_ops. An index built for a different operator is not an error and not
-     ;; slow-and-obvious -- it is correct rows and a sequential scan (#258).
+     ;; slow-and-obvious -- it is correct rows and a sequential scan (pre-publication issue 258).
      (when (eq (store-dialect store) :postgres)
        (list (ddl:ddl (list :create-index
                             :name (intern (string-upcase
@@ -148,7 +148,7 @@ bound and hand it in; then no path through this store can resolve one."
 ;;; --- rows <-> observations ---------------------------------------------------
 
 ;;; The local case-insensitive reader that lived here is now MNEMOSYNE/PARAM:ROW-VALUE
-;;; (#489) -- this store's `%row-get' was the fourth independent copy of it, and the defect
+;;; (pre-publication issue 489) -- this store's `%row-get' was the fourth independent copy of it, and the defect
 ;;; it was written for was found HERE: GETF missed every column because the driver interns
 ;;; keys lowercase, every column read back as its default, and every count assertion passed.
 ;;;
@@ -172,7 +172,7 @@ bound and hand it in; then no path through this store can resolve one."
    :supersedes (param:row-value row :supersedes)
    :superseded-by (param:row-value row :superseded_by)
    :superseded-at (param:row-value row :superseded_at)
-   ;; READ BACK FROM THE COLUMNS, never reconstructed from the content. #372's hard rule:
+   ;; READ BACK FROM THE COLUMNS, never reconstructed from the content. #138's hard rule:
    ;; "the traceable provenance is never reconstructed from the rendered text" -- a citation
    ;; parsed back out of prose is a guess about what the model was told, not a record of
    ;; what was stored.
@@ -324,7 +324,7 @@ of its own -- which is why this is ctx:assemble and not a LIMIT."
                     observations))
         (context (ctx:make-context :budget budget)))
     (dolist (o wanted)
-      ;; THE SHARED CONSTRUCTOR (#415), not a second copy. This store had its own inline
+      ;; THE SHARED CONSTRUCTOR (#150), not a second copy. This store had its own inline
       ;; version of the same five fields; a citation added to one and not the other is
       ;; exactly the drift that produces a store whose items can be cited and another
       ;; whose cannot, for no reason a caller could predict.
@@ -374,7 +374,7 @@ throw most of it away, and ranking in Lisp would mean the index served nothing."
       (and (integerp n) (plusp n)))))
 
 (defmethod mem:forget-subject ((store db-memory-store) subject)
-  "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#415)."
+  "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150)."
   (bt:with-lock-held ((store-lock store))
     (let ((n (q:run (store-connection store)
                     (list :delete-from (store-table store)

@@ -89,7 +89,7 @@ order."
 (defun ensure-token (session)
   "SESSION's token, minting one into the session if it has none. Returns the token.
 
-The bytes come from aion/random -- the same CSPRNG that mints session ids (#95), not
+The bytes come from aion/random -- the same CSPRNG that mints session ids (pre-publication issue 95), not
 `cl:random'. A token from a predictable generator is not a token.
 
 This is the seam the INJECTOR calls at response assembly. It is here rather than in the
@@ -112,7 +112,7 @@ before the visitor authenticated is a token an attacker may have held."
 ;;; --- the privilege change -------------------------------------------------
 ;;;
 ;;; A token minted before the visitor authenticated is a token an attacker may have held,
-;;; exactly as a session id is (#282). Registering the key here rather than teaching
+;;; exactly as a session id is (#120). Registering the key here rather than teaching
 ;;; SIGN-IN! about CSRF keeps session.lisp ignorant of what this value means, and means an
 ;;; app gets the rotation without knowing either half exists.
 ;;;

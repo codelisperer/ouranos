@@ -48,7 +48,7 @@ step names as they complete, and the OUTPUTS map (step name -> answer string)."
 ;;; Nodes: a STEP binds an agent to a prompt; a GROUP fans steps out in parallel
 ;;; (parallel *semantics*: each child sees the blackboard as of the group's
 ;;; start, none sees the others; results merge after). Concurrency is no longer
-;;; "a drop-in later": children run on threads as of #418. The isolation contract
+;;; "a drop-in later": children run on threads as of pre-publication issue 418. The isolation contract
 ;;; this comment described is what made that a small change rather than a
 ;;; redesign -- and it now covers the AGENT too, which is the piece it had missed.
 ;;; --------------------------------------------------------------------------
@@ -84,7 +84,7 @@ Two things a caller needs to know, both from `%run-group', where the reasoning i
   completion; what succeeded is merged; `cnd:parallel-child-failure' then names what
   failed and what did not.
 
-Until #418 this ran its children sequentially -- the isolation was real, the
+Until pre-publication issue 418 this ran its children sequentially -- the isolation was real, the
 concurrency was not."
   (make-wgroup :steps steps))
 
@@ -121,7 +121,7 @@ record the answer under the step name. Returns the answer."
       answer)))
 
 ;;; --------------------------------------------------------------------------
-;;; Fan-out, and the three kinds of sharing a `dolist' hid (#418).
+;;; Fan-out, and the three kinds of sharing a `dolist' hid (pre-publication issue 418).
 ;;;
 ;;; `%run-group' ran its children one after another. Its docstring described VISIBILITY
 ;;; ISOLATION -- children cannot see each other's writes -- and that was accurate and
@@ -174,7 +174,7 @@ record the answer under the step name. Returns the answer."
 ;;; in flight before the first completes, so the ordered guarantee is gone by construction. A
 ;;; caller who cares should warm the prefix with one turn before fanning out -- that is a
 ;;; CALLER's decision because only the caller knows whether the prefix is worth a serial
-;;; round-trip, and it is recorded here rather than silently paid for. See #417 for the ledger
+;;; round-trip, and it is recorded here rather than silently paid for. See pre-publication issue 417 for the ledger
 ;;; that makes the difference visible.
 ;;; --------------------------------------------------------------------------
 
@@ -247,7 +247,7 @@ both lists."
            (loop for child in children
                  ;; THREAD-LIFETIME: continues the caller's unit of work. A child of a
                  ;; parallel group belongs to the request that spawned it, so it carries the
-                 ;; registered dynamic bindings (#430). `observer' below is still passed
+                 ;; registered dynamic bindings (#158). `observer' below is still passed
                  ;; explicitly and stays that way: `%run-child' rebinds it on the child, which
                  ;; shadows the inherited value rather than fighting it. The wrapper sits on
                  ;; the spawn because the capture is taken where it is called -- here, on this

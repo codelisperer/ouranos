@@ -1,11 +1,11 @@
-;;;; packages.lisp --- aion/random: unpredictable bytes, from the OS (#95).
+;;;; packages.lisp --- aion/random: unpredictable bytes, from the OS (pre-publication issue 95).
 
 (cl:defpackage #:aion/random
   (:use #:cl)
   ;; SHADOWED, not merely unused. Inside this package `random' is OURS and signals, so the
   ;; one file in the tree whose whole subject is unpredictability cannot reach the weak
   ;; generator by reflex or by a merge. Writing CL:RANDOM here still works and is now a
-  ;; deliberate, visible act -- which is the distinction #95 asked for.
+  ;; deliberate, visible act -- which is the distinction pre-publication issue 95 asked for.
   (:shadow #:random)
   (:local-nicknames (#:crypto #:ironclad))
   (:documentation
@@ -18,7 +18,7 @@
 
     That is fatal for anything an attacker can both OBSERVE and BENEFIT from predicting --
     a session id is the clearest case, since it is handed to the viewer as a cookie by
-    design, so the output is public by construction. (#95: hyperion minted session ids
+    design, so the output is public by construction. (pre-publication issue 95: hyperion minted session ids
     this way, under a docstring promising 128 bits of entropy.)
 
     THE API IS NAMED SO THE WEAK ONE CANNOT BE REACHED FOR BY ACCIDENT. There is no

@@ -1,4 +1,4 @@
-;;;; checkers.asd --- tests for the gate's checker scripts (#459).
+;;;; checkers.asd --- tests for the gate's checker scripts (#163).
 ;;;;
 ;;;; NOT A FRAMEWORK. `scripts/' holds the guards `verify-tree.lisp' runs -- check-pins,
 ;;;; check-deps, check-asd-collisions and the rest -- and until this system existed nothing
@@ -11,7 +11,7 @@
 ;;;; checker block "must not contribute to the check count" -- `total checks executed' means
 ;;;; assertions the suites ran, and a gate check inflating it would corrupt the one number
 ;;;; this tree reasons with. So a checker that tested the checkers would produce no number,
-;;;; and #459 exists precisely because nothing attests that these work. Closing an
+;;;; and #163 exists precisely because nothing attests that these work. Closing an
 ;;;; invisibility problem with an invisible solution is no closure: an unregistered suite,
 ;;;; an unrun suite and a passing suite are identical at the exit code.
 ;;;;
@@ -42,7 +42,7 @@ that hides which scripts it is about.")
   :depends-on ("fiveam"
                ;; To COMPUTE a fixture's sha256 rather than hand-write one. A hand-written
                ;; hash is a second copy of a fact, and the test would then be checking that
-               ;; two hand-written things agree (#466).
+               ;; two hand-written things agree (pre-publication issue 466).
                "ironclad")
   :serial t
   :components ((:module "tests"

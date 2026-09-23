@@ -21,9 +21,9 @@ job. Its initial code was extracted from `praxeon/src/web.lisp`.
 
 ## Design facts
 
-- **Hyperion declares no HTTP server** (#139). The app depends on the Clack handler it
+- **Hyperion declares no HTTP server** (pre-publication issue 139). The app depends on the Clack handler it
   wants; `hyperion/server:default-server` picks from what loaded. `server-uv` (native
-  libuv, #117) is the destination; Woo and Hunchentoot go when it lands.
+  libuv, pre-publication issue 117) is the destination; Woo and Hunchentoot go when it lands.
 - Sessions are behind a `store` protocol; `rotate-session` exists — don't hand-roll it.
 - Desktop is an out-of-process native webview. `libev` is no longer needed (ADR-0011).
 - **A streaming body is a function in body position**, `(status headers (lambda (writer)
@@ -37,11 +37,11 @@ job. Its initial code was extracted from `praxeon/src/web.lisp`.
 
 ## Gotchas (hot reload)
 
-- `dev:serve` takes a **thunk returning a fresh app**, not the app (#235); it does **not
-  block** (#236); `:system` watches `<system>/src/` only — use `:paths` for a multi-surface
-  repo (#237); a changed `defstruct` leaves stale dependents ("X is not of type X") and
-  self-heals (#234); an error page carries no poller until #233.
-- The entropy guard (#95) covers all of `hyperion/src`, comments included.
+- `dev:serve` takes a **thunk returning a fresh app**, not the app (pre-publication issue 235); it does **not
+  block** (pre-publication issue 236); `:system` watches `<system>/src/` only — use `:paths` for a multi-surface
+  repo (pre-publication issue 237); a changed `defstruct` leaves stale dependents ("X is not of type X") and
+  self-heals (pre-publication issue 234); an error page carries no poller until pre-publication issue 233.
+- The entropy guard (pre-publication issue 95) covers all of `hyperion/src`, comments included.
 
 ## Where to look
 

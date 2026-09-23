@@ -169,7 +169,7 @@ Say it that way and the third row stops being a workaround and becomes the rule:
 edit an applied migration, so between an `ALTER` and the definition it changed, the
 definition is the one that moves.
 
-### A value a `defschema` reads from configuration (#258)
+### A value a `defschema` reads from configuration (pre-publication issue 258)
 
 A field spec's option values are **evaluated**, so a width can come from configuration:
 
@@ -181,7 +181,7 @@ A field spec's option values are **evaluated**, so a width can come from configu
   (:embedding :vector :dimensions +embedding-width+))
 ```
 
-That changed in #258 — the specs used to be quoted whole, so every value had to be a literal.
+That changed in pre-publication issue 258 — the specs used to be quoted whole, so every value had to be a literal.
 **If you are upgrading and a declaration passed a bare symbol or a list you meant as data,
 quote it** (`:default (quote (:a :b))`); self-evaluating values — keywords, strings, numbers,
 `t` — are unaffected, which is every option in every declaration in this tree.

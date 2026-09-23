@@ -35,7 +35,7 @@ tested for platforms this machine is not -- otherwise two thirds of the table is
 rather than checked, on whichever host happens to run the suite."
   (format nil "~A-~A" (host-os-name) (normalize-arch arch)))
 
-;;; --- who may produce a build (#145) -------------------------------------------
+;;; --- who may produce a build (pre-publication issue 145) -------------------------------------------
 ;;;
 ;;; Lives here rather than in the build script because it is part of the same vocabulary: the
 ;;; allow-list and the key that is checked against it should not be able to drift either.
@@ -53,7 +53,7 @@ reports the difference is an app that does not start.")
   "True when KEY names a platform this project actually builds and verifies."
   (and (member key *verified-platforms* :test #'string=) t))
 
-;;; --- where this executable lives (#335) ---------------------------------------
+;;; --- where this executable lives (pre-publication issue 335) ---------------------------------------
 ;;;
 ;;; A platform fact rather than a desktop one, which is why it sits here: hyperion/desktop
 ;;; needs it to find its sibling launcher, and hyperion/update needs it to answer where this

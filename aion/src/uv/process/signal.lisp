@@ -8,7 +8,7 @@
 ;;;; own facility is most dangerous.
 ;;;;
 ;;;; A STARTED SIGNAL HANDLE HOLDS THE LOOP OPEN. For a supervisor -- the `service` target
-;;;; kind (#25) -- that is exactly right: the process should stay up waiting for SIGTERM.
+;;;; kind (#37) -- that is exactly right: the process should stay up waiting for SIGTERM.
 ;;;; For a script it is the classic surprise, and the answer is UNWATCH-SIGNAL, or
 ;;;; (uv:describe-loop l), which will name this handle as the thing holding it.
 ;;;;

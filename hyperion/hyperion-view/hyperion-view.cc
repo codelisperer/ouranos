@@ -8,11 +8,11 @@
 // process's GUI main thread, so it never collides with SBCL's. One file over the MIT
 // `webview.h`, which wraps WebKitGTK / WKWebView / WebView2. Build with ./build.sh.
 //
-// --icon (#79): webview.h 0.10.0 exposes no icon API, so this is three small platform
+// --icon (#74): webview.h 0.10.0 exposes no icon API, so this is three small platform
 // paths hung off webview_get_window(). It sets the WINDOW icon, which on Windows is NOT
 // the executable's icon (that comes from the PE resource of the .exe and needs the dumped
 // SBCL image post-processed), and on macOS is outranked by a bundle's CFBundleIconFile
-// once the app is bundled (#74). Format per platform: .ico on Windows, anything GdkPixbuf
+// once the app is bundled (#72). Format per platform: .ico on Windows, anything GdkPixbuf
 // reads (.png) on Linux, anything NSImage reads on macOS.
 #include <cstdio>
 #include <cstdlib>
@@ -124,7 +124,7 @@ static id add_submenu(id main_menu, const char *title) {
 //
 // The second is undocumented and guarded accordingly: if the dictionary is ever immutable,
 // respondsToSelector: fails and the app falls back to the launcher's name. Cosmetic, and a
-// wrong name is a far better outcome than a crash on startup. A real .app bundle (#74)
+// wrong name is a far better outcome than a crash on startup. A real .app bundle (#72)
 // supplies CFBundleName properly and makes this path moot.
 static void set_app_name(const char *name) {
   id info = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
@@ -226,7 +226,7 @@ static void set_window_icon(webview_t w, const char *path) {
   std::free(wide);
 #elif defined(__APPLE__)
   // The Dock/app icon, through the objc runtime -- the mechanism webview.h itself uses.
-  // UNVERIFIED from this machine (#79 assigns macOS to the mac instance). Inside a .app
+  // UNVERIFIED from this machine (#74 assigns macOS to the mac instance). Inside a .app
   // bundle CFBundleIconFile wins regardless, so this covers the unbundled/dev case.
   id str = reinterpret_cast<id (*)(id, SEL, const char *)>(objc_msgSend)(
       reinterpret_cast<id>(objc_getClass("NSString")),
@@ -259,7 +259,7 @@ static void set_window_icon(webview_t w, const char *path) {
 #endif
 }
 
-// USAGE GOES TO STDOUT AND EXITS, AND THAT IS THE WHOLE OF #268. There was no --help at
+// USAGE GOES TO STDOUT AND EXITS, AND THAT IS THE WHOLE OF pre-publication issue 268. There was no --help at
 // all: it fell through to positional[0], became the URL, and webview_run() blocked
 // forever on a window showing a failed navigation to the string "--help". Measured
 // before the fix -- exited=FALSE after 5s, stdout empty, stderr empty.

@@ -1,7 +1,7 @@
 # ADR-0001 — What happens when a content file fails to load
 
 **Status:** Accepted — 2026-09-18 by the maintainer. Question 2 of
-[#359](https://github.com/codelisperer/ouranos/issues/359).
+pre-publication issue 359.
 
 ## Context
 
@@ -76,7 +76,7 @@ a mixture.
 
 **Dev mode is the documented exception.** Skip the bad file, report it, keep going. Someone
 editing wants to see the rest of the page they are working on, and no reader is affected.
-Part 2 of #359 already carries a dev-mode flag, so this needs no new concept.
+Part 2 of pre-publication issue 359 already carries a dev-mode flag, so this needs no new concept.
 
 ## Consequences of C
 
@@ -100,7 +100,7 @@ same event and C still refuses to start on a bad file.
 
 ## Provenance
 
-Written by Ouranos Claude (macOS) as Q2 of #359. Options A and B are the two originally
+Written by Ouranos Claude (macOS) as Q2 of pre-publication issue 359. Options A and B are the two originally
 written down. **Option C came from the hub's review**, which found that A assumes boot and
 deploy are different events and that the deployment model in the design doc makes them the
 same. A is kept here rather than dropped, because the failure is not obvious and the next

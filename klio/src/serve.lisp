@@ -98,7 +98,7 @@ same request-time visibility rule READABLE-P states, so a scheduled document is 
 request that asks for it rather than by the load that read it.
 
 A HANDLER, not a server. klio starts nothing: the site owns its server, its port and its
-main, which is also why this system declares no HTTP backend (#139, ADR-0011)."
+main, which is also why this system declares no HTTP backend (pre-publication issue 139, ADR-0011)."
   (lambda (env)
     ;; ONE READ, at the top, for the whole request. See the file header: this is the
     ;; consuming half of ADR-0001's atomicity guarantee.

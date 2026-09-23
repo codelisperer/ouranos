@@ -73,7 +73,7 @@ value may name a DIFFERENT object that something else in the image still holds."
   ;; and it still comes back afterwards
   (is (= 1 (com:in-apartment () 1))))
 
-;;; --- the extension surface (#201) ---------------------------------------------
+;;; --- the extension surface (pre-publication issue 201) ---------------------------------------------
 ;;;
 ;;; The finding these come from: the first external consumer of this binding -- a typelib
 ;;; spike -- could not get an interface pointer out of a COM-OBJECT without reaching into

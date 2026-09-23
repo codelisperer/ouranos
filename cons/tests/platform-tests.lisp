@@ -1,4 +1,4 @@
-;;;; platform-tests.lisp --- the platform registry, and the asymmetry it exists for (#182).
+;;;; platform-tests.lisp --- the platform registry, and the asymmetry it exists for (pre-publication issue 182).
 ;;;;
 ;;;; The registry answers "which platform packages should exist on THIS host", and both
 ;;;; bootstrap.lisp and scripts/verify-tree.lisp consume that one answer so they cannot
@@ -9,11 +9,11 @@
 ;;;; build policy. Every assertion below is over a GIVEN os rather than the running one --
 ;;;; a predicate about three platforms that can only be exercised on the one you happen to
 ;;;; be sitting at is checked on a third of its behaviour and asserted on the rest, which
-;;;; is the shape of defect #182 was filed about in the first place.
+;;;; is the shape of defect pre-publication issue 182 was filed about in the first place.
 
 (in-package #:cons/tests)
 
-(def-suite platform :description "The host-platform package registry (#182)." :in all)
+(def-suite platform :description "The host-platform package registry (pre-publication issue 182)." :in all)
 (in-suite platform)
 
 (defun %load-platform-registry ()
@@ -89,7 +89,7 @@ because two of the three are otherwise never checked anywhere."
   (%load-platform-registry)
   (let ((windows-systems (mapcar (lambda (e) (%pf entry-system e)) (%pf entries-for :windows))))
     (is-true (member "aion/windows" windows-systems :test #'string=)
-             "windows must own aion/windows (#170); it owns ~S" windows-systems)
+             "windows must own aion/windows (pre-publication issue 170); it owns ~S" windows-systems)
     ;; From macOS and Linux the same package must be NOT APPLICABLE -- present in the
     ;; not-applicable list, absent from the owned list.
     (dolist (os '(:darwin :linux))

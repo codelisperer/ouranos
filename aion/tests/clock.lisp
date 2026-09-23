@@ -1,6 +1,6 @@
 ;;;; clock.lisp --- tests for aion/clock (the monotonic clock and v6 ids on it).
 ;;;;
-;;;; These moved here with the code (#96). The monotonicity guarantee is the whole reason
+;;;; These moved here with the code (pre-publication issue 96). The monotonicity guarantee is the whole reason
 ;;;; this clock is hand-assembled rather than taken from frugal-uuid, so a move that
 ;;;; carried the code without carrying its proof would be the more dangerous half of the
 ;;;; refactor -- the code would still compile, still return plausible ids, and quietly
@@ -90,10 +90,10 @@ database index or an ORDER BY actually does -- yields time order. If the field l
 Named RUN-TESTS, not RUN -- FiveAM already exports RUN."
   (run! 'aion-clock))
 
-;;; --- the non-timestamp bits (#95) ------------------------------------------
+;;; --- the non-timestamp bits (pre-publication issue 95) ------------------------------------------
 ;;;
 ;;; A v6 UUID's high bits are a monotonic timestamp and are guessable by design. Its LOW
-;;; bits -- 14 of clock-seq and 48 of node -- are not, and since #95 they come from
+;;; bits -- 14 of clock-seq and 48 of node -- are not, and since pre-publication issue 95 they come from
 ;;; aion/random rather than from cl:random. These pin that they are actually varying and
 ;;; actually random-looking, which is what the switch was for.
 
@@ -116,7 +116,7 @@ Named RUN-TESTS, not RUN -- FiveAM already exports RUN."
                "node ~X must have the multicast bit set" node))))
 
 (test clock-entropy-does-not-come-from-cl-random
-  ;; The #95 rule for this file, enforced rather than described: the source must contain no
+  ;; The pre-publication issue 95 rule for this file, enforced rather than described: the source must contain no
   ;; call to cl:random. Docstrings may DISCUSS it -- and this file's does, at length -- so
   ;; the scan looks for the call form specifically.
   (let ((path (merge-pathnames "src/clock/clock.lisp"
@@ -128,4 +128,4 @@ Named RUN-TESTS, not RUN -- FiveAM already exports RUN."
                         while line
                         when (or (search "(random " line) (search "make-random-state" line))
                           collect n)))
-        (is-false hits "clock.lisp must not call cl:random (#95); lines ~S" hits)))))
+        (is-false hits "clock.lisp must not call cl:random (pre-publication issue 95); lines ~S" hits)))))

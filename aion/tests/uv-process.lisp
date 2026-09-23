@@ -7,7 +7,7 @@
 ;;;; under its plumbing. See aion/docs/uv-process-design.md.
 ;;;;
 ;;;; TWO THINGS WINDOWS CANNOT DO, rather than does differently, both verified against
-;;;; libuv 1.52.1 (#119): a process cannot raise a signal at ITSELF -- uv_kill answers
+;;;; libuv 1.52.1 (pre-publication issue 119): a process cannot raise a signal at ITSELF -- uv_kill answers
 ;;;; ENOSYS -- so the two self-signalling tests skip there with that reason; and there is
 ;;;; no stock byte-exact `cat`, so the relay child is another SBCL (see CAT-PROGRAM).
 ;;;;
@@ -54,7 +54,7 @@
 ;;; and the tests below read identically on both. The Unix values are unchanged from when
 ;;; this was a POSIX-only suite, deliberately: a green Linux run still means what it meant.
 ;;;
-;;; Each Windows equivalent was MEASURED rather than assumed (#119). Two that look obvious
+;;; Each Windows equivalent was MEASURED rather than assumed (pre-publication issue 119). Two that look obvious
 ;;; and are wrong: `findstr "^"` drops a final line that has no terminator, and `more`
 ;;; appends a CRLF -- so neither can stand in for `cat` where the assertion is exact.
 

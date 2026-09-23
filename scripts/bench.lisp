@@ -1,4 +1,4 @@
-;;;; bench.lisp --- what is Coalton's release mode actually worth? (#98)
+;;;; bench.lisp --- what is Coalton's release mode actually worth? (pre-publication issue 98)
 ;;;;
 ;;;;   sbcl --script scripts/with-mode.lisp dev     scripts/bench.lisp
 ;;;;   sbcl --script scripts/with-mode.lisp release scripts/bench.lisp
@@ -10,7 +10,7 @@
 ;;;; EVERY NUMBER THIS PRINTS STATES ITS MODE, and the mode is read from the RUNNING IMAGE
 ;;;; (`coalton-release-p`) rather than from COALTON_ENV. Those two can disagree -- the
 ;;;; variable is what was asked for, the predicate is what was built -- and a benchmark that
-;;;; reports the request rather than the reality is precisely the failure #98 was filed
+;;;; reports the request rather than the reality is precisely the failure pre-publication issue 98 was filed
 ;;;; over. If they disagree, this refuses to run.
 ;;;;
 ;;;; THE WORKLOAD is aion/csv/types:parse-rfc4180-rows -- a real RFC-4180 parser written as
@@ -172,7 +172,7 @@ quote -- so the parser actually visits its quoted-field states rather than the h
     ;; The MODE is on the line, not only in the section header above it. A header scopes a
     ;; number until someone copies ONE line into an issue or a doc, at which point the
     ;; scope is gone and the number is unattributed again -- which is precisely the
-    ;; ambiguity #98 existed to remove ("every performance number we have is currently
+    ;; ambiguity pre-publication issue 98 existed to remove ("every performance number we have is currently
     ;; meaningless"). A measurement that can be quoted without its mode is not fixed yet.
     (format t "  [~(~a~)] ~a~40t~8,3F s total   ~9,3F ms/op   ~9:D bytes/op~%"
             *mode* label secs (* 1000 (/ secs iterations)) (round bytes iterations))

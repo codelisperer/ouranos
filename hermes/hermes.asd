@@ -12,7 +12,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  :depends-on ("aion/http-client"  ; the interceptor-shaped client, shared (#202)
+  :depends-on ("aion/http-client"  ; the interceptor-shaped client, shared (pre-publication issue 202)
                "dexador"           ; still direct for hermes/blob's streaming needs
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
@@ -46,7 +46,7 @@
 ;;; S3-compatible for deployment -- so a new provider is a new class plus one
 ;;; REGISTER-STORE, not a new API.
 ;;;
-;;; It lives in HERMES rather than mnemosyne (#164) for two reasons. Nothing about object
+;;; It lives in HERMES rather than mnemosyne (pre-publication issue 164) for two reasons. Nothing about object
 ;;; storage is SQL, and hermes is chartered for exactly this -- external integrations behind
 ;;; one neutral protocol. And hermes is a satellite depending only on aion, so code at ANY
 ;;; point in the DAG can store a file; under mnemosyne, a praxeon agent or a databaseless
@@ -54,7 +54,7 @@
 ;;;
 ;;; The S3 backend also adds NO new external dependency here: ironclad (HMAC-SHA256),
 ;;; cl-base64 and dexador are already hermes' own, for Twilio and SendGrid.
-;;; hermes/payments --- the neutral payments protocol (#48).
+;;; hermes/payments --- the neutral payments protocol (pre-publication issue 48).
 ;;;
 ;;; A SEPARATE system, though it adds no dependency hermes core does not already have
 ;;; (dexador, jzon, ironclad are all present). The reason is not dependencies but load
@@ -67,9 +67,9 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("hermes"            ; conditions and the messaging doctrine
-               "aion/http-client"  ; the shared outbound client (#202) -- direct, not via hermes
+               "aion/http-client"  ; the shared outbound client (pre-publication issue 202) -- direct, not via hermes
                "coalton"           ; the normalized event vocabulary
-               "aion/secret/types" ; api key + webhook secret as opaque fields (#209)
+               "aion/secret/types" ; api key + webhook secret as opaque fields (pre-publication issue 209)
                "com.inuoe.jzon"
                "ironclad"          ; HMAC-SHA256 webhook signatures
                "aion/log")
@@ -82,7 +82,7 @@
                              (:file "events")    ; the records an event carries (CL)
                              (:file "protocol")  ; provider + operations + env selection
                              (:file "dev")       ; the in-memory provider; no vendor, no money
-                             (:file "stripe"))))  ; the first real backend (#47)
+                             (:file "stripe"))))  ; the first real backend (pre-publication issue 47)
   :in-order-to ((test-op (test-op "hermes/payments/tests"))))
 
 (defsystem "hermes/payments/tests"

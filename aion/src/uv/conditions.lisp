@@ -63,7 +63,7 @@ Ours, not libuv's, and a REFUSAL rather than a failure -- so it does NOT inherit
 UV-ERROR's report, which would claim libuv failed when libuv was never called.
 
 Signalled rather than returned as NIL because a submission that silently vanishes
-during shutdown is the defect class this condition exists because of (#296): only
+during shutdown is the defect class this condition exists because of (pre-publication issue 296): only
 the CALLER knows whether dropping that work is correct, so the caller has to say
 so. A teardown path that legitimately drops it handles this and says why."))
 

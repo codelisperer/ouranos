@@ -11,7 +11,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "contacts"))))
-  ;; The suite lives in mnemosyne.asd as `mnemosyne/examples/contacts/tests' (#357): it is
+  ;; The suite lives in mnemosyne.asd as `mnemosyne/examples/contacts/tests' (pre-publication issue 357): it is
   ;; OURANOS's test of this example, not the scaffolded project's own, and the name is what
   ;; makes its checks attribute to mnemosyne's README row instead of to a framework called
   ;; "contacts" that does not exist. This system stays standalone, which is the property the

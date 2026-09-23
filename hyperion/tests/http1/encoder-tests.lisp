@@ -1,4 +1,4 @@
-;;;; encoder-tests.lisp --- the response head, and what it refuses to write (#117, commit 2).
+;;;; encoder-tests.lisp --- the response head, and what it refuses to write (pre-publication issue 117, commit 2).
 ;;;;
 ;;;; The parser's suite is mostly refusals because a request arrives from a stranger. This
 ;;;; one is mostly refusals for a different reason: the dangerous values arrive from OUR OWN
@@ -14,7 +14,7 @@
 (in-package #:hyperion/http1/tests)
 
 (def-suite http1-encoder
-  :description "HTTP/1.1 response head encoding and framing (#117)." :in http1)
+  :description "HTTP/1.1 response head encoding and framing (pre-publication issue 117)." :in http1)
 (in-suite http1-encoder)
 
 (defun enc (status headers body-length keep-alive)

@@ -68,7 +68,7 @@ produces **spurious** failures in `library/math/bounded` — *"Signed value over
 bits."* The failure is an emulation artifact, not a real incompatibility, so a red local
 amd64 build is not evidence against a pin and a green one is not evidence for it. **The only
 meaningful amd64 gate is a native run** (GitHub Actions `ubuntu-latest`) — see
-[issue #87](https://github.com/codelisperer/ouranos/issues/87).
+pre-publication issue 87.
 
 ## Where a pin has and has not been validated
 
@@ -79,7 +79,7 @@ honestly; "it works" usually means "it works where I happened to run it."
 |---|---|---|---|
 | `7915fad0` | ✅ 506 checks, whole tree · ✅ 583 checks incl. a consuming app, cold rebuild from a cleared fasl cache (~86s) | ✅ suites green | ❌ **never** |
 
-The amd64 gap closes when [#87](https://github.com/codelisperer/ouranos/issues/87) lands,
+The amd64 gap closes when pre-publication issue 87 lands,
 and until then no pin should be described as fully validated.
 
 ## Consuming apps (separate repos)

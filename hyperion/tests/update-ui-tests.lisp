@@ -1,6 +1,6 @@
-;;;; update-ui-tests.lisp --- the update surface exists and behaves (#333).
+;;;; update-ui-tests.lisp --- the update surface exists and behaves (pre-publication issue 333).
 ;;;;
-;;;; WHY THIS SUITE EXISTS. #333's measurement was that `grep -rln "_hyperion/update"'
+;;;; WHY THIS SUITE EXISTS. pre-publication issue 333's measurement was that `grep -rln "_hyperion/update"'
 ;;;; returned one file and the hit was in a docstring: no route, no handler, no banner. The
 ;;;; typed core's suites were green throughout, because they are about the decision and say
 ;;;; nothing about whether anything renders it. A system that exports a surface needs a
@@ -186,7 +186,7 @@ exactly like the mount it was copied from."
 ;;; --- the routes exist -------------------------------------------------------
 
 (test the-three-routes-are-routable
-  "#333's measurement was that none of these existed. This is the direct answer to it."
+  "pre-publication issue 333's measurement was that none of these existed. This is the direct answer to it."
   (let ((names (mapcar #'router:route-name (router:routes (ui:update-router :check nil)))))
     (is (member :update-status names))
     (is (member :update-apply names))
@@ -239,7 +239,7 @@ trace rendered at them."
 ;;; --- apply ------------------------------------------------------------------
 
 (test apply-on-a-platform-with-no-artifact-explains-itself
-  "APPLY-UPDATE signals `update-not-implemented' wherever #74 has produced no artifact --
+  "APPLY-UPDATE signals `update-not-implemented' wherever #72 has produced no artifact --
 today macOS and Linux. That is an ordinary answer with a sentence attached, and the route
 renders the sentence rather than letting the condition escape as a 500.
 

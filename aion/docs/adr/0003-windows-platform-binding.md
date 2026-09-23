@@ -207,7 +207,7 @@ is the maintainer's.
 ## Amendment 1 — §4 is stronger and narrower than it was written (2026-08-27)
 
 *Written by PM at the maintainer's instruction, from measurements taken by the Windows lane
-as the first consumer of `aion/windows` (#181, #201). §4 stands; its premise was broader than
+as the first consumer of `aion/windows` (pre-publication issue 181, pre-publication issue 201). §4 stands; its premise was broader than
 the facts, and its coverage narrower.*
 
 ### What §4 got wrong
@@ -265,7 +265,7 @@ actually faulted are the ones no automatic check can reach. `cbSizeVft` remains 
 guard there, catching the past-the-end class only — which is at least the class that *faults*
 rather than the class that silently corrupts.
 
-`IEnumVARIANT` **is** checkable, and #181 needs it for collection iteration. It was
+`IEnumVARIANT` **is** checkable, and pre-publication issue 181 needs it for collection iteration. It was
 structurally absent from the prior art, so its slots would otherwise have been hand-copied
 with nothing verifying them.
 

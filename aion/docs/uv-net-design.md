@@ -4,7 +4,7 @@ Companion to [uv-design.md](uv-design.md), which covers the loop, filesystem, ti
 watching. This is the **transport** sub-system: TCP, pipes and asynchronous DNS.
 
 **Transport only.** Nothing here knows what HTTP is. That is not an omission — it is the
-line the ECOSYSTEM decisions log draws (2026-08-04, #117): *native bindings follow the
+line the ECOSYSTEM decisions log draws (2026-08-04, pre-publication issue 117): *native bindings follow the
 DAG, abstractions over them follow the domain*. A binding's specification is the C
 library's own documentation; an abstraction makes a choice the C library does not make
 for you. HTTP parsing and the request/response model are choices, and they belong to
@@ -16,10 +16,10 @@ Everything that wants a socket sits to aion's **right** in the DAG:
 
 | consumer | position | wants |
 |---|---|---|
-| `cons` | 2 | subprocess pipes (#119) |
+| `cons` | 2 | subprocess pipes (pre-publication issue 119) |
 | `mnemosyne` | 3 | the Postgres wire protocol |
 | `hermes` | leaf, depends on aion *only* | its own HTTP client |
-| `hyperion` | 5 | the native HTTP server (#117) |
+| `hyperion` | 5 | the native HTTP server (pre-publication issue 117) |
 
 Put TCP in hyperion and the first three become DAG violations. There is no version of
 this where transport lives at position 5.
@@ -71,7 +71,7 @@ Nagle's algorithm coalesces small writes; delayed ACK waits before acknowledging
 they add tens of milliseconds to a request/response exchange for no benefit. ADR-0011
 measured exactly that — a **44 ms floor** — and fixed the part `Content-Length` could fix,
 leaving a **p99 residual**. A *streamed* response cannot carry a `Content-Length` by
-definition, so the fix does not reach it at all, which leaves the SSE progress UI (#76)
+definition, so the fix does not reach it at all, which leaves the SSE progress UI (pre-publication issue 76)
 exposed.
 
 `uv_tcp_nodelay` is what closes it, and you can only call it if you own the socket. That is
@@ -173,4 +173,4 @@ resolving many names should use `resolve-async` on a loop you already run.
   libuv. Nothing here has been run on the other two, and two things are most likely to
   need attention there: the `struct addrinfo` field order (guarded, so it fails loudly)
   and named-pipe semantics, which on Windows are genuinely different from unix domain
-  sockets. That is the CI matrix's job (#87).
+  sockets. That is the CI matrix's job (pre-publication issue 87).

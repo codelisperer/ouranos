@@ -66,7 +66,7 @@ wrong browser)."
     (mapc #'bt:join-thread threads)
     (is (= 50 (channel:channel-length ch)))))
 
-;;; --- the window is a decision, not an accident (#231) --------------------
+;;; --- the window is a decision, not an accident (pre-publication issue 231) --------------------
 ;;;
 ;;; The defect was not that the log grew -- growing is what a log does. It was that
 ;;; "forever" was the shape the file happened to have rather than anything anyone chose,
@@ -115,7 +115,7 @@ wrong browser)."
     (signals channel:cursor-behind-window (channel:since ch 0))))
 
 (test the-default-capacity-is-a-number-not-nil
-  ;; The whole of #231 in one assertion: a channel built with no opinion is bounded.
+  ;; The whole of pre-publication issue 231 in one assertion: a channel built with no opinion is bounded.
   (let ((ch (channel:make-channel)))
     (is (integerp (channel:channel-window ch)))
     (is (= channel:*default-capacity* (channel:channel-window ch)))))
@@ -170,7 +170,7 @@ wrong browser)."
     (let ((cur (channel:subscribe ch :from :start)))
       (is (equal '(7 8 9) (channel:poll cur))))))
 
-;;; --- the handler must be able to touch the channel (#231 review) ----------
+;;; --- the handler must be able to touch the channel (pre-publication issue 231 review) ----------
 ;;;
 ;;; The suite as first written could not see this defect: SIGNALS and a bare
 ;;; INVOKE-RESTART are the only two handlers that never re-enter the channel, and they
@@ -226,7 +226,7 @@ wrong browser)."
                  (channel:since ch 2)))
         "the oldest available AFTER the handler ran, not the stale figure it was given")))
 
-;;; --- grow, then evict (#231 review) --------------------------------------
+;;; --- grow, then evict (pre-publication issue 231 review) --------------------------------------
 
 (test a-channel-grows-to-its-capacity-and-then-evicts
   ;; Neither path was exercised: capacities 3 and 4 never grow (the store starts at

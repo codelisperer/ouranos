@@ -86,7 +86,7 @@ family of leaf libraries — orthogonal to the web/data/agentic stack rather tha
 | **Push notifications** (native), in-app / web push | **Planned** — new backends, same protocol |
 | Voice, chat | **Planned** — later channels, same protocol |
 | Additional email/SMS vendors (SES, SNS, Postmark) | **Planned** — a class + one `register-impl` |
-| **Payments** (Stripe first) | **Shipped** (#47) — a separate module, same doctrine: hosted Checkout only, per ADR-0002 |
+| **Payments** (Stripe first) | **Shipped** (pre-publication issue 47) — a separate module, same doctrine: hosted Checkout only, per ADR-0002 |
 
 `(ql:quickload :hermes)` loads clean; the suites are green (35 delivery + 123 payments +
 276 blob = 434 checks); and the leaf-lib constraint holds — no dependency on hyperion, mnemosyne, or

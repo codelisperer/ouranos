@@ -1,13 +1,13 @@
-;;;; tests/http-client.lisp --- the interceptor-shaped HTTP client (#202).
+;;;; tests/http-client.lisp --- the interceptor-shaped HTTP client (pre-publication issue 202).
 ;;;;
-;;;; Like the interceptor pipeline before it (#177), this code was written, used in
+;;;; Like the interceptor pipeline before it (pre-publication issue 177), this code was written, used in
 ;;;; production paths by two providers, and moved -- with NO TESTS AT ALL. That is the same
 ;;;; finding twice: the tree's reusable pieces keep arriving covered by nothing, inside
 ;;;; systems reporting green.
 ;;;;
 ;;;; None of these touch the network. SEND-REQUEST takes its effect as a parameter, which is
 ;;;; both how it is tested here and how a consuming app stubs it -- the app that reported
-;;;; #202 had independently arrived at the same shape, calling it "an injectable var".
+;;;; pre-publication issue 202 had independently arrived at the same shape, calling it "an injectable var".
 
 (cl:defpackage #:aion/http-client/tests
   (:use #:cl #:fiveam)
@@ -135,7 +135,7 @@
                       (http:send-request (http:make-request :url "u") '()
                                          :perform (%ok :body "raw"))))))
 
-;;; --- #223: the bytes that arrived, exactly ----------------------------------
+;;; --- pre-publication issue 223: the bytes that arrived, exactly ----------------------------------
 ;;;
 ;;; The client used to decode every body to a UTF-8 string and keep nothing else, so there
 ;;; was no path to the octets at all. A signed update cannot go through that: the signature
@@ -166,7 +166,7 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
                          +binary+ :external-format '(:utf-8 :replacement #\ufffd))
                         :external-format :utf-8)))
     (is (not (equalp +binary+ round-tripped))
-        "if this ever passes, the premise of #223 is wrong and the design should be revisited")))
+        "if this ever passes, the premise of pre-publication issue 223 is wrong and the design should be revisited")))
 
 (test the-string-view-is-still-available-and-is-total
   ;; RESPONSE-BODY must not signal on bytes that are not UTF-8: ENSURE-2XX puts the body

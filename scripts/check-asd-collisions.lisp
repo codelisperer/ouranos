@@ -1,4 +1,4 @@
-;;;; check-asd-collisions.lisp --- two .asd files defining ONE system name (#364).
+;;;; check-asd-collisions.lisp --- two .asd files defining ONE system name (pre-publication issue 364).
 ;;;;
 ;;;; Run:  sbcl --script scripts/check-asd-collisions.lisp
 ;;;;
@@ -6,11 +6,11 @@
 ;;;; matching `.asd' it happens to find FIRST. `mnemosyne/examples/contacts/contacts.asd'
 ;;;; defines a system called `contacts' -- a short, ordinary word -- because being a
 ;;;; standalone scaffolded project is the property that example exists to demonstrate
-;;;; (#357 ruled on this deliberately, and the ruling still looks right).
+;;;; (pre-publication issue 357 ruled on this deliberately, and the ruling still looks right).
 ;;;;
 ;;;; WHAT THIS COSTS, and why the cost is worth a checker rather than a comment: on
 ;;;; 2026-09-16 a scaffolded project was committed at the repo root (2168d69, reverted by
-;;;; #363). It also defined `contacts'. ASDF resolved to the root one, and the suite died
+;;;; pre-publication PR 363). It also defined `contacts'. ASDF resolved to the root one, and the suite died
 ;;;; with "The name MNEMOSYNE/EXAMPLES/CONTACTS does not designate any package" -- an error
 ;;;; three steps from its cause, naming a package nobody had touched.
 ;;;;
@@ -33,7 +33,7 @@
 ;;;; happens to agree today.
 ;;;;
 ;;;; TEMPLATE `.asd' FILES ARE SKIPPED BY NAME, and the check for `{{' happens BEFORE any
-;;;; resolution, which is the #358 trap: a template `.asd' is perfectly valid Lisp, so
+;;;; resolution, which is the pre-publication issue 358 trap: a template `.asd' is perfectly valid Lisp, so
 ;;;; anything that resolves first gets a system genuinely named `{{name}}' and no error.
 ;;;; The four `cons/templates/*/files/{{name}}.asd' are the ONLY duplicate names in the
 ;;;; tracked tree, so a checker that did not skip them would fire on a clean tree on day
@@ -52,7 +52,7 @@
 (defvar *root*
   ;; Device-preserving, for the reason recorded in check-assets.lisp: `(make-pathname
   ;; :directory (butlast ...))' drops `:device' and Windows then resolves the result against
-  ;; the process's current drive (#482). The consequence here was quieter than a crash and
+  ;; the process's current drive (pre-publication issue 482). The consequence here was quieter than a crash and
   ;; worse for it -- a root on a drive where the tree is not contains no .asd files at all,
   ;; so this script reported `ok -- 0 .asd files, no system name defined twice' and exited 0
   ;; having read nothing. A checker that passes because it found no input is the failure this
@@ -117,7 +117,7 @@ somewhere else, not only about the twelve .asd files in this tree."
     (nreverse names)))
 
 (defun template-name-p (name)
-  "A name from a TEMPLATE .asd, checked before anything resolves it (#358)."
+  "A name from a TEMPLATE .asd, checked before anything resolves it (pre-publication issue 358)."
   (search "{{" name))
 
 (defun main ()
@@ -149,7 +149,7 @@ somewhere else, not only about the twelve .asd files in this tree."
        ;; is one command. Naming both paths is the whole improvement over the package error.
        (format t "The source registry is (:tree <root>), so ASDF resolves each of these names to~%")
        (format t "whichever file it finds FIRST, and the loser's package never gets defined -- which~%")
-       (format t "surfaces far away, as `the name X does not designate any package' (#363, #364).~%")
+       (format t "surfaces far away, as `the name X does not designate any package' (pre-publication PR 363, pre-publication issue 364).~%")
        (format t "If one of the paths above is a scaffold of your own, MOVE IT OUTSIDE THE TREE.~%")
        (format t "A .nosearch file does not work here -- measured, not assumed: ASDF still resolves~%")
        (format t "the name to it, both beside the marker and below it. Untracked and gitignored~%")

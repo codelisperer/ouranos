@@ -34,7 +34,7 @@
   :in-order-to ((test-op (test-op "elenchon/tests"))))
 
 ;;; The suite is wired -- it has a `:perform`, so `asdf:test-system` really runs it (the
-;;; false-green class of bug in issue #116). fixtures.lisp is Coalton and must load first:
+;;; false-green class of bug in pre-publication issue 116). fixtures.lisp is Coalton and must load first:
 ;;; it builds the graphs and exposes them to fiveam through promised types only.
 (defsystem "elenchon/tests"
   :description "Test suite for Elenchon: the typed CEG ADT and its evaluation semantics."

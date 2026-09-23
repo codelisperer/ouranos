@@ -1,11 +1,11 @@
-;;;; fiveam-report-tests.lisp --- the gate must carry out ALL of the finding (#448)
+;;;; fiveam-report-tests.lisp --- the gate must carry out ALL of the finding (pre-publication issue 448)
 ;;;;
 ;;;; scripts/fiveam-report.lisp parses the text a child image prints, which is the only
 ;;;; artefact that survives the child. It used to read the failure block "while the lines are
 ;;;; not blank", and FiveAM's default reason for an `is' check with no reason string BEGINS
 ;;;; with a blank line -- so the first such failure printed nothing and hid every failure
 ;;;; after it in that suite. A Windows run of KLIO/TESTS showed two failing tests; twelve
-;;;; were failing (#446).
+;;;; were failing (pre-publication issue 446).
 ;;;;
 ;;;; +REAL-REPORT+ IS REAL FIVEAM OUTPUT, captured from a suite made to fail on purpose and
 ;;;; pasted here byte for byte -- same rule as failure-origin-tests.lisp. A parser tested
@@ -28,7 +28,7 @@
 (in-package #:cons/tests)
 
 (def-suite fiveam-report
-  :description "Reading FiveAM's report without losing half of it (#448)." :in all)
+  :description "Reading FiveAM's report without losing half of it (pre-publication issue 448)." :in all)
 (in-suite fiveam-report)
 
 (defparameter +real-report+
@@ -114,7 +114,7 @@ the very same bytes."
               collect trimmed)))))
 
 (test every-failing-check-is-reported-not-only-those-before-the-first-bare-is
-  "#448, in both directions on one input. The old reader stopped at the indented empty line
+  "pre-publication issue 448, in both directions on one input. The old reader stopped at the indented empty line
 that opens a generated reason; the new one reads to the rules FiveAM prints, so a blank line
 inside an entry is content and a blank line outside one is the end."
   (%load-fiveam-report)

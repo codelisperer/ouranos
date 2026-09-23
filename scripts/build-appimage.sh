@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# build-appimage.sh --- package a Linux bundle as a single-file .AppImage (#74).
+# build-appimage.sh --- package a Linux bundle as a single-file .AppImage (#72).
 #
 #     scripts/build-appimage.sh dist/coalton-repl-0.1.0-linux-x86-64 \
 #         [--icon hyperion/examples/coalton-repl/assets/lambda.png] [--out dist]
@@ -12,7 +12,7 @@
 # WHAT THIS DOES NOT DO: bundle WebKitGTK. The hyperion-view links the system GTK/WebKit
 # stack, and pulling that into an AppImage is a different and much larger job (a full
 # linuxdeploy-style dependency walk, plus the LGPL relink question ADR-0013 keeps out of the
-# image). This packages what we build and carry; the GTK question is #94's remaining row and
+# image). This packages what we build and carry; the GTK question is #78's remaining row and
 # is not silently claimed here.
 #
 # AppRun is a two-liner because of ADR-0013: the app finds its own libraries beside itself,
@@ -106,12 +106,12 @@ if [ -n "$ICON" ] && [ -f "$ICON" ]; then
   cp "$ICON" "$APPDIR/$BIN.png"
 else
   # A 1x1 transparent PNG. appimagetool requires an icon to exist; shipping a real one is
-  # a per-app asset decision (#74 "icons per platform"), so the placeholder is LOUD rather
+  # a per-app asset decision (#72 "icons per platform"), so the placeholder is LOUD rather
   # than quietly passing for artwork.
   printf '%s' \
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' \
     | base64 -d > "$APPDIR/$BIN.png"
-  echo "build-appimage: NOTE -- no --icon given, shipping a placeholder (see #74)"
+  echo "build-appimage: NOTE -- no --icon given, shipping a placeholder (see #72)"
 fi
 cp "$APPDIR/$BIN.png" "$APPDIR/.DirIcon"
 

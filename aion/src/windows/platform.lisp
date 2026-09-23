@@ -10,14 +10,14 @@
 ;;;;
 ;;;;   aion/uv     is cross-platform code whose LIBRARY may be missing. A bundle shipped
 ;;;;               without libuv must still load, or the whole image dies on a user's
-;;;;               machine over a feature they never called (hyperion ADR-0011, #74). So
+;;;;               machine over a feature they never called (hyperion ADR-0011, #72). So
 ;;;;               library.lisp there never signals at load.
 ;;;;
 ;;;;   aion/windows is code that cannot mean anything off Windows. There is no call to
 ;;;;               defer to and no degraded mode to offer. Loading it on Linux is a build
 ;;;;               error, and the sooner it is one the better.
 ;;;;
-;;;; The gate already knows the difference: scripts/platform-packages.lisp (#182) says this
+;;;; The gate already knows the difference: scripts/platform-packages.lisp (pre-publication issue 182) says this
 ;;;; package is owned by :windows, so a macOS run reports `n/a' and never loads it, while a
 ;;;; Windows run that cannot load it fails. This file is the same fact enforced from inside.
 

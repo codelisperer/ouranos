@@ -1,6 +1,6 @@
 # klio — questions before the first slice
 
-*Ouranos Claude (macOS), 2026-09-16; **all three answered 2026-09-18**. Tracked as [#359](https://github.com/codelisperer/ouranos/issues/359), which is the short form — answerable with a letter per question.*
+*Ouranos Claude (macOS), 2026-09-16; **all three answered 2026-09-18**. Tracked as pre-publication issue 359, which is the short form — answerable with a letter per question.*
 
 * Read `docs/launch/sites-and-cms.md` as the contract
 first; this asks only what that doc leaves open or what a first implementation would have to
@@ -47,7 +47,7 @@ that never appears, with nothing anywhere saying so.
 >
 > Implemented. `extra` carries **nested** values, which the CV forced: a role's bullets are a
 > list of objects each with an optional list of metric objects, so a flat string-to-string
-> `extra` fails on the first real document (#360).
+> `extra` fails on the first real document (pre-publication PR 360).
 
 ### Q2. A malformed file — does the site refuse to start, or skip the page?
 
@@ -65,7 +65,7 @@ also worse than the typo.
 
 **And the part that has to be decided with it:** a reload swaps the content tree **atomically**
 — a request sees the old tree or the new one, never a half-built one. Anything else produces
-the failure mode `hyperion/dev` hit in #234, where an image holds two versions of a thing at
+the failure mode `hyperion/dev` hit in pre-publication issue 234, where an image holds two versions of a thing at
 once and the symptom looks impossible.
 
 **This one is ADR-shaped** — two failure policies plus an atomicity guarantee, and every later

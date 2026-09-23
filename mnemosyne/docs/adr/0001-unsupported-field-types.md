@@ -1,28 +1,28 @@
 # ADR-0001 — What happens when a backend cannot support a declared field type
 
-**Status:** Accepted *(2026-09-02, by the maintainer; #213 existed to have this made
+**Status:** Accepted *(2026-09-02, by the maintainer; pre-publication issue 213 existed to have this made
 deliberately rather than by accident)*. Extended by
 [ADR-0003](0003-one-dialect-vocabulary.md), which adopts the closed `Dialect` type built
 here across the four modules that branch on a dialect — it had spread to the field-type path
-and nowhere else (#432).
+and nowhere else (pre-publication issue 432).
 **Date:** 2026-09-02
-**Issue:** [#213](https://github.com/codelisperer/ouranos/issues/213), blocking
-[#142](https://github.com/codelisperer/ouranos/issues/142) (binary) and
-[#212](https://github.com/codelisperer/ouranos/issues/212) (vector)
+**Issue:** pre-publication issue 213, blocking
+pre-publication issue 142 (binary) and
+pre-publication issue 212 (vector)
 
-**Implemented 2026-09-16 (#334).** `field-type-sql` returns `Native | Emulated | Unsupported`,
+**Implemented 2026-09-16 (pre-publication issue 334).** `field-type-sql` returns `Native | Emulated | Unsupported`,
 the dialect is a closed `Dialect` type, and the CL shell (`mnemosyne/field-shell`) turns a
 refusal into `unsupported-field-type`. Emulation is refused rather than applied, because the
 opt-in this ADR requires at the declaration site does not exist yet — accepting it silently
 would be the implicit degradation this ADR rejected, arriving through the door marked *not yet
-implemented*. #142 and #212 now build **through** that signature, which is what this ADR
+implemented*. pre-publication issue 142 and pre-publication issue 212 now build **through** that signature, which is what this ADR
 exists to make unavoidable.
 
 ## Context
 
 `mnemosyne/field:Field-Type` is a closed set of eight types, and every one of them exists
-on every backend. Two requests now exceed it — a binary column (#142) and a vector column
-(#212) — and a third is predicted by a consuming app. So the protocol must answer a
+on every backend. Two requests now exceed it — a binary column (pre-publication issue 142) and a vector column
+(pre-publication issue 212) — and a third is predicted by a consuming app. So the protocol must answer a
 question it has never had to: **what happens when a backend genuinely cannot support a
 declared field type?**
 
@@ -40,7 +40,7 @@ This matters more than it first appears, because `field-type-sql` is in the **Co
 core**, where the house rule is no IO and therefore no conditions. An implementer adding
 `FT-Vector` cannot signal there even if they want to. The only thing they can write is a
 string. Whatever they write for the non-Postgres branch becomes the precedent — which is
-precisely the accident #213 was filed to prevent, and it is structural rather than a
+precisely the accident pre-publication issue 213 was filed to prevent, and it is structural rather than a
 matter of anyone's care.
 
 ### Measured: the weaker backend is the quieter one
@@ -56,7 +56,7 @@ is wrong somewhere far from the cause.
 
 Two consequences. First, **"refuse at migration time" is not the default — silence is**;
 refusal is something mnemosyne must implement, because the substrate will not provide it.
-Second, **"degrade" as it exists today is not the benign option #212 describes.** It is not
+Second, **"degrade" as it exists today is not the benign option pre-publication issue 212 describes.** It is not
 "correct results, 10,000× slower"; it is a text column and wrong answers. A real emulation
 — a blob plus a brute-force scan in Lisp — is a thing somebody has to *write*, and is a
 different proposal from letting a type name through.
@@ -94,7 +94,7 @@ the measurement shows the substrate gives.
 (:embedding :vector :dimensions 1536 :on-unsupported :emulate)
 ```
 
-This is the part that answers #212's reporter, whose argument deserves to win on its
+This is the part that answers pre-publication issue 212's reporter, whose argument deserves to win on its
 merits: *"a dev environment that cannot run the feature is a dev environment where the
 feature is never tested."* That is right, and a design that costs them their SQLite test
 story is worse than one that does not. The change is not whether emulation is available
@@ -106,10 +106,10 @@ Plus a predicate an app can ask, so production can assert what dev merely tolera
 
 ## Consequences
 
-- **#142 (binary) needs none of this machinery** — `BYTEA` and `BLOB` are native
+- **pre-publication issue 142 (binary) needs none of this machinery** — `BYTEA` and `BLOB` are native
   everywhere, so it is `Native` on both backends. But it must be implemented **through**
-  the new signature, which is the whole reason #213 blocks it: otherwise the easy case
-  ships a total function and #212 has to argue against it.
+  the new signature, which is the whole reason pre-publication issue 213 blocks it: otherwise the easy case
+  ships a total function and pre-publication issue 212 has to argue against it.
 - An app pinned to SQLite cannot silently ship a vector column. That is the point.
 - `Emulated` obliges someone to write a real emulation. Until one exists, `:emulate` on a
   vector column is itself unsupported — which is honest, and loud.
@@ -123,7 +123,7 @@ Plus a predicate an app can ask, so production can assert what dev merely tolera
   the weakest backend, which is how a neutral protocol quietly becomes SQLite-shaped. It
   also cannot be honoured — Postgres already refuses `vector` without the extension, so
   "works everywhere" is not on offer regardless of what we decide.
-- **Refuse always, no emulation.** Rejected on #212's evidence. It is coherent and it
+- **Refuse always, no emulation.** Rejected on pre-publication issue 212's evidence. It is coherent and it
   costs a real app its dev-and-test story for no gain that a stated opt-in does not give.
 - **Degrade implicitly.** Rejected: it is the status quo, it is the thing `docs/vocabulary-and-layers.md`
   and the tree's "no facade that silently does nothing useful" rule already forbid, and
@@ -132,7 +132,7 @@ Plus a predicate an app can ask, so production can assert what dev merely tolera
 ## Provenance
 
 Two measurements moved this. The first — that SQLite accepts `VECTOR(1536)` and
-`FLURBLE(9)` without complaint — inverted the framing: #213 and #212 both present "refuse
+`FLURBLE(9)` without complaint — inverted the framing: pre-publication issue 213 and pre-publication issue 212 both present "refuse
 at migration time" as the strict option and "degrade" as the lenient one, when in fact
 degradation is what happens if nobody does anything, and it is silent. The second — that
 `schema-ddl` already refuses for XTDB — meant this was never a question without a
@@ -142,5 +142,5 @@ The maintainer stated a lean toward *neutral* over *portable* before reading the
 and explicitly flagged it as a lean rather than a decision. It is recorded here because it
 matches where the evidence landed, not as the reason it landed there; the argument above
 stands on the two measurements without it. The one place the analysis changed direction
-was #212's reporter's objection, which is the reason emulation survives at all rather than
+was pre-publication issue 212's reporter's objection, which is the reason emulation survives at all rather than
 being refused outright.

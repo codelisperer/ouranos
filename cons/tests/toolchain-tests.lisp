@@ -1,4 +1,4 @@
-;;;; toolchain-tests.lisp --- the SBCL_HOME / stale-image diagnosis (#161).
+;;;; toolchain-tests.lisp --- the SBCL_HOME / stale-image diagnosis (pre-publication issue 161).
 ;;;;
 ;;;; The interesting states are ones a working machine is not in: a runtime whose contribs
 ;;;; cannot be loaded, and a dumped image left behind by an upgrade. That is exactly why
@@ -46,7 +46,7 @@ one thing it is making wrong."
 ;;; --- the fatal case: contribs unreachable ---------------------------------
 
 (test unloadable-contribs-are-fatal-and-name-sbcl-home-not-the-contrib
-  ;; The entire point of #161. The bare error says "Don't know how to REQUIRE SB-POSIX",
+  ;; The entire point of pre-publication issue 161. The bare error says "Don't know how to REQUIRE SB-POSIX",
   ;; which sends the reader after a missing dependency. The diagnosis must put SBCL_HOME in
   ;; front of them instead.
   (let ((findings (cons/toolchain:diagnose (%facts :contrib-available nil))))

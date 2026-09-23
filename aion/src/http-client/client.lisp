@@ -4,8 +4,8 @@
 ;;;; single dexador round-trip is the one effect at the edge, LEAVE stages process the
 ;;;; response, running in reverse so the outermost interceptor wraps everything.
 ;;;;
-;;;; Moved out of hermes (#202), where it was internal and unexported while praxeon
-;;;; independently reimplemented it as three raw dex:post calls. Same argument as #177: the
+;;;; Moved out of hermes (pre-publication issue 202), where it was internal and unexported while praxeon
+;;;; independently reimplemented it as three raw dex:post calls. Same argument as pre-publication issue 177: the
 ;;;; shape is request-response, not web, and a concept already reimplemented once is not
 ;;;; owned by whoever happened to hold it first.
 
@@ -69,7 +69,7 @@ accessors below are total, and totality is the entire point of this shape.")
                      (:predicate responsep))
   "An HTTP response. STATUS is the integer code.
 
-WHAT THE BODY IS -- the contract, decided in #223 rather than defaulted into. The response
+WHAT THE BODY IS -- the contract, decided in pre-publication issue 223 rather than defaulted into. The response
 carries the OCTETS THAT ARRIVED, exactly, and the string is DERIVED from them:
 
   RESPONSE-BYTES  what the server sent, byte for byte, never decoded or re-encoded
@@ -187,7 +187,7 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                  :method (request-method req)
                  :headers (request-headers req)
                  :content (request-content req)
-                 ;; ALWAYS binary (#223). Left to itself dexador decides by content-type
+                 ;; ALWAYS binary (pre-publication issue 223). Left to itself dexador decides by content-type
                  ;; and hands back a string for anything it considers text -- at which
                  ;; point the octets are gone and no caller can get them back. Decoding is
                  ;; this client's job now, and it happens in RESPONSE-BODY, once, from

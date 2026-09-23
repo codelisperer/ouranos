@@ -2,7 +2,7 @@
 ;;;;
 ;;;; Separate from src/packages.lisp because `cons/env` is its OWN ASDF system (see
 ;;;; cons.asd): a scaffolded app must load its .env as the first act of every entry point
-;;;; (#120), so it depends on this loader -- and it must not drag the whole build tool in
+;;;; (pre-publication issue 120), so it depends on this loader -- and it must not drag the whole build tool in
 ;;;; behind it to get one file.
 
 (cl:defpackage #:cons/env

@@ -125,7 +125,7 @@ password, and how TLS is negotiated. The CL shell builds it from the environment
 The password is a SECRET rather than a String because Coalton generates a printer that
 renders every field, so a String here was printed in full by anything that printed the
 config -- most damagingly an unhandled condition's backtrace, which is written to a
-deploy log exactly when a deployment is going wrong (#209). Nothing had to be wrong for
+deploy log exactly when a deployment is going wrong (pre-publication issue 209). Nothing had to be wrong for
 that to happen. AION/SECRET/TYPES:REVEAL is the single, greppable way back to plaintext,
 and MNEMOSYNE/CONN:CONNECT is the one place in this framework that calls it."
     (Pg-Config String UFix String String sec:Secret Ssl-Mode))

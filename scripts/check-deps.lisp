@@ -41,7 +41,7 @@
   "(system-name . file) for every .asd DISCOVERY FOUND AND ASDF COULD NOT READ.
 
 Not a skip. A file we found, could not parse, and therefore did not check is worse than one
-we never found, because it looks like coverage -- and before #358 it was swallowed by an
+we never found, because it looks like coverage -- and before pre-publication issue 358 it was swallowed by an
 IGNORE-ERRORS and contributed nothing, silently.")
 
 (defun actual-externals ()
@@ -71,7 +71,7 @@ experience differs, and a gate nobody can read is a gate nobody acts on."
   '("external deps by role" "sbcl contrib" "hermes")
   "Headings whose tables DOCUMENT a dependency. Matched as a case-folded prefix.
 
-THE FILE HAS TWELVE SECTIONS AND THIS READS THREE (#474). An earlier version read every table
+THE FILE HAS TWELVE SECTIONS AND THIS READS THREE (pre-publication issue 474). An earlier version read every table
 row in the file, so `documented' meant `appears in any table anywhere': a name in the
 Versions (pinned) snapshot satisfied the undocumented check while the externals table said
 nothing about it, and twelve names that are not external ASDF dependencies looked documented.
@@ -143,7 +143,7 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
 
   (when list-only (uiop:quit 0))
 
-  ;; Scaffolding, named rather than dropped (#361). Printing them is the difference
+  ;; Scaffolding, named rather than dropped (pre-publication issue 361). Printing them is the difference
   ;; between "we do not check these" being a statement and being an absence.
   (let ((templates (tree-deps:template-asd-files)))
     (when templates
@@ -151,7 +151,7 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
       (dolist (f templates)
         (format t "  ~A~%" (enough-namestring f *root*)))
       (format t "  Placeholder system names; the real dependency surface is~%")
-      (format t "  cons/templates/<t>/template.lisp, substituted at scaffold time. See #361.~%")))
+      (format t "  cons/templates/<t>/template.lisp, substituted at scaffold time. See pre-publication issue 361.~%")))
 
   (format t "~%=== drift ===~%")
   (cond

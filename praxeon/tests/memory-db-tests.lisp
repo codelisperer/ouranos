@@ -1,4 +1,4 @@
-;;;; memory-db-tests.lisp --- observational memory in a real database (#372).
+;;;; memory-db-tests.lisp --- observational memory in a real database (#138).
 ;;;;
 ;;;; AGAINST A REAL POSTGRES WITH pgvector, or not at all. The whole claim is that
 ;;;; similarity recall works through mnemosyne against the backend the docs tell you to
@@ -25,7 +25,7 @@
 
 (in-package #:praxeon/memory-db/tests)
 
-;;; --- writing to memory in tests (#415) --------------------------------------
+;;; --- writing to memory in tests (#150) --------------------------------------
 ;;;
 ;;; Provenance is REQUIRED on every write, so every test that writes must supply one. These
 ;;; wrappers supply a fixed source so that the tests about supersession, budgets and erasure
@@ -123,7 +123,7 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
 ;;; --- the tests --------------------------------------------------------------
 
 (test the-schema-is-built-from-the-embedder-not-from-a-literal
-  "#415: a schema hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small.
+  "#150: a schema hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small.
 
 The store's width comes from the injected provider, so a 4-wide test embedder produces a
 4-wide column. A DEFSCHEMA could not have expressed that without knowing the deployment."
@@ -135,7 +135,7 @@ The store's width comes from the injected provider, so a 4-wide test embedder pr
       (is (some (lambda (s) (search "vector(4)" s)) store-ddl)
           "the CREATE TABLE must size the column from the embedder, got:~%~{~A~%~}" store-ddl)
       (is (some (lambda (s) (search "vector_cosine_ops" s)) store-ddl)
-          "and the index must name the operator class that serves `<=>' (#258)"))))
+          "and the index must name the operator class that serves `<=>' (pre-publication issue 258)"))))
 
 (test an-observation-round-trips-through-the-database
   (with-store (store)
@@ -214,7 +214,7 @@ row, and it should not arrive at Postgres to be refused there in the language of
                           (make-array 7 :element-type 'double-float :initial-element 1.0d0)))))
 
 (test erasure-removes-the-rows-including-from-the-historical-view
-  "#415: a memory store without a defensible erasure story is a liability an app cannot fix
+  "#150: a memory store without a defensible erasure story is a liability an app cannot fix
 later. Erasure is not a tombstone -- :include-superseded must not find them either."
   (with-store (store)
     (let ((o (remember* store "member-5" "the member prefers mornings")))
@@ -250,7 +250,7 @@ same to anything that coerces."
           "while the turn, which WAS recorded, is still there"))))
 
 (test provenance-is-read-from-the-columns-not-parsed-out-of-the-content
-  "#372's HARD RULE, asserted rather than trusted:
+  "#138's HARD RULE, asserted rather than trusted:
 
   > The traceable provenance is never reconstructed from the rendered text. A passage's
   > document, version and locator come from what retrieval returned, and from nothing else.
@@ -282,7 +282,7 @@ provider call and then failing at the insert."
 (test the-database-store-cites-the-same-way-the-in-memory-one-does
   "One constructor, so the two stores cannot disagree about whether an item is citable.
 
-Both had their own inline ctx-item construction before #415; a citation added to one and
+Both had their own inline ctx-item construction before #150; a citation added to one and
 not the other gives a caller a store whose items can be cited and another whose cannot,
 for no reason they could predict. Asserted on the DATABASE store because it is the one
 whose items make a round trip through columns first."

@@ -1,9 +1,9 @@
-;;;; packages.lisp --- the neutral payments protocol (#48).
+;;;; packages.lisp --- the neutral payments protocol (pre-publication issue 48).
 
 (cl:defpackage #:hermes/payments/kind
   (:use #:coalton #:coalton-prelude)
   (:documentation
-   "The closed vocabulary of normalized webhook events, as a Coalton type (#48).
+   "The closed vocabulary of normalized webhook events, as a Coalton type (pre-publication issue 48).
 
     Seven kinds, and no eighth: a provider event that does not map onto one of these is
     reported as unmapped rather than invented into the vocabulary. Typed rather than a bare
@@ -25,7 +25,7 @@
   (:use #:coalton #:coalton-prelude)
   (:local-nicknames (#:sec #:aion/secret/types))
   (:documentation
-   "A typed amount and a provider config (#49).
+   "A typed amount and a provider config (pre-publication issue 49).
 
     What this prevents, precisely: a currency arrives at RUNTIME from a provider's JSON, so
     it cannot be in the type and a mismatch cannot be a compile error at that boundary.
@@ -54,7 +54,7 @@
   (:import-from #:hermes #:configuration-error #:configuration-error-missing)
   (:documentation
    "A neutral payments protocol: hosted checkout, subscriptions, and normalized webhooks
-    (#48). Stripe is one implementation of this protocol and never the protocol itself.
+    (pre-publication issue 48). Stripe is one implementation of this protocol and never the protocol itself.
 
     Mirrors hermes' messaging doctrine rather than inventing a second one -- a provider
     class, generic operations, an env-selected registry, and a dev backend. PAYMENT-PROVIDER

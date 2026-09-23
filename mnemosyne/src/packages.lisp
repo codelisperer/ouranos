@@ -97,7 +97,7 @@
   (:local-nicknames (#:entity #:mnemosyne/entity)
                     (#:clock #:aion/clock))
   ;; NEW-ID, NEXT-VID and VID->INSTANT are aion/clock's symbols, imported and re-exported
-  ;; rather than wrapped. The clock moved to aion (#96) because it is a floor primitive and
+  ;; rather than wrapped. The clock moved to aion (pre-publication issue 96) because it is a floor primitive and
   ;; not a persistence concern, but MNEMOSYNE/ID:NEW-ID is called from hyperion/auth-db,
   ;; from the blob store and from two example apps -- so the seam stays exactly where it
   ;; was and those call sites do not move. Re-export, not a forwarding DEFUN: this way
@@ -136,7 +136,7 @@
 (cl:defpackage #:mnemosyne/param
   (:use #:cl)
   (:documentation
-   "What a bound value MEANS, and how each backend must be told it (#165). CL NIL is
+   "What a bound value MEANS, and how each backend must be told it (pre-publication issue 165). CL NIL is
     false, the empty list and \"no value\" at once; SQL needs those distinct, and the
     drivers disagreed -- Postgres rendered NIL as the literal `false` (a hard error on
     numerics, silent corruption in text) while SQLite already stored SQL NULL. The
@@ -176,7 +176,7 @@
     a transaction, recording its id -- idempotently. ROLLBACK runs down-SQL newest-first.
     Migrations are Lisp-defined data (mnemosyne/backend:make-migration); no framework.")
   (:export #:migrate #:rollback #:pending #:applied-ids
-           ;; extensions are a deployment fact, not a schema one (#258)
+           ;; extensions are a deployment fact, not a schema one (pre-publication issue 258)
            #:require-extension #:extension-available-p #:extension-present-p
            #:extension-unavailable #:extension-unavailable-name
            #:extension-unavailable-reason #:extension-unavailable-detail))
@@ -193,7 +193,7 @@
     dialect-aware (?-params for sqlite/postgres, verified; :xtdb is the seam for XTDB 2's
     $N params + no-DDL + temporal SELECT). SQL returns (values sql params); FETCH / RUN
     compile then run via mnemosyne/conn.")
-  ;; +DIALECTS+ MOVED to MNEMOSYNE/FIELD-SHELL (#432, ADR-0003). It was a second list of
+  ;; +DIALECTS+ MOVED to MNEMOSYNE/FIELD-SHELL (pre-publication issue 432, ADR-0003). It was a second list of
   ;; the same three dialects, spelled as keywords where ddl and schema spelled them as
   ;; strings, and the two vocabularies could not disagree loudly -- only by one module
   ;; taking a branch meant for the other.
@@ -259,7 +259,7 @@
                     (#:schema #:mnemosyne/schema)
                     (#:fldsh #:mnemosyne/field-shell))
   (:documentation
-   "Does the live table still match its DEFSCHEMA? (#144)
+   "Does the live table still match its DEFSCHEMA? (pre-publication issue 144)
 
     SCHEMA-DDL derives CREATE TABLE from a MUTABLE definition for an IMMUTABLE, applied
     migration, so editing a defschema rewrites history for every database that has not

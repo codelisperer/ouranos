@@ -1,4 +1,4 @@
-;;;; parser-tests.lisp --- the HTTP/1.1 parser, mostly its refusals (#117).
+;;;; parser-tests.lisp --- the HTTP/1.1 parser, mostly its refusals (pre-publication issue 117).
 ;;;;
 ;;;; A parser suite that only feeds it valid requests is testing the wrong half. Every
 ;;;; rejection in the security floor has a case here, and each one names the attack it is
@@ -18,7 +18,7 @@
 
 (in-package #:hyperion/http1/tests)
 
-(def-suite http1 :description "HTTP/1.1 request-head parsing (#117).")
+(def-suite http1 :description "HTTP/1.1 request-head parsing (pre-publication issue 117).")
 (in-suite http1)
 
 (defun run-tests ()

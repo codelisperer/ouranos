@@ -29,15 +29,15 @@
   (value 0 :type real)             ; imputed importance (see praxeology Valued)
   (valid-time (now) :type integer) ; when true in the world
   (tx-time (now) :type integer)    ; when the system learned it
-  ;; WHERE THIS ITEM CAME FROM, so a persona can say it (#415). Untyped on purpose: this
+  ;; WHERE THIS ITEM CAME FROM, so a persona can say it (#150). Untyped on purpose: this
   ;; file loads before `praxeon/memory' and must not know what an observation is. Context
   ;; CARRIES the citation; it does not interpret it.
   ;;
   ;; NIL MEANS `NOT FROM A CITABLE PRODUCER' AND NOTHING ELSE. It cannot also mean "from
-  ;; memory, source unknown", because #415 made provenance mandatory on the write path and
+  ;; memory, source unknown", because #150 made provenance mandatory on the write path and
   ;; `praxeon/memory:observation->ctx-item' is the only route from an observation to an
   ;; item -- so a memory item without a citation cannot be built. That is deliberate: a
-  ;; slot where NIL means two things is the absent-versus-NULL defect (#489, #444, #415)
+  ;; slot where NIL means two things is the absent-versus-NULL defect (pre-publication issue 489, pre-publication issue 444, #150)
   ;; rebuilt in a struct.
   (source nil))
 
@@ -59,11 +59,11 @@
   "Select the highest-value items that fit within CONTEXT's budget.
 
 WHAT THIS IS FOR, because the answer is architectural and was undocumented until
-#402 asked (ADR-0001): RETRIEVED FACTS. The ranking has a precondition -- items
+pre-publication issue 402 asked (ADR-0001): RETRIEVED FACTS. The ranking has a precondition -- items
 must be INDEPENDENT, so that any subset of them, in any order, is a valid prompt
 fragment. A retrieved fact satisfies that. A conversation turn does not: an
 assistant `tool_use' must stay with its `tool_result', order carries meaning, and
-the cacheable prefix (#401) must not move. So conversation history is NOT assembled
+the cacheable prefix (pre-publication issue 401) must not move. So conversation history is NOT assembled
 here; it is trimmed by `praxeon/prompt:trim-history', which drops whole exchanges
 from the oldest end and pins the prefix. Two budgets, two kinds of data.
 

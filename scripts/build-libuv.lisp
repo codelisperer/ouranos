@@ -58,7 +58,7 @@
 ;;;;   exists to prevent, in a new costume. /MT statically links the CRT into libuv.dll,
 ;;;;   so a bundle carries one self-contained file.
 ;;;;
-;;;; ON MIXING C RUNTIMES (verified, not assumed -- see #107). The official Windows SBCL is
+;;;; ON MIXING C RUNTIMES (verified, not assumed -- see #84). The official Windows SBCL is
 ;;;; MinGW-built and links msvcrt.dll; an MSVC-built libuv.dll carries its own statically
 ;;;; linked CRT. Two allocators in one process is safe here for one reason only: NOTHING IS
 ;;;; FREED ACROSS THE BOUNDARY. Every cffi:foreign-alloc in aion/src/uv is released by
@@ -271,13 +271,13 @@ is the whole answer. On a machine carrying several it silently picks the newest 
 no way to see which it picked, or to choose another -- and that is tolerable right up to
 the point where THE CHOICE IS THE QUESTION.
 
-It is the question in #382. The claim under test there is not `does libuv build on this
+It is the question in pre-publication issue 382. The claim under test there is not `does libuv build on this
 box', it is `does libuv build with the BUILD TOOLS' -- the toolchain a user gets from the
 winget line in `no-msvc-error', which is what a developer who does not want a 10 GB IDE
 installs. A box carrying both a full Visual Studio and a Build Tools install answers only
 for the Visual Studio, so the configuration A USER ACTUALLY HAS is the one configuration
 that cannot be reached. The alternative was to drive the compile from a separate script,
-which would have measured a faithful build of something other than what ships (#206, #77).
+which would have measured a faithful build of something other than what ships (pre-publication issue 206, pre-publication issue 77).
 
 FOR THE PERSON DOING THE VERIFYING -- not a way to ship past a broken toolchain. Two
 properties keep it that way and both are load-bearing:
@@ -433,7 +433,7 @@ escape the closing quote, which is how a path with a space in it silently become
   (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%This is the only prerequisite aion/uv adds, and nothing else in the tree needs it.~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
 
 (defun require-toolchain ()
-  "Refuse NOW if this machine cannot compile, BEFORE anything is downloaded (#128).
+  "Refuse NOW if this machine cannot compile, BEFORE anything is downloaded (pre-publication issue 128).
 
 The check used to live only inside `compile-with-msvc', which runs after `ensure-source'
 has fetched a tarball, verified its checksum and unpacked it. So a machine with no compiler

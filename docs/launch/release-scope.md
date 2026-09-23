@@ -35,7 +35,7 @@ survive.
 | **hyperion** | 36 | 10 files / 948 lines | 2 | **Most built.** HTMX+Spinneret, i18n (incl. RTL), static caching w/ ETag, sessions, channels, typed interceptors, a native-webview desktop app that runs |
 | **praxeon** | 18 | 1 file / 378 lines | 1 | Actor loop, provider-neutral LLM, translator, per-agent models — real, and demoed by two example apps |
 | **cons** | 18 | 6 files / 262 lines | 3 | Bootstrap seed **works**; `init`/`setup`/`conform`/`env`/`db-repl`/`db-url`/`template check`/`version` + a per-framework task runner. The advertised `build\|test\|serve\|run` surface **does not exist yet** |
-| **hermes** | 12 | 1 file / 123 lines | 0 | Email + SMS shipped w/ signature-verified inbound; neutral payments with a Stripe backend shipped (#47) |
+| **hermes** | 12 | 1 file / 123 lines | 0 | Email + SMS shipped w/ signature-verified inbound; neutral payments with a Stripe backend shipped (pre-publication issue 47) |
 | **mnemosyne** | 20 | 3 files / 367 lines | 4 | Scaffold. Backend protocol, query DSL, migrations, and the bitemporal API are all **open research issues** |
 | **aion** | 13 | 2 files / 200 lines | **0** | `aion/log` and `aion/csv` are real; the "Coalton-first functional stdlib" core is **not written** |
 | **elenchon** | 3 | 0 | **0** | Design-complete as of the ADR pass; ~40 lines of placeholder code |

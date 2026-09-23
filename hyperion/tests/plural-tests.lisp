@@ -1,4 +1,4 @@
-;;;; plural-tests.lisp --- CLDR plural categories and plural-aware translation (#135).
+;;;; plural-tests.lisp --- CLDR plural categories and plural-aware translation (pre-publication issue 135).
 ;;;;
 ;;;; Two layers, tested differently on purpose:
 ;;;;

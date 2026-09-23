@@ -82,7 +82,7 @@
 ;;; per server, with no id, shared by every browser, and there is no session
 ;;; identity at all -- so per-viewer state (a read cursor, a locale) has nowhere to
 ;;; live, and the progress poll DRAINS the pending bubbles rather than fanning them
-;;; out (hyperion/channel is the substrate for that). See #133.
+;;; out (hyperion/channel is the substrate for that). See #96.
 ;;; --------------------------------------------------------------------------
 (defun %default-responder (agent message locale)
   "The default turn: the raw agent loop, ignoring LOCALE. A responder is
@@ -102,7 +102,7 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   (status "")                                                   ; latest status line
   (tokens 0)                                                    ; cumulative conversation cost
   (turn-tokens 0)                                               ; the last turn's cost
-  ;; HOW THIS APP RENDERS, carried rather than read from a global (#469). The style is a
+  ;; HOW THIS APP RENDERS, carried rather than read from a global (pre-publication issue 469). The style is a
   ;; property of an app, not of the image: praxeon/web can be started as a SECOND server
   ;; inside a host app's image, and assigning `hyperion/output:*output-style*' there would
   ;; change how the host renders for the rest of the process.
@@ -256,7 +256,7 @@ the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
       (:meta :charset "utf-8")
       (:meta :name "viewport" :content "width=device-width, initial-scale=1")
       (:title title)
-      ;; Vendored and embedded in the image (#123). This is FRAMEWORK code, not an
+      ;; Vendored and embedded in the image (pre-publication issue 123). This is FRAMEWORK code, not an
       ;; example: every app built on praxeon/web inherited the CDN fetch, so the fix
       ;; matters more here than anywhere else it appeared.
       (:link :rel "stylesheet" :href (assets:url :bulma))
@@ -424,7 +424,7 @@ client's post-processing (Elise's crisis guardrail) is reflected."
 answer bubble is built from the responder's return value for the poller. LOCALE is
 the resolved request locale, handed to the responder (e.g. for Elise's translator)."
   ;; THREAD-LIFETIME: continues -- this thread runs ONE turn of the request that spawned it,
-  ;; so it carries the caller's dynamic context (#430). Without the wrapper every line the
+  ;; so it carries the caller's dynamic context (#158). Without the wrapper every line the
   ;; turn logs -- including the LLM request and response lines -- is missing the request-id
   ;; that hyperion/logging bound around the request, because a LET binding does not cross a
   ;; thread. The field is simply absent and nothing reports it.
@@ -433,7 +433,7 @@ the resolved request locale, handed to the responder (e.g. for Elise's translato
     (lambda ()
      ;; THE TURN THREAD RENDERS. `%assistant-bubble' below is `spinneret:with-html-string',
      ;; and the request's own WITH-OUTPUT-STYLE wraps the dispatcher on the REQUEST thread,
-     ;; which this is not. Before #469 this worked because the style was a global assigned at
+     ;; which this is not. Before pre-publication issue 469 this worked because the style was a global assigned at
      ;; startup -- so the defect and the working behaviour were the same mechanism, and
      ;; removing the assignment without this would have rendered the assistant bubble in the
      ;; wrong style: only in the poller, only for the assistant, visible as whitespace rather
@@ -598,7 +598,7 @@ copies of it would drift -- silently, and in whichever copy nobody drives intera
 Positional rather than keyword on purpose: the only callers are the two entry points below,
 both of which must pass all of it, so keywords here would buy nothing but the chance to
 forget one."
-  ;; NO GLOBAL ASSIGNMENT (#469). The style travels on the conversation MAKE-APP builds, so
+  ;; NO GLOBAL ASSIGNMENT (pre-publication issue 469). The style travels on the conversation MAKE-APP builds, so
   ;; starting this surface as a second server inside a host image leaves the host's rendering
   ;; alone. `dev' still decides it; it is simply carried rather than published.
   (make-app :agent agent :agent-name agent-name :title title
@@ -637,7 +637,7 @@ previous signal handlers -- belongs to `hyperion/server:serve-forever' and is si
 delegated to. NAME titles the derived banner and defaults to AGENT-NAME, since that is the
 name the app already answers to.
 
-WHY IT LIVES HERE RATHER THAN IN EACH APP (#151). A praxeon app that wants to block used to
+WHY IT LIVES HERE RATHER THAN IN EACH APP (pre-publication issue 151). A praxeon app that wants to block used to
 have to reach past praxeon/web into hyperion/server, build the Clack app itself with
 MAKE-APP, and then remember the output-style knob -- which START sets, and which therefore
 is not part of the app but part of the entry point. That is three things to get right in

@@ -10,11 +10,11 @@
 ;;;; Generic infra (no domain, no HTTP): praxeon builds its per-conversation bubble
 ;;;; stream on this, and any live-updating Hyperion app can too.
 ;;;;
-;;;; A LOG THAT NEVER FORGETS MUST SAY WHAT BOUNDS IT (#231). This used to be one
+;;;; A LOG THAT NEVER FORGETS MUST SAY WHAT BOUNDS IT (pre-publication issue 231). This used to be one
 ;;;; VECTOR-PUSH-EXTEND with no removal anywhere in the file, so it promised "every
 ;;;; message, forever" -- BY ACCIDENT, because nobody had ever written down that it
 ;;;; did. At a conversation's pace that is bounded by the conversation, which is the
-;;;; case it was written for. At the rate #210 measured on a real market feed -- 424
+;;;; case it was written for. At the rate pre-publication issue 210 measured on a real market feed -- 424
 ;;;; msg/sec sustained -- it is a memory leak with a publication schedule.
 ;;;;
 ;;;; So the window is a DECISION at construction:
@@ -87,7 +87,7 @@ oldest one retained, and a lock. Readers consume by absolute index, non-destruct
 
 CAPACITY NIL means unbounded: every item is kept for the channel's lifetime. That is a
 legitimate choice for a short-lived or slow channel and an unbounded memory commitment for
-any other, which is why it must be typed rather than defaulted to (#231)."
+any other, which is why it must be typed rather than defaulted to (pre-publication issue 231)."
   (check-type capacity (or null (integer 1)))
   ;; THE STORE STARTS AT MIN(16, CAPACITY), and that is load-bearing rather than a
   ;; micro-optimisation. Eviction advances HEAD modulo the store's length, so the ring

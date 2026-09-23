@@ -13,7 +13,7 @@ bug in the *evidence*:
 
 - **A suite that ran nothing.** A test system with no `:perform (test-op …)` makes
   `asdf:test-system` load the files, run nothing, and exit 0. Aion was reported green
-  through an entire Coalton upgrade having executed **zero** checks (#116).
+  through an entire Coalton upgrade having executed **zero** checks (pre-publication issue 116).
 
   Three more instances landed in two days, by three different mechanisms: a `def-suite`
   without `:in all`, so `run-tests` never reached it — it reported success having executed
@@ -36,7 +36,7 @@ bug in the *evidence*:
   suite ran, the checks executed, each one passed against nothing. **The harness had to be
   able to see the failure before the failure could be asserted** — reading to the terminator
   *or* end of stream is also the only way a test can tell a truncated stream from a complete
-  one (#117).
+  one (pre-publication issue 117).
 - **A checker that never asked.** `scripts/verify-tree.lisp` did not load `praxeon/web`, so
   a green run said nothing whatever about a commit that changed only that file. Coverage of
   the checker matters as much as the checker.
@@ -62,7 +62,7 @@ So, before claiming anything works:
   the tree's own generator writes** — which is base64 text with a trailing newline. The
   client handed 89 bytes to a verifier requiring exactly 64, and every release the tree
   could produce would have been refused by every installed client, silently and permanently
-  (#224). A refused update against a security fix *is* the attack. Where a fixture is
+  (#111). A refused update against a security fix *is* the attack. Where a fixture is
   simpler than the artefact, the seam between producer and consumer is exactly what stops
   being tested — and both sides read correctly on their own.
   And the form that is NOT covered by it: **a fixture must differ in the dimension under
@@ -72,9 +72,9 @@ So, before claiming anything works:
 
   | defect | the natural fixture | what makes it see |
   |---|---|---|
-  | `supersede` inheriting the superseded observation's provenance (#415) | a correction in the **same** conversation — which is how anyone would write it | `conv-a` turn 1 corrected by `conv-b` turn 9 |
-  | an embedding batch paired back by arrival instead of `index` (#372) | rows **in order**, as a real reply usually is | rows deliberately out of order |
-  | provenance parsed out of content instead of read from columns (#372) | content and columns **agreeing** | content citing `conv-DECOY` turn 99 while the columns say `conv-real` turn 1 |
+  | `supersede` inheriting the superseded observation's provenance (#150) | a correction in the **same** conversation — which is how anyone would write it | `conv-a` turn 1 corrected by `conv-b` turn 9 |
+  | an embedding batch paired back by arrival instead of `index` (#138) | rows **in order**, as a real reply usually is | rows deliberately out of order |
+  | provenance parsed out of content instead of read from columns (#138) | content and columns **agreeing** | content citing `conv-DECOY` turn 99 while the columns say `conv-real` turn 1 |
 
   Each natural fixture is realistic, and each passes whether the code is right or wrong. The
   question to ask of a fixture is not only *is this as hard as production* but **would this
@@ -83,7 +83,7 @@ So, before claiming anything works:
 
 - **A decided requirement nobody implemented is invisible — read the doc as the contract
   and the code as a claim about it.** Four requirements settled in a committed design doc
-  were carried by neither the promoted client nor its reimplementation (#76), and **all four
+  were carried by neither the promoted client nor its reimplementation (pre-publication issue 76), and **all four
   surfaced by accident while doing something else** — including an anti-rollback bypass where
   a valid ISO-8601 fractional-second timestamp sorts *earlier* than the instant it names.
   Nothing was missing from the code's own point of view: the struct's shape read as the
@@ -95,7 +95,7 @@ So, before claiming anything works:
   second pass, every one of them invisible from the code's own point of view.
 - **A system that exports a surface must have a suite that exercises it.** Twice now a
   piece has been shipped, exported, documented and reused across frameworks with **zero**
-  coverage — `hyperion`'s interceptor pipeline (#177) and hermes' HTTP client (#202) — and
+  coverage — `hyperion`'s interceptor pipeline (pre-publication issue 177) and hermes' HTTP client (pre-publication issue 202) — and
   both times the gap was invisible because the *enclosing* system was green. Two instances
   is a pattern, and both were **reusable** pieces, which is the worst place for it: the
   first external consumer is the one who finds out. A non-zero check count for the system
@@ -114,13 +114,13 @@ So, before claiming anything works:
   nastiest member of this family, because an appeal to history in a line that has no history
   is exactly what makes a reviewer's eye skip — nobody checks a citation to something they
   believe they already know. Two reviewers read it and neither did; a third-party review tool
-  caught it (#231). Give a docstring changed in the same diff the scrutiny a new assertion
+  caught it (pre-publication issue 231). Give a docstring changed in the same diff the scrutiny a new assertion
   gets, not the pass a restatement gets. Note the order, too: the meanings had already
   diverged in the author's head — that is *why* the sentence got written — so the doc was the
   first place the divergence was visible, and reading it as background is what cost the catch.
 - **When a guard fires somewhere you did not expect, ask what property it is defending
   before you satisfy it.** A lane reached for a seeded MT19937 to fix a *collision* in a
-  staging-directory name and #95's entropy guard went red. The guard was right about
+  staging-directory name and pre-publication issue 95's entropy guard went red. The guard was right about
   something larger: that name is a path in a shared directory where a verified installer is
   about to be written **and then executed from**, so the property is not *unique*, it is
   **unguessable** — anyone who can predict it can create it first. *"It is only a temp
@@ -146,7 +146,7 @@ So, before claiming anything works:
   `docs/wiki/Framework-Hyperion.md` claimed, present tense, that a curated `secure-app`
   stack with CSRF and CSP "is bundled", while listing `secure-app` under *Planned / in
   progress* nine sections earlier and while the design doc still filed the whole thing under
-  *Proposed shape* (#227). Nothing had moved underneath it; **the document contained its own
+  *Proposed shape* (pre-publication issue 227). Nothing had moved underneath it; **the document contained its own
   refutation.** So sweep for internal consistency as a separate pass, not as a by-product.
 
   **Why that one survived is the transferable part: it sat immediately beside a *true*
@@ -168,7 +168,7 @@ So, before claiming anything works:
   them as `Proposed` — done by the same person who had written the grep rule an hour earlier.
   A status, a version, a count and a maturity all live in at least two places in this tree.
 - **When you find a claim false, grep the phrase across the tree before moving on.** A claim
-  #227's own ledger recorded as *fixed* was still live in `ECOSYSTEM.md`, because the
+  pre-publication issue 227's own ledger recorded as *fixed* was still live in `ECOSYSTEM.md`, because the
   correction had landed in `CLAUDE.md` and not in its sibling. **A sweep that fixes one
   instance of a claim leaves the reader exactly where they started** — and worse, leaves a
   ledger saying the claim is dead. Reading files in order can never catch this; the grep
@@ -186,7 +186,7 @@ So, before claiming anything works:
   source of false claims — and a worse one, because it is written in the confident voice of a
   correction.** `docs/launch/onboarding.md` asserted the README "still tells readers this is
   planned" when it no longer did, and cited an issue as open that was closed with its script
-  shipped (#227). Mark such entries FIXED/VERIFIED rather than deleting them: the shape of the
+  shipped (pre-publication issue 227). Mark such entries FIXED/VERIFIED rather than deleting them: the shape of the
   original mistake is the lesson, and a deleted correction teaches nobody.
 - **A stated invariant with nothing enforcing it decays like any other claim.**
   `ECOSYSTEM.md` said maturity and check counts are kept in step with the README's table, *and
@@ -197,7 +197,7 @@ So, before claiming anything works:
 - **A step named for the check you want is the best possible hiding place for the check you
   don't have.** The release workflow already had a step called *"Verify as a client would"*,
   and it ran the generator's own reader — the producer marking its own homework, which cannot
-  see a producer/consumer disagreement by construction (#77). It survived review precisely
+  see a producer/consumer disagreement by construction (pre-publication issue 77). It survived review precisely
   because the slot was occupied and the label told every later reader there was nothing to
   look at. Auditing a pipeline by reading its step list is exactly the method this defeats.
 - **A negative claim cannot be checked by reading the report — paste the output.** "I looked
@@ -205,13 +205,13 @@ So, before claiming anything works:
   positive claim names something someone else can go and find, and a negative names an
   absence that is indistinguishable from a bad search. A lane retracted a *true* statement
   about a label that existed, on the strength of a check it reported rather than showed, and
-  the retraction reached two other sessions before it was caught (#233). **A correction
+  the retraction reached two other sessions before it was caught (pre-publication issue 233). **A correction
   carries more authority than the original**, so a wrong one travels further and costs more
   to undo — which makes the shown command cheapest exactly where you are most confident.
 - **A safety check reachable only through the thing it guards is not a check.** An
   unknown-packaging-format refusal was written into a generic function's fallback method —
   and the test double for the installer launcher **replaces that generic**, so the refusal
-  was unreachable in exactly the configuration meant to exercise it (#76). The code read
+  was unreachable in exactly the configuration meant to exercise it (pre-publication issue 76). The code read
   correctly, the suite was green, and the guard was decorative. Put the refusal where the
   caller must pass through it, not in the layer a test or a backend can swap out.
 - **Assert the work, not the absence of failure.** A suite must report a **non-zero check
@@ -219,7 +219,7 @@ So, before claiming anything works:
   use — not a hand-rolled `asdf:test-system` loop. And **an assertion that a value is
   present cannot tell you it came from the right place**: a passing test asserting that an
   unsupported-schema refusal *carried a URL* was satisfied by a URL read out of the very
-  manifest the branch had just declared unreadable (#76). Assert provenance where provenance
+  manifest the branch had just declared unreadable (pre-publication issue 76). Assert provenance where provenance
   is the property that matters.
 - **Confirm the check you ran actually covered what you changed.** If you edited a file,
   something in your verification must have compiled it.
@@ -258,24 +258,24 @@ So, before claiming anything works:
   awkward. Remember `CL_SOURCE_REGISTRY` must point at the new worktree, and that it has no
   `vendor/libuv/` or `dist/`.
 
-**A check that never runs is not a check (#344, #346, #329).** Three instances in one
+**A check that never runs is not a check (pre-publication PR 344, pre-publication issue 346, pre-publication issue 329).** Three instances in one
 day, and the generalisation had to be corrected once before it fit all three — which is the
 most useful part of the case.
 
 The first framing was *a duplicated fact with no comparator*. That fits two of them:
 
-- **#344** — `mbedtls.pin` declares a `sources-digest` whose stated purpose is that it "ties
+- **pre-publication PR 344** — `mbedtls.pin` declares a `sources-digest` whose stated purpose is that it "ties
   this pin to that manifest so a version bump cannot quietly keep an old one". Nothing ever
   compared the two: not `mbedtls-sources.lisp`, not `check-pins.lisp` (which only looks for a
   version/sha field), not `verify-tree.lisp` (which did not run `check-pins` at all).
-- **#329 option B** — a proposed `sonames` field on `*lazy-natives*` would have been a second
+- **pre-publication issue 329 option B** — a proposed `sonames` field on `*lazy-natives*` would have been a second
   hand-maintained copy of `aion/uv/ffi:*library-names*`, in a different system, with nothing
   comparing the copies. Rejected for that reason; the ruling took option C, which makes both
   bundler carry functions name from the requesting end so the rule exists once.
 
 It does **not** fit the third, which is not duplication at all:
 
-- **#346** — `check-pins.lisp` existed, was correct, and ran on every pull request.
+- **pre-publication issue 346** — `check-pins.lisp` existed, was correct, and ran on every pull request.
   `verify-tree.lisp`, the gate `AGENTS.md` names as the thing to run cold before claiming
   anything works, had zero references to it. `grep -c "check-pins" scripts/verify-tree.lisp`
   → `0`.
@@ -290,14 +290,14 @@ missing — it is present, plausibly named, and its presence is exactly what sto
 looking. A repo containing `check-pins.lisp` looks, to a grep and to a reviewer, precisely
 like a repo that checks its pins.
 
-**The asymmetry in #346 is the part that explains why it survived.** `check-coalton.lisp` sat
+**The asymmetry in pre-publication issue 346 is the part that explains why it survived.** `check-coalton.lisp` sat
 one step above `check-pins.lisp` in the same CI job and was equally absent from the gate —
 but a wrong Coalton *fails to compile the tree*, which the gate does do, so it was caught by
 accident. A pin whose `advisories`/`reviewed` fields have gone missing compiles perfectly,
 and so does an asset whose bytes no longer match `ASSETS.pin`. The checks that had a second
 line of defence were the ones that had one.
 
-**Two properties worth copying from the fix (PR #348).** The checkers report in their own
+**Two properties worth copying from the fix (pre-publication PR 348).** The checkers report in their own
 `PROVENANCE` section and contribute nothing to `total checks executed`, because that figure
 means "assertions the suites ran" and is the number every issue in this repo quotes at every
 other. That was asserted in *both* states rather than once: the count reads 3799 in the
@@ -306,7 +306,7 @@ inflate it rather than that they did not happen to. And a **missing** checker is
 a failure, not a skip — absent and passing are identical at the exit code, which is the
 defect the whole section is about.
 
-**A defect needs a caller, the same way a check does (#430, #258).** The rule above says a
+**A defect needs a caller, the same way a check does (#158, pre-publication issue 258).** The rule above says a
 check that never runs is not a check, and tells you to find what invokes a named check before
 trusting it. The mirror holds and is not written anywhere: **before reporting a defect in a
 mechanism, find the code path that reaches it.** A fragile mechanism nothing exercises is
@@ -316,7 +316,7 @@ tests.
 Two cases in one afternoon, both the hub's, both caught by a lane checking the tree rather
 than reading the report.
 
-- **#430.** Filed as live: *"a child constructing a provider on its own thread reads the global
+- **#158.** Filed as live: *"a child constructing a provider on its own thread reads the global
   NIL rather than the role the caller established"* — a wrong answer rather than a missing one.
   The mechanism really is fragile: a dynamic binding does not cross a thread boundary, and
   `praxeon/llm:*provider-role*` is a `defvar`. But the only binder is `make-provider-from-env`
@@ -326,8 +326,8 @@ than reading the report.
   read happen on a different thread from the bind* before writing any code, and the answer was
   nowhere.
 
-- **#258.** The same substitution twice. First the ticket's body was relayed as a description
-  of the tree; it predated #212 landing and the three breakages it predicted were mostly
+- **pre-publication issue 258.** The same substitution twice. First the ticket's body was relayed as a description
+  of the tree; it predated pre-publication issue 212 landing and the three breakages it predicted were mostly
   already handled. Then `field-type-from "vector"` yielding `(FT-Vector 0)` was reported as a
   live defect losing the dimension. It is a deliberate backstop, documented at the call site
   and pinned by three tests, one of them named for the property and saying in its docstring
@@ -350,7 +350,7 @@ is the part that makes it real. Reporting the two as one loses that.
 
 The question is cheap and neither party asks it by default: **is there a caller?**
 
-**An assertion that cannot fail is not evidence (#437).** Before trusting a new check, ask what
+**An assertion that cannot fail is not evidence (pre-publication issue 437).** Before trusting a new check, ask what
 would make it report the other thing. A harness was to assert that a cache marker sat on the
 *last* part of a system prompt. With a single-element subject, *marked* and *marked last* are
 the same assertion and neither can fail — the check passed, and would have passed against an
@@ -420,20 +420,20 @@ question is what something is, read the whole record — then shorten what you q
 look at. And when a pipeline's exit status matters, take it from the command that matters:
 `${PIPESTATUS[0]}`, or do not pipe.
 
-**A surface with no producer, and the query that finds one (#129, #435, #437).** Three
+**A surface with no producer, and the query that finds one (#94, #161, pre-publication issue 437).** Three
 instances in one framework family, found in one evening, each the same shape: a surface that
 is built, exported, documented as load-bearing, covered by a suite — and called from nowhere
 but that suite.
 
-- **#129** — `cast → validate → insert!` is mandated in `AGENTS.md` and used by zero examples.
+- **#94** — `cast → validate → insert!` is mandated in `AGENTS.md` and used by zero examples.
   A missing `:vector` clause in `%cast-value` meant the mandated path could not store an
   embedding *and said something false about why*, and it sat undiscovered because nothing
   walked the path. A real consuming application had independently converged on `q:run` instead.
-- **#435** — `praxeon/ceiling`'s `meter`, `budget-guard` and `capability-guard` have exactly
-  two callers each, both in their own test file. This is why #417 survived: `record-usage`
+- **#161** — `praxeon/ceiling`'s `meter`, `budget-guard` and `capability-guard` have exactly
+  two callers each, both in their own test file. This is why pre-publication issue 417 survived: `record-usage`
   took two of four available token counts, and no caller ever held four and discovered there
   was nowhere to put two of them.
-- **#437** — the cacheable-prefix marker has four consumers (`pinned-exchange-count` pins it,
+- **pre-publication issue 437** — the cacheable-prefix marker has four consumers (`pinned-exchange-count` pins it,
   the Anthropic backend translates it, the OpenAI backend drops it, `text-part` constructs it)
   and no producer. `llm.lisp` calls it "the single largest win available".
 
@@ -469,7 +469,7 @@ praxeon/src/prompt.lisp:276    (llm:text-part text)
 ```
 
 Four callers, none passing `:cache`. Every caller that passes it is in the test suite. One
-query, and it is the same sentence as #435.
+query, and it is the same sentence as #161.
 
 So, in the lane's words: **"does anything produce this" is a question about call sites of the
 producer, not about occurrences of its keyword.** A keyword grep answers *is this concept
@@ -478,12 +478,12 @@ mentioned*, which is what both parties measured first.
 **And the narrower form of the docstring rule**, which is the same rule again because
 reachability is a question about callers: **a docstring is evidence about intent, never about
 reachability.** Both parties quoted a docstring to establish that a port helper was racy; both
-were right about the helper and wrong about which suite loaded it (see #433 above). A
+were right about the helper and wrong about which suite loaded it (see #159 above). A
 docstring cannot tell you whether the code it sits in ran.
 
-**A status is a claim about a system, and gets checked like one (#212, #429).** The same
+**A status is a claim about a system, and gets checked like one (pre-publication issue 212, pre-publication PR 429).** The same
 afternoon produced both directions of it. A consuming app's backlog carried *"blocked upstream
-on ouranos#212"* for months **after** #212 landed. The hub described #429 as built and shipped
+on ouranos pre-publication issue 212"* for months **after** pre-publication issue 212 landed. The hub described pre-publication PR 429 as built and shipped
 while it sat open — `git show origin/main:praxeon/src/memory.lisp` returned nothing — and the
 app read *"you can stop waiting"* as landed and could not have compiled against it. A lane
 reported a PR green having checked a local gate pass on a different host, never having run `gh
@@ -498,9 +498,9 @@ every rule in this file is about claims about systems. It is one. *Answered* is 
 side. The consuming app that caught the *shipped-while-open* error named them while doing it:
 
 - **Answered but not landed** — the design question is settled and a branch demonstrates it,
-  but nothing is on `main`. #429 for most of one afternoon.
+  but nothing is on `main`. pre-publication PR 429 for most of one afternoon.
 - **Landed but not pulled** — it is on `main`, and the consumer loads a *working tree* that has
-  not fetched it. #420 was in this state for the app, and for the hub's own checkout, which sat
+  not fetched it. pre-publication PR 420 was in this state for the app, and for the hub's own checkout, which sat
   three commits behind `origin/main` while the hub reported the merge.
 - **In effect** — the consumer's tree has it and compiles against it.
 
@@ -509,7 +509,7 @@ state a consuming app actually occupies for however long it takes somebody to de
 and on a feature branch that decision is not always theirs to make. A framework session saying
 "it landed" has told a consumer nothing about whether they can use it.
 
-**Read the commit you are making a claim about (#352).** Two cases in one day, both mine,
+**Read the commit you are making a claim about (pre-publication issue 352).** Two cases in one day, both mine,
 both **true readings of a real file**, and both about to become false reports.
 
 **A number.** The README's check-count total was edited against **4108**, read from a local
@@ -518,7 +518,7 @@ which is what made the stale total look like the safe part of the file — the c
 detail was real, and it corroborated the wrong commit.
 
 **A line of code, which is the case the existing check-count rule does not cover.** Checking
-whether #224 was still blocked, `install-directory` read:
+whether #111 was still blocked, `install-directory` read:
 
 ```lisp
 #-win32 nil
@@ -532,7 +532,7 @@ suspicious. `git show origin/main:` showed:
 #-win32 (progn app (%derived-install-dir))
 ```
 
-#335 had landed it. The reading was not wrong about the file; it was right about the wrong
+pre-publication issue 335 had landed it. The reading was not wrong about the file; it was right about the wrong
 commit.
 
 **The direction is what makes it dangerous.** The report would have been *blocked* — an
@@ -547,12 +547,12 @@ attributing correctly, to the commit you read, and still be wrong about the ques
 asked. The remedy is to go and read the right tree first.
 
 **The remedy is a different command, and switching to the wrong one is how the rule gets lost
-(#489).** `git show <ref>:path` reads a commit. `git grep` reads the checkout. They answer
+(pre-publication issue 489).** `git show <ref>:path` reads a commit. `git grep` reads the checkout. They answer
 different questions and nothing about either says so, which makes the second easy to reach for
 once the first has become a habit — the question silently changes from *what does this file say*
 to *what does `main` say*, and the command does not.
 
-Immediately after merging #490, the hub ran `git grep "defun %row-get"` and found the
+Immediately after merging pre-publication PR 490, the hub ran `git grep "defun %row-get"` and found the
 pre-conversion body, and `git grep "defun row-value"` and found nothing. On that evidence the
 conversion had not happened and the ledger claim in the merge commit — *two converted, two
 deliberately positional* — was false on `main`. It was not. **The hub checkout was three merges
@@ -577,7 +577,7 @@ different problem with a different fix, and the report would have sent someone t
 that already existed. File-absence is not test-absence; it is a claim about where you looked.
 
 **A suite can pass, report the right number of checks, and still have compiled with a
-warning (#258).** Three signals that normally agree, disagreeing.
+warning (pre-publication issue 258).** Three signals that normally agree, disagreeing.
 
 The pgvector execution tests were written into `mnemosyne/tests/query.lisp`. They use
 `+PG-URL-VAR+`, which `mnemosyne/tests/backends.lisp` defines — and `mnemosyne.asd` loads
@@ -610,7 +610,7 @@ and is where they belonged anyway. The lesson is not about load order — it is 
 agreeing with itself is not evidence, because both halves of the agreement come from the
 same run.
 
-**Expand loops before predicting a check-count delta from source (#276).** A new suite's first
+**Expand loops before predicting a check-count delta from source (pre-publication issue 276).** A new suite's first
 commit must move the total and you should say by how much first — but the prediction is a
 measurement too, and it can be a measurement of the wrong object like any other.
 
@@ -648,14 +648,14 @@ expands to several `is` forms — makes the two different numbers. Expand them, 
 and say which it is.
 
 **A term invented or silently dropped survives any number of matching predictions, and does
-not survive a sum that has to close (#432, #372).** The rule above says to write the
+not survive a sum that has to close (pre-publication issue 432, #138).** The rule above says to write the
 prediction down where the run can contradict it, and that is right. But a prediction on its
 own has a failure mode: when it matches you learn nothing you did not already believe, and
 when it misses the cheap response is to adjust the prediction and move on. What catches a
 real defect is **a second computation that has to agree with the first** — AGENTS.md's *two
 numbers computed different ways have to meet*.
 
-The worked case. #432 predicted **+183** mnemosyne checks and the suite delivered exactly that,
+The worked case. pre-publication issue 432 predicted **+183** mnemosyne checks and the suite delivered exactly that,
 so the prediction told nobody anything. The useful moment came later, deriving the README row,
 where two figures arrived from different directions:
 
@@ -679,7 +679,7 @@ across five merges: each term predicted before its run, and the sum checked agai
 actually read. A term invented or silently dropped survives any number of matching predictions
 and does not survive a sum that has to close.
 
-**A guard a comment could satisfy, and a control that tested a copy of it (#430).** The sweep
+**A guard a comment could satisfy, and a control that tested a copy of it (#158).** The sweep
 added with the inheritable-bindings registry fails any `make-thread` that has not recorded
 whether it carries the caller's dynamic bindings. A site counts as decided if `inheriting`
 appears near the spawn, or if a nearby comment says `THREAD-LIFETIME`. Both markers were found
@@ -714,7 +714,7 @@ duplication is what makes the test readable. Writing the logic inline is how you
 what is being checked. It is also what destroys the test's independence.
 
 **How it was found matters more than either defect.** Neither was found by review. The sweep
-failed on a real site — a spawn added in #418 hours after the test was written — and the first
+failed on a real site — a spawn added in pre-publication issue 418 hours after the test was written — and the first
 fix for that site was correct and still failed, because an eight-line comment between the spawn
 and its wrapper pushed `inheriting` outside the match window. The matcher only got read closely
 enough for the rest to become visible because a red had to be explained, and the explanation
@@ -728,7 +728,7 @@ bare failing check prints nothing *and* truncates every failure after it in that
 showing two failures may be showing a prefix of twelve. Every check needs a reason string, or a
 real failure will show up under the gate as less than the run actually knew.
 
-**The same shape once more, an hour later (#450).** `check-readme-counts.lisp --update`, invoked
+**The same shape once more, an hour later (pre-publication issue 450).** `check-readme-counts.lisp --update`, invoked
 by its path in the main checkout while the shell sat in a worktree, printed `UPDATED 2 lines`
 and left `git diff` in the worktree empty. It resolves the README from `*load-truename*`, so it
 had written to the hub's tree. Nothing was corrupted and the revert was clean, but the lane sees
@@ -744,7 +744,7 @@ that is why none of them looked wrong.
 **What happened to the person who wrote the paragraph above, two hours later.** Writing this
 entry did not stop its author doing it again twice the same evening.
 
-The first was a test for #452 asserting that a known observation's text and id reached the
+The first was a test for pre-publication issue 452 asserting that a known observation's text and id reached the
 model. It was pointed at an existing fixture that records `(:messages <length> :tools
 <length> :tool-choice ...)` — counts, not content. The claim was about content, the fixture
 holds none, and the test failed for a reason unrelated to what it was checking.
@@ -770,9 +770,9 @@ nameable in the seconds after something else surfaces it, which is the differenc
 fixing one test and noticing the shape. Build the check that can fail, and let someone else
 read the claim.
 
-**A control that never ran, and why the rule you already know does not fire (#466, #472).** The
+**A control that never ran, and why the rule you already know does not fire (pre-publication issue 466, pre-publication PR 472).** The
 gate's checkers had no tests, so each one got a fixture that breaks it and asserts the break
-is caught. `check-deps`'s break was to narrow `.asd` discovery to a single file — the #358
+is caught. `check-deps`'s break was to narrow `.asd` discovery to a single file — the pre-publication issue 358
 regression that `tree-deps` records as having actually happened.
 
 The suite passed 23 of 23. The obvious reading is that the test is weak: the break was applied
@@ -798,7 +798,7 @@ on: strengthen a test that was already fine, or worse, weaken the claim made for
 The check is the same one; only the colour you are hoping for has moved.
 
 **A checker whose root spans two checkouts reports their union, and the only tell is that
-every figure is exactly doubled (#480, #479).** `scripts/check-*.lisp` resolve their tree
+every figure is exactly doubled (pre-publication issue 480, pre-publication PR 479).** `scripts/check-*.lisp` resolve their tree
 from their own `*load-truename*` — the parent of `scripts/`. Put a copy where that parent
 contains **two** checkouts and the checker walks both, reports the union, and says nothing:
 no output names a tree.
@@ -816,7 +816,7 @@ from the ratio alone, without needing to know the cause — which is why the num
 here rather than only the rule.
 
 It is worth the catalogue because of **where it was found**: in the instrument being used to
-study the defect. The 188 was pasted into #479's body as evidence for a *different* run, and
+study the defect. The 188 was pasted into pre-publication PR 479's body as evidence for a *different* run, and
 read as a Linux-versus-macOS platform difference. It was neither. The session had run three
 variants while establishing what the checker does, and captioned the header line of one with
 the description of another — having only ever `tail`ed the run it was describing, so its
@@ -857,7 +857,7 @@ is exactly what makes it expensive on the occasions it is not. A rule like *a co
 must assert it was cold* is something you follow when you remember it. This is something you
 have to notice while you are thinking about something else entirely.
 
-That shape is not confined to instruments. #442 is the same form in a habit: a pull request
+That shape is not confined to instruments. pre-publication issue 442 is the same form in a habit: a pull request
 whose workflow never fired looks exactly like one whose run is queued, and *"two of the three
 resolve themselves, so waiting is usually correct — which is exactly what trains a lane to
 wait in the case where it never will."* A response that is right nearly always is not audited
@@ -883,11 +883,11 @@ not findings about the tree. They are findings about the instrument, every time.
 
 ## Coordination and process
 
-**A claim that flatters its reader is audited by nobody (#440).** The hub told a lane, and then
+**A claim that flatters its reader is audited by nobody (pre-publication PR 440).** The hub told a lane, and then
 the maintainer, that *"every one of your first runs has failed on the README row and nothing
 else"* and that its *"real failure rate on code is zero across four PRs"*.
 
-It was false. #440's first run failed on code:
+It was false. pre-publication PR 440's first run failed on code:
 
 ```
 run 35552183432
@@ -926,12 +926,12 @@ pull requests between 00:12 and 12:16 on 2026-09-21, verified individually rathe
 
 | PR | first run | gate | why it failed |
 |---|---|---|---|
-| #440 | 35552183432 | **FAIL** 4902 | `AION/DYNAMIC/TESTS` — the sweep catching `workflow.lisp:249` |
-| #429 | 35546959304 | PASS 4754 | README row only |
-| #453 | 35597664866 | PASS 5002 | README row only |
-| #456 | 35598560795 | PASS 4986 | README row only |
+| pre-publication PR 440 | 35552183432 | **FAIL** 4902 | `AION/DYNAMIC/TESTS` — the sweep catching `workflow.lisp:249` |
+| pre-publication PR 429 | 35546959304 | PASS 4754 | README row only |
+| pre-publication PR 453 | 35597664866 | PASS 5002 | README row only |
+| pre-publication PR 456 | 35598560795 | PASS 4986 | README row only |
 
-Two further pull requests in that stretch — #451 and #455, both docs — changed no counts and
+Two further pull requests in that stretch — pre-publication PR 451 and pre-publication PR 455, both docs — changed no counts and
 passed first time. They are outside the sample because **a pull request that cannot fail on the
 README row is not evidence about failing on it**, and the entry has to say so: a sample that
 silently drops the cleanest cases looks chosen from outside, whatever the boundary was.
@@ -962,17 +962,17 @@ self-contradiction only by comparing a document to itself, and this file asks fo
 because the second kind arrives exactly like this.
 
 **A measurement and an explanation of it, written in the same voice, are indistinguishable to
-the next reader — and the explanation is the half that rots (#478, #385).** Two instances on
+the next reader — and the explanation is the half that rots (pre-publication issue 478, pre-publication issue 385).** Two instances on
 one day, and **the asymmetry between them is the entry**: if both had been wrong this would be
 about carelessness and would teach nothing.
 
 **The one that had gone stale.** A note warned that forgetting `OURANOS_WITH_UV=1` drops 335
 checks and that *"there is no warning in the output — grep the whole run for `uv` and you get
 nothing, because the gate discloses what the PLATFORM axis skipped and not what the uv axis
-skipped (#385)"*.
+skipped (pre-publication issue 385)"*.
 
 The measurement was true: 4065 instead of 4400 on `d0547d1`, and it nearly went to the hub as
-a discrepancy. The explanation was true when written and **#385 is the ticket that fixed it**,
+a discrepancy. The explanation was true when written and **pre-publication issue 385 is the ticket that fixed it**,
 so the note cites the cure as the cause. `report-not-covered` is documented *"Printed ALWAYS,
 including when nothing was declined"* and `report-uv-declined` emits `off  uv axis  this host
 CAN answer these; the caller declined`. The surviving hazard is now *reading past a
@@ -1001,7 +1001,7 @@ explanation sit in one paragraph, say which is which. Six words did it —
 who finds a different cause corrects a sourced claim rather than an anonymous one, instead of
 "fixing" it from a private theory.
 
-**A claim that confirms a pattern you have just learned is audited by nobody (#51).** The hub
+**A claim that confirms a pattern you have just learned is audited by nobody (#58).** The hub
 reported that `create-portal-session` had a generic, an export and a dev-only implementation,
 and no method for the real backend — so a consuming app would get a working dev story and a
 failure the first time it pointed at production.
@@ -1043,7 +1043,7 @@ The habit: when a finding matches a shape you have seen several times recently, 
 moment the claim is least likely to be checked and most likely to be believed. Ask for the
 command, and read it to the end.
 
-**A relayed claim loses its container before it loses its content (#433).** The hub quoted a
+**A relayed claim loses its container before it loses its content (#159).** The hub quoted a
 sentence explaining why half of a known race had been fixed and half deliberately left, and
 attributed it to `55cec37`'s merge message. The sentence is not there. `%srv-free-port`
 appears in that message twice, both times about the ticket having named the wrong helper.
@@ -1085,7 +1085,7 @@ So when you relay, carry the container: *the Windows lane told me*, not *the rec
 quote whose origin you cannot name in the same sentence is one you have already lost, whether
 or not you have noticed.
 
-**Recorded locally is not filed upstream (#239).** Two careful app sessions nearly lost a defect
+**Recorded locally is not filed upstream (pre-publication issue 239).** Two careful app sessions nearly lost a defect
 because one said "filed" meaning *filed in our ledger* and the other, hearing it, stood down to
 avoid a duplicate. Both followed the convention as written; the ambiguity was in the
 instruction. A maintainer closing a duplicate costs a minute and yields a second independent
@@ -1103,7 +1103,7 @@ agent reads it while the blanket rule lived in AGENTS.md. A lane generalized its
 products to "a consuming app" through several tickets, buying nothing. If a rule is not in the
 file agents load, it is not a rule they have.
 
-**A silent CL name collision (#117).** `%stream-octets` was already the slot reader for
+**A silent CL name collision (pre-publication issue 117).** `%stream-octets` was already the slot reader for
 `octet-input-stream`; a chunk helper of the same name broke the *request* body path with no
 warning, and surfaced in an unrelated suite as a fall-through `ETYPECASE`. The CL cousin of
 Coalton's case-insensitivity hazard: silent collision, symptom elsewhere, message names neither.

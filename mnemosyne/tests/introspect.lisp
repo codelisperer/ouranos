@@ -1,4 +1,4 @@
-;;;; tests/introspect.lisp --- the live table vs the defschema (#144).
+;;;; tests/introspect.lisp --- the live table vs the defschema (pre-publication issue 144).
 ;;;;
 ;;;; Two halves, and the second is the one that matters.
 ;;;;
@@ -17,7 +17,7 @@
 ;;;; Then the ticket's own scenario, executed rather than described: a defschema that has
 ;;;; grown a column the table does not have, reconciled by DDL DERIVED FROM THE DIFF and
 ;;;; applied, after which the diff is clean -- and the reverse reading, where the table is
-;;;; ahead of the definition, which is the shape #144's workaround actually leaves behind.
+;;;; ahead of the definition, which is the shape pre-publication issue 144's workaround actually leaves behind.
 
 (in-package #:mnemosyne/tests)
 
@@ -76,7 +76,7 @@ these tests -- which is how they first failed."
     (is (null (intro:drift-extra drift)))))
 
 (test diff-reports-a-column-the-schema-lacks
-  ;; The inverse, and the one #144's survivable workaround produces: an ALTER migration ran
+  ;; The inverse, and the one pre-publication issue 144's survivable workaround produces: an ALTER migration ran
   ;; and the defschema was deliberately left alone. Correct data, lying definition.
   (let ((drift (intro:schema-diff (sch:find-schema 'drift-v1)
                                   (append (%v1-columns) (list (%dcol :nickname "text"))))))
@@ -142,7 +142,7 @@ these tests -- which is how they first failed."
       (is (search "ALTER TABLE drift_t ADD COLUMN nickname TEXT" sql)))))
 
 (test drift-ddl-does-not-drop-by-default
-  ;; An extra column is usually the #144 workaround -- correct data the defschema does not
+  ;; An extra column is usually the pre-publication issue 144 workaround -- correct data the defschema does not
   ;; mention. Defaulting to DROP COLUMN would turn a documentation problem into a
   ;; destructive one.
   (let ((drift (intro:schema-diff (sch:find-schema 'drift-v1)
@@ -202,7 +202,7 @@ Postgres is not."
       (is* (= 4 (length (intro:table-columns (%backend) c "drift_t")))))))
 
 (test a-defschema-ahead-of-the-table-is-found-and-reconciled
-  ;; #144, executed: the defschema grew a column, the table did not. The gap is detected,
+  ;; pre-publication issue 144, executed: the defschema grew a column, the table did not. The gap is detected,
   ;; the ALTER is DERIVED from the gap rather than hand-written, applying it closes the
   ;; gap -- and the already-applied CREATE was never touched.
   (with-each-backend (c)
@@ -227,7 +227,7 @@ Postgres is not."
              "applying the derived ALTER must leave the table matching the defschema")))))
 
 (test a-table-ahead-of-the-defschema-is-the-workaround-and-is-sayable
-  ;; The other direction, which is the state #144 says apps are actually left in: the ALTER
+  ;; The other direction, which is the state pre-publication issue 144 says apps are actually left in: the ALTER
   ;; ran and the defschema was deliberately not touched. VERIFY-SCHEMA must be able to call
   ;; that out AND to be told it is intended, because a check with only an off switch gets
   ;; switched off.
@@ -252,7 +252,7 @@ Postgres is not."
       (is* (not (intro:drift-table-present (intro:diff-table b c (sch:find-schema 'drift-v1))))))))
 
 (test a-changed-vector-dimension-is-drift-but-a-changed-varchar-precision-is-not
-  "The parenthesised number means different things in different types (#212).
+  "The parenthesised number means different things in different types (pre-publication issue 212).
 
 VARCHAR(255) and VARCHAR(80) hold the same kind of value and one can become the other, so
 the existing rule drops the precision and is right to. VECTOR(1536) and VECTOR(768) cannot:
@@ -269,14 +269,14 @@ about a vector column most worth seeing."
         "spacing a catalog happens to use must not read as a different type")
     (is (string= "VECTOR" (c "vector"))
         "a bare vector still canonicalises to itself")))
-;;; --- the guard that makes a config-resolved width safe (#258) ---------------
+;;; --- the guard that makes a config-resolved width safe (pre-publication issue 258) ---------------
 ;;;
-;;; #258 let `:dimensions' be an ordinary Lisp expression, so a width can come from
+;;; pre-publication issue 258 let `:dimensions' be an ordinary Lisp expression, so a width can come from
 ;;; configuration. That buys a real thing -- an app can measure recall at 1024 and at 3072
 ;;; without editing schema source -- and it creates one hazard: two deployments of the same
 ;;; code render DIFFERENT DDL, so a database migrated at one width meets a schema declaring
 ;;; another. This is the detector for exactly that, and it already existed: a changed vector
-;;; dimension is drift by design (#212). What is new is the assertion that it covers the case
+;;; dimension is drift by design (pre-publication issue 212). What is new is the assertion that it covers the case
 ;;; the new capability introduces, on every host, with no database.
 
 (sch:defschema width-1024 (:table "width_t")
@@ -312,7 +312,7 @@ every vector column drift, which would make the detector useless in the opposite
                                         (%dcol :embedding "vector(1024)")))))
     (is (intro:drift-clean-p drift))))
 
-;;; --- ADR-0003 / #432: introspect speaks the tree's dialect vocabulary -------
+;;; --- ADR-0003 / pre-publication issue 432: introspect speaks the tree's dialect vocabulary -------
 
 (test schema-diff-refuses-an-unrecognised-dialect
   "DRIFT-DIALECT is printed in a report an operator is meant to act on, so an unchecked
@@ -325,7 +325,7 @@ designator reaching it is a backend name nobody verified. Refuse at the entry in
   "The same dialect under either spelling gives the same verdict, and the DRIFT carries the
 canonical name rather than whatever the caller happened to type. A diff that reported
 drift in every row because the caller used the other module's spelling is the same defect
-#432 is about, one module over."
+pre-publication issue 432 is about, one module over."
   (dolist (pair '(("postgres" . :postgres) ("sqlite" . :sqlite)))
     (let* ((cols (%v1-columns :dialect (car pair)))
            (by-string  (intro:schema-diff (sch:find-schema 'drift-v1) cols :dialect (car pair)))

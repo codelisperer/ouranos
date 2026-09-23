@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# build-dmg.sh --- package a macOS bundle as a .app inside a .dmg (#94).
+# build-dmg.sh --- package a macOS bundle as a .app inside a .dmg (#78).
 #
 #     scripts/build-dmg.sh dist/coalton-repl-0.1.0-macos-arm64 \
 #         [--display-name "Coalton REPL"] \

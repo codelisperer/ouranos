@@ -19,7 +19,7 @@ your time goes on judgment rather than link-chasing.
   Do not spend time clicking links.
 - **Confidentiality in issues: clean.** All ~200 issue titles and bodies scanned for the
   four covered names — no hits. *(Issue **comments** and git history are separately covered
-  by [#90](https://github.com/codelisperer/ouranos/issues/90), which decided to publish from
+  by pre-publication issue 90, which decided to publish from
   a fresh commit precisely because history could not be cleaned.)*
 
 ## What you are looking for
@@ -61,14 +61,14 @@ by every AI session**, so an error there is an error in every future session.
 - [ ] **cons** — 7 files. `cons build|test|serve|run` is still partly aspirational; is that said plainly?
 - [ ] **mnemosyne** — 12 files. Was called "scaffold" until today at 139 checks; look for the same understatement elsewhere
 - [ ] **elenchon** — 14 files. Five ADRs landed this week; does the vision doc still read as open where it is now decided?
-- [ ] **hyperion** — 33 files, the largest surface. 11 ADRs; ADR-0011's backend half is being overtaken by [#117](https://github.com/codelisperer/ouranos/issues/117)
+- [ ] **hyperion** — 33 files, the largest surface. 11 ADRs; ADR-0011's backend half is being overtaken by pre-publication issue 117
 - [ ] **praxeon** — 10 files
 - [ ] **hermes** — 4 files
 
 ## Tier 3 — cross-cutting design docs
 
 - [ ] `docs/coalton-patterns.md` — the canonical Coalton reference; §7–8 are new
-- [ ] `docs/coalton-upstream.md` · `coalton.pin` · `libuv.pin` — three files naming versions ([#111](https://github.com/codelisperer/ouranos/issues/111) folds them into one)
+- [ ] `docs/coalton-upstream.md` · `coalton.pin` · `libuv.pin` — three files naming versions ([#86](https://github.com/codelisperer/ouranos/issues/86) folds them into one)
 - [ ] `docs/versioning-and-pinning.md` · `docs/dependencies.md`
 - [ ] `docs/logging.md` · `docs/migrations.md`
 - [ ] `docs/working-with-ai.md` — this is launch collateral now, not just an internal note
@@ -200,13 +200,13 @@ and `docs/dependencies.md` (a claim readers verify).
 
 ## What changed since 2026-08-04
 
-- **#91 is decided.** Thesis-led, all seven frameworks public with honest per-framework
+- **pre-publication issue 91 is decided.** Thesis-led, all seven frameworks public with honest per-framework
   maturity, explicitly not offering support, version `0.1.0`. Ship on description + badges;
-  CI (#87) and clean-machine bootstrap (#88) follow rather than gate.
+  CI (pre-publication issue 87) and clean-machine bootstrap (pre-publication issue 88) follow rather than gate.
 - **`README.md` rewritten in three places** — check counts (they were stale by ~4x: 594
   claimed against 2293 actual), the License section (per-framework `LICENSE` files now
   exist), and a new *"What this release promises"* section.
-- **#85 closed.** All seven frameworks carry the MIT text their `.asd` always declared, and
+- **pre-publication issue 85 closed.** All seven frameworks carry the MIT text their `.asd` always declared, and
   `publish-public.sh` now fails naming any framework that does not.
 - **Failure mode 2 in the table above is fixed.** "See per-project `LICENSE`/headers; there
   are none" — there are now.
@@ -246,7 +246,7 @@ catching*. So the boundary has to be explicit:
 
 - **It holds release-level narrative** — goal, scope, the promise, and the argument for the
   cut. An issue cannot hold *"what is this release for"*; `release-scope.md` proved that by
-  being the thing #91 needed and could not be.
+  being the thing pre-publication issue 91 needed and could not be.
 - **It does not hold per-item state.** No blocker lists that duplicate the board, no status
   that a label already carries. When this file and an issue disagree, the issue wins.
 

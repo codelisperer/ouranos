@@ -1,4 +1,4 @@
-;;;; tests/secret-types.lisp --- SECRET as a Coalton field type (#209).
+;;;; tests/secret-types.lisp --- SECRET as a Coalton field type (pre-publication issue 209).
 ;;;;
 ;;;; This is the test that actually covers the reported defect. MNEMOSYNE/BACKEND:PG-CONFIG
 ;;;; is a Coalton DEFINE-TYPE, and Coalton generates a printer that renders every field --

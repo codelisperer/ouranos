@@ -23,7 +23,7 @@ PROJECT=1
 OWNER=codelisperer
 WANT="${1:-}"
 
-# How stale is the checkout this is being run from (#391)? Printed BEFORE the gh check, so
+# How stale is the checkout this is being run from (pre-publication issue 391)? Printed BEFORE the gh check, so
 # a machine without gh still learns it, and before any board output, because the hub loop's
 # step 1 is "read the whole board before touching anything" -- which makes this the one
 # command guaranteed to run at the start of a pass.

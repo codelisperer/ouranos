@@ -54,7 +54,7 @@ and watching it makes the reload loop feed itself.")
 ;;; --- what is watched ------------------------------------------------------
 ;;;
 ;;; The watcher used to glob **/*.lisp, so editing a stylesheet, a template or a data file
-;;; refreshed nothing and the page silently went stale (#134). It now watches EVERYTHING
+;;; refreshed nothing and the page silently went stale (pre-publication issue 134). It now watches EVERYTHING
 ;;; under the roots and excludes by denylist, because an allowlist re-breaks the day
 ;;; somebody introduces a file type -- and it re-breaks silently, which is the same failure
 ;;; the original glob had.
@@ -162,7 +162,7 @@ SBCL's text reads: \"change in instance length of class VIEW: ...\"."
 is NIL on success, else the compiler's own diagnostics -- so the browser overlay shows what
 is actually wrong, not just which file. Diagnostics still echo to the REPL.
 
-REDEFINED-TYPES names any type whose instance layout CHANGED during this recompile (#234).
+REDEFINED-TYPES names any type whose instance layout CHANGED during this recompile (pre-publication issue 234).
 That matters because WATCH recompiles the files that changed and nothing else, so every
 unchanged file holding code compiled against the OLD layout is left alone and the image now
 holds two incompatible versions of one type. The symptom reads as a contradiction --
@@ -221,7 +221,7 @@ server and record the error. Returns :reloaded / :no-change / :error."
           (t
            (multiple-value-bind (err redefined)
                (if source (%recompile source) (values nil nil))
-             ;; #234: say so, loudly, at the moment it happens. The developer is looking at
+             ;; pre-publication issue 234: say so, loudly, at the moment it happens. The developer is looking at
              ;; the REPL that just printed the reload line; the alternative is that they
              ;; meet "X is not of type X" with nothing to connect it to.
              (when redefined
@@ -287,7 +287,7 @@ server and record the error. Returns :reloaded / :no-change / :error."
        (format s "~%route table reaches the running server -- so it needs the function, not")
        (format s "~%one result of it."))))
   (:documentation
-   "Signalled when SERVE or WATCH is handed something that cannot be a builder (#235).
+   "Signalled when SERVE or WATCH is handed something that cannot be a builder (pre-publication issue 235).
 
 Two independent consuming apps wrote `(serve (make-app) ...)', got a bare
 \"invalid number of arguments: 0\" from deep inside the watcher, and at least one
@@ -314,7 +314,7 @@ with zero arguments and is fine."
   "Validate BUILDER and return the form to keep, fixing two defects in one place because
 they are two spellings of one parameter.
 
-#157 -- a NAMED function object is coerced back to its symbol. `#'build-app' is what the
+pre-publication issue 157 -- a NAMED function object is coerced back to its symbol. `#'build-app' is what the
 phrase \"a thunk\" invites and is the obvious thing to write, but it captures the function
 object existing at that instant; recompiling the file that defines BUILD-APP makes a NEW
 object while the watcher still holds the old one, so every later rebuild is performed by
@@ -323,7 +323,7 @@ calls by name resolves fresh -- and in a Clack app that body is the dispatcher, 
 symptom is \"everything hot-reloads except adding a route\". FUNCALL on a SYMBOL re-resolves
 the current definition every time, which is the behaviour the caller plainly meant.
 
-#235 -- a function of one or more REQUIRED arguments is refused, because it is the app.
+pre-publication issue 235 -- a function of one or more REQUIRED arguments is refused, because it is the app.
 
 An anonymous thunk passes through untouched: it has no name to re-resolve, and a caller
 who wrote one is not describing a definition that can be recompiled."
@@ -348,7 +348,7 @@ save, changed files recompile and the server is rebuilt via BUILDER, keeping
 state; :dev tabs then refresh.
 
 EVERY file under the roots is watched, not just .lisp -- editing a stylesheet, a template
-or a data file rebuilds and refreshes too (#134). Only Lisp is COMPILED; anything else
+or a data file rebuilds and refreshes too (pre-publication issue 134). Only Lisp is COMPILED; anything else
 rebuilds the server and refreshes the browser without going near the compiler.
 
 EXCLUDE-DIRECTORIES prunes subtrees by name and EXCLUDE-TYPES skips extensions, defaulting
@@ -364,7 +364,7 @@ REDEFINING A TYPE is the case worth knowing about, and this docstring used to ca
 rare framework-hacking move, not everyday app dev\". That was wrong, and the wording was
 part of why it went unsuspected: a struct describing a UI element gains a slot routinely,
 and one consuming app hit this twice in a single afternoon doing ordinary product work
-(#234). Only the changed file is recompiled, so every unchanged dependent still holds code
+(pre-publication issue 234). Only the changed file is recompiled, so every unchanged dependent still holds code
 compiled against the old layout, and the image ends up with two versions of one type:
 
     The value #S(APP:VIEW :ID :SUBMISSIONS ...) is not of type APP:VIEW
@@ -393,11 +393,11 @@ Returns the dev handle; stop with UNWATCH."
             *dev* d)
       (setf (dev-thread d)
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
-            ;; server, not for the call that started it (#430).
+            ;; server, not for the call that started it (#158).
             (sb-thread:make-thread (lambda () (%watch-loop d)) :name "hyperion-dev-watch"))
       (format t "~&[dev] watching ~{~A~^ ~} — save any watched file to hot-reload~%"
               (mapcar #'namestring roots))
-      ;; #237: a root with no Lisp under it is almost always a mistake -- :SYSTEM resolved
+      ;; pre-publication issue 237: a root with no Lisp under it is almost always a mistake -- :SYSTEM resolved
       ;; somewhere the developer does not work. Cheap to notice, and the watcher would
       ;; otherwise run, print this banner, poll happily, and never fire.
       ;;
@@ -492,7 +492,7 @@ body; pass anything else (static files, JSON, streamed bodies) through unchanged
 (defun %runtime-error-page (condition trace script)
   "A dev error page for an unhandled APPLICATION error -- with the poller in it.
 
-This is the fix for #233, and the mechanism is not the one the report assumed. The report
+This is the fix for pre-publication issue 233, and the mechanism is not the one the report assumed. The report
 read the defect as \"the poller is injected into HTML responses, and a 500 is not one\".
 It is not that: %MAYBE-INJECT never looks at the status, so an app that RETURNS a 500 with
 an HTML body already gets the poller today. The real case is an app that SIGNALS -- which
@@ -525,7 +525,7 @@ padding:1rem;border-radius:6px;overflow-x:auto}p{color:#9b9aa3}</style></head>~
 
 (defun %call-app (app env script)
   "Call APP, injecting the poller -- and turning an unhandled condition into a dev error
-page that also carries the poller, rather than letting it unwind past WRAP-DEV (#233).
+page that also carries the poller, rather than letting it unwind past WRAP-DEV (pre-publication issue 233).
 
 HANDLER-BIND first, purely to capture the backtrace while the stack is still live;
 HANDLER-CASE then does the actual transfer of control. The error is echoed to
@@ -586,20 +586,20 @@ exists because SYSTEM resolves to that system's `src/`, which is the right answe
 app laid out as its own ASDF system and the wrong one for anything else -- notably the
 in-tree examples, whose sources sit in `examples/<name>/` with no `src/` beneath them.
 Without it those apps cannot adopt SERVE at all and are pushed back to hand-rolling WATCH,
-which is the boilerplate SERVE exists to delete (#132).
+which is the boilerplate SERVE exists to delete (pre-publication issue 132).
 
 :SYSTEM resolves to that system's `src/`. If your sources are NOT there -- a repo whose
 .asd sits at the root with surfaces in `desktop/src/` and `web/src/`, say -- :SYSTEM
 watches the wrong tree and hot reload appears to work: the watcher starts, the banner
 prints, the poller runs, and it never fires for the files you are editing. Use :PATHS.
-Read the banner: it names every root, and the roots it names are the whole truth (#237).
+Read the banner: it names every root, and the roots it names are the whole truth (pre-publication issue 237).
 
 BLOCK parks the calling thread until the watcher stops, and exists because SERVE otherwise
 RETURNS -- which is right for the REPL these examples are driven from and a trap for a
 command-line entry point. Both consuming apps called SERVE as the last form of a build-tool
 target; the function returned, the process exited, and it took the server with it AFTER
 printing that it was listening. It printed success. Pass :BLOCK T from any entry point that
-is not a REPL form (#236).
+is not a REPL form (pre-publication issue 236).
 
 Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
   (let ((d (watch (let ((make-app (%normalize-builder make-app "MAKE-APP")))

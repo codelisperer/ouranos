@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# verify-bundle-macos.sh --- prove a macOS bundle carries what it claims (#94).
+# verify-bundle-macos.sh --- prove a macOS bundle carries what it claims (#78).
 #
 #     scripts/verify-bundle-macos.sh dist/uv-probe-0.0.0-macos-arm64 [-- app args...]
 #     scripts/verify-bundle-macos.sh "dist/UV Probe.app"
@@ -91,7 +91,7 @@ else
   FAILED=1
 fi
 
-# THE INSTRUMENT CAN BE DISARMED FROM OUTSIDE THIS SCRIPT, SO IT HAS TO NOTICE (#140).
+# THE INSTRUMENT CAN BE DISARMED FROM OUTSIDE THIS SCRIPT, SO IT HAS TO NOTICE (#98).
 #
 # This whole check rests on DYLD_PRINT_LIBRARIES reaching dyld. THE HARDENED RUNTIME STRIPS
 # EVERY DYLD_* VARIABLE. So the day someone signs this app with `codesign --options runtime'
@@ -115,7 +115,7 @@ if ! grep -q "dyld" "$LOG"; then
   echo "         This check is now blind: it cannot see where any library was loaded from,"
   echo "         and every line below would read 'never loaded' rather than failing."
   echo "         Most likely cause: the bundle is signed with the HARDENED RUNTIME, which"
-  echo "         strips DYLD_* (#140). See the note above this check for what to do."
+  echo "         strips DYLD_* (#98). See the note above this check for what to do."
   FAILED=1
 fi
 

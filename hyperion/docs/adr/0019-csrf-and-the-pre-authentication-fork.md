@@ -1,12 +1,12 @@
 # ADR-0019 — CSRF: one mechanism, central on both sides, and a session before sign-in
 
 **Status:** Proposed — 2026-09-14. Answers the design fork in
-[#280](https://github.com/codelisperer/ouranos/issues/280), which the maintainer ruled a
+pre-publication issue 280, which the maintainer ruled a
 **launch blocker** — *"a sine qua non for going live with anything."* Implements the CSRF
 half of the `secure-app` wrapper in
 [`hyperion/docs/middleware-security.md`](../middleware-security.md), which records its own
 status as *"Captured; **not built** except the escape-by-default output posture"*; the
-headers half is [#281](https://github.com/codelisperer/ouranos/issues/281) and lands
+headers half is [#119](https://github.com/codelisperer/ouranos/issues/119) and lands
 independently.
 
 ## Context
@@ -68,11 +68,11 @@ Nothing needs un-reserving, and nothing exists yet.
 4. **Accept either carrier**: a `_csrf` form field or an `X-CSRF-Token` header, so HTMX and
    ordinary form posts share one path.
 5. **Constant-time comparison**, and the token minted from `aion/random` — the same CSPRNG
-   that mints session ids (#95), not `random`. The token source is already carried
+   that mints session ids (pre-publication issue 95), not `random`. The token source is already carried
    (`new-id` is `rnd:random-hex`, `session.lisp:154`); **constant-time comparison is not** —
    nothing in `aion/src` or `hyperion/src` does it today. It must be built, not reached for.
 6. **Rotate the token with the session id at every privilege change.** This ties to
-   [#282](https://github.com/codelisperer/ouranos/issues/282): a `sign-in!` that rotates by
+   [#120](https://github.com/codelisperer/ouranos/issues/120): a `sign-in!` that rotates by
    construction means the privilege change and both rotations cannot be separated.
 
 ## Consequences
@@ -83,7 +83,7 @@ Nothing needs un-reserving, and nothing exists yet.
 - **Anonymous visitors can hold a session.** Bounded by (2): only form-bearing responses
   mint one. The store still needs an expiry for never-authenticated sessions; without it the
   lazy mint is a slow storage leak rather than a fast one.
-- **An app's exemption list becomes deletable.** The acceptance criterion for #280 is
+- **An app's exemption list becomes deletable.** The acceptance criterion for pre-publication issue 280 is
   exactly that: a consuming app currently exempts sign-in, sign-up, reset and its newsletter
   with the reason recorded in source and a test pinning the exemption. When this lands, that
   list is the thing that goes away.
@@ -111,7 +111,7 @@ Nothing needs un-reserving, and nothing exists yet.
   standing guarantee about subdomains.
 - **Exempt the pre-auth forms.** Rejected: that is the unprotected sign-in, and login CSRF
   is the specific attack it enables.
-- **Per-form token injection.** Rejected on the field measurement reported against #280 —
+- **Per-form token injection.** Rejected on the field measurement reported against pre-publication issue 280 —
   60 edits in one consuming app, and opt-in protection thereafter. Opt-in protection is
   protection that a new form does not have.
 

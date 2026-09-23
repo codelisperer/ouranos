@@ -1,9 +1,9 @@
 ;;;; distil.lisp --- turning a window of a transcript into observations
 ;;;;
-;;;; The store (#60) answers where an observation lives. This answers where one comes from
+;;;; The store (pre-publication issue 60) answers where an observation lives. This answers where one comes from
 ;;;; when nobody wrote it by hand.
 ;;;;
-;;;; TWO CLAIMS, NOT ONE, AND THEY ARE NOT EQUALLY TRUSTWORTHY (#452).
+;;;; TWO CLAIMS, NOT ONE, AND THEY ARE NOT EQUALLY TRUSTWORTHY (pre-publication issue 452).
 ;;;;
 ;;;; Extracting an observation is a claim about CONTENT: the model read a window and says
 ;;;; what is in it. The window is right there to check it against.
@@ -243,7 +243,7 @@ function's extent would preempt every caller's."
 (defun apply-distillation (store distillation &key provenance (accept (constantly nil)))
   "Write DISTILLATION into STORE. Returns the observations written.
 
-PROVENANCE IS REQUIRED AND BELONGS TO THE WINDOW, NOT TO THIS CALL (#415). A distillation
+PROVENANCE IS REQUIRED AND BELONGS TO THE WINDOW, NOT TO THIS CALL (#150). A distillation
 pass reads a conversation that already happened, so the source of everything it writes is
 that conversation and its turn -- not the moment the pass ran. Passing it in rather than
 manufacturing one here is what keeps `when did they tell us this' answerable: the caller is

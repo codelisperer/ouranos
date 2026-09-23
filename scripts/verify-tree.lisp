@@ -9,7 +9,7 @@
 ;;;; system with no `:perform (test-op ...)` loads the files, runs nothing, and returns
 ;;;; SUCCESSFULLY -- so a verifier that trusts the exit status reports green for a suite
 ;;;; that never ran. Not hypothetical: aion was reported green through the entire Coalton
-;;;; 7915fad0 adoption while executing zero checks (#116). **"Exited 0" is not "the tests
+;;;; 7915fad0 adoption while executing zero checks (pre-publication issue 116). **"Exited 0" is not "the tests
 ;;;; passed."** The check count is the evidence, so we parse it and demand it.
 ;;;;
 ;;;; EVERY SYSTEM AND EVERY SUITE RUNS IN ITS OWN FRESH SBCL. That is the second thing, and
@@ -19,7 +19,7 @@
 ;;;; The earlier version loaded everything into ONE image: `+systems+` first, then
 ;;;; `+test-systems+`. `+systems+` contains `praxeon/web`, which declares
 ;;;; `clack-handler-woo` on non-Windows. `hyperion/tests` declared no HTTP backend at all
-;;;; after #139 -- but by the time it ran, praxeon/web had already pulled one into the same
+;;;; after pre-publication issue 139 -- but by the time it ran, praxeon/web had already pulled one into the same
 ;;;; image, so `available-servers` found one and the suite passed. `asdf:test-system
 ;;;; :hyperion` on its own failed outright with NO-SERVER-BACKEND, and this script reported
 ;;;; PASS for weeks. One image lets any system silently satisfy another's UNDECLARED
@@ -41,7 +41,7 @@
 ;;;; Suites that are legitimately empty must be listed in +KNOWN-EMPTY+ with a reason, so
 ;;;; that emptiness is a recorded decision rather than a silent gap.
 ;;;;
-;;;; BACKEND COVERAGE is the third thing, and the same idea one level down (#176). A suite
+;;;; BACKEND COVERAGE is the third thing, and the same idea one level down (pre-publication issue 176). A suite
 ;;;; can execute thousands of checks and still say nothing about the storage engine the docs
 ;;;; tell you to deploy on: mnemosyne reported 2645 green checks on SQLite at the same commit
 ;;;; that silently corrupted a text column on Postgres. A total check count cannot see that,
@@ -61,7 +61,7 @@
 ;;;; excusable: it means a server was named and did not answer, which is a broken
 ;;;; environment rather than a choice.
 ;;;;
-;;;; THE PLATFORM AXIS is the fourth thing, and the same idea one level further out (#182).
+;;;; THE PLATFORM AXIS is the fourth thing, and the same idea one level further out (pre-publication issue 182).
 ;;;; A package that can only be compiled on ONE host is invisible to a total check count and
 ;;;; to per-backend coverage alike. Without an axis, a WINDOWS run that never loads
 ;;;; aion/windows reports PASS and says nothing whatever about the binding -- while a macOS
@@ -81,7 +81,7 @@
 ;;;;   MISSING   required on this host and not in the tree -- FAILS
 ;;;;   n/a       owned by another OS; printed so a PASS says what it does NOT cover
 ;;;;
-;;;; THE OPTIONAL-COVERAGE AXIS is the fifth (#385), and it is the platform axis's mirror.
+;;;; THE OPTIONAL-COVERAGE AXIS is the fifth (pre-publication issue 385), and it is the platform axis's mirror.
 ;;;; PLATFORM reports what this host CANNOT answer; NOT COVERED reports what it CAN answer
 ;;;; and the caller declined -- `OURANOS_WITH_UV' unset, today. Both had been silences, and
 ;;;; the second is the worse one: a platform is a fact that stays true, a flag is a choice
@@ -92,20 +92,20 @@
 (require :asdf)
 (require :uiop)
 
-;;; The platform registry (#182) -- the SAME file bootstrap.lisp loads, so the two cannot
+;;; The platform registry (pre-publication issue 182) -- the SAME file bootstrap.lisp loads, so the two cannot
 ;;; drift about which packages this host owns. Loaded by path because it is deliberately not
 ;;; a member of any ASDF system: bootstrap consumes it before `cons' exists.
 (load (merge-pathnames "platform-packages.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
-;;; Where a failure CAME FROM (#192) -- tree code, or a dependency outside this checkout.
+;;; Where a failure CAME FROM (pre-publication issue 192) -- tree code, or a dependency outside this checkout.
 ;;; Split out of this script for the same reason as the registry above: everything here runs
 ;;; at toplevel, so a helper defined inline can only be exercised by running the whole gate.
 ;;; See cons/tests/failure-origin-tests.lisp.
 (load (merge-pathnames "failure-origin.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
-;;; Reading FiveAM's own report (#448). Split out for the same reason, and because the defect
+;;; Reading FiveAM's own report (pre-publication issue 448). Split out for the same reason, and because the defect
 ;;; it fixes was one the gate could not see about itself: it reported a prefix of each
 ;;; suite's failures and nothing about the output said so.
 (load (merge-pathnames "fiveam-report.lisp"
@@ -131,7 +131,7 @@
     :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/session-db
     :hyperion/auth-db :hyperion/cli
     :aion/random
-    ;; The credential wrapper (#209) and its Coalton view. Two systems because
+    ;; The credential wrapper (pre-publication issue 209) and its Coalton view. Two systems because
     ;; aion/secret must stay Coalton-free for cons; both belong in the gate, since a
     ;; break here silently un-redacts a password in three frameworks at once.
     :aion/secret :aion/secret/types
@@ -142,7 +142,7 @@
     :hyperion/examples/active-search :hyperion/examples/active-search-db
     :hyperion/examples/coalton-repl
     ;; The mnemosyne example was absent from this list while three hyperion examples were
-    ;; in it, so nothing here ever compiled it (#129). It is the example the conformance
+    ;; in it, so nothing here ever compiled it (#94). It is the example the conformance
     ;; pack ships beside, which makes it the one a reader is most likely to copy.
     :contacts)
   "Every system that must LOAD, each in its own image. Opt-in aux systems with native
@@ -156,7 +156,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     :hyperion/assets/tests :hermes/blob/tests
-    ;; praxeon/web's own suite (#151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
+    ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
     ;; `hyperion/update/tests' is justified as "invisible to this checker until someone
     ;; looked, which is the praxeon/web gap exactly", and the praxeon/web gap was still open
     ;; when that was written. `+systems+' LOADED praxeon/web, so a refactor there compiled;
@@ -164,59 +164,59 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; did not exist and no check count ever moved. The suite declares a Clack handler, which
     ;; is safe here only because every suite now gets its own fresh SBCL (see the header).
     :praxeon/web/tests
-    ;; Observational memory in a real database (#372). Registered in the same commit that
+    ;; Observational memory in a real database (#138). Registered in the same commit that
     ;; adds it: an unregistered suite, an unrun suite and a passing suite are identical at
     ;; the exit code, and this one would be the easiest of the three to leave that way --
     ;; it needs Postgres, so it is also the easiest to believe is "just skipping".
     :praxeon/memory-db/tests
-    ;; The gate's own checkers, tested against trees built to break them (#459). Here
+    ;; The gate's own checkers, tested against trees built to break them (#163). Here
     ;; rather than in the +CHECKERS+ block because that block must not move the check
     ;; count, and a fix for "nothing attests these work" that produces no number would be
     ;; attested only by its presence.
     :checkers/tests
-    ;; hyperion-view's ARGUMENT CONTRACT (#276). The launcher is C++, and before this entry a
+    ;; hyperion-view's ARGUMENT CONTRACT (pre-publication issue 276). The launcher is C++, and before this entry a
     ;; change to hyperion-view.cc moved no check count in either direction. The suite tests
     ;; the CLI, not the window -- and it carries one UNCONDITIONAL check so that a checkout
     ;; which has never built the launcher skips loudly here rather than reporting zero and
     ;; failing the gate.
     ;;
-    ;; THIS GATE NOW COMPILES IT (#410) -- `build-view-launcher', before LOADING. It did not
+    ;; THIS GATE NOW COMPILES IT (pre-publication issue 410) -- `build-view-launcher', before LOADING. It did not
     ;; when this entry was written, and the five assertions that need the binary therefore
     ;; skipped on every local run while CI built it and ran them: ten checks, two honest
     ;; totals, one PASS each. When the build is not possible the `view' axis is DECLINED and
     ;; said so, rather than skipping in silence.
     :hyperion/view/tests
-    ;; The desktop self-updater (#76). It verifies a signature and then decides whether to
+    ;; The desktop self-updater (pre-publication issue 76). It verifies a signature and then decides whether to
     ;; replace a binary on a user's machine, so it belongs inside the gate for the same
     ;; reason aion/random and hyperion/http1 do -- and it was invisible to this checker
     ;; until someone looked, which is the praxeon/web gap exactly.
     :hyperion/update/tests
-    ;; The updater's VISIBLE half (#333). Its own entry because its own system: the typed
+    ;; The updater's VISIBLE half (pre-publication issue 333). Its own entry because its own system: the typed
     ;; core being green said nothing about whether a route existed, which is how a P0 sat
     ;; In Review for weeks with no UI at all. Review cannot see an absence; a suite can.
     :hyperion/update-ui/tests
-    ;; The CSPRNG behind session ids (#95). A security primitive belongs inside the gate.
+    ;; The CSPRNG behind session ids (pre-publication issue 95). A security primitive belongs inside the gate.
     :aion/random/tests
-    ;; Credential redaction (#209) -- same argument as the CSPRNG above.
+    ;; Credential redaction (pre-publication issue 209) -- same argument as the CSPRNG above.
     :aion/secret/tests :aion/secret/types/tests
-    ;; The HTTP parser (#117). PURE and dependency-free precisely so it can live here --
+    ;; The HTTP parser (pre-publication issue 117). PURE and dependency-free precisely so it can live here --
     ;; aion/uv* is excluded from this checker for needing a C toolchain, and the most
     ;; security-critical code in the tree must not sit outside it. See ADR-0015.
     :hyperion/http1/tests
-    ;; The contacts example's changeset path (#129). Its test system existed with an empty
+    ;; The contacts example's changeset path (#94). Its test system existed with an empty
     ;; component list and no :perform -- declared, loadable, and asserting nothing. Named
-    ;; under its parent so its checks land in mnemosyne's README row (#357).
+    ;; under its parent so its checks land in mnemosyne's README row (pre-publication issue 357).
     :mnemosyne/examples/contacts/tests)
   "Every suite that must RUN, and run at least one check -- each in its own image.
 
 `mnemosyne/examples/contacts/tests' is the FIRST EXAMPLE SUITE here, and it is here on
-purpose (#129). Tests the gate never ran would be an unregistered suite, and this file's own
+purpose (#94). Tests the gate never ran would be an unregistered suite, and this file's own
 rule is that an unregistered suite, an unrun suite and a passing suite are identical at the
 exit code. It matters more for an example than for a framework: when a framework rots, code
 breaks; when the example that teaches the mandated doctrine rots, it teaches the wrong
-thing, which is what #353 is about.
+thing, which is what pre-publication issue 353 is about.
 
-ITS NAME IS LOAD-BEARING, not cosmetic (#357). `check-readme-counts.lisp' attributes a suite
+ITS NAME IS LOAD-BEARING, not cosmetic (pre-publication issue 357). `check-readme-counts.lisp' attributes a suite
 to a framework by the segment before the first slash. Named `contacts/tests' -- which is
 what it was -- it answered `contacts', a framework with no README row, so its checks reached
 the headline total without reaching any row and the table stopped summing to itself. Under
@@ -257,11 +257,11 @@ also swallow ours.")
   "Suites allowed to execute zero checks, each with the reason. Being on this list is a
 decision someone made, not an accident -- which is the difference that matters.")
 
-;;; --- the libuv systems, opt-in (#87) ---------------------------------------
+;;; --- the libuv systems, opt-in (pre-publication issue 87) ---------------------------------------
 
 (defparameter +uv-systems+
   '(:aion/uv :aion/uv/net :aion/uv/process
-    ;; The native HTTP server (#117). It is a hyperion system, but it is HERE and not in
+    ;; The native HTTP server (pre-publication issue 117). It is a hyperion system, but it is HERE and not in
     ;; +SYSTEMS+ for the same reason as the three above: it opens sockets through libuv and
     ;; cannot load without a built vendor/libuv. Its PARSER is separate and pure precisely
     ;; so the security-critical half stays in +TEST-SYSTEMS+ where every run reaches it --
@@ -288,7 +288,7 @@ that the pinned libuv builds at all."
   (let ((v (uiop:getenv "OURANOS_WITH_UV")))
     (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
 
-;;; --- the optional-coverage axis (#385) --------------------------------------
+;;; --- the optional-coverage axis (pre-publication issue 385) --------------------------------------
 ;;;
 ;;; `with-uv-p' above lets a caller run a smaller tree. That is legitimate and the file's
 ;;; own guidance recommends it between edits. What was NOT legitimate is that the smaller
@@ -311,7 +311,7 @@ that the pinned libuv builds at all."
 ;;; have caught the incident immediately. Ruled out deliberately: it is a probe wearing a
 ;;; different hat. It would make the gate's VERDICT depend on whether someone happened to
 ;;; run build-libuv.lisp, so two checkouts of one commit would gate differently -- the same
-;;; defect the opt-in exists to prevent, sign flipped. Hub ruling on #385.
+;;; defect the opt-in exists to prevent, sign flipped. Hub ruling on pre-publication issue 385.
 ;;;
 ;;; NO CHECK COUNT on these lines, also deliberately. The run does not know what it did not
 ;;; run, and a remembered figure would be a claim it cannot support -- worse than silence,
@@ -326,7 +326,7 @@ A registry rather than an `if' at each site, so adding an axis cannot add one th
 summary forgets to disclose -- which is the defect this exists to close, and it would be
 a poor joke to reintroduce it one axis later.
 
-EACH AXIS OWNS ITS DISCLOSURE TEXT, and that is #410's correction rather than tidying. The
+EACH AXIS OWNS ITS DISCLOSURE TEXT, and that is pre-publication issue 410's correction rather than tidying. The
 first version held (name predicate env-var systems build-hint) and ONE printer rendered
 every entry as \"the caller declined -- set <env> to 1 to include them\". That shape encodes
 two assumptions the `view' axis breaks:
@@ -371,7 +371,7 @@ state rather than a defect."
         (when (plusp (length line)) line)))))
 
 (defun report-checkout-freshness ()
-  "How far behind its upstream this checkout is, and when the clone last fetched (#391).
+  "How far behind its upstream this checkout is, and when the clone last fetched (pre-publication issue 391).
 
 PRINTED EVERY RUN, INCLUDING WHEN CURRENT, for the same reason as the block above: a line
 that appears only on bad news teaches readers that its absence means nothing happened, and
@@ -422,7 +422,7 @@ Printed ALWAYS, including when nothing was declined -- on the PLATFORM block's p
 A block that appears only when there is bad news teaches readers that its absence means
 nothing happened, and absence is precisely what they cannot distinguish from silence.
 
-NOT \"caller's choice\" ANY MORE, which was the heading until #410. `uv' is off only when
+NOT \"caller's choice\" ANY MORE, which was the heading until pre-publication issue 410. `uv' is off only when
 somebody chooses; `view' is off when a host has no C++ toolchain, when the 9 MB SDK fetch had
 no network, or when the caller said skip -- three causes, one of them a choice. A heading
 that named the cause was fine while there was one cause. Each entry now says its own.
@@ -453,12 +453,12 @@ their checks, and the only sign was one NOTE line in the summary."
   (format t "          OURANOS_WITH_UV is unset. Set it to 1 to include them (needs scripts/build-libuv.lisp to have run).~%")
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
 
-;;; --- the platform axis (#182) ----------------------------------------------
+;;; --- the platform axis (pre-publication issue 182) ----------------------------------------------
 ;;;
 ;;; ADR-0003 predicted this gap: without a platform axis, a WINDOWS run that never loads
 ;;; aion/windows reports PASS and says nothing whatever about the binding -- while a macOS
 ;;; run reporting PASS is CORRECT to have skipped it. Same output, two meanings. That is
-;;; #116 and the praxeon/web coverage gap again, with the blind spot being an entire
+;;; pre-publication issue 116 and the praxeon/web coverage gap again, with the blind spot being an entire
 ;;; platform.
 ;;;
 ;;; So the packages this host OWNS go through the same one-image-each machinery as
@@ -567,7 +567,7 @@ surfaces -- it just is not confused with a failing test."
                 (values code2 out2 :retried))))
         (values code out nil))))
 
-;;; --- provenance checkers (#346) --------------------------------------------
+;;; --- provenance checkers (pre-publication issue 346) --------------------------------------------
 ;;;
 ;;; FOUR CHECKS THAT EXISTED AND THIS GATE DID NOT RUN. Each answers a question about
 ;;; PROVENANCE -- are the bytes and versions we build from the ones we declared -- and each
@@ -657,7 +657,7 @@ absence is reported as one rather than stepped over."
                (format t "          ~a~%" line))
              (fail "scripts/~a exited ~d -- ~a" script code answers))))))))
 
-;;; --- backend coverage (#176) ----------------------------------------------
+;;; --- backend coverage (pre-publication issue 176) ----------------------------------------------
 
 (defparameter +required-backends+ '("postgres")
   "Backends that must actually execute checks when a suite reports per-backend coverage.
@@ -737,7 +737,7 @@ A skipped check is a check that DID NOT RUN, and the whole point of this script 
 green signal must say what produced it. A platform-guarded test is legitimate -- Windows
 cannot make a symlink -- but a suite that silently drops two checks on one platform reads as
 identical coverage everywhere, and the gap then shows up only as an unexplained difference
-in a total (#168)."
+in a total (pre-publication issue 168)."
   (let ((total 0) (start 0))
     (loop
       (let ((p (search "Skip: " output :start2 start)))
@@ -750,7 +750,7 @@ in a total (#168)."
     total))
 
 ;;; Reading FiveAM's report lives in scripts/fiveam-report.lisp, loaded at the top of this
-;;; file, for the reason #448 makes plain: parsing it "to the first blank line" reported only
+;;; file, for the reason pre-publication issue 448 makes plain: parsing it "to the first blank line" reported only
 ;;; the failures before the first bare `is` and gave no sign that it had stopped. A helper
 ;;; defined inline here can only be exercised by running the whole gate, which is how that
 ;;; survived being written, reviewed and relied on.
@@ -836,21 +836,21 @@ code we do not own, and a gate that cries wolf gets switched off."
     out))
 
 
-;;; --- the native launcher axis (#410) ---------------------------------------
+;;; --- the native launcher axis (pre-publication issue 410) ---------------------------------------
 ;;;
-;;; #395 moved the hyperion-view build OUT of this gate and INTO verify.yml. The SUITE stayed
+;;; pre-publication PR 395 moved the hyperion-view build OUT of this gate and INTO verify.yml. The SUITE stayed
 ;;; here, and five of its assertions skip unless the binary exists -- so a cold local gate
 ;;; covered ten checks fewer than CI on the same commit, both printed `VERDICT: PASS', and the
-;;; axes line read `base+uv' in both cases because the launcher was not an axis when #385 was
+;;; axes line read `base+uv' in both cases because the launcher was not an axis when pre-publication issue 385 was
 ;;; written. Measured on Windows at 4cc4564, both directions:
 ;;;
 ;;;   launcher present : 17 checks, 0 skipped
-;;;   launcher absent  :  7 checks, 5 skipped      <- the ten, independently of #410's Linux
+;;;   launcher absent  :  7 checks, 5 skipped      <- the ten, independently of pre-publication issue 410's Linux
 ;;;                                                   figures, on the other platform
 ;;;
 ;;; TWO THINGS ARE DONE ABOUT IT AND NEITHER IS SUFFICIENT ALONE.
 ;;;
-;;; 1. THE GATE BUILDS IT, so the canonical leg can compute the canonical number again. #395
+;;; 1. THE GATE BUILDS IT, so the canonical leg can compute the canonical number again. pre-publication PR 395
 ;;;    did not only change a total: it removed a capability, because the Linux lane had been
 ;;;    producing README figures from its own gate log and silently could not any more. Cost,
 ;;;    MEASURED rather than estimated -- Windows, MSVC, this machine:
@@ -859,13 +859,13 @@ code we do not own, and a gate that cries wolf gets switched off."
 ;;;      cold: SDK fetch (9 MB, NuGet) + compile     5.5 s
 ;;;      SDK already cached                          3.4 s
 ;;;
-;;;    Cheap enough to be unconditional, which is what makes this option viable at all. #410
+;;;    Cheap enough to be unconditional, which is what makes this option viable at all. pre-publication issue 410
 ;;;    records 3 s compile plus ~26 s of apt for a bare Linux runner.
 ;;;
 ;;; 2. AND THE AXIS IS DISCLOSED, because the build can fail for reasons that are nobody's
 ;;;    choice. Three are real and all three are reachable:
 ;;;
-;;;      no C++ toolchain            #382 measured this host class directly: a Windows box
+;;;      no C++ toolchain            pre-publication issue 382 measured this host class directly: a Windows box
 ;;;                                  with only Build Tools, and one with no MSVC at all.
 ;;;      no network                  the Windows SDK fetch is 9 MB from NuGet, and the cache
 ;;;                                  is gitignored and PER-WORKTREE -- so every cold gate in
@@ -875,7 +875,7 @@ code we do not own, and a gate that cries wolf gets switched off."
 ;;;                                  was written on.
 ;;;      OURANOS_SKIP_VIEW_BUILD=1   the caller's choice, for a slow or offline machine.
 ;;;
-;;; NOT A FAIL when the launcher is absent, for the reason #385 gives for the same question
+;;; NOT A FAIL when the launcher is absent, for the reason pre-publication issue 385 gives for the same question
 ;;; one axis over: a gate whose VERDICT depends on whether a C++ toolchain happens to be
 ;;; installed would gate two checkouts of one commit differently. It is disclosed instead.
 
@@ -900,7 +900,7 @@ code we do not own, and a gate that cries wolf gets switched off."
 
 A PROBE, where the uv axis deliberately refuses to be one. The difference is real rather
 than convenient: `with-uv-p' is a flag because a probe there would let COVERAGE CHANGE
-SILENTLY, and #385's whole argument is against unreported variance -- not against variance.
+SILENTLY, and pre-publication issue 385's whole argument is against unreported variance -- not against variance.
 This axis reports itself either way, in the tag, in NOT COVERED, and on the machine-readable
 `axes-declined' line. And the probe is the only honest predicate available here, because the
 assertions run if and only if the binary is present, whatever anyone intended: a flag would
@@ -922,7 +922,7 @@ let this run claim `view' while the five assertions skipped."
 
 (defun build-view-launcher ()
   "Build the native webview launcher, best effort, recording WHY when it does not happen."
-  (format t "~%========== NATIVE LAUNCHER (#410) ==========~%")
+  (format t "~%========== NATIVE LAUNCHER (pre-publication issue 410) ==========~%")
   ;; PREREQUISITES FIRST, inside run-build, so a host with no C++ toolchain DECLINES the axis
   ;; instead of failing the gate. That host is measured, not hypothetical (pre-publication issue 382).
   (let ((start (get-internal-real-time)))
@@ -960,7 +960,7 @@ let this run claim `view' while the five assertions skipped."
 
   ;; BEFORE the suites, because HYPERION/VIEW/TESTS skips five assertions when the binary is
   ;; absent and a gate that builds it afterwards would have measured the tree without it
-  ;; (#410). Best effort: a host that cannot build declines the axis and says so, rather than
+  ;; (pre-publication issue 410). Best effort: a host that cannot build declines the axis and says so, rather than
   ;; failing a gate over a C++ toolchain.
   (build-view-launcher)
 
@@ -1024,7 +1024,7 @@ let this run claim `view' while the five assertions skipped."
                  (unless details
                    (format t "~a~%" (failure-excerpt text 8))))
                (fail "~a had failing checks" s))))
-        ;; Per-backend coverage, INDEPENDENT of pass/fail above (#176). A suite can be
+        ;; Per-backend coverage, INDEPENDENT of pass/fail above (pre-publication issue 176). A suite can be
         ;; entirely green and still have exercised one storage engine -- that is the exact
         ;; shape of the defect this clause exists to catch, so it is checked separately
         ;; rather than folded into the cond, where the `Fail: 0` branch would swallow it.
@@ -1041,7 +1041,7 @@ let this run claim `view' while the five assertions skipped."
               (format t "  COVER   ~a -- ~a~%" s problem)
               (fail "~a: ~a" s problem))))))
 
-    ;; --- the platform axis (#182) ------------------------------------------
+    ;; --- the platform axis (pre-publication issue 182) ------------------------------------------
     ;; Printed as its own block, ALWAYS, on every OS -- including the ones that own
     ;; nothing. A reader of a macOS PASS has to be able to see what that PASS does not
     ;; cover, and silence cannot carry that.
@@ -1061,7 +1061,7 @@ let this run claim `view' while the five assertions skipped."
                  (format t "  planned ~a~34tnot in the tree yet (~a)~%" system issue))
                 ;; It landed and the registry did not notice. This one IS a failure: the
                 ;; package is now being carried with no gate over it, which is exactly the
-                ;; silence #182 exists to remove.
+                ;; silence pre-publication issue 182 exists to remove.
                 ((ouranos-platform:planned-p entry)
                  (format t "  STALE   ~a~34tPRESENT but registry says :planned (~a)~%" system issue)
                  (fail "~a is in the tree but scripts/platform-packages.lisp still marks it :planned -- flip it to :required so the gate covers it" system))
@@ -1151,7 +1151,7 @@ let this run claim `view' while the five assertions skipped."
       (format t "commit: ~a~%" (if (and sha (plusp (length sha))) sha "unknown")))
     (report-checkout-freshness)
     ;; The axis coordinate travels WITH the count, exactly as the commit does above and for
-    ;; the same reason (#385). A total from a run that declined an axis must not be
+    ;; the same reason (pre-publication issue 385). A total from a run that declined an axis must not be
     ;; printable as the same kind of number as a full one -- 4065 and 4400 were both true
     ;; of d0547d1 and only one of them is the tree's count. The suffix is after the digits,
     ;; so check-readme-counts.lisp's `%labelled-integer' still parses it.

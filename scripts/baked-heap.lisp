@@ -1,4 +1,4 @@
-;;;; baked-heap.lisp --- what heap was this binary born with? (#88)
+;;;; baked-heap.lisp --- what heap was this binary born with? (pre-publication issue 88)
 ;;;;
 ;;;;     sbcl --script scripts/baked-heap.lisp bin/cons dist/*/coalton-repl
 ;;;;

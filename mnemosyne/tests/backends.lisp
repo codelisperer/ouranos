@@ -1,11 +1,11 @@
-;;;; tests/backends.lisp --- which backends the suite runs against, and saying so LOUDLY (#176).
+;;;; tests/backends.lisp --- which backends the suite runs against, and saying so LOUDLY (pre-publication issue 176).
 ;;;;
 ;;;; mnemosyne's whole claim is a NEUTRAL protocol over interchangeable backends. Until this
 ;;;; file, every check it had ever reported green ran against SQLite alone -- the one backend
 ;;;; the docs do not tell you to deploy on. A neutral protocol verified against one backend is
 ;;;; an unverified claim, not a verified one.
 ;;;;
-;;;; #165 is the receipt: 2645 checks green on SQLite at the same commit that silently stored
+;;;; pre-publication issue 165 is the receipt: 2645 checks green on SQLite at the same commit that silently stored
 ;;;; the four characters "false" in a Postgres text column. The bug was found by a consuming
 ;;;; app standing up a real server -- not by the suite, not by review.
 ;;;;

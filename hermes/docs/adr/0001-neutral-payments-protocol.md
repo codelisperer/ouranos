@@ -1,6 +1,6 @@
 # ADR-0001 — Payments behind a neutral protocol, in its own system
 
-**Status:** Accepted (2026-09-02) · 2026-08-27 · issues #48, #49, #47, #50, #51
+**Status:** Accepted (2026-09-02) · 2026-08-27 · issues pre-publication issue 48, pre-publication issue 49, pre-publication issue 47, pre-publication issue 50, #58
 
 ## Context
 
@@ -28,7 +28,7 @@ lock-in that outlives the reason for it.
    not deliver messages. Inheriting from something whose contract is `DELIVER` in order to
    reuse a registry would be reuse of the wrong thing.
 
-3. **The protocol is specified and built before any vendor exists** (#48 before #47).
+3. **The protocol is specified and built before any vendor exists** (pre-publication issue 48 before pre-publication issue 47).
    Building a neutral protocol with a vendor in the room is how the vendor's shape gets into
    it. A **dev provider** — in-memory, charging nobody — is the first implementation, and it
    is selected by the same `HERMES_TRANSPORT=dev` that already forces the dev transport for
@@ -68,7 +68,7 @@ lock-in that outlives the reason for it.
 
 **Write directly against Stripe and generalize later.** Faster to a working checkout, and
 the generalization never happens — by the time a second provider is wanted, the vendor's
-vocabulary is in the application's call sites. #51 exists to keep this honest.
+vocabulary is in the application's call sites. #58 exists to keep this honest.
 
 **Payments inside hermes core.** Rejected on load path: see Decision 1.
 
@@ -79,7 +79,7 @@ name; the honest move is a narrow core and a named limit.
 ## Provenance
 
 The design changed materially **before** it was written, because requirements were solicited
-from a consuming application first — the lesson of #165, where a real application running
+from a consuming application first — the lesson of pre-publication issue 165, where a real application running
 the code decided a design that review had not.
 
 Two of its points reshaped the surface rather than adding to it. **The first specification

@@ -36,7 +36,7 @@ a tag-driven pipeline, and an app that notices a new version and installs it in 
    Releases (~~`/releases/latest/download/`~~, zero infrastructure) and S3 (private products,
    permanent human link). An app names one or a list.
 
-   **Corrected 2026-09-16 from inside the implementation (#332).** The URL shape is wrong;
+   **Corrected 2026-09-16 from inside the implementation (pre-publication issue 332).** The URL shape is wrong;
    the decision is not. `/releases/latest/download/` is a permanent URL only for a
    repository holding **one** product, because `latest` resolves per *repository*. The
    release repo holds every desktop app in the tree, so the most recently published one

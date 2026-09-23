@@ -1,9 +1,9 @@
-;;;; money.lisp --- a typed amount, and the provider config (#49).
+;;;; money.lisp --- a typed amount, and the provider config (pre-publication issue 49).
 ;;;;
 ;;;; WHAT THIS ACTUALLY PREVENTS, stated precisely, because the ticket's phrasing promises
 ;;;; slightly more than is reachable.
 ;;;;
-;;;; #49 asks for Money/Currency "so amounts cannot mix units". A currency arrives at
+;;;; pre-publication issue 49 asks for Money/Currency "so amounts cannot mix units". A currency arrives at
 ;;;; RUNTIME, out of a provider's JSON -- so it cannot be in the type, and no amount of
 ;;;; Coalton makes a mismatch a compile-time error at that boundary. Phantom-typing the
 ;;;; currency would work only for amounts written as literals in our own source, which is
@@ -122,7 +122,7 @@ mismatch cannot quietly become zero."
     "What a hosted-checkout provider needs to be reachable: a key, a webhook secret, and
 the API base. The two credentials are SECRETs, not Strings: Coalton prints a DEFINE-TYPE
 field by field, so a String here would put an API key into any backtrace that unwound
-through a frame holding this config -- the defect that reached a deploy log in #209. The
+through a frame holding this config -- the defect that reached a deploy log in pre-publication issue 209. The
 API base is not a credential and stays printable, which is what makes a redacted config
 still worth reading.
 
@@ -136,7 +136,7 @@ the event vocabulary follows."
   (define (make-config api-key webhook-secret api-base)
     "Takes plaintext -- credentials arrive as strings from the environment, so there is
 nowhere else for them to come from. What matters is that they do not come back out
-without REVEAL being written (#209): a one-way valve, not an unbreakable one."
+without REVEAL being written (pre-publication issue 209): a one-way valve, not an unbreakable one."
     (Config (sec:make-secret api-key) (sec:make-secret webhook-secret) api-base))
 
   (declare config-api-key (Config -> sec:Secret))

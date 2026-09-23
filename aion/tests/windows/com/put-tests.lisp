@@ -1,4 +1,4 @@
-;;;; put-tests.lisp --- writing a property, which this binding could not do (#306).
+;;;; put-tests.lisp --- writing a property, which this binding could not do (pre-publication issue 306).
 ;;;;
 ;;;; `invoke-method', `get-property' and `invoke' were exported and there was NO SETTER, so
 ;;;; any Automation object configured through properties rather than arguments was half

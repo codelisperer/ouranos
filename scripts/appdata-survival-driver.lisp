@@ -1,4 +1,4 @@
-;;;; appdata-survival-driver.lisp --- run a REAL apply, for #224's harness.
+;;;; appdata-survival-driver.lisp --- run a REAL apply, for #111's harness.
 ;;;;
 ;;;;     sbcl --script scripts/appdata-survival-driver.lisp \
 ;;;;          --dist DIR --product NAME --channel stable \
@@ -28,11 +28,11 @@
 ;;;;   machine the app exits here so nothing holds the bundle; here the driver is not IN the
 ;;;;   bundle and holds no handle on it, so the installer meets the same empty directory it
 ;;;;   would meet after a real exit. What that does mean is that this harness says nothing
-;;;;   about the shutdown ORDERING -- that is `*before-apply*' and #76 measured it
+;;;;   about the shutdown ORDERING -- that is `*before-apply*' and pre-publication issue 76 measured it
 ;;;;   separately.
 ;;;;
 ;;;; THE MANIFEST IS READ AS `<channel>.json', which is what `hyperion/update' asks an HTTP
-;;;; source for. The generator wrote `latest.json' until #77 and the harness renamed it by
+;;;; source for. The generator wrote `latest.json' until pre-publication issue 77 and the harness renamed it by
 ;;;; hand; both the rename and the disagreement are gone.
 
 (require :asdf)
@@ -63,7 +63,7 @@
 
 ;;; --- the source ------------------------------------------------------------
 ;;;
-;;; `hyperion/update:directory-source' -- promoted into the framework under #77, because
+;;; `hyperion/update:directory-source' -- promoted into the framework under pre-publication issue 77, because
 ;;; the release gate needs exactly the same thing and two copies of a source is two chances
 ;;; to disagree with the client about where a file lives. It is a documented backend of the
 ;;; `fetch-manifest'/`fetch-artifact' protocol (design section 5), the same standing as
@@ -82,7 +82,7 @@
         up:*app-name* app
         ;; NOT set: `*install-directory*'. Leaving it NIL is the point -- the client must
         ;; find the install through HKCU\Software\<APPNAME>\InstallDir, the value the
-        ;; installer itself wrote. That contract is what #206 was about, and a harness that
+        ;; installer itself wrote. That contract is what pre-publication issue 206 was about, and a harness that
         ;; handed the answer in would be testing the harness.
         up:*install-directory* nil
         up:*before-apply* nil

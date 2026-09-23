@@ -49,7 +49,7 @@
            #:render-millis #:render-seconds
            #:render-every-millis #:render-every-seconds))
 
-;;; --- Typed interceptor pipeline: MOVED to `aion/interceptor` (#177) ------
+;;; --- Typed interceptor pipeline: MOVED to `aion/interceptor` (pre-publication issue 177) ------
 ;;; Pedestal's idea (middleware as data in the request->response cycle) made a
 ;;; compile-time-checked value, parametric over the context type. It lives in aion now
 ;;; because the shape is request-response rather than web: hyperion uses it inbound,
@@ -93,17 +93,17 @@
   (:use #:cl)
   (:documentation
    "The web-server backend behind a neutral protocol. Hyperion declares NO backend
-    (#139): the application depends on the one it wants, and DEFAULT-SERVER picks from
+    (pre-publication issue 139): the application depends on the one it wants, and DEFAULT-SERVER picks from
     what the image actually loaded -- by PACKAGE presence, which is what lets the native
-    server (hyperion/server-uv, #117) be offered without core depending on libuv.
+    server (hyperion/server-uv, pre-publication issue 117) be offered without core depending on libuv.
     HYPERION_SERVER overrides. START takes an already-built Ring app so app construction
     stays with the caller, and STOP takes whichever handler START returned.")
   (:export #:default-server #:available-servers #:no-server-backend
            #:native-backend-p
            #:*default-port* #:start #:stop
-           ;; the blocking, production entry point (#124) + its interrupt seam
+           ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
            #:serve-forever #:request-shutdown #:request-shutdown-from-signal
-           ;; #238: the preflight, and the condition a caller may handle.
+           ;; pre-publication issue 238: the preflight, and the condition a caller may handle.
            #:port-answering-p #:port-in-use #:port-in-use-host #:port-in-use-port
            #:server-session #:server-session-p #:server-session-handler
            #:*shutdown-poll-interval*
@@ -122,12 +122,12 @@
     encode/decode JSON. Domain-neutral -- the caller supplies its own keys.")
   (:export #:body-string #:form-alist #:form-param #:form-params
            ;; a body is a stream and is read once; a middleware that must look
-           ;; inside it caches the result here rather than spending it (#280)
+           ;; inside it caches the result here rather than spending it (pre-publication issue 280)
            #:+body-string-key+ #:cache-body-string
-           ;; and the same one level up, for a multipart body (#280)
+           ;; and the same one level up, for a multipart body (pre-publication issue 280)
            #:+multipart-parts-key+ #:cache-multipart-parts
            #:query-param #:query-params #:request-header #:cookie
-           ;; multipart/form-data (#143): ceilings on by default, content streamed
+           ;; multipart/form-data (pre-publication issue 143): ceilings on by default, content streamed
            #:multipart-p #:parse-multipart #:delete-parts #:sanitize-filename
            #:part #:part-p #:part-name #:part-filename #:part-safe-filename
            #:part-content-type #:part-headers #:part-bytes #:part-path #:part-size
@@ -171,7 +171,7 @@
 (cl:defpackage #:hyperion/session
   (:use #:cl)
   (:local-nicknames (#:bt #:bordeaux-threads)
-                    (#:rnd #:aion/random)          ; session ids are a bearer credential (#95)
+                    (#:rnd #:aion/random)          ; session ids are a bearer credential (pre-publication issue 95)
                     (#:http #:hyperion/http))
   (:documentation
    "Cookie-based HTTP sessions: a session is an id + a thread-safe key/value bag
@@ -190,10 +190,10 @@
            #:store-ref #:store-add #:store-del #:store-count #:store-list
            #:memory-store #:make-memory-store
            #:ensure-session #:rotate-session #:new-id #:set-cookie-header
-           ;; the privilege change, rotation included by construction (#282)
+           ;; the privilege change, rotation included by construction (#120)
            #:sign-in! #:*privilege-scoped-keys*
            #:*cookie-name* #:*cookie-max-age* #:*id-bits*
-           ;; the middleware that owns the cookie, so a handler cannot drop it (#207)
+           ;; the middleware that owns the cookie, so a handler cannot drop it (pre-publication issue 207)
            #:wrap-session #:request-session #:+session-key+
            #:session-cookie-not-attachable #:session-cookie-not-attachable-response
            ;; dev/REPL session management
@@ -243,7 +243,7 @@
 (cl:defpackage #:hyperion/logging
   (:use #:cl)
   (:local-nicknames (#:log #:aion/log)
-                    (#:rnd #:aion/random)          ; not a credential; see NEW-REQUEST-ID (#95)
+                    (#:rnd #:aion/random)          ; not a credential; see NEW-REQUEST-ID (pre-publication issue 95)
                     (#:bt  #:bordeaux-threads))
   (:documentation
    "Request logging: WRAP is Clack middleware that assigns (or adopts, from an upstream
@@ -268,14 +268,14 @@
     advances. The fan-out substrate for live updates -- e.g. many browsers on one
     praxeon conversation each receiving every bubble.
 
-    THE WINDOW IS BOUNDED and chosen at construction (#231): MAKE-CHANNEL retains
+    THE WINDOW IS BOUNDED and chosen at construction (pre-publication issue 231): MAKE-CHANNEL retains
     *DEFAULT-CAPACITY* items unless told otherwise, and `:capacity nil' asks for the
     unbounded log deliberately rather than by default. A reader whose index has been
     evicted gets CURSOR-BEHIND-WINDOW and a RESYNC restart -- never a silent gap, which
     in an every-message-in-order primitive would be the worst possible failure.")
   (:export #:channel #:channel-p #:make-channel #:publish #:channel-length #:since
            #:cursor #:cursor-p #:subscribe #:poll #:cursor-at #:reset-cursor
-           ;; the window, and what happens when a reader falls out of it (#231)
+           ;; the window, and what happens when a reader falls out of it (pre-publication issue 231)
            #:*default-capacity* #:channel-earliest #:channel-window #:channel-retained
            #:cursor-behind-window #:cursor-behind-window-requested
            #:cursor-behind-window-earliest #:cursor-behind-window-channel
@@ -302,7 +302,7 @@
            #:subscription-hz #:rate-required
            #:*clock-ms*))
 
-;;; --- Server-Sent Events, over a feed (ADR-0016, #117 M2) -----------------
+;;; --- Server-Sent Events, over a feed (ADR-0016, pre-publication issue 117 M2) -----------------
 
 (cl:defpackage #:hyperion/sse
   (:use #:cl)
@@ -458,11 +458,11 @@
     turnkey entry any hyperion app uses -- it wraps the app for browser
     auto-refresh (WRAP-DEV) and always watches hyperion's own src/ too.")
   (:export #:*reload-epoch* #:mark-reloaded
-           ;; what the watcher watches (#134): a denylist, pruning directories
+           ;; what the watcher watches (pre-publication issue 134): a denylist, pruning directories
            #:*watch-excluded-directories* #:*watch-excluded-types*
            #:watch #:unwatch #:reload! #:dev-error
            #:serve #:wrap-dev
-           ;; #235: the guard is only useful if a caller can name what it signals.
+           ;; pre-publication issue 235: the guard is only useful if a caller can name what it signals.
            #:invalid-builder #:invalid-builder-got #:invalid-builder-arity))
 
 (cl:defpackage #:hyperion

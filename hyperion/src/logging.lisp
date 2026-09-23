@@ -37,7 +37,7 @@ surface it (an error page, a support reference). NIL outside a request.")
 
 
 ;; Declared inheritable alongside aion/log:*context*, which is bound on the very next line
-;; of the middleware below (#430). Both are lost across a thread boundary and both were lost
+;; of the middleware below (#158). Both are lost across a thread boundary and both were lost
 ;; by praxeon/web's turn thread; registering only the context would have carried half the
 ;; correlation and left a reader wondering why one field crossed and the other did not.
 (aion/dynamic:register-inheritable 'hyperion/logging:*request-id*)
@@ -48,7 +48,7 @@ A request id is NOT a credential -- it correlates log lines and is echoed in a h
 predicting one grants nothing. It is on the CSPRNG anyway, and the reason is worth stating
 because it is not \"defence in depth\": this file previously held a `%id-state' /
 `cl:random' pair character-for-character identical to the one that made session ids
-guessable (#95). Leaving the weak template in the same framework, next to the fixed
+guessable (pre-publication issue 95). Leaving the weak template in the same framework, next to the fixed
 version, is how it gets copied back the next time somebody needs a random hex string."
   (rnd:random-hex *id-bits*))
 

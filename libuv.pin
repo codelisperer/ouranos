@@ -20,7 +20,7 @@
 #   2. One version everywhere. Distro libuv is 1.51.0 on Ubuntu 26.04 and
 #      whatever brew/MSYS2 happens to carry elsewhere; three platforms on three
 #      versions is a matrix we would be debugging rather than using.
-#   3. It is the same artifact CI publishes and the installers bundle (#94).
+#   3. It is the same artifact CI publishes and the installers bundle (#78).
 #
 # 1.52.1 is the current stable release, and is also what MSYS2/ucrt64 ships on
 # Windows -- so the Windows machine can cross-check our build against a prebuilt

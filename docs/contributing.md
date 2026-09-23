@@ -58,9 +58,9 @@ the integration hub — one repo per worktree branch, no cross-branch edits.
 ### Testing against Postgres
 
 mnemosyne's claim is a **neutral** protocol over interchangeable backends, and a neutral
-protocol verified against one backend is an unverified claim. Until #176 every check it
+protocol verified against one backend is an unverified claim. Until pre-publication issue 176 every check it
 reported ran on SQLite alone — the one backend the docs do *not* tell you to deploy on.
-#165 is what that cost: 2645 checks green on SQLite at the same commit that silently stored
+pre-publication issue 165 is what that cost: 2645 checks green on SQLite at the same commit that silently stored
 the four characters `false` in a Postgres text column.
 
 The contract is one environment variable:
@@ -114,11 +114,11 @@ see*:
   no framework system pulls a Clack handler walked `asdf:system-depends-on` handling strings
   and symbols. The offending declaration was
   `(:feature (:not :os-windows) "clack-handler-woo")` — a *list*, silently skipped. The one
-  dependency form the guard existed to catch was the one form it could not parse (#218).
+  dependency form the guard existed to catch was the one form it could not parse (pre-publication issue 218).
 
 - **A staleness test that could not observe a stale function.** `hyperion/dev` coerces a
   named function object back to its symbol, because `#'build-app` captures the object at
-  that instant and never sees a later recompile (#157). The control captured
+  that instant and never sees a later recompile (pre-publication issue 157). The control captured
   `#'bt/build-app`, redefined it, and asserted the captured one stayed old. It didn't —
   **SBCL late-binds a `#'foo` written in the same compiled file as `foo`'s `defun`**, so the
   "captured" object tracked the redefinition and the control tested nothing.

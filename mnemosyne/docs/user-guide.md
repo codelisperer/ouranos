@@ -191,7 +191,7 @@ SELECT); provisional, see [`xtdb-notes.md`](xtdb-notes.md). The builder **enforc
 XTDB DML differences: it signals on `:on-conflict` (XTDB `INSERT` already upserts on `_id`)
 and on `:returning` (XTDB DML has none — read the value back with a separate query).
 
-**One vocabulary, three spellings** ([ADR-0003](adr/0003-one-dialect-vocabulary.md), #432).
+**One vocabulary, three spellings** ([ADR-0003](adr/0003-one-dialect-vocabulary.md), pre-publication issue 432).
 A dialect is a *designator*: the keyword `:postgres`, the string `"postgres"` and a typed
 `mnemosyne/field:Dialect` all name the same thing, and every entry point that branches on a
 dialect — `query:sql`, `ddl:ddl`, `schema:schema-ddl`, `introspect:schema-diff` — normalises
@@ -224,7 +224,7 @@ SQL needs "no value", "true" and "false" to be three different things. Common Li
 all three at once, and the drivers did not agree on how to resolve that: SQLite stored SQL
 NULL, while Postgres rendered `NIL` as the literal **`false`**. On a numeric column that was
 a hard error; on a **text** column it silently stored the four characters `false`, committed,
-and every later `WHERE ... IS NULL` quietly stopped matching (#165).
+and every later `WHERE ... IS NULL` quietly stopped matching (pre-publication issue 165).
 
 So mnemosyne decides what a bound value means, rather than leaving it to whichever engine is
 underneath. **Three values, and they are all spellable:**
@@ -387,7 +387,7 @@ Field types: `:string` `:text` `:integer` `:float` `:boolean` `:uuid` `:timestam
 `:binary` (`:blob` is the same type) `:vector`.
 Options: `:primary`, `:required`, `:default`, and `:dimensions` on a vector.
 
-**Option values are evaluated** (#258), so a width can come from configuration —
+**Option values are evaluated** (pre-publication issue 258), so a width can come from configuration —
 `:dimensions +embedding-width+`. They used to be quoted whole: if you are upgrading and a
 declaration passed a bare symbol or a list you meant as data, quote it
 (`:default (quote (:a :b))`). Self-evaluating values — keywords, strings, numbers, `t` — are
@@ -557,7 +557,7 @@ skip. On a development machine without pgvector, the tests **skip with a named r
 rather than passing.
 
 The praxeon-side seam — semantic search as something an agent calls — is
-[#258](https://github.com/codelisperer/ouranos/issues/258)'s remaining half and is deferred
+pre-publication issue 258's remaining half and is deferred
 under the app-first rule in [`ECOSYSTEM.md`](../../ECOSYSTEM.md): built in a consuming app
 first, promoted once a caller has proved its shape.
 #### Binary columns, and how big is too big

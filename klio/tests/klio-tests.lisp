@@ -24,7 +24,7 @@
     (is (stringp v))
     (is (plusp (length v)))))
 
-;;; --- request-time scheduling (#359 Part 2, item 1) --------------------------
+;;; --- request-time scheduling (pre-publication issue 359 Part 2, item 1) --------------------------
 ;;; The clock is an argument, so the scheduled case is testable without waiting.
 
 (defparameter +noon+ (encode-universal-time 0 0 12 17 9 2026 0))
@@ -69,7 +69,7 @@
   (signals k:unterminated-front-matter
     (k:split-front-matter (format nil "---~%title: A post~%# Hello~%"))))
 
-;;; --- front-matter: the typed core and `extra' (#359 Q1, answer B) -----------
+;;; --- front-matter: the typed core and `extra' (pre-publication issue 359 Q1, answer B) -----------
 
 (defun %meta (yaml &rest args)
   (apply #'k:parse-front-matter yaml args))
@@ -190,7 +190,7 @@ the front-matter and report something else, or nothing."
   (signals k:unsupported-front-matter
     (%meta (format nil "skills: [\"a\", \"b\",~%title: \"x\"~%"))))
 
-;;; --- the search index (#359 Part 2, item 6) ---------------------------------
+;;; --- the search index (pre-publication issue 359 Part 2, item 6) ---------------------------------
 
 (defun %index-of (&rest docs)
   "DOCS are (key :title t :tags ts :body b) lists."
@@ -243,7 +243,7 @@ an answer to the question that was asked."
     (is (equal '("post-1") (k:search-index-query ix "coalton")))
     (is (equal '("post-1") (k:search-index-query ix "COALTON")))))
 
-;;; --- markdown (#359 Part 2, item 4) -----------------------------------------
+;;; --- markdown (pre-publication issue 359 Part 2, item 4) -----------------------------------------
 
 (test markdown-becomes-html
   (is (search "<em>" (k:render-markdown "*emphasis*"))))
@@ -260,7 +260,7 @@ routing around it. A second path into 3bmd would be a second escaping policy."
 legitimately contain markup."
   (is (search "<b>" (k:render-markdown "<b>bold</b>" :allow-html t))))
 
-;;; --- dev mode (#359 Part 2, item 3) -----------------------------------------
+;;; --- dev mode (pre-publication issue 359 Part 2, item 3) -----------------------------------------
 
 (test production-is-the-default
   "A forgotten flag should fail closed. The opposite default makes an oversight a disclosure."
@@ -338,7 +338,7 @@ rather than a 500 on one page later"))))
   "A second, textually different name that resolves to DIR, or NIL if this platform has none.
 
 Windows keeps an 8.3 alias for a long name -- `runneradmin' is also `RUNNER~1' -- and that is
-the real #446: CI runners set TEMP to the aliased spelling. POSIX has no such thing, so a
+the real pre-publication issue 446: CI runners set TEMP to the aliased spelling. POSIX has no such thing, so a
 symlink stands in for the nearest equivalent property: two spellings, one directory.
 
 NIL RATHER THAN THE NAME WE WERE GIVEN. 8.3 generation is switched off on many volumes, and
@@ -364,7 +364,7 @@ tree has a rule about. The caller skips on NIL and says so."
         (uiop:ensure-directory-pathname link)))))
 
 (test a-document-is-found-though-its-tree-was-opened-by-another-name
-  "#446. A key is one namestring SUBTRACTED from another, so it holds only while the caller
+  "pre-publication issue 446. A key is one namestring SUBTRACTED from another, so it holds only while the caller
 and the walk spell the directory the same way. They need not: the walk resolves an 8.3 alias
 or a symlink and hands back the resolved name, and then nothing is subtracted and every
 document is keyed by its whole absolute path.
@@ -395,7 +395,7 @@ skip line instead of reporting a green it has not earned."
          (skip "this platform gave the directory no second name: 8.3 aliases may be off on this volume, or `ln -s' is unavailable"))
         ((not disagrees)
          #-win32 (ignore-errors (delete-file alias))
-         (skip "the walk preserved the spelling it was given, so subtraction cannot fail here -- this is the Windows 8.3 case (#446) and only that leg exercises it"))
+         (skip "the walk preserved the spelling it was given, so subtraction cannot fail here -- this is the Windows 8.3 case (pre-publication issue 446) and only that leg exercises it"))
         (t
          (unwind-protect
               (progn
@@ -597,7 +597,7 @@ index its prose without indexing its contact details"))))
 ;;; --- the tree as an application ---------------------------------------------
 ;;;
 ;;; The handler is tested as what it is -- a function from env to response -- rather than
-;;; over a socket. klio declares no HTTP backend (#139, ADR-0011): the SITE picks one, and a
+;;; over a socket. klio declares no HTTP backend (pre-publication issue 139, ADR-0011): the SITE picks one, and a
 ;;; suite that pulled one in to make a request would be choosing for every consumer and
 ;;; putting klio's checks behind a native dependency the gate treats as an opt-in axis. The
 ;;; end-to-end run over a real server, against the real content, is in the PR.
@@ -708,7 +708,7 @@ replace them it would be running a look nobody chose, shipped inside the library
         (is (= 404 status) "a site's own 404 body is still a 404 status")
         (is (string= "<p>no missing here</p>" body))))))
 
-;;; --- a small CL highlighter, at content-load time (#359 Q3) -----------------
+;;; --- a small CL highlighter, at content-load time (pre-publication issue 359 Q3) -----------------
 ;;;
 ;;; Ruled: a small CL highlighter, Lisp only, applied at load; other languages plain. The
 ;;; argument was that a site whose claim is "CL all the way down" should not ship JavaScript

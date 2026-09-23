@@ -150,7 +150,7 @@ user's original."
 (defun respond (agent user-input &optional (locale :en))
   "One Elise turn in the user's LOCALE, with the safety guardrail around deliberation.
 
-Composed as an interceptor chain over a PRAXEON/TURN context (#130) rather than as a
+Composed as an interceptor chain over a PRAXEON/TURN context (pre-publication issue 130) rather than as a
 `let*`. The previous version said in this docstring that it *was* a pipeline -- translate
 in, run the turn, guardrail on the way out -- while being a sequence of bindings that
 could not be reordered, inspected or short-circuited. Now it is the thing it claimed.
@@ -300,7 +300,7 @@ which returns immediately.
 This used to hand-roll the blocking part: a banner, `(loop (sleep 3600))', and a handler for
 `interactive-interrupt'. That answers Ctrl-C and nothing else -- no shutdown hooks, no
 restored signal handlers, and a supervisor's SIGTERM could only be answered by killing the
-process (#151). `praxeon/web:serve-forever' owns all of it now, and the banner comes from
+process (pre-publication issue 151). `praxeon/web:serve-forever' owns all of it now, and the banner comes from
 :name rather than from a FORMAT here that could disagree with the port actually bound."
   (apply #'web:serve-forever (append (%web-arguments :agent agent)
                                      (list :port port :host host))))

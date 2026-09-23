@@ -31,7 +31,7 @@ predicate that signals cannot be asked."
 (test a-class-in-this-view-is-present-and-names-its-file
   "Scripting.Dictionary ships with Windows in both bitnesses, so it is PRESENT whichever
 process asks. THE PATH IS THE ASSERTION: reporting it on the SUCCESS path is the half nobody
-requests, and #308 is what happens without it -- mnemosyne reported a green SQLite backend
+requests, and #129 is what happens without it -- mnemosyne reported a green SQLite backend
 for months on a DLL an unrelated install supplied, with every layer honest except which file
 answered."
   (multiple-value-bind (ok why path) (com:class-available-p "Scripting.Dictionary")

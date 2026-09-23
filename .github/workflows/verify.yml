@@ -1,4 +1,4 @@
-# verify.yml --- build and test the whole tree on Linux, macOS and Windows (#87).
+# verify.yml --- build and test the whole tree on Linux, macOS and Windows (pre-publication issue 87).
 #
 # THE CLAIM THIS FILE IS EVIDENCE FOR. "SBCL-exclusive and `sbcl --script` is uniform
 # across Linux/macOS/Windows" is load-bearing in ECOSYSTEM.md and in the README. A green
@@ -9,7 +9,7 @@
 # It is also the only path to one specific piece of evidence: a NATIVE amd64 run. A local
 # `docker build --platform linux/amd64` on Apple Silicon proves nothing -- QEMU
 # mis-emulates SBCL's compile-time 64-bit overflow folding and produces spurious failures
-# in Coalton's library/math/bounded (#110). So a red one is not evidence of a real
+# in Coalton's library/math/bounded (pre-publication issue 110). So a red one is not evidence of a real
 # incompatibility and a green one is not evidence of compatibility. Until this workflow
 # runs, no coalton.pin can honestly be called validated on amd64.
 #
@@ -99,7 +99,7 @@ jobs:
       # The FASLS are not, and they get NO restore-keys. A first build after a dependency
       # moves can fail where a rebuild succeeds -- observed as `The class
       # <DBD-POSTGRES-QUERY> is being redefined to be a DEFTYPE`, which did not reproduce
-      # in isolation and passed 6/6 on an identical re-run (#87). Mixing fasls compiled
+      # in isolation and passed 6/6 on an identical re-run (pre-publication issue 87). Mixing fasls compiled
       # against one dependency set with sources from another is how CI goes intermittently
       # red for reasons that look like nothing. So the fasl key names every .asd in the
       # tree plus both pins: change any of them and you get a COLD build, which is also
@@ -185,11 +185,11 @@ jobs:
       # From the committed libuv.pin, with the platform's own first-party toolchain and no
       # cmake. Doing it on all three legs is simultaneously the +N checks below and the
       # only cross-platform proof that the pinned libuv builds at all -- which is what the
-      # bundling story in #94/ADR-0013 rests on.
+      # bundling story in #78/ADR-0013 rests on.
       - name: Build the pinned libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
-      # --- the native webview launcher (#276) ---------------------------------------
+      # --- the native webview launcher (pre-publication issue 276) ---------------------------------------
       #
       # WHY AT ALL. hyperion-view is the launcher every desktop app shells out to, and
       # HYPERION/VIEW/TESTS could not run without the binary: `7 checks (5 skipped)' on
@@ -199,7 +199,7 @@ jobs:
       # desktop-release.yml builds the launcher and does not run the gate. No ordering of
       # existing events reached them, tag or no tag.
       #
-      # WHAT CHANGED, AND WHY THIS STEP STAYS (#410). verify-tree.lisp NOW BUILDS THE
+      # WHAT CHANGED, AND WHY THIS STEP STAYS (pre-publication issue 410). verify-tree.lisp NOW BUILDS THE
       # LAUNCHER ITSELF, because moving the build here made a local cold gate ten checks
       # short of CI on the same commit -- two honest totals, one PASS each, and nothing in
       # either output saying why. So the sentence above is history rather than current fact,
@@ -209,7 +209,7 @@ jobs:
       #   IT INSTALLS WHAT THE GATE CANNOT. The gate compiles; it does not apt-get. On a bare
       #   runner its `build.sh --check' fails without libwebkit2gtk-dev, and it would then
       #   DECLINE the view axis and still PASS -- disclosed, but ten checks lighter, which is
-      #   exactly the state #410 exists to end.
+      #   exactly the state pre-publication issue 410 exists to end.
       #   IT FAILS THE JOB LOUDLY. A broken launcher build here stops CI. The gate's own
       #   build is best-effort by design (a host without a C++ toolchain must not fail a
       #   Lisp gate), so CI needs one place that treats the build as mandatory. The gate then
@@ -221,7 +221,7 @@ jobs:
       #
       # NOT PATH-FILTERED. Filtering on `hyperion-view/**' would make this nearly free and
       # would reinstate "these assertions did not run" as the default state -- the exact
-      # condition #276 exists to end. It is also wrong on its own terms:
+      # condition pre-publication issue 276 exists to end. It is also wrong on its own terms:
       # THE-LAUNCHER-IS-WHERE-DESKTOP-LOOKS-FOR-IT depends on Lisp-side desktop.lisp, so the
       # filter would have to track a growing set of paths to stay honest, and a filter that
       # silently stops covering things is worse than none.
@@ -231,7 +231,7 @@ jobs:
       # roughly $2.60/month at Linux rates over ~75 runs a week. The step TIMES ITSELF and
       # prints both numbers as job notices so the estimate gets replaced by a measurement on
       # the first run. An estimate repeated often enough becomes a fact nobody took, which
-      # is how docs/dependencies.md came to claim 25 systems against an actual 86 (#278).
+      # is how docs/dependencies.md came to claim 25 systems against an actual 86 (#118).
       #
       # The 4.0 fallback matches desktop-release.yml: runner images have moved between
       # webkit2gtk 4.1 and 4.0, and build.sh probes for the same pair.
@@ -243,16 +243,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
             || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
-          echo "::notice::#276 apt prerequisites: $(( $(date +%s) - start ))s"
+          echo "::notice::pre-publication issue 276 apt prerequisites: $(( $(date +%s) - start ))s"
           t0=$(date +%s)
           ./hyperion/hyperion-view/build.sh
-          echo "::notice::#276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
+          echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
 
       # --- a real Postgres ----------------------------------------------------------
       #
       # NO LEG SETS OURANOS_ALLOW_NO_PG. Every check mnemosyne had ever reported green ran
-      # against SQLite alone, and #165 is what that cost: 2645 green checks at the commit
-      # that silently stored the four characters "false" in a Postgres text column (#176).
+      # against SQLite alone, and pre-publication issue 165 is what that cost: 2645 green checks at the commit
+      # that silently stored the four characters "false" in a Postgres text column (pre-publication issue 176).
       # A matrix that excuses Postgres on the awkward platforms re-acquires exactly that
       # blind spot, one leg at a time, and it would be invisible -- the suite stays green.
       #
@@ -287,7 +287,7 @@ jobs:
           export PATH="$(brew --prefix postgresql@17)/bin:$PATH"
           echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
           # pgvector BEFORE the server starts, so the extension files are in place when it
-          # reads its share directory (#371). Without it, mnemosyne's vector operator and
+          # reads its share directory (pre-publication issue 371). Without it, mnemosyne's vector operator and
           # index tests skip with "no pgvector on this host" and macOS covers neither.
           brew install pgvector >/dev/null
           brew services start postgresql@17
@@ -398,8 +398,8 @@ jobs:
       # ONE command, and deliberately not a hand-rolled asdf:test-system loop. A system
       # with no `:perform (test-op ...)` loads its files, runs NOTHING and exits 0 -- aion
       # was reported green through an entire Coalton upgrade having executed zero checks
-      # (#116). verify-tree parses FiveAM's per-suite check count and fails on zero, fails
-      # on a suite that never ran, fails on a deferred compile WARNING, and (since #176)
+      # (pre-publication issue 116). verify-tree parses FiveAM's per-suite check count and fails on zero, fails
+      # on a suite that never ran, fails on a deferred compile WARNING, and (since pre-publication issue 176)
       # fails when a suite reports per-backend coverage that never reached Postgres.
       #
       # OURANOS_WITH_UV folds in aion/uv, aion/uv/net and aion/uv/process now that libuv is
@@ -447,7 +447,7 @@ jobs:
   # WHAT IT PROTECTS. A §7 representation violation -- a `lisp` block trafficking in a type
   # Coalton has not promised -- is INVISIBLE in development mode, where types are CLOS
   # objects, and breaks globally the moment types become frozen structs. The tree passes in
-  # release mode today (#98); nothing but this job keeps that true, and the failure it
+  # release mode today (pre-publication issue 98); nothing but this job keeps that true, and the failure it
   # catches is one a developer cannot see locally unless they think to look.
   #
   # Linux only, as a full cold Coalton build in its own cache. It runs on pull requests as
@@ -498,7 +498,7 @@ jobs:
       - name: Build the pinned libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
-      # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (#276). Without it
+      # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (pre-publication issue 276). Without it
       # this job would run verify-tree over a tree missing five checks that the matrix leg
       # has -- 4436 against 4446 at one commit, with nothing in either output saying why.
       # That is precisely the false EQUIVALENCE the comment below records, one prerequisite
@@ -506,7 +506,7 @@ jobs:
       # This job exists to be comparable, so it builds what the leg it is compared against
       # builds.
       #
-      # verify-tree.lisp builds the launcher itself since #410, so what this step adds is the
+      # verify-tree.lisp builds the launcher itself since pre-publication issue 410, so what this step adds is the
       # apt prerequisites the gate cannot install and a LOUD failure if the compile breaks --
       # the gate's own build is deliberately best-effort. Same argument as the matrix leg's
       # copy of this step; see the long comment there.
@@ -517,10 +517,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
             || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
-          echo "::notice::#276 apt prerequisites: $(( $(date +%s) - start ))s"
+          echo "::notice::pre-publication issue 276 apt prerequisites: $(( $(date +%s) - start ))s"
           t0=$(date +%s)
           ./hyperion/hyperion-view/build.sh
-          echo "::notice::#276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
+          echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
 
       - name: Postgres -- the repo's own script
         run: |
@@ -532,7 +532,7 @@ jobs:
       # so "the tree passes in release mode" and "the tree passes" were not statements about
       # the same tree, and the entire point of the job is that they should be. A gate that
       # reports success for less than you think it checked is the family this repo keeps
-      # re-finding (#116, praxeon/web, #176); this one was a false EQUIVALENCE rather than a
+      # re-finding (pre-publication issue 116, praxeon/web, pre-publication issue 176); this one was a false EQUIVALENCE rather than a
       # false green, which is harder to see because both halves were individually honest.
       - name: Verify the tree in RELEASE mode
         env:

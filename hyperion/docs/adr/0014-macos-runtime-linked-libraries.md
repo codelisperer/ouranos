@@ -171,7 +171,7 @@ sbcl.core}`, and the wrapper-script problem ADR-0013 rejected does not come back
 
 ## The open decision (2026-08-06) — tried, proven, and what is left
 
-*The signing question is [#140](https://github.com/codelisperer/ouranos/issues/140). This
+*The signing question is [#98](https://github.com/codelisperer/ouranos/issues/98). This
 section exists so the choice can be made from evidence rather than re-derived. Everything
 below was run on macOS 26 / SBCL 2.6.5 (Homebrew) / Apple silicon.*
 
@@ -282,7 +282,7 @@ building SBCL ourselves eliminates it.
 ### The gate is resolved: Windows fails differently and lands in the same place
 
 *Measured 2026-08-06 by Ouranos Claude (Windows) on windows-x86-64, SBCL 2.6.6. Full
-evidence in [#140](https://github.com/codelisperer/ouranos/issues/140).*
+evidence in [#98](https://github.com/codelisperer/ouranos/issues/98).*
 
 The recommendation below was gated on one question: does Windows `signtool` accept a dumped
 SBCL `.exe`? **It does — and the signed binary then cannot start.**
@@ -307,10 +307,10 @@ Two further Windows results worth recording:
 - **There is no Windows analogue of the libzstd problem.** Every DLL the dumped image and
   the runtime name is a Windows system DLL (`msvcrt.dll` is the OS legacy CRT, not a
   redistributable). `:sb-core-compression` is NIL on that SBCL and libuv is built `/MT`
-  (#107). ADR-0014's carry-and-repoint has nothing to carry there beyond `libuv.dll`, which
+  (#84). ADR-0014's carry-and-repoint has nothing to carry there beyond `libuv.dll`, which
   the bundler already copies. The mechanism stays macOS-only.
 - **windows-arm64 is still untested** and would have produced a false pass under emulation —
-  filed as [#145](https://github.com/codelisperer/ouranos/issues/145).
+  filed as pre-publication issue 145.
 
 ### A new cost of option B: the core is not signed
 
@@ -378,7 +378,7 @@ The maintainer owns the decision; the measurements are no longer the obstacle.
 
 ## Provenance
 
-**This was found by looking, not by reasoning.** The macOS half of #94 was expected to be
+**This was found by looking, not by reasoning.** The macOS half of #78 was expected to be
 mechanical — ADR-0013 had settled the mechanism and the library-carrying code was already
 platform-neutral, so the first bundle built here carried `libuv.1.dylib` correctly on the
 first attempt. The `otool -L` that turned up `libzstd` was run to confirm there was nothing

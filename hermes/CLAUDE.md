@@ -17,7 +17,7 @@ or praxeon, and nothing in the DAG depends on it.
 - **Payments** is a separate module under the same doctrine — shipped, not planned.
   ADR-0001 (neutral protocol, own system) and ADR-0002 (Stripe hosted Checkout only; the
   PCI posture that follows) are accepted. There is no card-number operation, by design.
-- **Ads** (#262) is the next channel: a consuming app builds it and it is promoted. Build
+- **Ads** (#114) is the next channel: a consuming app builds it and it is promoted. Build
   against the neutral vocabulary in that ticket, not against Meta's nouns.
 - `hermes/blob` follows mnemosyne's rule: no `cl+ssl` dependency of its own.
 

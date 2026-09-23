@@ -2,7 +2,7 @@
 
 *How Ouranos names a version of itself, and how a consuming app pins a coherent set of
 everything underneath it. 2026-07-29 — a proposal, not yet decided; it depends on Ouranos
-having a version number, which [#91](https://github.com/codelisperer/ouranos/issues/91) has
+having a version number, which pre-publication issue 91 has
 not yet settled.*
 
 ---
@@ -65,7 +65,7 @@ Three reasons this beats per-app combination files:
    Ouranos CI; in an app it is an assertion nobody verifies — which is exactly what
    `versions.env` is today.
 2. **An app's lock stays one line.** Adding a fourth pinned thing later — libuv
-   ([#107](https://github.com/codelisperer/ouranos/issues/107)), a database engine — touches
+   ([#84](https://github.com/codelisperer/ouranos/issues/84)), a database engine — touches
    zero apps.
 3. It is the **Stack-resolver** model, which is the one that works in a language without
    reliable version metadata: a human curates, CI proves, consumers name.
@@ -83,7 +83,7 @@ which `versions.env` currently is not.
 
 **Ouranos must version itself.** No version, no tags today; there is nothing to pin. This is
 a hard prerequisite and it belongs to
-[#91](https://github.com/codelisperer/ouranos/issues/91) (release scope) — `0.1.0`.
+pre-publication issue 91 (release scope) — `0.1.0`.
 
 **Co-versioned, not independent.** The thesis already answers this: *"few, cohesive,
 **co-versioned**, house-owned."* One Ouranos version; the frameworks inherit it. The stray
@@ -182,7 +182,7 @@ only field that says anybody asked whether those were still the bytes to want.
 
 ## Sequencing
 
-1. **Settle the Ouranos version** — [#91](https://github.com/codelisperer/ouranos/issues/91).
+1. **Settle the Ouranos version** — pre-publication issue 91.
    Nothing here can start before it.
 2. Publish the manifest from Ouranos; fold `coalton.pin` and `versions.env` into it, so no
    number lives in two files.
@@ -191,4 +191,4 @@ only field that says anybody asked whether those were still the bytes to want.
 4. `cons` reads the manifest and scaffolds an app lock — the `cons setup` job already
    implied by the ASDF `(:tree)` drop-in generalization.
 5. Evaluate ocicl and qlot **before** any native resolver work
-   ([#20](https://github.com/codelisperer/ouranos/issues/20)).
+   ([#32](https://github.com/codelisperer/ouranos/issues/32)).

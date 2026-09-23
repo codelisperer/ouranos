@@ -1,11 +1,11 @@
-# docker-compose.test.yml --- a Postgres the verification gate can actually reach (#176).
+# docker-compose.test.yml --- a Postgres the verification gate can actually reach (pre-publication issue 176).
 #
 #   scripts/test-postgres.sh up      start it, wait until it answers
 #   scripts/test-postgres.sh down    stop and remove it
 #
 # Why this exists: mnemosyne's claim is a NEUTRAL protocol over interchangeable backends,
 # and every check it has ever reported green ran against SQLite alone -- the one backend
-# the docs do NOT tell you to deploy on. #165 is what that cost: 2645 checks green on
+# the docs do NOT tell you to deploy on. pre-publication issue 165 is what that cost: 2645 checks green on
 # SQLite at the same commit that silently corrupted a text column on Postgres.
 #
 # This is OPTIONAL infrastructure, not a new dependency of the tree. The suite's contract
@@ -15,8 +15,8 @@
 # Port 55432, not 5432: a developer machine that already runs Postgres must not have its
 # real server shadowed -- or, worse, have this suite silently run against it and CREATE
 # TABLE in something that matters.
-# THE IMAGE CARRIES pgvector, and that is why it is not the plain postgres image (#258).
-# mnemosyne declares a `:vector` column type (#212), and `CREATE EXTENSION vector` on
+# THE IMAGE CARRIES pgvector, and that is why it is not the plain postgres image (pre-publication issue 258).
+# mnemosyne declares a `:vector` column type (pre-publication issue 212), and `CREATE EXTENSION vector` on
 # postgres:17-alpine fails with "extension is not available" -- so every claim about vector
 # storage, distance operators or index kinds would be untestable here. A suite that cannot
 # run a feature is a suite where the feature is never tested, which is the argument ADR-0001

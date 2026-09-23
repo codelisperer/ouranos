@@ -30,7 +30,7 @@ BOUND WITH LET, SO IT IS PER-THREAD, and the failure is quiet in the same way th
 one is: work fanned out to another thread reads the global NIL, reports nothing, and a
 client watching progress simply sees that part of the turn produce no events.")
 
-;; Declared inheritable for the same reason as aion/log:*context* (#430). A thread that
+;; Declared inheritable for the same reason as aion/log:*context* (#158). A thread that
 ;; continues the current turn should still report progress; one that begins an independent
 ;; lifetime should not inherit an observer belonging to somebody else's turn.
 (aion/dynamic:register-inheritable '*observer*)

@@ -28,7 +28,7 @@
 ;;;; published nothing yet".
 ;;;;
 ;;;; A PUBLISH VERIFIED BY THE THING THAT PUBLISHED IT CANNOT SEE A PRODUCER/CONSUMER
-;;;; DISAGREEMENT -- which is the whole failure class of #332, and the same sentence this
+;;;; DISAGREEMENT -- which is the whole failure class of pre-publication issue 332, and the same sentence this
 ;;;; file already carries one layer down about the generator's own reader.
 ;;;;
 ;;;; WHY THE PRODUCER CANNOT CHECK ITS OWN WORK. `update-manifest.lisp' already ends by
@@ -38,7 +38,7 @@
 ;;;; and it was self-consistent through every producer/consumer defect this subsystem has
 ;;;; had:
 ;;;;
-;;;;   #206          the build script computed a platform key; the client recomputed it
+;;;;   pre-publication issue 206          the build script computed a platform key; the client recomputed it
 ;;;;   .sig encoding the generator wrote base64; the client read raw bytes
 ;;;;   format        the generator hard-coded "nsis"; the client dispatched on the field
 ;;;;   filename      the generator wrote latest.json; the client asks for <channel>.json
@@ -216,7 +216,7 @@
                      (fail "~A declares format ~S, which this client would refuse" key declared)))
                (handler-case
                    (let* ((staged (up:stage-payload source entry))
-                          ;; Removed before this script exits (#257). The client cannot do
+                          ;; Removed before this script exits (pre-publication issue 257). The client cannot do
                           ;; it -- it hands off to an installer and exits -- but a gate
                           ;; that runs once per release and stages every platform would
                           ;; otherwise leave a full set of installers behind on every run,
@@ -269,7 +269,7 @@
              (error (e) (fail "the apply path signalled: ~A" e))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t))))
   #-win32
-  (format t "~&  --  the whole-apply check is Windows-only: apply-update refuses on ~A until #74 produces an artifact for it~%"
+  (format t "~&  --  the whole-apply check is Windows-only: apply-update refuses on ~A until #72 produces an artifact for it~%"
           (platform:platform-key))
 
   ;; 4. WHAT WAS ACTUALLY READ. Design section 10: Authenticode MUTATES the artifact, so a

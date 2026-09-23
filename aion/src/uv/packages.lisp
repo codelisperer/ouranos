@@ -28,7 +28,7 @@ them safe.")
    #:load-libuv #:unload-libuv #:libuv-loaded-p #:libuv-not-found #:*libuv-path*
    ;; The sonames a shipped bundle must present. EXPORTED because the bundler has to
    ;; agree with them: it copies a library in under a name, and this is the list of
-   ;; names anything looking for it will ask for (#329). It was reachable only by
+   ;; names anything looking for it will ask for (pre-publication issue 329). It was reachable only by
    ;; FIND-SYMBOL, which is a workaround for a missing export, not a boundary.
    #:*library-names*
    #:verify-abi #:libuv-abi-mismatch
@@ -150,7 +150,7 @@ safe to call from any thread even while another thread runs a loop.")
    ;; Not for application code. These are the seam that lets aion/uv/net and
    ;; aion/uv/process add handle types WITHOUT duplicating the loop, the pointer
    ;; registry, the callback guard or the error decoding -- which the ECOSYSTEM
-   ;; decisions log (2026-08-04, #117) names as the reason granularity comes from
+   ;; decisions log (2026-08-04, pre-publication issue 117) names as the reason granularity comes from
    ;; sub-systems rather than from splitting the binding across frameworks. A shared
    ;; substrate has to be nameable to be shared; this is that name.
    #:check #:signal-uv-error #:uv-error-class

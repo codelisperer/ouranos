@@ -16,7 +16,7 @@
 ;;;; mnemosyne's Postgres wire is a named target. Transport at position 5 is unreachable
 ;;;; from all three. So the binding lives here and the DECISIONS built on it (HTTP
 ;;;; parsing, request/response, subprocess orchestration) live in the frameworks that own
-;;;; those domains. See the ECOSYSTEM decisions log, 2026-08-04, #117.
+;;;; those domains. See the ECOSYSTEM decisions log, 2026-08-04, pre-publication issue 117.
 ;;;;
 ;;;; It reuses aion/uv's loop, pointer registry, callback guard and error decoding rather
 ;;;; than restating them -- that reuse is exactly why the binding cannot be split across

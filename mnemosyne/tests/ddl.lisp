@@ -174,7 +174,7 @@
         (conn:disconnect c))))
   (is (not (uiop:directory-exists-p ":memory:"))))
 
-;;; --- vector index kinds (#258) ---------------------------------------------
+;;; --- vector index kinds (pre-publication issue 258) ---------------------------------------------
 
 (test a-vector-index-names-its-method-and-its-operator-class
   (let ((sql (ddl:ddl '(:create-index :name :idx_e :on :docs :columns (:embedding)
@@ -229,7 +229,7 @@ renders to."
                         :dialect "postgres")
                "CREATE UNIQUE INDEX IF NOT EXISTS idx_email ON users (email)")))
 
-;;; --- CREATE EXTENSION, which is a deployment fact (#258) --------------------
+;;; --- CREATE EXTENSION, which is a deployment fact (pre-publication issue 258) --------------------
 ;;;
 ;;; A schema that needs pgvector has a PRECONDITION. Without it stated, the failure is a
 ;;; Postgres error about an unknown TYPE -- which names neither the extension nor the
@@ -260,7 +260,7 @@ extension statement that quietly succeeded would make the whole schema look port
   (signals ddl:unsupported-ddl
     (ddl:ddl '(:create-extension :name :vector) :dialect "xtdb")))
 
-;;; --- ADR-0003 / #432: ddl speaks the tree's dialect vocabulary --------------
+;;; --- ADR-0003 / pre-publication issue 432: ddl speaks the tree's dialect vocabulary --------------
 
 (test ddl-refuses-an-unrecognised-spelling-instead-of-rendering-postgres
   "A typo used to be RENDERED, not refused -- and this module's else-arm means Postgres.

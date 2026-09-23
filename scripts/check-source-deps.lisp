@@ -3,7 +3,7 @@
 ;;;;   sbcl --dynamic-space-size 4096 --script scripts/check-source-deps.lisp
 ;;;;   sbcl --dynamic-space-size 4096 --script scripts/check-source-deps.lisp --list
 ;;;;
-;;;; WHY THIS EXISTS, and why check-deps.lisp does not already answer it (#449).
+;;;; WHY THIS EXISTS, and why check-deps.lisp does not already answer it (#162).
 ;;;;
 ;;;; check-deps.lisp compares the .asd files against docs/dependencies.md. Both are
 ;;;; DECLARATIONS. When they agree it has established that two statements of intent match
@@ -41,7 +41,7 @@
 ;;;; errors rather than reporting on the wrong tree. Note what that does and does not cover:
 ;;;; a scratch directory with no .asd files beneath it errors, and a copy sitting in ANOTHER
 ;;;; CHECKOUT analyses that checkout without complaint. For a reader the second case is a
-;;;; wrong report; for a writer it was #450 -- check-readme-counts.lisp resolved its README
+;;;; wrong report; for a writer it was pre-publication issue 450 -- check-readme-counts.lisp resolved its README
 ;;;; the same way, reported success, and had written to a different checkout than the
 ;;;; caller's. That script now takes its root from the caller's working directory and refuses
 ;;;; when the two disagree; this one still roots the way described above.
@@ -52,7 +52,7 @@
 (defparameter *script* (or *load-truename* *load-pathname*))
 (defparameter *scripts* (uiop:pathname-directory-pathname *script*))
 
-;;; THE READER IS GUARDED TOO (#480). "A wrong report is recoverable, you can read it twice"
+;;; THE READER IS GUARDED TOO (pre-publication issue 480). "A wrong report is recoverable, you can read it twice"
 ;;; does not survive contact with how a green checker is actually treated, which is that
 ;;; nobody reads it at all. Run from another checkout this used to report on ITS tree and
 ;;; exit 0 or 1 as though the answer were about the tree you are standing in.

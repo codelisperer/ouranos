@@ -223,12 +223,12 @@ browser refreshes, session intact" loop is a genuine differentiator; lean into i
 
 ### Server backends behind a protocol — and why polling, not SSE
 
-Hyperion declares **no HTTP server** (#139). The application depends on the Clack handler
+Hyperion declares **no HTTP server** (pre-publication issue 139). The application depends on the Clack handler
 it wants — `clack-handler-hunchentoot` (pure CL, every platform) or `clack-handler-woo`
 (Unix, and it binds libev at load time) — and `default-server` picks from the backends
 actually loaded into the image, overridable with `HYPERION_SERVER`. No backend shape leaks
 above the protocol, and neither of these two is a destination: both go when the native
-libuv server lands (#117).
+libuv server lands (pre-publication issue 117).
 
 Framework-declared backends were how every Linux desktop bundle came to die at startup on
 `libev.so.4` — the framework had made a native-dependency decision on behalf of apps that
@@ -270,8 +270,8 @@ where *many* browsers attach to *one* conversation — lives in praxeon and is b
 this. It was also the fix for a shared-session "bubble-stealing" bug, and it is the same
 generic infrastructure an app uses for **auth/login** (`hyperion/auth-db` builds on it).
 
-Session ids are 128 bits from the OS CSPRNG (`aion/random`, #95) and **rotate at privilege
-change** (`rotate-session`, #207) — and `wrap-session` holds the `Set-Cookie` so an
+Session ids are 128 bits from the OS CSPRNG (`aion/random`, pre-publication issue 95) and **rotate at privilege
+change** (`rotate-session`, pre-publication issue 207) — and `wrap-session` holds the `Set-Cookie` so an
 application is never handed a header it can silently drop. Both were real defects: ids came
 from `cl:random`, a Mersenne Twister whose state is recoverable from observed output, and a
 session id *is* observable by design.
@@ -281,7 +281,7 @@ PLANNED, not shipped** — see "Planned / in progress" above, and
 [`hyperion/docs/middleware-security.md`](../../hyperion/docs/middleware-security.md), which
 still calls it a *proposed* shape. There is no `secure-app`, no CSRF token machinery and no
 security-header middleware in `hyperion/src` today. This paragraph claimed it was bundled
-while the same page listed it as planned nine sections earlier (#227).
+while the same page listed it as planned nine sections earlier (pre-publication issue 227).
 
 XSS *is* already defended **at output** — Spinneret auto-escapes and
 `hyperion/markdown:render` is safe by default — which is real, and is the reason the

@@ -1,10 +1,10 @@
-;;;; tests/field-type.lisp --- the field-type vocabulary's non-total signature (#334).
+;;;; tests/field-type.lisp --- the field-type vocabulary's non-total signature (pre-publication issue 334).
 ;;;;
 ;;;; ADR-0001's whole point is that "this backend cannot store this" became REPRESENTABLE.
 ;;;; The awkward part of testing that today is that every type in the current vocabulary is
 ;;;; Native on every dialect -- which is exactly why the old total signature looked correct
 ;;;; for a year. So the refusal path is exercised by handing the shell an Unsupported value
-;;;; directly, rather than by waiting for #142 or #212 to introduce a type that produces one.
+;;;; directly, rather than by waiting for pre-publication issue 142 or pre-publication issue 212 to introduce a type that produces one.
 ;;;; A test that could only run after those land would be a test that does not exist now,
 ;;;; when the precedent is being set.
 
@@ -76,9 +76,9 @@ which backend. A condition that says only `unsupported' starts a search."
       (progn (fldsh:column-sql (fld:field-type-from "uuid") "postgres") t)
     (error () (fail "uuid/postgres is native and must not signal"))))
 
-;;; --- binary, the first type added through the partial signature (#142) -----
+;;; --- binary, the first type added through the partial signature (pre-publication issue 142) -----
 ;;;
-;;; ADR-0001 predicted this one: "#142 (binary) needs none of this machinery -- BYTEA and
+;;; ADR-0001 predicted this one: "pre-publication issue 142 (binary) needs none of this machinery -- BYTEA and
 ;;; BLOB are native everywhere, so it is Native on both backends. But it must be
 ;;; implemented THROUGH that signature." These tests pin both halves of that: that it is
 ;;; Native, and that it went through the Sql-Type rather than around it.
@@ -106,7 +106,7 @@ it. The same aliasing `int' already has for `integer'."
 matches. `blobby' is not `blob'."
   (is (string= "string" (fld:field-type-name (fld:field-type-from "blobby"))))
   (is (string= "string" (fld:field-type-name (fld:field-type-from "bin")))))
-;;; --- vector, the first type that is genuinely Unsupported (#212) -----------
+;;; --- vector, the first type that is genuinely Unsupported (pre-publication issue 212) -----------
 ;;;
 ;;; This is the case ADR-0001 was written for. Every type before it was Native on every
 ;;; dialect, which is why the old total signature looked correct for a year -- the suite
@@ -168,14 +168,14 @@ to do about it, matching the XTDB precedent."
       (is (string= "sqlite" (fldsh:unsupported-field-type-backend c)))
       (is (string= "unsupported" (fldsh:unsupported-field-type-support c))))))
 
-;;; --- ADR-0003 / #432: one dialect vocabulary, and its refusal ---------------
+;;; --- ADR-0003 / pre-publication issue 432: one dialect vocabulary, and its refusal ---------------
 ;;; These test the NORMALISER itself. The per-module tests (query, ddl, schema, introspect)
 ;;; test that each module goes through it; this tests that going through it is worth doing.
 
 (test dialect-for-accepts-every-designator-and-they-agree
   "A keyword, a string and an already-typed Dialect name the SAME dialect.
 
-THE DEFECT #432 IS ABOUT, stated positively. The tree held two vocabularies -- keywords in
+THE DEFECT pre-publication issue 432 IS ABOUT, stated positively. The tree held two vocabularies -- keywords in
 mnemosyne/query, strings in mnemosyne/ddl and mnemosyne/schema -- and a caller holding one
 spelling was not refused by the module that wanted the other; it took that module's
 `the other dialect' branch. Agreement is the property that makes one vocabulary true, and
@@ -223,7 +223,7 @@ actually is, rather than three words someone typed."
 (test xtdb-has-no-column-type-for-any-field-type
   "XTDB 2 is schemaless, so there is no column type to return -- for ANY field type.
 
-THE THIRD DIALECT IS WHY `THE OTHER ONE' IS WRONG AS A CONCEPT (#432). field-type-sql asked
+THE THIRD DIALECT IS WHY `THE OTHER ONE' IS WRONG AS A CONCEPT (pre-publication issue 432). field-type-sql asked
 `(== (dialect-name dialect) \"postgres\")' and handed D-Xtdb the SQLite arm, so a backend
 with no columns at all reported INTEGER, TEXT, BOOLEAN. Nothing reaches it on XTDB today --
 schema-ddl and every ddl form refuse XTDB first -- which is exactly why a wrong answer here

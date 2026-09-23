@@ -3,7 +3,7 @@
 (cl:defpackage #:aion/windows/registry
   (:use #:common-lisp)
   (:local-nicknames (#:w #:aion/windows))
-  (:documentation "Reading one registry value, in a named bitness view (#319). Read-only by
+  (:documentation "Reading one registry value, in a named bitness view (#132). Read-only by
 design: see registry.lisp's header for why the view is a required argument and why this is
 not a general registry API.")
   (:export

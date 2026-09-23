@@ -2,14 +2,14 @@
 ;;;;
 ;;;;   sbcl --script scripts/vswhere-probe.lisp
 ;;;;
-;;;; A few lines of output and no side effects. It exists because #128's remaining claims are
+;;;; A few lines of output and no side effects. It exists because pre-publication issue 128's remaining claims are
 ;;;; about what `find-msvc' ANSWERS on machines this one is not -- a Build Tools-only box, a
 ;;;; box with no compiler at all -- and the only way to talk about those answers is to be
 ;;;; able to print the one in front of you.
 ;;;;
 ;;;; It loads `build-libuv.lisp's discovery functions rather than reimplementing them. A
 ;;;; second copy of "where is Visual Studio" would be the producer/consumer defect this tree
-;;;; keeps finding (#206, #77), in a script whose whole purpose is to report faithfully.
+;;;; keeps finding (pre-publication issue 206, pre-publication issue 77), in a script whose whole purpose is to report faithfully.
 ;;;;
 ;;;; THE THREE LINES ARE THREE DIFFERENT QUESTIONS, and on a box with several installs they
 ;;;; do not have the same answer:
@@ -17,7 +17,7 @@
 ;;;;                             no-toolchain case: no installer, no vswhere, no discovery)
 ;;;;   find-msvc-via-vswhere  -- which install does `-latest' pick?
 ;;;;   find-msvc              -- which install will the BUILD actually use, i.e. the above
-;;;;                             unless OURANOS_MSVC_PATH overrides it (#382)
+;;;;                             unless OURANOS_MSVC_PATH overrides it (pre-publication issue 382)
 
 (require :asdf)
 

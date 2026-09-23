@@ -18,7 +18,7 @@ lines with nothing reporting it. `aion/dynamic' is how a spawn site carries this
 see the registration below.")
 
 ;; Declared inheritable so a spawn site that continues the current unit of work can carry
-;; the ambient fields onto the child (#430). Registration alone moves nothing: the value
+;; the ambient fields onto the child (#158). Registration alone moves nothing: the value
 ;; crosses only where a caller captures it. The sweep in aion's suite is what keeps that
 ;; honest, by failing on a thread-spawn site that has neither carried the bindings nor said
 ;; why it does not.

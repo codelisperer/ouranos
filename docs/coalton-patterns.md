@@ -95,7 +95,7 @@ Calling a method uses ordinary positional application: `(with-meta entity meta)`
   case-insensitivity means `And` is no escape from `and`.
 - **`join` is one of them too**, and it is not obvious: it is `Monad`'s, from
   `coalton/classes`, so a string-joining helper called `join` fails with *"Invalid identifier
-  name … defined in the package COALTON/CLASSES and not the current package"* (#262). The
+  name … defined in the package COALTON/CLASSES and not the current package"* (#114). The
   list above is not exhaustive — when a plain-sounding name is rejected, that is what
   happened. There is no `concat-all` in `coalton-library/string`, only a binary `concat`,
   which is why the helper gets written in the first place.
@@ -113,7 +113,7 @@ Calling a method uses ordinary positional application: `(with-meta entity meta)`
 ```
 
 The string is parsed as a **constructor**, and the error is `error: Invalid identifier name`
-pointing at something else entirely (#262). `define-class` *does* take one, which is what
+pointing at something else entirely (#114). `define-class` *does* take one, which is what
 makes this easy to get wrong. Put the prose in a `;;` comment above the form.
 
 ## 5. The CL ↔ Coalton boundary
@@ -128,7 +128,7 @@ makes this easy to get wrong. Put the prose in a `;;` comment above the form.
 `Optional` is a Coalton ADT, and `None` is an **object**. Every object is true in CL, so the
 idiom above returns `None` *as if it were a value* and the error branch is unreachable. It
 reads correctly, it compiles, and the failure it is guarding against passes straight through
-(#334).
+(pre-publication issue 334).
 
 The same applies to any Coalton ADT crossing into CL: **do not test one for truth.** Export a
 monomorphic predicate returning `Boolean` — which *does* map to CL's `T`/`NIL` — and ask that:
@@ -210,7 +210,7 @@ So never inspect, construct, or destructure a `define-type` value's representati
 CL. Cross the seam through Coalton accessors, or pass promised scalars. The failure mode
 is nasty: it works in development mode and breaks everywhere at once on a mode switch.
 
-### 7a. `print-object` on a `define-type` is a representation dependency (#209)
+### 7a. `print-object` on a `define-type` is a representation dependency (pre-publication issue 209)
 
 The rule above is usually met while writing a `lisp` block. It also bites somewhere much
 less obvious: **specializing a CLOS method — `print-object` above all — on a Coalton type.**
@@ -230,7 +230,7 @@ This came up for a real reason. Coalton generates a printer that renders a value
 field**, so a credential stored as a `String` field is written out in full by anything that
 prints the enclosing value — most damagingly an unhandled condition's backtrace, which
 reaches a deploy log precisely when a deployment is going wrong. That put a production
-database password in plaintext into a log (#209).
+database password in plaintext into a log (pre-publication issue 209).
 
 The obvious fix — a redacting `print-object` on `Pg-Config` — is the trap. **The fix that
 holds is to change the field's TYPE, not the enclosing type's printer:**
@@ -267,7 +267,7 @@ Two consequences worth internalizing:
   number without its mode could be off by an order of magnitude, in an unknown direction.
 - **Test both modes.** Coalton's docs warn that code can inadvertently depend on one
   mode's behavior, and a §7 representation violation is invisible in development mode. The
-  tree does pass in release mode today (3150 checks, measured under #209) — which is a result, not a
+  tree does pass in release mode today (3150 checks, measured under pre-publication issue 209) — which is a result, not a
   guarantee, and is what the release-mode CI leg exists to keep true.
 
 Both are scripted: `scripts/with-mode.lisp` runs anything under a chosen mode, each mode in

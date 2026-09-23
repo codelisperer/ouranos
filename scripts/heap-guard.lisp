@@ -1,4 +1,4 @@
-;;;; heap-guard.lisp --- the heap a dumped image is born with, decided once (#88).
+;;;; heap-guard.lisp --- the heap a dumped image is born with, decided once (pre-publication issue 88).
 ;;;;
 ;;;; SAVE-LISP-AND-DIE HAS NO HEAP PARAMETER. A dumped image inherits the heap of the
 ;;;; process that dumped it, and `:save-runtime-options t' -- which every executable in this
@@ -14,7 +14,7 @@
 ;;;; from the cause. Confirm any artifact with scripts/baked-heap.lisp.
 ;;;;
 ;;;; SHARED BY TWO CALLERS, which is the whole reason this is a file rather than a paragraph
-;;;; repeated twice. 4096 was already written three times in bootstrap.lisp before #195 --
+;;;; repeated twice. 4096 was already written three times in bootstrap.lisp before pre-publication PR 195 --
 ;;;; twice as a literal passed to children, once implicitly as a flag the reader was told to
 ;;;; type -- and the only copy anyone could get wrong was the one nobody checked. Adding
 ;;;; build-desktop-app.lisp as a second caller would have recreated exactly that.
@@ -57,7 +57,7 @@ runtime on macOS, guarded by an environment variable so it cannot loop. Same sha
 
 KEEP-VAR is read with GETENVP, not GETENV. GETENV returns \"\" for a name exported with an
 empty value and \"\" is true in Lisp, so a bare GETENV escape hatch is one a CI expression can
-trip by accident -- which is the #178 finding, and precisely the accident an escape hatch
+trip by accident -- which is the pre-publication PR 178 finding, and precisely the accident an escape hatch
 must not have."
   (when (>= (current-heap-mb) *wanted-heap-mb*)
     (return-from ensure-heap :already-big-enough))

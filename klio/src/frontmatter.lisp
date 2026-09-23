@@ -1,4 +1,4 @@
-;;;; frontmatter.lisp --- parse a content file's front-matter (#359 Q1: answer B).
+;;;; frontmatter.lisp --- parse a content file's front-matter (pre-publication issue 359 Q1: answer B).
 ;;;;
 ;;;; TYPED CORE PLUS A NAMED `extra'. The core is title, date, slug, tags, draft and
 ;;;; publish-at. Everything else lands in `extra', named as such, so a reader can see exactly
@@ -288,7 +288,7 @@ which is what it always meant."
         '()
         (values (%parse-block lines (fm-line-indent (first lines)) file)))))
 
-;;; --- the typed core, and `extra' (#359 Q1: answer B) ------------------------
+;;; --- the typed core, and `extra' (pre-publication issue 359 Q1: answer B) ------------------------
 
 (defparameter +core-keys+ '("title" "date" "slug" "tags" "draft" "publish-at")
   "The keys klio types. Everything else goes to `extra', named so a reader can see where the

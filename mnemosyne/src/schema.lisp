@@ -38,7 +38,7 @@ TYPE-NAME mirror the changeset dispatches casting on, and the usual options."
 (defun make-schema (name table fields)
   "A SCHEMA built at RUNTIME: NAME a symbol, TABLE a string, FIELDS a list of specs.
 
-WHY THIS IS PUBLIC AND DEFSCHEMA IS NOT ENOUGH (#372). A parameterised column carries its
+WHY THIS IS PUBLIC AND DEFSCHEMA IS NOT ENOUGH (#138). A parameterised column carries its
 parameter in its type, and for a vector that parameter is a DEPLOYMENT fact rather than a
 source-code one: the width follows from which embedding model an operator configured, so a
 literal `(:embedding :vector :dimensions 1536)' in a DEFSCHEMA has hard-coded one vendor's
@@ -73,7 +73,7 @@ than accepting whatever a caller assembled -- one parser, not two."
 (defun field-type-for (type-name opts &key field-name (context "mnemosyne/schema"))
   "The Field-Type a declaration means, including any parameter it carries.
 
-ONE PLACE THAT KNOWS A VECTOR NEEDS A DIMENSION (#212). Two callers build a Field-Type from
+ONE PLACE THAT KNOWS A VECTOR NEEDS A DIMENSION (pre-publication issue 212). Two callers build a Field-Type from
 a declared spec -- MAKE-FIELD here and MNEMOSYNE/DDL's column builder -- and a parameterised
 type is the first thing they cannot both get right by calling FIELD-TYPE-FROM with a name.
 Two copies of this rule is how the two would disagree about a declaration somebody writes
@@ -178,7 +178,7 @@ fingerprints for identical content."
   "Define and register schema NAME. TABLE defaults to the lowercased NAME. Each FIELD-SPEC
 is (:field :type &key required primary default dimensions).
 
-A FIELD SPEC'S OPTION VALUES ARE EVALUATED, and that CHANGED in #258: they used to be quoted
+A FIELD SPEC'S OPTION VALUES ARE EVALUATED, and that CHANGED in pre-publication issue 258: they used to be quoted
 whole, so every value was a literal. `:dimensions +embedding-width+' and
 `:dimensions (embedding-width)' now resolve a width from configuration at definition time,
 which is what the change bought.
@@ -205,7 +205,7 @@ below and docs/migrations.md §8. E.g.
     (%make-schema :name ',name
                   :table ,(or table (string-downcase (symbol-name name)))
                   ;; THE OPTION VALUES ARE ORDINARY LISP EXPRESSIONS, and that is the whole
-                  ;; of what #258 needed from this macro. The specs used to be quoted whole,
+                  ;; of what pre-publication issue 258 needed from this macro. The specs used to be quoted whole,
                   ;; so every value had to be a literal -- which is fine for `:primary t' and
                   ;; fatal for `:dimensions', the one option whose value is a DEPLOYMENT fact
                   ;; rather than a schema one. A consuming app cannot commit to an embedding
@@ -221,7 +221,7 @@ below and docs/migrations.md §8. E.g.
                   ;; width comes from configuration renders DIFFERENT DDL in two deployments.
                   ;; That is a real hazard and it already has a detector -- MNEMOSYNE/INTROSPECT's
                   ;; VERIFY-SCHEMA reports a changed vector dimension as drift, by design
-                  ;; (#212) -- so the rule is: a migration's up-SQL is PINNED, generated once
+                  ;; (pre-publication issue 212) -- so the rule is: a migration's up-SQL is PINNED, generated once
                   ;; and committed as text, never regenerated from a config-resolved schema at
                   ;; each deploy. Verify at boot; do not re-derive at deploy.
                   :fields (expand-derived
@@ -253,7 +253,7 @@ below and docs/migrations.md §8. E.g.
   "CREATE TABLE DDL for SCHEMA under DIALECT (a backend designator). Intended as a migration's
 up-SQL: DDL stays raw SQL in migrations, but the shape is derived from the schema, not
 hand-written twice. XTDB 2 is schemaless -- it has no DDL, so this does not apply there."
-  ;; NORMALISED BEFORE THE GUARD (#432, ADR-0003). This was `(string= dialect "xtdb")', and
+  ;; NORMALISED BEFORE THE GUARD (pre-publication issue 432, ADR-0003). This was `(string= dialect "xtdb")', and
   ;; STRING= on a symbol designator compares its SYMBOL-NAME -- so the KEYWORD :xtdb, which
   ;; is the spelling MNEMOSYNE/QUERY takes, compared "XTDB" against "xtdb" and missed. The
   ;; guard that exists to say "XTDB is schemaless" was skipped by one of the two spellings

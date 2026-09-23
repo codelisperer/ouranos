@@ -1,4 +1,4 @@
-;;;; tests/param.lisp --- NULL vs boolean false at the bind boundary (#165).
+;;;; tests/param.lisp --- NULL vs boolean false at the bind boundary (pre-publication issue 165).
 ;;;;
 ;;;; The bug this pins was reported as failing inserts, but the failing half was the SAFE
 ;;;; half. On Postgres a NIL bound to a numeric column raised 22P02 and stopped; a NIL bound
@@ -17,10 +17,10 @@
 ;;;; module existed (the driver refuses a non-scalar bind value), so those assertions were
 ;;;; genuinely red here.
 ;;;;
-;;;; WHAT CHANGED IN #176: the reproduction is no longer out of reach. The round-trip tests
+;;;; WHAT CHANGED IN pre-publication issue 176: the reproduction is no longer out of reach. The round-trip tests
 ;;;; below run under WITH-EACH-BACKEND, so when MNEMOSYNE_TEST_PG_URL names a reachable
 ;;;; server they execute on Postgres too -- where the NULL half IS the reproduction and
-;;;; goes genuinely red against the pre-#165 mapping. When the variable is unset they run
+;;;; goes genuinely red against the pre-pre-publication issue 165 mapping. When the variable is unset they run
 ;;;; on SQLite alone and the run says so loudly, rather than reporting a green that quietly
 ;;;; covers one engine. See tests/backends.lisp.
 ;;;;
@@ -91,7 +91,7 @@
 ;;; The shape triage asked for: insert, read back, assert. On SQLite the NULL half is a
 ;;; guard (it already passed before the fix) and the boolean half is a genuine repair.
 
-;;; The helpers are backend-NEUTRAL, and that constraint did real work here (#176).
+;;; The helpers are backend-NEUTRAL, and that constraint did real work here (pre-publication issue 176).
 ;;;
 ;;; The previous versions asserted through SQLite's `typeof()`, which Postgres does not
 ;;; have. Reaching for `pg_typeof` per backend would have preserved the shape and missed
@@ -128,7 +128,7 @@ nobody chose."
 
 (test null-round-trips-as-sql-null-not-as-the-string-false
   ;; On SQLite this is a GUARD: SQLite already stored NIL as NULL, so it cannot go red here.
-  ;; On Postgres it is the REPRODUCTION -- before #165 the text column held the four
+  ;; On Postgres it is the REPRODUCTION -- before pre-publication issue 165 the text column held the four
   ;; characters "false", `IS NULL` stopped matching, and the suite could not see it because
   ;; the suite could not reach Postgres. That is this ticket in one test.
   (with-each-backend (c)
@@ -180,7 +180,7 @@ nobody chose."
     (is* (eql 1 (%col c 1 "flag")))))
 
 (test a-nullable-numeric-insert-succeeds
-  ;; The LOUD half of the #165 report, and the half only Postgres can show: there this
+  ;; The LOUD half of the pre-publication issue 165 report, and the half only Postgres can show: there this
   ;; raised `invalid input syntax for type bigint: "false"` (22P02) and 6 of 12 operations
   ;; failed outright. On SQLite it always passed.
   (with-each-backend (c)
@@ -292,9 +292,9 @@ nobody chose."
     (is (eql 1 (round-trip t)))
     (is (eql 0 (round-trip :false)) "false survives as false, not as NULL")))
 
-;;; --- binary columns survive the drivers (#142) -----------------------------
+;;; --- binary columns survive the drivers (pre-publication issue 142) -----------------------------
 ;;;
-;;; #142 called this half "the real work" and warned that "Postgres BYTEA in particular has
+;;; pre-publication issue 142 called this half "the real work" and warned that "Postgres BYTEA in particular has
 ;;; its own escaping". Measured before writing any of it: both drivers already bind and
 ;;; return (unsigned-byte 8) vectors unchanged, so the column type was the whole change and
 ;;; this suite is what keeps that true rather than what made it true.
@@ -363,7 +363,7 @@ make an absent avatar indistinguishable from a deliberately blank one."
                    :|v|)
              0)))
 
-;;; --- vector search against a real pgvector (#258) --------------------------
+;;; --- vector search against a real pgvector (pre-publication issue 258) --------------------------
 ;;;
 ;;; EVERYTHING ABOVE IS RENDERING, and rendering is a producer checking its own output: it
 ;;; proves we emitted the operator we meant to, not that Postgres accepts it or that a
@@ -374,7 +374,7 @@ make an absent avatar indistinguishable from a deliberately blank one."
 ;;; they SKIP WITH A NAMED REASON rather than passing: a skip is coverage this run does not
 ;;; have, and the summary has to say so. Today that is the macOS and Windows CI legs, which
 ;;; provision Postgres by Homebrew and by the runner's preinstalled service and never see
-;;; that compose file -- #371 covers macOS; Windows is a documented exclusion.
+;;; that compose file -- pre-publication issue 371 covers macOS; Windows is a documented exclusion.
 
 (defun %pgvector-available-p (conn)
   "Is the pgvector extension installable on this server?
@@ -393,7 +393,7 @@ The skip reason names the host and the consequence, in the form verify-tree prin
 green run on a leg without pgvector says what it did not cover."
   `(let ((url (test-pg-url)))
      (if (null url)
-         (skip "no ~A: vector operator and index coverage needs a Postgres (#258)"
+         (skip "no ~A: vector operator and index coverage needs a Postgres (pre-publication issue 258)"
                +pg-url-var+)
          (let ((,conn (conn:connect (mnemosyne/url:backend-from-url url))))
            (unwind-protect
@@ -464,7 +464,7 @@ that does not exist, or a WITH option that is not an option, fails only here."
 ;;; 532 checks; the gate is what caught it, because verify-tree reads the child's output for
 ;;; `caught WARNING' rather than trusting the exit code.
 
-;;; --- an extension's precondition, against a real server (#258) --------------
+;;; --- an extension's precondition, against a real server (pre-publication issue 258) --------------
 ;;;
 ;;; The rendering tests in ddl.lisp prove we emit the statement we meant to. These ask a
 ;;; server the two questions a deployment actually has: does it OFFER the extension, and has
@@ -475,7 +475,7 @@ that does not exist, or a WITH option that is not an option, fails only here."
   "Bind CONN to a Postgres connection, or skip with a named reason."
   `(let ((url (test-pg-url)))
      (if (null url)
-         (skip "no ~A: extension preconditions need a Postgres (#258)" +pg-url-var+)
+         (skip "no ~A: extension preconditions need a Postgres (pre-publication issue 258)" +pg-url-var+)
          (let ((,conn (conn:connect (mnemosyne/url:backend-from-url url))))
            (unwind-protect (progn ,@body)
              (conn:disconnect ,conn))))))
@@ -516,7 +516,7 @@ database has. A precondition that asked the second would report a fresh database
 unsupported server, which is the wrong fix for the wrong problem."
   (%with-pg-conn (c)
     (if (not (%pgvector-available-p c))
-        (skip "no pgvector on this host (#258, macOS #371)")
+        (skip "no pgvector on this host (pre-publication issue 258, macOS pre-publication issue 371)")
         (progn
           (conn:exec c "DROP EXTENSION IF EXISTS vector CASCADE")
           (is-true (mig:extension-available-p c "vector")
@@ -527,7 +527,7 @@ which is the whole point of asking the right one")
           (mig:require-extension c "vector")
           (is-true (mig:extension-present-p c "vector") "and requiring it puts it back")))))
 
-;;; --- the changeset path reaching a real vector column (#258) -----------------
+;;; --- the changeset path reaching a real vector column (pre-publication issue 258) -----------------
 ;;;
 ;;; The cast tests in schema.lisp prove what `cast' produces. This proves POSTGRES ACCEPTS
 ;;; IT -- a producer checking its own output cannot see a producer/consumer disagreement, and
@@ -575,7 +575,7 @@ names the schema rather than the column."
     (is (zerop (second (first (conn:query c "SELECT count(*) FROM vec_cs_t"))))
         "nothing was written")))
 
-;;; --- reading a column out of a row (#489) ----------------------------------
+;;; --- reading a column out of a row (pre-publication issue 489) ----------------------------------
 ;;;
 ;;; The rows here are built with INTERN rather than written as `:|content|', because that is
 ;;; what the driver does and a literal would let a reader assume the case is incidental.

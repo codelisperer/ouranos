@@ -1,7 +1,7 @@
 ;;;; id.lisp --- entity stamping over aion/clock (effectful CL shell).
 ;;;;
 ;;;; The clock is NOT here any more. The monotonic Gregorian-100ns counter and the v6
-;;;; assembly moved to aion/clock (#96): the sortability of an id comes from a clock, a
+;;;; assembly moved to aion/clock (pre-publication issue 96): the sortability of an id comes from a clock, a
 ;;;; clock is a floor primitive, and requiring a data layer in order to obtain one is the
 ;;;; coupling aion exists to prevent. NEW-ID, NEXT-VID and VID->INSTANT are re-exported
 ;;;; from there by the package definition, so every existing call site is untouched.

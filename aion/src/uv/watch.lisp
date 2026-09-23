@@ -1,7 +1,7 @@
 ;;;; watch.lisp --- filesystem watching, over libuv's fs_event handle.
 ;;;;
 ;;;; One API over inotify (Linux), FSEvents (macOS) and ReadDirectoryChangesW (Windows).
-;;;; This is the surface #107 nominated as the first thing to prove, and deliberately so:
+;;;; This is the surface #84 nominated as the first thing to prove, and deliberately so:
 ;;;; it is small, it exercises the whole callback path, and it replaces a poller rather
 ;;;; than a working event-driven design.
 ;;;;

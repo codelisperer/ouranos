@@ -1,4 +1,4 @@
-;;;; checkers.lisp --- can each gate checker detect what it exists to detect? (#459)
+;;;; checkers.lisp --- can each gate checker detect what it exists to detect? (#163)
 ;;;;
 ;;;; THE QUESTION IS NOT "DO THE CHECKERS PASS ON THIS TREE". They do, every gate run, and
 ;;;; that establishes nothing about whether they would notice if the tree were broken. The
@@ -16,13 +16,13 @@
 ;;;; an arbitrary tree makes the wrong-tree write a supported operation rather than an
 ;;;; impossible one.
 ;;;;
-;;;; CORRECTED (#450): this said `check-source-deps' is safe because "run from outside its
+;;;; CORRECTED (pre-publication issue 450): this said `check-source-deps' is safe because "run from outside its
 ;;;; tree it errors rather than analysing the wrong one". It does not. Run from tree A with
 ;;;; tree B's copy it analyses B and reports B's findings, exit 1, no error -- measured. It
 ;;;; errors only when the copy sits somewhere with no .asd files beneath it at all, which is
 ;;;; a different case and the only one the claim was ever true of. `check-source-deps' own
 ;;;; header states it precisely ("a copy of this file somewhere else analyses whatever tree
-;;;; sits around that copy"); the overstatement was here, and it travelled -- #450's fix was
+;;;; sits around that copy"); the overstatement was here, and it travelled -- pre-publication issue 450's fix was
 ;;;; described as "make the writer behave like check-source-deps", which would have shipped
 ;;;; the same defect with a comment saying otherwise.
 ;;;;
@@ -30,7 +30,7 @@
 ;;;; directory and refuse when that disagrees with the script's own. The readers still have
 ;;;; the behaviour described above, and two other WRITERS still root the old way --
 ;;;; `fetch-cldr-plurals.lisp --write' and `mbedtls-sources.lisp', both deriving *root* from
-;;;; `*load-truename*' and writing into the tree. Reported on #450 rather than fixed here.
+;;;; `*load-truename*' and writing into the tree. Reported on pre-publication issue 450 rather than fixed here.
 ;;;;
 ;;;; It is also the better shape regardless: the test writes the artefact and the checker
 ;;;; reads it, which is a real producer/consumer split rather than a script checking its own
@@ -98,7 +98,7 @@ one left its directory behind."
 This is what makes the fixture work rather than a trick around it: the checkers locate their
 tree from where the script file is, so a checker placed in the fixture analyses the fixture.
 
-`tree-root.lisp' travels with it (#480). Four scripts LOAD it, so a fixture without it is a
+`tree-root.lisp' travels with it (pre-publication issue 480). Four scripts LOAD it, so a fixture without it is a
 fixture the script cannot run in -- and the ones that do not load it are unaffected by its
 presence, which is cheaper than a per-checker list that would go stale."
   (let* ((scripts (merge-pathnames "scripts/" tree))
@@ -158,7 +158,7 @@ the test would have passed for the wrong reason."
 ;;; What it exists to detect: two .asd files defining the same system name. ASDF's
 ;;; `(:tree <root>)' registry resolves such a name to whichever file it finds first, and the
 ;;; loser's package is never defined -- which surfaces far away as "the name X does not
-;;; designate any package" (#363, #364).
+;;; designate any package" (pre-publication PR 363, pre-publication issue 364).
 
 (test collisions-detects-one-name-defined-by-two-files
   "The thing the checker is for. Two .asd files, same system name, and it must say so."
@@ -414,7 +414,7 @@ built to be agreeable."
                     depends))
     ;; UNDER A REAL SECTION HEADING. The first version of this fixture wrote a bare table
     ;; with no heading, which the old permissive parser accepted -- so the fixture was easier
-    ;; than the artefact and stopped working the moment the parser was scoped (#474). A
+    ;; than the artefact and stopped working the moment the parser was scoped (pre-publication issue 474). A
     ;; manifest with no `## External deps by role' documents nothing, which is now correct.
     (%write (merge-pathnames "docs/dependencies.md" tree)
             (format nil "# Dependency manifest~%~%## External deps by role~%~%| Name | What |~%|---|---|~%~{| `~A` | fixture |~%~}"
@@ -422,7 +422,7 @@ built to be agreeable."
     tree))
 
 (test deps-reads-every-asd-not-only-the-first
-  "THE REGRESSION tree-deps.lisp RECORDS AS HAVING HAPPENED (#358): it once constructed the
+  "THE REGRESSION tree-deps.lisp RECORDS AS HAVING HAPPENED (pre-publication issue 358): it once constructed the
 file list from a name list instead of discovering it, so seven files were read where the tree
 carried thirteen, and any dependency the other six introduced was invisible. Its own comment
 says nothing broke only because the unread files happened to depend on documented systems --
@@ -451,7 +451,7 @@ rather than a crash, which is the shape a real regression has."
     tree))
 
 (test deps-does-not-accept-a-version-snapshot-as-documentation
-  "#474. `documented' once meant `appears in any table anywhere in the file', so a name in the
+  "pre-publication issue 474. `documented' once meant `appears in any table anywhere in the file', so a name in the
 Versions snapshot satisfied the undocumented check while the externals table said nothing
 about it. The manifest has twelve sections; three document dependencies."
   (let ((tree (%deps-tree-sectioned "## Versions (pinned) -- snapshot")))
@@ -514,7 +514,7 @@ nobody greps."
           "TODAY a stale manifest row passes. If this now fails, the stale check has been implemented and this test should become its detection test.~%~A"
           output))))
 
-;;; --- check-readme-counts: WHICH tree does a writer write to? (#450) --------
+;;; --- check-readme-counts: WHICH tree does a writer write to? (pre-publication issue 450) --------
 ;;;
 ;;; The other checkers here are readers, and a reader that resolves the wrong tree returns a
 ;;; wrong answer. This one WRITES, so resolving the wrong tree edits a checkout the caller
@@ -545,7 +545,7 @@ The row shape is the real one, prose and all -- including an issue reference in 
 because %REPLACE-LAST-INTEGER exists to not be fooled by it. A row without one would be a
 fixture easier than production."
   (format nil "# Fixture~%~%| framework | where it is | checks |~%|---|---|---|~%~
-| **aion** | **mixed** -- `aion/log` and `aion/csv` are real; the collections core *(in progress)* (#172) | ~D |~%~
+| **aion** | **mixed** -- `aion/log` and `aion/csv` are real; the collections core *(in progress)* (pre-publication issue 172) | ~D |~%~
 | **cons** | **alpha** -- the bootstrap seed and the task runner work | ~D |~%~%~
 Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own image.~%"
           aion cons-checks))
@@ -577,7 +577,7 @@ VERDICT: PASS~%"
     tree))
 
 (test readme-counts-refuses-to-write-to-a-checkout-the-caller-is-not-standing-in
-  "#450. The root came from `*load-truename*' alone, so running one checkout's copy of this
+  "pre-publication issue 450. The root came from `*load-truename*' alone, so running one checkout's copy of this
 script from another rewrote the SCRIPT's README and left the caller's alone -- reporting
 `VERDICT: UPDATED', because nothing had gone wrong from where the script was sitting. The
 caller's tree stays clean, which is the half that makes it hard to notice: there is no local
@@ -594,15 +594,15 @@ against a script that refused AFTER writing, which is the failure this is about.
         (%run-in ours (merge-pathnames "scripts/check-readme-counts.lisp" theirs)
                  "--from" (namestring log) "--update")
       (is (= 2 code) "must refuse, got exit ~D:~%~A" code out)
-      (is (search "#450" out) "the refusal should name the ticket, got:~%~A" out)
+      (is (search "pre-publication issue 450" out) "the refusal should name the ticket, got:~%~A" out)
       ;; `uiop:native-namestring', not `namestring'. The refusal being searched is printed
       ;; by tree-root.lisp:89-90, which formats both paths with native-namestring, and on
       ;; Windows those are different strings -- a backslash spelling against a forward-slash
       ;; one -- so the search never matched and these two assertions failed on every Windows
-      ;; checkout (#502). The two functions return the same string on Linux and macOS, which
+      ;; checkout (pre-publication issue 502). The two functions return the same string on Linux and macOS, which
       ;; is why this was green on both legs that gate a pull request.
       ;; TRUENAME before comparing, and computed here rather than by calling tree-root's own
-      ;; `shown' (#510). The fixture paths come from `uiop:temporary-directory', which keeps
+      ;; `shown' (pre-publication issue 510). The fixture paths come from `uiop:temporary-directory', which keeps
       ;; whatever spelling TEMP is set to, while the script prints a truenamed path -- and on
       ;; a host whose TEMP is a Windows 8.3 alias those are two spellings of one directory.
       ;; Calling the producer's function to build the expected string would make both sides
@@ -633,12 +633,12 @@ useless, and the exit code alone cannot tell those apart."
       (is (string/= before after) "the README must actually have changed")
       (is (search "| 2000 |" after) "aion's row must carry the gate's number, got:~%~A" after)
       (is (search "| 3000 |" after) "and cons's row too, got:~%~A" after)
-      (is (search "(#172)" after)
+      (is (search "(pre-publication issue 172)" after)
           "the prose must survive byte-for-byte, issue reference included"))))
 
-;;; --- the shared resolver, and the rest of the class (#480) -----------------
+;;; --- the shared resolver, and the rest of the class (pre-publication issue 480) -----------------
 ;;;
-;;; #450 fixed one writer. Two more writers and a reader rooted the same way. They share one
+;;; pre-publication issue 450 fixed one writer. Two more writers and a reader rooted the same way. They share one
 ;;; resolver now (scripts/tree-root.lisp), so these tests come in two layers rather than
 ;;; repeating one end-to-end test four times:
 ;;;
@@ -665,7 +665,7 @@ one indirection."
   (uiop:find-symbol* name :tree-root))
 
 (test tree-root-finds-the-checkout-from-a-subdirectory
-  "Walking up is what lets the gate run from a subdirectory of its own tree, which #480 says
+  "Walking up is what lets the gate run from a subdirectory of its own tree, which pre-publication issue 480 says
 to assert rather than assume. A resolver that only recognised its own root would refuse
 every run from inside mnemosyne/ and take the gate with it."
   (let* ((tree (%install-root-markers (%fresh-tree)))
@@ -686,7 +686,7 @@ every run from inside mnemosyne/ and take the gate with it."
 README and three carry an AGENTS.md, so klio/ and hermes/ both matched -- and a run from
 inside either would have resolved to the framework directory, disagreed with the real root,
 and been refused. A false positive in the guard breaks the gate from a subdirectory, which
-is the one thing #480 says to assert. The markers are the seed and the gate, which exist
+is the one thing pre-publication issue 480 says to assert. The markers are the seed and the gate, which exist
 only at the root.
 
 Measured against the REAL tree, not a fixture: the claim is about this repo's layout."
@@ -736,7 +736,7 @@ a code passes against a script that refuses AFTER writing, which is the shape of
                    "~A must not have rewritten ~A in the caller's tree either" script f)))))
 
 (test fetch-cldr-plurals-refuses-a-checkout-the-caller-is-not-in
-  "#480's first writer, and it writes TWICE -- the vendored rules and the pin beside them.
+  "pre-publication issue 480's first writer, and it writes TWICE -- the vendored rules and the pin beside them.
 Both are compared, because a guard that stopped one write and not the other would leave a
 pin describing data it no longer matches, which is worse than either alone."
   (%refuses-across-trees "fetch-cldr-plurals.lisp"
@@ -744,7 +744,7 @@ pin describing data it no longer matches, which is worse than either alone."
                          "hyperion/src/vendor/PLURALS.pin"))
 
 (test mbedtls-sources-refuses-a-checkout-the-caller-is-not-in
-  "#480's second writer. Its manifest records which upstream sources a pinned build uses, so
+  "pre-publication issue 480's second writer. Its manifest records which upstream sources a pinned build uses, so
 writing it into the wrong checkout puts one tree's answer into another tree's provenance."
   (%refuses-across-trees "mbedtls-sources.lisp" "mbedtls.sources"))
 
@@ -791,7 +791,7 @@ the script got past the root guard and then looked in the caller's tree."
       (is (search (namestring tree) out)
           "and must have searched the FIXTURE, naming it:~%~A" out))))
 
-;;; --- which DRIVE does a checker root at? (#482) -----------------------------
+;;; --- which DRIVE does a checker root at? (pre-publication issue 482) -----------------------------
 ;;;
 ;;; What these exist to detect: a checker that resolves its root with `(make-pathname
 ;;; :directory (butlast ...))', which does not carry `:device'. On Windows a device-less
@@ -816,7 +816,7 @@ the script got past the root guard and then looked in the caller's tree."
   "A directory on a different volume from TREE, or NIL when this host has only one.
 
 NIL is the honest answer rather than a fallback, because the tests using this SKIP on it.
-A second volume is the whole precondition of #482: without one the caller's drive cannot be
+A second volume is the whole precondition of pre-publication issue 482: without one the caller's drive cannot be
 made to differ from the fixture's, and a test that quietly ran anyway would report a pass
 for a condition it never created.
 
@@ -831,7 +831,7 @@ and a disconnected network mapping can error rather than return NIL."
             return root)))
 
 (test assets-roots-at-its-own-drive-not-the-callers
-  "#482. Run from a checkout on another volume, `check-assets' computed its root on THAT
+  "pre-publication issue 482. Run from a checkout on another volume, `check-assets' computed its root on THAT
 volume and raised FILE-DOES-NOT-EXIST reading an asset that was present the whole time.
 
 The tree here is the passing fixture -- bytes matching their pin, nothing wrong with it --
@@ -842,7 +842,7 @@ move for the test to mean anything."
          (script (%install-checker tree "check-assets.lisp"))
          (elsewhere (%other-volume-directory tree)))
     (if (null elsewhere)
-        (skip "this host has one volume, so the caller's drive cannot be made to differ from the fixture's and #482 is unreachable here")
+        (skip "this host has one volume, so the caller's drive cannot be made to differ from the fixture's and pre-publication issue 482 is unreachable here")
         (multiple-value-bind (code out) (%run-in elsewhere script)
           (is (= 0 code)
               "a tree whose bytes match must pass when the caller stands on ~A; exit was ~D~%~A"
@@ -851,7 +851,7 @@ move for the test to mean anything."
               "and it must not have looked on the caller's drive:~%~A" out)))))
 
 (test collisions-roots-at-its-own-drive-not-the-callers
-  "#482, and the half that does not announce itself. A root on the wrong volume contains no
+  "pre-publication issue 482, and the half that does not announce itself. A root on the wrong volume contains no
 `.asd' files, so this checker reported `ok -- 0 .asd files, no system name defined twice' and
 exited 0 -- a gate checker passing because it read nothing at all.
 
@@ -868,7 +868,7 @@ an empty drive."
     (let ((script (%install-checker tree "check-asd-collisions.lisp"))
           (elsewhere (%other-volume-directory tree)))
       (if (null elsewhere)
-          (skip "this host has one volume, so the caller's drive cannot be made to differ from the fixture's and #482 is unreachable here")
+          (skip "this host has one volume, so the caller's drive cannot be made to differ from the fixture's and pre-publication issue 482 is unreachable here")
           (multiple-value-bind (code out) (%run-in elsewhere script)
             (is (= 1 code)
                 "the collision must still be found when the caller stands on ~A; exit was ~D~%~A"
@@ -876,7 +876,7 @@ an empty drive."
             (is (not (search "0 .asd files" out))
                 "and it must have read the fixture rather than an empty drive:~%~A" out))))))
 
-;;; --- which SPELLING does the refusal print? (#510) --------------------------
+;;; --- which SPELLING does the refusal print? (pre-publication issue 510) --------------------------
 ;;;
 ;;; What this exists to detect: a refusal that names one directory two ways. `caller-root'
 ;;; is walked up from `uiop:getcwd', which preserves whatever spelling the caller used;
@@ -895,12 +895,12 @@ an empty drive."
 ;;; assertions above would also catch this, but only on a machine whose TEMP happens to be
 ;;; aliased, which is a property of GitHub's image rather than of this tree. When that image
 ;;; changes they go vacuous and nothing says so. Forcing the condition is the same rule the
-;;; #482 tests follow by moving their own working directory.
+;;; pre-publication issue 482 tests follow by moving their own working directory.
 
 (defun %another-name-for (dir)
   "A second, textually different name that resolves to DIR, or NIL if this platform has none.
 
-Copied from `klio/tests/klio-tests.lisp', where it was written for #446. Copied rather than
+Copied from `klio/tests/klio-tests.lisp', where it was written for pre-publication issue 446. Copied rather than
 depended on: `checkers' has no business loading klio, and a test helper is not a dependency
 worth taking across the DAG for.
 
@@ -962,7 +962,7 @@ rebuilt in the guard meant to prevent it."
       out)))
 
 (test the-refusal-names-one-directory-one-way-whatever-spelling-the-caller-used
-  "#510. The caller stands in an ALIAS of its own tree, so `uiop:getcwd' reports a spelling
+  "pre-publication issue 510. The caller stands in an ALIAS of its own tree, so `uiop:getcwd' reports a spelling
 that `*load-truename*' does not use. Before the fix the refusal printed the caller's tree in
 the caller's spelling and the script's tree truenamed, and a reader comparing them saw two
 directories where there was one.
@@ -981,7 +981,7 @@ with the producer."
         ((null seen)
          (skip "could not determine what spelling a process standing in the second name reports, so whether this host creates the condition at all is unknown -- skipping rather than asserting against a precondition that was never confirmed"))
         ((string= seen (uiop:native-namestring (truename ours)))
-         (skip "a child started in the second name reports the canonical one, so the two spellings collapse before the script sees them -- this is the Windows 8.3 case (#510) and only a host that hands the alias through exercises it"))
+         (skip "a child started in the second name reports the canonical one, so the two spellings collapse before the script sees them -- this is the Windows 8.3 case (pre-publication issue 510) and only a host that hands the alias through exercises it"))
         (t
           (multiple-value-bind (code out)
               (%run-in alias (merge-pathnames "scripts/mbedtls-sources.lisp" theirs))

@@ -26,7 +26,7 @@ separate repos with their own — not counted here.
 - **28** distinct **external** (third-party / Quicklisp) deps — 3 are foundation/test
   (`coalton`, `alexandria`, `fiveam`), **~13 are hyperion's web stack**, **3 are the
   mnemosyne data layer** (CL-DBI + two drivers), and **2 arrived with hermes** (`cl-base64`,
-  `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (#164)). One (`lass`) is example-only.
+  `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (pre-publication issue 164)). One (`lass`) is example-only.
 - **3** SBCL contribs (`sb-concurrency`, `sb-bsd-sockets`, `sb-posix` — ship with SBCL, zero install cost).
 - Every framework **except hyperion and mnemosyne** (the two that inherently carry a
   surface — web, DB) runs on just **2–4** external libs (hermes, the integrations leaf, is
@@ -39,29 +39,29 @@ separate repos with their own — not counted here.
 | `coalton` | typed core (the language) | aion, elenchon, hyperion, mnemosyne, praxeon | Foundation, not "sprawl" — treated as the language (see below). |
 | `alexandria` | CL utilities | all six core (not hermes) | De-facto CL stdlib; tiny, ubiquitous. |
 | `fiveam` | test framework | all `*/tests` | **Test-only.** |
-| `flexi-streams` | in-memory octet streams | `hyperion/tests` | **Test-only.** Hands `body-string` a body without a socket (#211). Already present transitively via clack; declared rather than assumed. |
+| `flexi-streams` | in-memory octet streams | `hyperion/tests` | **Test-only.** Hands `body-string` a body without a socket (pre-publication issue 211). Already present transitively via clack; declared rather than assumed. |
 | `clingon` | CLI arg parsing | cons/cli, hyperion/cli | hyperion/cli is being retired (ADR-0007) → collapses to **cons only**. |
 | `com.inuoe.jzon` | JSON | hyperion, praxeon(+web,+web-search) | **One** JSON lib across the tree — no duplication. |
-| `dexador` | HTTP client | **aion/http-client** (the shared client), hermes/blob | Wrapped once by `aion/http-client` (#202) and reached through it by hermes and praxeon; `hermes/blob` still calls it directly for streaming. **Shared** — and now shared through one client rather than three call styles. |
-| `ironclad` | crypto (SHA-256, HMAC, Ed25519, **OS CSPRNG**) | hermes, hermes/blob, praxeon, **aion/random** | Twilio's inbound `X-Twilio-Signature`; blob checksums + S3 SigV4; **Ed25519 verification of signed spend grants** in `praxeon/ceiling` (#172); and since #95 the **OS random source** behind `aion/random` (`/dev/urandom`, `CryptGenRandom`) that mints session ids. **Shared** — arrived with hermes and reused each time rather than duplicated; #95 added a fourth consumer and **no new dependency**. |
+| `dexador` | HTTP client | **aion/http-client** (the shared client), hermes/blob | Wrapped once by `aion/http-client` (pre-publication issue 202) and reached through it by hermes and praxeon; `hermes/blob` still calls it directly for streaming. **Shared** — and now shared through one client rather than three call styles. |
+| `ironclad` | crypto (SHA-256, HMAC, Ed25519, **OS CSPRNG**) | hermes, hermes/blob, praxeon, **aion/random** | Twilio's inbound `X-Twilio-Signature`; blob checksums + S3 SigV4; **Ed25519 verification of signed spend grants** in `praxeon/ceiling` (pre-publication issue 172); and since pre-publication issue 95 the **OS random source** behind `aion/random` (`/dev/urandom`, `CryptGenRandom`) that mints session ids. **Shared** — arrived with hermes and reused each time rather than duplicated; pre-publication issue 95 added a fourth consumer and **no new dependency**. |
 | `clack` | HTTP server abstraction | hyperion | Web. |
 | `woo` | HTTP server (Unix/macOS) | praxeon/web | Pulled by `clack-handler-woo`. **No framework declares it** — see the two rows below. |
 | `hunchentoot` | HTTP server (Windows) | praxeon/web, hyperion examples | Pulled by `clack-handler-hunchentoot`. Likewise app-declared. |
 | `clack-handler-woo` | Clack↔Woo adapter | praxeon/web (Unix) | The system an app actually declares; it pulls `woo`. Binds **libev at load time**, so an image that loads it cannot be shipped as a desktop bundle without carrying libev. |
-| `clack-handler-hunchentoot` | Clack↔Hunchentoot adapter | praxeon/web (Windows), all three hyperion examples, **`praxeon/web/tests`** | Pure CL, every platform, nothing to install — which is why the desktop example uses it. `praxeon/web/tests` declares it because a suite that drives a real server is an *application* for the #139 rule: `praxeon/web` must keep declaring none, so its suite cannot live in `praxeon/tests` (#151). |
+| `clack-handler-hunchentoot` | Clack↔Hunchentoot adapter | praxeon/web (Windows), all three hyperion examples, **`praxeon/web/tests`** | Pure CL, every platform, nothing to install — which is why the desktop example uses it. `praxeon/web/tests` declares it because a suite that drives a real server is an *application* for the pre-publication issue 139 rule: `praxeon/web` must keep declaring none, so its suite cannot live in `praxeon/tests` (pre-publication issue 151). |
 | `log4cl` | logging engine | `aion/log` (and via it: every framework) | The engine behind the `aion/log` facade. Confined to the opt-in `aion/log` system; core aion never pulls it. *Previously documented only in prose here — added as a row 2026-08-04 by `scripts/check-deps.lisp`.* |
 | `lass` | CSS as s-expressions | `hyperion/examples/coalton-repl` | **Example-only** — no framework depends on it. Kept because the house CSS-DSL story (ADR-0003 §4) is dogfooded in the desktop demo. |
 | `spinneret` | HTML as s-expressions | hyperion(+examples), praxeon/web | The HTML DSL — core to the thesis. |
 | `parenscript` | CL → JavaScript | hyperion | No Node. |
-| `quri` | URI parsing | hyperion, mnemosyne | Web; and percent-decoding a `DATABASE_URL` in `mnemosyne/url` (#147). Already in the tree, so mnemosyne adds no new external dep — and percent-decoding is not hand-rollable safely, since an escape may encode one byte of a multi-byte UTF-8 sequence. mnemosyne uses it for decoding ONLY: quri rejects `postgres://user@[::1]/db` outright, so the authority split is ours. |
-| `bordeaux-threads` | portable threads | hyperion, praxeon | Session-store locks; the per-session spend ledger in `praxeon/ceiling` (#172). **See watch #2** (we're SBCL-only). |
+| `quri` | URI parsing | hyperion, mnemosyne | Web; and percent-decoding a `DATABASE_URL` in `mnemosyne/url` (pre-publication issue 147). Already in the tree, so mnemosyne adds no new external dep — and percent-decoding is not hand-rollable safely, since an escape may encode one byte of a multi-byte UTF-8 sequence. mnemosyne uses it for decoding ONLY: quri rejects `postgres://user@[::1]/db` outright, so the authority split is ours. |
+| `bordeaux-threads` | portable threads | hyperion, praxeon | Session-store locks; the per-session spend ledger in `praxeon/ceiling` (pre-publication issue 172). **See watch #2** (we're SBCL-only). |
 | `3bmd` | Markdown → HTML | hyperion | `hyperion/markdown`. |
 | `3bmd-ext-code-blocks` | Markdown code blocks | hyperion | Pairs with `3bmd`. |
 | `plump` | HTML parsing | hyperion/import | The HTML→Spinneret importer — **aux system only** (core hyperion never pulls it). |
 | `dbi` (CL-DBI) | DB-independent API | mnemosyne | The neutral SQL substrate — one API over SQLite + Postgres. |
 | `dbd-postgres` | PostgreSQL **wire** driver | mnemosyne | Via `cl-postgres` (pure Lisp, no libpq); XTDB 2 rides it later. |
 | `dbd-sqlite3` | SQLite driver | mnemosyne | Local-dev backend; via `cl-sqlite` (FFI to the system `libsqlite3`). |
-| `cffi` | C FFI | `aion/uv` (aux only) | **New (2026-08-03).** The binding layer for libuv. Already present transitively (woo and cl-sqlite both pull it), so this makes an existing dependency explicit rather than adding a new one to the tree. Confined to the opt-in `aion/uv` and the Windows-only `aion/windows` (#170) — core aion stays `coalton` + `alexandria`. **`aion/windows` adds no new dependency at all**: `cffi` was already here, and its threads come from `sb-thread` rather than `bordeaux-threads`, since a portability shim over threads buys nothing in a system that is Windows-only inside an SBCL-only tree. |
+| `cffi` | C FFI | `aion/uv` (aux only) | **New (2026-08-03).** The binding layer for libuv. Already present transitively (woo and cl-sqlite both pull it), so this makes an existing dependency explicit rather than adding a new one to the tree. Confined to the opt-in `aion/uv` and the Windows-only `aion/windows` (pre-publication issue 170) — core aion stays `coalton` + `alexandria`. **`aion/windows` adds no new dependency at all**: `cffi` was already here, and its threads come from `sb-thread` rather than `bordeaux-threads`, since a portability shim over threads buys nothing in a system that is Windows-only inside an SBCL-only tree. |
 
 ### Shipped into generated projects
 
@@ -88,7 +88,7 @@ each template into a temporary directory, reads the `.asd` the generator actuall
 fails if a dependency in it is missing here or if a row here names a template that no longer
 ships it. It reads the emitted file rather than `template.lisp` because the manifest only
 says what we intended to substitute; the generated file says what a user got. That is how
-`fiveam` was found (#361).
+`fiveam` was found (pre-publication issue 361).
 
 ### Native (non-Lisp) dependencies
 
@@ -98,15 +98,15 @@ error, a missing shared library is a loader failure at some unrelated later mome
 | Dep | Role | Used by | How it is obtained |
 |---|---|---|---|
 | `libuv` 1.52.1 | event loop, async/sync fs, timers, fs watching | `aion/uv` (opt-in) | **Built from source** by `scripts/build-libuv.lisp` against the root `libuv.pin` (version + sha256 + url). Not a distro package: see below. |
-| `libsqlite3` | SQLite engine | mnemosyne, via `cl-sqlite` | The system's copy, whatever it is. **Unpinned and unbundled** — the same exposure ADR-0011 found with libev, still outstanding (#94). Vendoring it would make it carried automatically, since the bundler carries what this tree builds (ADR-0013). |
-| `libev` | Woo's event loop | only an app that declares `clack-handler-woo` | **No longer reachable from a framework** (#139): hyperion used to declare the Woo handler, so every image loading hyperion held an open libev handle and every Linux desktop bundle died at startup. Now it is an application's deliberate choice, and an application that makes it owns bundling it. |
-| OpenSSL (via `cl+ssl`) | TLS for a Postgres connection | only an app that declares `cl+ssl` | **Deliberately NOT a mnemosyne dependency** (#146), on exactly the reasoning of the row above. `cl-postgres` resolves cl+ssl at *connect* time rather than at load time, so an application that needs `sslmode=require` adds `cl+ssl` itself and mnemosyne keeps OpenSSL off the load path of every image that touches a database — including desktop bundles. `mnemosyne/conn` degrades `prefer` to plaintext with a warning when it is absent, and REFUSES `require`/`verify-*` rather than downgrading silently. |
+| `libsqlite3` | SQLite engine | mnemosyne, via `cl-sqlite` | The system's copy, whatever it is. **Unpinned and unbundled** — the same exposure ADR-0011 found with libev, still outstanding (#78). Vendoring it would make it carried automatically, since the bundler carries what this tree builds (ADR-0013). |
+| `libev` | Woo's event loop | only an app that declares `clack-handler-woo` | **No longer reachable from a framework** (pre-publication issue 139): hyperion used to declare the Woo handler, so every image loading hyperion held an open libev handle and every Linux desktop bundle died at startup. Now it is an application's deliberate choice, and an application that makes it owns bundling it. |
+| OpenSSL (via `cl+ssl`) | TLS for a Postgres connection | only an app that declares `cl+ssl` | **Deliberately NOT a mnemosyne dependency** (pre-publication issue 146), on exactly the reasoning of the row above. `cl-postgres` resolves cl+ssl at *connect* time rather than at load time, so an application that needs `sslmode=require` adds `cl+ssl` itself and mnemosyne keeps OpenSSL off the load path of every image that touches a database — including desktop bundles. `mnemosyne/conn` degrades `prefer` to plaintext with a warning when it is absent, and REFUSES `require`/`verify-*` rather than downgrading silently. |
 
 **Why libuv is built rather than installed.** Three reasons, in order of how much they
 cost when ignored: (1) ADR-0011 — Woo bound libev at load time and every Linux/macOS
 desktop bundle died on a clean machine, because a native dep you do not build is one you
 cannot bundle; (2) one version everywhere, instead of Ubuntu's 1.51.0 and whatever brew
-and MSYS2 carry; (3) it is the same artifact CI publishes and installers will ship (#94).
+and MSYS2 carry; (3) it is the same artifact CI publishes and installers will ship (#78).
 The build needs only a C compiler — no cmake, no make — so the "no external build tools"
 rule survives intact.
 
@@ -119,7 +119,7 @@ rule survives intact.
 
 `sb-posix` is there for exactly one call. A scratch directory must be **created**, never
 chosen-then-written-to, and `mkdir` is the only atomic create-or-fail CL exposes — it refuses
-a path already occupied, **including by a symlink**, which is the attack (#204). The guard is
+a path already occupied, **including by a symlink**, which is the attack (pre-publication issue 204). The guard is
 on `:unix` rather than on `:sbcl` because SBCL's Windows `sb-posix` is thinner, and naming a
 symbol it lacks is a READ error rather than a run-time one.
 
@@ -127,13 +127,13 @@ symbol it lacks is a READ error rather than a run-time one.
 
 | Framework | External deps | Count |
 |---|---|---|
-| **aion** | coalton, alexandria (+ `cffi` and native libuv in the opt-in `aion/uv`; log4cl via `aion/log`, which the opt-in `aion/pool` now depends on so a job that signals cannot be discarded in silence (#117 M2); **ironclad + bordeaux-threads in the opt-in `aion/random`, which `aion/clock` now uses for the non-timestamp bits of a v6 id (#95)**; `aion/csv` has none; **`aion/secret` has none and is Coalton-free — `aion/secret/types` is the opt-in Coalton view, #209**; **`aion/dynamic` has none** — it carries declared dynamic bindings across a thread boundary and owns no threading, #430) | 2 core |
-| **cons** | alexandria (+ clingon in `cons/cli`; `sb-posix` on Unix, an SBCL contrib, for `mkdir` in `cons/tempdir` — #204; intra-tree `aion/secret`, which has **no** external deps and **no** Coalton — #209) | 2 |
-| **mnemosyne** | coalton, alexandria, dbi, dbd-postgres, dbd-sqlite3, quri (+ `aion/log` → log4cl; `aion/clock` → `aion/random` → **ironclad** (#95, pure CL: load time only, no native dep); dexador + ironclad in the opt-in `hermes/blob`) | 6 core (+ transitive `cl-postgres` = PG wire, `sqlite`/cl-sqlite = SQLite FFI) |
+| **aion** | coalton, alexandria (+ `cffi` and native libuv in the opt-in `aion/uv`; log4cl via `aion/log`, which the opt-in `aion/pool` now depends on so a job that signals cannot be discarded in silence (pre-publication issue 117 M2); **ironclad + bordeaux-threads in the opt-in `aion/random`, which `aion/clock` now uses for the non-timestamp bits of a v6 id (pre-publication issue 95)**; `aion/csv` has none; **`aion/secret` has none and is Coalton-free — `aion/secret/types` is the opt-in Coalton view, pre-publication issue 209**; **`aion/dynamic` has none** — it carries declared dynamic bindings across a thread boundary and owns no threading, #158) | 2 core |
+| **cons** | alexandria (+ clingon in `cons/cli`; `sb-posix` on Unix, an SBCL contrib, for `mkdir` in `cons/tempdir` — pre-publication issue 204; intra-tree `aion/secret`, which has **no** external deps and **no** Coalton — pre-publication issue 209) | 2 |
+| **mnemosyne** | coalton, alexandria, dbi, dbd-postgres, dbd-sqlite3, quri (+ `aion/log` → log4cl; `aion/clock` → `aion/random` → **ironclad** (pre-publication issue 95, pure CL: load time only, no native dep); dexador + ironclad in the opt-in `hermes/blob`) | 6 core (+ transitive `cl-postgres` = PG wire, `sqlite`/cl-sqlite = SQLite FFI) |
 | **elenchon** | coalton, alexandria | 2 |
 | **praxeon** | coalton, alexandria, dexador, com.inuoe.jzon, ironclad, bordeaux-threads (+ `aion/log` → log4cl, `aion/interceptor` → none, `cons` → none; spinneret, sb-concurrency, woo\|hunchentoot in `praxeon/web`) | ~6 core |
-| **hyperion** | coalton, alexandria, bordeaux-threads, clack, spinneret, parenscript, quri, com.inuoe.jzon, 3bmd, 3bmd-ext-code-blocks, woo\|hunchentoot (+ `aion/random` → **ironclad** for session ids (#95); `aion/log` → log4cl; plump in `/import`, clingon in `/cli`; `aion/dynamic` in core so the request context and request id cross into a thread the request spawns (#430 -- **no new external dep**); `aion/platform` in `/desktop` for the one resolver that answers where the running executable lives (#335 -- **no new external dep**, and it REPLACES a second copy of that walk rather than adding one); `aion/signature` + `aion/platform` + `aion/http-client` + `cl-base64` in the opt-in `hyperion/update` (#76; dexador was dropped from that line in #332 once #223 moved the binary-body contract into `aion/http-client` — it arrives through the shared client now, declared where it is used) -- **no new external dep**, every one already in the tree; `cl-base64` because a detached `.sig` is base64 TEXT, which is the same reason `aion/signature` carries it) | ~11 (+ `sb-bsd-sockets`, an SBCL **contrib**, for the #238 port preflight — previously reaching core only transitively via clack/usocket and now declared) |
-| **hermes** (satellite) | dexador, com.inuoe.jzon, cl-base64, ironclad (+ `aion/log` → log4cl **and coalton**; `hermes/payments` adds coalton for the event vocabulary, plus `aion/secret/types` for opaque credentials (#209) — NO new external dep either way) | 4 |
+| **hyperion** | coalton, alexandria, bordeaux-threads, clack, spinneret, parenscript, quri, com.inuoe.jzon, 3bmd, 3bmd-ext-code-blocks, woo\|hunchentoot (+ `aion/random` → **ironclad** for session ids (pre-publication issue 95); `aion/log` → log4cl; plump in `/import`, clingon in `/cli`; `aion/dynamic` in core so the request context and request id cross into a thread the request spawns (#158 -- **no new external dep**); `aion/platform` in `/desktop` for the one resolver that answers where the running executable lives (pre-publication issue 335 -- **no new external dep**, and it REPLACES a second copy of that walk rather than adding one); `aion/signature` + `aion/platform` + `aion/http-client` + `cl-base64` in the opt-in `hyperion/update` (pre-publication issue 76; dexador was dropped from that line in pre-publication issue 332 once pre-publication issue 223 moved the binary-body contract into `aion/http-client` — it arrives through the shared client now, declared where it is used) -- **no new external dep**, every one already in the tree; `cl-base64` because a detached `.sig` is base64 TEXT, which is the same reason `aion/signature` carries it) | ~11 (+ `sb-bsd-sockets`, an SBCL **contrib**, for the pre-publication issue 238 port preflight — previously reaching core only transitively via clack/usocket and now declared) |
+| **hermes** (satellite) | dexador, com.inuoe.jzon, cl-base64, ironclad (+ `aion/log` → log4cl **and coalton**; `hermes/payments` adds coalton for the event vocabulary, plus `aion/secret/types` for opaque credentials (pre-publication issue 209) — NO new external dep either way) | 4 |
 
 The web framework and the data layer carry the surface; everything else is lean by construction.
 
@@ -236,7 +236,7 @@ depends only leftward + external — never on hyperion/mnemosyne/praxeon. Its ex
 |---|---|---|
 | `dexador` | HTTP client | **Shared** — already praxeon's; the one outbound effect. |
 | `com.inuoe.jzon` | JSON | **Shared** — the one JSON lib across the tree. |
-| `cl-base64` | Base64 | **New.** Twilio Basic auth + inbound-signature encoding. **Also `aion/signature` (#208)**, which moves it LEFTMOST: keys travel as text in CI secrets and manifests, and one canonical encoding beats each consumer choosing. Already loaded wherever ironclad is, so this widens where it is used rather than what is pulled in. |
+| `cl-base64` | Base64 | **New.** Twilio Basic auth + inbound-signature encoding. **Also `aion/signature` (pre-publication issue 208)**, which moves it LEFTMOST: keys travel as text in CI secrets and manifests, and one canonical encoding beats each consumer choosing. Already loaded wherever ironclad is, so this widens where it is used rather than what is pulled in. |
 | `ironclad` | crypto (HMAC-SHA1) | **New.** Verifies the inbound `X-Twilio-Signature`. |
 | `aion/log` (→ `log4cl`) | logging facade | Framework logging across the tree: hyperion (request id + one line per request), mnemosyne (SQL/migrations at :debug), praxeon (LLM metadata at :debug), hermes (send attempts/failures). One shared facade so an app configures logging once — see [`logging.md`](logging.md). |
 
@@ -245,7 +245,7 @@ So hermes adds **two** genuinely new external libs (`cl-base64`, `ironclad`) plu
 
 ## Vendored browser assets (not ASDF dependencies)
 
-Added 2026-08-05 (#123). A third category, listed here because it is a dependency surface
+Added 2026-08-05 (pre-publication issue 123). A third category, listed here because it is a dependency surface
 even though nothing in the `.asd` files mentions it and `scripts/check-deps.lisp` cannot
 see it.
 

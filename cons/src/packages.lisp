@@ -105,7 +105,7 @@
 (cl:defpackage #:cons/tempdir
   (:use #:cl)
   (:documentation
-   "Private scratch directories that are CREATED, never chosen and hoped for (#204).
+   "Private scratch directories that are CREATED, never chosen and hoped for (pre-publication issue 204).
 
     MAKE-TEMPORARY-DIRECTORY and WITH-TEMPORARY-DIRECTORY. Its own module because five
     call sites across src and tests had each open-coded the same unsafe idiom, and a
@@ -132,7 +132,7 @@
 (cl:defpackage #:cons/upstream
   (:use #:cl)
   (:documentation
-   "Is the framework checkout a consuming app builds against current? (#240)
+   "Is the framework checkout a consuming app builds against current? (pre-publication issue 240)
 
     Advisory only -- printed before a target runs, never a gate, never a network call.
     The count alone would be non-evidence: `git rev-list --count HEAD..@{u}' compares

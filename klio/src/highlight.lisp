@@ -1,6 +1,6 @@
 ;;;; highlight.lisp --- a small Common Lisp highlighter, applied at content-load time.
 ;;;;
-;;;; #359 Q3, ruled: a small CL highlighter, Lisp only, at content-load time; other languages
+;;;; pre-publication issue 359 Q3, ruled: a small CL highlighter, Lisp only, at content-load time; other languages
 ;;;; render as plain `<pre>`. The argument that decided it is worth keeping next to the code:
 ;;;; a site whose whole claim is "CL all the way down" that ships JavaScript to colour its
 ;;;; Lisp makes the opposite argument on every page. A general highlighter was the other

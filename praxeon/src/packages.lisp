@@ -6,7 +6,7 @@
 ;;;;   praxeon/conditions  -- the recoverable-failure protocol (CL condition system).
 ;;;;   praxeon/context     -- budgeted, bitemporal context assembly (seed of Kairos).
 ;;;;   praxeon/llm         -- LLM provider protocol + an Anthropic implementation.
-;;;;   praxeon/prompt      -- what is SENT: history trimmed to a budget, facts placed (#402).
+;;;;   praxeon/prompt      -- what is SENT: history trimmed to a budget, facts placed (pre-publication issue 402).
 ;;;;   praxeon/actor       -- the dynamic shell: deliberate -> select -> act loop.
 ;;;;   praxeon             -- umbrella package re-exporting the common surface.
 
@@ -101,7 +101,7 @@
   (:export
    ;; protocol
    #:provider #:complete
-   ;; the embedding seam (#372, #415) -- a SEPARATE hierarchy, not a capability on PROVIDER
+   ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch
    #:embedding-dimensions #:embedding-model-of
    #:openai-compatible-embeddings #:oai-embed-model #:oai-embed-base-url
@@ -168,8 +168,8 @@
 (defpackage #:praxeon/prompt
   (:use #:cl)
   (:documentation
-   "What is SENT, as distinct from what is remembered (#402, ADR-0001). History is
-    TRIMMED -- whole exchanges, oldest first, never through the cacheable prefix (#401);
+   "What is SENT, as distinct from what is remembered (pre-publication issue 402, ADR-0001). History is
+    TRIMMED -- whole exchanges, oldest first, never through the cacheable prefix (pre-publication issue 401);
     retrieved facts are RANKED by praxeon/context and placed after it. Nothing here
     mutates an agent.")
   (:local-nicknames (#:ctx #:praxeon/context)
@@ -189,7 +189,7 @@
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)
   (:documentation
-   "One agent turn as a VALUE a pipeline can operate on (#130). aion/interceptor threads
+   "One agent turn as a VALUE a pipeline can operate on (pre-publication issue 130). aion/interceptor threads
     a context :c through enter/leave stages; praxeon had no :c, so the flagship example
     hand-composed translate -> turn -> guardrail in a let* and said so in its docstring --
     stages that cannot be reordered, inspected, or short-circuited. TURN is that context:
@@ -209,7 +209,7 @@
                     (#:jzon #:com.inuoe.jzon)
                     (#:bt #:bordeaux-threads))
   (:documentation
-   "What a caller may spend, and refusing before it is spent (#172). Two ceilings, not
+   "What a caller may spend, and refusing before it is spent (pre-publication issue 172). Two ceilings, not
     one: this is the per-session RUNAWAY cap -- the `curl` in a loop -- carried as a claim
     in a grant the application signs. The monthly billing quota stays with the application,
     at mint time, where the ledger already lives; separating them dissolves the trade
@@ -265,7 +265,7 @@
   (:local-nicknames (#:actor #:praxeon/actor)
                     (#:evt #:praxeon/event)
                     (#:cnd #:praxeon/conditions)
-                    (#:bt #:bordeaux-threads)   ; fan-out really fans out (#418)
+                    (#:bt #:bordeaux-threads)   ; fan-out really fans out (pre-publication issue 418)
                     (#:px #:praxeon/praxeology))
   (:shadow #:step)                         ; STEP is our step-builder here
   (:export

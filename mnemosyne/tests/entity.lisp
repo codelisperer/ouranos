@@ -5,7 +5,7 @@
 ;;;; below is also the reference for implementing DTO on your own type.
 ;;;;
 ;;;; The CLOCK's guarantees are no longer tested here: the monotonic counter and the v6
-;;;; assembly moved to aion/clock (#96), and so did the tests that hammer them. What
+;;;; assembly moved to aion/clock (pre-publication issue 96), and so did the tests that hammer them. What
 ;;;; remains on that front is one check that the seam is a re-export and not a copy.
 
 ;;; --- Coalton support: a type that implements the DTO trait -----------------
@@ -62,7 +62,7 @@
        (member (char s 19) '(#\8 #\9 #\a #\b))))      ; variant
 
 (test the-id-seam-is-aion-clock-itself
-  "The clock moved to aion/clock (#96) and its guarantees are tested THERE -- shape,
+  "The clock moved to aion/clock (pre-publication issue 96) and its guarantees are tested THERE -- shape,
 strict monotonicity under six threads, and v6 lexical sort order. What is mnemosyne's to
 prove is that the seam did not become a copy: MNEMOSYNE/ID:NEW-ID must be aion's symbol,
 not a forwarding function that could drift from it. EQ on the symbols is the only

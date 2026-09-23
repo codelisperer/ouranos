@@ -16,7 +16,7 @@
                     (#:turn #:praxeon/turn)
                     (#:ceiling #:praxeon/ceiling)
                     (#:wf #:praxeon/workflow)
-                    (#:bt #:bordeaux-threads)   ; #418: fan-out is really concurrent now
+                    (#:bt #:bordeaux-threads)   ; pre-publication issue 418: fan-out is really concurrent now
                     (#:web-search #:praxeon/web-search)
                     (#:mem #:praxeon/memory)
                     (#:dst #:praxeon/distil))
@@ -24,7 +24,7 @@
 
 (cl:in-package #:praxeon/tests)
 
-;;; --- writing to memory in tests (#415) --------------------------------------
+;;; --- writing to memory in tests (#150) --------------------------------------
 ;;;
 ;;; Provenance is REQUIRED on every write, so every test that writes must supply one. These
 ;;; wrappers supply a fixed source so that the tests about supersession, budgets and erasure
@@ -118,7 +118,7 @@ inheriting the original's source."
 (defmethod llm:complete ((p scripted) messages
                          &key system tools max-tokens temperature tool-choice)
   ;; TOOL-CHOICE is accepted and ignored here. Adding a &key to a generic function obliges
-  ;; every method to accept it, which is a real compatibility cost of #416 and the reason
+  ;; every method to accept it, which is a real compatibility cost of pre-publication issue 416 and the reason
   ;; the PR says so: any provider implemented outside this tree needs the same edit.
   (declare (ignore messages system tools max-tokens temperature tool-choice))
   (or (pop (scripted-script p))
@@ -457,7 +457,7 @@ with payloads, to a bound observer."
       (is (not (null spec)))
       (is (not (null (llm:tool-spec-schema spec)))))))
 
-;;; --- a turn as a value, and a pipeline over it (#130) ----------------------
+;;; --- a turn as a value, and a pipeline over it (pre-publication issue 130) ----------------------
 ;;;
 ;;; The point of these is that a turn's SHAPE is now testable without a model. Before
 ;;; this, the composition lived in a `let*` inside the flagship example, so the only way
@@ -506,7 +506,7 @@ effect did or did not happen."
     (is (string= "answered: HI" (turn:turn-reply tn)))))
 
 (test a-leave-stage-can-replace-the-reply
-  ;; THE defect #130 names: Elise's crisis guardrail is an `if` at the bottom that appends
+  ;; THE defect pre-publication issue 130 names: Elise's crisis guardrail is an `if` at the bottom that appends
   ;; a note to whatever the model already said. A safety guardrail wants to REPLACE.
   (let* ((guardrail (turn:leave-stage "crisis"
                                       (lambda (tn) (turn:with-reply tn "please call 988"))))
@@ -522,7 +522,7 @@ effect did or did not happen."
     (is (string= "answered: x<b<a" (turn:turn-reply tn))
         "inner stage leaves first; got ~S" (turn:turn-reply tn))))
 
-;;; --- refusal, which is the property #172 is built on -----------------------
+;;; --- refusal, which is the property pre-publication issue 172 is built on -----------------------
 
 (test a-guard-can-refuse-and-the-model-is-never-called
   ;; A budget or safety refusal must cost nothing. If this regresses, a refusal still
@@ -544,7 +544,7 @@ effect did or did not happen."
     (is (string= "answered: hi" (turn:turn-reply tn)))))
 
 (test a-refusal-is-distinguishable-from-an-answer
-  ;; Requirement 3 of #172: a hard, legible refusal, never silent degradation. A caller
+  ;; Requirement 3 of pre-publication issue 172: a hard, legible refusal, never silent degradation. A caller
   ;; must be able to tell "refused" from "answered" without parsing the reply text.
   (let* ((deny (turn:guard-stage "deny" (lambda (tn) (turn:halt-with tn "quota exhausted"))))
          (refused (turn:run-chain (list deny) (%echo-effect) (turn:make-turn "hi" "en")))
@@ -564,7 +564,7 @@ effect did or did not happen."
     (is (zerop (car calls)))
     (is (string= ">hi" (turn:turn-input tn)) "the earlier stage's work is still visible")))
 
-;;; --- the cost ceiling (#172) -----------------------------------------------
+;;; --- the cost ceiling (pre-publication issue 172) -----------------------------------------------
 ;;;
 ;;; Two kinds of property here, and the second kind is why this file is long.
 ;;;
@@ -766,9 +766,9 @@ effect did or did not happen."
     (is (= before (ceiling:remaining-tokens l))
         "a refused turn must not be billed")))
 
-;;; --- what a cached prefix costs the guard (#417) -----------------------------
+;;; --- what a cached prefix costs the guard (pre-publication issue 417) -----------------------------
 ;;;
-;;; #401 made four counts visible on a COMPLETION; the ledger received two. Measured on
+;;; pre-publication issue 401 made four counts visible on a COMPLETION; the ledger received two. Measured on
 ;;; f725afd, before the fix: a turn reporting input 10 / output 40 / cache-read 5000 charged
 ;;; FIFTY, and ten such turns against a 1000-token cap left the guard still permitting more
 ;;; after the session had reported 50500 -- 101x under, in the direction that reads as
@@ -780,7 +780,7 @@ effect did or did not happen."
                        :cache-read-tokens read :cache-write-tokens write))
 
 (defun %meter-for (ledger completion &key (model "m"))
-  "The meter stage wired to COMPLETION's four counts -- the four accessors #401 added."
+  "The meter stage wired to COMPLETION's four counts -- the four accessors pre-publication issue 401 added."
   (ceiling:meter ledger :model model
                         :input-fn (lambda () (llm:completion-input-tokens completion))
                         :output-fn (lambda () (llm:completion-output-tokens completion))
@@ -814,7 +814,7 @@ bound a runaway and could not explain a bill."
       (is (string= "search" (getf line :means)) "and the old fields are untouched"))))
 
 (test a-provider-that-reports-no-cache-is-not-recorded-as-reporting-zero
-  "#401 paid for this distinction and the boundary is where it would be lost: NIL means the
+  "pre-publication issue 401 paid for this distinction and the boundary is where it would be lost: NIL means the
 provider said nothing, 0 means it reported a miss. Both charge nothing; only one is a
 measurement."
   (let ((l (%ledger :token-cap 100000)))
@@ -885,9 +885,9 @@ allowed to be the same, because a sum has to be a number."
   (is (= 10 (ceiling:chargeable-tokens :input 10 :cache-read nil :cache-write nil)))
   (is (= 10 (ceiling:chargeable-tokens :input 10 :cache-read 0 :cache-write 0))))
 
-;;; --- #218: a framework does not choose the application's HTTP server ---------
+;;; --- pre-publication issue 218: a framework does not choose the application's HTTP server ---------
 ;;;
-;;; #139 / ADR-0011 decided this and hyperion implemented it -- but only for itself.
+;;; pre-publication issue 139 / ADR-0011 decided this and hyperion implemented it -- but only for itself.
 ;;; praxeon/web went on declaring clack-handler-woo on Unix, so every praxeon web app
 ;;; deployed on Linux or macOS ran on Woo without ever choosing it, and Woo does not
 ;;; answer SIGTERM (measured 3x per cell on macOS, 21 runs on Linux). A supervisor's
@@ -939,7 +939,7 @@ question."
   ;; The framework system must not choose for the app.
   (let ((deps (%asd-deps "praxeon/web")))
     (is (null (%handlers-among deps))
-        "praxeon/web pulls an HTTP handler again: ~S -- see #139/#218"
+        "praxeon/web pulls an HTTP handler again: ~S -- see pre-publication issue 139/pre-publication issue 218"
         (%handlers-among deps))
     ;; The walk must still be ASKING something. Without this the assertion above passes
     ;; forever if find-system starts returning NIL (a renamed system, a broken registry).
@@ -953,15 +953,15 @@ question."
     (is-true (gethash "clack-handler-hunchentoot" deps)
              "praxeon/elise no longer declares an HTTP backend -- it will not start")
     (is-false (gethash "clack-handler-woo" deps)
-              "praxeon/elise declares Woo, which does not answer SIGTERM (#218)")))
-;;; --- #122: an agent's tools are ASSEMBLED from capabilities ------------------
+              "praxeon/elise declares Woo, which does not answer SIGTERM (pre-publication issue 218)")))
+;;; --- #90: an agent's tools are ASSEMBLED from capabilities ------------------
 ;;;
 ;;; The property: a means the caller may not use is ABSENT from the tool table, not
 ;;; refused at call time. Nothing downstream -- no prompt, no model output, no injected
 ;;; instruction -- can reach a means that was never advertised, because refusing it is not
 ;;; a decision anything makes; it is a table that does not contain it.
 ;;;
-;;; praxeon/ceiling has claimed this since #172. Nothing implemented it: AGENT-TOOL-SPECS
+;;; praxeon/ceiling has claimed this since pre-publication issue 172. Nothing implemented it: AGENT-TOOL-SPECS
 ;;; advertised every registered means, and CAPABILITY-GUARD gated a whole TURN rather than
 ;;; a means. These tests are what make the claim true rather than stated.
 
@@ -1057,7 +1057,7 @@ OTHER than the name the caller themselves supplied."
                (%names (actor:agent-tool-specs (%caps-agent) :permit permit))))))
 
 ;;; --------------------------------------------------------------------------
-;;; Prompt caching: the marker reaches the wire, and the counts come back (#401)
+;;; Prompt caching: the marker reaches the wire, and the counts come back (pre-publication issue 401)
 ;;;
 ;;; NO LIVE CALLS. These verify the two translations against the documented wire shapes --
 ;;; request (neutral marker -> cache_control) and response (usage -> the two counts) -- which
@@ -1068,7 +1068,7 @@ OTHER than the name the caller themselves supplied."
 ;;; a provider that changed that shape would leave them green. That is a provider/consumer
 ;;; disagreement no self-contained test can see, and the way it gets caught is a real call
 ;;; reporting a nonzero cache_creation_input_tokens -- which needs a key this environment
-;;; does not have (#401 records it as designed-and-translated, not proven end to end).
+;;; does not have (pre-publication issue 401 records it as designed-and-translated, not proven end to end).
 ;;; --------------------------------------------------------------------------
 (test a-marked-part-emits-cache-control
   "The neutral :cache marker becomes Anthropic's cache_control on that block, and only that."
@@ -1179,14 +1179,14 @@ count. NIL is the honest answer for the one it does not report."
         "a server reporting no details leaves the count NIL, not 0")))
 
 ;;; --------------------------------------------------------------------------
-;;; What is SENT, as distinct from what is remembered (#402, ADR-0001)
+;;; What is SENT, as distinct from what is remembered (pre-publication issue 402, ADR-0001)
 ;;;
 ;;; Two budgets over two kinds of data: retrieved facts are RANKED by
 ;;; ctx:assemble, conversation history is TRIMMED by prompt:trim-history. The
 ;;; properties worth asserting are the three the trim exists to keep -- a
-;;; tool_use is never orphaned, the cacheable prefix (#401) never moves, and the
+;;; tool_use is never orphaned, the cacheable prefix (pre-publication issue 401) never moves, and the
 ;;; live question is never dropped -- plus the two wirings, since an exported
-;;; function with a budget and no caller is what #402 was filed about.
+;;; function with a budget and no caller is what pre-publication issue 402 was filed about.
 ;;; --------------------------------------------------------------------------
 
 (defun %u (text &key cache)
@@ -1276,7 +1276,7 @@ request rather than a worse prompt."
         "and no tool_use may be sent without its result")))
 
 (test prompt-trim-pins-the-cacheable-prefix
-  "The marked prefix (#401) survives every trim. Trimming from the front would
+  "The marked prefix (pre-publication issue 401) survives every trim. Trimming from the front would
 write a new cache entry at 1.25x every turn and read none -- and dropping the
 marked part leaves no breakpoint at all."
   (let* ((pinned (%u (format nil "system context ~A" (make-string 400 :initial-element #\s))
@@ -1326,7 +1326,7 @@ context."
   (let ((history (list (%u "one") (%a "two") (%u "three"))))
     (is (equal history (prompt:trim-history history nil)))))
 
-;;; A provider that records what it was actually sent. The point of #402 is that
+;;; A provider that records what it was actually sent. The point of pre-publication issue 402 is that
 ;;; this list is not the agent's history, so nothing but a capture can show it.
 (defclass capturing (llm:provider)
   ((seen :initform '() :accessor capturing-seen)
@@ -1473,7 +1473,7 @@ for an agent whose context was not budgeted in any respect. Two budgets, two key
       (is-true (search "4242" printed) "the history budget is what the reader needs to see"))))
 
 ;;; --------------------------------------------------------------------------
-;;; Forced tool choice and structured results (#416)
+;;; Forced tool choice and structured results (pre-publication issue 416)
 ;;; --------------------------------------------------------------------------
 
 (in-suite praxeon)
@@ -1729,7 +1729,7 @@ unoverridable."
     (is (string= "Ship it"
                  (gethash "headline"
                           (llm:generate-structured p '((:role :user :content "b")) limited))))))
-;;; #418: PARALLEL actually runs its children at the same time.
+;;; pre-publication issue 418: PARALLEL actually runs its children at the same time.
 ;;;
 ;;; The claim under test is about CONCURRENCY, so the assertions are about overlap rather
 ;;; than about elapsed time. A duration is a number about this machine's load: on a loaded
@@ -1759,7 +1759,7 @@ the contract `parallel' documents -- a provider two children share must be safe 
 concurrently. This one is, by a lock. A test double that popped from a script list would not
 be, which is why the other workflow tests give each child its own."))
 
-;;; TOOL-CHOICE is accepted and ignored: #420 added it to the generic, which obliges every
+;;; TOOL-CHOICE is accepted and ignored: pre-publication PR 420 added it to the generic, which obliges every
 ;;; method to take it. A stub that omits it errors at call time rather than at compile time,
 ;;; so the omission survives a build and fails in the suite it was written for.
 (defmethod llm:complete ((p barrier) messages
@@ -1917,7 +1917,7 @@ Concurrently every call leaves before any returns, so all N send the same prefix
 yet cached and whether the provider records 1 write or N is a race this code does not
 control. A caller who cares should warm the prefix with one turn before fanning out; that is
 the caller's decision because only the caller knows whether the prefix is worth a serial
-round-trip. See #417 for the ledger that makes the difference visible."
+round-trip. See pre-publication issue 417 for the ledger that makes the difference visible."
   (let* ((n 5)
          (prefix (make-string 4000 :initial-element #\x))
          (p (make-instance 'barrier :n n :timeout 3.0)))
@@ -1929,9 +1929,9 @@ round-trip. See #417 for the ledger that makes the difference visible."
         "~D of ~D calls carried the identical prefix -- all of them were in flight together"
         (count prefix (barrier-systems p) :test #'string=) n)))
 
-;;; --- the first producer of a marked prefix (#437) ----------------------------
+;;; --- the first producer of a marked prefix (pre-publication issue 437) ----------------------------
 ;;;
-;;; #401 built the marker, #402 built the pinning that protects it, #417 built the ledger that
+;;; pre-publication issue 401 built the marker, pre-publication issue 402 built the pinning that protects it, pre-publication issue 417 built the ledger that
 ;;; prices it -- and nothing produced one. Four consumers, a constructor, and no caller outside
 ;;; this suite. The cause was a TYPE: `agent-system-prompt' is declared a STRING, so the one
 ;;; thing an agent has that is large, stable and byte-identical every turn could not carry a
@@ -1939,7 +1939,7 @@ round-trip. See #417 for the ledger that makes the difference visible."
 ;;; take.
 ;;;
 ;;; These assert the PRODUCER at its seam -- what DELIBERATE hands the provider as :SYSTEM. That
-;;; a request body reaching the wire carries `cache_control' is #437's own harness, on the
+;;; a request body reaching the wire carries `cache_control' is pre-publication issue 437's own harness, on the
 ;;; Windows lane, deliberately not duplicated here: a producer verifying its own output cannot
 ;;; see a producer/consumer disagreement.
 
@@ -1949,7 +1949,7 @@ round-trip. See #417 for the ledger that makes the difference visible."
 
 (defmethod llm:complete ((p system-capturing) messages &key system tools max-tokens temperature
                                                         tool-choice)
-  ;; TOOL-CHOICE is in the lambda list because the GENERIC grew it (#416) -- a method that
+  ;; TOOL-CHOICE is in the lambda list because the GENERIC grew it (pre-publication issue 416) -- a method that
   ;; omits a keyword the generic declares is not congruent, and SBCL refuses to add it. Main
   ;; moving under a branch shows up here rather than anywhere subtle.
   (declare (ignore messages tools max-tokens temperature tool-choice))
@@ -1978,7 +1978,7 @@ inclusive, so a boundary one part early silently caches less while looking ident
   "The control, and the property that makes the opt-in an opt-in: a prefix cache is a billing
 behaviour, and one that arrived without being asked for would be a surprise in a line item."
   (let ((system (%system-seen)))
-    (is (stringp system) "a plain string, exactly as before #437")
+    (is (stringp system) "a plain string, exactly as before pre-publication issue 437")
     (is (string= "a large stable brief" system))))
 
 (test an-empty-system-prompt-is-not-marked
@@ -1990,7 +1990,7 @@ behaviour, and one that arrived without being asked for would be a surprise in a
 (test the-message-pinning-has-nothing-to-do-under-this-producer
   "Recorded as a test rather than a comment because it corrects an argument made when this
 shape was chosen. The marker lives on the SYSTEM prompt; `pinned-exchange-count' scans MESSAGES.
-So the pinning #402 built is inert on the actor path -- which is fine, and it means the two
+So the pinning pre-publication issue 402 built is inert on the actor path -- which is fine, and it means the two
 features do not meet until a second producer marks a boundary inside the conversation. When one
 arrives, this test fails and says so."
   (let* ((provider (make-instance 'system-capturing))
@@ -2003,12 +2003,12 @@ arrives, this test fails and says so."
                "while the system prompt does carry one -- the control, so the zero above is
 about WHERE the marker is and not about there being none"))))
 
-;;; --- data through parameterised means (#400, ADR-0002) -----------------------
+;;; --- data through parameterised means (pre-publication issue 400, ADR-0002) -----------------------
 ;;;
 ;;; The pattern: a means per query, parameterised; the model SELECTS a question and supplies
 ;;; arguments, and never composes the query. ADR-0002 makes four claims, and three of them are
-;;; praxeon's -- asserted here, because a pattern document with no exercised example is #129 and
-;;; #435 one level up: a mandated path nothing walks.
+;;; praxeon's -- asserted here, because a pattern document with no exercised example is #94 and
+;;; #161 one level up: a mandated path nothing walks.
 ;;;
 ;;; The fourth claim -- that a value travels as a BIND PARAMETER rather than interpolated SQL --
 ;;; is mnemosyne's guarantee and is asserted in mnemosyne's own suite, which reads back the
@@ -2070,7 +2070,7 @@ schema, so the model cannot choose it."
   (lambda (capability) (string= capability "read:contacts")))
 
 (test the-pattern-runs-through-the-turn-loop-only-with-authority
-  "The path an app actually uses. Until #400 `run-turn' took no PERMIT, so every
+  "The path an app actually uses. Until pre-publication issue 400 `run-turn' took no PERMIT, so every
 capability-bearing means -- which is what ADR-0002 recommends -- was invisible and uninvocable
 through the framework's main entry point. Found by writing the ADR's own example and watching the
 turn loop refuse the means the ADR recommends."
@@ -2172,7 +2172,7 @@ fail-closed property, which is what makes the enumeration meaningful")))
             "and the result, so the pair says what was asked and what came back")))))
 
 ;;; --------------------------------------------------------------------------
-;;; Observational memory (#60)
+;;; Observational memory (pre-publication issue 60)
 ;;; --------------------------------------------------------------------------
 
 (in-suite praxeon)
@@ -2306,7 +2306,7 @@ subject would have a belief the store refuses to recall and cannot explain."
     (is (equal '("Original.") (%contents (mem:recall s "member-1"))))))
 
 ;;; --------------------------------------------------------------------------
-;;; Distilling a window into observations (#452)
+;;; Distilling a window into observations (pre-publication issue 452)
 ;;; --------------------------------------------------------------------------
 
 (in-suite praxeon)
@@ -2521,7 +2521,7 @@ observation, so the presence of a replacement is attributable to what was shown.
           "no replacement is proposed when nothing was offered to replace"))))
 
 ;;; --------------------------------------------------------------------------
-;;; A schema may not declare what nothing checks (#454)
+;;; A schema may not declare what nothing checks (pre-publication issue 454)
 ;;; --------------------------------------------------------------------------
 
 (in-suite praxeon)
@@ -2601,7 +2601,7 @@ level down, and the validator reads only the top."
     (is (equal '("address.properties") found)
         "the nested properties block is reported; got ~S" found)))
 
-;;; --- the embedding seam (#372, #415) ---------------------------------------
+;;; --- the embedding seam (#138, #150) ---------------------------------------
 
 (def-suite embedding
   :description "Turning text into a vector, as a provider call." :in praxeon)
@@ -2649,7 +2649,7 @@ level down, and the validator reads only the top."
   (make-array (fake-emit p) :element-type 'double-float :initial-element 1.0d0))
 
 (test an-anthropic-is-not-an-embedding-provider
-  "THE ABSENCE IS STRUCTURAL, AND THAT IS THE WHOLE DESIGN (#372).
+  "THE ABSENCE IS STRUCTURAL, AND THAT IS THE WHOLE DESIGN (#138).
 
 Anthropic has no embeddings endpoint. Had `embed' been a generic on PROVIDER with a
 capability predicate beside it, an `anthropic' would carry a method whose only job is to
@@ -2680,7 +2680,7 @@ the control, a guard that refused everything would pass the refusal test."
         (is (= 768 (cnd:embedding-dimension-mismatch-actual c)))))))
 
 (test a-declared-dimension-is-checked-against-the-provider-at-startup
-  "#415: a schema hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small.
+  "#150: a schema hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small.
 
 This is the OUTER guard. mnemosyne refuses the wrong width again at cast time and keeps
 doing so, but that error names a column; this one names the misconfiguration while the
@@ -2714,7 +2714,7 @@ only arrangement that can tell a sort from a pass-through."
   (signals cnd:deliberation-failure (llm::%embedding-vectors (jzon:parse "{}"))))
 
 (test the-embedding-provider-inherits-the-endpoint-it-does-not-restate
-  "THE MEASUREMENT BEHIND THE DESIGN (#372).
+  "THE MEASUREMENT BEHIND THE DESIGN (#138).
 
 The objection to a separate embedding hierarchy was that an app would configure the same
 endpoint twice. It does not: `%env-for' resolves PRAXEON_<ROLE>_* > PRAXEON_<IMPL>_* >
@@ -2747,9 +2747,9 @@ default that embeds with the wrong model."
     (signals cnd:deliberation-failure (llm:make-embedding-provider-from-env))))
 
 (test the-usage-event-does-not-report-a-count-the-provider-never-gave
-  "A PARTIAL report is the case the gate does not cover (#444).
+  "A PARTIAL report is the case the gate does not cover (pre-publication issue 444).
 
-The emit gate is `(when (or in out))', which is the #401 rule at the level it was written
+The emit gate is `(when (or in out))', which is the pre-publication issue 401 rule at the level it was written
 for: no counts at all, no event. But a provider that reports OUTPUT and not INPUT passes the
 gate, and `:input (or in 0)' then claimed a measurement nobody made -- on the event whose own
 comment fourteen lines up forbids exactly that.
@@ -2783,7 +2783,7 @@ still carries both numbers, or the fix would have been to stop reporting counts 
     (let ((usage (find :usage events :key #'evt:event-type)))
       (is (= 700 (evt:event-get usage :input)) "the control: a full report is unchanged")
       (is (= 12 (evt:event-get usage :output))))))
-;;; --- provenance is required on every write (#415) ---------------------------
+;;; --- provenance is required on every write (#150) ---------------------------
 
 (test a-write-with-no-provenance-is-refused
   "MANDATORY, NOT DEFAULTED, and the reason is the difference between the two.
@@ -2827,7 +2827,7 @@ conversation. Conflating them makes `what did it believe on Tuesday' answer with
 schedule instead of the member's.
 
 NIL when it was not recorded -- an absent measurement, not a zero one. Same distinction as
-#444's unreported token count and #489's absent column, which is three instances of it now."
+pre-publication issue 444's unreported token count and pre-publication issue 489's absent column, which is three instances of it now."
   (let ((without (mem:make-provenance "conv-a" 1))
         (with (mem:make-provenance "conv-a" 1 :at 12345)))
     (is (null (mem:provenance-at without))
@@ -2851,10 +2851,10 @@ produce observations citing a turn nobody had."
           "every observation the pass wrote cites the window it read")
       (is (= 7 (mem:provenance-turn (mem:observation-provenance o)))))))
 
-;;; --- a recalled memory can be cited (#415) ----------------------------------
+;;; --- a recalled memory can be cited (#150) ----------------------------------
 
 (test a-recalled-item-carries-the-observation-it-came-from
-  "#415's read path: a persona must be able to say where a remembered thing came from, or
+  "#150's read path: a persona must be able to say where a remembered thing came from, or
 it cannot be corrected.
 
 THE SOURCE IS THE OBSERVATION, not just its provenance, because correcting means
@@ -2901,7 +2901,7 @@ checks the constructor would pass against an assembly that drops the slot."
 (test a-nil-source-means-not-from-memory-and-cannot-mean-anything-else
   "NIL IS UNAMBIGUOUS, and that is a property of the write path rather than of this slot.
 
-Provenance is mandatory on every write (#415) and `observation->ctx-item' is the only route
+Provenance is mandatory on every write (#150) and `observation->ctx-item' is the only route
 from an observation to an item, so `from memory, source unknown' is unconstructible. A NIL
 source therefore means one thing. Without that guarantee this slot would be the
 absent-versus-NULL defect rebuilt in a struct, which this tree spent a day removing from

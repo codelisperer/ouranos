@@ -24,10 +24,10 @@ rewrite. Distributed as a binary (`bin/cons`, `save-lisp-and-die`).
 
 ## Gotchas
 
-- Templates must not ship a literal dev port (#238): ports derive from the project name
+- Templates must not ship a literal dev port (pre-publication issue 238): ports derive from the project name
   (FNV-1a, not `sxhash`, which isn't stable across SBCL versions), and `start` refuses a
   port already answering — by connecting, not binding.
-- `cons` warns when a consuming app's framework checkout is behind its remote (#240); the
+- `cons` warns when a consuming app's framework checkout is behind its remote (pre-publication issue 240); the
   comparison's *age* is reported, because `@{u}` only moves on fetch.
 - `setup.ps1`'s pin parser matches `[A-Z_]+` — a pin name with a digit is silently dropped.
 

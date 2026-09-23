@@ -1,9 +1,9 @@
 # Scaffolding: templates, target kinds, and how a third party adds one
 
 *Design for `cons`'s project-generation story. 2026-08-05. Consolidates thinking scattered
-across [`cons-vision.md`](cons-vision.md) §10, [#25](https://github.com/codelisperer/ouranos/issues/25)
-(service target), [#78](https://github.com/codelisperer/ouranos/issues/78) (desktop scaffold),
-[#20](https://github.com/codelisperer/ouranos/issues/20) (dependency-source protocol) and
+across [`cons-vision.md`](cons-vision.md) §10, [#37](https://github.com/codelisperer/ouranos/issues/37)
+(service target), [#73](https://github.com/codelisperer/ouranos/issues/73) (desktop scaffold),
+[#32](https://github.com/codelisperer/ouranos/issues/32) (dependency-source protocol) and
 hyperion ADR-0009 (multi-UX) — rather than adding an eighth opinion.*
 
 ---
@@ -61,13 +61,13 @@ A target kind is not a label; it is a set of `cons` verbs and an artifact shape.
 | Kind | `cons run` | `cons ship` | Owns |
 |---|---|---|---|
 | `lib` | REPL | — | nothing special |
-| `cli` | run in terminal | single binary (`save-lisp-and-die`) | argv parsing, terminal I/O, a command loop ([#125](https://github.com/codelisperer/ouranos/issues/125)) |
-| `web` | `serve` on a port | binary + assets | the blocking `serve` ([#124](https://github.com/codelisperer/ouranos/issues/124)) |
-| `desktop` | native window | per-OS installer | webview launcher, bundling ([#94](https://github.com/codelisperer/ouranos/issues/94)), installers ([#74](https://github.com/codelisperer/ouranos/issues/74)), updater ([#76](https://github.com/codelisperer/ouranos/issues/76)) |
-| `service` | foreground | OS unit + registration | SCM / launchd / systemd ([#25](https://github.com/codelisperer/ouranos/issues/25)) |
+| `cli` | run in terminal | single binary (`save-lisp-and-die`) | argv parsing, terminal I/O, a command loop ([#91](https://github.com/codelisperer/ouranos/issues/91)) |
+| `web` | `serve` on a port | binary + assets | the blocking `serve` (pre-publication issue 124) |
+| `desktop` | native window | per-OS installer | webview launcher, bundling ([#78](https://github.com/codelisperer/ouranos/issues/78)), installers ([#72](https://github.com/codelisperer/ouranos/issues/72)), updater (pre-publication issue 76) |
+| `service` | foreground | OS unit + registration | SCM / launchd / systemd ([#37](https://github.com/codelisperer/ouranos/issues/37)) |
 | `shared-lib` | — (nothing to run) | `.dll` / `.so` / `.dylib` + a C header | the exported C ABI, runtime lifecycle, thread registration (§3a) |
 
-Two things follow. **Target kinds are where the platform pain lives** — #25 already
+Two things follow. **Target kinds are where the platform pain lives** — #37 already
 specifies the NT service in detail (the SCM dispatcher, `advapi32`, START_PENDING →
 RUNNING with checkpoints, and the open question of whether the dispatcher can live in
 SBCL's main thread). Nothing here re-derives that; it places it.
@@ -92,7 +92,7 @@ inside it:
 
 - **Own the binding; do not depend on `librarian`.** It is not in the Quicklisp dist, so it
   would be a git-sourced dependency needing its own pin
-  ([#111](https://github.com/codelisperer/ouranos/issues/111)) — and, worse, a **shipped**
+  ([#86](https://github.com/codelisperer/ouranos/issues/86)) — and, worse, a **shipped**
   dependency of every library built this way. The house precedent decides it: we rejected
   `cl-libuv` and hand-wrote CFFI because a grovel-based binding puts a C toolchain on the
   load path, and we build libuv from source rather than take a distro package. The pattern
@@ -109,7 +109,7 @@ inside it:
   `save-lisp-and-die :callable-exports` exists, but producing a *loadable shared library*
   (rather than an executable) depends on how the SBCL in use was built — a linkable runtime
   is not universal. Confirm on all three platforms, at the pinned SBCL, **before** any
-  scaffold promises it. Spike first, exactly as [#25](https://github.com/codelisperer/ouranos/issues/25)
+  scaffold promises it. Spike first, exactly as [#37](https://github.com/codelisperer/ouranos/issues/37)
   requires for the NT service.
 - **Lifecycle is the caller's problem and must be made obvious.** The runtime is initialized
   once before any exported call and finalized after; **one SBCL image per process.** A
@@ -126,9 +126,9 @@ inside it:
   ([`docs/coalton-patterns.md`](../../docs/coalton-patterns.md) §7), and the same discipline
   one level out.
 - **The artifact is per-OS**, with macOS's `install_name` problem — which is
-  [#94](https://github.com/codelisperer/ouranos/issues/94) inverted. There we are consuming a
+  [#78](https://github.com/codelisperer/ouranos/issues/78) inverted. There we are consuming a
   native dependency; here **we are the native dependency someone else has to ship.** The two
-  should share an answer, and #94's ADR should be written knowing this is coming.
+  should share an answer, and #78's ADR should be written knowing this is coming.
 
 There is a pleasing symmetry with the Coalton thesis. `aion/docs/coalton-story.md` says the
 typed layer is where untyped external vocabularies become typed values, decoded once at the
@@ -155,7 +155,7 @@ Three properties, each chosen against a failure we have already had elsewhere:
 problem the moment templates are resolvable by URL. Substitution and conditional inclusion
 cover the cases; anything more wants a real reason.
 
-**Resolvable through the dependency-source protocol** ([#20](https://github.com/codelisperer/ouranos/issues/20)).
+**Resolvable through the dependency-source protocol** ([#32](https://github.com/codelisperer/ouranos/issues/32)).
 A template name resolves the same way a dependency does — a built-in, a git URL, later an
 OCI artifact. **This is the whole "make it available to `cons`" answer**, and it means the
 registry is not a new subsystem, it is a second consumer of one we already need.
@@ -191,7 +191,7 @@ turning it into a starter is the actual request, and it has a shape worth gettin
 
 ### 5a. Colour scheme is a scaffold parameter, not a styling exercise
 
-*Added 2026-08-05, once the mechanism existed (#123).*
+*Added 2026-08-05, once the mechanism existed (pre-publication issue 123).*
 
 "Change the colours" has to be a one-line answer for a generated project, or every app
 built with `cons` looks like Bulma's demo. **It now is, and the reason is a decision that
@@ -267,9 +267,9 @@ attempt migration-on-update. `cargo generate` does not either.
    and stop being special.
 3. **`cons template check`** — before external templates exist, because it is what stops
    them rotting.
-4. **Resolution via #20**, so a git URL works. This is when third-party authoring becomes real.
+4. **Resolution via #32**, so a git URL works. This is when third-party authoring becomes real.
 5. **`cons template from`** and the `saas` extraction.
-6. Target kinds fill in on their own schedule — #124, #94/#74, #25.
+6. Target kinds fill in on their own schedule — pre-publication issue 124, #78/#72, #37.
 
 Steps 1–3 are the ones that unblock everything and touch no platform code.
 

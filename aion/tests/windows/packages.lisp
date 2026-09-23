@@ -1,6 +1,6 @@
 ;;;; packages.lisp --- aion/windows test-suite package.
 ;;;;
-;;;; WINDOWS-ONLY, and the gate knows it: scripts/platform-packages.lisp (#182) declares
+;;;; WINDOWS-ONLY, and the gate knows it: scripts/platform-packages.lisp (pre-publication issue 182) declares
 ;;;; aion/windows as owned by :windows, so a macOS or Linux run reports `n/a' and never
 ;;;; reaches this file, while a Windows run that cannot load it FAILS. That is what makes
 ;;;; the absence of these checks on Windows a defect rather than a skip.

@@ -94,10 +94,10 @@
   (let ((c (cs:validate-required (cs:cast 'test-user '() '(:email)) '(:email))))
     (signals cs:changeset-invalid (cs:to-insert c))))
 
-;;; --- binary columns (#142) -------------------------------------------------
+;;; --- binary columns (pre-publication issue 142) -------------------------------------------------
 
 (test defschema-accepts-binary-and-blob
-  "Before #142 `make-field' rejected both, so a schema could not name a byte column at all
+  "Before pre-publication issue 142 `make-field' rejected both, so a schema could not name a byte column at all
 and an app had no way to register one itself."
   (finishes (sch:make-field '(:avatar :binary)))
   (finishes (sch:make-field '(:avatar :blob)))
@@ -141,7 +141,7 @@ row is written."
     (multiple-value-bind (value present) (cs:get-change c :payload)
       (is-true present "zero bytes is a value, so the field must be present")
       (is (equalp empty value)))))
-;;; --- vector columns (#212) -------------------------------------------------
+;;; --- vector columns (pre-publication issue 212) -------------------------------------------------
 
 (test defschema-carries-the-dimension-into-the-postgres-ddl
   (sch:defschema vector-demo (:table "vector_demo")
@@ -180,7 +180,7 @@ functions; a vector added by ALTER TABLE would have lost its width."
     (is (search "vector(768)" (princ-to-string sql))
         "add-column should carry the dimension, got: ~A" sql)))
 
-;;; --- an embedding width resolved from configuration (#258) ------------------
+;;; --- an embedding width resolved from configuration (pre-publication issue 258) ------------------
 ;;;
 ;;; The dimension of a vector column is a DEPLOYMENT fact, not a schema one. A consuming app
 ;;; could not commit to a width before measuring recall on its own corpus -- Russian-first
@@ -234,7 +234,7 @@ nothing -- asserted rather than promised."
     (is (eq :current_timestamp (sch:field-default field))
         "a keyword default is still the keyword and not its value")))
 
-;;; --- casting a vector, at cast time (#258) ----------------------------------
+;;; --- casting a vector, at cast time (pre-publication issue 258) ----------------------------------
 ;;;
 ;;; AGENTS.md makes `cast -> validate -> insert!' the path external input takes, and before
 ;;; this a vector could not travel it at all: `%cast-value' had no :vector clause, so ecase
@@ -299,7 +299,7 @@ is a guess that becomes invisible once the row is written."
     (let ((c (cs:cast 'vec3 (list :embedding raw) '(:embedding))))
       (is-false (cs:changeset-valid-p c) "~S must not cast to a vector" raw))))
 
-;;; --- staleness of a derived value (ADR-0002, #258) --------------------------
+;;; --- staleness of a derived value (ADR-0002, pre-publication issue 258) --------------------------
 ;;;
 ;;; The convention is one sentence: THE FINGERPRINT COVERS EXACTLY THE INPUTS TO THE DERIVED
 ;;; VALUE. The test that matters is the one asserting the version stamp's defect is ABSENT --
@@ -420,7 +420,7 @@ case the deriver column exists for -- and one comparing only the deriver misses 
               "a consumer that records no deriver is asking the fingerprint question alone and
 gets that answer, rather than every row reading as stale forever")))
 
-;;; --- ADR-0003 / #432: schema speaks the tree's dialect vocabulary -----------
+;;; --- ADR-0003 / pre-publication issue 432: schema speaks the tree's dialect vocabulary -----------
 
 (test the-schema-xtdb-guard-fires-under-either-spelling
   "The keyword :xtdb used to WALK PAST this guard.

@@ -12,7 +12,7 @@
   "Create an empty template directory, bind DIR to it, and remove it afterwards.
 
 Over CONS/TEMPDIR rather than a hand-rolled name, and not only for tidiness: the tests are
-where an idiom gets copied from, so an unsafe one here outlives every fix in src (#204)."
+where an idiom gets copied from, so an unsafe one here outlives every fix in src (pre-publication issue 204)."
   `(tempdir:with-temporary-directory (,dir "check")
      (ensure-directories-exist (merge-pathnames "files/src/" ,dir))
      ,@body))

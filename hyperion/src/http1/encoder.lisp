@@ -1,4 +1,4 @@
-;;;; encoder.lisp --- a response head, framed by what is actually there (#117, commit 2).
+;;;; encoder.lisp --- a response head, framed by what is actually there (pre-publication issue 117, commit 2).
 ;;;;
 ;;;; The parser's mirror image, and it enforces the same rule in the other direction: NEVER
 ;;;; LET A HEADER DISAGREE WITH THE FRAMING. Inbound, that rule rejects Content-Length and

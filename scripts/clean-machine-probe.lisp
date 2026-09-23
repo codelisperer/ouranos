@@ -26,7 +26,7 @@
 (defparameter *out* (or (argv-value "--out")
                         (error "clean-machine-probe: --out is required")))
 
-;;; --- WHICH SYSTEMS TO LOAD: DERIVED, NOT RESTATED (#283) ---------------------------
+;;; --- WHICH SYSTEMS TO LOAD: DERIVED, NOT RESTATED (pre-publication issue 283) ---------------------------
 ;;;
 ;;; This list used to be hand-written here, and it had already drifted: 28 systems against
 ;;; the gate's 39, with `aion/secret' and `aion/secret/types' missing because they landed
@@ -93,7 +93,7 @@ tree whose native dependencies are platform-specific by construction."
   "Every system this host should be able to load with nothing but what we provision.
 
 `aion/uv' and `hyperion/server-uv' are absent because +SYSTEMS+ does not carry them --
-they need a vendored libuv that a fresh checkout has not built (#128), and verify-tree
+they need a vendored libuv that a fresh checkout has not built (pre-publication issue 128), and verify-tree
 folds them in only under OURANOS_WITH_UV. Inheriting that decision rather than restating
 it is the point of deriving.")
 

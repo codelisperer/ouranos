@@ -1,10 +1,10 @@
 ;;;; web-tests.lisp --- praxeon/web's own suite.
 ;;;;
-;;;; WHY THIS FILE EXISTS AT ALL, which is the finding behind #151.
+;;;; WHY THIS FILE EXISTS AT ALL, which is the finding behind pre-publication issue 151.
 ;;;;
 ;;;; `praxeon/web' exports a surface and NOTHING LOADED IT. `praxeon/tests' depends on
 ;;;; "praxeon" and "praxeon/web-search"; the two existing tests that mention praxeon/web
-;;;; (#139/#218's backend-declaration pair) read its .asd with `asdf:find-system' rather
+;;;; (pre-publication issue 139/pre-publication issue 218's backend-declaration pair) read its .asd with `asdf:find-system' rather
 ;;;; than loading the system -- which is why they pass without a handler in the image, and
 ;;;; why nobody noticed there was no suite underneath them.
 ;;;;
@@ -13,8 +13,8 @@
 ;;;; not see absences.
 ;;;;
 ;;;; SEPARATE SYSTEM, NOT AN EXTRA FILE IN `praxeon/tests', because driving a real server
-;;;; needs a real Clack handler, and WHICH HANDLER IS THE APPLICATION'S CHOICE (#139,
-;;;; ADR-0011, applied to praxeon/web by #218). `praxeon/web' must keep declaring none. A
+;;;; needs a real Clack handler, and WHICH HANDLER IS THE APPLICATION'S CHOICE (pre-publication issue 139,
+;;;; ADR-0011, applied to praxeon/web by pre-publication issue 218). `praxeon/web' must keep declaring none. A
 ;;;; test system is an application for this purpose, so it declares hunchentoot -- the
 ;;;; backend that answers SIGTERM -- exactly as `praxeon/elise' does, and the core suite
 ;;;; stays free of an HTTP server it has no use for.
@@ -73,7 +73,7 @@ a question that has nothing to do with the network."
 ;;; --- the blocking entry ----------------------------------------------------
 
 (test serve-forever-blocks-serves-and-stops-on-request
-  ;; The claim #151 turns on. `praxeon/web:serve-forever' must actually BLOCK (so it is a
+  ;; The claim pre-publication issue 151 turns on. `praxeon/web:serve-forever' must actually BLOCK (so it is a
   ;; usable `main'), actually SERVE (so it is not just sleeping), and RETURN when asked (so
   ;; the hand-roll it replaces is not needed). All three, because the hand-rolled version
   ;; satisfied the first two and failed only the third.
@@ -137,7 +137,7 @@ a question that has nothing to do with the network."
       (is-true (fboundp symbol) "praxeon/web:~A is exported but not fbound" name))))
 
 ;;; --------------------------------------------------------------------------
-;;; The output style is the app's, not the image's (#469)
+;;; The output style is the app's, not the image's (pre-publication issue 469)
 ;;; --------------------------------------------------------------------------
 
 (in-suite praxeon-web)
@@ -158,7 +158,7 @@ would hide behind a poll."
     (format nil "~{~A~}" (web::%drain-bubbles conv))))
 
 (test starting-the-surface-does-not-change-the-image-s-output-style
-  "#469. praxeon/web can be started as a SECOND server inside a host app's image, so it must
+  "pre-publication issue 469. praxeon/web can be started as a SECOND server inside a host app's image, so it must
 not publish its own rendering choice to the global every Spinneret renderer in that image
 reads. Before the fix `%build-app' did `(setf out:*output-style* ...)' and the host's
 rendering changed for the rest of the process."
@@ -181,7 +181,7 @@ rendering changed for the rest of the process."
 
 (test the-turn-thread-renders-in-the-app-s-style
   "THE TRAP THIS FIX HAD TO AVOID. `%assistant-bubble' runs inside `%run-turn-async', and the
-request's WITH-OUTPUT-STYLE wraps the dispatcher on the REQUEST thread. Before #469 the turn
+request's WITH-OUTPUT-STYLE wraps the dispatcher on the REQUEST thread. Before pre-publication issue 469 the turn
 thread rendered correctly only because the style was a global assigned at startup, so removing
 that assignment without carrying the style would have rendered the assistant bubble in the
 wrong style -- only in the poller, only for the assistant, and visible as whitespace rather

@@ -109,13 +109,13 @@ real.
 | `aion/log` | log4cl, com.inuoe.jzon | **Real.** Neutral leveled + structured logging: pretty for dev, one-line JSON to stdout for staging/prod; ambient `*context*` fields. |
 | `aion/csv/types` | coalton | **Real.** The typed core of the CSV reader — a total `ParseState` transition and a provably-distinct `Dialect`; the shipping parser is conformance-tested against it. Separate so `aion/csv` stays Coalton-free. |
 | `aion/clock` | `aion/random` | **Real.** Monotonic Gregorian-100ns counter and v6 ids. Extracted from `mnemosyne/id`, because a monotonic clock is a floor primitive rather than a persistence concern. |
-| `aion/random` | ironclad, bordeaux-threads | **Real.** The CSPRNG behind session ids (#95). A security primitive, so it sits inside the verification gate. |
+| `aion/random` | ironclad, bordeaux-threads | **Real.** The CSPRNG behind session ids (pre-publication issue 95). A security primitive, so it sits inside the verification gate. |
 | `aion/signature` | ironclad | **Real.** Ed25519 verification — public key only, so a verifying host cannot mint. |
-| `aion/secret` | *nothing* | **Real.** An opaque credential wrapper: plaintext in, `reveal` out, `#<SECRET REDACTED>` on every print path (#209). Dependency-free and Coalton-free on purpose, so `cons` can hold a DB password without its core gaining Coalton. |
+| `aion/secret` | *nothing* | **Real.** An opaque credential wrapper: plaintext in, `reveal` out, `#<SECRET REDACTED>` on every print path (pre-publication issue 209). Dependency-free and Coalton-free on purpose, so `cons` can hold a DB password without its core gaining Coalton. |
 | `aion/secret/types` | `aion/secret`, coalton | **Real.** The same struct as an opaque Coalton field type (`repr :native`), so a `define-type` can carry a credential without a printable `String` field. |
-| `aion/interceptor` | coalton | **Real.** A typed, protocol-agnostic interceptor pipeline (#177). Not owned by a framework: the shape is request-response, not web, and the tree had reimplemented it twice before it moved here. |
-| `aion/http-client` | dexador | **Real.** An interceptor-shaped client for one outbound call (#202): enter stages, one round-trip, leave stages. The response carries the bytes that arrived; the string is derived (#223). |
-| `aion/platform` | *nothing* | **Real.** The host-platform registry (#182). |
+| `aion/interceptor` | coalton | **Real.** A typed, protocol-agnostic interceptor pipeline (pre-publication issue 177). Not owned by a framework: the shape is request-response, not web, and the tree had reimplemented it twice before it moved here. |
+| `aion/http-client` | dexador | **Real.** An interceptor-shaped client for one outbound call (pre-publication issue 202): enter stages, one round-trip, leave stages. The response carries the bytes that arrived; the string is derived (pre-publication issue 223). |
+| `aion/platform` | *nothing* | **Real.** The host-platform registry (pre-publication issue 182). |
 | `aion/uv`, `/net`, `/process` | cffi + a built libuv | **Real, opt-in.** The native boundary. Excluded from the default gate because they need a C toolchain — build with `scripts/build-libuv.lisp`, then `OURANOS_WITH_UV=1`. |
 | `aion/windows`, `/com` | cffi | **Real, Windows-only** (ADR-0003). UTF-16 marshalling, `GetLastError`/HRESULT as conditions, handle lifetime, struct layouts asserted at load. |
 

@@ -8,7 +8,7 @@
 ;;;; Why this file exists at all: `aion/tests` previously declared `:components ()` and no
 ;;;; `:perform (test-op ...)`, so `asdf:test-system :aion/tests` loaded nothing, ran nothing,
 ;;;; and exited SUCCESSFULLY -- reporting a green aion that had executed zero checks. See
-;;;; issue #116. `aion/cons.lisp`'s `test` target also called `aion/tests:run-tests`, a
+;;;; pre-publication issue 116. `aion/cons.lisp`'s `test` target also called `aion/tests:run-tests`, a
 ;;;; function that did not exist.
 
 (cl:defpackage #:aion/tests

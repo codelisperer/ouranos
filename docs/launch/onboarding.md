@@ -2,7 +2,7 @@
 
 *The path from "I know nothing about Common Lisp and have none of the tooling" to "I can
 build high-quality apps with this — and better still, deliberately with an AI." Written
-2026-08-04. Positioning input for [#91](https://github.com/codelisperer/ouranos/issues/91);
+2026-08-04. Positioning input for pre-publication issue 91;
 the gaps map to existing issues at the end.*
 
 > **Who this is for, precisely: experienced engineers who have heard of Lisp and never seen
@@ -28,7 +28,7 @@ is the one that works.
 `cons init` exists and scaffolds `lib` / `cli` / `web` / `agent` projects — but you obtain
 `cons` by cloning Ouranos and bootstrapping it. **No app developer should ever see the
 framework monorepo**, any more than a Rust programmer clones `rust-lang/rust`. That is
-[#22](https://github.com/codelisperer/ouranos/issues/22) (distribute the `cons` binary,
+[#34](https://github.com/codelisperer/ouranos/issues/34) (distribute the `cons` binary,
 make it self-hosting), and this doc is the argument for its priority: it is not a
 convenience, it is the entire app-developer on-ramp.
 
@@ -68,14 +68,14 @@ sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 bin/cons init myapp --template web
 ```
 
-**FIXED (#227).** The README used to tell readers this was *"planned; until it lands,
+**FIXED (pre-publication issue 227).** The README used to tell readers this was *"planned; until it lands,
 install those two yourself"* — understating what works, which costs exactly the readers who
 bounce at "install SBCL and Quicklisp yourself" and never find out that a script does it.
 It now documents `scripts/setup.sh` directly. This paragraph is kept rather than deleted
 because the *shape* of the mistake is the lesson: we were arguing against ourselves in the
 one document a first reader judges the project by.
 
-**VERIFIED (#88, closed).** This paragraph used to say none of it had run on a machine
+**VERIFIED (pre-publication issue 88, closed).** This paragraph used to say none of it had run on a machine
 without a working tree. `scripts/verify-clean-machine.sh` now provisions a container that
 has none of it — CI cannot cover this, because runners arrive with a toolchain. First-run
 failure is still unrecoverable, so the verifier is the thing that keeps it honest.
@@ -92,7 +92,7 @@ parity with `create-next-app`.
 a `desktop` template: `cons init myapp --template desktop && cons run` opening a **native
 OS window** running a hot-reloading server-rendered app, ~30–50 MB, no Electron, no Node,
 no bundler. The desktop Coalton REPL already proves every piece works. There is no
-template for it yet ([#78](https://github.com/codelisperer/ouranos/issues/78) is the
+template for it yet ([#73](https://github.com/codelisperer/ouranos/issues/73) is the
 adjacent work).
 
 That is a demo people record and post. `create-next-app` cannot answer it.
@@ -126,7 +126,7 @@ The second half of the answer is mechanical: **you do not type them.** Every ser
 editor does structural editing (paredit / parinfer); parens are maintained the way `gofmt`
 and Prettier maintain formatting — you stop thinking about them within an hour. That makes
 editor setup an *adoption-critical* path, not a nicety
-([#30](https://github.com/codelisperer/ouranos/issues/30)): a reader who opens a file in a
+([#42](https://github.com/codelisperer/ouranos/issues/42)): a reader who opens a file in a
 plain editor and starts counting brackets by hand has been failed by our docs, not by the
 language.
 
@@ -183,15 +183,15 @@ already pass several that comparable projects fail.
 | What they check | Us, honestly |
 |---|---|
 | README says what this is in 30 seconds | needs work — and it currently *understates* the tooling (§3) |
-| First command succeeds | **unverified on a clean machine** ([#88](https://github.com/codelisperer/ouranos/issues/88)) — the highest-risk item here |
-| Tests exist, run, and the count is visible | **594 checks, one command, fails on a suite that runs zero** ([#116](https://github.com/codelisperer/ouranos/issues/116)) |
-| CI green on *their* platform | **missing** ([#87](https://github.com/codelisperer/ouranos/issues/87)) — the most conspicuous gap |
+| First command succeeds | **unverified on a clean machine** (pre-publication issue 88) — the highest-risk item here |
+| Tests exist, run, and the count is visible | **594 checks, one command, fails on a suite that runs zero** (pre-publication issue 116) |
+| CI green on *their* platform | **missing** (pre-publication issue 87) — the most conspicuous gap |
 | Decisions are written down | **11 ADRs + a cross-cutting decisions log.** Genuinely better than most commercial codebases |
 | Docs match the code | mostly, and we have caught three drifts this week by looking |
 | Licensing unambiguous | MIT, one root `LICENSE`, matching every `.asd` |
 | Supply chain | **pinned Coalton SHA, pinned Quicklisp dist, libuv pinned by sha256 and built from source, no grovel on the load path.** Most Node projects cannot say any of that |
 | Observability | `aion/log` — structured fields, never interpolated strings, correlation id at the seam |
-| Security posture | session ids are 128 bits from the OS CSPRNG (`aion/random`, [#95](https://github.com/codelisperer/ouranos/issues/95)), rotated at privilege change ([#207](https://github.com/codelisperer/ouranos/issues/207)); a body-size ceiling and a per-session spend ceiling exist. Still incomplete — see the open `area:launch` items rather than this line |
+| Security posture | session ids are 128 bits from the OS CSPRNG (`aion/random`, pre-publication issue 95), rotated at privilege change (pre-publication issue 207); a body-size ceiling and a per-session spend ceiling exist. Still incomplete — see the open `area:launch` items rather than this line |
 | Upgrade / deprecation policy | **absent.** An enterprise reader looks for this early |
 | Can my AI assistant work in it | **`AGENTS.md` + `cons conform`** — see §7. Nobody else ships this |
 
@@ -208,7 +208,7 @@ weeks before publishing.
 > Coalton, back on it, ready to compete with the big boys.**
 
 The README already gestures at this; "returning the favour" is the sharper form and it
-earns the AI-friendliness work (§7, [#103](https://github.com/codelisperer/ouranos/issues/103))
+earns the AI-friendliness work (§7, [#81](https://github.com/codelisperer/ouranos/issues/81))
 its place as the headline rather than a feature. It also sets up the §5 answer without
 arguing: the reason a 1958 language is worth another look is that the thing which made it
 awkward for humans — code as data — is exactly what makes it tractable for machines.
@@ -220,13 +220,13 @@ Use it once, near the top, and then spend the rest of the page showing rather th
 | Gap | Issue | Cost |
 |---|---|---|
 | README understates what `setup.sh` already does | *(new)* | minutes — do it now |
-| Never run on a clean machine, any OS | [#88](https://github.com/codelisperer/ouranos/issues/88) | the highest-value verification we are not doing |
-| App developers must clone the monorepo | [#22](https://github.com/codelisperer/ouranos/issues/22) | **the whole app-developer on-ramp** |
-| No `desktop` template — the best first win is unreachable | [#78](https://github.com/codelisperer/ouranos/issues/78) | the demo people would share |
+| Never run on a clean machine, any OS | pre-publication issue 88 | the highest-value verification we are not doing |
+| App developers must clone the monorepo | [#34](https://github.com/codelisperer/ouranos/issues/34) | **the whole app-developer on-ramp** |
+| No `desktop` template — the best first win is unreachable | [#73](https://github.com/codelisperer/ouranos/issues/73) | the demo people would share |
 | No translate-don't-teach docs (§6) | *(new)* | the fastest adoption lever per hour spent |
-| Editor setup is not treated as adoption-critical (§5) | [#30](https://github.com/codelisperer/ouranos/issues/30) | a reader hand-counting brackets has been failed by our docs |
+| Editor setup is not treated as adoption-critical (§5) | [#42](https://github.com/codelisperer/ouranos/issues/42) | a reader hand-counting brackets has been failed by our docs |
 | `conform` is opt-in rather than default | *(new)* | one line in `cons init` |
-| No lockfile / per-project isolation (npm, pip, cargo all have it) | [#111](https://github.com/codelisperer/ouranos/issues/111) | table stakes, blocked on #91 |
+| No lockfile / per-project isolation (npm, pip, cargo all have it) | [#86](https://github.com/codelisperer/ouranos/issues/86) | table stakes, blocked on pre-publication issue 91 |
 | No upgrade / deprecation policy (§8) | *(new)* | an enterprise reader looks for it early |
 
 The first, sixth and seventh rows are hours of work. The second is a day. Together they

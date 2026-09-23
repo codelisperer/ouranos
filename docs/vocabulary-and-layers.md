@@ -19,7 +19,7 @@ at a particular altitude. When the name lives at a different altitude from its m
 two layers are welded together and neither can move.
 
 It shows up in **both directions**, and this tree produced one of each within a single change
-(#202).
+(pre-publication issue 202).
 
 ### Domain vocabulary living in a transport
 
@@ -106,7 +106,7 @@ separation. Sharing the vocabulary is free right up until it is very expensive.
 
 ## Provenance
 
-Both instances came from #202, and neither was predicted. The outbound one was found while
+Both instances came from pre-publication issue 202, and neither was predicted. The outbound one was found while
 moving the client out of hermes — it was the single thing that could not move verbatim. The
 inbound one was reported by the consuming application that adopted the client, when deleting
 its shim broke two tests it had not touched.

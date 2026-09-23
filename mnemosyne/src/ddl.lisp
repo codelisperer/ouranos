@@ -45,7 +45,7 @@ DSL: a keyword or symbol is an identifier, a string passes through."
     (t (princ-to-string x))))
 
 ;;; --- the dialect ------------------------------------------------------------
-;;; ONE VOCABULARY (#432, ADR-0003). This module used to normalise with its own
+;;; ONE VOCABULARY (pre-publication issue 432, ADR-0003). This module used to normalise with its own
 ;;; `%dialect-name': downcase a string, a symbol-name or a PRINC of anything else, then
 ;;; compare the result with STRING=. Two things followed, and both were defects rather than
 ;;; looseness:
@@ -71,7 +71,7 @@ DSL: a keyword or symbol is an identifier, a string passes through."
 ;;; --- indexes ---------------------------------------------------------------
 
 (defparameter +index-methods+ '(:btree :hash :gin :gist :brin :spgist :hnsw :ivfflat)
-  "Index methods :USING accepts. HNSW and IVFFLAT come from pgvector (#258).
+  "Index methods :USING accepts. HNSW and IVFFLAT come from pgvector (pre-publication issue 258).
 
 A CLOSED LIST rather than a passthrough, for the reason the dialect became one (ADR-0001):
 a string whose only legal values are a known set is a closed type wearing an open one, and
@@ -127,7 +127,7 @@ the corpus rather than on us -- so this renders what the caller asked for rather
 choosing. IVFFlat also has an ORDERING CONSTRAINT this cannot enforce: it must be built
 AFTER the table holds representative data, because it clusters what is there. Building it
 on an empty table produces an index that works and retrieves badly, which is a migration
-fact rather than a schema one (#258)."
+fact rather than a schema one (pre-publication issue 258)."
   (format nil "~{~A~^, ~}"
           (loop for (k v) on with by #'cddr
                 collect (format nil "~(~A~) = ~A" k v))))
@@ -173,7 +173,7 @@ rather than a readable error."
       (format nil "~A ~A~:[~; PRIMARY KEY~]~:[~; NOT NULL~]~@[ DEFAULT ~A~]"
               (%ident name)
               ;; Through the same builder MAKE-FIELD uses, so an :add-column naming a
-              ;; parameterised type gets the parameter (#212). Calling FIELD-TYPE-FROM with
+              ;; parameterised type gets the parameter (pre-publication issue 212). Calling FIELD-TYPE-FROM with
               ;; the bare name here would have produced a dimension-less vector and, before
               ;; that type existed, would silently have produced a TEXT column.
               (mnemosyne/field-shell:column-sql
@@ -244,14 +244,14 @@ Forms: :create-index (:name :on :columns :unique :if-not-exists :where), :drop-i
 
 DIALECT is a designator -- \"postgres\", :postgres or a typed MNEMOSYNE/FIELD:DIALECT -- and
 is normalised here; an unrecognised spelling signals MNEMOSYNE/FIELD-SHELL:UNKNOWN-DIALECT
-rather than rendering the Postgres form of the statement (#432, ADR-0003).
+rather than rendering the Postgres form of the statement (pre-publication issue 432, ADR-0003).
 
 Signals UNSUPPORTED-DDL when the dialect cannot express the form (SQLite CASCADE or DROP
 CONSTRAINT; anything at all on XTDB 2) -- at render time, where a migration author can see
 it, rather than as a driver error mid-migration."
   (unless (consp form)
     (error "mnemosyne/ddl: a DDL form is a list -- got ~S" form))
-  ;; NORMALISED ONCE, HERE (#432). Every branch below compares a typed value, so there is no
+  ;; NORMALISED ONCE, HERE (pre-publication issue 432). Every branch below compares a typed value, so there is no
   ;; arm that an unrecognised spelling can reach by not matching the other one.
   (setf dialect (fldsh:dialect-for dialect))
   (let ((op (first form)))
@@ -266,7 +266,7 @@ it, rather than as a driver error mid-migration."
 (defun %create-extension (args dialect)
   "(:create-extension :name :vector [:if-not-exists nil]) for DIALECT.
 
-AN EXTENSION IS A DEPLOYMENT FACT AND A MIGRATION HAS TO STATE IT (#258). `CREATE EXTENSION'
+AN EXTENSION IS A DEPLOYMENT FACT AND A MIGRATION HAS TO STATE IT (pre-publication issue 258). `CREATE EXTENSION'
 is privileged and is not available on every managed Postgres -- it is on RDS, Cloud SQL and
 DigitalOcean's managed databases, and on a bare install the extension package has to be on
 the host. A migration that assumes it fails as whatever Postgres says about an unknown TYPE,
@@ -295,6 +295,6 @@ which takes one statement at a time. An :alter-table with three actions yields t
   (if (eq (first form) :alter-table)
       ;; %ALTER-TABLE is below the entry point, so it is reached here without passing
       ;; through DDL -- normalise on this path too, or the one form that bypasses DDL is
-      ;; the one form with no check (#432).
+      ;; the one form with no check (pre-publication issue 432).
       (%alter-table form (fldsh:dialect-for dialect))
       (list (ddl form :dialect dialect))))

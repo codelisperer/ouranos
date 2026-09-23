@@ -34,7 +34,7 @@ The whole subsystem exists because the answer differs by view."
 
 (test an-absent-key-is-NIL-not-an-error
   "Absence is the common answer and the one a capability check is usually asking about. A
-lookup that signals cannot be built on -- see #306: a predicate that signals cannot be asked."
+lookup that signals cannot be built on -- see pre-publication issue 306: a predicate that signals cannot be asked."
   (is (null (reg:key-default-value "No.Such.Class.Here\CLSID" :64)))
   (is (null (reg:key-default-value "No.Such.Class.Here\CLSID" :32)))
   (is (null (reg:class-inproc-server "{00000000-0000-0000-0000-000000000000}" :64))))
@@ -85,7 +85,7 @@ alone could be satisfied by a binding that always returned NIL for :64; this can
           (is (null in-32) "and no 32-bit one on this machine; got ~S" in-32)))))
 
 (test the-value-read-is-a-path-that-exists
-  "Reporting WHICH FILE is the point (#308), so the file has to be real. A read that
+  "Reporting WHICH FILE is the point (#129), so the file has to be real. A read that
 truncated the string, or dropped the terminating NUL handling, would still return a
 plausible-looking string and this is what catches it."
   (let ((clsid (%clsid +dict+)))

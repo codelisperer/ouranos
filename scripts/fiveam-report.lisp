@@ -1,4 +1,4 @@
-;;;; fiveam-report.lisp --- reading FiveAM's own report, without losing half of it (#448)
+;;;; fiveam-report.lisp --- reading FiveAM's own report, without losing half of it (pre-publication issue 448)
 ;;;;
 ;;;; scripts/verify-tree.lisp runs each suite in its own child image and parses the text that
 ;;;; comes back, because that text is the only artefact that survives the child. What it
@@ -12,7 +12,7 @@
 ;;;; So a failing `(is (= 200 status))' -- the ordinary form, used all over this tree --
 ;;;; printed NOTHING under the gate, and took every failure after it in that suite with it.
 ;;;;
-;;;; WHAT THAT COST, MEASURED (#446). A Windows run reported:
+;;;; WHAT THAT COST, MEASURED (pre-publication issue 446). A Windows run reported:
 ;;;;
 ;;;;     FAIL    KLIO/TESTS              167 checks, some failing
 ;;;;             HIGHLIGHTING-HAPPENS-AT-LOAD-... : Unexpected Error: ...
@@ -64,7 +64,7 @@ block, entry rules included, interior blank lines preserved.
 
 READ TO THE STRUCTURE, NOT TO THE FIRST BLANK LINE. Each entry is wrapped in a rule, so a
 blank line inside one is part of a reason and a blank line outside one is the end of the
-block. That distinction is the entire content of #448: without it, the first failing check
+block. That distinction is the entire content of pre-publication issue 448: without it, the first failing check
 written without a reason string hides itself and everything after it.
 
 STOPS ON ANYTHING UNEXPECTED rather than reading on. A non-blank line outside an entry is not

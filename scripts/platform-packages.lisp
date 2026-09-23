@@ -1,4 +1,4 @@
-;;;; platform-packages.lisp --- which platform packages should exist on THIS host (#182).
+;;;; platform-packages.lisp --- which platform packages should exist on THIS host (pre-publication issue 182).
 ;;;;
 ;;;; ONE answer, consumed by both bootstrap.lisp and scripts/verify-tree.lisp. The issue is
 ;;;; explicit about why it is one file: two implementations of this predicate will drift,
@@ -56,23 +56,23 @@
 
 (defparameter *platform-packages*
   '((:windows
-     (:system "aion/windows"     :status :required :issue "#170"
+     (:system "aion/windows"     :status :required :issue "pre-publication issue 170"
       :note "the foundation: UTF-16, GetLastError/HRESULT as conditions, handles, and the layout table")
-     (:system "aion/windows/com" :status :required :issue "#170"
+     (:system "aion/windows/com" :status :required :issue "pre-publication issue 170"
       :note "the first subsystem -- COM is the meta-API (ADR-0003 s5), so it is sequenced first")
-     (:system "aion/windows/registry" :status :required :issue "#319"
+     (:system "aion/windows/registry" :status :required :issue "#132"
       :note "reading one value in a NAMED bitness view. Registered here rather than in
              verify-tree's +test-systems+ because that list is host-neutral and this suite
              can only run where the registry exists -- the same reason aion/windows and
              aion/windows/com are here. It shipped with six tests and no entry, so the gate
              never ran them: an unregistered suite and a passing one are identical at the
              exit code, and this one was reported complete on the strength of a code read.")
-     (:system "hades/windows"    :status :planned  :issue "#180"
+     (:system "hades/windows"    :status :planned  :issue "pre-publication issue 180"
       :note "the OS ergonomics layer over the binding; hades is not chartered yet"))
     (:darwin
-     (:system "hades/darwin"  :status :planned :issue "#180"))
+     (:system "hades/darwin"  :status :planned :issue "pre-publication issue 180"))
     (:linux
-     (:system "hades/linux"   :status :planned :issue "#180")))
+     (:system "hades/linux"   :status :planned :issue "pre-publication issue 180")))
   "Platform packages by host OS, each with the status that says how to read its absence.
 
 Keyed by the OS that OWNS the package -- the one where it can be compiled at all. Every
@@ -95,7 +95,7 @@ other OS gets `not applicable', silently and by design.")
 
 Read from *FEATURES* rather than from UIOP, because bootstrap.lisp loads this file and UIOP
 is not guaranteed to be present at that point. :WIN32 is SBCL's own and is in a bare image
-before ASDF is required -- see the measurement in #87. :DARWIN likewise."
+before ASDF is required -- see the measurement in pre-publication issue 87. :DARWIN likewise."
   (cond ((or (find :win32 *features*) (find :windows *features*)) :windows)
         ((find :darwin *features*) :darwin)
         ((find :linux *features*) :linux)

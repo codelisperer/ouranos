@@ -76,7 +76,7 @@
 ;;;
 ;;; A uv_pipe_t is a uv_stream_t, so everything above works on it unchanged. Bound here
 ;;; because it costs almost nothing given the stream layer, and because aion/uv/process
-;;; (#119) needs exactly this for a subprocess's stdio.
+;;; (pre-publication issue 119) needs exactly this for a subprocess's stdio.
 
 (cffi:defcfun ("uv_pipe_init" uv-pipe-init) :int
   (loop :pointer) (handle :pointer) (ipc :int))

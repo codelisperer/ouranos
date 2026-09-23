@@ -1,6 +1,6 @@
 ;;;; mode.lisp --- development mode.
 ;;;;
-;;;; Part 2 item 3 of #359: preview is a flag, not a URL.
+;;;; Part 2 item 3 of pre-publication issue 359: preview is a flag, not a URL.
 ;;;;
 ;;;; A secret production URL that shows drafts is an authentication surface with no
 ;;;; authentication. It ships once, gets shared, and is found by a scanner. A flag cannot leak

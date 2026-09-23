@@ -1,4 +1,4 @@
-;;;; with-mode.lisp --- run a script under a chosen COALTON COMPILATION MODE (#98).
+;;;; with-mode.lisp --- run a script under a chosen COALTON COMPILATION MODE (pre-publication issue 98).
 ;;;;
 ;;;;   sbcl --script scripts/with-mode.lisp release scripts/verify-tree.lisp
 ;;;;   sbcl --script scripts/with-mode.lisp dev     scripts/bench.lisp
@@ -30,7 +30,7 @@
 ;;;; BOTH modes are isolated, not just release. If development used the default cache it
 ;;;; would inherit fasls from whatever REPL the developer last ran, which is not a
 ;;;; controlled comparison -- and a benchmark whose baseline came from somewhere else is
-;;;; the thing #98 exists to stop.
+;;;; the thing pre-publication issue 98 exists to stop.
 
 (require :asdf)
 (require :uiop)

@@ -68,14 +68,14 @@ wants its own argument syntax is handed the remainder and parses it -- see `pars
 This used to carry the domain fields too, and that is the half that moved: `name', `email'
 and `role' are console input, so they now arrive through the changeset (see `contact-changeset')
 rather than being copied through a mapper. What is left is the part a hand-written mapper is
-still needed for, and it is #127's whole subject:
+still needed for, and it is #93's whole subject:
 
   :utc-time-created  ->  created_at     different names, no mechanical rule
   :utc-time-modified ->  updated_at     ditto
   :created-by        ->  created_by     hyphen vs underscore
   :modified-by       ->  updated_by     different name AND separator
 
-THIS FUNCTION EXISTING IS THE SIGNAL THAT #127 HAS NOT LANDED. When `touch!' and `defschema'
+THIS FUNCTION EXISTING IS THE SIGNAL THAT #93 HAS NOT LANDED. When `touch!' and `defschema'
 agree on names, or the framework owns the translation, this goes away and the stamp can be
 cast like anything else -- at which point `cs:insert!' becomes reachable here and this
 example can use it. Until then the insert below is assembled by hand, deliberately and
@@ -117,7 +117,7 @@ visibly, rather than pretending the join exists."
     (if applied (dolist (m applied) (ok "applied  ~A" m)) (info "none applied"))
     (if pending (dolist (m pending) (attn "pending  ~A" m)) (info "none pending"))))
 
-;;; --- adding a contact: the path the doctrine actually mandates (#129) -----
+;;; --- adding a contact: the path the doctrine actually mandates (#94) -----
 ;;;
 ;;; The root AGENTS.md says "external input flows cast -> validate -> insert!", and until
 ;;; this commit no example in the tree did that -- including this one, which SHIPS THREE
@@ -162,7 +162,7 @@ rules without a database. That separation is the point of the changeset being a 
 rather than a side effect.
 
 PARAMS may be a plist, an alist or a hash-table; `cast' accepts all three, which is the
-thing #129 assumed was missing and which has in fact been true for some time."
+thing #94 assumed was missing and which has in fact been true for some time."
   (let ((cs (cs:cast 'contact params +add-allowed+)))
     (setf cs (cs:validate-required cs '(:name)))
     (setf cs (cs:validate-length cs :name :max 120))
@@ -218,7 +218,7 @@ which is why it demanded a single token and why the seed data was hyphenated."
                       ;; ASSEMBLED BY HAND, AND VISIBLY SO. `cs:insert!' writes exactly
                       ;; `changeset-changes' and a changeset cannot be added to after
                       ;; `cast', so there is no way to carry the stamp through it while
-                      ;; `touch!' and `defschema' disagree about names. That is #127, and
+                      ;; `touch!' and `defschema' disagree about names. That is #93, and
                       ;; when it lands these two lines become (cs:insert! cs c).
                       (query:run c (list :insert-into "contacts"
                                          :values (list (append (stamp->columns e)
@@ -232,7 +232,7 @@ which is why it demanded a single token and why the seed data was hyphenated."
 (defun cmd-seed (c)
   ;; REAL NAMES. These were hyphenated -- "Ada-Lovelace" -- because `add' split on
   ;; whitespace and demanded a single token, so the demo data was shaped by a workaround
-  ;; for a missing validation path (#129). Both are gone.
+  ;; for a missing validation path (#94). Both are gone.
   (dolist (r '(("Ada Lovelace" "ada@analytical.engine" "Mathematician")
                ("Alan Turing" "alan@bombe.uk" "Cryptanalyst")
                ("Grace Hopper" "grace@cobol.mil" "Rear Admiral")
@@ -289,7 +289,7 @@ which is why it demanded a single token and why the seed data was hyphenated."
               ((string-equal cmd "seed")     (cmd-seed c))
               ;; THE RAW REMAINDER, not `args'. `add' parses its own arguments on commas
               ;; so a name can contain spaces; handing it the whitespace tokens is what
-              ;; forced single-token names (#129).
+              ;; forced single-token names (#94).
               ((string-equal cmd "add")      (cmd-add c (rest-of-line line)))
               ((string-equal cmd "list")     (cmd-list c args))
               (t (oops "unknown command: ~A  (try 'help')" cmd))))))

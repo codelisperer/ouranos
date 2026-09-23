@@ -72,7 +72,7 @@
 ;;;; ---------------------------------------------------------------------------------
 ;;;;
 ;;;; THE FILE WE PRODUCE **IS** THE SONAME, as in build-libuv.lisp, and that is what makes
-;;;; #329's hazard structurally absent here rather than avoided by care. #329 is about two
+;;;; pre-publication issue 329's hazard structurally absent here rather than avoided by care. pre-publication issue 329 is about two
 ;;;; bundler functions disagreeing over whether to name a copied library from the symlink or
 ;;;; from its target. Here there is no symlink to disagree about: we never run `make
 ;;;; install', so nothing creates the libmbedtls.so -> libmbedtls.so.1 chain an install step
@@ -312,7 +312,7 @@ carrying only the .NET workload answers vswhere but cannot compile this."
   (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
 
 (defun require-toolchain ()
-  "Refuse NOW if this machine cannot compile, BEFORE anything is downloaded (#128). A
+  "Refuse NOW if this machine cannot compile, BEFORE anything is downloaded (pre-publication issue 128). A
 prerequisite is a thing to check before you begin, not after a 5 MB fetch and a SHA-256."
   (ecase (toolchain)
     (:cc (unless (which "cc" "gcc" "clang")
@@ -448,7 +448,7 @@ has one, for the reason in the header."
          (args (append
                 (list "-shared" "-fPIC" "-O2" "-o" (namestring out))
                 ;; The built file must BE the soname: the loader resolves the soname, not
-                ;; the path it was linked from. This is also what keeps #329 inapplicable.
+                ;; the path it was linked from. This is also what keeps pre-publication issue 329 inapplicable.
                 (ecase (platform)
                   (:linux (list (format nil "-Wl,-soname,~A" (output-name))))
                   (:macos (list "-install_name" (namestring out))))
@@ -532,7 +532,7 @@ under the name it asks for, and that the entry points we are about to bind are i
       (when (and soname (plusp (length soname)))
         (format t "  ~A~%" (string-trim '(#\Space #\Tab) soname))
         (unless (search (output-name) soname)
-          (error "SONAME does not name ~A -- the loader would ask for a name that is not the file that landed (#329)."
+          (error "SONAME does not name ~A -- the loader would ask for a name that is not the file that landed (pre-publication issue 329)."
                  (output-name))))))
   (let ((exports (%exported-symbols library)))
     (when (null exports)
@@ -581,7 +581,7 @@ under the name it asks for, and that the entry points we are about to bind are i
       (handler-case
           (progn
             ;; BEFORE the fetch. A machine with no compiler should not spend a download and
-            ;; a SHA-256 to reach a refusal it could have been given immediately (#128).
+            ;; a SHA-256 to reach a refusal it could have been given immediately (pre-publication issue 128).
             (require-toolchain)
             (let ((srcdir (ensure-source version url sha)))
               (verify-sources srcdir)

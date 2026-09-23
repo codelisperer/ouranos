@@ -48,7 +48,7 @@ random vt, so the first VariantClear would try to release whatever that vt named
   "The address of the union, which every typed accessor below reads or writes through."
   (cffi:foreign-slot-pointer variant '(:struct ffi:variant) 'ffi::value))
 
-;;; --- by-reference [out] parameters (#304) ------------------------------------------
+;;; --- by-reference [out] parameters (pre-publication issue 304) ------------------------------------------
 ;;;
 ;;; Automation members routinely hand a result back through an argument rather than the
 ;;; return value: ADO's `Connection.Execute(CommandText, RecordsAffected, Options)' writes

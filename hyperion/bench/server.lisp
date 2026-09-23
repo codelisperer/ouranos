@@ -6,7 +6,7 @@
 ;;;; Exists to settle one decision with numbers instead of reasoning: can Hunchentoot carry
 ;;;; a DESKTOP app's live-feed rendering, so desktop bundles can drop Woo -- and with it
 ;;;; libev, a CFFI load-time dependency that makes every Linux/macOS bundle fail on a clean
-;;;; machine (issue #74). Woo is Unix-only, so this only compares on Linux/macOS.
+;;;; machine (issue #72). Woo is Unix-only, so this only compares on Linux/macOS.
 ;;;;
 ;;;; Endpoints, chosen to mirror what an HTMX live feed actually does:
 ;;;;   GET /tile    one server-rendered fragment (~1-2 KB) -- the polling case

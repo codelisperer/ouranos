@@ -1,8 +1,8 @@
-;;;; byref-tests.lisp --- [out] parameters, against a server that really writes one (#304).
+;;;; byref-tests.lisp --- [out] parameters, against a server that really writes one (pre-publication issue 304).
 ;;;;
 ;;;; A layer that cannot express a by-reference argument can call the Automation members
 ;;;; that happen to return their answer, and not the ones that hand it back -- which is most
-;;;; of Find/Replace, several Shell and WMI members, and ADO's records-affected. Before #304
+;;;; of Find/Replace, several Shell and WMI members, and ADO's records-affected. Before pre-publication issue 304
 ;;;; `+vt-byref+' was defined, exported, and used nowhere.
 ;;;;
 ;;;; WHY ADO OVER A CSV, AND NOT A DATABASE. `Connection.Execute(CommandText,
@@ -20,7 +20,7 @@
 ;;;;
 ;;;; SKIPS WHEN ACE IS ABSENT. The provider is not part of Windows; a machine without Office
 ;;;; or the Access Runtime has no ACE, and a red suite there would be a lie about this
-;;;; binding. That absence is exactly what #306's capability predicate is for, and until it
+;;;; binding. That absence is exactly what pre-publication issue 306's capability predicate is for, and until it
 ;;;; exists this file detects it the only way available: try, and skip on failure.
 
 (in-package #:aion/windows/com/tests)
@@ -40,13 +40,13 @@ about a machine rather than about the code.")
   "A provider that is registered NOWHERE, so the failure branch below can be driven on a
 machine that HAS ACE. Without it the absent-provider path is only reachable on a host
 without Office -- which is every CI runner and no developer machine, and is precisely how
-#323 reached main.")
+pre-publication issue 323 reached main.")
 
 (defmacro with-csv-connection ((conn dir &key (connection '+ace-text-connection+)) &body body)
   "A temp directory holding one CSV, and an open ADO connection over it. Skips if the
 provider is absent.
 
-SKIP DOES NOT ABORT THE TEST (#323). FiveAM's SKIP records a skipped check and RETURNS --
+SKIP DOES NOT ABORT THE TEST (pre-publication issue 323). FiveAM's SKIP records a skipped check and RETURNS --
 so the first version of this macro bound CONN to skip's return value, a list containing a
 TEST-SKIPPED object, and handed it to the next COM call as though it were a connection:
 
@@ -103,7 +103,7 @@ cleanup still runs because it is the UNWIND-PROTECT outside the block."
 
 (test a-plain-argument-in-the-same-position-carries-nothing-back
   "THE CONTROL. Without a cell the call still succeeds and the count is unreachable -- which
-is the behaviour before #304, reproduced rather than described. A test asserting only that
+is the behaviour before pre-publication issue 304, reproduced rather than described. A test asserting only that
 the cell gets a value would pass against a layer that wrote to every argument."
   (with-csv-connection (conn dir)
     (let ((plain 0))
@@ -137,7 +137,7 @@ and with a single by-ref argument nothing would ever notice."
       (is (eql 1 (com:by-ref-value options)) "and the options cell is not the count"))))
 
 (test the-absent-provider-path-skips-cleanly
-  "#323, AND THE ONLY TEST HERE THAT RUNS ITS INTERESTING BRANCH ON THIS MACHINE.
+  "pre-publication issue 323, AND THE ONLY TEST HERE THAT RUNS ITS INTERESTING BRANCH ON THIS MACHINE.
 
 Every other test in this file takes the provider-present path, because a developer box with
 Office has ACE. The absent path was therefore reachable only on a host WITHOUT Office --

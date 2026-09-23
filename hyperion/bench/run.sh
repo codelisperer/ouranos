@@ -9,7 +9,7 @@
 # reaped once no session holds it, which quietly kills a backgrounded server between calls.
 #
 # Woo is Unix-only, so this only compares on Linux/macOS. Answers the desktop
-# server-backend question in issue #74 with numbers instead of reasoning.
+# server-backend question in issue #72 with numbers instead of reasoning.
 set -eu
 
 # NB: no braces in the :? message -- the first `}` closes the expansion, so

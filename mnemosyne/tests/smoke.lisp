@@ -1,9 +1,9 @@
-;;;; tests/smoke.lisp --- an APPLICATION-shaped round trip, on every backend (#176).
+;;;; tests/smoke.lisp --- an APPLICATION-shaped round trip, on every backend (pre-publication issue 176).
 ;;;;
 ;;;; Why this file exists, in one sentence: a per-value matrix cannot see a bug in the
 ;;;; MEANING of a value.
 ;;;;
-;;;; The evidence is on #176 itself. A 21-case truth table was run against real Postgres 17
+;;;; The evidence is on pre-publication issue 176 itself. A 21-case truth table was run against real Postgres 17
 ;;;; and confirmed the write mapping perfectly -- and it could never have surfaced the defect
 ;;;; found minutes later, because that defect was not in the value:
 ;;;;
@@ -40,7 +40,7 @@ DROP first -- see %FRESH-TABLE in tests/param.lisp for why a real server needs i
     "CREATE TABLE smoke_doc (id integer primary key, title text, valid_until text, archived boolean)"))
 
 (defun current-lineage-p (row)
-  "The predicate from the #176 comment, verbatim in spirit: NULL means still current.
+  "The predicate from the pre-publication issue 176 comment, verbatim in spirit: NULL means still current.
 
 Written the way application code writes it -- CL NULL-ness of the plist value -- because
 that is the exact expression that inverted. A test that asked `(eq :null ...)` instead would

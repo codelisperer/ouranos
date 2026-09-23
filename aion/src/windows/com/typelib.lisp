@@ -1,4 +1,4 @@
-;;;; typelib.lisp --- constants read out of a server and emitted as a package (#181).
+;;;; typelib.lisp --- constants read out of a server and emitted as a package (pre-publication issue 181).
 ;;;;
 ;;;; Automating Excel through the generic accessor means a string in each hand:
 ;;;;
@@ -65,7 +65,7 @@
 ;;;; class biting from the Coalton side).
 ;;;;
 ;;;; ==============================================================================
-;;;; VERSION SKEW (issue #181, Q2)
+;;;; VERSION SKEW (pre-publication issue 181, Q2)
 ;;;; ==============================================================================
 ;;;;
 ;;;; Constants are baked at compile time, so a wrapper built against one version of a server
@@ -339,7 +339,7 @@ defining anything -- which is also how the suite tests it."
 Exists because the two are wanted together and acquiring by :OBJECT means CoCreateInstance.
 Calling TYPELIB-INFORMATION and TYPELIB-CONSTANTS in sequence against Excel STARTS EXCEL
 TWICE -- two out-of-process servers launched and torn down at compile time, which is slow
-enough to notice and leaves twice as much to go wrong on the cleanup path that #203 is
+enough to notice and leaves twice as much to go wrong on the cleanup path that #109 is
 already about."
   (%with-typelib (lib :object object :file file)
     (values (%information lib) (%constants lib))))
@@ -579,7 +579,7 @@ Office the difference is not small. Measured on one machine:
 Every name costs a cross-process call when the server is out-of-process, and there are
 thousands of them. WORSE, AND THE PART THAT SURPRISES PEOPLE: creating an Office server to
 read its description leaves an EXCEL.EXE or WINWORD.EXE running with no window, one per build,
-because releasing an interface does not make an out-of-process server quit (#203). Office
+because releasing an interface does not make an out-of-process server quit (#109). Office
 binaries carry their own type libraries, so :FILE reads the identical description in-process,
 starts nothing and leaves nothing behind.
 

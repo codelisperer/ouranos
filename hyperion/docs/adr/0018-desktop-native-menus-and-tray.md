@@ -2,14 +2,14 @@
 
 **Status:** Proposed
 **Date:** 2026-09-13
-**Context:** #271 (the macOS menu bar defect that prompted this), #276 (hyperion-view has no
+**Context:** pre-publication issue 271 (the macOS menu bar defect that prompted this), pre-publication issue 276 (hyperion-view has no
 automated coverage), ADR-0008 (out-of-process webview), ADR-0011 (no native library on every
 desktop image)
 
 ## Context
 
 A Hyperion desktop app is a Hyperion server on `127.0.0.1:<port>` plus `hyperion-view`, a
-small C++ launcher over `webview.h`, as a **separate process** (ADR-0008). #271 showed the
+small C++ launcher over `webview.h`, as a **separate process** (ADR-0008). pre-publication issue 271 showed the
 cost of that process having no native menu: it takes
 `NSApplicationActivationPolicyRegular`, so it *owns* the macOS menu bar, and it installed
 nothing into it — no Apple menu access, no ⌘Q, and no ⌘V inside the web view, because on
@@ -65,7 +65,7 @@ zero-config default for apps that declare nothing.
 
 | | what ships | why |
 |---|---|---|
-| **macOS** | full menu bar | The app owns the bar whether or not it fills it (#271). Not optional. |
+| **macOS** | full menu bar | The app owns the bar whether or not it fills it (pre-publication issue 271). Not optional. |
 | **Windows** | **tray icon**, not a menu bar | Windows has no application-owned system menu bar. An in-window `SetMenu` on a web-view-filling window is dated and fights the layout. `Shell_NotifyIcon` needs a window proc for its callback messages; `webview_get_window()` returns the real `HWND`, so `SetWindowSubclass` reaches it. |
 | **Linux** | nothing | GTK4 dropped per-window icons (already documented in our icon code), GNOME has no tray without extensions, and app menus are deprecated. `libayatana-appindicator` would put a **native library on the load path of every desktop image** — the exact shape ADR-0011 exists to prevent, after libev. |
 
@@ -76,7 +76,7 @@ neither idiom.
 ## Consequences
 
 - An app with no menu declaration keeps exactly today's behaviour: the macOS default menu
-  from #271, nothing elsewhere. The feature is opt-in and additive.
+  from pre-publication issue 271, nothing elsewhere. The feature is opt-in and additive.
 - The launcher gains an HTTP client and a JSON parser. Both are small; neither is a new
   external dependency on the Lisp side.
 - A menu that is fetched at startup is static for the session. Enable/disable, checkmarks and
@@ -84,8 +84,8 @@ neither idiom.
   protocol on the launcher's **stdin** is the cheapest transport, since `run-app` already owns
   the subprocess. **Deferred until something needs it.**
 - **Every line of this lands in the file with the least test coverage in the tree.**
-  `hyperion-view` has no automated coverage at all (#276) and two open hand-found defects
-  (#268, #269). #276 should land first, or this grows the untested surface.
+  `hyperion-view` has no automated coverage at all (pre-publication issue 276) and two open hand-found defects
+  (pre-publication issue 268, #116). pre-publication issue 276 should land first, or this grows the untested surface.
 
 ## Alternatives considered
 
@@ -104,7 +104,7 @@ neither idiom.
 ## Provenance
 
 The prompt was a user-visible defect — a frozen menu bar and a dead ⌘Q on two desktop apps
-(#271) — and the maintainer's own framing, that a menu is clearly worth it on macOS and that
+(pre-publication issue 271) — and the maintainer's own framing, that a menu is clearly worth it on macOS and that
 Windows probably wants a tray rather than a menu bar. That instinct is what the platform
 table records; the measurement only confirmed it.
 

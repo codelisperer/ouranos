@@ -1,6 +1,6 @@
-;;;; stripe.lisp --- Stripe as the first implementation of the neutral protocol (#47).
+;;;; stripe.lisp --- Stripe as the first implementation of the neutral protocol (pre-publication issue 47).
 ;;;;
-;;;; The protocol was specified and built before this file existed (#48), on purpose:
+;;;; The protocol was specified and built before this file existed (pre-publication issue 48), on purpose:
 ;;;; building a neutral protocol with a vendor in the room is how the vendor's shape gets
 ;;;; into it. What that bought is visible here -- this file translates, and adds no concept.
 ;;;;

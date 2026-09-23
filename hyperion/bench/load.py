@@ -7,7 +7,7 @@ Deliberately stdlib-only: it has to run on a bare WSL/CI box with no pip install
 numbers must not depend on a load generator we had to provision first.
 
 Three measurements, each chosen to answer a specific question in the Woo-vs-Hunchentoot
-decision for DESKTOP bundles (issue #74):
+decision for DESKTOP bundles (issue #72):
 
   latency @ concurrency 1  -- the actual desktop case: one user, one request at a time.
                               p50/p99 matter here, not throughput; a feed that repaints at

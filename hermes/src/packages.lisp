@@ -13,7 +13,7 @@
                     (#:b64  #:cl-base64)
                     (#:log  #:aion/log))
     (:import-from #:aion/http-client
-                ;; The HTTP client moved to aion (#202). Imported rather than nicknamed so
+                ;; The HTTP client moved to aion (pre-publication issue 202). Imported rather than nicknamed so
                 ;; the backends' call sites are unchanged by the move -- the point of the
                 ;; exercise was to stop reimplementing it, not to churn its consumers.
                 #:make-request #:request-url #:request-method #:request-headers

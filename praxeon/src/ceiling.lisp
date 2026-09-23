@@ -1,7 +1,7 @@
 ;;;; ceiling.lisp --- what a caller is allowed to spend, and refusing before it is spent.
 ;;;;
 ;;;; Praxeon had NO protection surface: no rate limit, no quota, no cost ceiling, no
-;;;; metering (#172). That was fine while the only consumer was one agent run locally by
+;;;; metering (pre-publication issue 172). That was fine while the only consumer was one agent run locally by
 ;;;; its author. It is not fine for an endpoint anyone can reach, billed to one API key,
 ;;;; and `praxeon/docs/comparison.md` says so publicly: praxeon "cannot be recommended for
 ;;;; anything internet-facing until this exists."
@@ -32,7 +32,7 @@
 ;;;; the application writes its own ledger. Had the agent written to a store, the
 ;;;; credential cost would have been paid anyway and the claim would have bought nothing.
 ;;;;
-;;;; ENFORCEMENT IS AN ENTER STAGE, which is the whole reason #130 came first. A guard that
+;;;; ENFORCEMENT IS AN ENTER STAGE, which is the whole reason pre-publication issue 130 came first. A guard that
 ;;;; halts on the way in SKIPS the effect, so a refusal costs nothing. Enforcement inline
 ;;;; in the completion path could only have refused AFTER spending, or appended a refusal
 ;;;; to an answer it had already paid for.
@@ -154,10 +154,10 @@ each individual call is small."
   (and (plusp (remaining-calls ledger))
        (<= estimated-tokens (remaining-tokens ledger))))
 
-;;; --- what the guard charges (#417) ----------------------------------------
+;;; --- what the guard charges (pre-publication issue 417) ----------------------------------------
 ;;;
 ;;; FOUR COUNTS, NOT TWO. A provider reports base input, output, tokens READ from a cached
-;;; prefix, and tokens WRITTEN to one. #401 made the last two visible on a COMPLETION and
+;;; prefix, and tokens WRITTEN to one. pre-publication issue 401 made the last two visible on a COMPLETION and
 ;;; the ledger never received them, so a turn served from cache cost the guard nothing:
 ;;; measured on f725afd, a turn reporting input 10 / output 40 / cache-read 5000 charged 50,
 ;;; and ten such turns against a 1000-token cap left the guard still permitting more after
@@ -179,7 +179,7 @@ each individual call is small."
 ;;;   A guard should err toward REFUSING. Parity over-counts a cache read against its price,
 ;;;   which stops a session early; price-weighting would let a cache-heavy workload run ten
 ;;;   times longer than its cap suggests. Today's behaviour is the extreme of that error and
-;;;   is what #417 is about.
+;;;   is what pre-publication issue 417 is about.
 ;;;
 ;;;   Price weights are a PROVIDER FACT THAT CHANGES. Baked in as the default they rot
 ;;;   silently, and the failure is invisible: a stale weight shows up as a cap that is not
@@ -196,7 +196,7 @@ commentary above for why, and note that changing these changes what a signed gra
 `token_cap' means, which is a decision about the contract and not a tuning knob.
 
 FOR COST-SHAPED ACCOUNTING, a host may bind this to the provider's price ratios. Anthropic's,
-read 2026-09-20 from the vendor's prompt-caching pricing as recorded in praxeon/llm's #401
+read 2026-09-20 from the vendor's prompt-caching pricing as recorded in praxeon/llm's pre-publication issue 401
 commentary (`a cache read is roughly a tenth', `a cache entry is written at 1.25x'):
 
   '((:input . 1) (:output . 1) (:cache-read . 1/10) (:cache-write . 5/4))
@@ -228,7 +228,7 @@ line and collapsed only here, where a sum has to be a number."
 
 ALL FOUR COUNTS ARE RECORDED SEPARATELY and none is folded into another. A report that added
 a cache read into `input' could still bound a runaway and could not explain a bill, and the
-distinction #401 paid for -- NIL means the provider said nothing, 0 means it reported a miss
+distinction pre-publication issue 401 paid for -- NIL means the provider said nothing, 0 means it reported a miss
 -- would be destroyed at exactly the boundary where someone starts trusting the numbers.
 
 CACHE-READ and CACHE-WRITE DEFAULT TO NIL, not 0, for that reason: a caller that does not
@@ -270,7 +270,7 @@ database credential."
   (and (member capability (grant-capabilities grant) :test #'equal) t))
 
 (defun grant-permit-fn (grant)
-  "GRANT as a PERMIT predicate for PRAXEON/ACTOR:AGENT-TOOL-SPECS and ACT (#122).
+  "GRANT as a PERMIT predicate for PRAXEON/ACTOR:AGENT-TOOL-SPECS and ACT (#90).
 
 The bridge, and the only place the two ideas meet: this module knows what a grant is and
 how one is verified; praxeon/actor knows what a means is. Handing across a closure means
@@ -289,7 +289,7 @@ decorative."
 ;;; --- the stages -----------------------------------------------------------
 ;;;
 ;;; This is where the ceiling becomes enforcement rather than arithmetic, and it is why
-;;; #130 had to land first. The guard is an ENTER stage, so a refusal halts before the
+;;; pre-publication issue 130 had to land first. The guard is an ENTER stage, so a refusal halts before the
 ;;; effect and the model call never happens. The meter is a LEAVE stage, so it sees a turn
 ;;; that actually completed.
 
@@ -300,10 +300,10 @@ ESTIMATE is what a turn is assumed to cost before it runs; a caller that can pre
 should pass its own. Refusing on an estimate is deliberate -- the alternative is to discover
 the ceiling after paying, which is the behaviour this exists to remove.
 
-SINCE #417 THE ESTIMATE HAS TO INCLUDE THE CACHED PREFIX the turn intends to read, because
+SINCE pre-publication issue 417 THE ESTIMATE HAS TO INCLUDE THE CACHED PREFIX the turn intends to read, because
 that prefix is now charged. The 1000 default was written when a cached read cost the ledger
 nothing; for a workload of short turns against a large shared prefix it is wrong by the size
-of the prefix, and wrong in the permitting direction -- which is the same defect #417 fixed,
+of the prefix, and wrong in the permitting direction -- which is the same defect pre-publication issue 417 fixed,
 one step earlier in the turn. A caller with a marked prefix (PRAXEON/LLM, `:cache t') knows
 its size and should pass it.
 
@@ -347,7 +347,7 @@ A FUNCTION THAT IS NOT SUPPLIED CONTRIBUTES NOTHING, and the two cases are still
 in the record: a missing INPUT-FN records 0, because that is the existing contract, while a
 missing CACHE-READ-FN records NIL -- we were not told rather than told zero. Anything that
 omits the two cache readers is charged exactly what it was charged before this change, which
-is the one compatibility promise here and also the reason #417 was invisible: the defaults
+is the one compatibility promise here and also the reason pre-publication issue 417 was invisible: the defaults
 read as complete."
   (turn:leave-stage
    "meter"

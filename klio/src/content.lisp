@@ -116,7 +116,7 @@ rather than whichever the OS happened to hand back first."
 were spelled the same way. That is not a given: a directory has more than one name, and the
 walk and the caller can each be holding a different one.
 
-WHERE THIS WAS MEASURED (#446). Windows keeps an 8.3 alias for a long file name, so
+WHERE THIS WAS MEASURED (pre-publication issue 446). Windows keeps an 8.3 alias for a long file name, so
 `C:\\Users\\runneradmin' is also `C:\\Users\\RUNNER~1', and CI runners set TEMP to the second
 form. The walk resolves the alias and returns the long name; DIRECTORY stays as the caller
 spelled it; nothing is subtracted, and every document ends up keyed by its whole absolute

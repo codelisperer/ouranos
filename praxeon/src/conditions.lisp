@@ -36,7 +36,7 @@
    (lambda (c s)
      (format s "~@[~A ~]refused: an observation~@[ about ~A~] must say where it came from.~%~%"
              (missing-provenance-operation c) (missing-provenance-subject c))
-     (format s "Observational memory is personal data held indefinitely, and a remembered claim that cannot be traced to a conversation and a turn cannot be CORRECTED -- a member disputing it has nothing to point at, and a persona repeating it has nothing to check (#415).~%")
+     (format s "Observational memory is personal data held indefinitely, and a remembered claim that cannot be traced to a conversation and a turn cannot be CORRECTED -- a member disputing it has nothing to point at, and a persona repeating it has nothing to check (#150).~%")
      (format s "Pass :provenance (praxeon/memory:make-provenance conversation turn). It is required rather than defaulted because a fabricated source is worse than an absent one: it reads as a citation.")))
   (:documentation "Signalled when a write to memory carries no provenance."))
 
@@ -52,7 +52,7 @@
              (embedding-dimension-mismatch-expected c)
              (embedding-dimension-mismatch-source c)
              (embedding-dimension-mismatch-provider c))
-     (format s "The dimension is a property of the DEPLOYMENT, not of the code (#415): a schema declaring 1536 has declared OpenAI's text-embedding-3-small, and pointing the same schema at a 768-wide model is a configuration error rather than a bad row.~%")
+     (format s "The dimension is a property of the DEPLOYMENT, not of the code (#150): a schema declaring 1536 has declared OpenAI's text-embedding-3-small, and pointing the same schema at a 768-wide model is a configuration error rather than a bad row.~%")
      (format s "Signalled here so the message names the misconfiguration. mnemosyne refuses the wrong width again at cast time, but that error names a column, which is a long way from the variable that caused it.")))
   (:documentation "Signalled when an embedding's width is not the width that was declared."))
 
@@ -88,7 +88,7 @@ had no way to express one: a `dolist' unwound on the first error, so children af
 ran and children before it were discarded along with the accumulated writes. One provider
 hiccup cost every sibling's work, and nothing said so. Concurrency makes the partial outcome
 unavoidable and therefore reportable -- every child runs to completion, what succeeded is
-merged, and this names what did not (#418)."))
+merged, and this names what did not (pre-publication issue 418)."))
 
 (define-condition budget-exceeded (praxeon-error)
   ((requested :initarg :requested :reader budget-exceeded-requested)

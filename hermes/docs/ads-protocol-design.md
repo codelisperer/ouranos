@@ -2,11 +2,11 @@
 
 **Status:** design note, open for revision. Not an ADR yet — one decision (targeting) is
 still open, and an ADR written before it would be an ADR about the easy half.
-**Issue:** [#262](https://github.com/codelisperer/ouranos/issues/262) · **Date:** 2026-09-14
+**Issue:** [#114](https://github.com/codelisperer/ouranos/issues/114) · **Date:** 2026-09-14
 
 ## Why a note before code
 
-#262 exists because the tree has promoted an application's code into a framework twice and
+#114 exists because the tree has promoted an application's code into a framework twice and
 lost requirements both times, the same way each time: **an app builds the shape its own
 screen needs, and a framework needs the shape every app will need.** Promotion then reads as
 a move rather than a redesign, and nobody re-derives the difference.
@@ -90,20 +90,20 @@ The caller may still throw `as-of` away, but it has to do so on purpose. A leaf-
 cannot own storage can still own the *unit of data*, and make the dimension that is easy to
 lose part of the value rather than part of the discipline.
 
-This matters more than #262 suggests. From the app: it stores no metrics today, and its rows
+This matters more than #114 suggests. From the app: it stores no metrics today, and its rows
 carry `created_at`/`updated_at` and a `vid` — which is **version, not valid-time**. It
 records that a row changed, not what was true when. So there is nowhere for a revised figure
 to live without new columns, and the app is carrying this because
 **mnemosyne's bitemporal support is designed and not built** —
-[#38](https://github.com/codelisperer/ouranos/issues/38) is the implementation ticket,
-gated by [#43](https://github.com/codelisperer/ouranos/issues/43). (#227 is the
+[#49](https://github.com/codelisperer/ouranos/issues/49) is the implementation ticket,
+gated by [#54](https://github.com/codelisperer/ouranos/issues/54). (pre-publication issue 227 is the
 stale-claims sweep where that gap was *found*; a finding's provenance is not its home.)
 
-**And this workload does not justify prioritising #38, which is worth saying plainly so
+**And this workload does not justify prioritising #49, which is worth saying plainly so
 nobody cites it as if it did.** What ads metrics need is narrow: record *when a figure was
 read* alongside *what day it describes*. Two time axes, so bitemporal in shape — but for one
 append-only table of `(campaign, day, read_at, value)` it is roughly fifteen lines of
-application code. **#38 is a convenience here, not a blocker.** Its real case is the general
+application code. **#49 is a convenience here, not a blocker.** Its real case is the general
 one: once several entities want "what did we believe on date X", every app hand-rolling its
 own read-time column is the sprawl argument, and that case stands on its own without this
 one propping it up.
@@ -437,7 +437,7 @@ header is required. Re-verify before building against any specific field here.
 ## Open: targeting
 
 Deliberately unfixed — and now informed by the eight-platform survey above, which narrows
-the options without settling them. #262 says audience definition is the part most likely to
+the options without settling them. #114 says audience definition is the part most likely to
 resist neutrality and should be prototyped first; the app's answer is that this is the founder's
 call, not the code's, and inventing a taxonomy here would be precisely the
 app-shape-versus-framework-shape failure this note exists to prevent.
@@ -459,13 +459,13 @@ nouns that only work for one network.
 
 ## Also open: what gets built first
 
-#262's order is create → target → test → measure. Both the app and I think the real first
+#114's order is create → target → test → measure. Both the app and I think the real first
 deliverable is likely the **measure** half alone — reading spend and outcomes for campaigns a
 human created in the network's own UI — with create and target designed but unbuilt. That is
 the founder's call; it is recorded here so the note is not read as proposing the full surface
 at once.
 
-## Carried from #262 without restating
+## Carried from #114 without restating
 
 Rate limits and errors go through the condition system with restarts, never return codes.
 The API version is pinned explicitly where a reader finds it. A refresh path that has never

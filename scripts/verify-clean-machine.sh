@@ -1,12 +1,12 @@
 #!/usr/bin/env sh
 # verify-clean-machine.sh --- run the documented getting-started sequence on a machine that
-# has never had SBCL, Quicklisp or Coalton on it, and PROVE it never had them (#198).
+# has never had SBCL, Quicklisp or Coalton on it, and PROVE it never had them (pre-publication issue 198).
 #
 #   scripts/verify-clean-machine.sh                 # this checkout's branch, ubuntu:24.04
 #   scripts/verify-clean-machine.sh --image debian:12
 #   scripts/verify-clean-machine.sh --ref main
 #
-# WHY THIS EXISTS. #88 verified bootstrap.lisp from a clean TREE, but neither of its legs
+# WHY THIS EXISTS. pre-publication issue 88 verified bootstrap.lisp from a clean TREE, but neither of its legs
 # was a clean OPERATING SYSTEM -- both redirected XDG_* to get a clean tree on a machine
 # that already had the toolchain. So the step BEFORE bootstrap, the one that provisions
 # SBCL and Quicklisp, had never run anywhere that lacked them. CI cannot cover it either:

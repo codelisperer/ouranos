@@ -3,7 +3,7 @@
 ;;;; Deliberately the same shape as hermes' messaging protocol: a provider class, generic
 ;;;; operations, a registry, env selection, and a dev backend. Payments is the same doctrine
 ;;;; applied to a second domain and not a new one -- Stripe is one implementation of this
-;;;; protocol and never the protocol itself (#51).
+;;;; protocol and never the protocol itself (#58).
 ;;;;
 ;;;; PAYMENT-PROVIDER is a SIBLING of hermes' PROVIDER rather than a subclass. A payment
 ;;;; provider does not deliver messages, and inheriting from something whose contract is
@@ -216,7 +216,7 @@ should know it at the call site rather than discover it when a second provider a
 ;;; --- idempotency ----------------------------------------------------------
 
 (defun idempotency-key (&optional (prefix "hermes"))
-  "A fresh idempotency key, so a retried create cannot double-charge (#50).
+  "A fresh idempotency key, so a retried create cannot double-charge (pre-publication issue 50).
 
 Generated here rather than left to the caller because the failure mode of forgetting one is
 a duplicate charge, and a default that is safe is worth more than a parameter that is correct

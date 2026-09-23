@@ -1,7 +1,7 @@
 # ADR-0001 — The stream contract: backpressure, NODELAY, and loop introspection
 
 **Status:** Proposed — 2026-08-04. Written **before** the implementation
-([#118](https://github.com/codelisperer/ouranos/issues/118)), which is the point: two of
+(pre-publication issue 118), which is the point: two of
 these are cheap now and expensive to retrofit.
 
 **Sits under [ADR-0002](0002-libuv-integration-strategy.md)** (the libuv integration
@@ -14,7 +14,7 @@ decides only the *stream* surface; the founding binding decisions are in
 
 `aion/uv` binds libuv's loop, filesystem, timers and file watching. **Streams — TCP, pipes
 — are the largest remaining surface**, and the one an HTTP server needs
-([#117](https://github.com/codelisperer/ouranos/issues/117)).
+(pre-publication issue 117).
 
 Node.js is the reference implementation of getting this wrong first. It shipped streams
 three times — streams1 (2010), streams2 (2012), streams3 (2013) — and the reason each time
@@ -43,7 +43,7 @@ Not a tuning knob discovered later. [hyperion ADR-0011](../../../hyperion/docs/a
 measured a **44 ms delayed-ACK floor** on every keep-alive request, fixed the buffered case
 with `Content-Length`, and recorded an unexplained **p99 ~40 ms residual**. Crucially,
 **streamed responses cannot carry a `Content-Length` by definition**, so the SSE progress UI
-([#76](https://github.com/codelisperer/ouranos/issues/76)) is still exposed to that floor
+(pre-publication issue 76) is still exposed to that floor
 and the existing fix cannot help it. Owning the socket is what makes this fixable at all.
 
 **3. `uv_walk` is bound, with a `describe-loop` reader.**
@@ -90,7 +90,7 @@ handle *kinds*, not new lifecycle or threading rules.
 The founder asked for a review of Node's libuv practice specifically because *"Node's
 wrapping of libuv is what put it on the map"* and ours should be industrial-strength too.
 That review is what produced this ADR: the three items above are Node's scar tissue rather
-than our own preferences, and the reason to write them down **before** #118 is that all
+than our own preferences, and the reason to write them down **before** pre-publication issue 118 is that all
 three are cheap now and were, historically, very expensive later.
 
 It also caught something worth recording about process rather than code: these constraints

@@ -78,7 +78,7 @@ replace. A missing file is not an error. Returns the list of keys applied."
 ;;; --- the entry-point form -------------------------------------------------
 ;;;
 ;;; WHY THIS EXISTS SEPARATELY FROM LOAD-DOTENV. A real failure, reported by a consuming
-;;; app (#120): `load-dotenv` was called while building the web handler -- but the app's
+;;; app (pre-publication issue 120): `load-dotenv` was called while building the web handler -- but the app's
 ;;; start path opened the database and ran a seed that sent mail BEFORE the handler was
 ;;; constructed. So that work ran against a bare environment.
 ;;;

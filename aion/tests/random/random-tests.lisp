@@ -1,4 +1,4 @@
-;;;; random-tests.lisp --- aion/random (#95).
+;;;; random-tests.lisp --- aion/random (pre-publication issue 95).
 ;;;;
 ;;;; A random source is awkward to test: every output is legal, so nothing can be asserted
 ;;;; about one value. What CAN be asserted is shape, range, the absence of the specific
@@ -13,7 +13,7 @@
 
 (in-package #:aion/random/tests)
 
-(def-suite random :description "aion/random: a CSPRNG that cannot be confused with cl:random (#95).")
+(def-suite random :description "aion/random: a CSPRNG that cannot be confused with cl:random (pre-publication issue 95).")
 (in-suite random)
 
 (defun run-tests () (run! 'random))
@@ -89,7 +89,7 @@
       (is-false (equalp a b) "two draws of ~D octets were identical" n))))
 
 (test the-weak-generator-is-unavailable-not-merely-unused
-  ;; #95's second requirement. Inside aion/random, `random' is shadowed and signals, so the
+  ;; pre-publication issue 95's second requirement. Inside aion/random, `random' is shadowed and signals, so the
   ;; file whose subject is unpredictability cannot reach MT19937 by reflex. CL:RANDOM still
   ;; works when written out, which makes reaching for it a visible decision.
   (signals error (funcall (find-symbol "RANDOM" (find-package "AION/RANDOM")) 100))

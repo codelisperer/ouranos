@@ -20,7 +20,7 @@
 
 ;;; --- the records ----------------------------------------------------------
 ;;;
-;;; Amounts are a single MONEY (#49), not a minor-units-plus-currency pair. The pair could
+;;; Amounts are a single MONEY (pre-publication issue 49), not a minor-units-plus-currency pair. The pair could
 ;;; be separated, passed half, or added to a different pair; a Money cannot. Read it with
 ;;; MONEY:MONEY-MINOR and MONEY:MONEY-CURRENCY, and combine amounts with MONEY:MONEY+,
 ;;; which returns None across currencies rather than a wrong number.
@@ -124,7 +124,7 @@ reads it is coupled to that provider, which is the coupling this protocol exists
   "The event's kind as a string, for CASE dispatch in application code."
   (kind:kind-name (event-kind event)))
 
-;;; --- applying events safely (#47 input, from a real integration) ----------
+;;; --- applying events safely (pre-publication issue 47 input, from a real integration) ----------
 ;;;
 ;;; Two defences that every consumer of a webhook stream needs, that are provider-
 ;;; independent, and that a consuming app reported having had to write itself. Pure

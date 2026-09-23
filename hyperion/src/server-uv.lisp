@@ -1,4 +1,4 @@
-;;;; server-uv.lisp --- accept, parse, call the handler, write (#117, commit 3).
+;;;; server-uv.lisp --- accept, parse, call the handler, write (pre-publication issue 117, commit 3).
 ;;;;
 ;;;; The effectful half. hyperion/http1 decides what a message IS; this owns the socket, the
 ;;;; buffer, the env and the error boundary. No Clack, no Hunchentoot, no Woo anywhere on
@@ -42,7 +42,7 @@
                     (#:bt  #:bordeaux-threads)
                     (#:log #:aion/log))
   (:documentation
-   "A native HTTP/1.1 server on aion/uv: no Clack, no Hunchentoot, no Woo (#117, ADR-0015).
+   "A native HTTP/1.1 server on aion/uv: no Clack, no Hunchentoot, no Woo (pre-publication issue 117, ADR-0015).
 
     START an app -- an ordinary Ring handler, (lambda (env) -> (status headers body)) --
     and STOP the server it returns. The env is the same nine keys every other hyperion
@@ -224,14 +224,14 @@ is ISO-8859-1 by definition (RFC 9112), so this is the encoding that round-trips
   "A Ring response body as octets. A string is UTF-8 (what a handler means by a string); an
 octet vector passes through; NIL is empty; a PATHNAME is read from disk.
 
-A PATHNAME IS THE CLACK CONTRACT FOR A STATIC FILE (#273). HYPERION/STATIC returns one for
+A PATHNAME IS THE CLACK CONTRACT FOR A STATIC FILE (pre-publication issue 273). HYPERION/STATIC returns one for
 every file it serves and deliberately does NOT set Content-Length, because Woo and
 Hunchentoot sendfile it and set the length themselves. Without a clause here every static
 file was a type error and a 500 on :uv -- and it stayed invisible because HYPERION/ASSETS
 returns an octet vector, so the embedded-asset path worked and nothing pointed at this.
 It is an ADR-0017 precondition: static files are what an app hits first.
 
-A BARE PATHNAME NO LONGER REACHES HERE (#313). %COMPLETE routes it to
+A BARE PATHNAME NO LONGER REACHES HERE (pre-publication issue 313). %COMPLETE routes it to
 %WRITE-FILE-RESPONSE, which declares Content-Length from the file and writes the body in
 bounded pieces -- because this clause holds the whole file in memory once, and
 %WRITE-RESPONSE then concatenates head and body, so a file of size N transiently costs about
@@ -268,7 +268,7 @@ been produced yet -- the streaming shape is a function AS the body, not among th
     (cons (apply #'concatenate '(vector (unsigned-byte 8))
                  (mapcar #'%body-octets body)))
     (function
-     (error "hyperion/server-uv: a function inside a list body is not a stream. A streamed body is the function ITSELF: (status headers (lambda (writer) ...)). See #117."))))
+     (error "hyperion/server-uv: a function inside a list body is not a stream. A streamed body is the function ITSELF: (status headers (lambda (writer) ...)). See pre-publication issue 117."))))
 
 (defun %ring-headers-flat (headers)
   "A Ring header plist -- (:content-type \"text/html\") -- as the flat name/value list of
@@ -431,7 +431,7 @@ grow instead -- which is the inline dispatcher's documented cost, not a new one.
   "Run THUNK on LOOP\'s thread -- directly when already on it, by submitting otherwise.
 Returns T if it ran or was queued, NIL if it was DROPPED because the loop is closing.
 
-DROPPING IS A DECISION HERE, NOT AN ACCIDENT (#296). SUBMIT signals LOOP-CLOSED once
+DROPPING IS A DECISION HERE, NOT AN ACCIDENT (pre-publication issue 296). SUBMIT signals LOOP-CLOSED once
 CLOSE-LOOP has claimed the loop, and the callers below are all finishing work for a
 connection that is going away with it: a response completion, or the end of a streamed
 body. There is nowhere to deliver them -- the socket dies with the loop -- so dropping is
@@ -440,7 +440,7 @@ correct and this is where that sentence lives.
 It is a named function rather than a HANDLER-CASE at each site because an unhandled
 condition that happens not to fire looks identical to a deliberate drop until the day it
 fires. The suite currently passes WITHOUT any call site handling LOOP-CLOSED, which means
-no test reaches a teardown-race submit -- the exact case that produced #291. So the drop is
+no test reaches a teardown-race submit -- the exact case that produced pre-publication issue 291. So the drop is
 written down and tested rather than left to be discovered.
 
 NOT EVERY CALLER MAY DROP. %STREAM-WRITE pairs its submit with a semaphore it then waits
@@ -582,12 +582,12 @@ message."
          ;; because "keep it" and "close it" are both wrong here.
          :streaming)))))
 
-;;; --- a file body: a known length, written in bounded pieces (#313) ----------
+;;; --- a file body: a known length, written in bounded pieces (pre-publication issue 313) ----------
 ;;;
 ;;; THE THIRD RESPONSE PATH, and it exists because neither of the other two is right for a
 ;;; large static file.
 ;;;
-;;;   %WRITE-RESPONSE reads the whole file (#273's pathname clause) and then CONCATENATES
+;;;   %WRITE-RESPONSE reads the whole file (pre-publication issue 273's pathname clause) and then CONCATENATES
 ;;;   head and body into one buffer, so a file of size N transiently costs about 2N. Right
 ;;;   for the stylesheets and images hyperion/static serves today; not right the first time
 ;;;   an app serves a video.
@@ -1079,7 +1079,7 @@ written into a closed socket."
                         (cond
                           ((functionp body)
                            (%stream-response conn app state status headers body keep-alive))
-                          ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (#313):
+                          ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (pre-publication issue 313):
                           ;; a known Content-Length with the body written in pieces. A
                           ;; pathname INSIDE a list still goes through %BODY-OCTETS, because
                           ;; a list body is pieces to concatenate and there is one length for

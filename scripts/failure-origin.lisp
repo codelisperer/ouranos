@@ -1,4 +1,4 @@
-;;;; failure-origin.lisp --- did this failure come from the TREE, or from a dependency? (#192)
+;;;; failure-origin.lisp --- did this failure come from the TREE, or from a dependency? (pre-publication issue 192)
 ;;;;
 ;;;; scripts/verify-tree.lisp runs every system in its own image and reports the ones that
 ;;;; die. Until this file it reported them all the same way:
@@ -21,7 +21,7 @@
 ;;;; flake, which may never recur; the cost is that the gate pointed at praxeon/web, and
 ;;;; the response to a red run is to go and change the code it names.
 ;;;;
-;;;; AGENTS.md already says a green can lie. This is the other direction, and #88 is where
+;;;; AGENTS.md already says a green can lie. This is the other direction, and pre-publication issue 88 is where
 ;;;; it lands hardest: verifying bootstrap on a clean machine is BY DEFINITION the
 ;;;; cold-cache case, and its output is the thing the project would publish as "bootstrap
 ;;;; works on three OSes."
@@ -151,6 +151,6 @@ Only the wording changes."
       (dolist (p paths) (format stream "             ~a~%" p))
       (format stream "             A dependency outside this checkout failed to load. Look at the~%")
       (format stream "             dependency cache first -- a cold ~~/.cache/common-lisp is the~%")
-      (format stream "             known cause -- rather than at ~a, which may be blameless. See #192.~%" system)
-      (format nil "~a failed -- inside a THIRD-PARTY .asd (~a), NOT tree code; see #192"
+      (format stream "             known cause -- rather than at ~a, which may be blameless. See pre-publication issue 192.~%" system)
+      (format nil "~a failed -- inside a THIRD-PARTY .asd (~a), NOT tree code; see pre-publication issue 192"
               system (first paths)))))

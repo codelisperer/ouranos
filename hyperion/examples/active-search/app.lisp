@@ -96,7 +96,7 @@ the /search fragment, so the page and the partial share one renderer."
       (:meta :charset "utf-8")
       (:meta :name "viewport" :content "width=device-width, initial-scale=1")
       (:title "Active Search — Hyperion example")
-      ;; Vendored and embedded in the image, not fetched from a CDN (#123): the
+      ;; Vendored and embedded in the image, not fetched from a CDN (pre-publication issue 123): the
       ;; examples are the argument for "no Node, no bundler, no asset pipeline", so
       ;; they should not be pulling their JavaScript off npm to make it.
       (:link :rel "stylesheet" :href (assets:url :bulma))
@@ -148,7 +148,7 @@ this replaces could not do for anyone, including its author.
 The vendored assets arrive as a MOUNT: hyperion/assets contributes its own routes
 instead of this app knowing their paths. There is no dev wiring here: hyperion/dev:serve
 wraps the app in DEV:WRAP-DEV, which serves the reload endpoints and injects the poller
-itself (#132) -- and registers those paths as QUIET, which a hand-rolled copy cannot do."
+itself (pre-publication issue 132) -- and registers those paths as QUIET, which a hand-rolled copy cannot do."
   (router:router
    (assets:mount)
    (router:route :get "/" (%handle-home) :name :home)
@@ -195,7 +195,7 @@ http://HOST:PORT. HOST \"0.0.0.0\" to reach it from another machine. Stop: (hype
   "Start and BLOCK until interrupted (the native-binary entry). HOST \"0.0.0.0\" for LAN.
 
 This used to be eleven lines of banner, UNWIND-PROTECT and interrupt handling, copied
-verbatim into four apps (#124). None of it was app knowledge -- it was \"how this
+verbatim into four apps (pre-publication issue 124). None of it was app knowledge -- it was \"how this
 framework's server runs in the foreground\" -- so it moved into the framework and this is
 what is left. An app that needs setup before serving does it here, above the call."
   (setf out:*output-style* :compact)

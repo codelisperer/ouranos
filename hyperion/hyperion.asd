@@ -12,9 +12,9 @@
   :version "0.0.0"
   :depends-on ("coalton"
                "aion/log"                             ; neutral logging facade (leftward dep
-               "aion/dynamic"   ; carries the request context across a thread (#430))
-               "aion/interceptor"                     ; the typed pipeline (#177; was a file here)
-               "aion/random"                          ; CSPRNG for session ids (#95) -- NOT cl:random
+               "aion/dynamic"   ; carries the request context across a thread (#158))
+               "aion/interceptor"                     ; the typed pipeline (pre-publication issue 177; was a file here)
+               "aion/random"                          ; CSPRNG for session ids (pre-publication issue 95) -- NOT cl:random
                "alexandria"
                "bordeaux-threads"                     ; hyperion/session store locks
                "clack"
@@ -23,26 +23,26 @@
                "quri"
                "com.inuoe.jzon"                       ; hyperion/http JSON
                "3bmd" "3bmd-ext-code-blocks"          ; hyperion/markdown
-               ;; #238: the port preflight connects rather than binds. An SBCL contrib,
+               ;; pre-publication issue 238: the port preflight connects rather than binds. An SBCL contrib,
                ;; so no external dependency -- but DECLARED, because it was reaching
                ;; hyperion only transitively through clack/usocket, and this tree has
                ;; already been bitten once by relying on that (flexi-streams).
                (:require "sb-bsd-sockets"))
-  ;; NO HTTP BACKEND HERE, deliberately (#139; ECOSYSTEM decisions log, 2026-08-05).
+  ;; NO HTTP BACKEND HERE, deliberately (pre-publication issue 139; ECOSYSTEM decisions log, 2026-08-05).
   ;;
   ;; This system used to depend on a CLACK HANDLER per platform -- clack-handler-woo on
   ;; Unix, clack-handler-hunchentoot on Windows. Woo binds libev through CFFI at LOAD time,
   ;; so every image that loaded hyperion held an open libev handle whether or not it ever
   ;; served a request; SBCL reopens recorded shared objects at startup, and every Linux
   ;; desktop bundle therefore died before `main` with `Error opening shared object
-  ;; "libev.so.4"`. ADR-0011 decided against that a week before #139 and was never
+  ;; "libev.so.4"`. ADR-0011 decided against that a week before pre-publication issue 139 and was never
   ;; implemented at this level.
   ;;
   ;; The fix is not to swap in a different permanent third-party server. A framework does
   ;; not get to choose the application's HTTP server, so the APP declares the backend it
   ;; wants -- exactly like every other opt-in capability in this tree -- and
   ;; hyperion/server:default-server picks from what the image actually loaded. When the
-  ;; native libuv server lands (#117) it arrives as one more choice rather than as surgery
+  ;; native libuv server lands (pre-publication issue 117) it arrives as one more choice rather than as surgery
   ;; on this file.
   ;;
   ;; Apps: depend on the CLACK HANDLER system, not the bare server. `clackup` resolves
@@ -63,7 +63,7 @@
                              (:file "http")     ; request/response utils
                              (:file "router")   ; URL dispatch over the typed paths (CL)
                              (:file "session")  ; cookie-based HTTP sessions + store
-                             (:file "csrf")     ; the CSRF refusal (ADR-0019, #280)
+                             (:file "csrf")     ; the CSRF refusal (ADR-0019, pre-publication issue 280)
                              (:file "channel")  ; broadcast log + per-reader cursors (fan-out)
                              (:file "feed")     ; latest-per-key at a subscriber's rate (ADR-0016)
                              (:file "sse")      ; feed -> EventSource, the ADR-0016 consumer
@@ -96,7 +96,7 @@
 
 ;;; Vendored browser assets -- htmx, Alpine.js and Bulma -- compiled INTO the fasl as
 ;;; literal octet vectors and served from memory, so a desktop bundle works with no
-;;; network and no files to copy beside the binary (#123, ADR-0013). Opt-in: ~770K of
+;;; network and no files to copy beside the binary (pre-publication issue 123, ADR-0013). Opt-in: ~770K of
 ;;; literals is not a cost to impose on an app that ships its own CSS.
 ;;;
 ;;; The vendored files are listed as static-file components in SERIAL order, before the
@@ -142,7 +142,7 @@
 ;;; reason to exist is not needing it, so the native path could never be proven Clack-free.
 ;;; Selection (hyperion/server:default-server preferring this backend when the image has
 ;;; loaded it) is a later commit and belongs on the SERVER side of that seam, where the
-;;; other backends are already chosen the same way (#139).
+;;; other backends are already chosen the same way (pre-publication issue 139).
 ;;;
 ;;; Native: needs a built vendor/libuv (scripts/build-libuv.lisp), so it is opt-in and sits
 ;;; in verify-tree's +UV-SYSTEMS+ rather than +SYSTEMS+ -- see the commentary there.
@@ -196,9 +196,9 @@
   :license "MIT"
   ;; ironclad is a TEST-time dependency only -- it is what lets the suite prove the
   ;; embedded bytes hash to the pinned sha256. hyperion/assets itself ships no crypto.
-  ;; clack-handler-hunchentoot likewise: #148's regression test serves the assets over a
+  ;; clack-handler-hunchentoot likewise: pre-publication issue 148's regression test serves the assets over a
   ;; real socket, because the bug was invisible to every in-image check. Hunchentoot
-  ;; rather than Woo so the suite needs no libev (ADR-0011, and #139 left the backend to
+  ;; rather than Woo so the suite needs no libev (ADR-0011, and pre-publication issue 139 left the backend to
   ;; the consumer -- here the consumer is the test).
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
                "fiveam" "ironclad" "clack-handler-hunchentoot"
@@ -216,7 +216,7 @@
 ;;; out-of-process C binary built separately (see hyperion-view/). `(ql:quickload
 ;;; :hyperion/desktop)` to use it.
 (defsystem "hyperion/view/tests"
-  :description "hyperion-view's argument contract, asserted headlessly (#276)."
+  :description "hyperion-view's argument contract, asserted headlessly (pre-publication issue 276)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; DEPENDS ON hyperion/desktop, not on nothing: the suite resolves the launcher through
@@ -235,7 +235,7 @@
   :serial t
   :components ((:file "src/desktop")))
 
-;;; The desktop self-updater (ADR-0010, #76). An aux system: only a desktop app pulls it,
+;;; The desktop self-updater (ADR-0010, pre-publication issue 76). An aux system: only a desktop app pulls it,
 ;;; and hyperion core stays free of crypto and of an HTTP client.
 ;;;
 ;;; PROMOTED from the client half of a consuming app that ships an updater to real users,
@@ -248,7 +248,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  ;; aion/signature for Ed25519 (#75/#208), aion/platform for the manifest key (#206 --
+  ;; aion/signature for Ed25519 (pre-publication issue 75/pre-publication issue 208), aion/platform for the manifest key (pre-publication issue 206 --
   ;; the client must look artifacts up under exactly the name the build script filed them
   ;; under), aion/http-client for the one outbound call, jzon for the manifest. NO NEW
   ;; EXTERNAL DEPENDENCY: every one of these is already in the tree.
@@ -257,12 +257,12 @@
   ;; keys with it), so this widens where it is used rather than what is pulled in.
   ;; aion/random because the staging directory's name must be UNGUESSABLE, not merely
   ;; unique: a verified installer is written there and then executed from there, so anyone
-  ;; who can predict the path can create it first. #95's guard over hyperion/src forbids
+  ;; who can predict the path can create it first. pre-publication issue 95's guard over hyperion/src forbids
   ;; cl:random for exactly this reason and caught the first version of it. No new external
   ;; dependency -- ironclad already arrives with aion/signature.
   :depends-on ("coalton" "aion/signature" "aion/platform" "aion/http-client"
-               ;; dexador is GONE from this line (#332). It was here for the local
-               ;; transport this file used to carry; #223 (0c65c72) moved that
+               ;; dexador is GONE from this line (pre-publication issue 332). It was here for the local
+               ;; transport this file used to carry; pre-publication issue 223 (0c65c72) moved that
                ;; contract into `aion/http-client', so the HTTP call is now made
                ;; through the shared client and nothing here names dexador. It still
                ;; arrives transitively, which is the point: declared where it is used.
@@ -286,7 +286,7 @@
   ;; sb-bsd-sockets so the HTTP backend can be tested against a socket that actually
   ;; answers. The contract under test there is between this client and DEXADOR -- a
   ;; 404 is a status Dexador SIGNALS rather than returns -- and no CLOS stub standing
-  ;; in for a source can state it (#332). An SBCL contrib, so nothing new is pulled in.
+  ;; in for a source can state it (pre-publication issue 332). An SBCL contrib, so nothing new is pulled in.
   :depends-on ("hyperion/update" "aion/platform"   ; update-client-tests.lisp calls platform:
                "fiveam" "aion/signature" "cl-base64"
                (:require "sb-bsd-sockets"))
@@ -296,7 +296,7 @@
   :perform (test-op (o c) (uiop:symbol-call :hyperion/update/tests :run-tests)))
 
 (defsystem "hyperion/update-ui"
-  :description "The updater's visible half: the poll, the banner and its two controls (#333)."
+  :description "The updater's visible half: the poll, the banner and its two controls (pre-publication issue 333)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -366,7 +366,7 @@
   :description "Example: Bulma + HTMX + Alpine + Parenscript, server-rendered (no Node)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  ;; The app declares its own HTTP backend (#139). Hunchentoot: pure CL, identical on all
+  ;; The app declares its own HTTP backend (pre-publication issue 139). Hunchentoot: pure CL, identical on all
   ;; three platforms, and indistinguishable from Woo on this workload once Content-Length
   ;; is set (ADR-0011 measured it). An example that cannot be run on Windows is not one.
   :depends-on ("hyperion" "hyperion/assets" "spinneret" "clack-handler-hunchentoot")
@@ -398,7 +398,7 @@
   :license "MIT"
   ;; Hunchentoot, and for this app it is load-bearing rather than a preference: Woo binds
   ;; libev at LOAD time, so a desktop bundle built against it dies before `main` on any
-  ;; machine without libev (#139, ADR-0011). Pure CL is what makes the artifact shippable.
+  ;; machine without libev (pre-publication issue 139, ADR-0011). Pure CL is what makes the artifact shippable.
   :depends-on ("hyperion" "hyperion/desktop" "hyperion/assets" "cons/coalton-repl"
                "spinneret" "lass" "clack-handler-hunchentoot")
   :serial t
@@ -424,11 +424,11 @@
                "fiveam"
                "sb-bsd-sockets"    ; server-tests: a free port, and "is it listening?"
                ;; TEST-ONLY: an in-memory octet input stream, to hand BODY-STRING a body
-               ;; without a socket (#211). Already present transitively via clack --
+               ;; without a socket (pre-publication issue 211). Already present transitively via clack --
                ;; declared because relying on that is how a dependency vanishes when
                ;; somebody else's changes.
                "flexi-streams"
-               ;; A backend, because #139 made hyperion declare none: an app (or a suite)
+               ;; A backend, because pre-publication issue 139 made hyperion declare none: an app (or a suite)
                ;; that actually starts a server picks its own, and server-tests starts real
                ;; ones. Without this the suite dies on NO-SERVER-BACKEND -- correctly, since
                ;; refusing to start beats answering on a server nobody chose.
@@ -448,7 +448,7 @@
                              ;; AFTER server-tests, which is not alphabetical and not an
                              ;; accident: it reuses that file's %SRV-FREE-PORT /
                              ;; %SRV-LISTENING-P / %SRV-AWAIT rather than keeping a second
-                             ;; copy of them (#336).
+                             ;; copy of them (pre-publication issue 336).
                              (:file "dev-serve-tests")
                              (:file "backend-tests")
                              (:file "session-tests")

@@ -59,7 +59,7 @@ ACT restart protocol (retry / substitute / abandon) applies."
   ;; handles escaping the string values (api key, query).
   (let* ((body (format nil "{\"api_key\":~A,\"query\":~A,\"max_results\":~D,\"include_answer\":true,\"search_depth\":\"basic\"}"
                        (jzon:stringify (%api-key)) (jzon:stringify query) max-results))
-         ;; Through the shared client (#202) rather than raw dexador: a non-2xx now
+         ;; Through the shared client (pre-publication issue 202) rather than raw dexador: a non-2xx now
          ;; carries the provider's own explanation instead of an opaque failure.
          (resp (http:response-body
                 (http:send-request

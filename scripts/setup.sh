@@ -94,7 +94,7 @@ need_scratch() { [ -n "$scratch" ] || scratch=$(mktemp -d); }
 # then closes MID-TRANSFER is exit 18 (partial file), which is in none of those categories,
 # so curl gave up on the first occurrence despite --retry 4.
 #
-# That is not hypothetical: the first ever clean-machine run of this script (#198) died
+# That is not hypothetical: the first ever clean-machine run of this script (pre-publication issue 198) died
 # exactly there, on a real SourceForge mirror, after 3m23s -- with `curl: (18) transfer
 # closed with 11526315 bytes remaining to read` and nothing installed.
 #
@@ -189,10 +189,10 @@ install_sbcl() {
 # is a CFFI "Unable to load any of the alternatives" deep inside ASDF, naming a soname
 # rather than a package anyone can install.
 #
-#   libev      -- Woo, praxeon/web's Clack handler on Unix (#218).
+#   libev      -- Woo, praxeon/web's Clack handler on Unix (pre-publication issue 218).
 #   libsqlite3 -- cl-sqlite, under mnemosyne's default backend.
 #
-# LIBSQLITE3 IS HERE BECAUSE THE CLEAN-MACHINE RUN FOUND IT (#198), and it is the better
+# LIBSQLITE3 IS HERE BECAUSE THE CLEAN-MACHINE RUN FOUND IT (pre-publication issue 198), and it is the better
 # illustration of why this list exists. On a stock ubuntu:24.04 the documented sequence
 # reported success end to end -- setup.sh exited 0, bootstrap.lisp exited 0, bin/cons was
 # built and ran -- while mnemosyne could not load AT ALL. bootstrap's warm step is an
@@ -345,7 +345,7 @@ info "Ouranos setup on $os ($(uname -m)) -- pins: SBCL $SBCL_VERSION, QL dist $Q
 # returned success. getting-started.md then tells the reader to run bootstrap.lisp, which
 # quickloads praxeon, which declares clack-handler-woo, which binds libev at LOAD time. So
 # the documented sequence was "setup succeeds, the next command fails", and the script had
-# a doctor that knew better sitting right next to the installer that did not ask it (#198).
+# a doctor that knew better sitting right next to the installer that did not ask it (pre-publication issue 198).
 #
 # Returns 0 when the machine is provisioned, 1 otherwise. Never exits: the caller decides.
 run_doctor() {
@@ -385,7 +385,7 @@ run_doctor() {
             else need "libev (Woo needs it to load hyperion)" "sudo apt install libev-dev  |  dnf install libev-devel"; fi
             # Checked here as well as installed above, because the doctor is what decides
             # whether setup.sh may claim success -- and this is the one the clean-machine
-            # run caught the whole sequence lying about (#198).
+            # run caught the whole sequence lying about (pre-publication issue 198).
             if ldconfig -p 2>/dev/null | grep -q 'libsqlite3\.so'; then printf '  PASS    libsqlite3 (mnemosyne)\n'
             else need "libsqlite3 (cl-sqlite needs it to load mnemosyne)" "sudo apt install libsqlite3-dev  |  dnf install libsqlite3-devel"; fi;;
     Darwin) if brew list libev >/dev/null 2>&1; then printf '  PASS    libev (Woo)\n'

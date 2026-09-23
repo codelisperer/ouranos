@@ -122,7 +122,7 @@ the served path and the emitted href together."
     (is (= (length (assets:asset-bytes (assets:asset :bulma)))
            (getf (second res) :content-length)))
     ;; The BODY ITSELF is the octet vector -- not a list containing one. This asserted
-    ;; `(first (third res))` until #148, which is why the suite stayed green while every
+    ;; `(first (third res))` until pre-publication issue 148, which is why the suite stayed green while every
     ;; asset served empty: it was written against the implementation's shape rather than
     ;; the Clack contract, so it locked the defect in instead of catching it.
     (is (equalp (assets:asset-bytes (assets:asset :bulma))
@@ -182,7 +182,7 @@ rather than quietly serve the current bytes."
 
 ;;; --- over the wire ------------------------------------------------------------
 ;;;
-;;; Everything above proves the bytes are correct IN THE IMAGE. #148 was a bug in
+;;; Everything above proves the bytes are correct IN THE IMAGE. pre-publication issue 148 was a bug in
 ;;; getting them OUT of it: `%respond` returned `(list bytes)` -- a list whose single
 ;;; element is an octet vector, which is not a Clack body -- so every asset served as
 ;;; 200 with a correct Content-Length and no content. htmx and Bulma silently failed to
@@ -266,7 +266,7 @@ races it and loses (CONNECTION-REFUSED)."
        (ignore-errors (hyperion/server:stop handler)))))
 
 (test every-asset-arrives-byte-for-byte-over-http
-  ;; The regression test for #148, and the one that would have caught it. Not "the
+  ;; The regression test for pre-publication issue 148, and the one that would have caught it. Not "the
   ;; response is non-empty" -- the served bytes must EQUAL the embedded bytes, which is
   ;; the only statement that rules out both truncation and re-encoding.
   (%with-asset-server (port)

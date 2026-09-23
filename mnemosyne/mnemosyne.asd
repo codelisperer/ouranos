@@ -17,8 +17,8 @@
   :depends-on ("coalton"
                "aion/secret"      ; conn.lisp calls sec:reveal on the backend password
                "aion/log"       ; neutral logging facade (leftward dep: aion is left of mnemosyne)
-               "aion/clock"     ; the monotonic clock + v6 ids behind mnemosyne/id (#96)
-               "aion/secret/types" ; the DB password as an opaque field, not a printable String (#209)
+               "aion/clock"     ; the monotonic clock + v6 ids behind mnemosyne/id (pre-publication issue 96)
+               "aion/secret/types" ; the DB password as an opaque field, not a printable String (pre-publication issue 209)
                "alexandria"
                "dbi"            ; CL-DBI: the DB-independent API (the neutral substrate)
                "dbd-postgres"   ; PostgreSQL over the WIRE (cl-postgres, no libpq); XTDB 2 rides it
@@ -27,7 +27,7 @@
   ;; NOT cl+ssl, deliberately. cl-postgres resolves it at connect time rather than at
   ;; load time, so TLS is available to any image whose APPLICATION depends on it, and
   ;; mnemosyne does not put OpenSSL -- a native library -- on the load path of every
-  ;; image that touches a database. Same doctrine as #139 for the HTTP server; the
+  ;; image that touches a database. Same doctrine as pre-publication issue 139 for the HTTP server; the
   ;; failure it avoids is ADR-0011's (a bundle that dies on a missing .so).
   :serial t
   :components ((:module "src"
@@ -35,7 +35,7 @@
                 :components ((:file "packages")
                              (:file "backend")   ; typed neutral store protocol (Coalton)
                              (:file "field")     ; typed field-type vocabulary (Coalton)
-                             (:file "field-shell") ; its refusals, as conditions (CL) -- #334
+                             (:file "field-shell") ; its refusals, as conditions (CL) -- pre-publication issue 334
                              (:file "entity")    ; typed entity metadata: DTO trait + touch (Coalton)
                              (:file "id")        ; time-ordered UUID/vid + touch! (CL)
                              (:file "url")       ; DATABASE_URL -> a typed Backend (CL)
@@ -54,10 +54,10 @@
 
 
 (defsystem "mnemosyne/examples/contacts/tests"
-  :description "The contacts example's cast -> validate path (#129)."
+  :description "The contacts example's cast -> validate path (#94)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  ;; DEFINED HERE, WHILE THE APP IT TESTS IS NOT (#357). `contacts' keeps its own
+  ;; DEFINED HERE, WHILE THE APP IT TESTS IS NOT (pre-publication issue 357). `contacts' keeps its own
   ;; contacts.asd and its own cons.lisp deliberately: it is the `cons init contacts
   ;; --template cli' demo, and being a standalone project with its own .asd is the property
   ;; the example exists to demonstrate. So the app system is named for WHAT IT IS and stays
@@ -90,7 +90,7 @@
                 :components ((:file "query")
                              ;; backends FIRST after query (which defines the package):
                              ;; every suite below may be backend-parameterised, and the
-                             ;; runner + coverage banner live here (#176).
+                             ;; runner + coverage banner live here (pre-publication issue 176).
                              (:file "backends")
                              (:file "field-type")
                              (:file "schema")

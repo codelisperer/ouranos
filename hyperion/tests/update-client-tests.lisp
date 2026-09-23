@@ -1,4 +1,4 @@
-;;;; update-client-tests.lisp --- the effectful half, against real signatures (#76).
+;;;; update-client-tests.lisp --- the effectful half, against real signatures (pre-publication issue 76).
 ;;;;
 ;;;; WHY THIS SUITE EXISTS AT ALL. `AGENTS.md': a system that exports a surface must have a
 ;;;; suite that exercises it, and twice now a reusable piece has shipped exported,
@@ -265,7 +265,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
     (is (string= "available" (field status :status)))))
 
 (test no-artifact-for-this-platform-is-its-own-state
-  ;; The #206 shape: a client that cannot find its own row must not report itself current.
+  ;; The pre-publication issue 206 shape: a client that cannot find its own row must not report itself current.
   (let ((status (status-of (signed-source (manifest-json :platform-key nil)))))
     (is (string= "no-artifact" (field status :status)))))
 
@@ -310,7 +310,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
                                                     :signature nil))))
 
 
-;;; --- the directory backend (#77) --------------------------------------------
+;;; --- the directory backend (pre-publication issue 77) --------------------------------------------
 ;;;
 ;;; It exists so a release can be checked BY THE CLIENT before it is uploaded --
 ;;; `scripts/verify-release-as-client.lisp'. That gate is worth nothing if this backend
@@ -363,7 +363,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
 
 (test the-channel-names-the-file-and-nothing-else-does
   ;; THE ONE THAT MATTERS. `<channel>.json' is what the HTTP backend asks a host for, and
-  ;; the generator wrote `latest.json' until #77 -- one document, two names, in two files
+  ;; the generator wrote `latest.json' until pre-publication issue 77 -- one document, two names, in two files
   ;; that cannot see each other. If this backend ever accepted some other name, the gate
   ;; would pass a release the real client cannot find, which is worse than no gate.
   (with-published-directory (dist :channel "beta")
@@ -410,7 +410,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
   ;; newline, and reads it back the same way. The client fetches those exact bytes. Until
   ;; this test existed they went straight to a verifier that requires 64 RAW bytes, so an
   ;; 89-byte base64 line failed -- every time, for every artifact, on every machine. The
-  ;; consequence is #206's: every installed client refuses every real release, silently
+  ;; consequence is pre-publication issue 206's: every installed client refuses every real release, silently
   ;; and permanently, and a refused update against a security fix IS the attack.
   ;;
   ;; It was invisible because every fixture in this file served raw bytes from memory. A
@@ -442,7 +442,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
 ;;; `*exit-after-handoff*' are substituted, so everything up to the irreversible step is
 ;;; genuinely exercised: the re-check, the writability gate, the payload download, the
 ;;; PAYLOAD signature check, the shutdown hook, and the exact arguments handed to NSIS.
-;;; What is NOT exercised is NSIS actually running, which needs a built installer from #74
+;;; What is NOT exercised is NSIS actually running, which needs a built installer from #72
 ;;; and a machine willing to have software installed on it.
 ;;;
 ;;; THE THREE TESTS THAT MATTER ARE THE ONES ASSERTING THE INSTALLER WAS *NOT* LAUNCHED.
@@ -450,7 +450,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
 ;;; each a path where launching anyway is the actual harm, and a test that only checks the
 ;;; reported state would pass while the installer ran.
 ;;;
-;;; WHY EVERY ONE OF THEM IS `#+win32'. `apply-update' REFUSES on macOS and Linux -- #74
+;;; WHY EVERY ONE OF THEM IS `#+win32'. `apply-update' REFUSES on macOS and Linux -- #72
 ;;; has produced no .dmg, no .app.tar.gz and no AppImage, so there is nothing to launch --
 ;;; and the refusal is a READER CONDITIONAL, resolved before any behaviour these tests
 ;;; describe. Without the guard every test below would signal `update-not-implemented' on
@@ -494,14 +494,14 @@ the artifact lookup is the real one rather than a hard-coded guess."
   "Run BODY with the irreversible step stubbed and a real, writable install directory.
 
 APP-NAME is a parameter because `*app-name*' is what a `~/.<appname>' path is computed
-from (design section 1), and the #224 fixtures need a name unique per run rather than a
+from (design section 1), and the #111 fixtures need a name unique per run rather than a
 shared literal that could collide with a real directory in somebody's home."
   `(let* ((dir (merge-pathnames (format nil "ouranos-apply-test-~D/" (random 100000))
                                 (uiop:temporary-directory))))
      (ensure-directories-exist dir)
      ;; WHAT THIS BODY STAGED, by difference. The successful path CANNOT be cleaned up by
      ;; the client -- it hands the installer to a detached process and exits -- so the
-     ;; suite has to, or it leaks exactly what #257 is about: roughly two directories per
+     ;; suite has to, or it leaks exactly what pre-publication issue 257 is about: roughly two directories per
      ;; whole-tree run, the suite committing in miniature the defect it is testing.
      ;;
      ;; By difference rather than from the stub launcher, because a path that stages and
@@ -531,7 +531,7 @@ shared literal that could collide with a real directory in somebody's home."
 #-win32
 (test on-a-platform-with-no-artifact-apply-refuses-and-says-which-platform
   ;; The other side of the guard, and not a placeholder: "macOS and Linux refuse" is a
-  ;; DECISION (#74 has produced no artifact for either), and a decision nothing asserts is
+  ;; DECISION (#72 has produced no artifact for either), and a decision nothing asserts is
   ;; how a half-built apply path ships. The detail names the platform key, so the refusal
   ;; a user or a log sees says WHICH platform is unbuilt rather than merely that one is.
   (with-apply ()
@@ -762,7 +762,7 @@ shared literal that could collide with a real directory in somebody's home."
     (is (null (intersection (rest nsis) (rest inno) :test #'string=))
         "the two packagings were given overlapping flags")))
 
-;;; --- the application's own data survives an update (#224) -------------------
+;;; --- the application's own data survives an update (#111) -------------------
 ;;;
 ;;; `hyperion/docs/desktop-distribution-design.md' section 1, on `~/.<appname>':
 ;;;
@@ -1002,7 +1002,7 @@ find it. A shared literal there could collide with something a developer cares a
       (is-false *launched*)
       (is-untouched data before))))
 
-;;; --- the staging directory does not accumulate (#257) -----------------------
+;;; --- the staging directory does not accumulate (pre-publication issue 257) -----------------------
 ;;;
 ;;; MEASURED BEFORE IT WAS FIXED: 113 MB across 48 directories on one machine in a day --
 ;;; twelve full installers from real updates, the rest from this suite. Nothing crashed and
@@ -1109,7 +1109,7 @@ find it. A shared literal there could collide with something a developer cares a
 (test a-refusal-after-staging-discards-the-payload-and-a-handoff-does-not
   ;; TWO HALVES OF ONE DECISION, and the second is the control that makes the first mean
   ;; something. `apply-update' stages BEFORE it checks the declared format, so an
-  ;; unrecognised format downloads a full installer and then refuses -- and until #257 it
+  ;; unrecognised format downloads a full installer and then refuses -- and until pre-publication issue 257 it
   ;; left it there. A refusal has an afterwards and must clean up.
   ;;
   ;; A HAND-OFF DOES NOT. The installer is about to run and this process is about to exit,
@@ -1139,7 +1139,7 @@ find it. A shared literal there could collide with something a developer cares a
           "a handed-off installer must survive -- the installer is about to run it"))))
 
 
-;;; --- the HTTP backend, against a socket that actually answers (#332) ---------
+;;; --- the HTTP backend, against a socket that actually answers (pre-publication issue 332) ---------
 ;;;
 ;;; EVERY TEST ABOVE REACHES THE CLIENT THROUGH A CLOS STUB -- `fixed-source',
 ;;; `broken-source', `directory-source'. All three return what the protocol says to return,
@@ -1276,7 +1276,7 @@ Returns (VALUES base-url stop-function)."
 
 (test http-carries-bytes-through-undecoded
   ;; The manifest signature is over the EXACT bytes, so a decode-and-re-encode round trip
-  ;; invalidates it, and an installer decoded as text is not an installer (#223). Served
+  ;; invalidates it, and an installer decoded as text is not an installer (pre-publication issue 223). Served
   ;; here with octets that are not valid UTF-8, because that is the input on which a decode
   ;; would either corrupt the body or signal -- and either one is the failure.
   (let ((doc (coerce #(255 254 0 123 34 97 34 58 49 125) '(vector (unsigned-byte 8))))
@@ -1291,7 +1291,7 @@ Returns (VALUES base-url stop-function)."
 (test http-asks-for-the-channel-by-name
   ;; The filename IS the contract (design section 2), and it is named once in the generator
   ;; and once in the client, in files that cannot see each other -- the drift that produced
-  ;; `latest.json' against a client asking for `stable.json' (#77). Asserted against the
+  ;; `latest.json' against a client asking for `stable.json' (pre-publication issue 77). Asserted against the
   ;; path a server actually received, which is the only place the two meet.
   (let ((asked '()))
     (with-canned-http (base (lambda (path) (push path asked) (values 404 nil)))
@@ -1331,7 +1331,7 @@ Returns (VALUES base-url stop-function)."
             (is (null signature))
             (is-false reached "the search continued past a source that had answered")))))))
 
-;;; --- #264: the window between the write and the launch ---------------------
+;;; --- pre-publication issue 264: the window between the write and the launch ---------------------
 ;;;
 ;;; `stage-payload' verifies the payload's signature over the bytes it holds IN MEMORY,
 ;;; writes them, and hands the launcher a PATH. These three tests are about the gap, and the
@@ -1396,7 +1396,7 @@ discovering it the way an attacker would."
           "the swap did not reach the staged file")
       (is-false *launched* "a substituted installer was handed to the launcher")
       (is-false *exited* "the process exited as though it had handed off")
-      ;; A refusal after staging has an afterwards, and #257 is what happens when it leaks.
+      ;; A refusal after staging has an afterwards, and pre-publication issue 257 is what happens when it leaks.
       (is-false (probe-file staging-dir)
                 "the refusal left the substituted installer on disk"))))
 
@@ -1444,7 +1444,7 @@ discovering it the way an attacker would."
       (is (= 10 shortened) "the truncation did not reach the staged file")
       (is-false *launched* "a truncated installer was handed to the launcher"))))
 
-;;; --- #264: the staging directory's permissions -----------------------------
+;;; --- pre-publication issue 264: the staging directory's permissions -----------------------------
 ;;;
 ;;; The ticket called TEMP "world-writable"; measured, it is not, and the whole point of
 ;;; these tests is that the property held BY INHERITANCE and nothing checked it. So they
@@ -1488,7 +1488,7 @@ left as it was."
            (is (member "SY" principals :test #'string-equal)
                "LocalSystem is not on the staging directory's DACL")
            ;; IN SIDS, because the DACL does not have to spell it as one. This assertion
-           ;; read `(member (%current-user-sid) principals)' until #446, which is false on
+           ;; read `(member (%current-user-sid) principals)' until pre-publication issue 446, which is false on
            ;; any account SDDL abbreviates -- it was failing on the CI runner beside the
            ;; refusal it was supposed to be the control for.
            (is (member (up::%current-user-sid) (principal-sids-of principals)
@@ -1514,7 +1514,7 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
 
 #+win32
 (test a-grant-to-this-process-is-not-a-stranger-because-sddl-abbreviated-it
-  ;; #446. `%current-user-sid' answers in SIDs; `icacls /save' answers in SDDL, which
+  ;; pre-publication issue 446. `%current-user-sid' answers in SIDs; `icacls /save' answers in SDDL, which
   ;; abbreviates some accounts -- the built-in Administrator is `LA'. Comparing the two
   ;; directly told a process running as such an account that its OWN staging directory
   ;; belonged to somebody else, and the refusal is not a warning: it aborts the update.
@@ -1522,7 +1522,7 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
   ;; The grant is real and is made the way the client makes its own -- by full SID, through
   ;; icacls, on a real directory -- and then read back through the same path. The account is
   ;; the one the CI runner happens to run as, which is why this had been failing on the
-  ;; Windows leg from the commit the check landed in (#264) and on no other leg ever.
+  ;; Windows leg from the commit the check landed in (pre-publication issue 264) and on no other leg ever.
   (let ((admin (rid-500-sid)))
     (if (null admin)
         (skip "this host would not name its built-in Administrator account, so there is no aliased SID to grant")
