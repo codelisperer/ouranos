@@ -260,44 +260,37 @@ knows nothing about where updates live:
 Both are implemented from day one so the protocol is real rather than aspirational, and an
 app picks one (or a list, tried in order — a useful fallback when a host is down).
 
-### 5a. The release repository is transitional, and `RELEASE_REPO` is the seam
+### 5a. Releases are published to this repository, through one variable, `RELEASE_REPO`
 
-Releases are published to
+Until 2026-09-23, releases were published to
 [`codelisperer/ouranos-desktop-releases`](https://github.com/codelisperer/ouranos-desktop-releases),
-which is a **consequence of this repository being private, and nothing more.** The updater
-client fetches with no credential — an installed application cannot hold one safely — and
-GitHub serves a private repository's release assets only to an authenticated request. A
-release attached here looks perfectly healthy in CI and returns 401/404 for every customer.
-So the assets need a public host, and a second repository is the cheapest one.
+because this repository was private. The updater client fetches with no credential — an
+installed application cannot hold one safely — and GitHub serves a private repository's
+release assets only to an authenticated request. A release attached here would have looked
+healthy in CI and returned 401/404 to every installed copy, so the assets needed a public
+host, and a second repository was the cheapest one.
 
-**This is expected to retire.** The maintainer expects ouranos to go public well before the
-dates below; at that point the assets can live on the releases of this repository, the
-second repo is archived, and the publishing credential is *deleted rather than renewed*.
+**That ended when this repository went public.** Releases are now published to this
+repository's own releases, using the workflow's built-in `GITHUB_TOKEN`. The second
+repository is archived and its publishing token was deleted. Copies of `coalton-repl` 0.1.0
+installed from it still poll its channel, which will not move again, so they have to be
+reinstalled from a release published here.
 
 **The seam is one environment variable.** `RELEASE_REPO` is set once in
-`.github/workflows/desktop-release.yml` and every other site — the manifest's `--base-url`
-and `--notes-url`, both `gh release` steps, the channel URL that `verify-published` fetches
-— reads `${RELEASE_REPO}`. Collapsing the split is therefore:
-
-1. point `RELEASE_REPO` at `${{ github.repository }}`;
-2. swap both `GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}` lines to `secrets.GITHUB_TOKEN`;
-3. add `permissions: contents: write` to the `publish` job;
-4. delete the `RELEASE_REPO_TOKEN` secret and archive the releases repo.
-
-Deliberately **not** generalised further. There is no second source type, no matrix over
-publishing targets and no configurability beyond that one variable, because the only known
-second case is the one that removes the first.
+`.github/workflows/desktop-release.yml`, now to `${{ github.repository }}`, and every other
+site — the manifest's `--base-url` and `--notes-url`, both `gh release` steps, the channel URL
+that `verify-published` fetches — reads `${RELEASE_REPO}`. Both `gh release create` calls pass
+`--latest=false`, because this repository's "Latest release" belongs to the framework, and
+installed copies never read it anyway: they poll the channel pointer.
 
 **Credential facts, written here so that someone debugging a failed release does not have to
-ask.** `RELEASE_REPO_TOKEN` is a fine-grained PAT with `Contents: write` on
-`ouranos-desktop-releases` **only** — it cannot touch the private ouranos repo — and it
-**expires 2027-09-18**. A release that fails at "Publish the versioned release" with a 403,
-on a workflow that has not otherwise changed, is that expiry until proven otherwise.
-
-One question is open and does not block anything: whether CI itself runs in the public repo
-after the flip. If it does, `GITHUB_TOKEN` suffices and the token retires; if releases are
-still cut from a private mirror, something equivalent survives. That is the maintainer's
-call — tracked on #90.
+ask.** Publishing uses `GITHUB_TOKEN`, with `contents: write` granted to the `publish` job
+only. The manifest is signed with the `OURANOS_SIGNING_KEY` secret, the private half of the
+release key. It is verified with the `OURANOS_PUBLIC_KEY` repository variable, the public
+half, which builds also put inside the app. Both were set on this repository on 2026-09-23,
+with the same key pair the 0.1.0 release used. A release that fails at "Publish the versioned
+release" with a 403 points at the job's permissions, since no personal token is involved any
+more.
 
 ## 6. The client — typed core, effectful shell
 
@@ -548,10 +541,11 @@ not remembered.
   installed app can reach, so every client-side piece was machinery for consuming a
   release that did not exist.
 
-  Three things gate the first real release, and none is code: the `OURANOS_SIGNING_KEY`
-  secret and `OURANOS_PUBLIC_KEY` variable (both absent — the `manifest` job has
-  consequently never run), a `RELEASE_REPO_TOKEN` with write access to the release repo
-  (`GITHUB_TOKEN` is scoped to this repository only), and a tag. **S3 is not wired**;
+  The first release, `coalton-repl` 0.1.0, was published on 2026-09-18, while this
+  repository was still private, to the separate release repository. A release from this
+  repository needs the `OURANOS_SIGNING_KEY` secret and the `OURANOS_PUBLIC_KEY` variable,
+  both set on 2026-09-23, and a `coalton-repl-v*` tag; no other credential is involved (5a).
+  **S3 is not wired**;
   `s3-source` exists and the client takes a list of sources, so it is additive.
   macOS carries no payload at all — #350, and declared rather than silent via
   `APP_PLATFORMS`.

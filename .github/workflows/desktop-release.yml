@@ -44,12 +44,15 @@ env:
   APP_CHANNEL: stable
   APP_SYSTEM: hyperion/examples/coalton-repl
   APP_ENTRY: hyperion/examples/coalton-repl:main
-  # WHERE A RELEASE GOES, and it is deliberately NOT this repository. An installed
-  # application cannot hold a credential safely, so the URL it polls has to be readable
-  # by anybody; ouranos is private, and a release attached here would 401 for every
-  # customer while looking perfectly healthy in CI. The release repo is public and holds
-  # assets only -- no source. See its README for the channel-pointer layout.
-  RELEASE_REPO: codelisperer/ouranos-desktop-releases
+  # WHERE A RELEASE GOES: this repository's own releases. An installed application cannot
+  # hold a credential, so the URL it polls has to be readable by anybody. While ouranos was
+  # private that ruled this repository out -- a release attached here would have returned
+  # 401 to every installed copy while looking healthy in CI -- so releases went to a
+  # separate public repository, codelisperer/ouranos-desktop-releases, published with a
+  # personal access token. ouranos is public now, so releases live here and the built-in
+  # GITHUB_TOKEN publishes them. It stays one variable so every URL below comes from one
+  # place (hyperion/docs/desktop-distribution-design.md, section 5a).
+  RELEASE_REPO: ${{ github.repository }}
   # WHAT THIS RELEASE IS SUPPOSED TO CARRY, checked against the manifest before anything
   # is published. macOS is absent because nothing builds its `.app.tar.gz' payload yet
   # (#350) -- `build-dmg.sh' writes the human .dmg and the workflow never calls it. That
@@ -322,7 +325,7 @@ jobs:
             exit 1
           fi
           # THE URLS ARE BAKED INTO A SIGNED DOCUMENT, so they have to be the ones the
-          # assets will really be served from -- ${RELEASE_REPO}, not ${GITHUB_REPOSITORY}.
+          # assets will really be served from, which is ${RELEASE_REPO}.
           # Signing them means a wrong host cannot be corrected afterwards by editing the
           # file; the release has to be regenerated.
           sbcl --script scripts/update-manifest.lisp generate --dist dist --product "$APP_NAME" --version "$APP_VERSION" --channel "$APP_CHANNEL" --base-url "https://github.com/${RELEASE_REPO}/releases/download/${GITHUB_REF_NAME}" --notes-url "https://github.com/${RELEASE_REPO}/releases/tag/${GITHUB_REF_NAME}"
@@ -380,6 +383,11 @@ jobs:
     needs: manifest
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
+    # Creating releases and uploading assets with the built-in token needs write access to
+    # this repository's contents. It is granted here, to the one job that publishes, rather
+    # than to the whole workflow.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -467,12 +475,8 @@ jobs:
       - name: Publish the versioned release
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::RELEASE_REPO_TOKEN is not set -- it needs write access to ${RELEASE_REPO}, which GITHUB_TOKEN does not have (different repository)."
-            exit 1
-          fi
           # The body a PERSON lands on. APP_PLATFORMS is already checked against the manifest
           # above, so coverage was declared to the machinery and not to a reader -- someone
           # arriving on a platform with no asset saw no asset and no reason (#350).
@@ -482,8 +486,11 @@ jobs:
             "Platforms in this release: ${APP_PLATFORMS}." \
             "" \
             "A platform not listed has no download here, and installed copies on it are not offered this version. macOS is absent because nothing builds its payload yet (#350).")
+          # --latest=false: this repository's "Latest release" is the framework's, and an app's
+          # release must not take it over. Installed copies never read it; they poll the
+          # channel pointer below.
           gh release view "$GITHUB_REF_NAME" --repo "$RELEASE_REPO" >/dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --repo "$RELEASE_REPO" \
+            gh release create "$GITHUB_REF_NAME" --repo "$RELEASE_REPO" --latest=false \
               --title "${APP_NAME} ${APP_VERSION}" \
               --notes "$notes"
           # --clobber so a re-run of a failed publish replaces rather than half-fails.
@@ -499,21 +506,17 @@ jobs:
       # the previous release, which is exactly the state before the run: clients stay put,
       # the job goes red, a human re-runs it. Nothing is offered that cannot be fetched.
       #
-      # No second `-z "$GH_TOKEN"' guard here on purpose. With an empty token the step
-      # above exits 1 and Actions stops the job, so a guard on this step could only be
-      # reached through the thing that already guards it -- and a guard reachable only
-      # through the thing it guards is not a guard. The case it would appear to cover --
-      # a versioned release published while the pointer silently stays stale -- is caught
-      # where it is actually visible: `verify-published' fetches the channel as a customer
-      # and fails unless the version it is offered is THIS one.
+      # A versioned release published while the pointer stays stale is caught where it is
+      # visible: `verify-published' fetches the channel as a customer and fails unless the
+      # version it is offered is THIS one.
       - name: Move the channel pointer
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           POINTER="${APP_NAME}-${APP_CHANNEL}"
           gh release view "$POINTER" --repo "$RELEASE_REPO" >/dev/null 2>&1 ||
-            gh release create "$POINTER" --repo "$RELEASE_REPO" \
+            gh release create "$POINTER" --repo "$RELEASE_REPO" --latest=false \
               --title "${APP_NAME} -- ${APP_CHANNEL} channel" \
               --notes "The current ${APP_CHANNEL} manifest for ${APP_NAME}. Assets here are REPLACED on every release; the versioned releases are the immutable ones. This tag is the permanent URL installed copies poll."
           gh release upload "$POINTER" --repo "$RELEASE_REPO" --clobber \
