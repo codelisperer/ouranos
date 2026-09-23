@@ -159,9 +159,13 @@
   (format t "as the CLIENT reads it -- hyperion/update, not the generator's own reader~%~%")
 
   (setf up:*public-key* public
-        ;; Strictly older than anything publishable, so the anti-rollback comparison can
-        ;; only refuse for a reason that is about the manifest.
-        up:*installed-version* "0.0.0"
+        ;; Older than anything the release workflow builds, so the anti-rollback comparison
+        ;; can only refuse for a reason that is about the manifest. It is a pre-release
+        ;; because the workflow's fallback version, 0.0.0-dev, is one: a pre-release sorts
+        ;; below its release, so an installed 0.0.0 refused every dispatch run started
+        ;; without a version (#7). The tag "0" sorts below the tags the workflow produces,
+        ;; both under semver's rule and under the client's lexicographic compare.
+        up:*installed-version* "0.0.0-0"
         up:*installed-published* nil
         up:*update-source* source)
 
