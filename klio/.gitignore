@@ -1,0 +1,19 @@
+# Compiled / build artifacts
+*.fasl
+*.fas
+*.lx64fsl
+bin/
+
+# Editors
+*~
+\#*\#
+.\#*
+.DS_Store
+/.lem/
+.vscode/alive/
+
+# Local secrets / config -- never commit (.env.example IS tracked)
+.env
+.env.*
+!.env.example
+secrets.lisp

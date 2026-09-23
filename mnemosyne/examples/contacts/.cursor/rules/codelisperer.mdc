@@ -1,0 +1,18 @@
+---
+description: codelisperer framework conformance (CL/Coalton) — follow AGENTS.md
+alwaysApply: true
+---
+
+Follow **AGENTS.md** at the project root — the canonical codelisperer conformance spec.
+Condensed rules:
+
+- Typed Coalton core + effectful CL shell; **no IO in Coalton**. Conditions, not return
+  codes. ADTs over booleans. Package-per-module; `:local-nicknames`.
+- Coalton function-type declares are uncurried with `*`: `(declare f (A * B -> C))`. Coalton
+  is case-insensitive; `match` on a nullary constructor needs parens `((None) ...)`.
+- Dependency DAG `aion -> cons -> mnemosyne -> elenchon -> hyperion -> praxeon`; never depend
+  on a framework to the right.
+- mnemosyne queries are data, not macros: `(:select (:id) :from (:users) :where (:= :email x))`;
+  external input flows cast -> validate -> insert!.
+- Build with `sbcl --script bootstrap.lisp` then `(ql:quickload :NAME)`; tests are fiveam.
+- 2-space indent, no trailing whitespace.

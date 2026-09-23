@@ -1,0 +1,87 @@
+%%% main.tex --- Hyperion: HTMX-First, Node-Free Full-Stack Web in Common Lisp
+%%%
+%%% Portable skeleton: compiles with a stock TeX Live (base `article` + common
+%%% packages). Build:  latexmk -pdf main.tex   (or `make`).
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, frame=single, framesep=4pt, breaklines=true}
+
+\title{\textbf{Hyperion}: HTMX-First, Node-Free\\ Full-Stack Web in Common Lisp}
+\author{Bob\\ \small\texttt{eternal.recursion@proton.me}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Modern web development is dominated by a JavaScript build ecosystem whose
+complexity is largely incidental to the problem of delivering interactive
+hypermedia. \textsc{HTMX} demonstrates that a server rendering HTML fragments can
+recover much of that interactivity without a single-page-application toolchain.
+We argue that Common Lisp is an unusually strong host for this model---its macros
+afford an ergonomic HTML DSL, its condition system makes failure legible, and its
+\emph{live image} enables editing a running program---and present \textsc{Hyperion},
+a full-stack web framework biased toward ``Common Lisp all the way down.''
+Hyperion pairs a compile-time-checked HTMX vocabulary (in Coalton) with an open,
+effectful rendering layer (CLOS + Spinneret), authors all client JavaScript via
+Parenscript (no Node.js), generates CSS from a Lisp DSL, and provides a
+Figwheel-style hot-reload development loop. We situate Hyperion within a small
+ecosystem whose thesis is to make Coalton a first-class ``modern Lisp.''
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+% The JS tooling tax; HTMX as a corrective; why a Lisp; the "CL all the way down" aim.
+
+\section{The JavaScript Tooling Tax}
+\label{sec:tax}
+% Build chains, transpilers, bundlers; incidental vs essential complexity.
+
+\section{The HTMX Case}
+\label{sec:htmx}
+% Hypermedia + fragment rendering; how far it reaches toward SPA interactivity.
+
+\section{Typed HTMX: a Coalton Core and a CLOS Shell}
+\label{sec:typed}
+% ADTs for swaps/triggers/targets/verbs; a Duration type; static Coalton dispatch
+% vs open CLOS rendering; generic components, never domain ones.
+
+\section{Live Development}
+\label{sec:live}
+% The hot-reload loop: recompile into the running image, rebuild the server around
+% preserved state, browser refreshes; compile errors surfaced in-page; the contrast
+% with restart-and-replay stacks.
+
+\section{Common Lisp to JavaScript, without Node}
+\label{sec:cljs}
+% Parenscript today; a typed Coalton->TS path as a far horizon.
+
+\section{The Ecosystem}
+\label{sec:ecosystem}
+% cons (tooling), hyperion (web), praxeon (agents), a Coalton-first FP library;
+% the shared house style; Coalton as a first-class modern Lisp.
+
+\section{Evaluation Plan}
+\label{sec:eval}
+% Expressiveness vs a Node/React equivalent; hot-reload latency; component coverage.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

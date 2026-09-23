@@ -1,0 +1,21 @@
+{
+  // Alive boots its LSP server as an SBCL image; by default that image knows
+  // nothing about this project, so opening a file makes it complain that
+  // PRAXEON/* "does not designate any package". We extend the default start
+  // command to (a) give SBCL a bigger heap for Coalton's first compile, and
+  // (b) load the whole system before the server starts -- so every PRAXEON/*
+  // package exists and completion/xref see the real code. The quickload is
+  // wrapped in ignore-errors so Alive still starts if the system won't load
+  // (e.g. before the repo-root bootstrap.lisp has written the ASDF
+  // source-registry drop-in that puts the frameworks on the load path).
+  "alive.lsp.startCommand": [
+    "sbcl",
+    "--dynamic-space-size", "4096",
+    "--eval", "(ql:quickload '(:bordeaux-threads :usocket :cl-json :flexi-streams))",
+    "--eval", "(require :asdf)",
+    "--eval", "(asdf:load-system :alive-lsp)",
+    "--eval", "(ignore-errors (ql:quickload :cons))",       // `cons:project` for cons.lisp
+    "--eval", "(ignore-errors (ql:quickload :praxeon/elise))",
+    "--eval", "(alive/server:start)"
+  ]
+}

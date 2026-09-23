@@ -1,0 +1,11 @@
+# Build artifacts (per-machine, per-OS) + the fetched, license-restricted WebView2 SDK.
+/hyperion-view
+/hyperion-view.exe
+*.o
+*.obj
+/.obj-msvc/
+*.pdb
+*.ilk
+*.exp
+*.lib
+/.webview2-sdk/

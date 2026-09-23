@@ -1,0 +1,11 @@
+{
+  "web": {
+    "title": "I am Elise — Lean on me, when all your other friends are asleep.",
+    "intro": "Elise is a demonstration of the Praxeon actor model — an LLM-powered assistant exploring how a clinical *intake* conversation might help prepare for a new visit. This is demoware, not a real clinical setting. Elise is not a clinician; she does not diagnose, prescribe, or give medical advice, and she is no substitute for professional care. The visit is fictitious — please don't share real personal or health information.",
+    "disclaimer": "Demoware — not a real clinical setting. Not therapy or medical advice. The visit is fictitious; please don't enter real personal or health information.",
+    "gate-title": "Before you begin",
+    "gate-body": "This is a demonstration, not a real clinical visit. Elise is not a clinician and does not provide diagnosis, treatment, or medical advice. The visit — and anything you say or share here — is fictitious. Please do not enter real personal or health information.",
+    "gate-accept": "I understand — this is a fictitious demonstration",
+    "crisis": "If you're in immediate danger or thinking about harming yourself, please reach out right now to local emergency services, or a crisis line such as 988 (Suicide & Crisis Lifeline, US). You deserve support from a real person, and talking to someone can help."
+  }
+}

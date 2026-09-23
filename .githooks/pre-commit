@@ -1,0 +1,50 @@
+#!/usr/bin/env sh
+# pre-commit --- the integration hub only ever commits to main.
+#
+# AGENTS.md, "One agent, one working tree": the main checkout is the integration hub and
+# belongs to the PM session; every lane works in its own worktree on its own branch. That
+# rule was written after two near-misses and has since been broken once more, by a lane
+# that had synced and read AGENTS.md in the hub and then reached for `git checkout -b`
+# because it was already sitting there.
+#
+# Its diagnosis is why this file exists: READING in the hub is fine, and the transition
+# from reading to WRITING is where the rule has to fire -- and nothing made it fire.
+#
+# How it tells a hub from a worktree, without knowing any machine's paths: git puts a
+# `.git` DIRECTORY in the main checkout and a `.git` FILE in every linked worktree. So a
+# lane is never affected by this hook, on any machine, with no configuration.
+#
+# Escape: OURANOS_ALLOW_HUB_BRANCH=1, affirmative only -- the same shape as the guard in
+# build-desktop-app.lisp, because a guard an empty string can switch off will be switched
+# off by an empty string.
+
+set -eu
+
+git_dir_entry="$(git rev-parse --show-toplevel)/.git"
+[ -d "$git_dir_entry" ] || exit 0          # linked worktree: not the hub, nothing to say
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+[ "$branch" = "main" ] && exit 0
+[ "$branch" = "HEAD" ] && exit 0           # detached: a deliberate verification checkout
+
+case "$(printf '%s' "${OURANOS_ALLOW_HUB_BRANCH:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) exit 0 ;;
+esac
+
+cat >&2 <<MSG
+
+  REFUSED: this is the integration hub, and you are on '$branch', not main.
+
+  The hub belongs to the PM session -- review, tree-wide verification, docs and merges.
+  Lane work goes in its own worktree so that two agents cannot share a checkout:
+
+      git worktree add ../ouranos-<track> -b $branch
+      cd ../ouranos-<track>
+
+  Your commit has NOT been made and nothing is staged differently; move the work and
+  commit there. If you genuinely mean to commit a branch in the hub:
+
+      OURANOS_ALLOW_HUB_BRANCH=1 git commit ...
+
+MSG
+exit 1

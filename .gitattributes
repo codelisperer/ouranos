@@ -1,0 +1,41 @@
+# Line-ending policy for the codelisperer monorepo.
+#
+# Every text file is LF in the repo AND in every working tree, on every OS.
+# SBCL compiles the working-tree files directly, and a CRLF turns a FORMAT
+# ~<newline> continuation into an illegal ~<Return> directive -- surfaced as a
+# compile-time "macroexpansion" error. Forcing LF on checkout makes the build
+# identical on Linux/macOS/Windows and immunizes against core.autocrlf.
+#
+# PLANNED, not true today (#387): source was meant to ALSO avoid FORMAT ~<newline>
+# continuations entirely, so that a stray CRLF from a zip download or a misconfigured
+# editor -- a tree that did not arrive through `git checkout', where the rule above
+# cannot reach -- could not break the build either. There are 53, across 13 files.
+# CLAUDE.md and AGENTS.md state the rule for new code and it holds for new code; the
+# existing 53 are a sweep nobody has done. Severity is low precisely because the line
+# below does hold: every git checkout is LF on every OS, and nothing is broken today.
+# #387 carries the sweep and the checker that would keep it swept, in that order --
+# a checker landing first would need a baseline of known violations, and a stored
+# count of those is an allowlist wearing a number.
+
+* text=auto eol=lf
+
+# Windows-only scripts are the deliberate exception -- they want CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: never normalize.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.exe   binary
+*.dll   binary
+*.dylib binary
+*.so    binary
+*.gz    binary
+*.zip   binary
+*.woff  binary
+*.woff2 binary

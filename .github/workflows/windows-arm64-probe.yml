@@ -1,0 +1,325 @@
+# windows-arm64-probe.yml --- answer #145, on a genuine ARM64 Windows, in one run.
+#
+# This is an INSTRUMENT, not a release job. It builds nothing anyone keeps; it produces
+# MEASUREMENTS. #145 is not "ARM64 is broken" -- we do not know whether ARM64 is broken,
+# and that is the whole problem. Every open item on it is an observation no x86-64 machine
+# can make, plus three failures predicted by READING code, which stays a guess until a
+# machine says otherwise.
+#
+# So: no assertions and no early exit. Every step is `continue-on-error` and every step
+# PRINTS what it found, because a probe that stops at the first failure answers one
+# question per run and #145 has seven. One run, seven answers, written to the job summary
+# so the verdict is readable without opening a log.
+#
+# Deliberately NOT a row in desktop-release.yml. That matrix is the set of platforms we
+# BUILD, and `*verified-platforms*` in scripts/build-desktop-app.lisp is diffed against it
+# -- adding windows-arm64 there would declare it verified, which is the exact claim #178
+# exists to refuse. The matrix row is what this probe EARNS, not what it starts from.
+#
+# When it comes back green: move `windows-arm64` into *verified-platforms*, add the row to
+# desktop-release.yml, tick #145's checklist, and delete this file. It has no other job.
+#
+# Runner note: `windows-11-arm` became available to PRIVATE repositories on 2026-01-29 and
+# counts against the plan's included minutes (2 vCPU in private repos, 4 in public). The
+# issue text predates that and says CI cannot close this. It can now.
+
+name: windows-arm64 probe (#145)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: windows-arm64 probe
+    runs-on: windows-11-arm
+    # The probe is allowed to fail. It is asking questions, and "no" is an answer.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Coalton's first compile is minutes, and a private-repo arm64 runner has 2 vCPU.
+      # Same shape as desktop-release.yml's cache, keyed to this platform.
+      - name: Cache Lisp toolchain
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/AppData/Local/cache/common-lisp
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: lisp-windows-arm64-${{ hashFiles('scripts/versions.env') }}-${{ hashFiles('**/*.asd') }}
+          restore-keys: |
+            lisp-windows-arm64-${{ hashFiles('scripts/versions.env') }}-
+            lisp-windows-arm64-
+
+      # -- 0. Is this even the machine we think it is? ----------------------------------
+      # Predicted failure 1 lives here. Under x86-64 EMULATION on an ARM64 host,
+      # PROCESSOR_ARCHITECTURE reports AMD64 and the true host appears ONLY in
+      # PROCESSOR_ARCHITEW6432 -- and both of our arch detectors read only the former.
+      # If ARCHITEW6432 is empty here then this shell is native, PF1 cannot be reproduced
+      # on this runner at all, and that is itself the finding: PF1 needs a VM to observe.
+      - name: 0. Host architecture, as Windows reports it
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $facts = [ordered]@{
+            'PROCESSOR_ARCHITECTURE'  = "$env:PROCESSOR_ARCHITECTURE"
+            'PROCESSOR_ARCHITEW6432'  = "$env:PROCESSOR_ARCHITEW6432"
+            'PROCESSOR_IDENTIFIER'    = "$env:PROCESSOR_IDENTIFIER"
+            'OSArchitecture (CIM)'    = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
+            'process arch (.NET)'     = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+            'OS arch (.NET)'          = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          }
+          $facts.GetEnumerator() | ForEach-Object { '{0,-24} = {1}' -f $_.Key, $_.Value }
+          $md = @('## 0. Host architecture', '', '| fact | value |', '| --- | --- |')
+          $facts.GetEnumerator() | ForEach-Object { $md += "| ``$($_.Key)`` | ``$($_.Value)`` |" }
+          $md += ''
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # -- 0b. What is even on this image? -----------------------------------------------
+      # NOT on #145's list, and it should be: desktop-release.yml has EIGHT `shell: bash`
+      # steps. Git Bash ships on the x86-64 Windows images; whether it is on the ARM64 one
+      # is an assumption nobody has checked, and if it is absent the matrix row fails for a
+      # reason that has nothing whatever to do with ARM64.
+      - name: 0b. Tooling the release workflow assumes
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $tools = 'bash','git','choco','cl','link','dumpbin','editbin','makensis','cmake','signtool'
+          $md = @('## 0b. Tooling present', '', '| tool | path |', '| --- | --- |')
+          foreach ($t in $tools) {
+            $p = (Get-Command $t -ErrorAction SilentlyContinue).Source
+            if (-not $p) { $p = '-- ABSENT --' }
+            '{0,-10} {1}' -f $t, $p
+            $md += "| ``$t`` | ``$p`` |"
+          }
+          # vswhere is never on PATH; it lives at a fixed location under the x86 tree.
+          $vsw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $has = Test-Path $vsw
+          "vswhere (fixed path)  $vsw  present=$has"
+          $md += "| ``vswhere`` | ``$(if ($has) { $vsw } else { '-- ABSENT --' })`` |"
+          $md += ''
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # -- 1. Predicted failure 2 -- the vswhere component ID -----------------------------
+      # All three call sites (build-libuv.lisp, setup.ps1, hyperion-view/build.ps1) require
+      # Microsoft.VisualStudio.Component.VC.Tools.x86.x64. On a machine that installed only
+      # the ARM64 C++ workload that component is absent and all three report "no compiler
+      # found" on a machine that has one. Ask all three ways; let the runner settle it.
+      - name: 1. vswhere -- which C++ components does this image actually have?
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vsw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vsw)) {
+            'vswhere ABSENT -- MSVC discovery cannot work at all on this image'
+            '## 1. vswhere', '', '**ABSENT** -- MSVC discovery cannot work at all.', '' |
+              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          $queries = [ordered]@{
+            'no -requires (any VS)'       = @()
+            'x64 component (what we ask)' = @('-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
+            'ARM64 component'             = @('-requires', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64')
+          }
+          $md = @('## 1. vswhere', '')
+          foreach ($q in $queries.GetEnumerator()) {
+            $out = (& $vsw -products '*' -latest -property installationPath @($q.Value) 2>&1 | Out-String).Trim()
+            $verdict = if ($out) { "FOUND: $out" } else { 'NOT FOUND' }
+            '{0,-28} -> {1}' -f $q.Key, $verdict
+            $md += "- **$($q.Key)** -> ``$verdict``"
+          }
+          ''
+          'Installed VC.Tools component IDs (the ground truth behind the queries above):'
+          # `-include packages` is REQUIRED: without it the json has no packages property
+          # at all and this section prints nothing, which reads as "no components found"
+          # rather than "wrong query". Measured on x86-64 before this file was pushed.
+          $json = & $vsw -products '*' -latest -format json -include packages 2>&1 | Out-String
+          try {
+            @(($json | ConvertFrom-Json).packages) |
+              Where-Object { $_.id -like '*VC.Tools*' } |
+              ForEach-Object { "  $($_.id)" }
+          } catch { "  (could not parse vswhere json: $_)" }
+          $md += ''
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # -- 2. Predicted failure 3 -- vcvarsall arm64 vs amd64_arm64 -----------------------
+      # build.ps1 passes the host arch straight to vcvarsall; build-libuv.lisp maps a
+      # machine-type containing ARM64 to "arm64". Both assume a NATIVE arm64 toolchain. If
+      # only cross tools are installed the correct argument is amd64_arm64 and "arm64"
+      # fails.
+      #
+      # "Did vcvarsall succeed" is NOT the check, and this was measured rather than
+      # assumed: on an x86-64 machine with NO arm64 target toolset installed,
+      # `vcvarsall amd64_arm64` exits 0 and hands back a compiler that targets x64. A
+      # caller keyed on the exit code would build an x64 artifact and label it arm64 --
+      # the same false pass this whole issue is about, one layer down.
+      #
+      # So ask cl what it TARGETS. Its banner ends "Version 19.xx.xxxxx for ARM64", and
+      # that string is the only answer that settles it. The physical toolset listing below
+      # is the corroborating ground truth: a target directory with no cl.exe in it means
+      # the toolset is not really there, whatever vswhere and vcvarsall claim.
+      - name: 2. vcvarsall -- arm64, amd64_arm64, or neither?
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vsw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vsw)) { 'vswhere absent -- skipping'; exit 0 }
+          $vs = (& $vsw -products '*' -latest -property installationPath 2>&1 | Out-String).Trim()
+          if (-not $vs) { 'no VS installation -- cannot test vcvarsall'; exit 0 }
+
+          'Physically installed toolsets (host -> target, and whether cl.exe is really there):'
+          Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Host*\*" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              '  {0,-28} cl.exe: {1}' -f
+                ($_.FullName.Substring($vs.Length + 1) -replace '.*\\bin\\', ''),
+                (Test-Path (Join-Path $_.FullName 'cl.exe'))
+            }
+          ''
+
+          $vcv = Join-Path $vs 'VC\Auxiliary\Build\vcvarsall.bat'
+          "vcvarsall: $vcv (exists: $(Test-Path $vcv))"
+          $md = @('## 2. vcvarsall', '', '| argument | cl found | cl TARGETS |', '| --- | --- | --- |')
+          foreach ($arch in 'arm64', 'amd64_arm64', 'x64') {
+            $out = (cmd /c "call `"$vcv`" $arch >nul 2>&1 && where cl && cl" 2>&1 | Out-String)
+            $found = $out -match 'cl\.exe'
+            $target = if ($out -match 'Version [\d.]+ for (\S+)') { $matches[1] } else { '(no banner)' }
+            '{0,-12} -> cl found: {1,-5}  targets: {2}' -f $arch, $found, $target
+            $md += "| ``$arch`` | $found | **$target** |"
+          }
+          $md += ''
+          $md += 'The answer to predicted failure 3 is the TARGETS column, not the found column.'
+          $md += ''
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # -- 3. Does setup.ps1 pick the right SBCL, and does the arm64 MSI install? ---------
+      # Two checklist items at once: predicted failure 1 in action (which arch does
+      # setup.ps1 CHOOSE on this host?) and "SBCL arm64 MSI installs and runs at the
+      # pinned version".
+      - name: 3. Provision the Lisp toolchain (scripts/setup.ps1)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          ./scripts/setup.ps1 -CI
+          '--- what did we actually get? ---'
+          $v = (sbcl --version 2>&1 | Out-String).Trim()
+          $v
+          '## 3. SBCL', '', '```', $v, '```', '' |
+            Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # -- 4. Checklist 3a -- and the guard doubles as the instrument ---------------------
+      # The refusal message in build-desktop-app.lisp already prints (uiop:architecture),
+      # (machine-type) and the derived platform key -- which is EXACTLY what 3a asks for.
+      # So run the real script with NO override: exit 2, and that message is the
+      # measurement, taken by the real file rather than by a copy of one function.
+      #
+      # The question 3a names precisely: if uiop:architecture returns non-NIL this is
+      # settled; if it returns NIL (as it does on macOS/Apple silicon) then everything
+      # rests on (machine-type), which no x86-64 machine can observe.
+      - name: 4. Checklist 3a -- what does SBCL report here?
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $out = (sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp `
+                    --system hyperion/examples/coalton-repl `
+                    --entry hyperion/examples/coalton-repl:main `
+                    --name coalton-repl --version 0.0.0-probe 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          "exit code: $code   (2 = the #178 guard fired, which is CORRECT and expected here)"
+          $out
+          '## 4. Checklist 3a -- SBCL''s own report', '', '```', "exit $code", $out.Trim(), '```', '' |
+            Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: 5. Bootstrap the tree
+        continue-on-error: true
+        shell: pwsh
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      # -- 6. Checklist 3c -- arm64 libuv. This is #128 again, one architecture over. -----
+      - name: 6. Checklist 3c -- build libuv for arm64
+        continue-on-error: true
+        shell: pwsh
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
+
+      # -- 7. Checklist 3b -- hyperion-view, and PROVE the binary is arm64 ----------------
+      # "It built" is not the check. The PE machine field must say AA64; an x64 binary that
+      # built happily under emulation is the exact false pass this issue was filed about.
+      #
+      # The machine field is read straight out of the PE header rather than via dumpbin,
+      # which needs an MSVC environment this shell does not have -- and a probe should not
+      # fail to answer a question because its instrument needed a toolchain.
+      #   e_lfanew @ 0x3C -> PE signature (4 bytes) -> COFF header, machine is the first u16.
+      #   0xAA64 = ARM64, 0x8664 = x64, 0x014C = x86.
+      - name: 7. Checklist 3b -- hyperion-view, and its machine type
+        continue-on-error: true
+        shell: pwsh
+        working-directory: hyperion/hyperion-view
+        run: |
+          ./build.ps1
+          $exe = 'hyperion-view.exe'
+          if (-not (Test-Path $exe)) {
+            'NOT BUILT -- nothing to inspect'
+            '## 7. Checklist 3b -- hyperion-view', '', '**NOT BUILT.**', '' |
+              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          $fs = [IO.File]::OpenRead((Resolve-Path $exe))
+          try {
+            $br = New-Object IO.BinaryReader($fs)
+            $fs.Position = 0x3C
+            $fs.Position = $br.ReadInt32() + 4
+            $machine = $br.ReadUInt16()
+          } finally { $fs.Dispose() }
+          $name = switch ($machine) { 0xAA64 { 'ARM64 (AA64)' } 0x8664 { 'x64' } 0x014C { 'x86' } default { "unknown 0x{0:X4}" -f $machine } }
+          "PE machine field: 0x{0:X4}  = {1}" -f $machine, $name
+          $isArm = ($machine -eq 0xAA64)
+          $verdict = if ($isArm) { 'AA64 -- genuinely arm64' } else { "$name -- NOT arm64: this is the false pass #145 warned about" }
+          "VERDICT: $verdict"
+          '## 7. Checklist 3b -- hyperion-view', '', "PE machine = ``0x$('{0:X4}' -f $machine)`` ($name)", '', "**$verdict**", '' |
+            Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # -- 8. End to end, with the override the guard was designed for --------------------
+      # OURANOS_ALLOW_UNVERIFIED_PLATFORM is for exactly this person doing exactly this
+      # job: the one bringing a new platform up. Affirmative-only since #178, so "1" is the
+      # spelling that works -- an empty value would leave the guard armed on purpose.
+      - name: 8. End to end -- dump the app image (override in effect)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          OURANOS_ALLOW_UNVERIFIED_PLATFORM: "1"
+        run: |
+          sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp `
+            --system hyperion/examples/coalton-repl `
+            --entry hyperion/examples/coalton-repl:main `
+            --name coalton-repl --version 0.0.0-probe
+          $d = 'dist/coalton-repl-0.0.0-probe-windows-arm64'
+          if (-not (Test-Path $d)) { "no bundle at $d"; exit 0 }
+          Get-ChildItem $d | Format-Table Name, Length
+          $md = @('## 8. End to end', '', '| file | PE machine |', '| --- | --- |')
+          foreach ($f in 'coalton-repl.exe', 'hyperion-view.exe') {
+            $p = Join-Path $d $f
+            if (-not (Test-Path $p)) { $md += "| ``$f`` | -- MISSING -- |"; continue }
+            $fs = [IO.File]::OpenRead((Resolve-Path $p))
+            try {
+              $br = New-Object IO.BinaryReader($fs)
+              $fs.Position = 0x3C
+              $fs.Position = $br.ReadInt32() + 4
+              $m = $br.ReadUInt16()
+            } finally { $fs.Dispose() }
+            $n = switch ($m) { 0xAA64 { 'ARM64 (AA64)' } 0x8664 { 'x64' } 0x014C { 'x86' } default { "unknown 0x{0:X4}" -f $m } }
+            "$f -> 0x$('{0:X4}' -f $m) $n"
+            $md += "| ``$f`` | ``0x$('{0:X4}' -f $m)`` $n |"
+          }
+          $md += ''
+          $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: 9. Keep whatever it produced
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-arm64-probe
+          path: dist/
+          if-no-files-found: warn

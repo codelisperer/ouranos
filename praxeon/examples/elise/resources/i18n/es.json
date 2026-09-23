@@ -1,0 +1,11 @@
+{
+  "web": {
+    "title": "Soy Elise — Apóyate en mí, cuando todos tus demás amigos duerman.",
+    "intro": "Elise es una demostración del modelo de actores de Praxeon: un asistente basado en un LLM que explora cómo una conversación clínica de *admisión* podría ayudar a prepararse para una nueva consulta. Esto es una demostración, no un entorno clínico real. Elise no es profesional de la salud; no diagnostica, no receta ni da consejos médicos, y no sustituye la atención profesional. La consulta es ficticia; por favor, no comparta información personal ni de salud reales.",
+    "disclaimer": "Demostración — no es un entorno clínico real. No es terapia ni consejo médico. La consulta es ficticia; por favor, no introduzca información personal ni de salud reales.",
+    "gate-title": "Antes de empezar",
+    "gate-body": "Esto es una demostración, no una consulta clínica real. Elise no es profesional de la salud y no ofrece diagnóstico, tratamiento ni consejo médico. La consulta —y todo lo que diga o comparta aquí— es ficticia. Por favor, no introduzca información personal ni de salud reales.",
+    "gate-accept": "Entiendo — es una demostración ficticia",
+    "crisis": "Si estás en peligro inmediato o piensas en hacerte daño, por favor comunícate ahora mismo con los servicios de emergencia locales o con una línea de crisis, como el 988 (Línea de Prevención del Suicidio y Crisis, EE. UU.) o el teléfono de la esperanza de tu país. Mereces el apoyo de una persona real, y hablar con alguien puede ayudar."
+  }
+}

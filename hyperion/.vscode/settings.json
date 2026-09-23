@@ -1,0 +1,18 @@
+{
+  // Alive boots its LSP as an SBCL image; by default it doesn't know this
+  // project, so (in-package #:hyperion/xxx) draws "does not designate any
+  // package". Extend the start command to give SBCL a Coalton-sized heap and
+  // load the system before the server starts -- so every HYPERION/* package
+  // exists and completion/xref see the real code. ignore-errors keeps Alive
+  // starting even if the system won't load (e.g. before the repo-root
+  // `sbcl --script bootstrap.lisp` has written its ASDF source-registry drop-in).
+  "alive.lsp.startCommand": [
+    "sbcl",
+    "--dynamic-space-size", "4096",
+    "--eval", "(ql:quickload '(:bordeaux-threads :usocket :cl-json :flexi-streams))",
+    "--eval", "(require :asdf)",
+    "--eval", "(asdf:load-system :alive-lsp)",
+    "--eval", "(ignore-errors (ql:quickload :hyperion))",
+    "--eval", "(alive/server:start)"
+  ]
+}

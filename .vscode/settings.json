@@ -1,0 +1,32 @@
+{
+  // Monorepo root (VS Code / Alive). Alive boots ONE SBCL image for the whole tree,
+  // with a Coalton-sized heap (4096) and the LSP started. It auto-loads only `cons`
+  // (small, dependency-light) -- so `cons:project` resolves in every framework's
+  // `cons.lisp` build spec with no complaint. It does NOT auto-load the six frameworks
+  // (Coalton's first compile is minutes); load whichever you're working on IN THE REPL:
+  //   (ql:quickload :hyperion)   ; or :aion :mnemosyne :elenchon :praxeon
+  // then that system's packages exist: eval inside its files (Alive uses each file's
+  // in-package), or (in-package :cons/project) in the REPL. Discovery is automatic
+  // once the repo-root `sbcl --script bootstrap.lisp` has written the ASDF
+  // source-registry drop-in. ignore-errors keeps Alive starting even before that.
+  //
+  // Two hardening flags, both plain SBCL -- identical on Linux/macOS/Windows:
+  //   --disable-debugger  a startup error must KILL the image, not hang in it. Alive is
+  //     spawned with stdin on a pipe, so a debugger prompt blocks forever on a socket read
+  //     -- an invisible zombie holding no port, one more per reconnect. Alive's in-editor
+  //     debugger is unaffected: it `let`-binds *invoke-debugger-hook* / *debugger-hook*
+  //     around every eval (alive-lsp src/session/threads.lisp, run-with-debugger).
+  //   the `find-package :ql` eval loads Quicklisp when ~/.sbclrc doesn't, so a missing or
+  //     never-created init file can't silently brick the LSP on a fresh machine.
+  "alive.lsp.startCommand": [
+    "sbcl",
+    "--dynamic-space-size", "4096",
+    "--disable-debugger",
+    "--eval", "(unless (find-package :ql) (load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname))))",
+    "--eval", "(ql:quickload '(:bordeaux-threads :usocket :cl-json :flexi-streams))",
+    "--eval", "(require :asdf)",
+    "--eval", "(asdf:load-system :alive-lsp)",
+    "--eval", "(ignore-errors (ql:quickload :cons))",
+    "--eval", "(alive/server:start)"
+  ]
+}

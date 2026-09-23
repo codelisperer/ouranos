@@ -1,0 +1,15 @@
+{
+  // Load contacts into Alive's LSP image so (in-package #:mnemosyne/examples/contacts) resolves and
+  // completion/xref see the real code. ignore-errors keeps Alive starting even if
+  // the system will not load yet (e.g. before deps are installed).
+  "alive.lsp.startCommand": [
+    "sbcl",
+    "--dynamic-space-size", "4096",
+    "--eval", "(ql:quickload '(:bordeaux-threads :usocket :cl-json :flexi-streams))",
+    "--eval", "(require :asdf)",
+    "--eval", "(asdf:load-system :alive-lsp)",
+    "--eval", "(ignore-errors (ql:quickload :cons))",
+    "--eval", "(ignore-errors (ql:quickload :contacts))",
+    "--eval", "(alive/server:start)"
+  ]
+}

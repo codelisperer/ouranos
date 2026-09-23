@@ -1,0 +1,44 @@
+# SBCL / ASDF / Coalton build artifacts
+*.fasl
+*.dfsl
+*.abcl
+.cache/
+bin/
+build/
+
+# LaTeX (paper/) build artifacts
+paper/*.pdf
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.toc
+
+# Coalton
+coalton-*.fasl
+
+# Editors
+*~
+\#*\#
+.\#*
+.DS_Store
+/.lem/
+# Alive (VS Code): per-project compile scratch -- fasls + a tmp.lisp eval buffer
+.vscode/alive/
+
+# Local secrets — never commit API keys
+.env
+.env.*
+!.env.example
+secrets.lisp
+
+# Stray scaffolding artifacts (created during setup, deletion was sandbox-blocked)
+.claude/.probe
+.claude/commands/.probe-moved
+
+# Stray Clojure tooling caches (Common Lisp project -- not used here)
+.clj-kondo/
+.lsp/

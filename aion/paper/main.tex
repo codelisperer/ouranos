@@ -1,0 +1,102 @@
+%%% main.tex --- Aion: A Coalton-First Functional Standard Library for Common Lisp
+%%%
+%%% Portable skeleton: compiles with a stock TeX Live (base `article` + common
+%%% packages). Build:  latexmk -pdf main.tex   (or `make`).
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, frame=single, framesep=4pt, breaklines=true}
+
+\title{\textbf{Aion}: A Coalton-First Functional\\ Standard Library for Common Lisp}
+\author{Bob\\ \small\texttt{eternal.recursion@proton.me}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Common Lisp's built-in sequence handling is notoriously inconsistent---lists,
+vectors, and extensible sequences each demand different accessors, and mutation is
+the default. The Clojure community, by contrast, made \emph{immutable, persistent}
+collections and a single sequence abstraction the substrate of an entire language.
+We ask how to bring that ``Clojure goodness'' to Common Lisp without abandoning
+CL, and find that much of the hard work is already done: \textsc{Coalton}, a
+statically typed, Hindley--Milner language embedded in CL, already ships persistent
+RRB-tree vectors, HAMT maps, ordered maps, immutable lists, a lazy iterator, and a
+full typeclass tower \emph{including monad transformers}. We present \textsc{Aion},
+a library that (i) exposes this substrate to plain-CL developers through a
+consistent, generic sequence protocol---finally giving Common Lisp a coherent
+immutable-collections story---and (ii) fills the genuine remaining gaps: persistent
+sets, transducers, optics, memoized lazy sequences, and threading macros. Aion is part of a six-framework ecosystem whose thesis is to
+establish Coalton as a first-class ``modern Lisp,'' a peer to Clojure, Scheme,
+OCaml, and Haskell.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+% CL's inconsistent, mutable sequences; the Clojure model; the "don't reimplement,
+% expose + fill gaps" thesis; Coalton as an already-strong substrate.
+
+\section{The Common Lisp Sequence Problem}
+\label{sec:problem}
+% elt vs nth vs aref; map needing a result-type; mutable defaults; extensible
+% sequences as a partial, under-adopted fix.
+
+\section{What Coalton Already Provides}
+\label{sec:coalton}
+% Persistent Seq (RRB), hashmap (HAMT), ordmap/ordtree, immutable list; the
+% typeclass tower (Functor/Applicative/Monad, Foldable, Traversable) + monad
+% transformers; the lazy Iterator; Result/Optional. A scorecard vs Clojure, Rust,
+% TypeScript (fp-ts/Effect), and raw JS.
+
+\section{Aion's Design: Two Faces}
+\label{sec:design}
+% The typed Coalton layer and the pure-CL face (aion/cl); a consistent ISeq-style
+% protocol (first/rest/conj/seq/into) over the persistent substrate; how much
+% Coalton the CL face exposes.
+
+\section{Filling the Gaps}
+\label{sec:gaps}
+% Persistent sets; statically-typed transducers (the research angle); optics/lenses
+% for immutable update; memoized lazy-seq vs re-runnable Iterator; itertools
+% breadth; threading macros.
+% NOTE: Monoid was listed here as a gap and is NOT one -- Coalton ships it
+% (library/classes.ct, with mempty/mconcat and instances across ten modules).
+% Struck 2026-08-05. See aion/docs/coalton-gap-analysis.md.
+% STILL TO ADD: aion/uv (libuv bound with no groveller and no cmake) and the
+% boundary-decoding thesis in aion/docs/coalton-story.md -- neither appears here.
+
+\section{The Ecosystem}
+\label{sec:ecosystem}
+% cons (tooling), hyperion (web), praxeon (agents), aion (this, the functional
+% core the others consume); shared house style; Coalton as a first-class modern Lisp.
+
+\section{Evaluation Plan}
+\label{sec:eval}
+% Ergonomics vs CL sequences and vs FSet/serapeum; benchmarks vs Clojure persistent
+% collections and Rust `im`; adoption by praxeon/hyperion as evidence of fit.
+
+\section{Related Work}
+\label{sec:related}
+% FSet, cl-hamt, serapeum, trivia (CL); Clojure persistent collections; immutable.js,
+% fp-ts, monocle-ts (TS); the `im` crate (Rust); Coalton itself.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

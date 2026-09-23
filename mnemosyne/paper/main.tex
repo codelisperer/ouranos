@@ -1,0 +1,318 @@
+%%% main.tex --- Mnemosyne: A Typed, Backend-Neutral Data Layer for CL/Coalton
+%%%
+%%% Portable: compiles with a stock TeX Live. Build: ./build.sh (or pwsh build.ps1).
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, frame=single, framesep=4pt, breaklines=true}
+
+\title{\textbf{Mnemosyne}: A Typed, Backend-Neutral\\ Data Layer for Common Lisp and Coalton}
+\author{Bob\\ \small\texttt{eternal.recursion@proton.me}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Mnemosyne is the persistence layer of the \textsc{codelisperer} ecosystem: a small,
+backend-neutral data library that keeps its \emph{types} in \textsc{Coalton} (a
+statically typed, Hindley--Milner language embedded in Common Lisp) and its \emph{effects}
+in CL. It sits behind one substrate---\textsc{CL-DBI}---and speaks to \textbf{SQLite} for
+zero-ops local development, to \textbf{PostgreSQL over the wire protocol} (via
+\texttt{cl-postgres}, pure Lisp, no \texttt{libpq}) for production, and to \textbf{XTDB~2}
+(which also speaks PG wire) as a later, distinct dialect. Queries are expressed as
+\emph{data}---a HoneySQL-style plist compiled to a parameterized SQL string and an ordered
+bind list, so values are never interpolated and statements stay composable and
+injection-safe. Migrations are typed Lisp data applied idempotently. Bitemporality is
+treated as a \emph{capability}, not a default: native in XTDB~2, and on SQL backends via
+the SQL:2011 temporal model, opt-in per entity. We describe the architecture, the
+backend-neutral protocol, connections and transactions, the migration runner, the query
+language, and the bitemporal story, and situate Mnemosyne against Ecto, HoneySQL, and XTDB.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+The \textsc{codelisperer} ecosystem is a reaction to JVM/Node dependency sprawl: a small
+family of co-evolving Common Lisp / Coalton frameworks, ``CL all the way down.'' Mnemosyne
+is its data layer. It is deliberately \emph{not} database-first in the sense of committing
+to a single engine; it is an \emph{Ecto-like}~\citep{ecto} mid-layer that apps and higher
+libraries consume, depending only on a driver, never on the web framework.
+
+Mnemosyne also anchors a three-tier memory stack. Mnemosyne provides general DB
+abstractions; \emph{Kairos} (a bitemporal knowledge-graph store) is built on those; and
+\emph{Praxeon} (the agentic framework) leverages Kairos for recall under a context-budget
+economics. The budget economics live in Praxeon; the general persistence lives here.
+
+\section{Architecture: typed core, effectful shell}
+\label{sec:arch}
+Mnemosyne follows the ecosystem's house rule: \textbf{ontology and pure logic in Coalton;
+IO and effects in CL}. The Coalton core (\texttt{mnemosyne/backend}) is IO-free and defines
+the vocabulary: a \texttt{Backend} algebraic type (\texttt{Sqlite} of a file path, or
+\texttt{Postgres} of a wire configuration), a \texttt{Migration} record (id, description,
+up-/down-SQL), a \texttt{Direction}, and pure functions over them---which migrations are
+pending, the backend-parameterized \texttt{schema\_migrations} DDL. Because Coalton and CL
+share a runtime, the effectful shell calls these as ordinary functions across a thin
+boundary: CL-facing constructors (\texttt{make-sqlite}, \texttt{make-postgres},
+\texttt{make-migration}) build typed values from CL scalars, and total accessors read their
+fields back. No IO ever enters the typed core.
+
+The effectful shell is three small CL modules over CL-DBI~\citep{cldbi}:
+\texttt{mnemosyne/conn} (connect / exec / query / transaction), \texttt{mnemosyne/migrate}
+(the runner), and \texttt{mnemosyne/query} (data-driven SQL). Recoverable failure uses the
+condition system---a \texttt{db-error} wrapping the driver's condition---not return codes.
+
+\section{Backend neutrality over CL-DBI}
+\label{sec:backends}
+A single substrate, CL-DBI, gives one API over interchangeable drivers, so moving between
+engines is largely a connection change.
+\begin{itemize}
+\item \textbf{SQLite} (\texttt{dbd-sqlite3}, via \texttt{cl-sqlite}'s FFI to the system
+  \texttt{libsqlite3})---the embedded, zero-ops development backend; an app can ship as a
+  binary plus a \texttt{.db} file.
+\item \textbf{PostgreSQL over the wire} (\texttt{dbd-postgres}, via \texttt{cl-postgres})---
+  the production backend. It implements the PG wire protocol in pure Lisp, so there is no
+  \texttt{libpq} C dependency: the frameworks are MIT and the driver is zero-C.
+\item \textbf{XTDB~2}---also speaks PG wire, so the same driver \emph{connects} unchanged,
+  but it is a \emph{distinct dialect}: schemaless (no DDL), with different parameter and
+  transaction semantics and bitemporal temporal-SELECT extensions
+  (\S\ref{sec:bitemporal}). It is modeled as its own dialect, not as ``Postgres.''
+\end{itemize}
+This keeps the dependency surface small and deliberate: the whole data layer adds only
+CL-DBI plus two drivers.
+
+\section{Connections and transactions}
+\label{sec:conn}
+The connection API is start/stop-symmetric with no globals, so a future lifecycle component
+(\emph{Atropos}) can wrap it in one line:
+\begin{lstlisting}
+(mnemosyne/conn:with-connection (c (mnemosyne/backend:make-sqlite ":memory:"))
+  (mnemosyne/conn:exec c "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+  (mnemosyne/conn:with-transaction (c)
+    (mnemosyne/conn:exec c "INSERT INTO t (name) VALUES (?)" "Ann"))
+  (mnemosyne/conn:query c "SELECT id, name FROM t"))   ; -> list of plists
+\end{lstlisting}
+Bind parameters use \texttt{?} placeholders uniformly---CL-DBI translates them per driver,
+verified against both SQLite and real PostgreSQL---so values are never interpolated into
+SQL. \texttt{with-transaction} commits on normal exit and rolls back on a non-local exit.
+(A connection pool is future work; today a connection is used per operation/request.)
+
+\section{Migrations}
+\label{sec:migrate}
+Migrations are Lisp data, not a framework. The runner ensures the tracking table, computes
+the pending set (mirroring the typed \texttt{pending}), and applies each pending up-SQL in
+id order---each in its own transaction, then records its id---idempotently; re-running is a
+no-op. \texttt{rollback} runs down-SQL newest-first. Because XTDB~2 is schemaless, DDL
+migrations are a SQL-backend concern; XTDB ``migrations'' are semantic, handled separately.
+
+\section{The query language}
+\label{sec:query}
+Mnemosyne's queries are \emph{data}. Following HoneySQL~\citep{honeysql}, a query is a plist
+of clauses whose predicates are s-expressions, compiled to a parameterized SQL string and
+an ordered bind list:
+\begin{lstlisting}
+(mnemosyne/query:sql
+ '(:select (:id :email) :from (:users)
+   :where (:and (:= :email "a@x") (:> :id 10))
+   :order-by ((:id :desc)) :limit 20))
+;; => "SELECT id, email FROM users WHERE (email = ? AND id > ?) ORDER BY id DESC LIMIT ?"
+;;    ("a@x" 10 20)
+\end{lstlisting}
+One convention carries the design: a keyword or symbol is an \emph{identifier}
+(column/table); anything else is a \emph{value}, bound as a parameter. Thus values can never
+be accidentally interpolated---the compiler emits a placeholder and appends the value to the
+bind list---so the language is injection-safe by construction. \texttt{(:raw "\ldots")} is
+the sole escape hatch.
+
+The statement is chosen by which clause is present: \texttt{:select} /
+\texttt{:insert-into} / \texttt{:update} / \texttt{:delete-from}. SELECT supports
+\texttt{:from}, \texttt{:join}, \texttt{:where}, \texttt{:group-by}, \texttt{:having},
+\texttt{:order-by}, \texttt{:limit}, \texttt{:offset}; INSERT takes \texttt{:values} as a
+list of plists (multi-row), plus \texttt{:on-conflict} upserts and \texttt{:returning};
+UPDATE takes \texttt{:set}; DELETE, UPDATE, and INSERT all support \texttt{:returning} and
+\texttt{:where} where applicable. The predicate and expression grammar covers the usual
+operators (comparison, \texttt{:and}/\texttt{:or}/\texttt{:not}, \texttt{:like}, \texttt{:in},
+\texttt{:between}, \texttt{:is-null}) and grows naturally to the shape a real application
+writes: joins (\texttt{:inner}/\texttt{:left}/\texttt{:right}/\texttt{:full}/\texttt{:cross},
+an ordered list preserving order and kind), table and column aliases (\texttt{(:as expr
+alias)}), aggregate and scalar functions (\texttt{(:count :*)}, \texttt{(:sum col)},
+\texttt{(:count (:distinct col))}, arbitrary \texttt{(:call "fn" \ldots)}), and subqueries
+wherever an expression is legal---as a derived table in \texttt{:from}, as the right side of
+\texttt{:in}, or under \texttt{:exists}. \texttt{sql} compiles; \texttt{fetch} and
+\texttt{run} compile \emph{and} execute through \texttt{mnemosyne/conn}, so an account insert
+or a login lookup never touches raw SQL. A \texttt{*dialect*} parameter selects the
+target---\texttt{:sqlite} and \texttt{:postgres} share \texttt{?} placeholders; \texttt{:xtdb}
+is the seam for XTDB~2's \texttt{\$N} parameters, no-DDL, and temporal SELECT. Because XTDB~2,
+though PG-wire, diverges on DML, the compiler \emph{enforces} the difference rather than emit
+invalid SQL: an \texttt{:xtdb} query carrying \texttt{:on-conflict} (XTDB \texttt{INSERT}
+already upserts on \texttt{\_id}) or \texttt{:returning} (XTDB DML has none) signals a
+condition.
+
+\paragraph{The inverse: SQL to data.} Because the compiler is total over a well-defined
+subset, its inverse is tractable: \texttt{parse} is a small hand-written tokenizer plus a
+recursive-descent parser that turns a SQL string back into query data, so a user who knows
+the SQL but not the data form can obtain it mechanically. It is \emph{round-trippable}---an
+\texttt{:inline} mode on \texttt{sql} renders values in place rather than binding them, so
+\texttt{(sql (parse s) :inline t)} reproduces \texttt{s} and \texttt{(parse (sql q :inline
+t))} reproduces \texttt{q}. The inverse tracks the compiler across the whole widened
+surface---joins, aliases, aggregate and scalar functions, subqueries, \texttt{EXISTS},
+\texttt{IN (SELECT \ldots)}, \texttt{RETURNING}, and \texttt{ON CONFLICT} upserts all
+round-trip---and a fiveam suite pins both directions. Constructs outside the supported subset
+raise an error rather than mis-parse. (Inline rendering is for round-tripping and display
+only; execution always uses bound parameters.)
+
+\paragraph{Lisp data, not Clojure data---and no macros.} HoneySQL uses Clojure's literal
+maps and vectors (\texttt{\{:select [\ldots]\}}, \texttt{[:= :id 1]}); Common Lisp has
+neither as reader syntax, so Mnemosyne uses the idiomatic substrate---a \emph{plist} for the
+query and \emph{lists} for predicates: \texttt{(:select (\ldots) :where (:= :id 1))}.
+Keywords carry over directly. More consequentially, \texttt{sql} is an ordinary
+\emph{function} over quoted data, \emph{not} a macro. Where a macro-based CL query DSL---for
+instance Postmodern's S-SQL---fixes a query at compile time, a query here is a first-class
+value: it can be assembled programmatically, merged, stored, and transformed at runtime,
+then compiled on demand. The absence of a macro is the point: data-oriented design yields
+composition for free, and CL's considerable macro power is simply not needed to obtain a
+safe, ergonomic query surface.
+
+\section{Coverage and completeness}
+\label{sec:coverage}
+The query language covers the SQL a typical application actually writes, and it is
+instructive to place it against three yardsticks.
+
+\paragraph{Versus HoneySQL.} HoneySQL is broad---joins of every kind, subqueries, common
+table expressions, set operations (\texttt{UNION}/\texttt{INTERSECT}), \texttt{DISTINCT},
+aliases, aggregate and window functions, \texttt{CASE}, upserts (\texttt{ON CONFLICT}),
+\texttt{RETURNING}, and a rich library of clause-merging helpers for composition. Mnemosyne
+now covers the large intersection most applications spend their time in---\texttt{SELECT}
+with filtering, grouping, ordering, and limits; joins of all five kinds with aliasing;
+aggregate and scalar function calls with \texttt{DISTINCT}; subqueries as derived tables,
+under \texttt{IN}, and under \texttt{EXISTS}; multi-row \texttt{INSERT}; \texttt{UPDATE};
+\texttt{DELETE}; \texttt{RETURNING}; and \texttt{ON CONFLICT} upserts---plus the comparison,
+boolean, \texttt{LIKE}, \texttt{IN}, \texttt{BETWEEN}, and null predicates and a \texttt{:raw}
+escape hatch. Because \texttt{sql} is a function over data, first-class composition is
+inherent---queries merge and transform as ordinary plists without dedicated helper
+combinators. Common table expressions (\texttt{WITH}), set operations, window functions, and
+\texttt{CASE} remain \emph{roadmap}.
+
+\paragraph{Versus the SQL standard.} SQL is vast; Mnemosyne implements a practical slice of
+data manipulation and its predicate grammar. Schema definition (DDL) is intentionally
+\emph{not} in the builder---it is written as raw SQL inside migrations---because DDL is rare,
+one-off, and highly dialect-specific. The escape hatch keeps the long tail reachable without
+growing the core.
+
+\paragraph{Versus XTDB's subset.} XTDB~2 implements its own subset of SQL plus bitemporal
+extensions, and omits DDL entirely (it is schemaless). Its DML also diverges---\texttt{INSERT}
+is already an upsert keyed on \texttt{\_id}, so there is no \texttt{ON CONFLICT}, and there is
+no \texttt{RETURNING}---which the compiler enforces by signalling for those clauses under the
+\texttt{:xtdb} dialect rather than emitting invalid SQL. Full support additionally means the
+\texttt{:xtdb} dialect mapping XTDB's grammar and adding temporal SELECT (\texttt{FOR
+VALID\_TIME AS OF \ldots}); today that temporal path is a placeholder seam. The honest
+summary: a safe, composable surface covering the majority of application queries---including
+joins, aggregates, subqueries, upserts, and \texttt{RETURNING}---with a clear, bounded
+roadmap toward the remaining HoneySQL breadth (CTEs, set ops, window functions) and XTDB's
+temporal dialect.
+
+\section{Schemas and changesets}
+\label{sec:schema}
+Above the query language sits an Ecto-inspired~\citep{ecto} pair: \emph{schemas} and
+\emph{changesets}. A schema names a table and its typed fields; \texttt{defschema} is light
+sugar over a data structure registered in a table. The field \emph{types}---the vocabulary
+\texttt{FT-String}, \texttt{FT-Integer}, \texttt{FT-Uuid}, and so on---are the typed Coalton
+core (\texttt{mnemosyne/field}); each maps to a SQL column type per dialect and names the
+cast the shell applies. Definition, casting, and validation are the dynamic CL shell. A
+schema is a single source of truth read two ways: \texttt{schema-ddl} renders a
+\texttt{CREATE TABLE} (a migration's up-SQL, so the table shape is derived, not written
+twice---and the types resolve per dialect, \texttt{:uuid} becoming \texttt{UUID} on Postgres
+and \texttt{TEXT} on SQLite), and the changeset machinery reads the same field types to cast
+and validate.
+
+A changeset is the safe funnel from untrusted external data (form posts, JSON) to the
+database. \texttt{cast} takes a schema, a bag of raw params, and the list of fields the
+caller permits; it copies \emph{only} permitted fields (safe mass-assignment), casting each
+raw value to its field's type (\texttt{"42"} to \texttt{42}, \texttt{"yes"} to a portable
+\texttt{1}) and recording an error on a failed cast. A pipeline of validators---
+\texttt{validate-required}, \texttt{validate-number}, \texttt{validate-length},
+\texttt{validate-format} (predicate-based, so no regex dependency is imposed),
+\texttt{validate-inclusion}, and a general \texttt{validate-change}---then threads the
+changeset immutably, accumulating errors as data. Only at the edge does the condition system
+enter: \texttt{to-insert} / \texttt{to-update} compile a valid changeset's changes straight
+into a \texttt{mnemosyne/query} statement, and \texttt{insert!} / \texttt{update!} run it,
+each signalling \texttt{changeset-invalid} if asked to persist an invalid changeset. Raw
+params never reach SQL uncast, and errors are ordinary values until persistence is attempted.
+This is the surface an application's sign-up and login paths write against---\texttt{cast},
+validate, \texttt{insert!}---without hand-writing SQL or an ORM's worth of machinery.
+
+\section{Time-ordered identity and entity metadata}
+\label{sec:identity}
+Persistent entities need identity and audit metadata, and the design---ported from a prior
+Clojure system---takes the maxim that \emph{the best serial identifier is time itself}.
+\texttt{new-id} mints an RFC-9562 version-6 UUID (time-ordered, so lexical order is time
+order) whose embedded 60-bit timestamp \emph{is} the version identifier \texttt{vid}: a
+monotonic, sortable integer serial, alongside the UTC instant. The load-bearing property is
+that the \texttt{vid} is \emph{unique and strictly monotonic even under concurrent burst
+generation}. A plain UUID library does not guarantee this---its timestamp field has
+millisecond-ish real resolution and collides \emph{en masse} under rapid generation (measured:
+two distinct timestamps in twenty thousand calls), even though the whole UUIDs stay unique via
+their random bits. Mnemosyne therefore owns a monotonic 100-nanosecond clock---a locked,
+strictly-increasing counter that advances sub-tick when the wall clock is coarse---and
+assembles the version-6 layout itself (pure bit-work, no dependency), so the embedded
+timestamp equals the \texttt{vid}. The property is pinned by test: twenty thousand
+back-to-back and forty thousand across eight threads, zero collisions, strictly increasing.
+
+Over this sits the port of the Clojure \texttt{touch!} operation, which stamps an entity with
+identity and audit fields (id, vid, created/modified UTC instants, created-by/modified-by),
+creating them when absent and bumping the version when present. It appears in two forms that
+mirror the typed-core / effectful-shell split. The dynamic form, \texttt{touch!}, stamps a
+hash-table---the CL analogue of the Clojure map ``universal object''---for code that is not
+yet typed. The typed form is a Coalton \texttt{DTO} typeclass: a type implements it by saying
+how to read and replace a \texttt{Meta} slot, after which a pure \texttt{touch} (create versus
+update) is compile-time-checked to apply only to entities that carry metadata---the typesafe
+upgrade over assoc-onto-any-map. (The port also fixes a latent bug in the original, whose
+create branch dropped the UUID into the id field as an empty string.) A typeclass-constrained
+function is not directly callable from CL, so the boundary uses a monomorphic wrapper per
+entity type; the pattern, with the other Coalton embedding subtleties the project has
+catalogued, is documented alongside the code.
+
+\section{Bitemporality as a capability}
+\label{sec:bitemporal}
+Mnemosyne is often described as ``the bitemporal data layer,'' but bitemporality is a
+\emph{capability}, not the default---plain tables stay plain. XTDB~2~\citep{xtdb} provides
+valid-time and transaction-time natively. On SQL backends we target the SQL:2011 temporal
+model~\citep{sql2011}: valid-time period columns and a system-versioning pattern (neither
+PostgreSQL nor SQLite ships native \texttt{WITH SYSTEM VERSIONING}, so Mnemosyne implements
+the pattern), opt-in per entity. Because XTDB~2 already speaks PG wire, the future migration
+to native bitemporality is ``point the connection at XTDB~2,'' modulo its distinct dialect.
+
+\section{Related work}
+\label{sec:related}
+Mnemosyne draws its data-layer shape from Ecto~\citep{ecto} (Elixir) and its query-as-data
+form from HoneySQL~\citep{honeysql} (Clojure), which also documents XTDB support over the PG
+driver. It rides CL-DBI~\citep{cldbi} and \texttt{cl-postgres}. Its bitemporal target is
+XTDB~2~\citep{xtdb} and the SQL:2011 temporal standard~\citep{sql2011}. What is distinctive
+is the split: a typed Coalton core over an effectful CL shell, and a deliberately minimal,
+backend-neutral surface.
+
+\section{Status and conclusion}
+\label{sec:conclusion}
+The typed backend core, the CL-DBI connection shell (verified on SQLite and real
+PostgreSQL), the migration runner, the HoneySQL-style query language (with its round-trip
+parser), the Ecto-style schema/changeset layer, and the time-ordered identity / entity-metadata
+layer are implemented and covered by a fiveam suite; XTDB~2 connectivity is de-risked over PG
+wire, and a DB-backed session store already consumes the query layer from the web framework.
+Next is the SQL:2011 temporal capability. Mnemosyne aims to be the small, typed, house-owned
+persistence layer a modern CL application needs---without the sprawl it was built to avoid.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

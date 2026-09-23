@@ -1,0 +1,60 @@
+# Vendored browser assets — version, checksum, source, licence.
+#
+# WHY THESE ARE HERE AT ALL: every example and `praxeon/web` loaded these from a CDN
+# (unpkg, jsdelivr) at run time. That is wrong for three reasons, and the third is the
+# one that decided it:
+#
+#   1. It contradicts the thesis. "No Node, no bundler, no asset pipeline" is hard to
+#      credit while the flagship demo fetches its JavaScript from npm's CDN.
+#   2. It is a runtime dependency on a third party we do not control, pinned by URL only.
+#   3. THE DESKTOP APP DOES NOT WORK OFFLINE. We build installers for the Coalton REPL
+#      and ship them to end users; it rendered nothing without internet. An installed
+#      native application that needs a CDN is broken, not merely impure. (#123)
+#
+# The doctrine already existed — ECOSYSTEM's Fates entry commits to "React vendored — no
+# npm, no asset pipeline" for Clotho. This applies it to the thing that most needed it.
+#
+# HOW THEY ARE SERVED: embedded in the image at COMPILE time by `hyperion/assets`, not
+# read from disk at run time. ADR-0013 established that `asdf:system-source-directory`
+# returns the BUILD machine's path inside a dumped image — so a file-on-disk approach
+# would fail in exactly the desktop bundle this fixes. Native libraries must ship beside
+# the binary because they cannot be embedded; small text assets can, and should.
+#
+# UPDATING: fetch the new version, verify the sha256 below, replace the file and the
+# licence, and bump the version here. `scripts/check-assets.lisp` verifies the files on
+# disk still match these hashes.
+
+htmx        1.9.12   sha256 449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452
+            file     htmx.min.js
+            url      https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js
+            licence  Zero-Clause BSD (htmx.LICENSE)
+
+alpinejs    3.14.1   sha256 358d9afbb1ab5befa2f48061a30776e5bcd7707f410a606ba985f98bc3b1c034
+            file     alpine.min.js
+            url      https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js
+            licence  MIT (alpine.LICENSE)
+
+bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee
+            file     bulma.min.css
+            url      https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css
+            licence  MIT (bulma.LICENSE)
+
+# BULMA WAS UPGRADED 0.9.4 → 1.0.4, and the reason is theming, not currency.
+#
+# The requirement is to recolour a generated project easily. On 0.9.4 that is not
+# possible without a build step: the palette is compiled into the CSS, so changing it
+# means editing Sass variables and running dart-sass — Node, and the asset pipeline this
+# stack exists to avoid. Measured, not assumed: 0.9.4 contains ZERO CSS custom
+# properties. Bulma 1.x exposes 1412, including per-colour `--bulma-<name>-h/-s/-l`, so
+# a theme is a few declarations on `:root` that we generate from Lisp with no build step.
+# `hyperion/assets:theme` does exactly that. Dark mode arrives free in the same move:
+# 1.x ships both `prefers-color-scheme` and `[data-theme=dark]`.
+#
+# The upgrade is normally breaking. Here it was verified not to be: every Bulma class
+# used anywhere in this tree — 18 in the examples, 31 more in `praxeon/src/web.lisp` and
+# the Coalton REPL — was checked against 1.0.4 and all of them survive. Zero markup
+# changes. The cost is size: 207K → 678K, which is real but is bytes in an image, not a
+# dependency.
+#
+# htmx stays at 1.9.12. 2.x IS a breaking change and nothing needs it; that is a separate
+# decision with its own testing.

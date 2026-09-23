@@ -1,0 +1,122 @@
+%%% main.tex --- Elenchon: AI-Assisted Requirements-Based Testing via Cause-Effect Graphs
+%%%
+%%% Portable skeleton: compiles with a stock TeX Live (base `article` + common
+%%% packages). Build:  latexmk -pdf main.tex   (or `make`).
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, frame=single, framesep=4pt, breaklines=true}
+
+\title{\textbf{Elenchon}: AI-Assisted Requirements-Based\\ Testing via Cause-Effect Graphs}
+\author{Bob\\ \small\texttt{eternal.recursion@proton.me}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Most software defects originate in requirements, not code, yet requirements are
+written in ambiguous natural language and rarely tested as first-class artifacts.
+Cause-effect graphing---formalized industrially as Richard Bender's
+Requirements-Based Testing---addresses this by reducing a requirement to a boolean
+graph of \emph{causes} and \emph{effects} from which a minimal, high-coverage set
+of functional test cases can be derived. Its adoption has been limited by the
+manual labor of the reduction. We present \textsc{Elenchon}, a statically typed
+(\textsc{Coalton}) cause-effect-graph engine: given a \emph{structured} graph of
+causes and effects it reasons to the minimum decision table demonstrating each
+cause independently drives its effect (essentially MC/DC coverage), and it surfaces
+requirement defects---ambiguity, incompleteness, contradiction---as a co-product.
+Closing the manual-reduction gap is the job of a \emph{consumer above} Elenchon: an
+agentic, large-language-model front-end (the \textsc{ChatRBT} example built on
+\textsc{praxeon}) that \emph{disambiguates and formalizes} prose requirements into
+the structured causes and effects Elenchon consumes. That front-end depends on
+Elenchon, not the reverse; ambiguity is handled there not by guessing but through
+the Common Lisp condition system, which escalates un-formalizable requirements back
+to the human. Elenchon is the \emph{fourth} framework in a six-framework ecosystem
+whose thesis is to establish Coalton as a first-class ``modern Lisp''; it depends
+only leftward---on the functional-collections library (\textsc{aion}) for the graph
+and decision-table data---and never on the agentic layer that drives it.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+% Defects are born in requirements; requirements are ambiguous and untested; CEG/RBT
+% as the corrective; the manual-reduction bottleneck; LLMs as the missing front-end.
+
+\section{Background: Cause-Effect Graphing and RBT}
+\label{sec:background}
+% Myers' technique; Bender's RBT industrialization; causes/effects; the E/I/O/R/M
+% constraints; decision tables; the minimal-set / MC/DC coverage criterion.
+
+\section{The Formalization Gap}
+\label{sec:gap}
+% Why CEG/RBT is underused: turning prose into causes/effects is skilled manual
+% labor. The disambiguation problem stated precisely.
+
+\section{Disambiguation as an LLM Task Under Rigor (the Consumer Layer)}
+\label{sec:extract}
+% This layer lives ABOVE Elenchon, in a consumer (praxeon's ChatRBT) that depends on
+% Elenchon and feeds it structured causes/effects -- Elenchon itself does no NL.
+% NL -> yes/no causes & effects; constraining LLM output to propositions; ambiguity
+% as a recoverable failure via the condition system (retry/substitute/abandon->ask);
+% propose-and-confirm vs autonomous. Realized as a praxeon End/Means/Action loop.
+
+\section{A Typed Cause-Effect-Graph Core}
+\label{sec:ceg}
+% The CEG as an algebraic data type in Coalton; boolean wiring + constraints;
+% expression-tree vs node-graph representation; why static types fit this core.
+
+\section{Solving for Minimal, Sufficient Tests}
+\label{sec:solve}
+% CEG -> decision table; the minimum columns showing each cause independently drives
+% its effect; native Bender/Myers table-walk vs an FFI'd SAT/SMT backend behind a
+% neutral protocol; traceability as a first-class output.
+
+\section{Requirement Defects as a Co-Product}
+\label{sec:defects}
+% Dangling causes/effects, contradictory constraints, non-propositional requirements;
+% the ambiguity review as arguably the higher-value deliverable.
+
+\section{The Ecosystem}
+\label{sec:ecosystem}
+% The six core frameworks in dependency order (low->high): aion (functional stdlib),
+% cons (project & dev tooling), mnemosyne (bitemporal data layer), elenchon (this,
+% the CEG/RBT engine -- the fourth), hyperion (HTMX web framework), praxeon (agentic
+% AI), plus hermes (a satellite leaf-lib for external integrations -- email/SMS,
+% payments later -- outside the linear DAG; it depends only on aion, and nothing in
+% the core DAG depends on it).
+% A framework never depends on one to its right. The shared house style; Coalton
+% as a first-class modern Lisp. Elenchon depends only leftward (aion; later mnemosyne)
+% and never on praxeon/hyperion; the agentic NL->CEG layer (praxeon's ChatRBT) is a
+% consumer ABOVE Elenchon that depends on it, not the reverse.
+
+\section{Evaluation Plan}
+\label{sec:eval}
+% Test-count and coverage vs hand-written suites and, where available, Bender RBT
+% output; extraction fidelity (human-confirmed causes/effects); a worked canonical
+% example (requirement -> graph -> table -> tests).
+
+\section{Related Work}
+\label{sec:related}
+% Bender RBT/SoftTest; Myers cause-effect graphing; MC/DC (DO-178C); combinatorial
+% (pairwise) and classification-tree test design; LLM-based test generation.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

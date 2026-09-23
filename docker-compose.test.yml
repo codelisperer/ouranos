@@ -1,0 +1,49 @@
+# docker-compose.test.yml --- a Postgres the verification gate can actually reach (#176).
+#
+#   scripts/test-postgres.sh up      start it, wait until it answers
+#   scripts/test-postgres.sh down    stop and remove it
+#
+# Why this exists: mnemosyne's claim is a NEUTRAL protocol over interchangeable backends,
+# and every check it has ever reported green ran against SQLite alone -- the one backend
+# the docs do NOT tell you to deploy on. #165 is what that cost: 2645 checks green on
+# SQLite at the same commit that silently corrupted a text column on Postgres.
+#
+# This is OPTIONAL infrastructure, not a new dependency of the tree. The suite's contract
+# is the MNEMOSYNE_TEST_PG_URL environment variable; a container is one way to satisfy it
+# and a server you already run is another. Nothing here is on the load path of anything.
+#
+# Port 55432, not 5432: a developer machine that already runs Postgres must not have its
+# real server shadowed -- or, worse, have this suite silently run against it and CREATE
+# TABLE in something that matters.
+# THE IMAGE CARRIES pgvector, and that is why it is not the plain postgres image (#258).
+# mnemosyne declares a `:vector` column type (#212), and `CREATE EXTENSION vector` on
+# postgres:17-alpine fails with "extension is not available" -- so every claim about vector
+# storage, distance operators or index kinds would be untestable here. A suite that cannot
+# run a feature is a suite where the feature is never tested, which is the argument ADR-0001
+# quoted when it made emulation opt-in.
+#
+# Measured cost of the swap, on this machine: 422 MB against 283 MB, and 12.3 s to pull
+# cold. Seconds rather than minutes, once per runner image.
+#
+# It is Debian-based rather than Alpine, which is where most of the extra size is. The
+# tmpfs mount below is unaffected: the data directory is the same path.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ouranos-test-pg
+    environment:
+      POSTGRES_USER: ouranos
+      POSTGRES_PASSWORD: ouranos
+      POSTGRES_DB: ouranos_test
+    ports:
+      - "55432:5432"
+    # tmpfs, so the data directory never touches the developer's disk and every `up` is
+    # a genuinely fresh server. A test database that survives a restart accumulates state
+    # that makes a suite pass for reasons nobody chose.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ouranos -d ouranos_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

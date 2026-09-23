@@ -1,0 +1,100 @@
+%%% main.tex --- cons: Cargo-Class Project and Dependency Tooling for Common Lisp
+%%%
+%%% Portable skeleton: compiles with a stock TeX Live (base `article` + common
+%%% packages). Build:  latexmk -pdf main.tex   (or `./build.sh`).
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, frame=single, framesep=4pt, breaklines=true}
+
+\title{\textbf{cons the magnificent}: Cargo-Class Project\\
+       and Dependency Tooling for Common Lisp}
+\author{Bob\\ \small\texttt{eternal.recursion@proton.me}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Common Lisp's project and dependency tooling is fragmented across several capable
+but disjoint tools---ASDF for system definition and build, Quicklisp for
+distribution, ocicl for lockfile-based reproducibility, qlot for pinning, Roswell
+for implementation and script management---with no single, modern front-end tying
+them together. Contemporary languages solve this with an integrated tool
+(\textsc{cargo}, \textsc{npm}, the \textsc{go} tool); Common Lisp has no
+equivalent, so every project reinvents its own onboarding scripts. We present
+\textsc{cons}, an opinionated front-end that \emph{delegates} to existing engines
+and adds developer experience: project scaffolding, integrated build/test/run/repl
+tasks driven by a declarative per-project \texttt{cons.lisp} spec (a portable,
+GNU-make-free replacement for the per-project Makefile), and a neutral
+\emph{dependency-source protocol} with Quicklisp and ocicl backends (and a native
+resolver to follow). We describe its design, its place in a Coalton-centered
+ecosystem, and a path to lockfile-based reproducibility that could ultimately subsume
+the tools it began by wrapping.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+% The recurring per-project setup ritual; the absence of a cargo-class tool.
+
+\section{The Fragmentation Problem}
+\label{sec:frag}
+% ASDF / Quicklisp / ocicl / qlot / Roswell: what each does and doesn't do.
+
+\section{Design: Delegate, then Own}
+\label{sec:design}
+% A thin front-end; the neutral dependency-source protocol; delegate first,
+% native resolver later; the same "pluggable backend" pattern used across the
+% ecosystem.
+
+\section{Scaffolding: \texttt{cons init}}
+\label{sec:new}
+% Templates (lib/cli/web/agent); generating the shared "just works" scaffold.
+
+\section{Build Tasks: the \texttt{cons.lisp} Spec}
+\label{sec:tasks}
+% A project declares its tasks in a declarative, Lispy `cons.lisp` manifest --- targets
+% (build/test/repl/run/serve/dev) that mostly delegate to ASDF/Quicklisp. `cons <target>`
+% then runs identically on Linux/macOS/Windows, with no GNU-make dependency: the portable
+% replacement for the per-project Makefile. Two execution modes: in-process in cons's warm
+% image (a dumped SBCL binary carrying Quicklisp and a large heap, so `cons build` compiles
+% Coalton-heavy systems directly), or an isolated subprocess sbcl (`--fresh`, and required
+% for save-lisp-and-die targets). Contrast with the Makefile ritual it eliminates.
+
+\section{Dependency Management}
+\label{sec:deps}
+% Quicklisp and ocicl backends; a native source model + version resolver +
+% lockfiles; reproducibility.
+
+\section{Distribution and Self-Hosting}
+\label{sec:dist}
+% bin/cons via save-lisp-and-die; the bootstrap path; cons managing cons.
+
+\section{The Ecosystem}
+\label{sec:ecosystem}
+% cons (tooling), hyperion (web), praxeon (agents), a Coalton-first FP library;
+% Coalton as a first-class modern Lisp.
+
+\section{Evaluation Plan}
+\label{sec:eval}
+% Onboarding time vs hand-rolled setup; reproducibility guarantees.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

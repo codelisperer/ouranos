@@ -1,0 +1,592 @@
+# desktop-release.yml --- build a Hyperion desktop app for every OS, natively.
+#
+# SBCL cannot cross-compile: save-lisp-and-die dumps an image for the HOST platform only.
+# So there is no "build all targets" machine -- each OS builds its own artifact on its own
+# runner, and they meet again at the release. That is the whole reason this file exists;
+# see hyperion/docs/desktop-distribution-design.md and ADR-0010.
+#
+# Every runner does the SAME four things:
+#   scripts/setup.{sh,ps1}  ->  bootstrap.lisp  ->  hyperion-view  ->  build-desktop-app.lisp
+# all of which are plain repo scripts that work identically on a developer's machine. CI is
+# a caller here, not a place where build knowledge lives.
+#
+# Toolchain versions come from scripts/versions.env -- one pin for CI and dev machines both.
+
+name: desktop release
+
+# TRIGGERS -- note what is deliberately NOT here: a bare `v*` tag.
+#
+# This monorepo holds six co-evolving FRAMEWORKS; the desktop app built here is an
+# EXAMPLE (the M1 proof of ADR-0008), not a product. A framework release tag must never
+# ship an app update, and an app's version must never be the monorepo's version -- they
+# are unrelated numbers. So the tag trigger is APP-SCOPED: `coalton-repl-v0.1.0`.
+#
+# Real products consuming Hyperion live in their own repos (see the root CLAUDE.md) and
+# will want this as a reusable `workflow_call` template. That is not a flag flip: a
+# reusable workflow's `actions/checkout` grabs the CALLER's repo, so it needs a second
+# checkout of ouranos at a pinned ref plus configurable paths. Tracked, not faked.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp (default: 0.0.0-dev)"
+        required: false
+        type: string
+  push:
+    tags: ["coalton-repl-v*"]
+
+# The app to build -- the coalton-repl example (ADR-0008's M1 proof).
+env:
+  APP_NAME: coalton-repl
+  # The manifest is one signed document PER CHANNEL, at a permanent URL, named for the
+  # channel (design section 2). Stated once because the generator writes it and the upload
+  # step sends it, and those two disagreeing about a filename is #77's recurring defect.
+  APP_CHANNEL: stable
+  APP_SYSTEM: hyperion/examples/coalton-repl
+  APP_ENTRY: hyperion/examples/coalton-repl:main
+  # WHERE A RELEASE GOES, and it is deliberately NOT this repository. An installed
+  # application cannot hold a credential safely, so the URL it polls has to be readable
+  # by anybody; ouranos is private, and a release attached here would 401 for every
+  # customer while looking perfectly healthy in CI. The release repo is public and holds
+  # assets only -- no source. See its README for the channel-pointer layout.
+  RELEASE_REPO: codelisperer/ouranos-desktop-releases
+  # WHAT THIS RELEASE IS SUPPOSED TO CARRY, checked against the manifest before anything
+  # is published. macOS is absent because nothing builds its `.app.tar.gz' payload yet
+  # (#350) -- `build-dmg.sh' writes the human .dmg and the workflow never calls it. That
+  # is a real gap; the point of this line is that it is a STATED one rather than a silent
+  # hole every Mac user falls into.
+  APP_PLATFORMS: linux-x86-64 windows-x86-64
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false           # one OS failing must not hide the others' results
+      matrix:
+        include:
+          # Ideally we would build on the OLDEST supported Linux (glibc is forward- but not
+          # backward-compatible, so binaries built here will not run on older distros).
+          # We cannot: upstream's SBCL 2.6.6 Linux binary itself requires GLIBC_2.38, and
+          # ubuntu-22.04 ships 2.35 -- `sbcl: /lib/.../libc.so.6: version GLIBC_2.38 not
+          # found`. So the floor for OUR binaries is set by whatever glibc the SBCL we can
+          # actually run needs. 24.04 (glibc 2.39) it is; widening that floor means building
+          # SBCL from source on an older base, or building in a container. Tracked.
+          - os: ubuntu-24.04
+            platform: linux-x86-64
+            cache: ~/.cache/common-lisp
+          - os: windows-2022
+            platform: windows-x86-64
+            cache: ~/AppData/Local/cache/common-lisp
+          # macos-14+ are arm64; macos-13 is the last x86_64 image if Intel support is wanted.
+          - os: macos-14
+            platform: macos-arm64
+            cache: ~/.cache/common-lisp
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The version comes from the APP's own tag (coalton-repl-v0.1.0 -> 0.1.0), never from
+      # a monorepo/framework tag. A tag that does not carry this app's prefix yields
+      # 0.0.0-dev, so a stray tag can never masquerade as a release of this app.
+      - name: Derive version
+        shell: bash
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#${APP_NAME}-v}"
+            [ "$v" = "${GITHUB_REF_NAME}" ] && v=""      # tag did not match APP_NAME-v*
+          fi
+          echo "APP_VERSION=${v:-0.0.0-dev}" >> "$GITHUB_ENV"
+          echo "building ${APP_NAME} ${v:-0.0.0-dev} for ${{ matrix.platform }}"
+
+      # Coalton's first compile is minutes; the Quicklisp dist and Coalton checkout are
+      # tens of MB. Key on the pins, so a version bump invalidates exactly what it should.
+      - name: Cache Lisp toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ matrix.cache }}
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: lisp-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env') }}-${{ hashFiles('**/*.asd') }}
+          restore-keys: |
+            lisp-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env') }}-
+            lisp-${{ matrix.platform }}-
+
+      # The native webview launcher's build deps (the launcher's own --check reports these,
+      # but on a runner we install them up front rather than fail).
+      - name: Install launcher build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
+
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -CI
+          else
+            ./scripts/setup.sh --ci
+          fi
+
+      - name: Verify the toolchain
+        shell: bash
+        run: |
+          sbcl --version
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -Check
+          else
+            ./scripts/setup.sh --check
+          fi
+
+      # Writes the ASDF source-registry drop-in the later steps rely on. NO_WARM skips
+      # compiling all six frameworks -- a desktop build needs only its own dependency chain.
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Build the webview launcher
+        shell: bash
+        working-directory: hyperion/hyperion-view
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./build.ps1
+          else
+            ./build.sh
+          fi
+
+      # THE BUNDLE MUST BE ABLE TO CARRY WHAT THE IMAGE OPENS (#274). build-desktop-app.lisp
+      # already copies every vendored native library the image has open, and its
+      # *lazy-natives* registry exists precisely to wake libuv so the bundler learns the
+      # VENDORED path rather than whatever the build machine happens to have installed. None
+      # of that fires if vendor/libuv/ does not exist -- so before this step the workflow
+      # could produce a bundle for an app that loads aion/uv and carries no libuv, which
+      # works on every build machine and fails on every user's.
+      #
+      # Not conditional on the app actually using :uv. The cost is one C build; the
+      # alternative is a step that must be remembered at the moment ADR-0017 flips the
+      # default, which is the class of thing nobody remembers.
+      #
+      # Windows needs MSVC (#128) and it is on the runner; Linux uses the g++ installed
+      # above; macOS uses Xcode CLT, which the image ships.
+      - name: Build the pinned libuv
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
+
+      - name: Dump the app image
+        shell: bash
+        run: |
+          sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp \
+            --system "$APP_SYSTEM" --entry "$APP_ENTRY" \
+            --name "$APP_NAME" --version "$APP_VERSION"
+
+      # save-lisp-and-die writes a CONSOLE-subsystem PE, so a desktop app would drag a
+      # console window behind it. editbin (MSVC, already on the runner) rewrites the one
+      # header field. Post-dump because save-lisp-and-die ends the process.
+      - name: No console window (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows-gui-subsystem.ps1 \
+            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}/${APP_NAME}.exe"
+
+      - name: Smoke-test the bundle
+        shell: bash
+        run: |
+          d="dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+          ls -l "$d"
+          test -f "$d/VERSION"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            test -f "$d/${APP_NAME}.exe" && test -f "$d/hyperion-view.exe"
+          else
+            test -x "$d/${APP_NAME}" && test -x "$d/hyperion-view"
+          fi
+          # NB: not launched here -- it opens a window and blocks. A headless smoke test
+          # (start, poll the local port, quit) is a TODO once the app grows a --check flag.
+
+      # THE test for a bundle: run it on a machine that has never seen this repo. A native
+      # dependency the image will dlopen is invisible on the machine that built it, which is
+      # how the first Linux artifact shipped and died on a user's box with
+      # `Error opening shared object "libev.so.4"` (#74, #94). See ADR-0013.
+      #
+      # BLOCKING on purpose. It failed when it was added -- the bundle still loaded Woo and
+      # therefore libev -- which is what #139 fixed by taking the HTTP backend out of the
+      # framework entirely. It passes now: the image starts and serves on a machine with no
+      # toolchain and no libraries of ours. Keep it blocking; a bundle that cannot start is
+      # not one to publish, and `fail-fast: false` keeps a red Linux leg from hiding the
+      # other two.
+      #
+      # What this does NOT cover: the WINDOW. hyperion-view links WebKitGTK/GTK, which
+      # is DECLARED, not bundled (ECOSYSTEM decisions log, 2026-08-05) -- so in a bare
+      # container the app starts, serves, and exits without a window. Verifying the window
+      # needs a runner with the GTK stack and a display, which is #87's business.
+      #
+      # macOS and Windows need their own clean room -- a runner with nothing installed, or a
+      # fresh VM. The DESIGN they share is ADR-0013; this script is only the Linux half.
+      - name: Verify the bundle on a clean machine (Linux)
+        if: runner.os == 'Linux'
+        run: ./scripts/verify-bundle.sh "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+
+      # The installer is BOTH the human download and the update payload (ADR-0010), so it
+      # is built here beside the bundle rather than in a later job -- it needs the bundle's
+      # files, and shipping a bundle without its installer would publish something users
+      # cannot install.
+      - name: Package the AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ./scripts/build-appimage.sh "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}" \
+            --icon hyperion/examples/coalton-repl/assets/lambda.png
+          ./scripts/verify-bundle.sh "dist/${APP_NAME}-${APP_VERSION}-x86_64.AppImage"
+
+      - name: Build the installer (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install nsis -y --no-progress
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1 \
+            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.APP_NAME }}-${{ env.APP_VERSION }}-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  # --- the signed manifest (#75) ------------------------------------------------
+  #
+  # THE MANIFEST IS THE CONTRACT between this workflow and every installed app: one signed
+  # JSON document per channel, at a permanent URL, listing each platform's artifact with its
+  # size, SHA-256 and signature. Shape: hyperion/docs/desktop-distribution-design.md §3.
+  #
+  # It runs AFTER the matrix and downloads its artifacts, because the hashes have to be of
+  # the bytes that were actually built. Computing them anywhere else would be computing them
+  # from something that might differ.
+  #
+  # SIGNING IS NOT OPTIONAL AND NOT SKIPPABLE. The update client fails closed on a manifest
+  # with no signature -- an unsigned manifest is exactly what an attacker who can serve bytes
+  # would produce -- so a release that could not sign must fail rather than publish something
+  # clients will refuse. Hence no `continue-on-error` here.
+  manifest:
+    name: signed manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    # A tag build publishes; a workflow_dispatch is a dry run that still proves the job works.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive version
+        shell: bash
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#${APP_NAME}-v}"
+            [ "$v" = "${GITHUB_REF_NAME}" ] && v=""
+          fi
+          echo "APP_VERSION=${v:-0.0.0-dev}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: incoming
+
+      # The matrix uploads one directory per platform; the manifest generator wants them all
+      # in one place, named as they will be published.
+      - name: Collect the artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          find incoming -type f \( -name '*setup.exe' -o -name '*.AppImage' -o -name '*.app.tar.gz' \) -exec cp {} dist/ \;
+          ls -l dist
+
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: ./scripts/setup.sh --ci
+
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      # The private key never appears on a command line: argv is visible to every other
+      # process on the machine, and CI logs echo command lines. It arrives as an environment
+      # variable that the script reads for itself.
+      - name: Generate and sign the manifest
+        env:
+          OURANOS_SIGNING_KEY: ${{ secrets.OURANOS_SIGNING_KEY }}
+        shell: bash
+        run: |
+          if [ -z "$OURANOS_SIGNING_KEY" ]; then
+            echo "::error::OURANOS_SIGNING_KEY is not set -- refusing to publish an unsigned manifest."
+            exit 1
+          fi
+          # THE URLS ARE BAKED INTO A SIGNED DOCUMENT, so they have to be the ones the
+          # assets will really be served from -- ${RELEASE_REPO}, not ${GITHUB_REPOSITORY}.
+          # Signing them means a wrong host cannot be corrected afterwards by editing the
+          # file; the release has to be regenerated.
+          sbcl --script scripts/update-manifest.lisp generate --dist dist --product "$APP_NAME" --version "$APP_VERSION" --channel "$APP_CHANNEL" --base-url "https://github.com/${RELEASE_REPO}/releases/download/${GITHUB_REF_NAME}" --notes-url "https://github.com/${RELEASE_REPO}/releases/tag/${GITHUB_REF_NAME}"
+
+      # THIS STEP USED TO BE A LIE, and its name is why it lasted. It ran
+      # `update-manifest.lisp verify' -- `verify-detached', the GENERATOR'S OWN READER, in
+      # the generator's own file -- and called that "as a client would". A client does not
+      # have that reader; it has hyperion/update. So the step could only ever confirm that
+      # the producer was self-consistent, which it was through every producer/consumer
+      # defect this subsystem has had (#206's platform key, the `.sig' encoding, the
+      # hard-coded `format', the manifest filename). A self-check that looks conscientious
+      # is worse than none: it occupies the slot where the real check would go.
+      #
+      # It also SKIPPED ITSELF when OURANOS_PUBLIC_KEY was unset. A verification step that
+      # silently does nothing is the same defect one level up, so it now fails instead:
+      # publishing something nobody can verify is not a thing to do quietly.
+      #
+      # LAST, AND ON THE EXACT DIRECTORY ABOUT TO BE UPLOADED (design section 10).
+      # Authenticode signing mutates the artifact, so a release verified before signing is
+      # a release verified in a file nobody will download. The gate writes VERIFIED.sha256
+      # naming the bytes it actually read, and only when it passes.
+      - name: Verify as a client would -- with the client
+        shell: bash
+        run: |
+          if [ -z "${{ vars.OURANOS_PUBLIC_KEY }}" ]; then
+            echo "::error::OURANOS_PUBLIC_KEY is not set -- refusing to publish a release nobody can verify."
+            exit 1
+          fi
+          sbcl --dynamic-space-size 4096 --script scripts/verify-release-as-client.lisp \
+            --dist dist --product "$APP_NAME" --version "$APP_VERSION" \
+            --channel "$APP_CHANNEL" --public-key "${{ vars.OURANOS_PUBLIC_KEY }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: |
+            dist/${{ env.APP_CHANNEL }}.json
+            dist/${{ env.APP_CHANNEL }}.json.sig
+            dist/*.sig
+            dist/VERIFIED.sha256
+          if-no-files-found: error
+
+  # --- the publish (#332) -------------------------------------------------------
+  #
+  # Everything above this job was already real: the bundles, the installers, the signed
+  # manifest, the client that can read all three. None of it reached anywhere an installed
+  # application could look. The manifest was uploaded as a WORKFLOW ARTIFACT -- visible to
+  # somebody browsing Actions with repo access, and not a URL. `hyperion/update' was an
+  # updater with nothing to update from.
+  #
+  # TAG BUILDS ONLY. A `workflow_dispatch' run still builds, signs and gates, which is what
+  # makes it a useful dry run; publishing is the irreversible half and wants a tag.
+  publish:
+    name: publish
+    needs: manifest
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive version
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#${APP_NAME}-v}"
+          [ "$v" = "${GITHUB_REF_NAME}" ] && v=""
+          echo "APP_VERSION=${v:-0.0.0-dev}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: incoming
+
+      # The installers come from the BUILD artifacts and the signatures from the MANIFEST
+      # artifact, so the directory that gets uploaded is assembled here from two sources and
+      # has never existed as a whole before this step. That is exactly the situation in which
+      # a file quietly goes missing or arrives stale, which is why the next step exists.
+      - name: Reassemble the release directory
+        shell: bash
+        run: |
+          mkdir -p dist
+          find incoming -type f \( -name '*setup.exe' -o -name '*.AppImage' -o -name '*.app.tar.gz' \) \
+            -exec cp {} dist/ \;
+          cp incoming/manifest/* dist/
+          ls -l dist
+
+      # DESIGN SECTION 10, ASSERTED RATHER THAN REMEMBERED. The gate wrote VERIFIED.sha256
+      # naming the exact bytes it read, precisely so the upload step could stop assuming a
+      # step order and check one. Authenticode and codesign MUTATE an artifact; a release
+      # verified before signing is a release verified in a file nobody will download.
+      #
+      # `sha256sum -c' is also the one check here that can catch the reassembly above going
+      # wrong -- a missing installer, or one from a re-run of a different build.
+      - name: The bytes about to be uploaded are the bytes that passed the gate
+        shell: bash
+        working-directory: dist
+        run: |
+          test -f VERIFIED.sha256 || {
+            echo "::error::no VERIFIED.sha256 -- the gate did not pass, so there is nothing to publish"
+            exit 1
+          }
+          echo "the gate verified these:"
+          cat VERIFIED.sha256
+          sha256sum -c VERIFIED.sha256
+
+      # A MISSING PLATFORM IS NORMAL, SAYS THE GENERATOR -- and it is right that a platform
+      # can join the matrix a release late. The cost is that a platform which never joins is
+      # indistinguishable from one that has not joined YET, at every step, forever: the
+      # manifest is well-formed, the gate passes, the release publishes, and Macs are simply
+      # never offered an update. Nothing anywhere says so.
+      #
+      # So the absence is DECLARED instead of inferred. APP_PLATFORMS is what this release is
+      # supposed to carry; a mismatch either way is a failure. A platform that silently stops
+      # building can no longer slip out, and the day macOS packaging lands (#350) this line
+      # changes in the same commit as the step that produces it.
+      - name: The manifest carries exactly the platforms this release declares
+        shell: bash
+        run: |
+          got=$(python3 -c "import json;print(' '.join(sorted(json.load(open('dist/${APP_CHANNEL}.json'))['platforms'])))")
+          want=$(printf '%s\n' ${APP_PLATFORMS} | sort | tr '\n' ' ' | sed 's/ *$//')
+          echo "declared: ${want}"
+          echo "manifest: ${got}"
+          if [ "$got" != "$want" ]; then
+            echo "::error::the manifest and APP_PLATFORMS disagree -- refusing to publish a release whose coverage nobody stated"
+            exit 1
+          fi
+
+      # TWO RELEASES, AND THE SPLIT IS THE DESIGN.
+      #
+      # The VERSIONED release is immutable and is what the manifest's payload URLs name, so a
+      # download link in a signed manifest keeps working forever.
+      #
+      # The CHANNEL POINTER release is mutable and holds only the manifest, and it exists
+      # because `releases/latest/download/' CANNOT BE USED HERE. `latest' resolves per
+      # REPOSITORY, and this repository holds every desktop app in the tree: whichever app
+      # published most recently would own `latest', and every other app's client would ask it
+      # for a manifest that is not in that release, get a 404, read that -- correctly -- as
+      # "this channel has published nothing", and go quiet. Every app but the most recent one
+      # would stop updating, silently. A per-app per-channel tag cannot be taken over.
+      #
+      # Mutability is not a weakness here: the manifest is signed and the client verifies the
+      # signature over the exact bytes before it parses anything, so replacing the asset is
+      # the ONLY way to move a channel and forging one still needs the key.
+      - name: Publish the versioned release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_REPO_TOKEN is not set -- it needs write access to ${RELEASE_REPO}, which GITHUB_TOKEN does not have (different repository)."
+            exit 1
+          fi
+          # The body a PERSON lands on. APP_PLATFORMS is already checked against the manifest
+          # above, so coverage was declared to the machinery and not to a reader -- someone
+          # arriving on a platform with no asset saw no asset and no reason (#350).
+          notes=$(printf '%s\n' \
+            "Built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}. Signed with the Ouranos release key; verify with scripts/verify-release-as-client.lisp." \
+            "" \
+            "Platforms in this release: ${APP_PLATFORMS}." \
+            "" \
+            "A platform not listed has no download here, and installed copies on it are not offered this version. macOS is absent because nothing builds its payload yet (#350).")
+          gh release view "$GITHUB_REF_NAME" --repo "$RELEASE_REPO" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --repo "$RELEASE_REPO" \
+              --title "${APP_NAME} ${APP_VERSION}" \
+              --notes "$notes"
+          # --clobber so a re-run of a failed publish replaces rather than half-fails.
+          gh release upload "$GITHUB_REF_NAME" --repo "$RELEASE_REPO" --clobber \
+            $(find dist -maxdepth 1 -type f \( -name '*setup.exe' -o -name '*.AppImage' -o -name '*.app.tar.gz' \) ) \
+            $(find dist -maxdepth 1 -type f -name '*.sig' ! -name "${APP_CHANNEL}.json.sig")
+
+      # ORDER IS THE INVARIANT: assets first, pointer last, and it is load-bearing rather
+      # than tidy. The pointer is the only thing an installed app reads, so moving it is
+      # what makes a release visible. Move it BEFORE the payloads are attached and every
+      # client is offered an update whose download 404s -- an update that fails after the
+      # user has said yes. In this order the worst partial failure leaves the channel on
+      # the previous release, which is exactly the state before the run: clients stay put,
+      # the job goes red, a human re-runs it. Nothing is offered that cannot be fetched.
+      #
+      # No second `-z "$GH_TOKEN"' guard here on purpose. With an empty token the step
+      # above exits 1 and Actions stops the job, so a guard on this step could only be
+      # reached through the thing that already guards it -- and a guard reachable only
+      # through the thing it guards is not a guard. The case it would appear to cover --
+      # a versioned release published while the pointer silently stays stale -- is caught
+      # where it is actually visible: `verify-published' fetches the channel as a customer
+      # and fails unless the version it is offered is THIS one.
+      - name: Move the channel pointer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+        run: |
+          POINTER="${APP_NAME}-${APP_CHANNEL}"
+          gh release view "$POINTER" --repo "$RELEASE_REPO" >/dev/null 2>&1 ||
+            gh release create "$POINTER" --repo "$RELEASE_REPO" \
+              --title "${APP_NAME} -- ${APP_CHANNEL} channel" \
+              --notes "The current ${APP_CHANNEL} manifest for ${APP_NAME}. Assets here are REPLACED on every release; the versioned releases are the immutable ones. This tag is the permanent URL installed copies poll."
+          gh release upload "$POINTER" --repo "$RELEASE_REPO" --clobber \
+            "dist/${APP_CHANNEL}.json" "dist/${APP_CHANNEL}.json.sig"
+          echo "channel URL: https://github.com/${RELEASE_REPO}/releases/download/${POINTER}/"
+
+  # --- and then read it back the way a customer would (#332) --------------------
+  #
+  # A SEPARATE JOB, ON A DIFFERENT MACHINE, WITH NO ACCESS TO `dist/'. That is the entire
+  # point and it is structural rather than a matter of care: this job cannot accidentally
+  # verify a local copy, because it does not have one. All it is given is a URL and a public
+  # key -- the two things an installed application has.
+  #
+  # It fetches with NO CREDENTIALS. `hyperion/update' goes through Dexador and sends no
+  # token, and nothing here puts one in the environment. That is not a detail: a private
+  # repository serves release assets only to an authenticated request, so a publish that
+  # LOOKS fine to CI is a 404 to every customer. This job is the only thing in the pipeline
+  # that can tell those apart.
+  #
+  # A publish verified by the workflow that published it cannot see a producer/consumer
+  # disagreement, and this subsystem has had four of them.
+  verify-published:
+    name: verify the published release
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive version
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#${APP_NAME}-v}"
+          [ "$v" = "${GITHUB_REF_NAME}" ] && v=""
+          echo "APP_VERSION=${v:-0.0.0-dev}" >> "$GITHUB_ENV"
+
+      - name: Cache Lisp toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/common-lisp
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: lisp-linux-x86-64-${{ hashFiles('scripts/versions.env') }}-${{ hashFiles('**/*.asd') }}
+          restore-keys: |
+            lisp-linux-x86-64-${{ hashFiles('scripts/versions.env') }}-
+            lisp-linux-x86-64-
+
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: ./scripts/setup.sh --ci
+
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      # GitHub serves a newly attached asset within a second or two, but not always by the
+      # time the upload call returns. Retried rather than slept on, so the log says which
+      # attempt worked -- a fixed sleep that is too short fails intermittently and a fixed
+      # sleep that is long enough is a guess nobody revisits.
+      - name: Fetch, verify and stage it from the network, unauthenticated
+        shell: bash
+        run: |
+          url="https://github.com/${RELEASE_REPO}/releases/download/${APP_NAME}-${APP_CHANNEL}/"
+          for attempt in 1 2 3 4 5; do
+            echo "--- attempt ${attempt}: ${url}"
+            if sbcl --dynamic-space-size 4096 --script scripts/verify-release-as-client.lisp \
+                 --base-url "$url" --product "$APP_NAME" --version "$APP_VERSION" \
+                 --channel "$APP_CHANNEL" --public-key "${{ vars.OURANOS_PUBLIC_KEY }}"; then
+              echo "the published release verifies as a client reads it"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::the PUBLISHED release could not be fetched and verified the way an installed app would"
+          exit 1

@@ -1,0 +1,110 @@
+# The mbedTLS release this tree builds TLS termination against (#292).
+#
+# Same doctrine as libuv.pin: the REPO declares the version, so adopting a new
+# one is an ordinary commit that propagates through git. A native dependency
+# each machine resolves independently is the "works on mine, not on yours"
+# hazard, and for a C ABI mismatch it does not fail politely.
+#
+# We do NOT depend on a distro or system OpenSSL. `hyperion/tls` is an OPT-IN
+# aux system: nothing that merely uses hyperion gets a crypto library on its
+# load path. That is not a new decision -- mnemosyne.asd and aion.asd both
+# already refuse cl+ssl in those words, both citing ADR-0011's failure, where
+# Woo's load-time libev made every desktop bundle die on a clean machine.
+#
+# Consequence worth stating: a desktop bundle that does not serve HTTPS carries
+# nothing at all, and under ADR-0008 desktop is plaintext-on-localhost anyway.
+# The cost lands only on a bundle that actually terminates TLS.
+
+# --- why 4.1 and not 3.6 LTS -----------------------------------------------
+#
+# Counter-intuitive, and measured rather than assumed (#292):
+#
+#   3.6 LTS  released March 2024, three-year lifetime -> ends MARCH 2027
+#   4.1      the first 4.x LTS, released March 2026   -> ends ~MARCH 2029
+#
+# Both from BRANCHES.md in the respective tarballs. Choosing 3.6 in late 2026
+# does not avoid the 4.x migration, it SCHEDULES it inside eighteen months and
+# against a support deadline -- after doing the transcription once already.
+#
+# On size: 4.1.1 compiles 110 sources where 3.6.2 compiles 108 -- the same, not
+# the fivefold increase the 437-file tree suggests, and not the reduction an
+# earlier count of 89 claimed. Both of those numbers were mine and both were
+# wrong: 437 counts tests, programs, examples and the vendored framework, and 89
+# came from finding two file(GLOB) calls and missing the add_subdirectory lines
+# that pull in extras, platform and utilities. The list is settled by LINKING,
+# not by reading -- see scripts/mbedtls-sources.lisp.
+
+# --- why BearSSL is not here -----------------------------------------------
+#
+# It was the other candidate and is MIT, with a better I/O model for a socket
+# libuv owns (a buf/ack engine that never touches an fd). It is out on
+# capability: BR_TLS10/11/12 and nothing beyond -- NO TLS 1.3 -- and every
+# source file in 0.6 is dated August 2018, still the latest release. For an
+# internet-facing on-prem server that is disqualifying before the dormancy
+# argument is needed. Recorded so it is not re-proposed for its elegance.
+
+version 4.1.1
+sha256  3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c
+url     https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.1.1/mbedtls-4.1.1.tar.bz2
+
+# Licence: dual Apache-2.0 OR GPL-2.0-or-later; WE TAKE APACHE-2.0. Permissive
+# and fine to ship beside MIT code, but it is not MIT -- it carries a patent
+# grant and NOTICE obligations, so the licence text ships with any artifact
+# that carries the library. Approved by the maintainer 2026-09-15.
+licence Apache-2.0
+
+# --- staying current -------------------------------------------------------
+#
+# This is the field that matters most on this pin and least on libuv's. A TLS
+# implementation publishes security releases several times a year; upgrading is
+# easy and NOTICING is the hard part. `reviewed` is the only thing separating
+# "no advisory affects us" from "nobody has looked" -- identical from outside,
+# and only one of them is fine. Bump it when you look, including when the answer
+# is "nothing to do". See docs/versioning-and-pinning.md.
+
+advisories https://github.com/Mbed-TLS/mbedtls/security/advisories
+reviewed   2026-09-15
+
+# --- the source set --------------------------------------------------------
+#
+# mbedTLS 4.x does NOT name its sources. The crypto is a second project inside
+# the tarball whose CMake says `file(GLOB src_crypto "*.c")`, so there is no
+# upstream list to diff ours against -- which is the check libuv.pin's
+# "verified against 1.52.1" relies on and this pin cannot have.
+#
+# So the property is different: DID THE SET CHANGE BETWEEN PINS. mbedtls.sources
+# is the committed answer for 4.1.1, and scripts/mbedtls-sources.lisp re-globs a
+# tree and reports what appeared or vanished BY NAME. The digest below ties this
+# pin to that manifest so a version bump cannot quietly keep an old one.
+#
+# Not bureaucracy. Verified against the real 4.1.1 -> 4.2.0 step: 437 files under
+# tf-psa-crypto/ become 436, and the one that goes is
+# tf-psa-crypto/drivers/builtin/src/ecp_curves_new.c. Two ADJACENT releases. With
+# a glob and no manifest that upgrade just stops compiling an elliptic-curve
+# source and says nothing.
+#
+# THREE FIELDS ON THIS PIN ANSWER THREE DIFFERENT QUESTIONS, and none of them
+# substitutes for another:
+#
+#   sha256          did we get the BYTES we expected?
+#   sources-digest  is the SET we compile the set we transcribed?
+#   reviewed        has anybody asked whether those are still the bytes to WANT?
+#
+# The digest sees a file appear or vanish; it does NOT see a file whose contents
+# changed, which is the sha256's job. A pin can be perfectly verified, compiling
+# exactly the recorded set, and perfectly vulnerable.
+
+sources-count  110
+sources-digest 44997596e6cfd039f7c203be27925ad4d29e656a72b1824cb61692bd58deac5a
+
+# --- adopting a new mbedTLS ------------------------------------------------
+#
+#   1. curl -sLO https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-X.Y.Z/mbedtls-X.Y.Z.tar.bz2
+#   2. sha256sum it; update `version`, `sha256`, `url`
+#   3. sbcl --script scripts/mbedtls-sources.lisp <unpacked-tree>
+#      -- read every GONE and NEW line against the release notes before
+#         accepting them; a GONE file is one we silently stop compiling
+#   4. --record the tree, update `sources-count` and `sources-digest`
+#   5. bump `reviewed` -- you have just read the release notes, that IS the review
+#   6. delete vendor/mbedtls/, rebuild, run the hyperion/tls suite on all three
+#      OSes before committing

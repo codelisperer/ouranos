@@ -1,0 +1,418 @@
+;;;; auth-db-tests.lisp --- integration tests for the mnemosyne-backed identity store.
+;;;;
+;;;; Own package + system so core Hyperion keeps no DB dependency. In-memory SQLite, one
+;;;; connection per test.
+
+(cl:defpackage #:hyperion/auth-db/tests
+  (:use #:cl #:fiveam)
+  (:local-nicknames (#:auth #:hyperion/auth-db)
+                    (#:conn #:mnemosyne/conn)
+                    (#:q    #:mnemosyne/query)
+                    (#:bt   #:bordeaux-threads)
+                    (#:be   #:mnemosyne/backend))
+  (:export #:run-tests))
+(in-package #:hyperion/auth-db/tests)
+
+(def-suite auth-db :description "mnemosyne-backed identity store: users + password auth.")
+(defun run-tests () (run! 'auth-db))
+(in-suite auth-db)
+
+(defmacro with-auth ((var) &body body)
+  (let ((c (gensym)))
+    `(let ((,c (conn:connect (be:make-sqlite ":memory:"))))
+       (unwind-protect
+            (let ((,var (auth:make-db-auth ,c :dialect :sqlite :ensure t)))
+              ,@body)
+         (conn:disconnect ,c)))))
+
+(test password-hash-round-trips
+  (let ((h (auth:hash-password "s3cret-pass")))
+    (is (stringp h))
+    (is (auth:verify-password "s3cret-pass" h))
+    (is (not (auth:verify-password "wrong" h)))
+    (is (not (auth:verify-password "s3cret-pass" nil)))))
+
+(test create-and-find-by-email-normalizes-and-round-trips
+  (with-auth (a)
+    (let ((u (auth:create-user a :email "Bob@example.COM" :phone "+18135233751"
+                                 :password "pw" :roles '(:super-admin))))
+      (is (auth:user-p u))
+      (is (string= "bob@example.com" (auth:user-email u)))   ; normalized
+      (is (string= "+18135233751" (auth:user-phone u)))
+      (is (equal '(:super-admin) (auth:user-roles u))))
+    (let ((got (auth:find-user-by-email a "BOB@example.com")))   ; case-insensitive lookup
+      (is (auth:user-p got))
+      (is (equal '(:super-admin) (auth:user-roles got))))
+    (is (null (auth:find-user-by-email a "nobody@x.com")))))
+
+(test phone-is-optional
+  (with-auth (a)
+    (let ((u (auth:create-user a :email "np@x.com" :password "pw")))
+      (is (null (auth:user-phone u))))))
+
+(test authenticate-checks-password
+  (with-auth (a)
+    (auth:create-user a :email "u@x.com" :password "right")
+    (is (auth:user-p (auth:authenticate a "u@x.com" "right")))
+    (is (auth:user-p (auth:authenticate a "U@X.com" "right")))   ; email case-insensitive
+    (is (null (auth:authenticate a "u@x.com" "wrong")))
+    (is (null (auth:authenticate a "missing@x.com" "right")))))
+
+(test temp-password-flag-and-forced-change
+  (with-auth (a)
+    (let ((u (auth:create-user a :email "t@x.com" :password "temp123" :temp-password-p t)))
+      (is (auth:user-temp-password-p u))
+      ;; complete the forced change: set a new password, clearing the temp flag
+      (auth:set-password a (auth:user-id u) "chosen-pw")
+      (let ((got (auth:find-user-by-email a "t@x.com")))
+        (is (not (auth:user-temp-password-p got)))
+        (is (auth:user-p (auth:authenticate a "t@x.com" "chosen-pw")))
+        (is (null (auth:authenticate a "t@x.com" "temp123")))))))   ; old temp no longer valid
+
+(test duplicate-email-signals
+  (with-auth (a)
+    (auth:create-user a :email "dup@x.com" :password "pw")
+    (signals auth:duplicate-email (auth:create-user a :email "DUP@x.com" :password "pw2"))))
+
+(test find-by-id
+  (with-auth (a)
+    (let ((u (auth:create-user a :email "id@x.com" :password "pw")))
+      (is (string= "id@x.com" (auth:user-email (auth:find-user-by-id a (auth:user-id u)))))
+      (is (null (auth:find-user-by-id a "no-such-id"))))))
+
+;;; --- roles: grant / revoke ------------------------------------------------
+;;;
+;;; The gap these close: roles could be decided once, at creation, and never again -- so an
+;;; app could not promote a moderator, appoint a second administrator, or (the direction you
+;;; least want to be slow at) revoke either. The app that reported it had reached around the
+;;; API and written the framework's own table, duplicating the serialisation format by hand.
+
+(defvar *store-connection* nil
+  "The raw connection behind the store under test -- so a test can look at columns the
+public surface does not expose (`vid`, which is what the compare-and-swap guards on).")
+
+(defmacro with-auth-roles ((var &rest make-args) &body body)
+  "WITH-AUTH, but passing extra arguments through to MAKE-DB-AUTH and keeping the raw
+connection reachable as *STORE-CONNECTION*."
+  `(let ((*store-connection* (conn:connect (be:make-sqlite ":memory:"))))
+     (unwind-protect
+          (let ((,var (auth:make-db-auth *store-connection*
+                                         :dialect :sqlite :ensure t ,@make-args)))
+            ,@body)
+       (conn:disconnect *store-connection*))))
+
+(defun %roles-of (store id)
+  (auth:user-roles (auth:find-user-by-id store id)))
+
+(defun %vid-of (id)
+  "Read the row version directly -- the value the compare-and-swap is guarding on. Drivers
+disagree on result-key case, so match the column name case-insensitively."
+  (let* ((rows (q:fetch *store-connection*
+                        (list :select '(:vid) :from (list auth:*table*)
+                              :where (list := :_id id))
+                        :dialect :sqlite))
+         (row (first rows)))
+    (loop for (k v) on row by #'cddr
+          when (and (symbolp k) (string-equal (symbol-name k) "VID")) do (return v))))
+
+(test grant-role-adds-without-disturbing-the-others
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "g@x.com" :roles '(:member)))))
+      (is (eq t (auth:grant-role a id :moderator :actor "test")))
+      (is (equal '(:member :moderator) (%roles-of a id)))
+      (auth:grant-role a id :editor :actor "test")
+      (is (equal '(:member :moderator :editor) (%roles-of a id)))
+      ;; the whole point: the pre-existing role is still there
+      (is (member :member (%roles-of a id))))))
+
+(test revoke-role-removes-only-the-named-one
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "r@x.com"
+                                                :roles '(:member :moderator :editor)))))
+      (is (eq t (auth:revoke-role a id :moderator :actor "test")))
+      (is (equal '(:member :editor) (%roles-of a id))))))
+
+(test grant-and-revoke-are-idempotent
+  ;; An admin console clicking "grant" twice, or two admins revoking the same role, must not
+  ;; be an error -- the end state is what was asked for either way.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "i@x.com" :roles '(:member)))))
+      (is (eq t (auth:grant-role a id :member :actor "test")))          ; already held
+      (is (equal '(:member) (%roles-of a id)))
+      (is (eq t (auth:revoke-role a id :ghost :actor "test")))          ; never held
+      (is (equal '(:member) (%roles-of a id)))
+      (auth:revoke-role a id :member :actor "test")
+      (is (null (%roles-of a id)))
+      (is (eq t (auth:revoke-role a id :member :actor "test"))))))      ; and again, on an empty list
+
+(test a-no-op-grant-does-not-bump-the-version
+  ;; If an idempotent grant bumped `vid` it would invalidate some other writer's in-flight
+  ;; compare-and-swap for no reason at all.
+  (with-auth-roles (a)
+    (let* ((id (auth:user-id (auth:create-user a :email "v@x.com" :roles '(:member))))
+           (before (%vid-of id)))
+      (is (integerp before))
+      (auth:grant-role a id :member :actor "test")
+      (is (eql before (%vid-of id)) "no-op grant must not write")
+      (auth:grant-role a id :moderator :actor "test")
+      (is (= (1+ before) (%vid-of id)) "a real change bumps the version"))))
+
+(test roles-round-trip-through-the-frameworks-own-serialisation
+  ;; The format the reporting app was duplicating by hand with ~S. If it ever changes, this
+  ;; is what says so -- rather than a user silently losing their roles at next login.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "s@x.com"))))
+      (auth:grant-role a id :super-admin :actor "test")
+      (auth:grant-role a id :billing-manager :actor "test")
+      ;; survives a re-read from the database, keywords intact
+      (let ((roles (%roles-of a id)))
+        (is (equal '(:super-admin :billing-manager) roles))
+        (is (every #'keywordp roles))))))
+
+(test mutating-roles-on-a-missing-user-reports-rather-than-inventing-one
+  (with-auth (a)
+    (is (null (auth:grant-role a "no-such-id" :admin :actor "test")))
+    (is (null (auth:revoke-role a "no-such-id" :admin :actor "test")))))
+
+(test concurrent-grants-of-different-roles-all-survive
+  ;; This is the bug a wholesale SET-ROLES would have had: each thread reads the list, adds
+  ;; its own role, writes the whole thing back, and the losers vanish silently. Here the
+  ;; read-modify-write is inside the store, so every grant must be present at the end.
+  (with-auth (a)
+    (let* ((id (auth:user-id (auth:create-user a :email "c@x.com")))
+           (roles '(:alpha :bravo :charlie :delta :echo :foxtrot :golf :hotel))
+           (threads (mapcar (lambda (r)
+                              (bt:make-thread (lambda () (auth:grant-role a id r :actor "test"))
+                                              :name (format nil "grant-~A" r)))
+                            roles)))
+      (mapc #'bt:join-thread threads)
+      (let ((final (%roles-of a id)))
+        (is (= (length roles) (length final)) "every grant must survive: got ~S" final)
+        (dolist (r roles)
+          (is (member r final) "~S was lost" r))))))
+
+(test the-compare-and-swap-gives-up-rather-than-spinning-forever
+  ;; Driving the retry budget to zero exercises the give-up path deterministically, without
+  ;; needing to win a race against a real second writer.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "x@x.com"))))
+      (let ((auth:*role-update-attempts* 0))
+        (signals auth:role-update-conflict (auth:grant-role a id :admin :actor "test")))
+      ;; and the failure wrote nothing
+      (is (null (%roles-of a id))))))
+
+;;; --- the last-administrator question --------------------------------------
+;;;
+;;; Deliberately NOT the store's decision: roles are arbitrary keywords, so it cannot know
+;;; :SUPER-ADMIN outranks :MODERATOR, and teaching it would mean the framework inventing
+;;; application vocabulary. USERS-WITH-ROLE makes the app's own guard a one-liner.
+
+(test users-with-role-finds-every-holder
+  (with-auth (a)
+    (auth:create-user a :email "a1@x.com" :roles '(:super-admin))
+    (auth:create-user a :email "a2@x.com" :roles '(:member))
+    (let ((id3 (auth:user-id (auth:create-user a :email "a3@x.com" :roles '(:member)))))
+      (is (= 1 (length (auth:users-with-role a :super-admin))))
+      (auth:grant-role a id3 :super-admin :actor "test")
+      (is (= 2 (length (auth:users-with-role a :super-admin))))
+      (is (member id3 (auth:users-with-role a :super-admin) :test #'string=))
+      (is (null (auth:users-with-role a :nobody-has-this))))))
+
+(test the-store-will-revoke-the-last-admin-and-the-app-is-what-stops-it
+  ;; Both halves matter. The store must not refuse (it cannot know), and the guard the app
+  ;; writes on top of USERS-WITH-ROLE must actually catch it.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "solo@x.com" :roles '(:super-admin)))))
+      ;; the app's one-line guard sees it coming
+      (is (= 1 (length (auth:users-with-role a :super-admin))))
+      ;; and the store, asked directly, does it anyway
+      (auth:revoke-role a id :super-admin :actor "test")
+      (is (null (auth:users-with-role a :super-admin))))))
+
+;;; --- the optional role vocabulary -----------------------------------------
+
+(test without-a-vocabulary-any-keyword-is-accepted
+  ;; The historical behaviour, and the default: :MODERATER is stored happily and grants
+  ;; nothing. Kept so existing callers are unaffected.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "free@x.com"))))
+      (auth:grant-role a id :moderater :actor "test")
+      (is (equal '(:moderater) (%roles-of a id))))))
+
+(test with-a-vocabulary-a-typo-is-an-error-at-the-point-of-the-mistake
+  (with-auth-roles (a :known-roles '(:member :moderator :super-admin))
+    (let ((id (auth:user-id (auth:create-user a :email "voc@x.com" :roles '(:member)))))
+      (signals auth:unknown-role (auth:grant-role a id :moderater :actor "test"))
+      (is (equal '(:member) (%roles-of a id)) "the bad grant wrote nothing")
+      (is (eq t (auth:grant-role a id :moderator :actor "test")))
+      ;; revoke checks too -- a typo on the way out silently no-ops otherwise, which is the
+      ;; worse direction: you believe you removed a role and you did not
+      (signals auth:unknown-role (auth:revoke-role a id :moderater :actor "test"))
+      (is (member :moderator (%roles-of a id))))))
+
+(test a-vocabulary-is-enforced-at-creation-too
+  (with-auth-roles (a :known-roles '(:member))
+    (signals auth:unknown-role
+      (auth:create-user a :email "bad@x.com" :roles '(:member :nonsense)))))
+
+(test a-role-must-be-a-keyword
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "kw@x.com"))))
+      (signals type-error (auth:grant-role a id "admin" :actor "test")))))
+
+;;; --- the compare-and-swap actually retrying -------------------------------
+;;;
+;;; Everything above runs in one image, where the store's lock serialises writers and the
+;;; swap therefore never loses. That makes the in-image tests silent about the case the swap
+;;; exists FOR: a second process -- another app instance, another box behind a load balancer
+;;; -- committing between our read and our write, where no lock in this image applies.
+;;;
+;;; So this drives that case deterministically instead of racing for it: a file-backed
+;;; database with TWO connections (which is what two processes look like from SQLite's side),
+;;; and a competing commit interposed exactly between the read and the write. It reaches for
+;;; the internal %UPDATE-ROLES because that is the only way to place the interloper at the
+;;; one instant that matters rather than hoping a thread lands there.
+
+(defun %temp-db-path (tag)
+  (merge-pathnames (format nil "hyperion-auth-cas-~A-~D.sqlite" tag (get-universal-time))
+                   (uiop:temporary-directory)))
+
+(test a-lost-compare-and-swap-retries-and-keeps-the-other-writers-change
+  (let ((path (%temp-db-path "retry")))
+    (unwind-protect
+         (let* ((ca (conn:connect (be:make-sqlite (namestring path))))
+                (cb (conn:connect (be:make-sqlite (namestring path)))))
+           (unwind-protect
+                (let* ((a (auth:make-db-auth ca :dialect :sqlite :ensure t))
+                       (b (auth:make-db-auth cb :dialect :sqlite))   ; same rows, other "process"
+                       (id (auth:user-id (auth:create-user a :email "cas@x.com"
+                                                             :roles '(:member))))
+                       (interposed 0))
+                  ;; On the FIRST pass only, the other connection commits first. A's write is
+                  ;; then guarding on a `vid` that no longer exists, must affect zero rows,
+                  ;; and must re-read rather than clobber.
+                  (let ((result
+                          (hyperion/auth-db::%update-roles
+                           a id
+                           (lambda (roles)
+                             (when (zerop interposed)
+                               (incf interposed)
+                               (auth:grant-role b id :interloper :actor "test"))
+                             (append roles (list :mine))))))
+                    (is (eq t result))
+                    (is (= 1 interposed) "the competing write must have happened once")
+                    (let ((final (auth:user-roles (auth:find-user-by-id a id))))
+                      ;; Both survive. Without the retry, :INTERLOPER would have been
+                      ;; overwritten and lost -- silently, which is the whole problem.
+                      (is (member :interloper final) "the other writer's change was clobbered")
+                      (is (member :mine final) "our own change did not land")
+                      (is (member :member final) "the pre-existing role was lost"))))
+             (conn:disconnect ca)
+             (conn:disconnect cb)))
+      (ignore-errors (delete-file path)))))
+
+;;; --- #166: role changes must be auditable ------------------------------------
+;;;
+;;; `roles' holds only CURRENT STATE, so the questions actually asked after an incident --
+;;; who granted :super-admin and when, who removed the moderator, was the account escalated
+;;; before or after -- were unanswerable. `updated_at' does not narrow the window either:
+;;; it moves on any user write, a password change included.
+
+(test a-grant-is-recorded-with-who-and-when
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "audit@example.com" :password "pw")))
+          (before (get-universal-time)))
+      (auth:grant-role a id :moderator :actor "admin-7")
+      (let ((history (auth:role-history a id)))
+        (is (= 1 (length history)) "expected one event, got ~S" history)
+        (let ((e (first history)))
+          (is (eq :moderator (getf e :role)))
+          (is (string= "grant" (getf e :action)))
+          (is (string= "admin-7" (getf e :actor)))
+          (is (<= before (getf e :at)) "the timestamp must be the moment of the change"))))))
+
+(test the-history-reconstructs-the-order-of-events
+  ;; The question is "was this account escalated before or after the incident", so ordering
+  ;; is the property, not merely presence.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "order@example.com" :password "pw"))))
+      (auth:grant-role a id :moderator :actor "alice")
+      (auth:grant-role a id :editor :actor "bob")
+      (auth:revoke-role a id :moderator :actor "carol")
+      (let ((history (auth:role-history a id)))
+        (is (equal '("grant" "grant" "revoke") (mapcar (lambda (e) (getf e :action)) history)))
+        (is (equal '(:moderator :editor :moderator) (mapcar (lambda (e) (getf e :role)) history)))
+        (is (equal '("alice" "bob" "carol") (mapcar (lambda (e) (getf e :actor)) history)))))))
+
+(test a-no-op-grant-records-nothing
+  ;; An idempotent grant that changed nothing is not a role change, and a log full of them
+  ;; is a log nobody reads -- which would defeat the whole point.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "noop@example.com" :password "pw"))))
+      (auth:grant-role a id :member :actor "alice")
+      (auth:grant-role a id :member :actor "bob")      ; already held
+      (auth:revoke-role a id :ghost :actor "carol")    ; never held
+      (is (= 1 (length (auth:role-history a id)))
+          "only the change that actually happened should be recorded"))))
+
+(test the-history-is-per-user
+  (with-auth (a)
+    (let ((one (auth:user-id (auth:create-user a :email "one@example.com" :password "pw")))
+          (two (auth:user-id (auth:create-user a :email "two@example.com" :password "pw"))))
+      (auth:grant-role a one :moderator :actor "alice")
+      (auth:grant-role a two :editor :actor "bob")
+      (is (= 1 (length (auth:role-history a one))))
+      (is (eq :moderator (getf (first (auth:role-history a one)) :role)))
+      (is (eq :editor (getf (first (auth:role-history a two)) :role))))))
+
+(test an-actorless-change-is-refused-rather-than-recorded-as-unknown
+  ;; The one deliberate break in #166. An optional audit field is an omitted audit field:
+  ;; the caller who most needs the record is the one who has not thought about it.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "noactor@example.com" :password "pw"))))
+      (signals auth:missing-actor (auth:grant-role a id :moderator))
+      (signals auth:missing-actor (auth:revoke-role a id :moderator))
+      (signals auth:missing-actor (auth:grant-role a id :moderator :actor ""))
+      ;; ...and the refusal must leave the roles alone. A half-applied change with no
+      ;; record is precisely the state this issue exists to prevent.
+      (is (null (%roles-of a id)))
+      (is (null (auth:role-history a id))))))
+
+(test the-refusal-says-what-to-pass
+  (let ((text (princ-to-string (make-condition 'auth:missing-actor :operation "GRANT-ROLE"))))
+    (is (search "GRANT-ROLE" text))
+    (is (search ":ACTOR" text))
+    (is (search "current-user-id" text) "it must show the shape of the fix: ~S" text)))
+
+(test the-event-and-the-change-commit-together
+  ;; An audit row that can survive a failed update -- or an update that survives a failed
+  ;; audit -- is worse than no audit: a record that is wrong rather than missing, with
+  ;; nothing downstream able to tell which. Asserted by their agreeing after a real change.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "atomic@example.com" :password "pw"))))
+      (auth:grant-role a id :moderator :actor "alice")
+      (is (member :moderator (%roles-of a id)))
+      (is (= 1 (length (auth:role-history a id))))
+      (auth:revoke-role a id :moderator :actor "alice")
+      (is (null (%roles-of a id)))
+      (is (= 2 (length (auth:role-history a id))))
+      (is (string= "revoke" (getf (second (auth:role-history a id)) :action))))))
+
+(test two-changes-in-the-same-second-still-come-back-in-order
+  ;; `at' is whole seconds and these will share one. Ordering is THE property the log
+  ;; exists for -- before or after the incident -- so a tie that resolves arbitrarily is a
+  ;; wrong answer, not a cosmetic one. The tiebreaker is _id, a time-ordered UUID v6.
+  (with-auth (a)
+    (let ((id (auth:user-id (auth:create-user a :email "sameseC@x.com" :password "pw"))))
+      (auth:grant-role a id :moderator :actor "alice")
+      (auth:revoke-role a id :moderator :actor "bob")
+      (auth:grant-role a id :moderator :actor "carol")
+      (let ((history (auth:role-history a id)))
+        (is (equal '("grant" "revoke" "grant")
+                   (mapcar (lambda (e) (getf e :action)) history))
+            "order was ~S" (mapcar (lambda (e) (getf e :actor)) history))
+        (is (equal '("alice" "bob" "carol") (mapcar (lambda (e) (getf e :actor)) history)))
+        ;; ...and assert the premise: they really did land in the same second, so this test
+        ;; is exercising the tiebreaker rather than passing on distinct timestamps.
+        (is (= 1 (length (remove-duplicates (mapcar (lambda (e) (getf e :at)) history))))
+            "the events had distinct timestamps, so the tie was never tested")))))

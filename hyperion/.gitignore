@@ -1,0 +1,36 @@
+# Compiled / build artifacts
+*.fasl
+*.fas
+*.lx64fsl
+bin/
+
+# Editors
+*~
+\#*\#
+.\#*
+.DS_Store
+/.lem/
+# Stray Clojure tooling caches (this is a Common Lisp project -- not used here)
+.clj-kondo/
+.lsp/
+# Alive (VS Code): per-project compile scratch -- fasls + a tmp.lisp eval buffer
+.vscode/alive/
+
+# Local secrets / config -- never commit
+.env
+.env.*
+!.env.example
+secrets.lisp
+
+# Paper / LaTeX (if a paper/ is added)
+paper/*.pdf
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.bbl
+paper/*.blg
+
+# Claude Code local (personal) settings
+.claude/settings.local.json

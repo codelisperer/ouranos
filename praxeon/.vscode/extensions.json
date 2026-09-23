@@ -1,0 +1,6 @@
+{
+  // Prompt on clone: install Alive (drives SBCL directly). Avoid
+  // ailisp.commonlisp-vscode -- its Roswell cl-lsp server times out (see
+  // docs/editor-setup.md).
+  "recommendations": ["rheller.alive"]
+}

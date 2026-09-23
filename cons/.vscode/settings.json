@@ -1,0 +1,16 @@
+{
+  // Load cons into Alive's LSP image so (in-package #:cons) resolves and
+  // completion/xref see the real code. ignore-errors keeps Alive starting even
+  // if the system won't load (e.g. before the repo-root bootstrap.lisp has
+  // written its ASDF source-registry drop-in). Heap matches the
+  // siblings for a uniform core (harmless; cons is light today).
+  "alive.lsp.startCommand": [
+    "sbcl",
+    "--dynamic-space-size", "4096",
+    "--eval", "(ql:quickload '(:bordeaux-threads :usocket :cl-json :flexi-streams))",
+    "--eval", "(require :asdf)",
+    "--eval", "(asdf:load-system :alive-lsp)",
+    "--eval", "(ignore-errors (ql:quickload :cons))",
+    "--eval", "(alive/server:start)"
+  ]
+}

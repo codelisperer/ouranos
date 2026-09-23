@@ -1,0 +1,15 @@
+# CLDR cardinal plural rules -- version, checksum, source, licence.
+#
+# The rules are DATA generated from upstream, never transcribed: a
+# hand-written table is wrong for the first locale nobody anticipated,
+# and wrong silently, since a missing rule falls back to `other`.
+#
+# Regenerate:  sbcl --script scripts/fetch-cldr-plurals.lisp --write
+# Verify only: sbcl --script scripts/fetch-cldr-plurals.lisp
+#
+version   48.2.1
+url       https://raw.githubusercontent.com/unicode-org/cldr-json/48.2.1/cldr-json/cldr-core/supplemental/plurals.json
+sha256    6c0a48e9bcfc25856f90202f703c2c7f89c105d6868f7712a943a6ed2dcbe8f4
+locales   224
+generated hyperion/src/vendor/cldr-plurals.lisp
+licence   Unicode-3.0 (https://www.unicode.org/license.txt)

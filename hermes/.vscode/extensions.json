@@ -1,0 +1,4 @@
+{
+  // Alive drives SBCL directly.
+  "recommendations": ["rheller.alive"]
+}

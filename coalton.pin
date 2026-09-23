@@ -1,0 +1,63 @@
+# The Coalton commit this tree is built and tested against.
+#
+# Coalton is consumed as a git checkout tracking `main`, not a Quicklisp release
+# (see docs/coalton-upstream.md). That means each machine tracks upstream
+# INDEPENDENTLY -- and two machines on different Coalton commits is a
+# reproducibility hazard that shows up as "works on mine, not on yours" with no
+# visible cause.
+#
+# This file is the fix: the REPO declares which Coalton it is on, so adopting a
+# new one is an ordinary commit that propagates through git like everything else.
+#
+# To sync a machine to this pin:
+#   cd "$(sbcl --noinform --non-interactive \
+#            --eval '(require :asdf)' \
+#            --eval '(load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))' \
+#            --eval '(ql:quickload :coalton :silent t)' \
+#            --eval '(princ (namestring (asdf:system-source-directory :coalton)))')"
+#   git fetch origin && git checkout <sha below>
+#
+# Then rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+# If anything looks impossible afterwards, clear ~/.cache/common-lisp and retry.
+#
+# A `git pull` OF THIS TREE is itself a trigger, which is the part that surprises
+# people. A changed Coalton source forces its dependents to recompile, and a rebuild
+# interrupted partway leaves the cache in a state where the next load FAILS rather
+# than resuming where it stopped. So a Coalton compile error arriving straight after
+# a pull is very likely a half-built cache and not the change you just pulled: clear
+# the cache before you go looking at the diff. On 2026-09-21 one Coalton file changed
+# on main -- mnemosyne/src/field.lisp -- and a consuming app hit this; the first read
+# was that the merges had broken something, which is the wrong place to start. Three
+# cold builds that day were all clean, because a COLD cache and a HALF-BUILT one are
+# different things and only the first was ever being tested.
+#
+# Resolving the checkout through ASDF rather than a hard-coded path is what makes
+# this work identically on macOS, Linux, and Windows.
+#
+# OPTIONAL `repo` LINE. A sha is only meaningful relative to a repository, so if we
+# ever work from a FORK, name it here and scripts/setup.{sh,ps1} will clone from it:
+#
+#   repo    https://github.com/<org>/coalton
+#
+# Absent, upstream (coalton-lang/coalton) is assumed. setup warns if an existing
+# checkout tracks a different remote than this file declares -- otherwise a machine
+# cloned from upstream and one cloned from the fork can silently disagree about what
+# a given sha refers to.
+#
+# To verify that the pinned Coalton is the one that actually LOADS (which the
+# checkout alone does not prove -- ASDF may resolve elsewhere, or serve stale
+# fasls):  sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
+
+sha     7915fad0
+date    2026-07-29
+subject Add Optional & Result instances for Foldable
+
+# --- staying current -------------------------------------------------------
+#
+# Coalton is a Lisp library with no native code and no network surface, so its
+# risk profile is nothing like a TLS or transport library's. It is listed here
+# anyway because the check is about the PRACTICE, not the danger: a pin that
+# opts out is a pin nobody reviews, and the exemption outlives the reasoning.
+
+advisories https://github.com/coalton-lang/coalton/security/advisories
+reviewed   2026-09-15

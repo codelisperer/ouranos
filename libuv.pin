@@ -1,0 +1,62 @@
+# The libuv release this tree builds `aion/uv` against.
+#
+# Same doctrine as coalton.pin: the REPO declares the version, so adopting a new
+# one is an ordinary commit that propagates through git like everything else. A
+# native dependency that each machine resolves independently is the "works on
+# mine, not on yours" hazard with an added twist -- a C ABI mismatch does not
+# fail politely, it corrupts memory.
+#
+# We do NOT depend on a distro package. libuv is FETCHED AND BUILT FROM SOURCE by
+#   sbcl --script scripts/build-libuv.lisp
+# which compiles it with `cc` directly -- no make, no cmake, no autotools (the
+# house rule: `sbcl --script` is the only build driver). The one prerequisite is
+# a C compiler, which every machine that ships a desktop bundle already has.
+#
+# Why from source rather than `apt install libuv1-dev`:
+#   1. ADR-0011. Woo bound libev at load time, so every Linux/macOS desktop
+#      bundle died on a clean machine with "libev.so.4: cannot open shared
+#      object file". A native dep we do not build is a native dep we cannot
+#      bundle, and it fails at the user, not at us.
+#   2. One version everywhere. Distro libuv is 1.51.0 on Ubuntu 26.04 and
+#      whatever brew/MSYS2 happens to carry elsewhere; three platforms on three
+#      versions is a matrix we would be debugging rather than using.
+#   3. It is the same artifact CI publishes and the installers bundle (#94).
+#
+# 1.52.1 is the current stable release, and is also what MSYS2/ucrt64 ships on
+# Windows -- so the Windows machine can cross-check our build against a prebuilt
+# of the identical version.
+
+version 1.52.1
+sha256  66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7
+url     https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
+
+# On the checksum. Recorded trust-on-first-use: fetched over TLS from the
+# official host (dist.libuv.org) and hashed here. Every later fetch on every
+# machine is verified against this line, which is what the pin is for -- it
+# turns a silent substitution into a loud failure.
+#
+# Upstream also publishes a detached GPG signature next to the tarball
+# (libuv-v1.52.1.tar.gz.sign). Verifying it requires the release key and a trust
+# decision about that key, so it is deliberately NOT in the build path; anyone
+# who wants that stronger guarantee can take it by hand.
+#
+# To adopt a new libuv:
+#   1. curl -sLO https://dist.libuv.org/dist/vX.Y.Z/libuv-vX.Y.Z.tar.gz
+#   2. sha256sum libuv-vX.Y.Z.tar.gz
+#   3. update the three lines above, delete vendor/libuv/, rebuild, run the
+#      aion/uv suite on all three OSes before committing.
+
+# --- staying current -------------------------------------------------------
+#
+# Where an advisory would appear, recorded here because the answer is
+# per-library and looking it up under time pressure is the wrong moment.
+# libuv publishes security fixes as ordinary releases and announces them on its
+# GitHub releases page and security advisories tab.
+#
+# REVIEWED is the date a human last read that page. It is the only thing that
+# distinguishes "no advisory affects us" from "nobody has looked" -- two states
+# that are otherwise identical from outside, and only one of them is fine.
+# Bump it when you look, even when the answer is "nothing to do".
+
+advisories https://github.com/libuv/libuv/security/advisories
+reviewed   2026-09-15

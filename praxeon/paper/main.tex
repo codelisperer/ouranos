@@ -1,0 +1,243 @@
+%%% main.tex --- Praxeon: A Praxeological Foundation for Agentic AI
+%%%
+%%% Portable skeleton: compiles with a stock TeX Live using the base `article`
+%%% class plus common packages (no exotic dependencies). To target a specific
+%%% venue, swap the class line below:
+%%%   ACM:   \documentclass[sigconf,natbib=false]{acmart}
+%%%   IEEE:  \documentclass[conference]{IEEEtran}
+%%%   LNCS:  \documentclass{llncs}
+%%% and adjust the front matter accordingly.
+%%%
+%%% Build:  latexmk -pdf main.tex   (or `make`)
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+%% A minimal Lisp/Coalton listing style.
+\definecolor{lstkw}{RGB}{0,90,160}
+\definecolor{lstcm}{RGB}{110,110,110}
+\definecolor{lststr}{RGB}{160,60,60}
+\lstdefinelanguage{Coalton}{
+  morekeywords={coalton-toplevel,define,define-type,define-class,define-struct,
+    declare,match,defpackage,defmethod,defgeneric,defclass,defstruct,defun,
+    handler-case,restart-case,let,let*,lambda},
+  sensitive=true,
+  morecomment=[l]{;;},
+  morecomment=[l]{;},
+  morestring=[b]",
+}
+\lstset{
+  language=Coalton,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{lstkw}\bfseries,
+  commentstyle=\color{lstcm}\itshape,
+  stringstyle=\color{lststr},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  frame=single,
+  framesep=4pt,
+  breaklines=true,
+}
+
+\title{\textbf{Praxeon}: A Praxeological Foundation for\\
+       Industrial-Strength Agentic AI in Common Lisp}
+\author{Bob\\ \small\texttt{eternal.recursion@proton.me}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The dominance of Python in artificial intelligence is widely attributed to the
+language's merits, yet Python's role is largely that of an orchestration layer
+over compiled C++/CUDA kernels; the computationally decisive path is already not
+Python. We argue that this observation reframes, rather than refutes, the case
+for a Lisp in the modern AI stack: the layer a host language can genuinely own is
+\emph{agent orchestration and context management}, which is CPU-bound and where
+homoiconicity, a condition system, and image-based development are decisive. We
+present \textsc{Praxeon}, a Common Lisp framework whose core ontology is drawn
+from praxeology---the study of human action---and whose implementation pairs a
+statically typed core (in Coalton) with a dynamic shell. We describe a case
+study, \emph{Elise}, a psychologically-informed successor to Weizenbaum's ELIZA,
+and outline \emph{Kairos}, a bitemporal knowledge substrate for context. We
+close with an evaluation plan comparing \textsc{Praxeon} against contemporary
+Python and TypeScript agent frameworks on expressiveness and orchestration cost.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+% Motivate: PAIP lineage; the frustration with Python's dominance; the claim that
+% a Lisp offers a better speed/flexibility trade-off for the orchestration layer.
+Since Norvig's \emph{Paradigms of AI Programming}~\citep{norvig1992paip}, Common
+Lisp has been a natural medium for expressing artificial-intelligence systems as
+programs that manipulate programs. This paper revisits that tradition for the era
+of large language models (LLMs), and asks what, precisely, a Lisp can contribute
+that the incumbent Python and TypeScript ecosystems cannot.
+
+\section{The Misdiagnosis of Python's Dominance}
+\label{sec:misdiagnosis}
+% Python as glue over C++/CUDA; the hot path is not Python; therefore no host
+% language gets "closer to Rust" on tensors. The real, winnable territory.
+Python did not prevail in AI on the strength of the language. Frameworks such as
+PyTorch and JAX dispatch the substantive computation to compiled kernels
+(cuBLAS, cuDNN, XLA); the interpreter's own throughput is nearly irrelevant
+because the workload is kernel-launch- and I/O-bound. A corollary follows: no
+choice of host language moves the tensor hot path closer to a systems language,
+because that path is already not the host language. The layer that remains
+open---and CPU-bound---is orchestration.
+
+\section{A Praxeological Model of Agency}
+\label{sec:praxeology}
+% ends/means/action/plan/actor; the mapping table; why this beats node/chain.
+We model an agent using the vocabulary of praxeology~\citep{mises1949human}: an
+\emph{actor} applies \emph{means} to attain \emph{ends} through \emph{action},
+ranking ends by preference and economizing a scarce resource. The mapping to
+agent architecture is direct (Table~\ref{tab:map}), and, we argue, more
+principled than the ``node/chain/runnable'' vocabulary of current frameworks.
+
+\begin{table}[h]
+\centering
+\caption{Praxeological concepts and their agent-architecture counterparts.}
+\label{tab:map}
+\begin{tabular}{ll}
+\toprule
+Praxeology & Agent architecture \\
+\midrule
+ends & goals \\
+means & tools \\
+action & applying a means toward an end \\
+preference over ends & the objective / valuation \\
+action under uncertainty & the LLM's probabilistic reasoning \\
+economizing scarce time & the context/token budget \\
+imputation of value & credit assignment for tool calls \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Why a Lisp, and Which}
+\label{sec:whichlisp}
+% Summarize the dialect analysis: SBCL native perf, Coalton typed core, vs
+% Clojure ecosystem, vs Scheme purity. Justify Common Lisp + Coalton.
+We compare Common Lisp (SBCL), Clojure, and Scheme (Chez) along native
+performance, metaprogramming, static-typing options, and ecosystem, and select
+Common Lisp with a Coalton~\citep{coalton} typed core: it offers native
+ahead-of-time compilation, the richest macro and condition systems, and---via
+Coalton's Hindley--Milner types---a statically checked core suitable for
+industrial use.
+
+\section{The Praxeon Architecture}
+\label{sec:arch}
+% Typed Coalton core (ontology) + dynamic CL shell (effects, conditions, LLM).
+\textsc{Praxeon} is organized in two layers. A typed core, written in Coalton,
+defines what agents \emph{are}; a dynamic Common Lisp shell owns effects, the
+provider protocol, the budgeted context, and the deliberate--act loop. The core
+ontology is small:
+
+\begin{lstlisting}
+(coalton-toplevel
+  (define-type End    (End String))            ; a goal
+  (define-type Means  (Means String String))   ; name, description
+  (define-type Action (Action Means End String))
+  (define-type Plan   (Plan (List Action)))
+  (define-type Actor  (Actor String (List Means))))
+\end{lstlisting}
+
+Recoverable failure---ubiquitous in long-running agents---is handled with the
+condition system, so that recovery policy (retry, substitute, abandon) is
+injected at the handler rather than fixed at the point of failure.
+
+\section{Case Study: Elise}
+\label{sec:elise}
+% The modern-psychology ELIZA; reflective listening via LLM; safety guardrail.
+\emph{Elise} is a reflective, psychologically-informed conversational actor---a
+successor to Weizenbaum's ELIZA~\citep{weizenbaum1966eliza} that replaces
+hard-coded scripts with an LLM prompted to draw on evidence-based practice. Elise
+is a demonstration of the actor model, not a clinical instrument, and includes a
+transparent safety guardrail that surfaces crisis resources.
+
+\section{Live Development: Reshaping a Running Agent}
+\label{sec:live}
+% Image-based development in practice: hot reload with state preserved; failures
+% surfaced in REPL and browser at once; the structural contrast with Python.
+The abstract's claim that image-based development is decisive is best appreciated
+in practice. \textsc{Praxeon}'s web surface presents Elise as a server-rendered
+(HTMX) application behind a file watcher in the spirit of ClojureScript's
+Figwheel~\citep{figwheel}: saving a source file recompiles it into the
+\emph{running} image and rebuilds the server around the \emph{same} agent, so the
+conversation---the accumulated context---survives while the machinery beneath it
+is replaced. Because the request dispatcher invokes its rendering and handler
+functions by name, a redefined function is resolved through the function cell on
+the next request, and behavior hot-swaps without a restart.
+
+The condition system renders failure legible rather than fatal. A compilation
+error during reload is captured and surfaced \emph{simultaneously} as diagnostics
+in the developer's REPL and as an overlay on the live page, while the last
+successfully compiled server continues to serve; correcting the error clears both
+and reloads the view. In use, one edits source and watches the running artifact
+change---the conversation intact, errors shown in place---rather than restarting
+the process and replaying inputs to recover the prior state.
+
+The contrast with the incumbent stack is structural rather than cosmetic. The
+canonical Python loop is to edit, restart the process, lose in-memory state, and
+replay inputs to return to the point of interest; auto-reloading facilities
+re-execute modules and discard the live object graph, and neither a first-class
+means to redefine a function in a running image while preserving state, nor a
+condition system to pause and resume at the point of failure, is available. For
+agent orchestration in particular---processes that are long-lived, stateful, and
+failure-prone---a restart is costly precisely because it discards the scarce
+accumulated context. A substrate on which behavior can be reshaped without
+discarding that context is therefore not a mere convenience but an \emph{economy},
+consonant with this paper's praxeological thesis: the least costly viable means to
+a working system. A natural extension makes a runtime condition's restarts
+themselves selectable from the browser---the interactive debugger, delivered over
+the wire.
+
+\section{Kairos: A Bitemporal Context Substrate}
+\label{sec:kairos}
+% valid-time vs transaction-time; XTDB-style; Arrow FFI; auditable context.
+Context items in \textsc{Praxeon} carry two timestamps---valid time and
+transaction time---so that an agent can reason about \emph{what was believed, and
+as of when}. We sketch \emph{Kairos}, a standalone bitemporal knowledge graph in
+the spirit of XTDB~\citep{xtdb}, intended to back context management via a
+foreign-function interface to Apache Arrow for columnar storage.
+
+\section{Related Work}
+\label{sec:related}
+% Lang* (Python), Mastra (TS), Bosquet/Spell (Clojure); PAIP; Coalton; XTDB.
+We situate \textsc{Praxeon} relative to Python agent frameworks, the TypeScript
+framework Mastra, and Clojure efforts such as Bosquet, contrasting their
+orchestration vocabularies with the praxeological model.
+
+\section{Evaluation Plan}
+\label{sec:eval}
+% Expressiveness (LOC / concept count for equivalent agents); orchestration
+% latency on CPU-bound routing; robustness under injected tool failures.
+We propose to evaluate \textsc{Praxeon} on (i) expressiveness, measured by the
+concepts and lines required to express equivalent agents; (ii) orchestration
+cost, measured as CPU-bound routing and context-assembly latency against
+equivalent Python/TypeScript implementations; and (iii) robustness under
+injected tool failures, exercising the condition-system recovery paths.
+
+\section{Conclusion}
+\label{sec:conclusion}
+The winnable claim for a Lisp in modern AI is not raw numeric speed but a
+principled, malleable orchestration layer. \textsc{Praxeon} pursues that claim
+with a praxeological core, a typed/dynamic split, and a bitemporal context
+substrate.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

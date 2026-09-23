@@ -1,0 +1,67 @@
+# Ouranos monorepo — root ignores. Per-project .gitignore files (under each
+# framework dir) still apply to their own subtrees.
+
+# Build artifacts
+/bin/
+*.fasl
+*.o
+*.so
+*.dylib
+*.dll
+
+# The seeded cons image / any saved images
+/cons.core
+/*.core
+
+# Desktop app bundles from scripts/build-desktop-app.lisp (per-machine, per-OS)
+/dist/
+
+# Vendored native dependencies: fetched + built by scripts/build-libuv.lisp from the
+# libuv.pin. Per-machine and per-OS, so the PIN is committed and the artifact is not.
+/vendor/
+
+# Local secrets / config — never commit
+.env
+.env.*
+!.env.example
+secrets.lisp
+
+# Editor / OS
+.DS_Store
+# Alive's fasl scratch cache (root; per-framework .gitignores also cover their own)
+.vscode/alive/
+# clojure-lsp / lsp caches (from Joyride/clj-kondo tooling)
+.lsp/
+.clj-kondo/
+*~
+\#*\#
+.#*
+
+# Coalton local checkout, if vendored here later
+/coalton-*.fasl
+
+# SQLite databases created at runtime (examples, dev)
+*.db
+*.sqlite
+*.sqlite3
+
+# Claude Code local (personal) settings
+.claude/settings.local.json
+
+# LaTeX paper build artifacts (papers build to PDF via build.sh/ps1)
+*.pdf
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# the confidential name list used by scripts/publish-public.sh (never publish)
+.private-names
+
+# Which board agent this checkout is (scripts/agent.sh). Machine-local by definition.
+.ouranos-agent

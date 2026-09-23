@@ -1,0 +1,5 @@
+{
+  // Alive drives SBCL directly. Avoid ailisp.commonlisp-vscode (its Roswell
+  // cl-lsp server times out).
+  "recommendations": ["rheller.alive"]
+}

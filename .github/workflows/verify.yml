@@ -1,0 +1,526 @@
+# verify.yml --- build and test the whole tree on Linux, macOS and Windows (#87).
+#
+# THE CLAIM THIS FILE IS EVIDENCE FOR. "SBCL-exclusive and `sbcl --script` is uniform
+# across Linux/macOS/Windows" is load-bearing in ECOSYSTEM.md and in the README. A green
+# three-OS matrix is what makes it a fact rather than an assertion -- and the LF-endings
+# decision exists precisely BECAUSE a CRLF checkout broke the Windows build twice, which
+# is the kind of thing only a Windows runner ever notices.
+#
+# It is also the only path to one specific piece of evidence: a NATIVE amd64 run. A local
+# `docker build --platform linux/amd64` on Apple Silicon proves nothing -- QEMU
+# mis-emulates SBCL's compile-time 64-bit overflow folding and produces spurious failures
+# in Coalton's library/math/bounded (#110). So a red one is not evidence of a real
+# incompatibility and a green one is not evidence of compatibility. Until this workflow
+# runs, no coalton.pin can honestly be called validated on amd64.
+#
+# CI IS A CALLER HERE, NOT A PLACE WHERE BUILD KNOWLEDGE LIVES. Every step below is a
+# plain repo script a developer runs the same way on their own machine:
+#
+#   scripts/setup.{sh,ps1}  ->  bootstrap.lisp  ->  scripts/verify-tree.lisp
+#
+# If a step needs logic, the logic belongs in the script, not in this YAML. The two
+# exceptions are marked and argued where they appear (the caches, and standing up a
+# Postgres out of whatever each runner image happens to ship).
+#
+# Toolchain versions come from scripts/versions.env and coalton.pin -- one pin for CI and
+# for dev machines both.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, with no commit to trigger it. The tree can go red without anyone touching it:
+  # a Quicklisp dist that stops resolving, a runner image that drops a preinstalled
+  # Postgres, a brew formula that moves. Finding that on a Monday beats finding it inside
+  # the next PR that is trying to land something unrelated.
+  schedule:
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    # Generous on purpose: verify-tree runs 40+ ISOLATED SBCL images (one per system, one
+    # per suite) and a cold Coalton compile is minutes on its own. A tight limit here would
+    # turn a slow cache miss into a red build.
+    timeout-minutes: 40
+
+    strategy:
+      # One OS failing must never hide the other two. The whole value of a matrix is
+      # knowing WHICH platform broke, and fail-fast throws that away.
+      fail-fast: false
+      matrix:
+        # WHICH LEGS RUN DEPENDS ON THE EVENT, and this is a billing decision rather than
+        # a technical one. While this repo is PRIVATE, Actions minutes are charged with a
+        # 10x multiplier for macOS and 2x for Windows -- on a matrix whose cold-cache legs
+        # run tens of minutes. So:
+        #
+        #   pull_request                        Linux alone
+        #   push to main                        Linux + Windows
+        #   weekly cron / workflow_dispatch     all three
+        #
+        # Linux is the right leg to keep on PRs, and not merely because it is the cheapest:
+        # it is the NATIVE amd64 signal, the one piece of evidence that cannot be obtained
+        # any other way (QEMU mis-emulates SBCL's overflow folding -- see the header). A
+        # CRLF checkout or a path separator is caught on main within one merge by the
+        # Windows leg. A macOS-only break is caught by the weekly cron or by someone
+        # dispatching a run, so up to seven days, not one merge -- the cost of the decision
+        # recorded below.
+        #
+        # WHEN THIS REPO GOES PUBLIC (#91), standard runners are free and this reverts to
+        # all three on everything: delete the conditional and keep the second array.
+        #
+        # The same triple desktop-release.yml builds, deliberately: two workflows
+        # disagreeing about which platforms are supported is worse than either answer. The
+        # Linux floor is set by SBCL's own binary -- 2.6.7 needs GLIBC_2.38 and
+        # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-14+
+        # are arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
+        # matters.
+        # macOS is NOT on push-to-main (maintainer, 2026-09-14). It bills at a 10x
+        # multiplier and was 48% of the month's Actions spend from 8% of its minutes,
+        # and it earns that only once we ship downloadable macOS desktop builds. It
+        # stays on the weekly cron and workflow_dispatch, which is where a macOS-only
+        # break gets caught. Windows stays on main: CRLF and path separators are the
+        # platform breaks this tree actually has.
+        include: ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"os":"ubuntu-24.04","platform":"linux-x86-64","fasl":"~/.cache/common-lisp"}]'
+          || github.event_name == 'push'
+          && '[{"os":"ubuntu-24.04","platform":"linux-x86-64","fasl":"~/.cache/common-lisp"},{"os":"windows-2022","platform":"windows-x86-64","fasl":"~/AppData/Local/cache/common-lisp"}]'
+          || '[{"os":"ubuntu-24.04","platform":"linux-x86-64","fasl":"~/.cache/common-lisp"},{"os":"macos-14","platform":"macos-arm64","fasl":"~/.cache/common-lisp"},{"os":"windows-2022","platform":"windows-x86-64","fasl":"~/AppData/Local/cache/common-lisp"}]') }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # --- caches -------------------------------------------------------------------
+      #
+      # TWO caches, keyed differently on purpose, and this is the one place where CI
+      # carries real reasoning rather than calling a script.
+      #
+      # The DOWNLOADS (Quicklisp dist, the Coalton checkout) are content-addressed by the
+      # pins: given the same versions.env and coalton.pin you want the same bytes, and a
+      # restore-keys fallback is safe because setup.{sh,ps1} re-check and re-fetch what
+      # does not match.
+      #
+      # The FASLS are not, and they get NO restore-keys. A first build after a dependency
+      # moves can fail where a rebuild succeeds -- observed as `The class
+      # <DBD-POSTGRES-QUERY> is being redefined to be a DEFTYPE`, which did not reproduce
+      # in isolation and passed 6/6 on an identical re-run (#87). Mixing fasls compiled
+      # against one dependency set with sources from another is how CI goes intermittently
+      # red for reasons that look like nothing. So the fasl key names every .asd in the
+      # tree plus both pins: change any of them and you get a COLD build, which is also
+      # the only build that surfaces Coalton's deferred WARNINGs (AGENTS.md, "Green is not
+      # evidence"). An exact-match-or-nothing cache is a slower CI and a truthful one.
+      - name: Cache the Lisp toolchain (downloads)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: toolchain-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env', 'coalton.pin') }}
+          restore-keys: |
+            toolchain-${{ matrix.platform }}-
+
+      - name: Cache compiled fasls (exact match only)
+        uses: actions/cache@v6
+        with:
+          path: ${{ matrix.fasl }}
+          key: fasl-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
+
+      # --- toolchain ----------------------------------------------------------------
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -CI
+          else
+            ./scripts/setup.sh --ci
+          fi
+
+      - name: Verify the toolchain
+        shell: bash
+        run: |
+          sbcl --version
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -Check
+          else
+            ./scripts/setup.sh --check
+          fi
+
+      # OURANOS_NO_WARM because verify-tree.lisp compiles every system itself, each in its
+      # own image. Warming here would compile the tree twice and, worse, would leave fasls
+      # that let a child borrow what a sibling built -- the exact borrowing verify-tree
+      # runs isolated images to prevent. What is wanted from bootstrap is the ASDF
+      # source-registry drop-in and bin/cons.
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      # THE STEP THAT THE FIRST CI RUN OF THIS FILE PROVED IS NOT OPTIONAL.
+      #
+      # `asdf:load-system` RESOLVES dependencies but never FETCHES them; `ql:quickload`
+      # fetches. verify-tree.lisp uses the former deliberately -- quickload does not
+      # escalate a compile-time WARNING to a failure. On a developer machine the difference
+      # is invisible because the dependencies are already installed. On a runner, which has
+      # installed NOTHING, 23 of 30 systems failed to load and the tree reported FAIL over
+      # `Component "log4cl" not found`.
+      #
+      # The obvious fix -- drop OURANOS_NO_WARM and let bootstrap warm the stack -- is
+      # wrong, and quietly so: warming compiles OUR tree with quickload, and once a fasl
+      # exists the file is merely LOADED afterwards. Coalton reports an unused binding as a
+      # full WARNING that ASDF escalates to a build failure, so a warm tree makes the gate
+      # blind to the exact class of defect it exists to catch. The gate must do the
+      # compiling, so this installs THIRD-PARTY SYSTEMS ONLY.
+      - name: Install external dependencies (third-party only)
+        run: sbcl --dynamic-space-size 4096 --script scripts/install-deps.lisp
+
+      # Which Coalton actually LOADS, not which one is checked out -- a Quicklisp dist
+      # release or a second checkout on the source-registry silently wins otherwise, and
+      # stale fasls can produce an image built from a commit nobody pinned.
+      - name: Check the Coalton pin
+        run: sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
+
+      # Every pin says where its advisories live and when a human last read them. Presence
+      # of the fields fails the build; review AGE is reported and never fails, because a
+      # check that goes red on a calendar boundary turns unrelated PRs red and gets
+      # ignored. See docs/versioning-and-pinning.md.
+      - name: Check the pins declare an advisory source
+        run: sbcl --script scripts/check-pins.lisp --report
+
+      # From the committed libuv.pin, with the platform's own first-party toolchain and no
+      # cmake. Doing it on all three legs is simultaneously the +N checks below and the
+      # only cross-platform proof that the pinned libuv builds at all -- which is what the
+      # bundling story in #94/ADR-0013 rests on.
+      - name: Build the pinned libuv
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
+
+      # --- the native webview launcher (#276) ---------------------------------------
+      #
+      # WHY AT ALL. hyperion-view is the launcher every desktop app shells out to, and
+      # HYPERION/VIEW/TESTS could not run without the binary: `7 checks (5 skipped)' on
+      # every platform, and the five that skipped were every test that exercises the
+      # launcher -- argv handling, flag refusal, surplus arguments. Those five had NEVER
+      # executed on any leg. This file ran the gate and did not build the launcher;
+      # desktop-release.yml builds the launcher and does not run the gate. No ordering of
+      # existing events reached them, tag or no tag.
+      #
+      # WHAT CHANGED, AND WHY THIS STEP STAYS (#410). verify-tree.lisp NOW BUILDS THE
+      # LAUNCHER ITSELF, because moving the build here made a local cold gate ten checks
+      # short of CI on the same commit -- two honest totals, one PASS each, and nothing in
+      # either output saying why. So the sentence above is history rather than current fact,
+      # and is kept because it is the reason this step exists at all.
+      #
+      # This step is NOT redundant now, for two reasons:
+      #   IT INSTALLS WHAT THE GATE CANNOT. The gate compiles; it does not apt-get. On a bare
+      #   runner its `build.sh --check' fails without libwebkit2gtk-dev, and it would then
+      #   DECLINE the view axis and still PASS -- disclosed, but ten checks lighter, which is
+      #   exactly the state #410 exists to end.
+      #   IT FAILS THE JOB LOUDLY. A broken launcher build here stops CI. The gate's own
+      #   build is best-effort by design (a host without a C++ toolchain must not fail a
+      #   Lisp gate), so CI needs one place that treats the build as mandatory. The gate then
+      #   rebuilds in ~2-4 s, which buys local/CI agreement for the price of one compile.
+      #
+      # LINUX ONLY. macOS needs no package at all (WebKit.framework is built in) but is the
+      # expensive leg; Windows needs the WebView2 SDK fetch. Linux is the cheap leg and the
+      # one that runs on every pull request, which is where a guard belongs.
+      #
+      # NOT PATH-FILTERED. Filtering on `hyperion-view/**' would make this nearly free and
+      # would reinstate "these assertions did not run" as the default state -- the exact
+      # condition #276 exists to end. It is also wrong on its own terms:
+      # THE-LAUNCHER-IS-WHERE-DESKTOP-LOOKS-FOR-IT depends on Lisp-side desktop.lisp, so the
+      # filter would have to track a growing set of paths to stay honest, and a filter that
+      # silently stops covering things is worse than none.
+      #
+      # COST, with each number labelled. The compile is 1.90 s, measured. The apt install is
+      # the real cost and was NOT measured when this landed -- estimated at about a minute,
+      # roughly $2.60/month at Linux rates over ~75 runs a week. The step TIMES ITSELF and
+      # prints both numbers as job notices so the estimate gets replaced by a measurement on
+      # the first run. An estimate repeated often enough becomes a fact nobody took, which
+      # is how docs/dependencies.md came to claim 25 systems against an actual 86 (#278).
+      #
+      # The 4.0 fallback matches desktop-release.yml: runner images have moved between
+      # webkit2gtk 4.1 and 4.0, and build.sh probes for the same pair.
+      - name: Build the native webview launcher (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          start=$(date +%s)
+          sudo apt-get update
+          sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
+          echo "::notice::#276 apt prerequisites: $(( $(date +%s) - start ))s"
+          t0=$(date +%s)
+          ./hyperion/hyperion-view/build.sh
+          echo "::notice::#276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
+
+      # --- a real Postgres ----------------------------------------------------------
+      #
+      # NO LEG SETS OURANOS_ALLOW_NO_PG. Every check mnemosyne had ever reported green ran
+      # against SQLite alone, and #165 is what that cost: 2645 green checks at the commit
+      # that silently stored the four characters "false" in a Postgres text column (#176).
+      # A matrix that excuses Postgres on the awkward platforms re-acquires exactly that
+      # blind spot, one leg at a time, and it would be invisible -- the suite stays green.
+      #
+      # This is the second place CI carries knowledge rather than calling a script, and it
+      # is unavoidable: what a Postgres costs to stand up is a fact about the RUNNER IMAGE,
+      # not about this tree. Linux calls the repo's own script; the other two use what
+      # their image ships.
+      #
+      # The port is NOT pinned to 55432 here. That number exists in
+      # docker-compose.test.yml to protect a DEVELOPER's real server from being shadowed
+      # or, worse, silently CREATE TABLE'd into. A runner has no real server to protect,
+      # and forcing a preinstalled service onto another port is fragility bought for
+      # nothing. The invariant is the URL in $GITHUB_ENV, which is all the suite contracts
+      # for (mnemosyne/tests/backends.lisp).
+      - name: Postgres (Linux) -- the repo's own script
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ./scripts/test-postgres.sh up
+          echo "MNEMOSYNE_TEST_PG_URL=$(./scripts/test-postgres.sh url)" >> "$GITHUB_ENV"
+
+      - name: Postgres (macOS) -- Homebrew
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          # The image may or may not still ship a postgresql formula; install is a no-op
+          # when it does. `|| true` on link: a keg-only formula that is already linked
+          # exits non-zero and that is not a failure.
+          brew install postgresql@17 >/dev/null
+          brew link --overwrite --force postgresql@17 || true
+          export PATH="$(brew --prefix postgresql@17)/bin:$PATH"
+          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+          # pgvector BEFORE the server starts, so the extension files are in place when it
+          # reads its share directory (#371). Without it, mnemosyne's vector operator and
+          # index tests skip with "no pgvector on this host" and macOS covers neither.
+          brew install pgvector >/dev/null
+          brew services start postgresql@17
+          # Wait for it rather than sleeping: a fixed sleep is either too short (flaky) or
+          # too long (paid on every run).
+          for i in $(seq 1 60); do
+            pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { echo "postgres did not come up"; exit 1; }
+            sleep 1
+          done
+          createuser -h 127.0.0.1 -s ouranos || true
+          psql -h 127.0.0.1 -d postgres -c "ALTER ROLE ouranos WITH PASSWORD 'ouranos'"
+          # ASSERT THE PROBE, NOT THE INSTALL. `brew install pgvector` exiting 0 and the
+          # running server being able to see the extension are different facts: the formula
+          # builds against a Postgres installation, and if it picks a different one than
+          # postgresql@17 the files land where this server does not look. The install still
+          # succeeds, the tests still skip, and the step still looks fine. This is the same
+          # question mnemosyne/tests/param.lisp asks before it decides to skip.
+          n=$(psql -h 127.0.0.1 -d postgres -tAc \
+                "select count(*) from pg_available_extensions where name = 'vector'")
+          if [ "$n" != "1" ]; then
+            echo "pgvector installed but this server cannot see it (pg_available_extensions returned $n)."
+            echo "The vector suites would skip and the run would look green. Failing instead."
+            exit 1
+          fi
+          echo "pgvector is available to this server." 
+          createdb -h 127.0.0.1 -O ouranos ouranos_test || true
+          echo "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" >> "$GITHUB_ENV"
+
+      - name: Postgres (Windows) -- the preinstalled service
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The runner image ships PostgreSQL installed but STOPPED, and the major version
+          # moves with the image. Discover it rather than hardcoding a path that will rot.
+          $svc = Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $svc) { throw "no preinstalled PostgreSQL service on this runner image" }
+          Set-Service -Name $svc.Name -StartupType Manual
+          Start-Service -Name $svc.Name
+          $pgbin = (Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin' | Select-Object -First 1).FullName
+          if (-not $pgbin) { throw "PostgreSQL service $($svc.Name) exists but no bin directory was found" }
+          $env:PATH = "$pgbin;$env:PATH"
+          echo $pgbin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # The image documents this superuser password; it is a throwaway on a throwaway
+          # machine, not a secret.
+          $env:PGPASSWORD = 'root'
+          for ($i = 0; $i -lt 60; $i++) {
+            & "$pgbin\pg_isready.exe" -h 127.0.0.1 -p 5432 | Out-Null
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 59) { throw "postgres did not come up" }
+            Start-Sleep -Seconds 1
+          }
+          & "$pgbin\psql.exe" -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=0 -c "CREATE ROLE ouranos LOGIN SUPERUSER PASSWORD 'ouranos'"
+          & "$pgbin\psql.exe" -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=0 -c "CREATE DATABASE ouranos_test OWNER ouranos"
+          "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Show what Postgres we got
+        shell: bash
+        run: |
+          echo "MNEMOSYNE_TEST_PG_URL=${MNEMOSYNE_TEST_PG_URL:-<unset>}"
+          test -n "${MNEMOSYNE_TEST_PG_URL:-}" || { echo "no Postgres URL was exported"; exit 1; }
+
+      # --- the gate -----------------------------------------------------------------
+      #
+      # ONE command, and deliberately not a hand-rolled asdf:test-system loop. A system
+      # with no `:perform (test-op ...)` loads its files, runs NOTHING and exits 0 -- aion
+      # was reported green through an entire Coalton upgrade having executed zero checks
+      # (#116). verify-tree parses FiveAM's per-suite check count and fails on zero, fails
+      # on a suite that never ran, fails on a deferred compile WARNING, and (since #176)
+      # fails when a suite reports per-backend coverage that never reached Postgres.
+      #
+      # OURANOS_WITH_UV folds in aion/uv, aion/uv/net and aion/uv/process now that libuv is
+      # built above -- real checks over a real event loop that, until this workflow, were
+      # verified by nothing that ran automatically.
+      - name: Verify the tree
+        shell: bash
+        env:
+          OURANOS_WITH_UV: "1"
+        run: |
+          set -o pipefail
+          sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
+            2>&1 | tee verify.log
+
+      # --- the README's numbers, against the run that just happened -------------------
+      #
+      # The Status table's per-framework check counts were hand-maintained, and every merge
+      # invalidated them: three corrections in three days, each stale again within the hour.
+      # This makes the table falsifiable by the same gate it quotes.
+      #
+      # LINUX ONLY, because the counts are host-specific by construction -- the Windows leg
+      # runs COM suites this one cannot, and hyperion/update alone differs by 44 checks
+      # between the two. Linux is the leg that runs on every pull request AND every push to
+      # main, so it is the number a reader can reproduce from the badge. Running this on
+      # every leg would demand a table that is simultaneously three different numbers.
+      #
+      # It reads the log rather than re-running anything: a second gate run would be forty
+      # minutes to re-derive figures the first one already printed.
+      - name: Check the README's counts against the gate
+        if: matrix.platform == 'linux-x86-64'
+        shell: bash
+        run: sbcl --script scripts/check-readme-counts.lisp --from verify.log
+
+      - name: Stop Postgres (Linux)
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: ./scripts/test-postgres.sh down || true
+
+  # --- release mode ---------------------------------------------------------------
+  #
+  # Coalton's mode is fixed before Coalton is built, so this cannot be a step inside the
+  # matrix above -- it is a different BUILD of the same tree, and the two cannot share an
+  # image or a fasl cache. Hence a job.
+  #
+  # WHAT IT PROTECTS. A §7 representation violation -- a `lisp` block trafficking in a type
+  # Coalton has not promised -- is INVISIBLE in development mode, where types are CLOS
+  # objects, and breaks globally the moment types become frozen structs. The tree passes in
+  # release mode today (#98); nothing but this job keeps that true, and the failure it
+  # catches is one a developer cannot see locally unless they think to look.
+  #
+  # Linux only, and not on pull requests: this is a full cold Coalton build in its own
+  # cache, and the same billing argument as the matrix above applies while the repo is
+  # private. A representation violation that lands on main is found by the next push, the
+  # weekly run, or a dispatch -- not never.
+  release-mode:
+    name: release-mode (linux-x86-64)
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Its OWN cache, keyed apart from the development one. Sharing would be the exact
+      # defect scripts/with-mode.lisp exists to prevent: `:coalton-release` is a feature,
+      # ASDF's output translations do not encode features in the fasl path, and a release
+      # run against development fasls reports a release result for a development build.
+      - name: Cache the Lisp toolchain (downloads)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: toolchain-linux-x86-64-${{ hashFiles('scripts/versions.env', 'coalton.pin') }}
+          restore-keys: |
+            toolchain-linux-x86-64-
+
+      - name: Cache release-mode fasls (exact match only)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ouranos/fasl-release
+          key: fasl-release-linux-x86-64-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
+
+      - name: Provision the Lisp toolchain
+        run: ./scripts/setup.sh --ci
+
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Install external dependencies (third-party only)
+        run: sbcl --dynamic-space-size 4096 --script scripts/install-deps.lisp
+
+      # Needed BEFORE the verify step, because that step sets OURANOS_WITH_UV=1 and the uv
+      # systems will not load without vendor/libuv/. Not run under with-mode: libuv is a C
+      # library and Coalton's mode has nothing to say about it.
+      - name: Build the pinned libuv
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
+
+      # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (#276). Without it
+      # this job would run verify-tree over a tree missing five checks that the matrix leg
+      # has -- 4436 against 4446 at one commit, with nothing in either output saying why.
+      # That is precisely the false EQUIVALENCE the comment below records, one prerequisite
+      # over: two individually honest halves that are not statements about the same tree.
+      # This job exists to be comparable, so it builds what the leg it is compared against
+      # builds.
+      #
+      # verify-tree.lisp builds the launcher itself since #410, so what this step adds is the
+      # apt prerequisites the gate cannot install and a LOUD failure if the compile breaks --
+      # the gate's own build is deliberately best-effort. Same argument as the matrix leg's
+      # copy of this step; see the long comment there.
+      - name: Build the native webview launcher
+        shell: bash
+        run: |
+          start=$(date +%s)
+          sudo apt-get update
+          sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
+          echo "::notice::#276 apt prerequisites: $(( $(date +%s) - start ))s"
+          t0=$(date +%s)
+          ./hyperion/hyperion-view/build.sh
+          echo "::notice::#276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
+
+      - name: Postgres -- the repo's own script
+        run: |
+          ./scripts/test-postgres.sh up
+          echo "MNEMOSYNE_TEST_PG_URL=$(./scripts/test-postgres.sh url)" >> "$GITHUB_ENV"
+
+      # OURANOS_WITH_UV=1, matching the development matrix EXACTLY. Without it this job ran
+      # verify-tree over a SMALLER tree than the gate it exists to be compared against --
+      # so "the tree passes in release mode" and "the tree passes" were not statements about
+      # the same tree, and the entire point of the job is that they should be. A gate that
+      # reports success for less than you think it checked is the family this repo keeps
+      # re-finding (#116, praxeon/web, #176); this one was a false EQUIVALENCE rather than a
+      # false green, which is harder to see because both halves were individually honest.
+      - name: Verify the tree in RELEASE mode
+        env:
+          OURANOS_WITH_UV: "1"
+        run: sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp
+
+      # Not a gate -- a record. The numbers land in the job log with their mode attached,
+      # so "what is release mode worth on this commit" is answerable without anyone
+      # rebuilding the tree twice by hand. It runs after the gate deliberately: a benchmark
+      # of a tree that does not pass is a measurement of nothing.
+      - name: Benchmark (release)
+        run: sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/bench.lisp
+
+      - name: Stop Postgres
+        if: always()
+        run: ./scripts/test-postgres.sh down || true
