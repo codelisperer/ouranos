@@ -37,7 +37,7 @@
 (defvar *dialect* :sqlite
   "The SQL dialect SQL compiles for: :sqlite | :postgres (both use \"?\") | :xtdb.
 
-A DESIGNATOR, not a vocabulary of its own (#432, ADR-0003): a keyword, a string or a typed
+A DESIGNATOR, not a vocabulary of its own (pre-publication issue 432, ADR-0003): a keyword, a string or a typed
 MNEMOSYNE/FIELD:DIALECT all name the same thing, and SQL normalises whichever it is through
 MNEMOSYNE/FIELD-SHELL:DIALECT-FOR before anything branches on it.")
 
@@ -220,7 +220,7 @@ problem would be the worse trade.")
 (defun %order (ctx specs)
   "ORDER BY specs: a column, (column :asc|:desc), or ((expression) [:asc|:desc]).
 
-THE EXPRESSION FORM EXISTS FOR NEAREST-NEIGHBOUR SEARCH (#258), which is the whole use of
+THE EXPRESSION FORM EXISTS FOR NEAREST-NEIGHBOUR SEARCH (pre-publication issue 258), which is the whole use of
 a distance operator: `ORDER BY embedding <=> $1 LIMIT 10'. Without it the operators would
 compile in a WHERE clause and be unreachable in the one place they are actually written.
 
@@ -348,7 +348,7 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
 (defun %check-dialect (dialect)
   "Normalise DIALECT through the one tree-wide normaliser and return the typed value.
 
-THIS FUNCTION USED TO BE THE SECOND VOCABULARY (#432, ADR-0003). It held its own list of
+THIS FUNCTION USED TO BE THE SECOND VOCABULARY (pre-publication issue 432, ADR-0003). It held its own list of
 keywords and refused anything else, including the string \"postgres\" -- which is what
 MNEMOSYNE/DDL and MNEMOSYNE/SCHEMA take, so a caller holding one spelling was refused by the
 module that wanted the other. Refusing was already better than what came before it: every

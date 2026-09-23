@@ -1,9 +1,9 @@
-;;;; view-tests.lisp --- the launcher's ARGUMENT CONTRACT, asserted (#276).
+;;;; view-tests.lisp --- the launcher's ARGUMENT CONTRACT, asserted (pre-publication issue 276).
 ;;;;
 ;;;; hyperion-view is C++ and verify-tree neither compiles nor runs it, so before this
 ;;;; file a change to hyperion-view.cc moved NO check count in either direction -- the
 ;;;; gate was structurally blind to the one component every desktop app shells out to.
-;;;; It had two open defects found by hand (#268, #269) and zero tests, which is where the
+;;;; It had two open defects found by hand (pre-publication issue 268, #116) and zero tests, which is where the
 ;;;; third comes from.
 ;;;;
 ;;;; WHAT IS TESTED HERE IS THE CLI, NOT THE WINDOW, and that is deliberate rather than a
@@ -14,13 +14,13 @@
 ;;;; hyperion/desktop:run-app and by consuming apps, is enforced by nothing else, and is
 ;;;; exercisable with no display at all. That is the part a gate can hold.
 ;;;;
-;;;; The window half stays #276's open remainder, and it is stated in the issue rather
+;;;; The window half stays pre-publication issue 276's open remainder, and it is stated in the issue rather
 ;;;; than implied by this file's existence.
 ;;;;
 ;;;; SKIPS, NOT FAILURES, WHEN THE BINARY IS ABSENT. The launcher is build output: a fresh
 ;;;; checkout has no hyperion-view until someone runs build.{sh,ps1}. A red suite there
 ;;;; would train people to ignore it. FiveAM prints the skip and its reason, and
-;;;; verify-tree surfaces skips rather than burying them (#284's lesson, one file over) --
+;;;; verify-tree surfaces skips rather than burying them (pre-publication issue 284's lesson, one file over) --
 ;;;; so "not built here" is visible rather than silent.
 
 (defpackage #:hyperion/view/tests
@@ -36,7 +36,7 @@
 (defparameter +budget+ 10
   "Seconds a CLI invocation may take before we call it hung.
 
-#268 was `--help' never exiting -- it fell through to the URL slot and webview_run()
+pre-publication issue 268 was `--help' never exiting -- it fell through to the URL slot and webview_run()
 blocked forever on a window. So EVERY invocation here is bounded, and a timeout is a
 FAILURE rather than a hang: a test that waits forever for a launcher that waits forever
 teaches nobody anything.")
@@ -71,7 +71,7 @@ resolution moves, this suite must move with it or say so."
 
 (test the-resolution-rule-answers-without-erroring
   ;; DELIBERATELY NOT GUARDED BY WITH-LAUNCHER, and it is the reason this suite can sit in
-  ;; the gate at all. verify-tree FAILS a suite that executes zero checks (#116), and on a
+  ;; the gate at all. verify-tree FAILS a suite that executes zero checks (pre-publication issue 116), and on a
   ;; machine that has never run build.{sh,ps1} every other test here skips -- so without
   ;; one unconditional check, adding this suite to the gate would turn a fresh checkout
   ;; red. This is that check, and it is not a formality: DEFAULT-LAUNCHER walks three
@@ -89,7 +89,7 @@ resolution moves, this suite must move with it or say so."
     (is (probe-file exe) "default-launcher resolved to ~A, which is not a file" exe)))
 
 (test help-prints-usage-and-exits
-  ;; #268, and the reason this suite exists at all. Before the fix: no --help handling,
+  ;; pre-publication issue 268, and the reason this suite exists at all. Before the fix: no --help handling,
   ;; so it became the URL, a window opened on a failed navigation, and the process never
   ;; returned. Measured on Windows: exited=FALSE after 5s, stdout empty, stderr empty.
   (with-launcher

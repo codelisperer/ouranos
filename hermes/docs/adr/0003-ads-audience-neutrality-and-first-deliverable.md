@@ -6,8 +6,8 @@ Reddit, Snapchat, plus Instantly as a non-ads comparison) — see
 [`../ads-protocol-design.md`](../ads-protocol-design.md). It narrows the options and corrects
 one factual claim in option A below; it does not answer either question. Everything
 else in the ads protocol is settled and is being built as
-[#327](https://github.com/codelisperer/ouranos/issues/327); these two are what
-[#262](https://github.com/codelisperer/ouranos/issues/262) is `Blocked` on.
+[#133](https://github.com/codelisperer/ouranos/issues/133); these two are what
+[#114](https://github.com/codelisperer/ouranos/issues/114) is `Blocked` on.
 
 > **Read Question 0 first.** It was added after the other two and it may make them moot: if
 > the minimum product needs no Meta credential, there is nothing to decide about targeting
@@ -215,7 +215,7 @@ inclusion in every network.
 
 ## Question 2 — Which half ships first?
 
-**What hangs on it:** what #327's successor actually builds, and how soon a consuming app gets
+**What hangs on it:** what #133's successor actually builds, and how soon a consuming app gets
 something usable.
 
 ### A. Measure alone *(recommended — and the recommendation is not ours alone)*
@@ -229,7 +229,7 @@ target are designed but unbuilt.
 - **Both the design note and the consuming app independently landed on this**, which is why
   it is recommended here — not because it is the smallest.
 
-### B. #262's stated order: create → target → test → measure
+### B. #114's stated order: create → target → test → measure
 
 The full surface in sequence.
 
@@ -350,7 +350,7 @@ field-mapping was attempted.
 **The hazard to design against is the two surfaces drifting.** The CL protocol should *call* the
 typed core for every decision — validation, lowering, refusal — rather than reimplementing any
 of it. Two implementations of one rule disagree in the dark, and here the consumer that notices
-is a live campaign spending money. (The same failure was found and removed in #335, where a path
+is a live campaign spending money. (The same failure was found and removed in pre-publication issue 335, where a path
 resolver existed twice; ADR-0014's *"there is nothing here that can disagree with the resolver"*
 holds only while there is one.)
 

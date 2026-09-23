@@ -1,4 +1,4 @@
-;;;; tree-root.lisp --- which checkout is this run about? (#450, #480)
+;;;; tree-root.lisp --- which checkout is this run about? (pre-publication issue 450, pre-publication issue 480)
 ;;;;
 ;;;; Loaded by every script in this directory that reads or writes the tree. It answers one
 ;;;; question and refuses to guess at it.
@@ -6,7 +6,7 @@
 ;;;; THE QUESTION IS NOT `WHERE DOES THIS CODE LIVE'. That is what `*load-truename*' answers,
 ;;;; and for a long time it was what these scripts used. The question is `which tree did you
 ;;;; mean', and the only thing that expresses that is where the caller is standing. Run one
-;;;; checkout's copy of a script from another and the two answers differ; before #450 the
+;;;; checkout's copy of a script from another and the two answers differ; before pre-publication issue 450 the
 ;;;; script took its own and said nothing.
 ;;;;
 ;;;; For check-readme-counts.lisp that meant rewriting a README in a checkout the operator
@@ -42,7 +42,7 @@ NOT `README.md' alone, and not `README.md' + `AGENTS.md': twenty directories in 
 carry a README and three carry an AGENTS.md, so either pair would make `klio/' and `hermes/'
 look like roots. A run from inside one of those would then `disagree' with the real root and
 be refused, which is a false positive in the guard and would break the gate from a
-subdirectory -- the one thing #480 says to assert rather than assume.
+subdirectory -- the one thing pre-publication issue 480 says to assert rather than assume.
 
 The seed and the gate instead. Both sit only at the root -- `find . -name bootstrap.lisp'
 and `find . -name verify-tree.lisp' each return exactly one path -- and both have been there
@@ -74,7 +74,7 @@ are one answer rather than two."
   "DIR as this message should print it: TRUENAME first, then native.
 
 THE TWO PATHS IN THE REFUSAL BELOW COME FROM DIFFERENT PLACES AND WERE SPELLED DIFFERENTLY
-(#510). `caller-root' is walked up from `uiop:getcwd', which preserves whatever spelling the
+(pre-publication issue 510). `caller-root' is walked up from `uiop:getcwd', which preserves whatever spelling the
 caller used; `script-root' comes from a script's `*load-truename*', and TRUENAME resolves a
 Windows 8.3 alias to the long name. On a host whose TEMP is the aliased spelling -- which is
 what GitHub's Windows runners set -- the same directory printed as `C:\Users\RUNNER~1\...'
@@ -104,10 +104,10 @@ not run."
          (caller-root (checkout-root (uiop:getcwd))))
     (cond
       ((null caller-root)
-       (values nil (format nil "run this from inside the checkout you mean -- ~A is not in one (looked for ~{`~A'~^ and ~} upwards). These scripts used to take the checkout the SCRIPT lives in, which is how one of them wrote to a tree its caller had never named (#450)."
+       (values nil (format nil "run this from inside the checkout you mean -- ~A is not in one (looked for ~{`~A'~^ and ~} upwards). These scripts used to take the checkout the SCRIPT lives in, which is how one of them wrote to a tree its caller had never named (pre-publication issue 450)."
                            (uiop:native-namestring (uiop:getcwd)) +markers+)))
       ((not (same-directory-p caller-root script-root))
-       (values nil (format nil "this script lives in one checkout and you are standing in another, so `which tree' has two answers and nothing here can tell which you meant (#450, #480).~%  you are in:    ~A~%  script is in:  ~A~%Run that tree's own copy: cd into the checkout you mean and use its scripts/."
+       (values nil (format nil "this script lives in one checkout and you are standing in another, so `which tree' has two answers and nothing here can tell which you meant (pre-publication issue 450, pre-publication issue 480).~%  you are in:    ~A~%  script is in:  ~A~%Run that tree's own copy: cd into the checkout you mean and use its scripts/."
                            (shown caller-root)
                            (shown script-root))))
       (t (values caller-root nil)))))

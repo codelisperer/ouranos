@@ -2,7 +2,7 @@
 
 (cl:defpackage #:aion/clock
   (:use #:cl)
-  (:local-nicknames (#:rnd #:aion/random))   ; 62 unpredictable bits per v6 id (#95)
+  (:local-nicknames (#:rnd #:aion/random))   ; 62 unpredictable bits per v6 id (pre-publication issue 95)
   (:documentation
    "A monotonic Gregorian-100ns clock, and time-ordered v6 identities built on it.
 
@@ -15,7 +15,7 @@
     This lives in aion because a monotonic clock is a floor primitive rather than a
     persistence concern -- `a v6 UUID can signify more than the identity of a database
     row'. Everything that wants one sits to aion's right in the DAG or, like hermes, may
-    depend on aion and nothing else. It was extracted from mnemosyne/id (issue #96);
+    depend on aion and nothing else. It was extracted from mnemosyne/id (pre-publication issue 96);
     mnemosyne keeps TOUCH! and the entity-stamping convention, which are about rows.
 
     Dependency-free on purpose: pure bit-work plus SBCL's own mutex and clock. frugal-uuid

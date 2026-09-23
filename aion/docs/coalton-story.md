@@ -1,7 +1,7 @@
 # Aion's Coalton story
 
 *What the typed layer is actually for, across every capability aion has today — `csv`,
-`log`, and now `uv`. Written 2026-08-04 to make [#86](https://github.com/codelisperer/ouranos/issues/86)'s
+`log`, and now `uv`. Written 2026-08-04 to make pre-publication issue 86's
 claim true by describing what is really being built, rather than by softening the claim.*
 
 Read [`coalton-gap-analysis.md`](coalton-gap-analysis.md) for what Coalton already gives us,
@@ -166,13 +166,13 @@ No further work; it is the worked example the other two should read first.
    a corpus chosen for the cells where they could disagree. It found one real divergence
    (CRLF as two terminators). The §4 measurement is deferred honestly, because the hot loop
    is untouched.
-3. **Persistent sets ([#5](https://github.com/codelisperer/ouranos/issues/5))** — still
+3. **Persistent sets ([#20](https://github.com/codelisperer/ouranos/issues/20))** — still
    worth building, but note what changes: under this thesis it is no longer *the* thing
    that makes aion "Coalton-first." It is a gap-fill on Coalton's own substrate, valuable on
    its own terms, and no longer load-bearing for the claim.
 
 That reordering is the practical payoff of writing this down. The claim in
-[#86](https://github.com/codelisperer/ouranos/issues/86) is discharged by `log` and `csv` —
+pre-publication issue 86 is discharged by `log` and `csv` —
 days of work on capabilities that already exist and already have tests — rather than by
 persistent sets, which is weeks and was gating go-live for no good reason.
 
@@ -186,6 +186,6 @@ The launch pitch has a sharper sentence available than "a functional stdlib for 
 
 That is checkable, it is already true of `aion/uv`, and it says something specific about
 where bugs come from. It also feeds
-[#103](https://github.com/codelisperer/ouranos/issues/103) directly: "what makes an Ouranos
+[#81](https://github.com/codelisperer/ouranos/issues/81) directly: "what makes an Ouranos
 framework LLM-consumable" has a concrete first answer — *the boundary is typed, so a
 generated call site cannot invent a state that does not exist.*

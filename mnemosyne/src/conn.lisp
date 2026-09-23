@@ -59,7 +59,7 @@ Coalton, and the typed core does no IO."
 
 cl-postgres does not depend on cl+ssl; it looks the package up at connect time and
 signals \"CL+SSL is not loaded\" if it is absent. So TLS here is a property of what the
-application chose to load, exactly like the HTTP server in hyperion (#139) -- mnemosyne
+application chose to load, exactly like the HTTP server in hyperion (pre-publication issue 139) -- mnemosyne
 must not drag cl+ssl (and OpenSSL, a native library) into every image that touches a
 database, including desktop bundles, where an unvendorable .so is precisely what
 ADR-0011 was about."
@@ -133,7 +133,7 @@ is why the argument is always supplied."
                         :port          (be:backend-pg-port backend)
                         :username      (be:backend-pg-user backend)
                         ;; The ONE place mnemosyne turns the password back into plaintext
-                        ;; (#209): the driver needs a String. Everywhere else it stays an
+                        ;; (pre-publication issue 209): the driver needs a String. Everywhere else it stays an
                         ;; opaque SECRET, so no backtrace, log line or printed config can
                         ;; render it. `grep -rn reveal' enumerates the disclosure points.
                         :password      (sec:reveal (be:backend-pg-password backend))
@@ -158,7 +158,7 @@ the driver's result (typically the affected-row count). (CL-DBI takes the bind p
 a single list.)"
   (%wrapping-db-errors "exec"
     (let ((start (get-internal-real-time))
-          ;; #165: what NIL, :TRUE and :FALSE mean is mnemosyne's decision, not the
+          ;; pre-publication issue 165: what NIL, :TRUE and :FALSE mean is mnemosyne's decision, not the
           ;; driver's -- the drivers disagreed, and one of them corrupted data silently.
           (params (param:to-driver-params params (dbi:connection-driver-type connection))))
       (let ((result (dbi:do-sql connection sql params)))
@@ -173,7 +173,7 @@ a single list.)"
 (column-keyword -> value)."
   (%wrapping-db-errors "query"
     (let ((start (get-internal-real-time))
-          ;; #165: normalised on the way out here too -- a WHERE clause binds values the
+          ;; pre-publication issue 165: normalised on the way out here too -- a WHERE clause binds values the
           ;; same way an INSERT does, so `(:= :col nil)` must mean the same thing in both.
           (params (param:to-driver-params params (dbi:connection-driver-type connection))))
       (let ((rows (param:from-driver-rows

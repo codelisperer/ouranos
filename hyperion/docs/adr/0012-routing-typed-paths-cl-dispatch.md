@@ -6,7 +6,7 @@
 
 Hyperion had no URL dispatch. Every application hand-rolled the same `cond` over
 `:request-method` and `:path-info` — five of them in the tree, four inside this repo
-([#121](https://github.com/codelisperer/ouranos/issues/121)):
+(pre-publication issue 121):
 
 | Where | |
 |---|---|
@@ -24,7 +24,7 @@ The cost was not verbosity. Three capabilities were missing outright:
    on a known path returned 404. The two failures are indistinguishable in that shape
    even in principle.
 3. **The table was opaque.** A `cond` cannot be enumerated, so a route listing, a
-   dev-time overview, or the OpenAPI emit that ADR-0009 / [#35](https://github.com/codelisperer/ouranos/issues/35)
+   dev-time overview, or the OpenAPI emit that ADR-0009 / [#46](https://github.com/codelisperer/ouranos/issues/46)
    imagine had nothing to read.
 
 ADR-0009 lists "routes" as one bullet inside a `hyperion/api` capability, which framed
@@ -74,20 +74,20 @@ That is a real trap, so it is pinned by a test rather than left to the reader.
 ## Consequences
 
 - Path parameters exist, so a detail view is expressible — the precondition for the
-  examples #132 will port and for any CRUD surface.
+  examples pre-publication issue 132 will port and for any CRUD surface.
 - 405 with a correct `Allow`, and OPTIONS, come free everywhere routing is used.
 - `mount` gives framework modules a way to *contribute* routes instead of an app retyping
   them: `hyperion/dev`'s reload endpoints and `praxeon/web`'s chat surface are the two
-  standing cases (#132).
-- The route set being data unblocks the introspective half of #35 without committing to
+  standing cases (pre-publication issue 132).
+- The route set being data unblocks the introspective half of #46 without committing to
   the rest of it.
 - **Not addressed, deliberately:** parameter *typing* (`:id` binds a string; a typed
   contract is ADR-0009's question), route *generation* (naming exists via `:name`, reverse
   URL building does not), and any interceptor integration — `hyperion/interceptor` is the
   natural composition point, but the effectful-stage question it names as open
-  (`docs/interceptors-design.md`) is unresolved, and #130 wants the same answer. Routing
+  (`docs/interceptors-design.md`) is unresolved, and pre-publication issue 130 wants the same answer. Routing
   should not settle it by accident.
-- Nothing in the tree is ported by this ADR. #117 may replace the server under Hyperion,
+- Nothing in the tree is ported by this ADR. pre-publication issue 117 may replace the server under Hyperion,
   and the examples are frozen until then; the capability lands first, adoption follows.
 
 ## Alternatives considered

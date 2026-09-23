@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  #230 -- would this tree load on a Windows machine that has only what we provision?
+  pre-publication issue 230 -- would this tree load on a Windows machine that has only what we provision?
 
 .DESCRIPTION
   The Windows counterpart to scripts/verify-clean-machine.sh, and NOT a port of it. That
@@ -15,7 +15,7 @@
 
       FOR EVERY NATIVE LIBRARY THE TREE PULLED IN -- WHERE DID IT COME FROM?
 
-  Presence was never the question. #229's sqlite backend reported 36 honest checks against
+  Presence was never the question. pre-publication issue 229's sqlite backend reported 36 honest checks against
   a real SQLite for months, supplied by an Embarcadero RAD Studio installation nobody
   installed for this. The check was truthful at every layer it could inspect; the falsehood
   was one layer below, in WHICH FILE the loader found. A harness that only asks "did it
@@ -89,7 +89,7 @@ $Work = Join-Path $env:TEMP "ouranos-clean-$PID"
 if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
-Info '#230 -- would this tree load on a Windows machine with only what we provision?'
+Info 'pre-publication issue 230 -- would this tree load on a Windows machine with only what we provision?'
 Note "tree        : $Root"
 Note "sbcl        : $Sbcl"
 Note "clean PATH  : $CleanPath"
@@ -161,7 +161,7 @@ try {
   $check | ForEach-Object { Note $_ }
   if ($checkOk) { Good 'setup.ps1 -Check is satisfied' } else { Fail 'setup.ps1 -Check reports missing prerequisites' }
   # A WARN about an unprovisioned sqlite3.dll is a finding here even though -Check tolerates
-  # it: that is the whole of #229, and this harness exists to stop tolerating it.
+  # it: that is the whole of pre-publication issue 229, and this harness exists to stop tolerating it.
   if ($check | Select-String -Pattern 'NOT provisioned by setup.ps1' -Quiet) {
     Fail 'sqlite3.dll on this machine comes from somewhere setup.ps1 did not put it'
   }

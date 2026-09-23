@@ -17,7 +17,7 @@
 ;;;; PLATFORM-EXCLUSIVE, which is a new category for this tree (ADR-0003 Consequences).
 ;;;; aion/uv is opt-in but cross-platform; this cannot load off-platform at all, and
 ;;;; scripts/platform-packages.lisp is what makes its absence mean one thing on Windows and
-;;;; a different thing everywhere else (#182).
+;;;; a different thing everywhere else (pre-publication issue 182).
 ;;;;
 ;;;; NO C TOOLCHAIN, EVER (ADR-0003 s8). kernel32, ole32, oleaut32 ship with the OS, so
 ;;;; unlike aion/uv there is nothing to build and no vendor/ step. That is also why this is

@@ -19,7 +19,7 @@ from a `defschema` via `schema-ddl`), the **data-driven query builder** (`fetch`
 `LIKE` filter + `ORDER BY`), **time-ordered identity** (`touch!` stamps `_id`/`vid`/audit
 — watch the monotonic `vid`s climb), and the **changeset path** the root `AGENTS.md`
 mandates for external input — `cast` takes only permitted fields, `validate-*` accumulates
-errors, and a refusal names the field and the reason (#129).
+errors, and a refusal names the field and the reason (#94).
 
 Try `add` with no arguments, and `add Someone, not-an-email` — the refusals come from
 `changeset-errors`, not from a message the command invented. `_id` and `vid` are *not* in

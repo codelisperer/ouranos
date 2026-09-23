@@ -1,11 +1,11 @@
-;;;; server-uv-tests.lisp --- the native libuv HTTP server, over a real socket (#117).
+;;;; server-uv-tests.lisp --- the native libuv HTTP server, over a real socket (pre-publication issue 117).
 ;;;;
 ;;;; EVERY CHECK HERE GOES THROUGH A TCP SOCKET, on purpose. An in-image call to the handler
 ;;;; would prove the handler works and nothing about the server: framing, the head the peer
 ;;;; actually receives, what happens when a request arrives in two pieces, and whether a
 ;;;; failure produces a response at all are all invisible from inside. This suite is the
 ;;;; first consumer of hyperion/server-uv, and AGENTS.md is explicit that an exported
-;;;; surface without one is how #177 and #202 shipped uncovered.
+;;;; surface without one is how pre-publication issue 177 and pre-publication issue 202 shipped uncovered.
 ;;;;
 ;;;; SO THE HANG CASES ARE THE POINT. The file header of server-uv.lisp argues that a
 ;;;; swallowed condition is worse than a crash because the client just waits; two tests here
@@ -28,7 +28,7 @@
 
 (in-package #:hyperion/server-uv/tests)
 
-(def-suite server-uv :description "The native libuv HTTP/1.1 server (#117).")
+(def-suite server-uv :description "The native libuv HTTP/1.1 server (pre-publication issue 117).")
 (in-suite server-uv)
 
 (defun run-tests ()
@@ -912,7 +912,7 @@ exists to make possible, and the thing that was impossible before M2."
       (sb-thread:signal-semaphore gate 10)
       (pool:stop-pool p))))
 
-;;; --- a streamed body (#117 M2) ---------------------------------------------
+;;; --- a streamed body (pre-publication issue 117 M2) ---------------------------------------------
 ;;;
 ;;; The framing assertions matter more here than anywhere else in this file. A fixed-length
 ;;; response that is wrong is one wrong response; a chunked one that is wrong DESYNCHRONISES
@@ -1152,16 +1152,16 @@ if two of them disagree about who writes what."
       (pool:stop-pool pool))))
 
 
-;;; --- work submitted to a loop that is going away (#296) --------------------
+;;; --- work submitted to a loop that is going away (pre-publication issue 296) --------------------
 ;;;
 ;;; THE SUITE PASSED WITHOUT ANY OF THIS, which was the finding. No call site handled
 ;;; LOOP-CLOSED and every test still went green -- meaning nothing here reached a
-;;; teardown-race submit, the exact case that produced the modal assertion in #291. A
+;;; teardown-race submit, the exact case that produced the modal assertion in pre-publication issue 291. A
 ;;; refusal nothing reaches is indistinguishable from a refusal that does not work.
 ;;;
 ;;; These reach it deterministically rather than by racing: close the loop first, THEN
 ;;; submit. The race itself is not tested here and should not be -- a green run of a race
-;;; proves nothing, and the five-run evidence for the fix belongs with the fix (#297).
+;;; proves nothing, and the five-run evidence for the fix belongs with the fix (pre-publication PR 297).
 
 (test on-loop-drops-work-for-a-loop-that-is-closing
   (let ((loop (uv:make-loop))
@@ -1195,7 +1195,7 @@ if two of them disagree about who writes what."
     (uv:close-loop (srv::server-loop server))     ; close it out from under STOP
     (finishes (srv:stop server))
     (finishes (srv:stop server))))
-;;; --- a static file, which is a PATHNAME body (#273) ------------------------
+;;; --- a static file, which is a PATHNAME body (pre-publication issue 273) ------------------------
 ;;;
 ;;; hyperion/static returns a PATHNAME for every file it serves -- its own comment calls
 ;;; that "the Clack contract for static files", because Woo and Hunchentoot sendfile it and
@@ -1269,11 +1269,11 @@ backend does"))))))
         (ignore-errors (delete-file file))
         (ignore-errors (uiop:delete-empty-directory dir))))))
 
-;;; --- a large static file, in bounded pieces (#313) --------------------------
+;;; --- a large static file, in bounded pieces (pre-publication issue 313) --------------------------
 ;;;
-;;; #273 gave %BODY-OCTETS its pathname clause, which is what makes static files work on
+;;; pre-publication issue 273 gave %BODY-OCTETS its pathname clause, which is what makes static files work on
 ;;; :uv at all. It reads the file WHOLE, and %WRITE-RESPONSE then concatenates head and body
-;;; into one buffer, so a file of size N transiently costs about 2N. #273 said so at the
+;;; into one buffer, so a file of size N transiently costs about 2N. pre-publication issue 273 said so at the
 ;;; time and said this half was not covered, which is why it is a separate ticket rather
 ;;; than a regression.
 ;;;
@@ -1379,7 +1379,7 @@ reason this is not the chunked path")
               "and the bytes must be the file's, in order"))))))
 
 (test a-large-static-file-is-never-held-whole-in-memory
-  "The point of #313. Measured, not argued: the largest piece the response ever put in
+  "The point of pre-publication issue 313. Measured, not argued: the largest piece the response ever put in
 flight, against the size of the file it served."
   (let ((size (* 512 1024))
         (chunk 8192)

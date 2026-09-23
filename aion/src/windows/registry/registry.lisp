@@ -1,4 +1,4 @@
-;;;; registry.lisp --- reading one registry value, in a NAMED bitness view (#319).
+;;;; registry.lisp --- reading one registry value, in a NAMED bitness view (#132).
 ;;;;
 ;;;; DELIBERATELY NOT A REGISTRY API. Read only -- no writes, no deletes, no key creation --
 ;;;; and no more surface than one question needs: does this key have a default value in

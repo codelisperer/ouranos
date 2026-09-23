@@ -260,7 +260,7 @@ the page's initial render and the /eval fragment."
         (:title "Coalton REPL")
         ;; Vendored and embedded in the image, not fetched from a CDN. This app ships as
         ;; a native installer; loading htmx over the network meant it rendered nothing
-        ;; offline (#123).
+        ;; offline (pre-publication issue 123).
         (:script :src (assets:url :htmx) :defer t)
         (:style (:raw *css*)))
       (:body
@@ -305,7 +305,7 @@ the page's initial render and the /eval fragment."
 the desktop build carries it and this file never names its path.
 
 There is no dev wiring here on purpose: hyperion/dev:serve wraps the app in DEV:WRAP-DEV,
-which serves the reload endpoints and injects the poller script itself (#132). An app that
+which serves the reload endpoints and injects the poller script itself (pre-publication issue 132). An app that
 declares them again gets the boilerplate back and loses WRAP-DEV's REGISTER-QUIET-PATH,
 which is what keeps poller traffic out of the developer's own REPL output."
   (router:router

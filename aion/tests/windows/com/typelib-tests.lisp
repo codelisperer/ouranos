@@ -184,7 +184,7 @@ naming-tests: Count, Union and Replace are all Office constants."
 
 (test only-generates-a-narrow-package
   "The Excel typelib is enormous, and generating all of it is sometimes not what is wanted
-(issue #181, Q5). :ONLY is the answer, and it is checked here against a filter that keeps two
+(pre-publication issue 181, Q5). :ONLY is the answer, and it is checked here against a filter that keeps two
 of about thirty constants."
   (let ((*package* (find-package :aion/windows/com/tests)))
     (eval (com:expand-typelib-constants "AION-TYPELIB-TEST-NARROW" *scripting* nil
@@ -224,7 +224,7 @@ anything else is emitted as a DEFPARAMETER."
     (is (eq 'defconstant (cdr (assoc "+XL-UP+" definers :test #'string=)))
         "an integer constant should still be a real constant")))
 
-;;; --- version skew (issue #181, Q2) --------------------------------------------------
+;;; --- version skew (pre-publication issue 181, Q2) --------------------------------------------------
 
 (test the-generated-package-records-what-it-was-built-from
   (let ((package (find-package "AION-TYPELIB-TEST-SCRIPTING")))

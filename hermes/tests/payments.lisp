@@ -1,4 +1,4 @@
-;;;; tests/payments.lisp --- the neutral payments protocol (#48), and #50's constraints.
+;;;; tests/payments.lisp --- the neutral payments protocol (pre-publication issue 48), and pre-publication issue 50's constraints.
 ;;;;
 ;;;; Two kinds of test here. The ORDINARY ones check the protocol does what it says. The
 ;;;; ones that matter check the properties an application would otherwise discover in
@@ -118,7 +118,7 @@
          (r (pay:refund p "pay_1")))
     (is (not (pay:refund-record-partial-p r)))))
 
-;;; --- webhook verification (#50) --------------------------------------------
+;;; --- webhook verification (pre-publication issue 50) --------------------------------------------
 
 (test a-correctly-signed-webhook-verifies-and-normalizes
   (let* ((p (%provider))
@@ -130,7 +130,7 @@
     (is (string= "sub_1" (pay:subscription-ref (pay:event-subscription ev))))))
 
 (test a-tampered-payload-does-not-verify
-  ;; #50. The signature is over the bytes; changing the amount changes the bytes.
+  ;; pre-publication issue 50. The signature is over the bytes; changing the amount changes the bytes.
   (let* ((p (%provider))
          (payload (%event-json :status "active"))
          (sig (pay:dev-sign payload))
@@ -148,7 +148,7 @@
       (pay:verify-webhook p payload (pay:dev-sign payload "someone-elses-secret")))))
 
 (test a-replayed-event-is-recognisable-because-the-id-is-stable
-  ;; #50 asks us to EXPOSE ids so an application can dedupe; the protocol cannot dedupe for
+  ;; pre-publication issue 50 asks us to EXPOSE ids so an application can dedupe; the protocol cannot dedupe for
   ;; it, because that needs durable storage hermes is not permitted to have. What we owe is
   ;; a stable id -- verified here by replaying the identical delivery.
   (let* ((p (%provider))
@@ -215,7 +215,7 @@
     (signals pay:unsupported-operation (pay:create-customer bare :email "a@b.c"))))
 
 (test idempotency-keys-are-unique
-  ;; #50: a retried create must not double-charge.
+  ;; pre-publication issue 50: a retried create must not double-charge.
   (let ((keys (loop repeat 50 collect (pay:idempotency-key))))
     (is (= 50 (length (remove-duplicates keys :test #'string=))))))
 
@@ -237,7 +237,7 @@
     (is (stringp url))
     (is (search "checkout" url))))
 
-;;; --- Money (#49) -----------------------------------------------------------
+;;; --- Money (pre-publication issue 49) -----------------------------------------------------------
 ;;;
 ;;; What this type is FOR is narrower than "amounts cannot mix units", and the tests say
 ;;; which. A currency arrives at runtime from a provider payload, so it cannot be in the
@@ -291,7 +291,7 @@
 
 ;;; --- applying events safely --------------------------------------------------
 ;;;
-;;; From a consuming app running a real payment integration, offered before #47 was built
+;;; From a consuming app running a real payment integration, offered before pre-publication issue 47 was built
 ;;; rather than after. Each is provider-independent and each is a failure that produces no
 ;;; error when it happens -- which is why they are worth having in the framework rather
 ;;; than rediscovered per application.
@@ -499,7 +499,7 @@
       (is (notany (lambda (name) (search forbidden name)) exported)
           "~A must not appear in the payments surface without its own decision" forbidden))))
 
-;;; --- Stripe, the first real backend (#47) ----------------------------------
+;;; --- Stripe, the first real backend (pre-publication issue 47) ----------------------------------
 ;;;
 ;;; Every one of these runs offline. The backend takes its effect as a parameter -- the same
 ;;; seam aion/http-client exposes -- so a canned response stands in for the network and no
@@ -690,7 +690,7 @@
       (is (equal "true" (cdr (assoc "allow_promotion_codes" captured :test #'string=)))
           "and sent when asked for -- without it every coupon is unreachable"))))
 
-;;; --- #209: a provider config must not print its credentials -----------------
+;;; --- pre-publication issue 209: a provider config must not print its credentials -----------------
 
 (test payments-config-printing-does-not-disclose-its-credentials
   ;; Same defect shape as the DB password that reached a deploy log: a Coalton

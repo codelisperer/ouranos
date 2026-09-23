@@ -1,4 +1,4 @@
-;;;; env-scan.lisp --- which configuration keys does this project actually need? (#120)
+;;;; env-scan.lisp --- which configuration keys does this project actually need? (pre-publication issue 120)
 ;;;;
 ;;;; Every framework that needs configuration ships its own `.env.example` listing ONLY its
 ;;;; own keys -- hermes has one, praxeon has one. That is the right shape: the library

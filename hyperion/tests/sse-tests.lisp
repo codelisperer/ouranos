@@ -1,4 +1,4 @@
-;;;; sse-tests.lisp --- the wire format, and the two ways it silently does nothing (#117 M2).
+;;;; sse-tests.lisp --- the wire format, and the two ways it silently does nothing (pre-publication issue 117 M2).
 ;;;;
 ;;;; SSE is deceptively forgiving to write and unforgiving in exactly two places, and both
 ;;;; failures look like "the endpoint does nothing" rather than like an error:
@@ -16,7 +16,7 @@
 
 (in-package #:hyperion/tests)
 
-(def-suite sse :description "Server-Sent Events over a feed (ADR-0016, #117 M2)." :in hyperion)
+(def-suite sse :description "Server-Sent Events over a feed (ADR-0016, pre-publication issue 117 M2)." :in hyperion)
 (in-suite sse)
 
 (defun %sse-lines (record) (uiop:split-string record :separator (string #\Newline)))

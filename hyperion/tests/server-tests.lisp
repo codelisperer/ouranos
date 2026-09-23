@@ -1,4 +1,4 @@
-;;;; server-tests.lisp --- the blocking foreground entry (#124).
+;;;; server-tests.lisp --- the blocking foreground entry (pre-publication issue 124).
 ;;;;
 ;;;; A blocking function is awkward to test by definition: the obvious test starts it and
 ;;;; then has nothing to do but wait. REQUEST-SHUTDOWN is what makes it tractable -- the
@@ -43,7 +43,7 @@
 (defun %srv-await-released (port &key (timeout 10))
   "Block until nothing accepts on PORT. True if it was released, NIL on timeout.
 
-WHY EVERY TEARDOWN WAITS ON THIS (#433). `request-shutdown' returns when the thread that was
+WHY EVERY TEARDOWN WAITS ON THIS (#159). `request-shutdown' returns when the thread that was
 BLOCKED in SERVE-FOREVER has returned; the backend's acceptor giving the socket back is a
 separate event a moment later. A teardown that returns in between leaves a listener winding
 down on a port the OS now considers free -- and `%srv-free-port' hands out a number it has
@@ -106,7 +106,7 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
               ,@body)
          (when ,session-var (ignore-errors (srv:request-shutdown ,session-var)))
          (ignore-errors (sb-thread:join-thread ,thread :timeout 10))
-         ;; AND WAIT FOR THE SOCKET, not just for the thread (#433). Asserted rather than
+         ;; AND WAIT FOR THE SOCKET, not just for the thread (#159). Asserted rather than
          ;; merely awaited: a port still accepting ten seconds after shutdown is a leak, and
          ;; an invariant nothing checks is not an invariant.
          (is (%srv-await-released ,port-var)
@@ -161,7 +161,7 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
       (%srv-await (lambda () session))
       (when session (srv:request-shutdown session))
       (ignore-errors (sb-thread:join-thread thread :timeout 10))
-      ;; The socket, not just the thread (#433) -- these two teardowns never waited.
+      ;; The socket, not just the thread (#159) -- these two teardowns never waited.
       (is (%srv-await-released port)
           "the port was still accepting after teardown -- the next test's free port is not free")
       (let ((text (get-output-stream-string out)))
@@ -183,13 +183,13 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
       (%srv-await (lambda () session))
       (when session (srv:request-shutdown session))
       (ignore-errors (sb-thread:join-thread thread :timeout 10))
-      ;; The socket, not just the thread (#433) -- these two teardowns never waited.
+      ;; The socket, not just the thread (#159) -- these two teardowns never waited.
       (is (%srv-await-released port)
           "the port was still accepting after teardown -- the next test's free port is not free")
       (is (not (search "serving at" (get-output-stream-string out)))))))
 
 
-;;; --- the control for the teardown guard (#433) ------------------------------
+;;; --- the control for the teardown guard (#159) ------------------------------
 
 (test the-release-check-reports-a-port-that-is-still-accepting
   "THE CONTROL FOR EVERY TEARDOWN ABOVE. Each one now asserts `%srv-await-released', and a
@@ -226,7 +226,7 @@ it is the only direction of this guard that can be made to happen on purpose."
 ;;; --- the interrupt seam ----------------------------------------------------
 
 (test signal-installation-goes-through-the-seam-and-is-restored
-  ;; The seam exists so #117 can swap uv_signal_t in with one rebinding. Test it as the
+  ;; The seam exists so pre-publication issue 117 can swap uv_signal_t in with one rebinding. Test it as the
   ;; contract it is: called with a thunk, returns a restorer, restorer is invoked.
   (let ((installed 0) (restored 0) (request-stop nil))
     (%srv-with-globals ((srv:*install-signal-handlers*
@@ -251,7 +251,7 @@ it is the only direction of this guard that can be made to happen on purpose."
         (srv:request-shutdown session)))
     (is (= 0 installed))))
 
-;;; --- #238: refuse a port that is already answering ---------------------------
+;;; --- pre-publication issue 238: refuse a port that is already answering ---------------------------
 ;;;
 ;;; The collision this prevents does not look like a port problem. A dev window opens onto
 ;;; a SIBLING application -- its title, its routes, and a 404 for everything yours added --
@@ -316,7 +316,7 @@ it is the only direction of this guard that can be made to happen on purpose."
            (error () (is-true t "failed for some other reason, which is fine here")))
       (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
-;;; --- the streaming shim, on a real Clack backend (#117 M2) ------------------
+;;; --- the streaming shim, on a real Clack backend (pre-publication issue 117 M2) ------------------
 ;;;
 ;;; THIS IS THE HALF THAT WOULD OTHERWISE GO UNTESTED. hyperion's streaming convention is a
 ;;; FUNCTION in body position -- (status headers (lambda (writer) ...)) -- and the native

@@ -42,7 +42,7 @@ See WRAP-CSRF for the one asymmetry this creates."
 ON BY DEFAULT deliberately, and it governs every body reader rather than only the multipart
 one. A limit an application has to remember to set is one that is not set on the day it
 matters -- and a ceiling on one reader while its neighbour has none is worse than no ceiling
-at all, because the presence of a limit reads as the question having been asked (#211).")
+at all, because the presence of a limit reads as the question having been asked (pre-publication issue 211).")
 
 (define-condition body-too-large (error)
   ((limit :initarg :limit :reader body-too-large-limit)
@@ -88,7 +88,7 @@ reads the stream. Without a cache this is single-use by construction: the stream
 the first reader, and the second call gets NIL. That is a property of the request, not a bug
 here, but it is the reason the cache exists.
 
-BOUNDED BY MAX-SIZE, and this is a denial-of-service fix rather than tidiness (#211). The
+BOUNDED BY MAX-SIZE, and this is a denial-of-service fix rather than tidiness (pre-publication issue 211). The
 previous version allocated exactly what Content-Length claimed, before reading a byte -- so
 an unauthenticated request consisting of a header and no body at all could allocate
 arbitrarily much. On a default SBCL image that is fatal rather than merely wasteful: the
@@ -130,7 +130,7 @@ application without telling it."
 ;;; query strings like ?tag=a&tag=b. Reading only the first value is not a rounding error:
 ;;; it is a plausible answer that happens to be one element of the real one, with no error
 ;;; and no empty value to notice, so a form that records one of three choices looks like a
-;;; working form until somebody checks the data weeks later (#136).
+;;; working form until somebody checks the data weeks later (pre-publication issue 136).
 
 (defun form-alist (body)
   "Every name/value pair of a urlencoded BODY, in order, url-decoded: ((name . value) ...).
@@ -145,7 +145,7 @@ N times.
 A pair with no `=` is skipped, which is what this module has always done -- a bare `?debug`
 reads as absent rather than as the empty string. Preserved deliberately: changing it would
 silently flip every `(when (query-param env \"debug\") ...)` in existing code from false to
-true, which is a bigger change than it looks and is not what #136 is about."
+true, which is a bigger change than it looks and is not what pre-publication issue 136 is about."
   (when body
     (loop for pair in (uiop:split-string body :separator "&")
           for eq = (position #\= pair)
@@ -173,7 +173,7 @@ FIRST, not only: a repeated field yields its remaining values to FORM-PARAMS, wh
 accessor to use when a field can occur more than once.
 
 Why this still takes the first rather than signalling on a repeat, which would have turned
-#136's silent loss into a loud error: the body is CLIENT-supplied. Anyone can post
+pre-publication issue 136's silent loss into a loud error: the body is CLIENT-supplied. Anyone can post
 `name=a&name=b` to any handler, so a reader that signalled on a repeated name would hand
 every form in every app a remote way to raise an unhandled condition. A request parser has
 to be total over whatever arrives. So the guarantee moved into the name and the docstring,
@@ -233,7 +233,7 @@ its own keys -- keeps this domain-neutral."
 ;;; multipart/form-data (RFC 7578)
 ;;; ===========================================================================
 ;;;
-;;; A file upload is the one request shape this module could not express at all (#143).
+;;; A file upload is the one request shape this module could not express at all (pre-publication issue 143).
 ;;; BODY-STRING decodes the body as UTF-8, which corrupts every non-text byte before any
 ;;; parsing could begin, and nothing understood a boundary, a part header or a filename.
 ;;; So `<input type="file">` was not "awkward" -- the bytes were already damaged by the

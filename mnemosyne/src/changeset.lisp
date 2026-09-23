@@ -135,7 +135,7 @@ every application would put the same string-building in each of them, differentl
 
 ACCEPTS A SEQUENCE OF REALS, which is what an embedding is in Lisp, and refuses a
 wrong-length one HERE -- at cast time, where the error can name the schema's width -- rather
-than at insert time, where it is a Postgres error about a column (#258).
+than at insert time, where it is a Postgres error about a column (pre-publication issue 258).
 
 ALSO ACCEPTS A WELL-FORMED LITERAL of the right width, and that is not leniency: `[1,0.5,0]'
 is exactly what Postgres RETURNS for a vector column (measured), so refusing it would make
@@ -180,7 +180,7 @@ from the type not being supported at all."
         ((:boolean :bool) (%to-bool raw))
         ((:uuid) (if (%uuid-string-p raw) (values raw t) (values nil nil)))
         ((:timestamp :date) (values (if (stringp raw) raw (princ-to-string raw)) t))
-        ;; BYTES IN, BYTES OUT, AND NOTHING ELSE (#142). A string is refused rather than
+        ;; BYTES IN, BYTES OUT, AND NOTHING ELSE (pre-publication issue 142). A string is refused rather than
         ;; encoded: choosing an encoding here would be this function guessing what the
         ;; caller meant, and the guess is invisible once the row is written. An app that
         ;; wants to store text as bytes encodes it itself, where the choice is readable.

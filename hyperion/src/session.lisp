@@ -23,7 +23,7 @@ slot. ROTATE-SESSION has to change it IN PLACE, because a rotation that returned
 object would leave every reference already taken -- the one on the request env, the one a
 handler bound at the top of its login -- pointing at a session that is no longer in the
 store. Writes through those references would then vanish without a word, which is the
-same class of silent defect rotation exists to close (#207).
+same class of silent defect rotation exists to close (pre-publication issue 207).
 
 So: the slot is writable, SESSION-ID is a plain reader with NO SETF expander, and nothing
 outside ROTATE-SESSION ever assigns it. `%ID' rather than `ID' so that the generated
@@ -70,7 +70,7 @@ THIS IS NOT SESSION-FIXATION DEFENCE, and it reads exactly as though it were. Th
 KEPT, deliberately: this is a restart of app state for a browser that stays attached, not
 a new credential. Calling it at sign-in leaves the visitor holding the same session id
 after authenticating that they held before -- which is the whole of session fixation, and
-a reviewer skimming the handler sees a reset and moves on (#207).
+a reviewer skimming the handler sees a reset and moves on (pre-publication issue 207).
 
 At a privilege boundary -- sign-in above all -- you want ROTATE-SESSION."
   (bt:with-lock-held ((session-lock session))
@@ -141,7 +141,7 @@ data bag. The in-memory store never needs this; a DB store does."
 ;;; needed "before anything security-sensitive". SBCL's `cl:random' is MT19937, whose
 ;;; internal state is RECOVERABLE from observed output; after that, every future id is
 ;;; known. Seeding does not help, because the attack is on the output. That is a session
-;;; hijacking primitive, and every consuming app inherited it (#95).
+;;; hijacking primitive, and every consuming app inherited it (pre-publication issue 95).
 ;;;
 ;;; The docstring below said "*ID-BITS* of entropy" throughout, which was the more dangerous
 ;;; half: a reader auditing this file found a reassuring number sitting directly above the
@@ -205,7 +205,7 @@ Set-Cookie header value that tells the browser about it.
 CALL THIS AT EVERY PRIVILEGE CHANGE, sign-in above all. An id minted before the visitor
 authenticated is an id an attacker may have chosen and may still hold; rotating it is what
 makes session fixation fail. RESET-SESSION does NOT do this and is the inviting wrong
-answer next door -- see its docstring (#207).
+answer next door -- see its docstring (pre-publication issue 207).
 
 Before this existed, an app wanting rotation had to assemble it from NEW-ID,
 RESTORE-SESSION, STORE-ADD and STORE-DEL -- four calls to get right independently, with
@@ -249,7 +249,7 @@ and store DATA. Returns (values SESSION SET-COOKIE).
     (sign-in! store env :user-id (user-id user))
 
 THE ROTATION CANNOT BE SEPARATED FROM THE PRIVILEGE CHANGE. That is the whole reason this
-exists (#282). ENSURE-SESSION is the function whose NAME sounds like what a sign-in wants
+exists (#120). ENSURE-SESSION is the function whose NAME sounds like what a sign-in wants
 and is the wrong one: it REUSES the id the request arrived with, so the id a visitor held
 before authenticating is the id they hold after. That reads correctly, works, and passes
 tests -- a consuming app shipped exactly it.
@@ -282,13 +282,13 @@ is where cookie policy belongs; this value is for an app driving sessions withou
 ;;; ENSURE-SESSION returns the cookie as a SECOND VALUE, and a second value is a contract
 ;;; nothing enforces. Ignore it and every request mints a fresh session: nothing persists,
 ;;; sign-in does nothing, and every handler still reads correctly on its own. That failure
-;;; is invisible at the call site and cost a consuming app real time (#207).
+;;; is invisible at the call site and cost a consuming app real time (pre-publication issue 207).
 ;;;
 ;;; So the house move rather than a docstring: WRAP-SESSION holds the header itself and the
 ;;; application never touches it. There is no second value to drop because the app is not
 ;;; given one -- the wrong thing is unrepresentable rather than discouraged, as with
-;;; AION/RANDOM shadowing CL:RANDOM (#95) and payments having no operation that accepts a
-;;; card number (#48).
+;;; AION/RANDOM shadowing CL:RANDOM (pre-publication issue 95) and payments having no operation that accepts a
+;;; card number (pre-publication issue 48).
 ;;;
 ;;; It also covers rotation without being told about it: the id is read on the way in and
 ;;; compared on the way out, so a handler that calls ROTATE-SESSION gets the new cookie

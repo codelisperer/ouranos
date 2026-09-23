@@ -2,7 +2,7 @@
 
 **Status:** Accepted *(2026-09-21)*
 **Date:** 2026-09-21
-**Issue:** [#258](https://github.com/codelisperer/ouranos/issues/258). Ruled by the hub after a
+**Issue:** pre-publication issue 258. Ruled by the hub after a
 reversal; see **Provenance**.
 
 ## Context
@@ -39,7 +39,7 @@ content-bearing consumer meets it. That is the request this answers.
 ```
 
 and that declaration is the convention. (The list is quoted because a field spec's option
-values are evaluated — #258. A single input needs no quote: `:derived-from :body`.) mnemosyne adds two companion columns —
+values are evaluated — pre-publication issue 258. A single input needs no quote: `:derived-from :body`.) mnemosyne adds two companion columns —
 `embedding_fingerprint` and `embedding_deriver` — as real fields, so DDL, drift detection and
 casting need no special case for them.
 

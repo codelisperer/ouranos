@@ -102,7 +102,7 @@
       (is (integerp (getf sum :created)))
       (is (equal '(:x) (getf sum :keys))))))
 
-;;; --- rotation: the privilege-boundary primitive (#207) --------------------
+;;; --- rotation: the privilege-boundary primitive (pre-publication issue 207) --------------------
 ;;;
 ;;; The defect these guard is not a missing feature but an INVITING WRONG ANSWER:
 ;;; RESET-SESSION sits where rotation should be, reads like fixation defence, and keeps
@@ -182,7 +182,7 @@
     (is (string= before (session:session-id s)))
     (is (null (session:session-get s :user-id)))))
 
-;;; --- the middleware: a Set-Cookie a handler cannot drop (#207) ------------
+;;; --- the middleware: a Set-Cookie a handler cannot drop (pre-publication issue 207) ------------
 
 (defun %wrapped (store handler &rest options)
   (apply #'session:wrap-session handler store options))
@@ -220,7 +220,7 @@
     (is (= 1 (session:store-count store)))))
 
 (test a-handler-that-ignores-the-session-entirely-still-persists
-  ;; The #207 second defect, from the other side. With ENSURE-SESSION the app must
+  ;; The pre-publication issue 207 second defect, from the other side. With ENSURE-SESSION the app must
   ;; remember to emit a second value; forget, and every request mints afresh while each
   ;; handler still reads correctly. Here the handler is given no opportunity to forget.
   (let* ((store (session:make-memory-store))
@@ -266,7 +266,7 @@
          (app (%wrapped store (lambda (env) (declare (ignore env)) :not-a-response))))
     (signals session:session-cookie-not-attachable (funcall app (%env)))))
 
-;;; --- SIGN-IN!: the privilege change, rotation included (#282) --------------
+;;; --- SIGN-IN!: the privilege change, rotation included (#120) --------------
 ;;;
 ;;; The reported incident, reproduced in both directions. The control below runs the
 ;;; pattern the consuming app actually shipped and shows the donated id surviving; the
@@ -325,7 +325,7 @@
 
 (test sign-in-under-wrap-session-emits-the-cookie-without-the-handler-returning-it
   ;; The middleware detects the id change, so an app never handles the header. The handler
-  ;; here deliberately DISCARDS sign-in!'s second value, which is the mistake #207 is about.
+  ;; here deliberately DISCARDS sign-in!'s second value, which is the mistake pre-publication issue 207 is about.
   (let* ((store (session:make-memory-store))
          (app (lambda (env)
                 (session:sign-in! store env :user-id 99)     ; second value dropped on purpose

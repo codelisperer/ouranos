@@ -481,7 +481,7 @@ The guards are **enter** stages: a refusal halts the chain and the model call ne
 The meter is a **leave** stage, so a refused turn is not billed for the budget it was
 refused by.
 
-**Wire all four counts** (#417). A provider reports base input, output, tokens *read* from a
+**Wire all four counts** (pre-publication issue 417). A provider reports base input, output, tokens *read* from a
 cached prefix and tokens *written* to one, and `input_tokens` is the input that was **not**
 served from cache. A meter given only the first two charges nothing for a cached prefix —
 measured before the fix, a turn reporting `input 10 / output 40 / cache-read 5000` charged
@@ -548,10 +548,10 @@ had the agent written to a store, the credential cost would have been paid anywa
 **Rate limiting** beyond the per-session call cap — a refused caller can ask for another
 session, and stopping that is your minting decision.
 
-The **prompt-injection posture** of #122 that used to be listed here has landed: `agent-means-for`
+The **prompt-injection posture** of #90 that used to be listed here has landed: `agent-means-for`
 assembles the tool table from the caller's authority, `grant-permit-fn` turns a signed grant into
 the predicate it needs, and `act` re-checks at call time, so a means the caller may not use is
-absent rather than filtered by prompt. See §11 for the shape. #122 remains open for its other
+absent rather than filtered by prompt. See §11 for the shape. #90 remains open for its other
 halves (co-hosting postures, service-contract details).
 
 ## 11. Let an agent answer questions from your database (`#400`, ADR-0002)
@@ -609,7 +609,7 @@ halves of the loop: the table the model is shown, and the check at the moment of
 `act` re-checks at call time as well as at advertisement time, because a model can name a tool it
 was never offered — from its training, from an injected instruction, from a stale history.
 
-> **`run-turn` gained `:permit` in #400.** Before that it took none and passed none, so a
+> **`run-turn` gained `:permit` in pre-publication issue 400.** Before that it took none and passed none, so a
 > capability-bearing means — which is what this whole pattern recommends — was invisible and
 > uninvocable through the framework's main entry point, and an app could only reach one by driving
 > `deliberate` and `act` by hand. Found by writing this section's example and watching the turn
@@ -624,7 +624,7 @@ query. A single `query` means taking a structured `(:select …)` is the same pr
 parentheses: data is not the safety property, *a fixed shape with bound values* is.
 
 The reasoning, the rejected alternatives (including a read-only replica with row-level security)
-and the ordering against #372's semantic-search seam are in
+and the ordering against #138's semantic-search seam are in
 [`docs/adr/0002-data-access-through-means.md`](adr/0002-data-access-through-means.md).
 
 ## 12. Run the tests

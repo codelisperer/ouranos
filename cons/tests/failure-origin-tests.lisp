@@ -1,11 +1,11 @@
-;;;; failure-origin-tests.lisp --- where did the gate's failure come from? (#192)
+;;;; failure-origin-tests.lisp --- where did the gate's failure come from? (pre-publication issue 192)
 ;;;;
 ;;;; scripts/failure-origin.lisp decides whether a dead child image failed because THIS TREE
 ;;;; is broken or because a dependency outside the checkout is. That decision is printed in
 ;;;; the gate's verdict, so getting it wrong sends a reader to the wrong file -- which is the
-;;;; entire defect #192 is about, reintroduced one level up.
+;;;; entire defect pre-publication issue 192 is about, reintroduced one level up.
 ;;;;
-;;;; The message below is the REAL one, pasted from the run that produced #192, not a
+;;;; The message below is the REAL one, pasted from the run that produced pre-publication issue 192, not a
 ;;;; plausible reconstruction. A classifier tested only against text someone invented while
 ;;;; writing the classifier tests whether the author is self-consistent.
 ;;;;
@@ -16,7 +16,7 @@
 (in-package #:cons/tests)
 
 (def-suite failure-origin
-  :description "Tree failure vs dependency failure, in the gate's own output (#192)." :in all)
+  :description "Tree failure vs dependency failure, in the gate's own output (pre-publication issue 192)." :in all)
 (in-suite failure-origin)
 
 (defun %load-failure-origin ()
@@ -40,7 +40,7 @@ whole test system down on a tree where the file moved. Same reasoning as %PF."
              ,(concatenate 'string "ouranos-failure-origin:" (string-downcase (string name))))
             ,@args))
 
-;;; The output that produced #192, verbatim.
+;;; The output that produced pre-publication issue 192, verbatim.
 (defparameter +real-dependency-failure+
   "Unhandled LOAD-SYSTEM-DEFINITION-ERROR in thread #<SB-THREAD:THREAD tid=229851 \"main thread\" RUNNING {1200038003}>: Error while trying to load definition for system woo from pathname /home/bcalc/quicklisp/dists/quicklisp/software/woo-20241012-git/woo.asd: Couldn't load #P\"/home/bcalc/.cache/common-lisp/sbcl-2.6.7-linux-x64/home/bcalc/quicklisp/dists/quicklisp/software/cffi-20260101-git/toolchain/static-link.fasl\": file does not exist.
 Backtrace for: #<SB-THREAD:THREAD tid=229851 \"main thread\" RUNNING {1200038003}>
@@ -149,7 +149,7 @@ takes a string for exactly this reason.")
     (is (search "woo.asd" printed) "and name the offending definition")
     (is (search "may be blameless" printed)
         "and say plainly that the named system may not be at fault")
-    (is (search "#192" printed) "and point at the ticket that explains it")
+    (is (search "pre-publication issue 192" printed) "and point at the ticket that explains it")
     ;; the summary line is what appears under VERDICT: FAIL
     (is (search "NOT tree code" summary) "the verdict line must carry it too: ~S" summary)
     (is (search "PRAXEON/WEB" summary)

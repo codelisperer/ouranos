@@ -1,6 +1,6 @@
-;;;; embedding.lisp --- turning text into a vector, as a provider call (#372, #415).
+;;;; embedding.lisp --- turning text into a vector, as a provider call (#138, #150).
 ;;;;
-;;;; praxeon owns provider calls. #415 states the reason a consuming app must not make this
+;;;; praxeon owns provider calls. #150 states the reason a consuming app must not make this
 ;;;; one itself: "no consuming app should be making one directly, and every app that does
 ;;;; will make it differently."
 ;;;;
@@ -27,7 +27,7 @@
 ;;;; configuration is one variable, the model -- and that is not duplication, because
 ;;;; `text-embedding-3-small' and a chat model are necessarily different values.
 ;;;;
-;;;; THE DIMENSION IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE CODE (#415): "a schema
+;;;; THE DIMENSION IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE CODE (#150): "a schema
 ;;;; hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small". So a provider
 ;;;; ADVERTISES its width, and a schema declaring a different one is a configuration error
 ;;;; that can be named at startup. mnemosyne refuses the wrong width again at cast time and
@@ -35,13 +35,13 @@
 ;;;; that caused it.
 ;;;;
 ;;;; RESOLUTION HAPPENS ON THE CALLING THREAD. `EMBED' TAKES A PROVIDER AND NEVER RESOLVES
-;;;; ONE. `make-embedding-provider-from-env' reads `*provider-role*', a special, and #430
+;;;; ONE. `make-embedding-provider-from-env' reads `*provider-role*', a special, and #158
 ;;;; records that nothing currently resolves a provider across a thread boundary -- latent
 ;;;; rather than live. Memory writes during a fanned-out turn are precisely where that would
 ;;;; stop being latent: inside a worker the role level falls through to impl and then to
 ;;;; shared, which is not an error, it is the WRONG MODEL, quietly, for that call -- and it
 ;;;; surfaces later as a width that does not match the column. Resolve once where the role
-;;;; is bound and pass the provider in, and #430 cannot reach this seam at all.
+;;;; is bound and pass the provider in, and #158 cannot reach this seam at all.
 
 (in-package #:praxeon/llm)
 
@@ -57,7 +57,7 @@ vendor rather than about the protocol."))
 (defgeneric embed (provider text)
   (:documentation "TEXT as a vector of DOUBLE-FLOATs of length (EMBEDDING-DIMENSIONS PROVIDER).
 
-PROVIDER is passed, never resolved here -- see the note on #430 at the top of this file."))
+PROVIDER is passed, never resolved here -- see the note on #158 at the top of this file."))
 
 (defgeneric embed-batch (provider texts)
   (:documentation "A list of vectors, one per text in TEXTS, in order.
@@ -67,7 +67,7 @@ results back up with their inputs positionally, and a provider that returned the
 completion order would corrupt every caller silently."))
 
 (defgeneric embedding-dimensions (provider)
-  (:documentation "The width of the vectors PROVIDER produces. A deployment fact (#415)."))
+  (:documentation "The width of the vectors PROVIDER produces. A deployment fact (#150)."))
 
 (defgeneric embedding-model-of (provider)
   (:documentation "The model id PROVIDER embeds with, or NIL. The counterpart of MODEL-OF."))
@@ -219,7 +219,7 @@ complete, or PRAXEON_EMBED_IMPL something that cannot embed.")
 (defun make-embedding-provider-from-env (&key role)
   "Construct the embedding provider for ROLE, or the default when ROLE is NIL.
 
-CALL THIS ON THE THREAD THAT OWNS THE ROLE. It reads `*provider-role*', and #430 records
+CALL THIS ON THE THREAD THAT OWNS THE ROLE. It reads `*provider-role*', and #158 records
 that a resolution inside a worker thread falls through to the shared level without erroring
 -- the wrong model, quietly. Resolve here and pass the provider to EMBED."
   (let* ((*provider-role* (and role (string role)))

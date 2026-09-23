@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# staleness.sh --- say, in one line, how far behind this checkout is (#391).
+# staleness.sh --- say, in one line, how far behind this checkout is (pre-publication issue 391).
 #
 #   scripts/staleness.sh          print the line
 #   . scripts/staleness.sh        define staleness_line, print nothing
@@ -19,7 +19,7 @@
 # checkout is current" and "this call site never had the banner wired". A line that is
 # always present makes its absence meaningful and its content ambient, which is the only
 # property that helps someone who was not already suspicious. Same argument as
-# verify-tree's NOT COVERED block (#385), applied to the proposal that came after it.
+# verify-tree's NOT COVERED block (pre-publication issue 385), applied to the proposal that came after it.
 #
 # IT NEVER FETCHES, deliberately. A network call here would make a fast local command
 # depend on GitHub being up, and could hang. `origin/main' is a local ref and FETCH_HEAD's

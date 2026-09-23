@@ -1,29 +1,29 @@
-# windows-arm64-probe.yml --- answer #145, on a genuine ARM64 Windows, in one run.
+# windows-arm64-probe.yml --- answer pre-publication issue 145, on a genuine ARM64 Windows, in one run.
 #
 # This is an INSTRUMENT, not a release job. It builds nothing anyone keeps; it produces
-# MEASUREMENTS. #145 is not "ARM64 is broken" -- we do not know whether ARM64 is broken,
+# MEASUREMENTS. pre-publication issue 145 is not "ARM64 is broken" -- we do not know whether ARM64 is broken,
 # and that is the whole problem. Every open item on it is an observation no x86-64 machine
 # can make, plus three failures predicted by READING code, which stays a guess until a
 # machine says otherwise.
 #
 # So: no assertions and no early exit. Every step is `continue-on-error` and every step
 # PRINTS what it found, because a probe that stops at the first failure answers one
-# question per run and #145 has seven. One run, seven answers, written to the job summary
+# question per run and pre-publication issue 145 has seven. One run, seven answers, written to the job summary
 # so the verdict is readable without opening a log.
 #
 # Deliberately NOT a row in desktop-release.yml. That matrix is the set of platforms we
 # BUILD, and `*verified-platforms*` in scripts/build-desktop-app.lisp is diffed against it
-# -- adding windows-arm64 there would declare it verified, which is the exact claim #178
+# -- adding windows-arm64 there would declare it verified, which is the exact claim pre-publication PR 178
 # exists to refuse. The matrix row is what this probe EARNS, not what it starts from.
 #
 # When it comes back green: move `windows-arm64` into *verified-platforms*, add the row to
-# desktop-release.yml, tick #145's checklist, and delete this file. It has no other job.
+# desktop-release.yml, tick pre-publication issue 145's checklist, and delete this file. It has no other job.
 #
 # Runner note: `windows-11-arm` became available to PRIVATE repositories on 2026-01-29 and
 # counts against the plan's included minutes (2 vCPU in private repos, 4 in public). The
 # issue text predates that and says CI cannot close this. It can now.
 
-name: windows-arm64 probe (#145)
+name: windows-arm64 probe (pre-publication issue 145)
 
 on:
   workflow_dispatch:
@@ -78,7 +78,7 @@ jobs:
           $md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       # -- 0b. What is even on this image? -----------------------------------------------
-      # NOT on #145's list, and it should be: desktop-release.yml has EIGHT `shell: bash`
+      # NOT on pre-publication issue 145's list, and it should be: desktop-release.yml has EIGHT `shell: bash`
       # steps. Git Bash ships on the x86-64 Windows images; whether it is on the ARM64 one
       # is an assumption nobody has checked, and if it is absent the matrix row fails for a
       # reason that has nothing whatever to do with ARM64.
@@ -226,7 +226,7 @@ jobs:
                     --entry hyperion/examples/coalton-repl:main `
                     --name coalton-repl --version 0.0.0-probe 2>&1 | Out-String)
           $code = $LASTEXITCODE
-          "exit code: $code   (2 = the #178 guard fired, which is CORRECT and expected here)"
+          "exit code: $code   (2 = the pre-publication PR 178 guard fired, which is CORRECT and expected here)"
           $out
           '## 4. Checklist 3a -- SBCL''s own report', '', '```', "exit $code", $out.Trim(), '```', '' |
             Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
@@ -238,7 +238,7 @@ jobs:
           OURANOS_NO_WARM: "1"
         run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 
-      # -- 6. Checklist 3c -- arm64 libuv. This is #128 again, one architecture over. -----
+      # -- 6. Checklist 3c -- arm64 libuv. This is pre-publication issue 128 again, one architecture over. -----
       - name: 6. Checklist 3c -- build libuv for arm64
         continue-on-error: true
         shell: pwsh
@@ -276,14 +276,14 @@ jobs:
           $name = switch ($machine) { 0xAA64 { 'ARM64 (AA64)' } 0x8664 { 'x64' } 0x014C { 'x86' } default { "unknown 0x{0:X4}" -f $machine } }
           "PE machine field: 0x{0:X4}  = {1}" -f $machine, $name
           $isArm = ($machine -eq 0xAA64)
-          $verdict = if ($isArm) { 'AA64 -- genuinely arm64' } else { "$name -- NOT arm64: this is the false pass #145 warned about" }
+          $verdict = if ($isArm) { 'AA64 -- genuinely arm64' } else { "$name -- NOT arm64: this is the false pass pre-publication issue 145 warned about" }
           "VERDICT: $verdict"
           '## 7. Checklist 3b -- hyperion-view', '', "PE machine = ``0x$('{0:X4}' -f $machine)`` ($name)", '', "**$verdict**", '' |
             Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       # -- 8. End to end, with the override the guard was designed for --------------------
       # OURANOS_ALLOW_UNVERIFIED_PLATFORM is for exactly this person doing exactly this
-      # job: the one bringing a new platform up. Affirmative-only since #178, so "1" is the
+      # job: the one bringing a new platform up. Affirmative-only since pre-publication PR 178, so "1" is the
       # spelling that works -- an empty value would leave the guard armed on purpose.
       - name: 8. End to end -- dump the app image (override in effect)
         continue-on-error: true

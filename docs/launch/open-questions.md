@@ -26,47 +26,47 @@ directly for the launch).
 
 | Issue | Evidence |
 |---|---|
-| [#1](https://github.com/codelisperer/ouranos/issues/1) aion/log adoption across frameworks | `26ce870 feat(logging): adopt aion/log across hyperion, mnemosyne, praxeon (#1)` |
-| [#3](https://github.com/codelisperer/ouranos/issues/3) App-owned migration convention | `db1ccae docs: the app-owned migration convention (#3)` |
-| [#83](https://github.com/codelisperer/ouranos/issues/83) First-run DB bring-up | `728b69d feat(hyperion/examples): demonstrate first-run DB bring-up patterns (#83)` |
+| pre-publication issue 1 aion/log adoption across frameworks | `26ce870 feat(logging): adopt aion/log across hyperion, mnemosyne, praxeon (#1)` |
+| pre-publication issue 3 App-owned migration convention | `db1ccae docs: the app-owned migration convention (#3)` |
+| pre-publication issue 83 First-run DB bring-up | `728b69d feat(hyperion/examples): demonstrate first-run DB bring-up patterns (#83)` |
 
 ### Strong candidates — the code exists, the issue reads as unstarted
 
 | Issue | What is already there |
 |---|---|
-| [#24](https://github.com/codelisperer/ouranos/issues/24) Headless Coalton eval + type introspection (`epic+design+research`) | `cons/src/coalton-repl.lisp` — sessions, `eval-input`, expression-vs-definition, inferred types. The engine is **built**. |
-| [#31](https://github.com/codelisperer/ouranos/issues/31) Studio surface + CL-native desktop | The desktop half is **done** — ADR-0008/0010, `hyperion/src/desktop.lisp`, `hyperion-view/`, NSIS installers, `desktop-release.yml`. Only *Studio* remains. |
-| [#61](https://github.com/codelisperer/ouranos/issues/61) Praxeon "Studio" DX | The issue body itself lists what has shipped: `studio.lisp`, `praxeon/event`, `praxeon/web`. Four checkboxes remain out of a large scope. |
-| [#21](https://github.com/codelisperer/ouranos/issues/21) Task runner over ASDF via `cons.lisp` | Every framework ships a `cons.lisp` spec and `cons <target>` drives it. |
-| [#27](https://github.com/codelisperer/ouranos/issues/27) Hot-reload dev loop | `hyperion/src/dev.lisp`, and the poller has been through at least two fix commits. |
-| [#28](https://github.com/codelisperer/ouranos/issues/28) All client JS via Parenscript | `hyperion/src/js.lisp`; the coalton-repl app is written this way. |
-| [#74](https://github.com/codelisperer/ouranos/issues/74) Per-OS installers | Windows NSIS exists (`scripts/installers/windows.nsi`, WebView2 bootstrapper). `.dmg`/AppImage unclear — likely *partial*, not done. |
-| [#64](https://github.com/codelisperer/ouranos/issues/64) Typesafe HTMX "spun out to its own web-framework repo" | Reads as a pre-monorepo artifact. Hyperion **is** the spun-out web framework. Probably strike-or-merge into [#26](https://github.com/codelisperer/ouranos/issues/26). |
-| [#12](https://github.com/codelisperer/ouranos/issues/12) Typed CEG ADT | Done on `work/elenchon-design`; closes on merge. |
-| [#8](https://github.com/codelisperer/ouranos/issues/8) Lazy-seq, **Monoid**, itertools | The `Monoid` third was never a real gap — Coalton has it. Already corrected in-issue. |
+| [#36](https://github.com/codelisperer/ouranos/issues/36) Headless Coalton eval + type introspection (`epic+design+research`) | `cons/src/coalton-repl.lisp` — sessions, `eval-input`, expression-vs-definition, inferred types. The engine is **built**. |
+| [#43](https://github.com/codelisperer/ouranos/issues/43) Studio surface + CL-native desktop | The desktop half is **done** — ADR-0008/0010, `hyperion/src/desktop.lisp`, `hyperion-view/`, NSIS installers, `desktop-release.yml`. Only *Studio* remains. |
+| [#63](https://github.com/codelisperer/ouranos/issues/63) Praxeon "Studio" DX | The issue body itself lists what has shipped: `studio.lisp`, `praxeon/event`, `praxeon/web`. Four checkboxes remain out of a large scope. |
+| [#33](https://github.com/codelisperer/ouranos/issues/33) Task runner over ASDF via `cons.lisp` | Every framework ships a `cons.lisp` spec and `cons <target>` drives it. |
+| [#39](https://github.com/codelisperer/ouranos/issues/39) Hot-reload dev loop | `hyperion/src/dev.lisp`, and the poller has been through at least two fix commits. |
+| [#40](https://github.com/codelisperer/ouranos/issues/40) All client JS via Parenscript | `hyperion/src/js.lisp`; the coalton-repl app is written this way. |
+| [#72](https://github.com/codelisperer/ouranos/issues/72) Per-OS installers | Windows NSIS exists (`scripts/installers/windows.nsi`, WebView2 bootstrapper). `.dmg`/AppImage unclear — likely *partial*, not done. |
+| pre-publication issue 64 Typesafe HTMX "spun out to its own web-framework repo" | Reads as a pre-monorepo artifact. Hyperion **is** the spun-out web framework. Probably strike-or-merge into [#38](https://github.com/codelisperer/ouranos/issues/38). |
+| pre-publication issue 12 Typed CEG ADT | Done on `work/elenchon-design`; closes on merge. |
+| [#23](https://github.com/codelisperer/ouranos/issues/23) Lazy-seq, **Monoid**, itertools | The `Monoid` third was never a real gap — Coalton has it. Already corrected in-issue. |
 
 ### ✅ Pass 1 was run on 2026-07-29 — and it found something about triage itself
 
-**Closed (4):** [#1](https://github.com/codelisperer/ouranos/issues/1) ·
-[#3](https://github.com/codelisperer/ouranos/issues/3) ·
-[#83](https://github.com/codelisperer/ouranos/issues/83) ·
-[#64](https://github.com/codelisperer/ouranos/issues/64) (stale framing; its four design items
-moved verbatim into [#26](https://github.com/codelisperer/ouranos/issues/26), where they
+**Closed (4):** pre-publication issue 1 ·
+pre-publication issue 3 ·
+pre-publication issue 83 ·
+pre-publication issue 64 (stale framing; its four design items
+moved verbatim into [#38](https://github.com/codelisperer/ouranos/issues/38), where they
 belong — Hyperion *is* the "spun out web framework" the title imagined).
 
 **Trimmed (7)** with an explicit STATUS block so the tracker stops overstating remaining work:
-[#8](https://github.com/codelisperer/ouranos/issues/8) ·
-[#21](https://github.com/codelisperer/ouranos/issues/21) ·
-[#24](https://github.com/codelisperer/ouranos/issues/24) ·
-[#31](https://github.com/codelisperer/ouranos/issues/31) ·
-[#61](https://github.com/codelisperer/ouranos/issues/61) ·
-[#74](https://github.com/codelisperer/ouranos/issues/74) ·
-[#105](https://github.com/codelisperer/ouranos/issues/105).
+[#23](https://github.com/codelisperer/ouranos/issues/23) ·
+[#33](https://github.com/codelisperer/ouranos/issues/33) ·
+[#36](https://github.com/codelisperer/ouranos/issues/36) ·
+[#43](https://github.com/codelisperer/ouranos/issues/43) ·
+[#63](https://github.com/codelisperer/ouranos/issues/63) ·
+[#72](https://github.com/codelisperer/ouranos/issues/72) ·
+[#83](https://github.com/codelisperer/ouranos/issues/83).
 
 **The lesson, which is worth more than the cleanup:** the list above predicted *eight* closes.
 Only four survived checking, because **"the code exists" is not the same as "the issue is
-done."** #21, #27, and #28 all have working implementations and real unchecked scope
-remaining — #27's file-notify item is a genuine gap that #107 (libuv) would fill. Closing
+done."** #33, #39, and #40 all have working implementations and real unchecked scope
+remaining — #39's file-notify item is a genuine gap that #84 (libuv) would fill. Closing
 them on filename evidence would have destroyed real backlog.
 
 So the rule for future passes: **read the checklist, not the source tree.** An issue with no
@@ -87,16 +87,16 @@ ecosystem answer.
 
 ### Cluster A — "AI-friendliness" · **this is the value proposition**
 
-[#11](https://github.com/codelisperer/ouranos/issues/11) (aion) ·
-[#18](https://github.com/codelisperer/ouranos/issues/18) (elenchon, the second half) ·
-[#69](https://github.com/codelisperer/ouranos/issues/69) (praxeon) ·
-[#30](https://github.com/codelisperer/ouranos/issues/30) (hyperion, partly)
+[#25](https://github.com/codelisperer/ouranos/issues/25) (aion) ·
+[#31](https://github.com/codelisperer/ouranos/issues/31) (elenchon, the second half) ·
+[#70](https://github.com/codelisperer/ouranos/issues/70) (praxeon) ·
+[#42](https://github.com/codelisperer/ouranos/issues/42) (hyperion, partly)
 
 Four frameworks each independently planning "keep the docs LLM-consumable." Meanwhile the
 README's central claim is that **it is AI's turn to put CL back on the map** — this *is*
 the differentiator, and it is currently the most fragmented thing in the tree.
 
-Praxeon's [#69](https://github.com/codelisperer/ouranos/issues/69) is much the most
+Praxeon's [#70](https://github.com/codelisperer/ouranos/issues/70) is much the most
 developed thinking (one vocabulary enforced across names/docstrings/skills; docstrings
 stating contracts; executable examples as the real spec; skills changing in the same
 commit as the API). **That should be promoted to an ecosystem standard**, not left as one
@@ -107,12 +107,12 @@ per-framework as mechanical work. Highest launch leverage of anything on this pa
 
 ### Cluster B — Bitemporality, designed twice
 
-[#43](https://github.com/codelisperer/ouranos/issues/43) (mnemosyne: valid-time /
-transaction-time API) · [#56](https://github.com/codelisperer/ouranos/issues/56) (praxeon:
+[#54](https://github.com/codelisperer/ouranos/issues/54) (mnemosyne: valid-time /
+transaction-time API) · [#60](https://github.com/codelisperer/ouranos/issues/60) (praxeon:
 Kairos, "the bitemporal context engine")
 
 Kairos's own issue says the `valid-time`/`tx-time` stamps already in `context.lisp` are
-"the seed of a bitemporal knowledge graph." mnemosyne #43 is designing exactly those two
+"the seed of a bitemporal knowledge graph." mnemosyne #54 is designing exactly those two
 axes for persistence. **Two independent bitemporal models in one ecosystem is a genuine
 architectural risk** — and an avoidable one, since praxeon sits to the *right* of
 mnemosyne in the DAG and can simply consume its model.
@@ -122,9 +122,9 @@ first consumer. Do not let these diverge.
 
 ### Cluster C — Two products called "Studio"
 
-[#31](https://github.com/codelisperer/ouranos/issues/31) (hyperion: live component
+[#43](https://github.com/codelisperer/ouranos/issues/43) (hyperion: live component
 editing, render preview, hot-reload control) ·
-[#61](https://github.com/codelisperer/ouranos/issues/61) (praxeon: agent inspection,
+[#63](https://github.com/codelisperer/ouranos/issues/63) (praxeon: agent inspection,
 memory config, workflow visualization)
 
 These are **different products sharing a name**, which is its own decision. Either they
@@ -136,8 +136,8 @@ Studio would be a documentation problem forever.
 
 ### Cluster D — The pure-CL face, as a house convention
 
-[#4](https://github.com/codelisperer/ouranos/issues/4) (aion) ·
-[#17](https://github.com/codelisperer/ouranos/issues/17) (elenchon)
+[#19](https://github.com/codelisperer/ouranos/issues/19) (aion) ·
+[#30](https://github.com/codelisperer/ouranos/issues/30) (elenchon)
 
 Both are "expose the typed core to CL users who never touch Coalton." That is a
 *convention*, not two designs — and `docs/coalton-patterns.md` §5 already carries half of
@@ -155,9 +155,9 @@ doc, then applied per framework.
 
 After striking and merging, what remains is not a flat list. **Mnemosyne gates most of the
 tree, and it is the least-settled framework** — six open research questions
-([#41](https://github.com/codelisperer/ouranos/issues/41)–[#46](https://github.com/codelisperer/ouranos/issues/46))
-plus two on migrations ([#38](https://github.com/codelisperer/ouranos/issues/38),
-[#40](https://github.com/codelisperer/ouranos/issues/40)).
+([#52](https://github.com/codelisperer/ouranos/issues/52)–[#57](https://github.com/codelisperer/ouranos/issues/57))
+plus two on migrations ([#49](https://github.com/codelisperer/ouranos/issues/49),
+[#51](https://github.com/codelisperer/ouranos/issues/51)).
 
 Everything downstream waits on it:
 
@@ -205,12 +205,12 @@ typed-core, arm64, `.dmg`) · **any** (no platform dependency).
 
 | # | Issue | Who | Client |
 |---|---|---|---|
-| [85](https://github.com/codelisperer/ouranos/issues/85) | LICENSE files — no LICENSE means all-rights-reserved regardless of `.asd` metadata | any | |
-| [90](https://github.com/codelisperer/ouranos/issues/90) | Confidentiality sweep — must precede the visibility flip; commits and issues can't be redacted after | mac | **yes** |
-| [91](https://github.com/codelisperer/ouranos/issues/91) | Settle release scope — **maintainer**, not an AI task; everything sequences off it | — | |
-| [86](https://github.com/codelisperer/ouranos/issues/86) | aion's "Coalton-first" claim — the first thing a skeptic checks, on the framework carrying the differentiator | mac | |
-| [89](https://github.com/codelisperer/ouranos/issues/89) | Repo description + maturity badges — the description is still a placeholder naming only Hyperion | any | |
-| [84](https://github.com/codelisperer/ouranos/issues/84) | coalton-repl input box scrolls away — trivial, except it is a visible bug *in the launch artifact* | any | |
+| pre-publication issue 85 | LICENSE files — no LICENSE means all-rights-reserved regardless of `.asd` metadata | any | |
+| pre-publication issue 90 | Confidentiality sweep — must precede the visibility flip; commits and issues can't be redacted after | mac | **yes** |
+| pre-publication issue 91 | Settle release scope — **maintainer**, not an AI task; everything sequences off it | — | |
+| pre-publication issue 86 | aion's "Coalton-first" claim — the first thing a skeptic checks, on the framework carrying the differentiator | mac | |
+| pre-publication issue 89 | Repo description + maturity badges — the description is still a placeholder naming only Hyperion | any | |
+| pre-publication issue 84 | coalton-repl input box scrolls away — trivial, except it is a visible bug *in the launch artifact* | any | |
 
 Four of six are hours of work.
 
@@ -218,37 +218,37 @@ Four of six are hours of work.
 
 | # | Issue | Who |
 |---|---|---|
-| [103](https://github.com/codelisperer/ouranos/issues/103) | AI-friendliness standard — **the value prop**; wants deciding before the release | mac |
-| [109](https://github.com/codelisperer/ouranos/issues/109) | Collaboration teachable — the other half of the pitch; `working-with-ai.md` mostly does it | any |
-| [87](https://github.com/codelisperer/ouranos/issues/87) | CI matrix — the evidence for "works everywhere", and the only native-amd64 gate | linux |
-| [88](https://github.com/codelisperer/ouranos/issues/88) | Clean-machine bootstrap — the first command anyone runs | all three |
-| [74](https://github.com/codelisperer/ouranos/issues/74) | `.dmg` + AppImage — people must be able to install the demo | mac / linux |
-| [102](https://github.com/codelisperer/ouranos/issues/102) | Triage — visitors read the tracker | mac |
-| [79](https://github.com/codelisperer/ouranos/issues/79) · [80](https://github.com/codelisperer/ouranos/issues/80) | Demo polish: window icon; REPL sees the invoking project | win / any |
-| [98](https://github.com/codelisperer/ouranos/issues/98) | Release-mode builds — needed the moment you make a performance claim, and after the 44 ms find you will | any |
-| [94](https://github.com/codelisperer/ouranos/issues/94) | Native/FFI bundling — **downgraded by ADR-0011** (libev dropped); verify before treating as P1 | linux + win |
-| [101](https://github.com/codelisperer/ouranos/issues/101) | Register codelisperer.org — gates the site, not the announcement | maintainer |
+| [81](https://github.com/codelisperer/ouranos/issues/81) | AI-friendliness standard — **the value prop**; wants deciding before the release | mac |
+| pre-publication issue 109 | Collaboration teachable — the other half of the pitch; `working-with-ai.md` mostly does it | any |
+| pre-publication issue 87 | CI matrix — the evidence for "works everywhere", and the only native-amd64 gate | linux |
+| pre-publication issue 88 | Clean-machine bootstrap — the first command anyone runs | all three |
+| [72](https://github.com/codelisperer/ouranos/issues/72) | `.dmg` + AppImage — people must be able to install the demo | mac / linux |
+| pre-publication issue 102 | Triage — visitors read the tracker | mac |
+| [74](https://github.com/codelisperer/ouranos/issues/74) · [75](https://github.com/codelisperer/ouranos/issues/75) | Demo polish: window icon; REPL sees the invoking project | win / any |
+| pre-publication issue 98 | Release-mode builds — needed the moment you make a performance claim, and after the 44 ms find you will | any |
+| [78](https://github.com/codelisperer/ouranos/issues/78) | Native/FFI bundling — **downgraded by ADR-0011** (libev dropped); verify before treating as P1 | linux + win |
+| pre-publication issue 101 | Register codelisperer.org — gates the site, not the announcement | maintainer |
 
 ### P2 / P3
 
 Everything else is post-announcement. Strategically important within P2 but *not*
-launch-blocking: [#42](https://github.com/codelisperer/ouranos/issues/42) (mnemosyne backend
+launch-blocking: [#53](https://github.com/codelisperer/ouranos/issues/53) (mnemosyne backend
 protocol — the critical path for auth, Kairos, and the company site) and
-[#95](https://github.com/codelisperer/ouranos/issues/95) (CSPRNG — a real security defect).
+pre-publication issue 95 (CSPRNG — a real security defect).
 
 **Park explicitly, with a note in the issue:**
-[#33](https://github.com/codelisperer/ouranos/issues/33) ·
-[#36](https://github.com/codelisperer/ouranos/issues/36) ·
-[#29](https://github.com/codelisperer/ouranos/issues/29) ·
-[#46](https://github.com/codelisperer/ouranos/issues/46) ·
-[#22](https://github.com/codelisperer/ouranos/issues/22)/[#23](https://github.com/codelisperer/ouranos/issues/23) ·
-[#47](https://github.com/codelisperer/ouranos/issues/47)–[#51](https://github.com/codelisperer/ouranos/issues/51) (payments — nothing is being sold) ·
-[#108](https://github.com/codelisperer/ouranos/issues/108) (YottaDB — premature before #42) ·
-[#107](https://github.com/codelisperer/ouranos/issues/107) (libuv — decide *after* the release).
+[#44](https://github.com/codelisperer/ouranos/issues/44) ·
+[#47](https://github.com/codelisperer/ouranos/issues/47) ·
+[#41](https://github.com/codelisperer/ouranos/issues/41) ·
+[#57](https://github.com/codelisperer/ouranos/issues/57) ·
+[#34](https://github.com/codelisperer/ouranos/issues/34)/[#35](https://github.com/codelisperer/ouranos/issues/35) ·
+pre-publication issue 47–[#58](https://github.com/codelisperer/ouranos/issues/58) (payments — nothing is being sold) ·
+[#85](https://github.com/codelisperer/ouranos/issues/85) (YottaDB — premature before #53) ·
+[#84](https://github.com/codelisperer/ouranos/issues/84) (libuv — decide *after* the release).
 
 ### The client-app column is thinner than expected
 
-Only [#83](https://github.com/codelisperer/ouranos/issues/83) was genuinely app-filed and
+Only pre-publication issue 83 was genuinely app-filed and
 open, and it is now closed. The app's real historical needs — RTL i18n, static caching,
 `db-repl`, the hot-reload log flood — are **all already closed**. Its live dependencies are
 mnemosyne persistence and auth, both P2. **Client work is not competing with go-live**, which
@@ -261,20 +261,20 @@ Sequenced so each one unblocks the next. Times are for focused work, not calenda
 | # | Session | Output | Why here |
 |---|---|---|---|
 | **1** | **Triage** (pass 1) — half a day | ~15 issues closed or trimmed | Everything downstream is cheaper against an honest list |
-| **2** | **AI-friendliness standard** (cluster A) — one sitting | An ecosystem doc; #11/#18/#69/#30 become mechanical | It is the value prop, and the launch needs it before code |
-| **3** | **Mnemosyne #42 → #41 → #43** — the big one, two or three sittings | ADRs; unblocks Kairos, the CMS, auth, the case studies | The critical path. Nothing else here is as blocking |
-| **4** | **Bitemporal + Studio + CL-face** (clusters B, C, D) — one sitting | Three decisions, two of them mostly implied by session 3 | Cheap once #43 is settled |
-| **5** | **Release scope** ([#91](https://github.com/codelisperer/ouranos/issues/91)) — one sitting | The decision, into the ECOSYSTEM.md log | Wants sessions 1–2 done so it decides against reality |
+| **2** | **AI-friendliness standard** (cluster A) — one sitting | An ecosystem doc; #25/#31/#70/#42 become mechanical | It is the value prop, and the launch needs it before code |
+| **3** | **Mnemosyne #53 → #52 → #54** — the big one, two or three sittings | ADRs; unblocks Kairos, the CMS, auth, the case studies | The critical path. Nothing else here is as blocking |
+| **4** | **Bitemporal + Studio + CL-face** (clusters B, C, D) — one sitting | Three decisions, two of them mostly implied by session 3 | Cheap once #54 is settled |
+| **5** | **Release scope** (pre-publication issue 91) — one sitting | The decision, into the ECOSYSTEM.md log | Wants sessions 1–2 done so it decides against reality |
 
 **Explicitly deferred, and say so in the issues** — payments
-([#48](https://github.com/codelisperer/ouranos/issues/48)–[#51](https://github.com/codelisperer/ouranos/issues/51),
+(pre-publication issue 48–[#58](https://github.com/codelisperer/ouranos/issues/58),
 nothing is being sold yet), native reach to TypeScript/Dart
-([#33](https://github.com/codelisperer/ouranos/issues/33)), mobile
-([#36](https://github.com/codelisperer/ouranos/issues/36)), the CSS DSL
-([#29](https://github.com/codelisperer/ouranos/issues/29)), cons distribution
-([#22](https://github.com/codelisperer/ouranos/issues/22),
-[#23](https://github.com/codelisperer/ouranos/issues/23)), EDN interop
-([#46](https://github.com/codelisperer/ouranos/issues/46)). A deferred question you have
+([#44](https://github.com/codelisperer/ouranos/issues/44)), mobile
+([#47](https://github.com/codelisperer/ouranos/issues/47)), the CSS DSL
+([#41](https://github.com/codelisperer/ouranos/issues/41)), cons distribution
+([#34](https://github.com/codelisperer/ouranos/issues/34),
+[#35](https://github.com/codelisperer/ouranos/issues/35)), EDN interop
+([#57](https://github.com/codelisperer/ouranos/issues/57)). A deferred question you have
 *decided* to defer costs nothing; an open one you keep re-reading costs every time.
 
 ---

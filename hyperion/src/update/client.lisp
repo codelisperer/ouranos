@@ -1,4 +1,4 @@
-;;;; client.lisp --- the effectful half: fetch, verify, decide (#76).
+;;;; client.lisp --- the effectful half: fetch, verify, decide (pre-publication issue 76).
 ;;;;
 ;;;; THE ORDER OF OPERATIONS IN `check-for-update' IS THE SECURITY DESIGN, and it is the
 ;;;; one thing in this file a refactor must not tidy:
@@ -124,7 +124,7 @@ a domain someone else may come to own. The release build supplies it."))
    "GitHub Releases. Zero infrastructure, and PUBLIC REPOSITORIES ONLY -- a private repo
 serves release assets only to an authenticated request, and an installed application cannot
 hold a token safely. A product whose source is private publishes its assets to a separate
-public repository (#332); this is not a limitation to work around, it is the reason that
+public repository (pre-publication issue 332); this is not a limitation to work around, it is the reason that
 repository exists.
 
 THE BASE URL IS A RELEASE, AND WHICH ONE MATTERS.
@@ -178,7 +178,7 @@ link alongside the versioned manifest. Costs pennies."))
 ;;; can see a producer/consumer disagreement. `update-manifest.lisp' already ends by
 ;;; verifying every signature it wrote -- with its OWN reader, in its own file -- which can
 ;;; confirm only that the producer is self-consistent. It was self-consistent through all
-;;; three of the defects this backend was added to catch: the platform key (#206), the
+;;; three of the defects this backend was added to catch: the platform key (pre-publication issue 206), the
 ;;; `.sig' encoding, and the packaging field. A self-check that looks conscientious is worse
 ;;; than none, because it occupies the slot where the real check would go.
 
@@ -251,10 +251,10 @@ deployment configuration.")
 ;;; `aion/http-client' decoded every body to a string and kept nothing else -- fatal here
 ;;; twice over: the manifest signature is over the exact bytes of a file, so a decode and
 ;;; re-encode invalidates it, and an NSIS installer decoded as UTF-8 is not an installer.
-;;; Its own docstring said it was a stopgap and that #223 belonged to the lane that owns
+;;; Its own docstring said it was a stopgap and that pre-publication issue 223 belonged to the lane that owns
 ;;; that client.
 ;;;
-;;; #223 landed (0c65c72). The shared client now carries the octets that arrived and derives
+;;; pre-publication issue 223 landed (0c65c72). The shared client now carries the octets that arrived and derives
 ;;; the string from them, and -- arrived at independently, on the same reasoning -- captures
 ;;; a non-2xx as a RESPONSE instead of letting dexador signal it. Both halves of the local
 ;;; workaround are now the shared client's documented behaviour, so keeping it would leave
@@ -279,7 +279,7 @@ than failures. Any other non-2xx is a source that is behaving unexpectedly and s
             ;; invisible until it is catastrophic: BODY is those same bytes decoded as
             ;; UTF-8, which is exactly the re-encoding that invalidates a detached
             ;; signature, and an installer decoded as text is mangled. This line read
-            ;; RESPONSE-BODY when the two meant the same thing, and #223 made them differ.
+            ;; RESPONSE-BODY when the two meant the same thing, and pre-publication issue 223 made them differ.
             ((<= 200 status 299) (http:response-bytes response))
             (t (error 'update-source-error
                       :detail (format nil "~A returned HTTP ~D" url status)))))))
@@ -315,7 +315,7 @@ MEASURED, both directions, against a signature this tree's own generator wrote:
 NEITHER SUITE COULD SEE IT. The client's tests serve signatures from memory as raw bytes and
 never read a file the generator produced, so the failing question was unaskable -- AGENTS.md,
 a suite that always satisfies a precondition cannot test the absence of that precondition. It
-is #206's shape, a producer and a consumer naming one contract twice and apart, with #206's
+is pre-publication issue 206's shape, a producer and a consumer naming one contract twice and apart, with pre-publication issue 206's
 consequence: every installed client refuses every real release, silently and forever. A
 refused update against a security fix IS the attack.
 
@@ -397,7 +397,7 @@ distinct from a signature failure because it is a release-process bug rather tha
 
 NIL is ORDINARY. A platform can join the release matrix a release late, and the caller
 reports that as its own state rather than as being up to date -- which is the silent shape
-#206 produced."
+pre-publication issue 206 produced."
   (let ((entry (gethash key (manifest-platforms manifest))))
     (when (hash-table-p entry) entry)))
 
@@ -706,7 +706,7 @@ load-bearing rather than a preference: an app under Program Files cannot rewrite
 without elevation, and `windows.nsi' sets RequestExecutionLevel user precisely so it cannot.
 
 Elsewhere: derived from the running image (see `%derived-install-dir'), which is why this
-needs no installer and is not blocked on one (#335). It returned NIL on every non-Windows
+needs no installer and is not blocked on one (pre-publication issue 335). It returned NIL on every non-Windows
 host until then -- no branch at all -- so `install-writable-p' answered NIL for a reason it
 could not report, and the Not-Writable path could never be reached off Windows.
 
@@ -775,7 +775,7 @@ rather than housekeeping -- so the moment after a successful stage is the one mo
 code is guaranteed not to reach. A delete-on-success would therefore never run on the path
 that actually creates these, which is every applied update.
 
-The leak was real and measured (#257): 113 MB across 48 directories on one machine in a
+The leak was real and measured (pre-publication issue 257): 113 MB across 48 directories on one machine in a
 day, twelve of them full installers from real updates and the rest from the suite. Nothing
 crashed and nobody would have reported it; it surfaces months later as an application that
 fills a disk, with no way to connect it to updating.
@@ -794,9 +794,9 @@ proceed because it could not tidy up."
     removed))
 
 
-;;; --- the staging directory's permissions (#264) ----------------------------
+;;; --- the staging directory's permissions (pre-publication issue 264) ----------------------------
 ;;;
-;;; WHAT THIS ASSERTS, AND WHY IT IS NOT WHERE THE TICKET SAID TO LOOK. #264 described the
+;;; WHAT THIS ASSERTS, AND WHY IT IS NOT WHERE THE TICKET SAID TO LOOK. pre-publication issue 264 described the
 ;;; staged installer as sitting in "a shared, world-writable location (TEMP on Windows)".
 ;;; Measured, that is false on Windows. `uiop:temporary-directory' is the PER-USER temp
 ;;; (%LOCALAPPDATA%\Temp), not C:\Windows\Temp, and a staging directory created there
@@ -825,8 +825,8 @@ proceed because it could not tidy up."
 ;;; the ticket's premise is TRUE: /tmp really is world-writable, and its sticky bit stops
 ;;; another user REPLACING a file they do not own but is a different guarantee from the one
 ;;; established here. The apply path does not exist on those platforms yet -- `apply-update'
-;;; refuses outside Windows because #74 has produced no .dmg, no .app.tar.gz and no AppImage
-;;; -- so the mode bits belong with whoever writes those strategies, next to #243's
+;;; refuses outside Windows because #72 has produced no .dmg, no .app.tar.gz and no AppImage
+;;; -- so the mode bits belong with whoever writes those strategies, next to #113's
 ;;; stage-and-rename. A reader who finds a careful DACL assertion here and no POSIX
 ;;; equivalent should read that as NOT YET, not as weighed and dismissed.
 
@@ -840,7 +840,7 @@ object and rewrite its DACL, and LocalSystem is the OS. Denying them would be th
 the DACL that excluded them would be one `takeown' away -- and would break backup and
 anti-malware software that legitimately needs to read there.
 
-THIS LIST IS NOT WHERE A NEW ALIAS GOES. When #446 found the check refusing `LA', adding it
+THIS LIST IS NOT WHERE A NEW ALIAS GOES. When pre-publication issue 446 found the check refusing `LA', adding it
 here would have made both symptoms disappear and left the actual defect -- a SID compared
 against an alias -- in place for every aliased account. An alias that turns up unexpectedly
 is a question about `%principal-sids', not an entry here.")
@@ -956,12 +956,12 @@ reasoning about where each one came from."
   "PRINCIPALS that are SDDL aliases, paired with the SID each one denotes. An alist; an alias
 that could not be resolved is simply absent.
 
-WHY THIS IS NEEDED AT ALL (#446). `%current-user-sid' returns a SID, always. `icacls /save'
+WHY THIS IS NEEDED AT ALL (pre-publication issue 446). `%current-user-sid' returns a SID, always. `icacls /save'
 emits SDDL, and SDDL spells some accounts with an alias instead of a SID -- the built-in
 Administrator is `LA', not `S-1-5-21-…-500'. So the two sides of the comparison are not
 in the same alphabet, and a process running as an account that HAS an alias was told its own
 staging directory belonged to a stranger. That is what the Windows CI leg had been reporting
-since the check landed in #264: `grants access to LA', where the resolved name printed
+since the check landed in pre-publication issue 264: `grants access to LA', where the resolved name printed
 directly underneath it was the account the runner was running as.
 
 THE ALIAS IS MACHINE-RELATIVE, WHICH IS WHY THIS ASKS WINDOWS INSTEAD OF TABULATING IT.
@@ -1101,12 +1101,12 @@ THE NAME CARRIES A RANDOM SUFFIX AS WELL AS A TIME, because `get-universal-time'
 one-second resolution and two applies inside one second would otherwise SHARE a directory.
 Not hypothetical: one whole-tree run produced `ouranos-update-3997370989' and
 `…990' one second apart, and the second directory held two different payloads from two
-tests that had landed in the same second (#257). A name whose uniqueness suffix is not
+tests that had landed in the same second (pre-publication issue 257). A name whose uniqueness suffix is not
 unique is worse than no suffix, because it reads as a guarantee."
   (%sweep-staging)
   ;; `aion/random', and hyperion's entropy suite is right to insist -- it rejected the
   ;; first version of this line, and the second, which was a COMMENT naming the standard
-  ;; generator. The rule is absolute by design (#95, `tests/entropy-tests.lisp'): prose
+  ;; generator. The rule is absolute by design (pre-publication issue 95, `tests/entropy-tests.lisp'): prose
   ;; goes around it, never an allowlist.
   ;;
   ;; What it caught was real. SBCL's generator is MT19937 seeded identically at every image
@@ -1118,7 +1118,7 @@ unique is worse than no suffix, because it reads as a guarantee."
   ;; Seeding it from the clock would have fixed the collision and left the deeper
   ;; problem: this name is a path in a shared-by-convention directory that a VERIFIED
   ;; INSTALLER is about to be written to and then EXECUTED FROM. Anyone who can predict it
-  ;; can create it first. That is why #95's guard covers the whole of `hyperion/src' rather
+  ;; can create it first. That is why pre-publication issue 95's guard covers the whole of `hyperion/src' rather
   ;; than only the things that look like secrets, and it caught this.
   ;;
   ;; The entropy makes the name unguessable; the loop makes it unique. A name is only unique
@@ -1170,7 +1170,7 @@ rather than a buffer with a verified prefix and uninitialised tail."
 (defun %reverify-staged (installer signature)
   "Re-establish, FROM DISK, that the bytes about to be executed are the verified bytes.
 
-WHY THIS EXISTS AND WHAT IT DOES NOT DO (#264). `stage-payload' verifies the payload's
+WHY THIS EXISTS AND WHAT IT DOES NOT DO (pre-publication issue 264). `stage-payload' verifies the payload's
 signature over the bytes it holds IN MEMORY, then writes them and hands `launch-installer'
 a PATH. Between the write and the launch the file is an ordinary file, and nothing
 re-established that the bytes at that path are the bytes that were verified. The window was
@@ -1185,9 +1185,9 @@ also holding in memory proves only that memory agrees with itself.
 
 IT NARROWS THE WINDOW; IT DOES NOT CLOSE IT. What remains is the interval between this read
 and the OS's own open-for-execute, which on Windows is a separate process whose loader does
-its own open. Closing it needs either a handle held across the hand-off or #243's
+its own open. Closing it needs either a handle held across the hand-off or #113's
 stage-and-rename, where the verified artefact never sits at the path that gets executed.
-That decision belongs with #74's macOS and Linux strategies rather than before them.
+That decision belongs with #72's macOS and Linux strategies rather than before them.
 
 MEASURE THE PRECONDITION BEFORE COSTING THE REST: on Windows the staged file lives under
 `uiop:temporary-directory', which is the PER-USER temp (`%LOCALAPPDATA%\\Temp'), not
@@ -1215,7 +1215,7 @@ another. Verifying after the swap would mean a bad payload has already replaced 
 program, which is the failure the signature exists to prevent rather than to report.
 
 THE SIGNATURE COMES BACK OUT because what is verified here is bytes in memory, and what
-gets executed is a path (#264). `%reverify-staged' has to ask the same question of the file
+gets executed is a path (pre-publication issue 264). `%reverify-staged' has to ask the same question of the file
 on disk immediately before the hand-off, and only the caller knows when that moment is.
 A second value, so callers wanting just the path are unaffected."
   (let* ((url (or (platform-payload-url entry)
@@ -1300,7 +1300,7 @@ silently, against a user's machine."
 ;;; receives a literal `"' inside the value.
 ;;;
 ;;; This was `(format nil "/DIR=~S" install-dir)', which reads like "quote the path" and is
-;;; not: `~S' is the LISP PRINTER, so it also escapes every backslash. #224's end-to-end
+;;; not: `~S' is the LISP PRINTER, so it also escapes every backslash. #111's end-to-end
 ;;; harness caught it -- `apply-update' reported `applying', the installer ran, and three
 ;;; minutes later the installed bundle was still the old version. Measured against a real
 ;;; Inno installer, one variable at a time:
@@ -1362,7 +1362,7 @@ new surface."))
   (uiop:launch-program (%nsis-arguments installer install-dir)))
 
 (defmethod launch-installer ((format (eql :inno)) installer install-dir)
-  "MEASURED END TO END, not reasoned about: #224's harness runs this method against a real
+  "MEASURED END TO END, not reasoned about: #111's harness runs this method against a real
 Inno installer and a real per-user install, and asserts the bundle actually changed version
 afterwards. Before that assertion existed, this method exited 3 and installed nothing."
   (uiop:launch-program (%inno-arguments installer install-dir)))
@@ -1388,7 +1388,7 @@ window between checking and applying is exactly where a channel gets a security 
 (defun apply-update (&key (source *update-source*) (channel "stable") (product nil))
   "Install the available update.
 
-WINDOWS ONLY. macOS and Linux refuse, because #74 has produced no .dmg, no .app.tar.gz
+WINDOWS ONLY. macOS and Linux refuse, because #72 has produced no .dmg, no .app.tar.gz
 and no AppImage -- there is literally nothing to launch. A green run here is evidence
 about Windows and about nothing else.
 
@@ -1409,7 +1409,7 @@ The order, and every step of it is load-bearing:
              :detail (format nil "no update to apply (~A)" (getf status :status))))
     #-win32
     (error 'update-not-implemented
-           :detail (format nil "the ~A apply strategy is not built yet -- #74 has produced no artifact for it"
+           :detail (format nil "the ~A apply strategy is not built yet -- #72 has produced no artifact for it"
                            (platform:platform-key)))
     #+win32
     (let ((dir (install-directory)))
@@ -1428,7 +1428,7 @@ The order, and every step of it is load-bearing:
               ;; EVERY EXIT FROM HERE ON EITHER HANDS OFF OR CLEANS UP. `%sweep-staging'
               ;; handles the hand-off case, because after a hand-off this process exits and
               ;; has no afterwards -- but a refusal after staging DOES have one, and until
-              ;; #257 it left a full installer behind every time. An unrecognised format and
+              ;; pre-publication issue 257 it left a full installer behind every time. An unrecognised format and
               ;; an application that is not ready to stop are both ordinary outcomes, not
               ;; rare ones, and neither has any reason to leave a payload on the disk.
               (handed-off nil))
@@ -1457,7 +1457,7 @@ The order, and every step of it is load-bearing:
               (error 'unknown-payload-format :format-name (platform-format entry)))
             ;; LAST THING BEFORE THE IRREVERSIBLE STEP, and deliberately after the format
             ;; refusal and the application's shutdown -- both of those can take arbitrary
-            ;; time, and every moment between the write and the launch is window (#264). The
+            ;; time, and every moment between the write and the launch is window (pre-publication issue 264). The
             ;; check belongs as late as it can be placed, which is here: the next form hands
             ;; a path to something that will execute it.
             ;;

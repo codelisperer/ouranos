@@ -24,7 +24,7 @@ blank/comment lines yield no key."
     (is (null (k "# a comment")))
     (is (null (k "   ")))))
 
-;;; --- LOAD-PROJECT-ENV: the entry-point form (#120) -------------------------
+;;; --- LOAD-PROJECT-ENV: the entry-point form (pre-publication issue 120) -------------------------
 ;;;
 ;;; The bug this closes was an ORDERING bug, not a parsing one. A consuming app called
 ;;; `load-dotenv` while building its web handler -- but its start path opened the database

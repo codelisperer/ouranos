@@ -1,4 +1,4 @@
-;;;; update-manifest.lisp --- generate and sign the release manifest (#75).
+;;;; update-manifest.lisp --- generate and sign the release manifest (pre-publication issue 75).
 ;;;;
 ;;;;   sbcl --script scripts/update-manifest.lisp keygen
 ;;;;   sbcl --script scripts/update-manifest.lisp generate --dist dist --product NAME \
@@ -10,7 +10,7 @@
 ;;;; THE MANIFEST IS THE CONTRACT between CI and every installed app: one signed JSON
 ;;;; document per channel at a permanent URL. Its shape is
 ;;;; hyperion/docs/desktop-distribution-design.md section 3, and the client half is the
-;;;; update module in a consuming app today, moving to hyperion/update (#76).
+;;;; update module in a consuming app today, moving to hyperion/update (pre-publication issue 76).
 ;;;;
 ;;;; THE SIGNATURE IS OVER THE EXACT BYTES OF THE FILE, detached, alongside it as `.sig'.
 ;;;; That is not a stylistic choice. If the signature covered a re-serialisation, then any
@@ -21,9 +21,9 @@
 ;;;;
 ;;;; A NOTE ON DRIFT, because this tree has already been bitten by exactly it. The manifest
 ;;;; field names live here AND in the client's parser, which is two copies of one contract.
-;;;; That is the same shape as #206 (platform-key in a build script the client cannot load),
+;;;; That is the same shape as pre-publication issue 206 (platform-key in a build script the client cannot load),
 ;;;; where the failure mode is a client that reports itself up to date forever. It is
-;;;; tolerable only because the client is being moved into hyperion/update (#76); when it
+;;;; tolerable only because the client is being moved into hyperion/update (pre-publication issue 76); when it
 ;;;; lands, the schema belongs in one place and this script should consume it rather than
 ;;;; restate it. Recorded here so it is a known debt rather than a discovery.
 
@@ -188,7 +188,7 @@ release was published as `nsis' and every client would have handed Inno NSIS's f
   "Byte strings that identify a packaging FROM THE ARTIFACT ITSELF.
 
 THE PRODUCER SHOULD MEASURE, NOT BE TOLD. Every producer/consumer defect this subsystem has
-had -- the platform key (#206), the `.sig' encoding, this field -- is one contract named
+had -- the platform key (pre-publication issue 206), the `.sig' encoding, this field -- is one contract named
 twice in two places that cannot see each other. A flag would move the drift rather than
 remove it: someone would have to remember to pass it, and forgetting is silent. Reading the
 artifact makes the manifest a statement about the bytes being published.
@@ -306,7 +306,7 @@ than the others, and the client already treats an absent entry as `nothing for m
           (die "two platforms share a payload artifact -- refusing to publish:~{~%    ~A~}" urls)))
       ;; `<channel>.json', which is the name the CLIENT asks an HTTP source for -- design
       ;; section 2, channels are separate manifests rather than a field in one. This wrote
-      ;; `latest.json' until #77: one document with two names, in two files that cannot see
+      ;; `latest.json' until pre-publication issue 77: one document with two names, in two files that cannot see
       ;; each other, which is this subsystem's recurring defect. It also meant two channels
       ;; generated into one dist overwrote each other, the name carrying no channel at all.
       (let ((path (merge-pathnames (format nil "~A.json" channel) dist)))

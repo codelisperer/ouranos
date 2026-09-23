@@ -6,7 +6,7 @@ backend half is a WAYPOINT, not a destination** — see Provenance.
 
 > **Clarified 2026-08-05 by the maintainer.** This ADR reads as though Hunchentoot is where
 > desktop bundles settle. It is not. **Hunchentoot is a near-term stop-gap until the
-> libuv-backed server ([#117](https://github.com/codelisperer/ouranos/issues/117)) exists,
+> libuv-backed server (pre-publication issue 117) exists,
 > at which point it is to be removed as a dependency entirely** — as is Woo. Anything built
 > on the assumption that a third-party HTTP server is permanent should be built so that
 > assumption is cheap to withdraw.
@@ -22,7 +22,7 @@ Error opening shared object "libev.so.4": cannot open shared object file
 Woo — Hyperion's default server on Unix — binds **libev** through CFFI at *load* time, so
 libev is a hard runtime dependency of every Linux and macOS bundle. No end user has
 `libev-dev` installed, and the failure is invisible on any machine that has built the tree
-(issue #74). The obvious fix is to build desktop bundles against **Hunchentoot**, which is
+(issue #72). The obvious fix is to build desktop bundles against **Hunchentoot**, which is
 pure CL — and is already what Windows uses, so it is the path we have shipped and proven.
 
 The objection was performance, and it deserved a real answer rather than reasoning: a
@@ -73,7 +73,7 @@ connection, on every Hyperion app running Hunchentoot. On Windows, that is all o
 ## Consequences
 
 - Desktop bundles lose a native dependency. The **general** problem does not go away —
-  WebKitGTK, `tinyfiledialogs`, SQLite and OpenSSL are queued behind it (#94) — but the
+  WebKitGTK, `tinyfiledialogs`, SQLite and OpenSSL are queued behind it (#78) — but the
   first and most immediate blocker is gone.
 - **Every Hyperion app gets faster**, not only desktop ones. A 44 ms floor on the main
   request path is the difference between an HTMX UI that feels immediate and one that feels
@@ -82,7 +82,7 @@ connection, on every Hyperion app running Hunchentoot. On Windows, that is all o
   but **p99 is still ~40 ms** — an occasional straggler continues to hit the delayed-ACK
   timer, so something intermittently splits the write. Worth chasing; it may argue for
   setting `TCP_NODELAY` on the listening socket as well, which would also protect *streamed*
-  responses that by definition cannot carry a Content-Length (the SSE progress UI in #76).
+  responses that by definition cannot carry a Content-Length (the SSE progress UI in pre-publication issue 76).
 - Choosing Hunchentoot for desktop is an **`.asd`-level** decision, not a runtime one: the
   handler is baked into the dumped image at build time, so `hyperion.asd`'s
   platform-conditional dependency on `clack-handler-woo` has to become a deliberate choice
@@ -118,7 +118,7 @@ Content-Length bug bit hardest, and is worth taking.
 ## Alternatives considered
 
 - **Bundle libev into the AppImage / `.app`** and keep Woo. Still needed for WebKitGTK
-  regardless (#94), but it is strictly more machinery than not depending on libev at all,
+  regardless (#78), but it is strictly more machinery than not depending on libev at all,
   and it would have left the Content-Length bug undiscovered.
 - **Write our own event-loop server** over a native shim we control, removing both the
   dependency and the bundling question. Seriously considered, and weakened considerably by
@@ -151,7 +151,7 @@ machine. That was correct given the options *at the time*.
 was really an unvendorable native dependency, the alternative was not "pick the other
 third-party server" but "own the async substrate." That became `aion/uv` — libuv bound
 directly, built from source by a Lisp script, with no groveller and no CMake — and then
-[#117](https://github.com/codelisperer/ouranos/issues/117): a native libuv HTTP server with
+pre-publication issue 117: a native libuv HTTP server with
 the typed interceptor pipeline on top, no Hunchentoot and no Woo.
 
 Worth being precise about what that does *not* rest on: **performance.** This ADR measured
@@ -162,12 +162,12 @@ claiming otherwise would be falsified by our own benchmark.
 Amend or supersede this ADR once the desktop path actually runs on the native server.
 
 **What the clarification changes.** [ADR-0002](../../../aion/docs/adr/0002-libuv-integration-strategy.md)
-gave #117 an explicit exit condition — *if the HTTP security surface outgrows the maintainer,
+gave pre-publication issue 117 an explicit exit condition — *if the HTTP security surface outgrows the maintainer,
 fall back to Hunchentoot or Clack over our own socket layer.* That exit still exists, but it
 is now the **unwanted** branch rather than a neutral one, and its cost should be priced
 accordingly: taking it means keeping a dependency the maintainer intends to remove.
 
-It also decides the shape of [#139](https://github.com/codelisperer/ouranos/issues/139).
+It also decides the shape of pre-publication issue 139.
 The fix is **not** "make hyperion depend on Hunchentoot instead of Woo" — that swaps one
 permanent third-party server for another. It is that **hyperion should stop declaring a
 server backend at all** and let the application choose, the way every other opt-in aux
@@ -177,5 +177,5 @@ surgery on the framework, and removing Hunchentoot later is an app-level edit.
 **An open question falls out of it:** does **Clack** survive? Routing already yields a Clack
 handler (`to-app`, ADR-0012), so today the abstraction is load-bearing. A native libuv server
 could implement a Clack handler — keeping every existing app working — or bypass Clack
-entirely. Those are different amounts of work and different amounts of freedom, and #117
+entirely. Those are different amounts of work and different amounts of freedom, and pre-publication issue 117
 should answer it deliberately rather than by accident.

@@ -18,16 +18,16 @@ knowledge graph *on* it (praxeon, unbuilt) · **Praxeon** is the agent on Kairos
   `cast → validate → insert!`.
 - **Bitemporal is DESIGNED, NOT BUILT.** The SQL:2011 model (valid-time period columns +
   system versioning, opt-in per entity) is the plan; there is no period column or temporal
-  DDL in `src/` today. Don't describe it as present. **#38** is the implementation
-  ticket (migrations bitemporal-aware), gated by **#43** (settle the bitemporal API);
-  #56 is Kairos and a separate concern. (#227 is the sweep that *found* the gap --
+  DDL in `src/` today. Don't describe it as present. **#49** is the implementation
+  ticket (migrations bitemporal-aware), gated by **#54** (settle the bitemporal API);
+  #60 is Kairos and a separate concern. (pre-publication issue 227 is the sweep that *found* the gap --
   a finding's provenance is not its home.)
 - A backend that cannot support a declared field type **refuses at migration time**;
   emulation is opt-in at the declaration site — ADR-0001 (accepted). `field-type-sql`
   returns `Native | Emulated | Unsupported`, never a bare string.
-- `cl+ssl` is deliberately not a dependency (#146): `conn` degrades `sslmode=prefer` to
+- `cl+ssl` is deliberately not a dependency (pre-publication issue 146): `conn` degrades `sslmode=prefer` to
   plaintext with a warning and refuses `require`/`verify-*` unless the app declares it.
-  Note this is now undercut by `aion/http-client` pulling `cl+ssl` on non-Windows (#265).
+  Note this is now undercut by `aion/http-client` pulling `cl+ssl` on non-Windows (#115).
 
 ## Gotchas
 

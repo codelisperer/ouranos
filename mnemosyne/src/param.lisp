@@ -1,4 +1,4 @@
-;;;; param.lisp --- what a bound value MEANS, and how each backend must be told it (#165).
+;;;; param.lisp --- what a bound value MEANS, and how each backend must be told it (pre-publication issue 165).
 ;;;;
 ;;;; Common Lisp NIL is false, the empty list, and "no value", all at once. SQL needs those
 ;;;; to be different things. Every driver resolves that ambiguity for itself, and they do not
@@ -110,7 +110,7 @@ choice: it cannot invent a literal the driver will reject."
 ;;;     (defun current-lineage-p (row) (null (row-value row :valid_until)))
 ;;;
 ;;; That line is written with ROW-VALUE and an underscore; the original said `(getf row
-;;; :valid-until)' and BOTH halves of that would fail today (#489). GETF misses because the
+;;; :valid-until)' and BOTH halves of that would fail today (pre-publication issue 489). GETF misses because the
 ;;; driver interns keys lowercase, and `:valid-until' would miss again on the hyphen, which
 ;;; is not folded and cannot be -- a hyphenated column cannot be declared through mnemosyne
 ;;; at all. Corrected here rather than left, because a reader copying the idiom from a block
@@ -177,7 +177,7 @@ vocabulary. Keys are untouched; only values are translated."
 ;;; --- reading a column out of a row -----------------------------------------
 ;;;
 ;;; `FROM-DRIVER-ROW' says it plainly: "Keys are untouched; only values are translated."
-;;; That is the right division of labour and it leaves a hazard nobody owned (#489).
+;;; That is the right division of labour and it leaves a hazard nobody owned (pre-publication issue 489).
 ;;;
 ;;; THE DRIVER INTERNS COLUMN KEYS LOWERCASE. A row arrives as `(:|content| "...")', so
 ;;; `(getf row :content)' looks up `:|CONTENT|', misses, and returns the default. Nothing
@@ -210,7 +210,7 @@ vocabulary. Keys are untouched; only values are translated."
    (lambda (c s)
      (format s "mnemosyne: no column ~S in this row.~%~%" (unknown-column-key c))
      (format s "Columns present: ~{~S~^, ~}~%" (or (unknown-column-available c) '(none)))
-     (format s "Keys are SQL spellings and only CASE is folded. A Lisp hyphen is not an underscore: `:valid-until' does not find `valid_until', and it never could, because mnemosyne emits identifiers unquoted so a hyphenated column cannot be declared either (#489).~%")
+     (format s "Keys are SQL spellings and only CASE is folded. A Lisp hyphen is not an underscore: `:valid-until' does not find `valid_until', and it never could, because mnemosyne emits identifiers unquoted so a hyphenated column cannot be declared either (pre-publication issue 489).~%")
      (format s "This signals rather than returning NIL because an absent column, a NULL column and an empty string are otherwise the same answer.")))
   (:documentation "Signalled when a row has no column under the requested key."))
 

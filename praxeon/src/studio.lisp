@@ -16,7 +16,7 @@ list of (:name :description) plists). This is the data behind DESCRIBE-AGENT and
 the hook a future graphical/REST studio renders -- all provider-neutral.
 
 IT USED TO REPORT ONE :BUDGET, taken from the context object, and that was the
-false claim #402 found: nothing was budgeted by it, and this is what someone reads
+false claim pre-publication issue 402 found: nothing was budgeted by it, and this is what someone reads
 when they are already confused. There are two budgets over two kinds of data now
 (ADR-0001), so there are two keys, each named for what it governs."
   (let ((provider (actor:agent-provider agent)))

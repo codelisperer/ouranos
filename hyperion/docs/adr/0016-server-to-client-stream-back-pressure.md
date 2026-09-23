@@ -4,9 +4,9 @@
 
 ## Context
 
-M2 of [#117](https://github.com/codelisperer/ouranos/issues/117) gives hyperion its first
+M2 of pre-publication issue 117 gives hyperion its first
 real server→client streams: a streaming response body on the native server, and SSE on top
-of it. [#210](https://github.com/codelisperer/ouranos/issues/210) asks that the back-pressure
+of it. pre-publication issue 210 asks that the back-pressure
 question be settled **before** that surface exists, on the grounds that *"the cheapest time
 to decide is before the first stream API hardens, not after."* That is the whole reason this
 ADR is written now rather than discovered later: a stream API acquires a back-pressure
@@ -80,7 +80,7 @@ wrongly is silent in both directions — a lost intermediate value, or unbounded
 
 **Unbounded queueing per subscriber.** The default, and what you get by not deciding. Rejected
 because its failure mode is invisible: memory grows, the browser falls behind, and nothing
-reports an error — the operator sees "the app is slow". #210 names this and the maintainer's
+reports an error — the operator sees "the app is slow". pre-publication issue 210 names this and the maintainer's
 ruling names it; recording it as *rejected* rather than *not considered* is the point.
 
 **Bounded queue with drop-oldest.** Honest about its limit and bounded in memory, but it drops
@@ -108,6 +108,6 @@ Two things moved while writing it rather than being carried in from the ruling. 
 turning out to be unbounded** reframed the decision: the question was not "what should we add"
 but "the primitive we already shipped is the alternative being rejected, and it has no
 consumers yet." That is a considerably stronger reason to decide now than the schedule
-argument #210 makes. And **drop-oldest was the alternative that took longest to reject**,
+argument pre-publication issue 210 makes. And **drop-oldest was the alternative that took longest to reject**,
 because it is bounded and honest; what settles it is that for keyed values, coalescing *is*
 drop-oldest done correctly — same intent, right unit of eviction.

@@ -1,8 +1,8 @@
 ;;;; introspect.lisp --- what the TABLE actually is, and where it disagrees with the
-;;;; DEFSCHEMA (#144).
+;;;; DEFSCHEMA (pre-publication issue 144).
 ;;;;
 ;;;; SCHEMA-DDL reads a MUTABLE definition to produce SQL for an IMMUTABLE, already-applied
-;;;; migration. That wiring is the bind #144 reports: a migration that says
+;;;; migration. That wiring is the bind pre-publication issue 144 reports: a migration that says
 ;;;; `(schema-ddl (find-schema 'profile))` is evaluated when migrations RUN, not when the
 ;;;; migration was WRITTEN, so editing the defschema silently rewrites history for anyone
 ;;;; who has not run it yet. Adding one column leaves three moves and all three are wrong:
@@ -28,7 +28,7 @@
 ;;;; actually has; SCHEMA-DIFF compares that to the defschema and returns the difference as
 ;;;; DATA; VERIFY-SCHEMA signals on it, so an app can assert the invariant at boot or in a
 ;;;; test rather than discover it in production. DRIFT-DDL turns the difference back into
-;;;; mnemosyne/ddl forms, which closes the loop #144 asks about: you edit the defschema,
+;;;; mnemosyne/ddl forms, which closes the loop pre-publication issue 144 asks about: you edit the defschema,
 ;;;; ask what it would take to get there, and paste THAT into a NEW migration. Migration
 ;;;; 0007 is never touched, and the ALTER was still derived rather than hand-written.
 ;;;;
@@ -61,7 +61,7 @@ an operator needs to see in a drift report. DEFAULT is likewise raw, and is not 
 (defun %row-values (row)
   "The values of a result ROW (a plist) in SELECT order.
 
-DELIBERATELY POSITIONAL, AND NOT TO BE CONVERTED TO MNEMOSYNE/PARAM:ROW-VALUE (#489).
+DELIBERATELY POSITIONAL, AND NOT TO BE CONVERTED TO MNEMOSYNE/PARAM:ROW-VALUE (pre-publication issue 489).
 Positional avoids the drivers' disagreement about column-name case by never naming a column,
 and a catalog query is where that would bite -- but the stronger reason is the one visible in
 the two callers below: they destructure `information_schema' rows as (name data-type
@@ -72,7 +72,7 @@ both vendors' spellings into the backend-neutral half of this file."
 
 (defun %truthy (v)
   "Is V the driver's way of saying yes? Covers `1`/`t` (mnemosyne/param's boolean
-vocabulary, #165), SQLite's integer flags, and Postgres' 'YES' text in information_schema."
+vocabulary, pre-publication issue 165), SQLite's integer flags, and Postgres' 'YES' text in information_schema."
   (typecase v
     (null nil)
     (integer (plusp v))
@@ -180,7 +180,7 @@ Precision is dropped because no dialect's catalog reports it the way the DDL wro
 a `VARCHAR(255)` that reads back as `character varying` would otherwise be permanent,
 unfixable drift.
 
-EXCEPT WHERE THE PARENTHESES ARE THE TYPE (#212). `VECTOR(1536)` and `VECTOR(768)` are not
+EXCEPT WHERE THE PARENTHESES ARE THE TYPE (pre-publication issue 212). `VECTOR(1536)` and `VECTOR(768)` are not
 one type at two precisions: they are different columns, pgvector rejects an insert of the
 wrong width, and no amount of ALTER will make one hold the other's data. Dropping the
 number there would make a changed embedding dimension invisible to drift detection, which
@@ -225,7 +225,7 @@ assert on it, or hand it to DRIFT-DDL.
                  added to the defschema and no migration was written.
   EXTRA          COLUMNs in the table with no field in the schema. Also common, and often
                  CORRECT -- an ALTER migration whose defschema was deliberately left
-                 alone is exactly this shape, which is the state #144 describes.
+                 alone is exactly this shape, which is the state pre-publication issue 144 describes.
   MISMATCHED     a list of (FIELD . COLUMN) that share a name and disagree about type,
                  NOT NULL, or PRIMARY KEY.
 
@@ -274,9 +274,9 @@ DIALECT is a backend designator, and it matters: the SQL type a field expects is
 dialect-dependent (`:uuid` is UUID on Postgres and TEXT on SQLite), so diffing a SQLite
 table against Postgres expectations would report drift in every row. An unrecognised one
 signals MNEMOSYNE/FIELD-SHELL:UNKNOWN-DIALECT here rather than being carried into the report
-as a backend name nobody checked (#432, ADR-0003)."
+as a backend name nobody checked (pre-publication issue 432, ADR-0003)."
   ;; NORMALISED ONCE, and rendered back to its canonical spelling for the DRIFT slot, which
-  ;; is declared `:type string' and is read by the reporting functions (#432, ADR-0003).
+  ;; is declared `:type string' and is read by the reporting functions (pre-publication issue 432, ADR-0003).
   ;; A designator that reaches DRIFT unchecked is a dialect name nobody verified, printed in
   ;; a report an operator is meant to act on.
   (let ((dialect (fldsh:dialect-name-of dialect))
@@ -345,7 +345,7 @@ the definition. The dialect is taken from BACKEND, so it cannot be got wrong."
 
 An error rather than a warning, and with a CONTINUE restart rather than without one: the
 divergence is usually a missing migration, which is worth stopping a boot for, but an app
-that has deliberately let the two differ -- the survivable option in #144 -- needs a way
+that has deliberately let the two differ -- the survivable option in pre-publication issue 144 -- needs a way
 to say so that is a decision in the code and not a muffled warning nobody reads."))
 
 (defun verify-schema (backend connection schema &key (allow-extra nil))
@@ -356,7 +356,7 @@ Call it after MIGRATE, from an app's bring-up or from its test suite: replaying 
 must arrive at the present, and this is the assertion that says so.
 
 ALLOW-EXTRA tolerates columns the table has and the defschema does not. That is the exact
-shape of the #144 workaround -- an ALTER migration whose defschema was deliberately left
+shape of the pre-publication issue 144 workaround -- an ALTER migration whose defschema was deliberately left
 alone -- and an app that has chosen it should be able to keep the rest of the check rather
 than turn the whole thing off. Missing and mismatched columns still signal."
   (let* ((drift (diff-table backend connection schema))
@@ -389,7 +389,7 @@ Three deliberate refusals:
   SQLite and a data-losing decision on Postgres; emitting a plausible ALTER for it would
   be guessing on the author's behalf about their data. They are in the drift; write it.
 - EXTRA columns generate a DROP only under INCLUDE-DROPS. The default is off because the
-  overwhelmingly common cause of an extra column is #144's own workaround -- correct data
+  overwhelmingly common cause of an extra column is pre-publication issue 144's own workaround -- correct data
   that the defschema does not mention -- and defaulting to `DROP COLUMN` would turn a
   documentation problem into a destructive one.
 - A missing table generates nothing: that is SCHEMA:SCHEMA-DDL's job, not an ALTER.

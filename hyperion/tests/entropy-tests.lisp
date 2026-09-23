@@ -1,6 +1,6 @@
-;;;; entropy-tests.lisp --- nothing in hyperion mints a secret from cl:random (#95).
+;;;; entropy-tests.lisp --- nothing in hyperion mints a secret from cl:random (pre-publication issue 95).
 ;;;;
-;;;; The fix for #95 was swapping two call sites. This is the part that keeps them swapped.
+;;;; The fix for pre-publication issue 95 was swapping two call sites. This is the part that keeps them swapped.
 ;;;;
 ;;;; A comment already said the generator was predictable and should be replaced -- it sat
 ;;;; three lines above the defect for months and stopped nobody, because a note is not a
@@ -15,7 +15,7 @@
 (in-package #:hyperion/tests)
 
 (def-suite entropy
-  :description "No security-relevant value in hyperion comes from cl:random (#95)." :in hyperion)
+  :description "No security-relevant value in hyperion comes from cl:random (pre-publication issue 95)." :in hyperion)
 (in-suite entropy)
 
 (defun %hyperion-source-files ()
@@ -45,7 +45,7 @@ path is wrong and this test is vacuous" (length files))
         (when hits (push (cons (file-namestring f) hits) found))))
     (is-false found
               "cl:random must not appear in hyperion/src -- SBCL's is MT19937, whose state ~
-is recoverable from observed output, and a session id is observable by design (#95). ~
+is recoverable from observed output, and a session id is observable by design (pre-publication issue 95). ~
 Found: ~S" found)))
 
 ;;; --- and the ids themselves ------------------------------------------------

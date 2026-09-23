@@ -56,7 +56,7 @@ prefix -- see `cache-boundary-p' and the commentary below."
       (list :type :text :text text :cache t)
       (list :type :text :text text)))
 
-;;; --- the cacheable prefix (#401) ------------------------------------------
+;;; --- the cacheable prefix (pre-publication issue 401) ------------------------------------------
 ;;;
 ;;; A chat turn resends the whole conversation, so an N-turn conversation costs O(N^2) in
 ;;; input tokens, and the repeating part -- system prompt, per-user context, every turn but
@@ -70,17 +70,17 @@ prefix -- see `cache-boundary-p' and the commentary below."
 ;;; an interpretation.
 ;;;
 ;;; An index or a message count would have been simpler and is wrong for one reason: history
-;;; trimming (#402). A budget that drops an early message SILENTLY MOVES what an index points
+;;; trimming (pre-publication issue 402). A budget that drops an early message SILENTLY MOVES what an index points
 ;;; at, so a breakpoint meant for the end of the system context ends up mid-conversation and
 ;;; costs full price on every turn while looking exactly like one that works. A marker
 ;;; attached to the data cannot be relocated by trimming: either the marked part is still
 ;;; there, or it was dropped and there is no breakpoint at all -- which the cache counts on
 ;;; the completion make visible.
 ;;;
-;;; WHICH CONSTRAINS #402 RATHER THAN THE REVERSE. A cached prefix is only a saving while its
+;;; WHICH CONSTRAINS pre-publication issue 402 RATHER THAN THE REVERSE. A cached prefix is only a saving while its
 ;;; bytes do not change, so a budget that trims from the FRONT defeats caching completely:
 ;;; every turn writes a new cache entry at 1.25x and reads none. The two features are the
-;;; same decision from opposite ends. Whatever #402 does, the marked prefix has to be PINNED
+;;; same decision from opposite ends. Whatever pre-publication issue 402 does, the marked prefix has to be PINNED
 ;;; -- trimming happens after it, never through it.
 ;;;
 ;;; FAILING QUIET is requirement 3 and it is the reason this is a hint rather than a request
@@ -90,7 +90,7 @@ prefix -- see `cache-boundary-p' and the commentary below."
 ;;; one that does and missed.
 
 (defun cache-boundary-p (part)
-  "True when PART marks the end of a cacheable prefix (#401)."
+  "True when PART marks the end of a cacheable prefix (pre-publication issue 401)."
   (and (getf part :cache) t))
 
 (defun tool-use-part (id name input)
@@ -113,13 +113,13 @@ value (a jzon-serializable hash-table, or NIL) describing its arguments."
   (name "" :type string)
   (description "" :type string)
   (schema nil)
-  ;; CACHE marks this spec as the end of a cacheable prefix (#401). Tools sit before the
+  ;; CACHE marks this spec as the end of a cacheable prefix (pre-publication issue 401). Tools sit before the
   ;; system prompt in a provider's prefix ordering, so a breakpoint here caches the tool
   ;; definitions alone -- worth it when the tool set is large and stable and the system
   ;; prompt is not.
   (cache nil)
   ;; VALIDATORS are functions of the returned arguments, each returning NIL when the
-  ;; arguments are acceptable or a string describing what is wrong (#416).
+  ;; arguments are acceptable or a string describing what is wrong (pre-publication issue 416).
   ;;
   ;; THE FRAMEWORK HOLDS THE MECHANISM AND THE CALLER HOLDS THE VALUES. Length limits and
   ;; required wording are facts about someone else's platform: they differ by destination
@@ -146,7 +146,7 @@ concept: Anthropic input/output_tokens, OpenAI prompt/completion_tokens)."
   (stop-reason :end :type keyword)
   (input-tokens nil)
   (output-tokens nil)
-  ;; Prefix-cache accounting (#401). NIL and 0 are DIFFERENT ANSWERS and the distinction is
+  ;; Prefix-cache accounting (pre-publication issue 401). NIL and 0 are DIFFERENT ANSWERS and the distinction is
   ;; the whole point: NIL means the provider did not report it, 0 means it reported a miss.
   ;; Collapsing them would make a misplaced breakpoint indistinguishable from a provider
   ;; that has no cache -- and a breakpoint one message too late costs full price on every
@@ -238,7 +238,7 @@ makes rather than a default they inherit.")
                                   :input-tokens (completion-input-tokens completion)
                                   :output-tokens (completion-output-tokens completion)
                                   ;; Cache counts on every provider present and future
-                                  ;; (#401), for the same reason the rest is here: a new
+                                  ;; (pre-publication issue 401), for the same reason the rest is here: a new
                                   ;; backend is instrumented the moment it specializes
                                   ;; COMPLETE. These are counts, so they leak nothing.
                                   :cache-read-tokens (completion-cache-read-tokens completion)
@@ -257,7 +257,7 @@ makes rather than a default they inherit.")
 there is one -- the body is where a provider explains a 400, so surfacing it turns an opaque
 failure into an actionable one.
 
-Reads AION/HTTP-CLIENT:HTTP-ERROR rather than decoding dexador conditions directly (#202).
+Reads AION/HTTP-CLIENT:HTTP-ERROR rather than decoding dexador conditions directly (pre-publication issue 202).
 praxeon used to hand-roll that decoding in this function precisely because the shared client
 was not reachable; now the client carries status and body and this only has to phrase them."
   (typecase e
@@ -341,7 +341,7 @@ translation happened."
     ;; system, tools, and temperature are optional. Only send temperature when
     ;; explicitly asked: current models reject a non-default sampling
     ;; temperature (400), so omitting it is the portable default.
-    ;; SYSTEM is a string or a list of neutral parts (#401). It has to accept parts because
+    ;; SYSTEM is a string or a list of neutral parts (pre-publication issue 401). It has to accept parts because
     ;; caching the system prompt is the single largest win available -- the measured case was
     ;; 574 input tokens against an empty history, essentially all of it system and context --
     ;; and Anthropic can only cache it when it is sent as BLOCKS carrying cache_control. A
@@ -379,7 +379,7 @@ translation happened."
 ;;; --- request translation: neutral -> Anthropic JSON ---------------------
 (defun %anthropic-system-json (system)
   "SYSTEM as Anthropic wants it: a plain string stays a string, a list of neutral parts
-becomes a block array (#401).
+becomes a block array (pre-publication issue 401).
 
 Its own function rather than three lines inside COMPLETE, because logic inside COMPLETE can
 only be exercised by making a request -- which for this file means spending API credits to
@@ -416,7 +416,7 @@ learn whether a `mapcar' ran."
              (gethash "content" ht) (getf part :content))
        (when (getf part :is-error)
          (setf (gethash "is_error" ht) t))))
-    ;; The prefix breakpoint (#401). Attached to the block the caller marked, because
+    ;; The prefix breakpoint (pre-publication issue 401). Attached to the block the caller marked, because
     ;; Anthropic's cache_control means "cache through this block inclusive" -- which is
     ;; exactly what `:cache t' was defined to mean, so this is a translation and not an
     ;; interpretation. Emitted for ANY part type: a conversation's cacheable prefix commonly
@@ -585,7 +585,7 @@ same reason as the Anthropic one."
 
 ;;; --- request translation: neutral -> OpenAI JSON ------------------------
 (defun %system-text (system)
-  "SYSTEM as a plain string, whether it arrived as one or as a list of neutral parts (#401).
+  "SYSTEM as a plain string, whether it arrived as one or as a list of neutral parts (pre-publication issue 401).
 Non-text parts are skipped: a system prompt is prose, and silently stringifying a tool_use
 block into it would put vendor shapes in front of a model that did not ask for them."
   (if (stringp system)
@@ -649,7 +649,7 @@ expand into one role:\"tool\" message each)."
                 (list ht)))))))
 
 (defun %messages->openai (messages system)
-  ;; FAILING QUIET on the prefix marker (#401, requirement 3). OpenAI-compatible servers
+  ;; FAILING QUIET on the prefix marker (pre-publication issue 401, requirement 3). OpenAI-compatible servers
   ;; have no caller-controlled breakpoint -- caching, where it exists, is automatic and
   ;; server-side -- so `:cache t' is DROPPED here rather than translated or rejected. The
   ;; call succeeds and costs what it costs; what tells a caller the hint went nowhere is
@@ -708,7 +708,7 @@ expand into one role:\"tool\" message each)."
                                      (when choice (gethash "finish_reason" choice)))
                        :input-tokens (and usage (gethash "prompt_tokens" usage))
                        :output-tokens (and usage (gethash "completion_tokens" usage))
-                       ;; Cache accounting, where the server offers any (#401). OpenAI
+                       ;; Cache accounting, where the server offers any (pre-publication issue 401). OpenAI
                        ;; reports automatic caching as prompt_tokens_details.cached_tokens
                        ;; and has no write count at all, so CACHE-WRITE-TOKENS stays NIL
                        ;; here -- which is the honest answer rather than a zero. A local

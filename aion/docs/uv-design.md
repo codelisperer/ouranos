@@ -3,7 +3,7 @@
 The design narrative for the libuv binding: what it is, the decisions that shaped it,
 and the things that will bite whoever touches it next. Status lives on the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1)
-([#107](https://github.com/codelisperer/ouranos/issues/107)).
+([#84](https://github.com/codelisperer/ouranos/issues/84)).
 
 ## What it is
 
@@ -164,9 +164,9 @@ type-checked — the pure-CL face from `docs/coalton-patterns.md` §5.
 Named honestly, because a binding that implies more coverage than it has is worse than a
 small one:
 
-- **UDP and TTY.** TCP, pipes and DNS landed in `aion/uv/net` (#118 — see
+- **UDP and TTY.** TCP, pipes and DNS landed in `aion/uv/net` (pre-publication issue 118 — see
   [uv-net-design.md](uv-net-design.md)); processes and signals landed in
-  `aion/uv/process` (#119 — [uv-process-design.md](uv-process-design.md)). UDP
+  `aion/uv/process` (pre-publication issue 119 — [uv-process-design.md](uv-process-design.md)). UDP
   (`uv_udp_t`) and TTY are what remain of the stream surface, and neither has a consumer
   asking for it yet.
   *`aion/uv/net` was built to honour [`adr/0001-stream-contract.md`](adr/0001-stream-contract.md),
@@ -176,8 +176,8 @@ small one:
   [`adr/0002`](adr/0002-libuv-integration-strategy.md).*
 - **`uv_queue_work`.** Deliberately absent: its work function runs on a *foreign*
   threadpool thread, which is the one place rule 2 above would be violated.
-- **Bundling into desktop artifacts** (#94) and the CI matrix (#87).
-- **`hyperion/dev` adoption.** #107 nominated the hot-reload watcher as the first real
+- **Bundling into desktop artifacts** (#78) and the CI matrix (pre-publication issue 87).
+- **`hyperion/dev` adoption.** #84 nominated the hot-reload watcher as the first real
   consumer; the watcher exists here, the swap has not been made.
 
 ## Gotchas for the next person

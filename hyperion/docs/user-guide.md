@@ -14,7 +14,7 @@
 - **No native library** — Hyperion itself declares no HTTP server, so nothing to install.
   An app that chooses `clack-handler-woo` needs **`libev`** (macOS `brew install libev`,
   Debian/Ubuntu `sudo apt-get install libev-dev`) and cannot be shipped as a desktop bundle
-  without carrying it; `clack-handler-hunchentoot` is pure CL and needs nothing (#139).
+  without carrying it; `clack-handler-hunchentoot` is pure CL and needs nothing (pre-publication issue 139).
 
 ## Getting started
 
@@ -419,7 +419,7 @@ file.
 Hunchentoot `sendfile(2)` it. The native `:uv` server declares `Content-Length` from the file
 and copies it to the socket in bounded pieces (`hyperion/server-uv:*file-chunk-bytes*`,
 64 KiB), so a large download costs one piece of memory rather than the whole file — it does
-not hold the file in the image, and it does not use `sendfile` either (#313; `sendfile` on
+not hold the file in the image, and it does not use `sendfile` either (pre-publication issue 313; `sendfile` on
 `:uv` removes the copy through user space and is PLANNED, a separate change from the bounded
 memory).
 

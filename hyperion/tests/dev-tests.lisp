@@ -1,4 +1,4 @@
-;;;; dev-tests.lisp --- what the hot-reload watcher watches (#134).
+;;;; dev-tests.lisp --- what the hot-reload watcher watches (pre-publication issue 134).
 ;;;;
 ;;;; The bug: the watcher globbed **/*.lisp, so editing a stylesheet, a template or a data
 ;;;; file refreshed nothing and the page silently went stale. The fix widens it to
@@ -174,14 +174,14 @@ and the editor droppings that appear beside a file on every save."
             "editing a stylesheet must register as a change")))))
 
 ;;;; ---------------------------------------------------------------------------
-;;;; The hyperion/dev cluster: #157 #233 #234 #235 #236 #237.
+;;;; The hyperion/dev cluster: pre-publication issue 157 pre-publication issue 233 pre-publication issue 234 pre-publication issue 235 pre-publication issue 236 pre-publication issue 237.
 ;;;;
 ;;;; Six defects reported by two consuming apps against the loop hyperion/CLAUDE.md calls
-;;;; the framework's signature feature. They are not five papercuts: #157 and #235 are two
-;;;; wrong spellings of ONE parameter, and #233/#234/#237 are all the dev server proceeding
+;;;; the framework's signature feature. They are not five papercuts: pre-publication issue 157 and pre-publication issue 235 are two
+;;;; wrong spellings of ONE parameter, and pre-publication issue 233/pre-publication issue 234/pre-publication issue 237 are all the dev server proceeding
 ;;;; in a state it could have detected and named.
 
-;;; --- #235 / #157: the builder parameter -------------------------------------
+;;; --- pre-publication issue 235 / pre-publication issue 157: the builder parameter -------------------------------------
 
 (defun bt/build-app ()
   "A named builder, so #'BT/BUILD-APP can be told from an anonymous thunk."
@@ -203,7 +203,7 @@ and the editor droppings that appear beside a file on every save."
       (is (search "'make-app" text) "the message must show the right spelling: ~S" text))))
 
 (test a-named-function-object-is-coerced-back-to-its-symbol
-  ;; #157: #'build-app captures the object existing at that instant, so recompiling the
+  ;; pre-publication issue 157: #'build-app captures the object existing at that instant, so recompiling the
   ;; file that defines it leaves the watcher rebuilding with the pre-edit builder forever.
   ;; A SYMBOL re-resolves on every FUNCALL, which is what the caller plainly meant.
   (is (eq 'bt/build-app (hyperion/dev::%normalize-builder #'bt/build-app))))
@@ -226,7 +226,7 @@ and the editor droppings that appear beside a file on every save."
            (is (string= "v1" (first (third (funcall (funcall captured) nil))))
                "a captured function object should still be the OLD builder")
            (is (string= "v2" (first (third (funcall (funcall coerced) nil))))
-               "the coerced symbol must resolve to the NEW builder -- this is #157"))
+               "the coerced symbol must resolve to the NEW builder -- this is pre-publication issue 157"))
       (setf (fdefinition 'bt/build-app)
             (lambda () (lambda (env) (declare (ignore env))
                          (list 200 '(:content-type "text/plain") '("v1"))))))))
@@ -240,7 +240,7 @@ and the editor droppings that appear beside a file on every save."
 (test a-symbol-builder-is-already-right
   (is (eq 'bt/build-app (hyperion/dev::%normalize-builder 'bt/build-app))))
 
-;;; --- #233: an application error must not disconnect the tab -----------------
+;;; --- pre-publication issue 233: an application error must not disconnect the tab -----------------
 
 (test an-app-that-signals-becomes-a-page-carrying-the-poller
   ;; THE mechanism correction. The report read this as "the poller goes into HTML
@@ -254,7 +254,7 @@ and the editor droppings that appear beside a file on every save."
     (is (= 500 (first resp)))
     (is (search "text/html" (getf (second resp) :content-type)))
     (let ((body (first (third resp))))
-      (is (search "reload" body) "the error page must carry the poller -- that is #233")
+      (is (search "reload" body) "the error page must carry the poller -- that is pre-publication issue 233")
       (is (search "a typo in a handler" body) "and must say what went wrong")
       (is (search "</body>" body) "the poller appends to document.body, so there must be one"))))
 
@@ -286,7 +286,7 @@ and the editor droppings that appear beside a file on every save."
     (is (= 200 (first resp)))
     (is (search "hi" (first (third resp))))))
 
-;;; --- #234: a changed type layout must be reported ---------------------------
+;;; --- pre-publication issue 234: a changed type layout must be reported ---------------------------
 
 (test a-layout-change-warning-is-recognised-and-names-the-type
   ;; SBCL's own wording is the signal, so this test is what stops a rephrasing from
@@ -302,7 +302,7 @@ and the editor droppings that appear beside a file on every save."
              (make-condition 'simple-warning :format-control "redefining FOO"
                                              :format-arguments nil)))))
 
-;;; --- #237: a root with no Lisp in it ----------------------------------------
+;;; --- pre-publication issue 237: a root with no Lisp in it ----------------------------------------
 
 (test a-watched-root-with-no-lisp-is-noticed
   ;; NOT the reported case -- that repo's src/ held a populated shared core, so this stays

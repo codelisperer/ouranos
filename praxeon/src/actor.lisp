@@ -19,7 +19,7 @@
 jzon-serializable JSON-schema value or NIL), the FN that performs it, and the CAPABILITY a
 caller must hold to see it at all.
 
-CAPABILITY is a string or NIL (#122). NIL means unrestricted -- every means registered
+CAPABILITY is a string or NIL (#90). NIL means unrestricted -- every means registered
 before this existed is unrestricted, and stays so. A means that names a capability is
 ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
   (name "" :type string)
@@ -31,7 +31,7 @@ ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
 (defstruct (agent (:constructor make-agent))
   "A runtime agent.
 
-TWO BUDGETS, over two kinds of data (#402, ADR-0001). CONTEXT budgets RETRIEVED
+TWO BUDGETS, over two kinds of data (pre-publication issue 402, ADR-0001). CONTEXT budgets RETRIEVED
 FACTS -- independent items, ranked by value density and chosen by `ctx:assemble'.
 HISTORY-BUDGET bounds what the CONVERSATION costs to resend: an estimated token
 ceiling on the messages a deliberation sends, applied by
@@ -44,7 +44,7 @@ client rendering `agent-history' still shows the whole conversation."
   (name "agent" :type string)
   (provider nil)                          ; a praxeon/llm:provider
   (system-prompt "" :type string)
-  ;; CACHE-SYSTEM (#437): send the system prompt as a marked part, so the provider caches the
+  ;; CACHE-SYSTEM (pre-publication issue 437): send the system prompt as a marked part, so the provider caches the
   ;; prefix it sits in. NIL by default, and the default is the decision -- a prefix cache is a
   ;; billing behaviour, and one that arrived without being asked for would be a surprise in a
   ;; line item. See DELIBERATE for what it does and what it deliberately does not reach.
@@ -53,7 +53,7 @@ client rendering `agent-history' still shows the whole conversation."
   (context (ctx:make-context) :type ctx:context)
   ;; 120000 ESTIMATED tokens, not NIL, and the default is the decision. An opt-in bound
   ;; that no existing agent opts into leaves every consumer resending its whole history
-  ;; every turn -- the quadratic cost #402 was filed about -- and leaves the trim with no
+  ;; every turn -- the quadratic cost pre-publication issue 402 was filed about -- and leaves the trim with no
   ;; caller in practice. Sized for a 200k-token window with room for the system prompt,
   ;; the tool table, the retrieved facts and the model's own output; an estimate can read
   ;; LOW (see `prompt:*chars-per-token*'), so the headroom is deliberate. NIL means send
@@ -65,7 +65,7 @@ client rendering `agent-history' still shows the whole conversation."
   "Register a means under NAME: a human DESCRIPTION, the FN performing it (a
 function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
-CAPABILITY string a caller must hold to see or use it (#122). Returns NAME."
+CAPABILITY string a caller must hold to see or use it (#90). Returns NAME."
   (setf (gethash name (agent-means agent))
         (make-means-entry :name name :description description
                           :schema schema :capability capability :fn fn))
@@ -96,7 +96,7 @@ host that authorises some other way use the same machinery."
 (defun agent-means-for (agent &key permit)
   "The MEANS-ENTRYs a caller described by PERMIT may use -- the tool table, ASSEMBLED.
 
-This is the property #122 asks for and the one praxeon/ceiling's docstring already claimed:
+This is the property #90 asks for and the one praxeon/ceiling's docstring already claimed:
 a means the caller may not use is ABSENT, not filtered later. Nothing downstream -- no
 prompt, no model output, no injected instruction -- can reach a means that was never
 advertised, because refusing it is not a decision anything makes at call time. It is a
@@ -117,10 +117,10 @@ capabilities existed, so existing agents are unchanged."
 (defun request-messages (agent)
   "The messages a deliberation SENDS. Returns (values messages estimated-tokens).
 
-Not `agent-history', and the difference is the whole of #402 (ADR-0001):
+Not `agent-history', and the difference is the whole of pre-publication issue 402 (ADR-0001):
 
   - the history is TRIMMED to AGENT-HISTORY-BUDGET by `prompt:trim-history' --
-    whole exchanges from the oldest end, never through the cacheable prefix (#401);
+    whole exchanges from the oldest end, never through the cacheable prefix (pre-publication issue 401);
   - the agent's context items are ASSEMBLED by `ctx:assemble' -- the highest-value
     retrieved facts that fit ITS budget -- and placed AFTER that prefix, because
     facts change every turn and caching them would invalidate the cache each time.
@@ -139,9 +139,9 @@ permanent, and pay for them on every later turn)."
 (defun agent-system-parts (agent)
   "The agent's system prompt as PRAXEON/LLM wants it: a plain string, or -- when
 AGENT-CACHE-SYSTEM is set -- a one-part list whose part is marked as the end of the cacheable
-prefix (#401, #437).
+prefix (pre-publication issue 401, pre-publication issue 437).
 
-THE FIRST PRODUCER OF A MARKED PREFIX IN THIS TREE, and #437 is the finding that there was
+THE FIRST PRODUCER OF A MARKED PREFIX IN THIS TREE, and pre-publication issue 437 is the finding that there was
 none: `:cache t' had four consumers (the pinning in praxeon/prompt, the Anthropic translation,
 the OpenAI drop, the counts on the completion), a constructor in `llm:text-part', and no caller
 anywhere outside the suite. The cause was a TYPE: this slot was read straight out of
@@ -153,7 +153,7 @@ WHAT THIS CACHES, exactly, because the answer is smaller than it looks. A provid
 prefix as TOOLS, then SYSTEM, then MESSAGES, so a boundary at the end of the system prompt
 caches the tools and the system prompt and NOTHING ELSE. That is the right first producer,
 because it is the shape a consuming app is starting with -- one large shared brief and many
-short completions -- and it is where the measurement that opened #401 came from (574 input
+short completions -- and it is where the measurement that opened pre-publication issue 401 came from (574 input
 tokens for a one-line question against an EMPTY history, essentially all prefix).
 
 WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached.
@@ -172,7 +172,7 @@ A SHORT PROMPT MAY NOT CACHE AT ALL, and that is the provider's rule rather than
 function's: Anthropic has a minimum cacheable prefix (model-dependent, of the order of a
 thousand tokens) and silently does not cache below it. Nothing here can detect that, and
 nothing should pretend to -- what tells you is COMPLETION-CACHE-READ-TOKENS coming back 0
-rather than NIL, which is the distinction #401 paid for and #417 carried into the ledger."
+rather than NIL, which is the distinction pre-publication issue 401 paid for and pre-publication issue 417 carried into the ledger."
   (let ((prompt (agent-system-prompt agent)))
     (if (and (agent-cache-system agent) (plusp (length prompt)))
         (list (llm:text-part prompt :cache t))
@@ -184,14 +184,14 @@ advertising the means PERMIT allows as tools. Returns (values COMPLETION
 ESTIMATED-INPUT-TOKENS). Signals DELIBERATION-FAILURE when no provider is configured.
 
 What is sent is REQUEST-MESSAGES, not the raw history -- trimmed to the agent's
-history budget with its retrieved facts placed after the cacheable prefix (#402).
+history budget with its retrieved facts placed after the cacheable prefix (pre-publication issue 402).
 The estimate comes back as a second value so the caller can put it beside the
 provider's reported input tokens: ours is a claim, the provider's is the measurement,
 and a budget enforced against an estimate nobody compares is how a bound silently
 stops bounding.
 
 PERMIT is passed to AGENT-TOOL-SPECS, so a means the caller may not use is never described
-to the model at all (#122)."
+to the model at all (#90)."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
   (multiple-value-bind (messages estimate) (request-messages agent)
@@ -206,7 +206,7 @@ to the model at all (#122)."
 Returns the means' result, or a substituted / abandoned value.
 
 PERMIT is re-checked HERE as well as at advertisement time, and that is defence in depth
-rather than belt-and-braces (#122). A model can name a tool it was never offered -- from
+rather than belt-and-braces (#90). A model can name a tool it was never offered -- from
 its training, from an injected instruction, from a stale history -- and an agent can be
 handed to a workflow that advertises a different table than the one it invokes through. The
 question `may this caller use this means' has to be answerable at the moment of use, not
@@ -289,10 +289,10 @@ bounds the deliberate/act cycle so a misbehaving loop stays finite.
 
 PERMIT IS THE CALLER'S AUTHORITY and it travels to both halves of the loop -- the tool table
 the model is shown (DELIBERATE) and the check at the moment of use (ACT). Without it, a means
-that names a capability is invisible and uninvocable, which is the fail-closed rule of #122
+that names a capability is invisible and uninvocable, which is the fail-closed rule of #90
 working as designed.
 
-IT WAS MISSING UNTIL #400, and the consequence was not a missing convenience: `run-turn' is the
+IT WAS MISSING UNTIL pre-publication issue 400, and the consequence was not a missing convenience: `run-turn' is the
 framework's main entry point, so EVERY capability-bearing means was unreachable through it. An
 app could register one, see it refused as `no such means registered\', and have no way to pass
 the authority that would permit it short of driving DELIBERATE and ACT by hand. Found by writing
@@ -308,9 +308,9 @@ pattern was unexecutable through the path every reader would use."
       ;; Economic calculation: report what this step cost so the scarce resource
       ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
       ;; enforced against and :INPUT is what the provider actually charged -- two numbers
-      ;; computed different ways, on one event, so they can be made to meet (#402).
+      ;; computed different ways, on one event, so they can be made to meet (pre-publication issue 402).
       ;;
-      ;; Still only when the provider reported something, which is the #401 rule applied
+      ;; Still only when the provider reported something, which is the pre-publication issue 401 rule applied
       ;; to the event stream: emitting :usage with :input 0 for a provider that reports
       ;; no usage would claim a measurement nobody made, and a renderer summing input+output
       ;; would show a running total of zero as though it were the cost. When there is no
@@ -345,12 +345,12 @@ pattern was unexecutable through the path every reader would use."
           ;; already honours it for the cache fields, which it passes with no `or'. NIL
           ;; means the provider did not report it; 0 means it reported a miss.
           ;;
-          ;; The gate above is the #401 rule at the level it was written for: no counts at
+          ;; The gate above is the pre-publication issue 401 rule at the level it was written for: no counts at
           ;; all, no event. It does not cover a PARTIAL report, and that is what this line
           ;; got wrong -- a provider reporting output and not input emitted `:input 0',
           ;; which is the thing the comment fourteen lines up forbids, one field down. A
           ;; renderer summing input+output then shows a total that is short by an unknown
-          ;; amount rather than absent, and short-by-unknown reads as a real number (#444).
+          ;; amount rather than absent, and short-by-unknown reads as a real number (pre-publication issue 444).
           (evt:emit :usage :input in :output out
                            :cache-read cache-read :cache-write cache-write
                            :estimated-input estimate)))
@@ -411,7 +411,7 @@ acyclic to stay finite."
          (evt:emit :delegate :agent (agent-name sub) :task task)
          ;; The sub-turn runs with the COORDINATOR's authority, not with none. A delegated
          ;; subtask that silently lost the permit would be a capability-bearing means becoming
-         ;; unreachable one level down -- the same defect #400 found in RUN-TURN, reached by
+         ;; unreachable one level down -- the same defect pre-publication issue 400 found in RUN-TURN, reached by
          ;; delegation instead of by the main loop.
          (run-turn sub (or task "") :permit permit)))
      :schema (%string-arg-schema
@@ -434,7 +434,7 @@ acyclic to stay finite."
           (format stream "~&[error] ~A~%" e))))))
 
 ;;; --------------------------------------------------------------------------
-;;; A turn as a pipeline (#130)
+;;; A turn as a pipeline (pre-publication issue 130)
 ;;;
 ;;; RUN-TURN above is the deliberate/act loop -- the thing that talks to a model. It is
 ;;; also, from a pipeline's point of view, THE EFFECT: the single impure pivot that a

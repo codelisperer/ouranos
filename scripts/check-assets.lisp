@@ -26,7 +26,7 @@
 (defvar *root*
   ;; NOT `(make-pathname :directory (butlast ...))'. That form does not carry `:device'
   ;; through, and on Windows a device-less pathname is resolved against whatever drive the
-  ;; process is standing on rather than the drive this script lives on (#482). A checkout on
+  ;; process is standing on rather than the drive this script lives on (pre-publication issue 482). A checkout on
   ;; D: running against a fixture under %TEMP% on C: computed a root on D:, where nothing is,
   ;; and this script then raised FILE-DOES-NOT-EXIST reading an asset that was present all
   ;; along. `pathname-parent-directory-pathname' keeps the device, and it is already what

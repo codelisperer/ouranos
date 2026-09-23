@@ -9,7 +9,7 @@
 ;;;; `asdf:system-source-directory` resolves to the BUILD machine's path inside a dumped
 ;;;; image -- which is why a native library has to be copied next to the binary. An asset
 ;;;; read from `assets/vendor/` at run time would hit exactly that, and the desktop
-;;;; bundle is the very thing this fixes (#123). A `.so` cannot be embedded; 770K of text
+;;;; bundle is the very thing this fixes (pre-publication issue 123). A `.so` cannot be embedded; 770K of text
 ;;;; can, so it is. There is no path to get wrong, no file to forget to copy into the
 ;;;; `.app`, and no ordering dependency on the installer.
 ;;;;
@@ -114,7 +114,7 @@ Bind it before calling URL and MOUNT -- both read it, so they cannot disagree.")
   (format nil "~a/~a" *prefix* (%url-name (%require key))))
 
 (defun %respond (asset)
-  ;; The body is the octet vector ITSELF, not a list containing it (#148). A Clack body
+  ;; The body is the octet vector ITSELF, not a list containing it (pre-publication issue 148). A Clack body
   ;; is a list of STRINGS, a pathname, a stream, or a byte vector -- and the list form
   ;; is the one that reads most naturally here, which is exactly why this was wrong:
   ;; `(list bytes)` is a list whose single element is a vector, so the handler writes

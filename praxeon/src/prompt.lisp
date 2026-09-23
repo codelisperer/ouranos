@@ -1,4 +1,4 @@
-;;;; prompt.lisp --- what is SENT, as distinct from what is remembered (#402)
+;;;; prompt.lisp --- what is SENT, as distinct from what is remembered (pre-publication issue 402)
 ;;;;
 ;;;; An agent's `history' slot is the RECORD of a conversation. It is not the
 ;;;; request. This module builds the request: it trims the history to a token
@@ -25,7 +25,7 @@
 ;;;;    is handed and validates nothing, so this invariant has no second line of
 ;;;;    defence -- an orphaned part becomes a malformed request.
 ;;;;
-;;;; 2. The cacheable prefix (#401) is PINNED. Every message up to and including
+;;;; 2. The cacheable prefix (pre-publication issue 401) is PINNED. Every message up to and including
 ;;;;    the last one carrying a `:cache t' part survives every trim. A cached
 ;;;;    prefix is a saving only while its bytes do not change; trimming from the
 ;;;;    front would write a new cache entry at 1.25x every turn and read none.
@@ -123,7 +123,7 @@ separated from its `tool_result'."
   (and (some (lambda (p) (eq (getf p :type) :tool-result)) (%parts message)) t))
 
 (defun cache-boundary-message-p (message)
-  "True when MESSAGE carries a part marking the end of the cacheable prefix (#401)."
+  "True when MESSAGE carries a part marking the end of the cacheable prefix (pre-publication issue 401)."
   (and (some #'llm:cache-boundary-p (%parts message)) t))
 
 (defun %opens-exchange-p (message)
@@ -152,7 +152,7 @@ rule someone has to remember at each call site."
     (nreverse groups)))
 
 (defun pinned-exchange-count (groups)
-  "How many leading exchanges of GROUPS are pinned by the cacheable prefix (#401).
+  "How many leading exchanges of GROUPS are pinned by the cacheable prefix (pre-publication issue 401).
 
 The prefix ends at the LAST `:cache t' part, so every exchange up to and
 including the one containing it is pinned -- rounded out to the exchange
@@ -178,7 +178,7 @@ caching."
 prefix kept. Returns a fresh list; MESSAGES is untouched.
 
 BUDGET NIL means send everything -- for a caller that bounds its own context and
-does not want ours. Otherwise: keep the pinned exchanges (#401), then the newest
+does not want ours. Otherwise: keep the pinned exchanges (pre-publication issue 401), then the newest
 exchanges that fit, stopping at the first that does not so what is sent is a
 contiguous tail rather than a conversation with a hole in it. The newest exchange
 is kept whatever it costs.
@@ -239,8 +239,8 @@ model can tell a retrieved fact from something the user said.")
 
 Deliberately minimal -- role and content, in the order `ctx:assemble' returned.
 What a retrieved fact should actually carry (which document, which version, which
-clause, which language) is #372's question, and this is the seam that answers it
-once #372 lands. An item's `content' is a bare string today, so a bare string is
+clause, which language) is #138's question, and this is the seam that answers it
+once #138 lands. An item's `content' is a bare string today, so a bare string is
 what this can render."
   (when items
     (with-output-to-string (s)

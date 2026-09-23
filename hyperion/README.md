@@ -80,7 +80,7 @@ and `hyperion/router` owns dispatch in CL, where the handlers and the Clack env 
 "does the method match" separately: **405** with a computed `Allow` (a hand-rolled
 `cond` cannot tell that from a 404 even in principle), and **HEAD/OPTIONS derived
 rather than declared**, so they cannot drift from the routes they describe. 86 checks.
-Nothing in the tree is ported onto it yet — [#132](https://github.com/codelisperer/ouranos/issues/132).
+Nothing in the tree is ported onto it yet — pre-publication issue 132.
 
 Two **opt-in, mnemosyne-backed** systems sit beside the core so that hyperion itself keeps
 no database dependency: **`hyperion/session-db`** (a durable session STORE behind the same

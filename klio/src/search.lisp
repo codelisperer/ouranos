@@ -1,6 +1,6 @@
 ;;;; search.lisp --- the in-memory search index.
 ;;;;
-;;;; Part 2 item 6 of #359: tokenised, field-weighted, no stemming, built at load.
+;;;; Part 2 item 6 of pre-publication issue 359: tokenised, field-weighted, no stemming, built at load.
 ;;;;
 ;;;; WHAT THIS IS NOT. It is not a ranking engine and does not try to be. Three sites of prose
 ;;;; is a corpus of a few hundred documents, and the useful question is "which pages mention
@@ -8,7 +8,7 @@
 ;;;; relevance tuning are a later decision, and a bad one to guess at now.
 ;;;;
 ;;;; It holds no content. A document is identified by a key the caller chooses, so the index
-;;;; does not have to know what a page is -- which is #359 Q1 and is not ruled.
+;;;; does not have to know what a page is -- which is pre-publication issue 359 Q1 and is not ruled.
 
 (in-package #:klio)
 

@@ -12,16 +12,16 @@
   :license "MIT"
   :version "0.0.1"
   :depends-on ("aion/log"      ; neutral logging facade
-               "aion/dynamic"  ; bindings that cross a thread (#430); used in workflow, event
-               "aion/interceptor"  ; the typed pipeline a turn is threaded through (#130)
-               "aion/http-client"  ; the shared outbound client (#202)
+               "aion/dynamic"  ; bindings that cross a thread (#158); used in workflow, event
+               "aion/interceptor"  ; the typed pipeline a turn is threaded through (pre-publication issue 130)
+               "aion/http-client"  ; the shared outbound client (pre-publication issue 202)
                "coalton"
                "alexandria"
                "cons"             ; config/env: the shared load-dotenv lives in cons
                "cons/env"         ; config.lisp calls cons/env:load-dotenv directly
                "dexador"          ; HTTP client for LLM providers
                "com.inuoe.jzon"   ; JSON reader/writer
-               "ironclad"         ; Ed25519 verification of signed grants (#172)
+               "ironclad"         ; Ed25519 verification of signed grants (pre-publication issue 172)
                "bordeaux-threads")  ; the session ledger is shared across a turn
   :serial t
   :components ((:module "src"
@@ -32,12 +32,12 @@
                              (:file "praxeology")   ; Coalton-typed core ontology
                              (:file "conditions")   ; recoverable-failure protocol
                              (:file "context")      ; budgeted context (Kairos seed)
-                             (:file "memory")       ; observational memory (#60)
+                             (:file "memory")       ; observational memory (pre-publication issue 60)
                              (:file "llm")          ; provider protocol + Anthropic
-                             (:file "embedding")    ; the embedding seam (#372, #415)
-                             (:file "structured")   ; forced tool calls (#416)
-                             (:file "distil")       ; window -> observations (#452)
-                             (:file "prompt")       ; what is SENT: trim + placement (#402)
+                             (:file "embedding")    ; the embedding seam (#138, #150)
+                             (:file "structured")   ; forced tool calls (pre-publication issue 416)
+                             (:file "distil")       ; window -> observations (pre-publication issue 452)
+                             (:file "prompt")       ; what is SENT: trim + placement (pre-publication issue 402)
                              (:file "turn")         ; a turn as a value (interceptor context)
                              (:file "ceiling")      ; cost/rate ceiling as pipeline stages
                              (:file "actor")        ; the deliberate/act loop
@@ -51,13 +51,13 @@
 ;;; does IO, so it lives in the CL shell; the Actor stays provider-neutral (it's
 ;;; just a registered means with a JSON schema).
 (defsystem "praxeon/memory-db"
-  :description "Observational memory persisted through mnemosyne, with similarity recall over pgvector (#372)."
+  :description "Observational memory persisted through mnemosyne, with similarity recall over pgvector (#138)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   ;; AN AUX SYSTEM, AND NOT BECAUSE OF THE DAG. mnemosyne is to praxeon's LEFT, so this
   ;; dependency is legal in the core system too. What keeps it out of core is the design
-  ;; rule: #258's deliverable 2 asks for the seam "without praxeon growing a datastore of
+  ;; rule: pre-publication issue 258's deliverable 2 asks for the seam "without praxeon growing a datastore of
   ;; its own", and praxeon/CLAUDE.md says anything an agent stores externally reaches
   ;; praxeon as an injected seam, never a dependency. praxeon's core :depends-on is
   ;; ("aion/log") and nothing else.
@@ -65,7 +65,7 @@
   :components ((:file "src/memory-db")))
 
 (defsystem "praxeon/memory-db/tests"
-  :description "Observational memory in a real Postgres with pgvector (#372)."
+  :description "Observational memory in a real Postgres with pgvector (#138)."
   :depends-on ("praxeon/memory-db" "fiveam")
   :components ((:module "tests"
                 :components ((:file "memory-db-tests"))))
@@ -115,7 +115,7 @@
                "hyperion"                   ; elise.lisp calls i18n:translate directly
                "praxeon/web-search"         ; gives Elise the web-search means
                "praxeon/translate"          ; lets Elise converse in the user's locale
-               ;; THE APP declares its HTTP backend, not the framework (#139/#218). Elise
+               ;; THE APP declares its HTTP backend, not the framework (pre-publication issue 139/pre-publication issue 218). Elise
                ;; is a real deployable with `bin/elise --server', so it is the layer where
                ;; this choice belongs. Hunchentoot rather than Woo because a supervisor
                ;; must be able to stop it: Woo does not answer SIGTERM (measured -- see
@@ -138,12 +138,12 @@
 
 ;;; praxeon/web's OWN suite, and the reason it is a separate system rather than another file
 ;;; in praxeon/tests: driving a real server needs a real Clack handler, and which handler is
-;;; the APPLICATION's choice -- praxeon/web must keep declaring none (#139/ADR-0011, #218).
+;;; the APPLICATION's choice -- praxeon/web must keep declaring none (pre-publication issue 139/ADR-0011, pre-publication issue 218).
 ;;; A test system is an application for that purpose, so this one declares hunchentoot (the
 ;;; backend that answers SIGTERM, as praxeon/elise does) and the core suite stays free of an
 ;;; HTTP server it has no use for.
 ;;;
-;;; IT EXISTS BECAUSE praxeon/web EXPORTED A SURFACE AND NOTHING LOADED IT (#151). The two
+;;; IT EXISTS BECAUSE praxeon/web EXPORTED A SURFACE AND NOTHING LOADED IT (pre-publication issue 151). The two
 ;;; existing tests that mention it read its .asd rather than loading the system, so they pass
 ;;; with no handler in the image -- and a layer no suite loads cannot report that its
 ;;; consumers are working around it, which is how elise's hand-rolled sleep loop survived.
@@ -161,7 +161,7 @@
 
 ;;; A Clack-based web + REST surface for Praxeon agents (HTMX UI). The server backend is
 ;;; the APPLICATION's choice and is declared by the application -- this system deliberately
-;;; declares none (#139/ADR-0011, applied here by #218). See the :depends-on comment below.
+;;; declares none (pre-publication issue 139/ADR-0011, applied here by pre-publication issue 218). See the :depends-on comment below.
 (defsystem "praxeon/web"
   :description "A Clack-based web + REST surface for Praxeon agents (HTMX UI)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -171,12 +171,12 @@
                "hyperion/assets"             ; vendored htmx/Bulma, embedded (no CDN)
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
                (:require "sb-concurrency")   ; thread-safe mailbox for the SSE channel
-               ;; The HTTP backend is the APP's choice, not hyperion's (#139) -- and it is
+               ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
                ;; declared as the CLACK HANDLER system, not the bare server, because that
                ;; is what `clackup` resolves :woo / :hunchentoot through. Depending on the
                ;; raw server (as this did) left Clack to lazy-load the handler at runtime.
                ;; NO HTTP BACKEND HERE, deliberately -- the same decision hyperion took
-               ;; at #139 / ADR-0011, which this system was simply missed by. See the long
+               ;; at pre-publication issue 139 / ADR-0011, which this system was simply missed by. See the long
                ;; comment in hyperion.asd: a FRAMEWORK does not get to choose the
                ;; APPLICATION's HTTP server. praxeon/web is a framework aux system, so the
                ;; app declares the handler it wants and hyperion/server:default-server
@@ -184,7 +184,7 @@
                ;;
                ;; It used to declare clack-handler-woo on Unix, which meant every praxeon
                ;; web app deployed on Linux or macOS ran on Woo without ever choosing it --
-               ;; and WOO DOES NOT ANSWER SIGTERM (#218). Measured 3x per cell on macOS,
+               ;; and WOO DOES NOT ANSWER SIGTERM (pre-publication issue 218). Measured 3x per cell on macOS,
                ;; and 21 runs on Linux before that; hunchentoot and the native :uv backend
                ;; both keep the signal, in both modes:
                ;;

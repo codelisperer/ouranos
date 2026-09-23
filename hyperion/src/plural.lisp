@@ -1,7 +1,7 @@
 ;;;; plural.lisp --- CLDR plural categories: the operand model and the rule evaluator.
 ;;;;
 ;;;; A string with a count in it can only be authored one way per locale, and one way is
-;;;; not enough for most of them (#135). English needs two forms; Russian and Ukrainian
+;;;; not enough for most of them (pre-publication issue 135). English needs two forms; Russian and Ukrainian
 ;;;; need three on one set of boundaries, Polish three on different ones, Arabic six.
 ;;;; CL's `~:P` pluralizes in English regardless of locale, so every non-English
 ;;;; dictionary either read wrong at most counts or had to reword around the construction.

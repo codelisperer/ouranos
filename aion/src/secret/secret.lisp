@@ -1,6 +1,6 @@
 ;;;; secret.lisp --- an opaque credential wrapper: plaintext in, REVEAL out.
 ;;;;
-;;;; The defect this exists to make unrepresentable (#209): SBCL prints a structure by
+;;;; The defect this exists to make unrepresentable (pre-publication issue 209): SBCL prints a structure by
 ;;;; printing its slots, and Coalton generates a printer for a DEFINE-TYPE that does the
 ;;;; same. So a credential stored as a bare STRING is rendered in full by anything that
 ;;;; prints the aggregate holding it -- most damagingly an unhandled condition's

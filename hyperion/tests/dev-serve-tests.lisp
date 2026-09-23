@@ -1,12 +1,12 @@
-;;;; dev-serve-tests.lisp --- SERVE's :BLOCK, which was exported with no suite (#336).
+;;;; dev-serve-tests.lisp --- SERVE's :BLOCK, which was exported with no suite (pre-publication issue 336).
 ;;;;
-;;;; SERVE gained :BLOCK in 6903485 (PR #250). The same commit's other three fixes all got
+;;;; SERVE gained :BLOCK in 6903485 (pre-publication PR 250). The same commit's other three fixes all got
 ;;;; suites; this one did not, and it is the one whose failure mode is a process that exits
 ;;;; after printing that it is listening. Two consuming apps lost an afternoon to exactly
 ;;;; that: SERVE was the last form of a build-tool target, it returned, the process ended,
 ;;;; and it took the server with it AFTER the success banner.
 ;;;;
-;;;; WHY THIS IS ITS OWN FILE, which #336 asks to have answered before the test is written.
+;;;; WHY THIS IS ITS OWN FILE, which pre-publication issue 336 asks to have answered before the test is written.
 ;;;; `dev-tests.lisp' states its own scope in its header -- the watcher's FILE SELECTION --
 ;;;; and says plainly that "driving the whole watcher would mean starting a server and
 ;;;; sleeping through poll intervals to assert on something these say precisely". That
@@ -20,7 +20,7 @@
 ;;;; a %DEV- prefix, which is the duplicated-fact defect this tree has now found three
 ;;;; times in one day (AGENTS.md: a check that exists is not a check that runs).
 ;;;;
-;;;; THE FIXTURE IS NOT EASIER THAN REALITY, per #336. Every test here starts a REAL server
+;;;; THE FIXTURE IS NOT EASIER THAN REALITY, per pre-publication issue 336. Every test here starts a REAL server
 ;;;; on a REAL free port through SERVE itself, and waits for the port to accept a connection
 ;;;; before asserting anything. A fixture that stubbed the server would be testing a
 ;;;; different thing than the one that cost those afternoons.
@@ -70,7 +70,7 @@ must stay well under +BLOCK-HOLDS+ for the pincer to close.")
 (defun %dev-serve-root ()
   "A temp directory holding one .lisp file.
 
-The file is not decoration. WATCH warns when a watched root contains no Lisp (#237), and a
+The file is not decoration. WATCH warns when a watched root contains no Lisp (pre-publication issue 237), and a
 suite that prints warnings on every run teaches its readers to scroll past warnings -- which
 is the habit the warning exists to defeat."
   (let ((root (merge-pathnames (format nil "hyperion-dev-serve-~D-~D/"
@@ -109,7 +109,7 @@ Cleanup is unconditional and deliberately belt-and-braces: UNWATCH stops the wat
 the server it manages. A suite that leaks a listening socket fails somewhere else, later, for
 reasons that look nothing like this file.
 
-CORRECTED (#433): this used to say the JOIN was \"what makes the NEXT test's free port
+CORRECTED (#159): this used to say the JOIN was \"what makes the NEXT test's free port
 genuinely free\". It is not, and that claim was the defect rather than a description of it.
 The join is on the thread that called SERVE; the socket is held by the backend's acceptor,
 which gives it back a moment later. So the port could still be accepting when this returned,

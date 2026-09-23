@@ -1,4 +1,4 @@
-;;;; packages.lisp --- hyperion/update: the desktop self-updater (#76).
+;;;; packages.lisp --- hyperion/update: the desktop self-updater (pre-publication issue 76).
 ;;;;
 ;;;; PROMOTED, NOT WRITTEN FRESH. The client half of this module existed first inside a
 ;;;; consuming application that ships it to real users, and its shape is that client's
@@ -23,7 +23,7 @@
 ;;;;
 ;;;; WHY THE SCHEMA LIVES HERE. `scripts/update-manifest.lisp' generates the manifest and
 ;;;; names its fields; this parses it and names them again. Two copies of one contract is
-;;;; exactly the shape of #206, where a platform-key mismatch made a client report itself
+;;;; exactly the shape of pre-publication issue 206, where a platform-key mismatch made a client report itself
 ;;;; up to date forever -- a failure that is silent, permanent, and only visible at the
 ;;;; user. That script records the debt explicitly and names this module as the place it
 ;;;; is repaid: the field names belong in ONE place, and it is this one.
@@ -66,7 +66,7 @@
     The third is the one that matters, and it is split out here as `No-Artifact'. \"No
     build for your platform yet\" is a different sentence to a user than \"you are
     current\" -- a platform can join the release matrix a release late, which is normal
-    and temporary. It is also the exact shape of the silent failure #206 produced: a
+    and temporary. It is also the exact shape of the silent failure pre-publication issue 206 produced: a
     client that cannot find its own row reports itself up to date forever, with no error,
     no log line, and no user who thinks to report that something did not happen. A state
     that can only be reached by a real absence is how that stays visible.

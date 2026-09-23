@@ -7,8 +7,8 @@
 A dumped SBCL image is self-contained **Lisp**. It is not self-contained **native code**:
 every CFFI binding resolves a shared library *by name*, on the end user's machine, at run
 time. The proof is not hypothetical — the CI-built Linux bundle died on a clean box with
-`Error opening shared object "libev.so.4"` ([#74](https://github.com/codelisperer/ouranos/issues/74),
-[#94](https://github.com/codelisperer/ouranos/issues/94)).
+`Error opening shared object "libev.so.4"` ([#72](https://github.com/codelisperer/ouranos/issues/72),
+[#78](https://github.com/codelisperer/ouranos/issues/78)).
 
 [ADR-0011](0011-desktop-server-backend-and-content-length.md) removed *that* library by
 dropping Woo from desktop bundles. It did not solve the category, and said so. We then added
@@ -19,7 +19,7 @@ What changed between July and now is **whose artifact it is**. `libuv` is not re
 a distro: `scripts/build-libuv.lisp` fetches a sha-pinned tarball (`libuv.pin`) and compiles
 it with the platform's own C compiler into `vendor/libuv/lib/`. We know exactly what file
 would ship, at exactly what version, because we produced it. That is what makes bundling a
-mechanical problem rather than a guess, and it is why #94 is tractable now.
+mechanical problem rather than a guess, and it is why #78 is tractable now.
 
 Three platforms will implement this. Three improvised answers would cost a rewrite, so the
 mechanism is settled here once, before any of them is written.
@@ -81,7 +81,7 @@ failure shipped. The clean-room run is the acceptance test, not a nicety.
   of `hyperion/desktop:image-directory`. It cannot share that code: `aion/uv` sits far to the
   left of `hyperion` in the DAG, and deliberately does not depend even on `aion` core. This
   is recorded as a known duplication to be resolved by
-  [#125](https://github.com/codelisperer/ouranos/issues/125)'s runtime module — not by a
+  [#91](https://github.com/codelisperer/ouranos/issues/91)'s runtime module — not by a
   comment asking two files to stay in sync.
 - In a dumped image, candidate 3 (`vendor/`) is dead weight rather than a fallback:
   `asdf:system-source-directory` returns the *build* machine's path, which does not exist on

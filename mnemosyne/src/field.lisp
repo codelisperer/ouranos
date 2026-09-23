@@ -14,12 +14,12 @@
     "The column-type vocabulary a schema field can declare. SQLite is dynamically typed
 (affinities); Postgres gets precise types; XTDB 2 is schemaless (types advisory)."
     FT-String FT-Text FT-Integer FT-Float FT-Boolean FT-Uuid FT-Timestamp FT-Date
-    ;; Raw bytes (#142). BLOB on SQLite, BYTEA on Postgres -- native on both, which is
+    ;; Raw bytes (pre-publication issue 142). BLOB on SQLite, BYTEA on Postgres -- native on both, which is
     ;; what ADR-0001 predicted when it said binary "needs none of this machinery" and
     ;; would be Native on both backends. It is added THROUGH the partial signature the
     ;; ADR requires rather than before it, so the easy case did not set the precedent.
     FT-Binary
-    ;; THE FIRST PARAMETERISED CONSTRUCTOR IN THIS VOCABULARY (#212), and the parameter is
+    ;; THE FIRST PARAMETERISED CONSTRUCTOR IN THIS VOCABULARY (pre-publication issue 212), and the parameter is
     ;; not decoration: pgvector's type IS `vector(1536)', so a dimension-less vector is not
     ;; a narrower vector, it is not a column type at all. That makes the dimension part of
     ;; the type rather than an option beside it.
@@ -64,7 +64,7 @@ number, rather than one string a caller has to take apart again."
     (match ty
       ((FT-Vector n) n)
       (_ 0)))
-  ;; THE DIALECT IS A CLOSED SET (ADR-0001 Consequences, #334). It was a String, and a typo
+  ;; THE DIALECT IS A CLOSED SET (ADR-0001 Consequences, pre-publication issue 334). It was a String, and a typo
   ;; -- "postgers" -- silently took the non-Postgres branch: no error anywhere, and a
   ;; migration with SQLite affinities against a Postgres database. A String argument whose
   ;; only legal values are three known words is a closed type wearing an open one.
@@ -92,7 +92,7 @@ number, rather than one string a caller has to take apart again."
   ;; THE CL-FACING PAIR. `dialect-from' returns an Optional, which is right for a Coalton
   ;; caller and a trap for a CL one: Coalton's NONE is an OBJECT, and every object is true in
   ;; CL, so `(or (dialect-from name) (error ...))' accepts the failure case silently. Found by
-  ;; a test asserting the refusal, which is the only reason it was not shipped (#334).
+  ;; a test asserting the refusal, which is the only reason it was not shipped (pre-publication issue 334).
   (declare dialect-known? (String -> Boolean))
   (define (dialect-known? name)
     (match (dialect-from name)
@@ -138,7 +138,7 @@ number, rather than one string a caller has to take apart again."
       ((Emulated sql) sql)
       ((Unsupported) "")))
 
-  ;; THE DIALECT IS MATCHED, NOT NAME-COMPARED (#432, ADR-0003). This used to ask
+  ;; THE DIALECT IS MATCHED, NOT NAME-COMPARED (pre-publication issue 432, ADR-0003). This used to ask
   ;; `(== (dialect-name dialect) "postgres")': a two-way test on a three-constructor type,
   ;; put by rendering the closed type back into the open string it exists to replace. Both
   ;; consequences of that shape were real -- D-Xtdb took the SQLite arm and got INTEGER/TEXT
@@ -150,7 +150,7 @@ number, rather than one string a caller has to take apart again."
 
 Every type in the current vocabulary is NATIVE on both RELATIONAL dialects -- which is
 exactly why the old total signature looked correct for a year. The ADT is here for the types
-that do not fit (#142 binary, #212 vector), so the first one to arrive cannot set the
+that do not fit (pre-publication issue 142 binary, pre-publication issue 212 vector), so the first one to arrive cannot set the
 precedent by accident."
     (match dialect
       ;; XTDB 2 IS SCHEMALESS: there is no column type to return and there never was one.

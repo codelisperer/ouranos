@@ -27,7 +27,7 @@
 (defvar *handler* nil "The running server handler, or NIL.")
 
 (defparameter *dev-port* {{dev-port}}
-  "This project's development port, derived from its NAME when it was generated (#238).
+  "This project's development port, derived from its NAME when it was generated (pre-publication issue 238).
 
 Not shared with any other project made from this template, which is the point: a literal in
 a template guarantees every app made from it wants the same port, and the second window

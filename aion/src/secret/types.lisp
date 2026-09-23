@@ -4,7 +4,7 @@
 ;;;; point: a native type IS the CL struct, so the redacting printer travels with the
 ;;;; value into any Coalton aggregate that holds it, in either compilation mode. A
 ;;;; Coalton-side wrapper would be a DEFINE-TYPE like any other -- printed field by
-;;;; field, with the String inside rendered in full, which is the bug (#209).
+;;;; field, with the String inside rendered in full, which is the bug (pre-publication issue 209).
 ;;;;
 ;;;; The `lisp' blocks here traffic only in a native type and String, both promised
 ;;;; representations, so they respect the §7 rule rather than sidestepping it.

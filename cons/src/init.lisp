@@ -73,7 +73,7 @@ developer's machine wants.")
 (defun dev-port (name)
   "A stable development port for a project called NAME.
 
-THE LITERAL IN A TEMPLATE IS THE DEFECT, not the collision it produces (#238). A fixed
+THE LITERAL IN A TEMPLATE IS THE DEFECT, not the collision it produces (pre-publication issue 238). A fixed
 port in a template file guarantees that every application generated from it wants the same
 one -- and when two are open at once the second window shows the FIRST application: its
 title, its routes, and a 404 for everything the second added. That reads as a
@@ -115,7 +115,7 @@ case can differ too. When the comparison fails ENOUGH-PATHNAME returns the file 
 says nothing, and an absolute `relative path' then defeats the (MERGE-PATHNAMES destination
 root) at the call site -- MERGE-PATHNAMES keeps the absolute one, so every scaffolded file
 is written back into the TEMPLATE directory instead of the target. The scaffold reports
-success; the target is empty (#185)."
+success; the target is empty (pre-publication issue 185)."
   (let* ((root (uiop:ensure-directory-pathname root))
          ;; PROBE-FILE answers the truename, which settles short-vs-long and case both.
          (base (or (probe-file root) root))
@@ -254,7 +254,7 @@ REPL session wants after editing one.")
   "The template DESIGNATOR names: a built-in by name, or a DIRECTORY holding a manifest.
 
 The directory case is what makes a template authorable outside cons today; resolving a git
-URL or an OCI artifact is the same seam, one step later (design §4, #20)."
+URL or an OCI artifact is the same seam, one step later (design §4, #32)."
   (etypecase designator
     ((or keyword string)
      (let ((path (and (stringp designator)
@@ -340,7 +340,7 @@ generated project instead."
         :run-line "
     cons serve   # run the web app on http://127.0.0.1:8080
     cons bin     # dump a native bin/{{name}}")
-       ;; Declared, not yet scaffolded -- the verbs behind them are #25 (service), #94/#74
+       ;; Declared, not yet scaffolded -- the verbs behind them are #37 (service), #78/#72
        ;; (desktop) and design §3a (shared-lib). Named here so a template can already
        ;; declare one and say plainly that its ship path is unbuilt.
        (%make-target-kind :name :desktop :executable-p t :implemented-p nil)
@@ -389,7 +389,7 @@ reason."
     ;; install without :with-claude (it would be skipped anyway, but be explicit).
     (cons/conform:install-conformance root :name name :with-claude nil)
     ;; Fold every dependency's declared configuration keys into this project's own
-    ;; .env.example (#120). Without this the app author has to find them by reading each
+    ;; .env.example (pre-publication issue 120). Without this the app author has to find them by reading each
     ;; dependency's source, which drifts the moment a library adds a key -- and the failure
     ;; that follows is a runtime configuration-error deep inside that library, nowhere near
     ;; anything they just changed. Appends, so the template's own file survives; run

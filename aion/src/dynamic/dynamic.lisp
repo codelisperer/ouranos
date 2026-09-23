@@ -1,4 +1,4 @@
-;;;; dynamic.lisp --- carry declared dynamic bindings across a thread boundary (#430).
+;;;; dynamic.lisp --- carry declared dynamic bindings across a thread boundary (#158).
 ;;;;
 ;;;; THE DEFECT THIS EXISTS FOR. `aion/log:*context*' holds the ambient structured fields --
 ;;;; correlation id, user, request -- and is bound with LET by `with-context'. A LET binding

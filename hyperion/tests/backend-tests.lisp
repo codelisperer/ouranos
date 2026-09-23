@@ -1,4 +1,4 @@
-;;;; backend-tests.lisp --- which HTTP backend gets chosen (#139).
+;;;; backend-tests.lisp --- which HTTP backend gets chosen (pre-publication issue 139).
 ;;;;
 ;;;; Hyperion declares no HTTP server; the application does. So the interesting logic is
 ;;;; "given what the operator asked for and what is actually in the image, which backend do
@@ -7,7 +7,7 @@
 ;;;; of the process running the suite, and asserting on whichever handlers happened to be
 ;;;; loaded by everything else in the image -- a test whose result depends on its neighbours.
 ;;;;
-;;;; Separate from server-tests.lisp, which owns the blocking entry point (#124): that file
+;;;; Separate from server-tests.lisp, which owns the blocking entry point (pre-publication issue 124): that file
 ;;;; asks what a running server does, this one asks which server we run at all.
 
 (in-package #:hyperion/tests)
@@ -54,7 +54,7 @@
     (is (null missing)
         "reported as available, but the handler package is not loaded: ~S" missing)))
 
-;;; --- the native backend (#117, commit 5) -----------------------------------
+;;; --- the native backend (pre-publication issue 117, commit 5) -----------------------------------
 ;;;
 ;;; Pure tests only, here. Whether :UV actually SERVES anything is asked in
 ;;; hyperion/server-uv/tests, which is the only suite that may load a system needing libuv.

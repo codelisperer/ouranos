@@ -1,6 +1,6 @@
 ;;;; packages.lisp --- aion/signature: Ed25519 over bytes, and nothing else.
 ;;;;
-;;;; THREE CONSUMERS, THREE POINTS IN THE DAG, NO NATURAL OWNER (#208). praxeon's spend
+;;;; THREE CONSUMERS, THREE POINTS IN THE DAG, NO NATURAL OWNER (pre-publication issue 208). praxeon's spend
 ;;;; ceiling verifies signed grants; the desktop updater must verify a release artifact
 ;;;; before applying it; marketplace items may travel between users later. Same primitive
 ;;;; each time -- verify a detached signature over bytes -- with a different envelope around

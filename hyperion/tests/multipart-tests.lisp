@@ -1,4 +1,4 @@
-;;;; multipart-tests.lisp --- multipart/form-data (#143).
+;;;; multipart-tests.lisp --- multipart/form-data (pre-publication issue 143).
 ;;;;
 ;;;; Two things here are worth more than the happy path, and both are why this belongs in
 ;;;; the framework rather than in each app:
@@ -105,7 +105,7 @@ Backed by a temp file so it is a real stream, read once, exactly like a socket."
 
 (test repeated-names-are-all-returned
   ;; <input type=file multiple> and repeated fields post the same name more than once --
-  ;; the same trap #136 fixed for urlencoded bodies.
+  ;; the same trap pre-publication issue 136 fixed for urlencoded bodies.
   (%with-parts (parts (%mp-body "BOUND" '(("tag" "a") ("tag" "b") ("tag" "c"))))
     (is (= 3 (length (http:find-parts parts "tag"))))
     (is (equal '("a" "b" "c") (mapcar #'http:part-text (http:find-parts parts "tag"))))

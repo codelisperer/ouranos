@@ -128,7 +128,7 @@ design over convenience** unless the maintainer flags time pressure.
   §10). Decided in **hyperion ADR-0009 (Provisional)**; the forcing function is the first
   real SaaS product. This is the payoff: **Hyperion apps are born multi-UX.**
 - **The public repo starts from a fresh commit — the development history stays private**
-  (decided 2026-08-04, issue #90). An audit before publication found client/product names in
+  (decided 2026-08-04, pre-publication issue 90). An audit before publication found client/product names in
   **188 diff lines and 12 commit messages**, spread from the first commit through the
   subtree-merged originals — including a merge commit whose title names a client org.
   Rewriting 217 commits would preserve provenance nobody reads, invalidate every SHA, and
@@ -166,13 +166,13 @@ design over convenience** unless the maintainer flags time pressure.
   and where one is required to build something optional, it is the one the OS already
   ships.** This is also why `scripts/build-libuv.lisp` drives the compiler from Lisp with **no
   CMake, no autotools, no make** — 37 sources, one invocation, transcribed from libuv's
-  `CMakeLists.txt`. Windows support for that script is the open half (#107). **The full libuv
+  `CMakeLists.txt`. Windows support for that script is the open half (#84). **The full libuv
   picture starts at [`aion/docs/adr/0002`](aion/docs/adr/0002-libuv-integration-strategy.md)**
   (strategy: why bind at all, what is never bound, sequencing, exit conditions), which
   cross-references the founding decisions in `aion/docs/uv-design.md` and the stream contract
   in `aion/docs/adr/0001`.
 - **Native bindings follow the DAG; abstractions over them follow the domain** (decided
-  2026-08-04, #117). The **thin, faithful 1:1 binding** of a native library lives in **aion**,
+  2026-08-04, pre-publication issue 117). The **thin, faithful 1:1 binding** of a native library lives in **aion**,
   because everything that wants a socket sits to aion's right: `cons` wants `uv_spawn` for
   build/test runs, `hermes` depends on `aion` *only* by design and will want its own HTTP
   client, and mnemosyne's Postgres wire is a named libuv target. Put TCP in hyperion and
@@ -197,7 +197,7 @@ design over convenience** unless the maintainer flags time pressure.
   surveyed: it did not load, its `CoInitialize` ran once on the loading thread (apartments are
   per-thread), and its `VARIANT` was sized 16 bytes — right on x86, wrong on x64 where it is
   24 — silently corrupting **every call with two or more arguments**. Written ourselves
-  instead, and the split follows the #117 rule exactly: the **raw binding is `aion/windows`**
+  instead, and the split follows the pre-publication issue 117 rule exactly: the **raw binding is `aion/windows`**
   (+ `/com`, `/service`, `/registry`, `/security`, `/shell`, opt-in and platform-exclusive —
   a new category, since `aion/uv` is opt-in but portable); the **ergonomic layer is Hades**
   (a satellite — only a consuming app depends on it, never a framework);
@@ -241,24 +241,24 @@ design over convenience** unless the maintainer flags time pressure.
   a skip**.
 - **AI attribution: where it matters, not in every commit** (decided 2026-08-04). No
   `Co-Authored-By` trailers for an assistant — they say nothing about *how* the work was
-  done, and the public repo starts from a fresh commit (#90), so they would not survive to
+  done, and the public repo starts from a fresh commit (pre-publication issue 90), so they would not survive to
   be read. Instead: one statement in the README pointing at
   [`docs/working-with-ai.md`](docs/working-with-ai.md), and a **`Provenance`** section on an
   ADR or design doc when the *process* shaped the outcome — a measurement that contradicted an
   assumption, a counterargument that landed, a lean abandoned. ADR-0011 is the worked
   example: a hunch turned into a benchmark found a 44 ms bug in our own request path, and the
   maintainer then rejected the ADR's *framing* rather than its answer, which is how `aion/uv`
-  and #117 exist. **The maintainer owns every decision**; assisted research often shapes what
+  and pre-publication issue 117 exist. **The maintainer owns every decision**; assisted research often shapes what
   the choices even are, and recording that is the honest and useful part. Binding on every
   assistant via [`AGENTS.md`](AGENTS.md) (always loaded), and propagated to consuming apps by
   `cons conform`, which carries its own copy of the spec.
 - **Desktop packaging: declare the platform webview, carry only what we build, and build on
-  the oldest supported base** (decided 2026-08-05, #94). Researched against Tauri and Wails
+  the oldest supported base** (decided 2026-08-05, #78). Researched against Tauri and Wails
   rather than guessed. **(a) WebKitGTK is declared, not bundled.** Tauri splits by format —
   `.deb`/`.rpm` declare `libwebkit2gtk`, the AppImage bundles it at ~10 MB → ~100 MB — and the
   deciding factor is not size: a declared dependency means **the distro ships WebKit security
   patches**, whereas a bundled browser engine freezes every user at our build date and makes
-  WebKit CVE response permanently ours. With no update pipeline yet (#76, #77) that is a
+  WebKit CVE response permanently ours. With no update pipeline yet (pre-publication issue 76, pre-publication issue 77) that is a
   liability we decline. The cost accepted: the AppImage is not quite "download one file and
   run." **(b) Build on Ubuntu 22.04** — glibc is forward- but not backward-compatible, so the
   build base *is* the oldest system the artifact runs on. 22.04 is Tauri's own baseline and
@@ -274,12 +274,12 @@ design over convenience** unless the maintainer flags time pressure.
   because this is exactly the distinction that erodes into "well, cmake is just a build
   helper."
 - **Third-party servers are an APPLICATION choice, never a framework dependency** (decided
-  2026-08-05, #139). `hyperion` declares no HTTP backend; an app that wants Woo or Hunchentoot
+  2026-08-05, pre-publication issue 139). `hyperion` declares no HTTP backend; an app that wants Woo or Hunchentoot
   adds it itself. ADR-0011 said desktop bundles use Hunchentoot and it was never implemented,
   so `hyperion` still pulled `clack-handler-woo` → `libev` and Linux bundles died at startup.
   Swapping one permanent third-party server for another was rejected: **Hunchentoot is a
-  stop-gap, and the destination is the native libuv server (#117), after which both are
-  removed.** #117 is therefore **escalated** — it is the path off third-party servers
+  stop-gap, and the destination is the native libuv server (pre-publication issue 117), after which both are
+  removed.** pre-publication issue 117 is therefore **escalated** — it is the path off third-party servers
   entirely, not a nice-to-have. Anything built meanwhile should assume a third-party server is
   temporary and make that assumption cheap to withdraw.
 - **Papers build without make** — each `<fw>/paper/` ships `build.sh` + `build.ps1`
@@ -299,7 +299,7 @@ design over convenience** unless the maintainer flags time pressure.
   `(asdf:system-source-directory :coalton)`, **never a hard-coded path** (that is what
   makes it work on Windows). Cadence, triage classes, and the adoption record live in
   [`docs/coalton-upstream.md`](docs/coalton-upstream.md); build-time enforcement is
-  [issue #105](https://github.com/codelisperer/ouranos/issues/105). **Currently pinned:
+  [issue #83](https://github.com/codelisperer/ouranos/issues/83). **Currently pinned:
   `7915fad0`** (adopted 2026-07-29; 9/9 systems, 506 checks, 0 failures).
 - **Publishing (future)** — **Ultralisp** (rolling, fast) for reach + **ocicl** (OCI,
   pinned/reproducible) for consumption. Independent per-lib release, if ever needed,
@@ -328,7 +328,7 @@ design over convenience** unless the maintainer flags time pressure.
   the provider protocol + client + webhook verify; persistence → mnemosyne, web endpoints →
   hyperion, both app-driven. Depends leftward only (`aion/log` + dexador, jzon, cl-base64,
   ironclad); never on hyperion/mnemosyne/praxeon. See `hermes/docs/roadmap.md`.
-  **Status: email + SMS shipped; payments (Stripe) shipped (#47); push planned.**
+  **Status: email + SMS shipped; payments (Stripe) shipped (pre-publication issue 47); push planned.**
 - **Typed interceptor pipeline** (`hyperion/interceptor`, Coalton) — Pedestal-style,
   parametric over context; `execute` (pure) + `execute-effect` (effects at the edge).
   Serves HTTP and agentic contexts. Elise's crisis guardrail is the first real chain.
@@ -340,7 +340,7 @@ design over convenience** unless the maintainer flags time pressure.
 - **Licensing** — audited: no strong copyleft; a few weak-copyleft **LLGPL** transitive
   deps (via `trivia`) — safe to use unmodified. Frameworks **MIT**; consuming apps proprietary.
 - **Why MUMPS/globals, which looks like a retro choice and is not** — the motivation
-  behind #108/#113/#114, recorded because it is the kind of "why" that evaporates between
+  behind #85/#87/#88, recorded because it is the kind of "why" that evaporates between
   sessions and makes the work look arbitrary later. First met on a large contract at the
   **US Dept of Veterans Affairs**, whose EHR (VistA) runs on it. Two claims, one strong
   and one needing care:
@@ -361,10 +361,10 @@ design over convenience** unless the maintainer flags time pressure.
   Not obscure, either, which is worth saying because it reads as niche: MUMPS quietly runs
   a large share of healthcare (Epic, the biggest EHR vendor, sits on InterSystems) — an
   under-marketed incumbent rather than a revival. This also **answers mnemosyne's open
-  neutrality question** (#108 blocker 2, #42): if globals are a first-class backend, the
+  neutrality question** (#85 blocker 2, #53): if globals are a first-class backend, the
   neutral protocol has to be *narrower* than SQL — get/put/traverse — with SQL layered
   above for the SQL backends, not the other way round.
-- **First public release (#91, 2026-08-24)** — `0.1.0`, all seven frameworks public with
+- **First public release (pre-publication issue 91, 2026-08-24)** — `0.1.0`, all seven frameworks public with
   honest per-framework maturity, explicitly **not** offering support. The decision that
   matters here is not the scope, it is the reframe that produced it: *"what does v0.1
   cover"* is a **goal** question wearing a scope question's clothes. Three goals were
@@ -378,7 +378,7 @@ design over convenience** unless the maintainer flags time pressure.
   the README that this is a working research stack rather than a supported product. That
   one paragraph is what keeps users from arriving uninvited.
   Consequences worth recording, because each looks like a corner cut if you do not know the
-  goal: **CI (#87) and clean-machine bootstrap (#88) follow the launch rather than gate
+  goal: **CI (pre-publication issue 87) and clean-machine bootstrap (pre-publication issue 88) follow the launch rather than gate
   it** — they are evidence for *contributors*, and contributors are not what this release
   is aimed at. **`docs/launch/` publishes** — a project that names its own credibility gaps
   is harder to dismiss than one that hides them. And **history is not cleaned, it is

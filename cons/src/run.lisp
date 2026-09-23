@@ -236,7 +236,7 @@ target's exit code; an interactive target instead stays in its REPL."
   (handler-case
       (let ((tgt  (%require-target spec name))
             (pmap (%param-map spec params)))
-        ;; #240: before doing the work, say whether the framework this app is built
+        ;; pre-publication issue 240: before doing the work, say whether the framework this app is built
         ;; against has moved. Advisory, fail-open, no network -- see cons/upstream.
         (cons/upstream:report)
         (%load-env spec)

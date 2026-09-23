@@ -1,4 +1,4 @@
-;;;; env-scan-tests.lisp --- `cons env`: which keys does this project need? (#120)
+;;;; env-scan-tests.lisp --- `cons env`: which keys does this project need? (pre-publication issue 120)
 ;;;;
 ;;;; The parser is the part that can be wrong, and it is wrong in a specific direction: a
 ;;;; .env.example is mostly PROSE, so the hazard is reading commentary as configuration.

@@ -1,13 +1,13 @@
-;;;; dev-port-tests.lisp --- derived development ports (#238).
+;;;; dev-port-tests.lisp --- derived development ports (pre-publication issue 238).
 ;;;;
 ;;;; The port collision is the symptom; the LITERAL IN THE TEMPLATE is the defect, and
 ;;;; every application generated from that file inherits it.
 
 (in-package #:cons/tests)
 
-;;;; --- #238: a template must not ship a literal dev port ----------------------
+;;;; --- pre-publication issue 238: a template must not ship a literal dev port ----------------------
 
-(def-suite dev-port :description "Derived development ports (#238)." :in all)
+(def-suite dev-port :description "Derived development ports (pre-publication issue 238)." :in all)
 (in-suite dev-port)
 
 (test the-same-name-always-derives-the-same-port

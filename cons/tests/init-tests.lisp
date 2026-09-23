@@ -69,7 +69,7 @@ BODY, and remove the directory however BODY exits."
                "~(~A~) has no files/" (cons/init:template-name template)))))
 
 (test a-template-can-live-anywhere
-  ;; The seam third-party authoring arrives through (#20 resolves a URL to a directory;
+  ;; The seam third-party authoring arrives through (#32 resolves a URL to a directory;
   ;; this is the other half already working). Nothing about cons/templates/ is privileged.
   (tempdir:with-temporary-directory (tmp "tmpl")
        (ensure-directories-exist (merge-pathnames "files/src/" tmp))
@@ -161,7 +161,7 @@ BODY, and remove the directory however BODY exits."
 
 (test every-template-with-an-entry-point-depends-on-the-env-loader
   ;; Load-bearing, not descriptive -- which is why it is separate from the list above.
-  ;; A scaffolded entry point must load .env as its FIRST act (#120), and it cannot do
+  ;; A scaffolded entry point must load .env as its FIRST act (pre-publication issue 120), and it cannot do
   ;; that without the loader declared. `lib` is deliberately exempt: a library has no
   ;; entry point, so loading the environment is not its call to make.
   (dolist (kind '(:cli :agent :web))
@@ -174,7 +174,7 @@ BODY, and remove the directory however BODY exits."
 
 (test the-web-template-declares-an-http-backend
   ;; Not folded into the test above, because this one is load-bearing rather than
-  ;; descriptive: hyperion declares no HTTP server (#139), so a scaffolded web app that
+  ;; descriptive: hyperion declares no HTTP server (pre-publication issue 139), so a scaffolded web app that
   ;; names no Clack handler COMPILES and then dies at SRV:START with NO-SERVER-BACKEND --
   ;; a failure `cons template check` cannot see, since building is not starting.
   (let ((deps (cons/init:template-dependencies (cons/init:find-template :web))))
@@ -192,7 +192,7 @@ BODY, and remove the directory however BODY exits."
         (is (null (search "{{" content)) "~A still carries an unfilled marker" relpath)))
     (is-true (search "T <t@example.com>" (%file root "widget.asd")))))
 
-;;; --- .env is the first act of a scaffolded entry point (#120) -------------
+;;; --- .env is the first act of a scaffolded entry point (pre-publication issue 120) -------------
 ;;;
 ;;; Checked STATICALLY, by reading the template source, rather than by generating and
 ;;; building. `cons template check` builds only :lib in this suite -- deliberately, since
@@ -213,7 +213,7 @@ and DIRECTORY makes no promise about order."
         (write-string (uiop:read-file-string file) out)))))
 
 (test a-scaffolded-entry-point-loads-dotenv-before-anything-reads-the-environment
-  ;; The bug behind #120 was ORDERING: a consuming app loaded .env while building its web
+  ;; The bug behind pre-publication issue 120 was ORDERING: a consuming app loaded .env while building its web
   ;; handler, but its start path had already opened a database and sent mail. One symptom
   ;; blamed the library ("missing required configuration: <KEY>" for a key sitting in
   ;; .env); one was silent (a stray database in the wrong directory).
@@ -226,10 +226,10 @@ and DIRECTORY makes no promise about order."
 
 (test the-lib-template-does-not-load-the-environment
   ;; A library has no entry point, and loading the environment on its consumer's behalf
-  ;; would be exactly the surprising action #120 is trying to remove.
+  ;; would be exactly the surprising action pre-publication issue 120 is trying to remove.
   (is (not (search "load-project-env" (%template-src :lib)))))
 
-;;; --- what a generated project depends on (#361) ----------------------------
+;;; --- what a generated project depends on (pre-publication issue 361) ----------------------------
 ;;;
 ;;; `cons init` writes an .asd into someone else's project, and until this test nothing
 ;;; checked what that .asd asked for. The four externals it ships were all documented, but

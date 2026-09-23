@@ -285,7 +285,7 @@ connection fails, the handle is closed for you and the future carries the error.
 ;;;
 ;;; A uv_pipe_t is a uv_stream_t too, so it needs only its own bind and connect. Bound
 ;;; here because it costs a dozen lines given everything above, and because aion/uv/process
-;;; (#119) will want exactly this for a subprocess's stdio.
+;;; (pre-publication issue 119) will want exactly this for a subprocess's stdio.
 
 (defun listen-pipe (loop path &key (backlog 128) on-connection)
   "Listen on a named pipe / unix domain socket at PATH."

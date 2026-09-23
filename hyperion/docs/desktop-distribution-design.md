@@ -93,14 +93,14 @@ Schema-versioned `config.toml` with a `config_version` key, `load → detect →
 restamp` on startup, unparseable files backed up rather than wiped. This is `cons`'s
 scaffold concern; noted here because the update path must guarantee it survives.
 
-**Asserted, not merely promised (#224).** `scripts/verify-appdata-survives.ps1` installs a
+**Asserted, not merely promised (#111).** `scripts/verify-appdata-survives.ps1` installs a
 real application with a real installer, populates `~/.<appname>`, applies a real signed
 update through `hyperion/update` — the real `launch-installer`, the real installer — and
 requires the directory to be byte-identical afterwards. It asserts the update *landed*
 first, because an installer that silently did nothing leaves the data perfectly intact;
 and `-Control` rebuilds the installer with a deliberate `RMDir /r` so the harness has to
 be shown catching the loss it exists to catch. Windows, both packagings. **macOS and Linux
-are blocked on §7's unwritten strategies (#74) and are openly unrun** — a guarantee kept
+are blocked on §7's unwritten strategies (#72) and are openly unrun** — a guarantee kept
 on one platform is not a guarantee. The client half of the same claim, covering every
 refusal path on every platform, is in `hyperion/tests/update-client-tests.lisp`.
 
@@ -175,7 +175,7 @@ between CI and every installed app; version it (`schema: 1`) from the first rele
   promise — it names the bundle directory, the manifest keys on it, and a client matches
   itself against it to decide an update applies — so an unverified one is indistinguishable
   from a tested one all the way to the user's machine. `windows-arm64` is the live case
-  (#145): derivable, plausible, and never once executed. Whoever verifies a new platform
+  (pre-publication issue 145): derivable, plausible, and never once executed. Whoever verifies a new platform
   sets `OURANOS_ALLOW_UNVERIFIED_PLATFORM=1` to build, works that issue's checklist, then
   adds the key to `*verified-platforms*` — the override is for the verifier, not for CI.
   Only an explicit affirmative (`1`/`true`/`yes`/`on`) counts: a name exported with an
@@ -231,7 +231,7 @@ knows nothing about where updates live:
   <app>-<channel>/<channel>.json`. Zero infrastructure; public repos only (a private repo
   needs a token, which an installed app cannot hold safely).
 
-> **Amended 2026-09-16 (#332).** This read `/releases/latest/download/<channel>.json`,
+> **Amended 2026-09-16 (pre-publication issue 332).** This read `/releases/latest/download/<channel>.json`,
 > described as *"a permanent redirect to the newest release's asset, so no URL changes
 > per version"*. That is true of a repository holding **one** product and false of every
 > other, and the release repository holds every desktop app built from this tree.
@@ -365,7 +365,7 @@ So it is the quotes and not the backslashes, and the third row is the control th
 matters: a path with a space is the case the quoting was reaching for, and the spawner
 already handles it. **NSIS never showed the fault**, because `/D=` takes no quotes — the
 same defect, in the same module, invisible in the packaging that had been run and fatal in
-the one that had not (#76). Found by §1's #224 harness, which asserts that the installed
+the one that had not (pre-publication issue 76). Found by §1's #111 harness, which asserts that the installed
 version actually changed.
 
 **THE RELAUNCH IS A STATED PROPERTY OF THE UPDATE PATH, AND IT IS NOT FREE.** Inno's
@@ -426,7 +426,7 @@ rendering HTMX, so the updater is just another route and component — no bridge
       :hx-swap "outerHTML")
 ```
 
-- `GET /_hyperion/update/status` → **CORRECTED** (#333): *not* an empty response. The
+- `GET /_hyperion/update/status` → **CORRECTED** (pre-publication issue 333): *not* an empty response. The
   sketch above puts `hx-get` on the element it also swaps `outerHTML`, so replacing it with
   nothing **deletes the poller** — the updater never checks again, in the state that is
   overwhelmingly the common case, and the app then looks exactly like an app with no update
@@ -438,18 +438,18 @@ rendering HTMX, so the updater is just another route and component — no bridge
     fires whenever an element enters the DOM and every swap inserts one, so a reply
     carrying it re-requests itself forever.
 - `POST /_hyperion/update/apply` → starts the download. **The SSE progress bar is PLANNED
-  and deliberately unbuilt** (#333). `state.lisp` overrules this line for the state that
+  and deliberately unbuilt** (pre-publication issue 333). `state.lisp` overrules this line for the state that
   would need it: on `Applying`, "PROGRESS IS UNREPORTABLE FROM HERE BY CONSTRUCTION — the
   process that would report progress is the one being replaced … a progress bar that cannot
   advance is worse than a sentence that explains why." So `applying` renders that sentence.
   The *download* phase is reportable in principle, but `apply-update` is synchronous with no
   progress seam to subscribe to; adding one is a change to `hyperion/update`, not to the UI.
 - `POST /_hyperion/update/restart` → performs §7 and relaunches, **via an app-supplied
-  `*restart*` thunk** (#333). The framework cannot know whether it is inside an AppImage, a
+  `*restart*` thunk** (pre-publication issue 333). The framework cannot know whether it is inside an AppImage, a
   signed `.app` or an NSIS install, and does not guess — the same position `hyperion/update`
   already takes with `*before-apply*` and `*launch-installer*`.
 
-> Implemented in `hyperion/update-ui` (#333). Where this section and that system disagree,
+> Implemented in `hyperion/update-ui` (pre-publication issue 333). Where this section and that system disagree,
 > the system is the one that was measured; the corrections above say why rather than only
 > that.
 
@@ -470,7 +470,7 @@ so a user never unzips anything, and CI has one thing per OS to build, sign, pub
 |----|--------|------|-------|
 | Windows | `.exe` (NSIS) | NSIS via choco on the runner | Per-user install (`%LOCALAPPDATA%\Programs`), no elevation, Start-menu shortcut, uninstaller. Must support `/S` + `/D=` and relaunch on completion — that is also the update path (§7). MSI later if enterprise deployment asks. |
 | macOS | `.dmg` (+ `.app.tar.gz`) | `create-dmg` | Drag-to-Applications window for humans; the `.tar.gz` is the updater's payload. The `.app` must be signed + notarized to install cleanly (§10). |
-| Linux | `.AppImage` | `appimagetool` (pinned in `scripts/versions.env`) — **built by [`scripts/build-appimage.sh`](../../scripts/build-appimage.sh)** | One self-contained file, and the easiest self-update. It carries what we *build* — the image, the launcher, and the native libraries the bundler copied in (ADR-0013). It does **not** carry `libwebkit2gtk`: that is a full linuxdeploy-style dependency walk plus an LGPL relink question, and is the open row in #94. A `.deb` can follow for Debian/Ubuntu fleets, with updates deferred to the package manager. |
+| Linux | `.AppImage` | `appimagetool` (pinned in `scripts/versions.env`) — **built by [`scripts/build-appimage.sh`](../../scripts/build-appimage.sh)** | One self-contained file, and the easiest self-update. It carries what we *build* — the image, the launcher, and the native libraries the bundler copied in (ADR-0013). It does **not** carry `libwebkit2gtk`: that is a full linuxdeploy-style dependency walk plus an LGPL relink question, and is the open row in #78. A `.deb` can follow for Debian/Ubuntu fleets, with updates deferred to the package manager. |
 
 ## 10. OS code-signing — the scheduled tax
 
@@ -532,11 +532,11 @@ not remembered.
   swaps and relaunches on all three OSes; the HTMX banner + progress UI. Proven by the
   `coalton-repl` example updating itself from 0.1.0 to 0.1.1.
 
-  **Status, 2026-09-16 (#332).** The publish half now exists: `desktop-release.yml` has a
+  **Status, 2026-09-16 (pre-publication issue 332).** The publish half now exists: `desktop-release.yml` has a
   `publish` job (versioned release + channel pointer, in
   [`codelisperer/ouranos-desktop-releases`](https://github.com/codelisperer/ouranos-desktop-releases))
   and a separate `verify-published` job that fetches the result over the network with no
-  credentials, through the client's own code. Until #332 there was **no publish step at
+  credentials, through the client's own code. Until pre-publication issue 332 there was **no publish step at
   all** — the signed manifest was uploaded as a workflow artifact, which is not a URL an
   installed app can reach, so every client-side piece was machinery for consuming a
   release that did not exist.
@@ -547,7 +547,7 @@ not remembered.
   both set on 2026-09-23, and a `coalton-repl-v*` tag; no other credential is involved (5a).
   **S3 is not wired**;
   `s3-source` exists and the client takes a list of sources, so it is additive.
-  macOS carries no payload at all — #350, and declared rather than silent via
+  macOS carries no payload at all — #135, and declared rather than silent via
   `APP_PLATFORMS`.
 - **M2 — code-signing.** §10 wired into CI for Windows and macOS; clean first-install on a
   machine that has never seen the app.

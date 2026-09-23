@@ -100,7 +100,7 @@ Skips when the build cannot write the environment — see ENV-WRITABLE-P."
       (is (eq :dev (h:delivery-result-provider
                     (h:send (h:make-sms :to "+15551230000" :from "+15559990000" :text "hi"))))))))
 
-;;; --- the boundary with aion/http-client (#202) ----------------------------
+;;; --- the boundary with aion/http-client (pre-publication issue 202) ----------------------------
 ;;;
 ;;; The HTTP client moved to aion, and with it the ensure-2xx behaviour this file used to
 ;;; test directly -- covered now by aion/http-client/tests, where the code lives.

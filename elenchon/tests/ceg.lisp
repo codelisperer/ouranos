@@ -60,7 +60,7 @@
 
 (test a-dangling-ref-yields-unknown-not-false
   ;; Node cycles and dangling refs became expressible when ADR-0001 chose a DAG. The
-  ;; evaluator must surface that as underdetermined; the builder (#14) rejects it.
+  ;; evaluator must surface that as underdetermined; the builder (#27) rejects it.
   (is (string= "unknown" f:dangling-ref-result)))
 
 (test count-true-is-unknown-when-a-cause-is-unbound

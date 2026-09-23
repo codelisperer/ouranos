@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  #224 -- prove an update does not touch ~/.<appname>, with a real installer.
+  #111 -- prove an update does not touch ~/.<appname>, with a real installer.
 
 .DESCRIPTION
   hyperion/docs/desktop-distribution-design.md section 1 says ~/.<appname> is "never
@@ -32,9 +32,9 @@
   survival test that has never been shown to fail is indistinguishable from one that
   cannot.
 
-  WHAT THIS DOES NOT COVER: macOS and Linux, which is #74's blocker and #224's openly
+  WHAT THIS DOES NOT COVER: macOS and Linux, which is #72's blocker and #111's openly
   unrun half; and the shutdown ordering, which is *before-apply* and was measured under
-  #76. The client half of #224 -- every refusal path, on every platform -- is in
+  pre-publication issue 76. The client half of #111 -- every refusal path, on every platform -- is in
   hyperion/tests/update-client-tests.lisp, with *launch-installer* stubbed. Neither half
   is evidence about the other; the seam is exactly the launch.
 
@@ -84,11 +84,11 @@ $BaseUrl = 'https://appdata-survival.invalid/dist'   # never resolves: see the d
 # `-not $null' is true and this guard refused on the one OS the harness supports. The
 # message made it worse than a bare failure: it asserts "this harness is Windows-only,
 # and says so rather than pretending otherwise" while standing on Windows, which sends
-# the reader to #74 instead of to the guard. Same defect as verify-clean-machine.ps1
-# carried (#230); `$env:OS' is Windows_NT on every Windows since NT, absent elsewhere,
+# the reader to #72 instead of to the guard. Same defect as verify-clean-machine.ps1
+# carried (pre-publication issue 230); `$env:OS' is Windows_NT on every Windows since NT, absent elsewhere,
 # and reads the same under 5.1 and 7.
 if ($env:OS -ne 'Windows_NT') {
-  Die "#224's other two thirds are blocked on #74. This harness is Windows-only, and says so rather than pretending otherwise."
+  Die "#111's other two thirds are blocked on #72. This harness is Windows-only, and says so rather than pretending otherwise."
 }
 
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ $Work = Join-Path $env:TEMP "ouranos-appdata-$PID"
 if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
-Info "#224 -- an update must not touch ~/.<appname>"
+Info "#111 -- an update must not touch ~/.<appname>"
 Note "app           : $App"
 Note "data          : $DataDir"
 Note "work          : $Work"
@@ -231,7 +231,7 @@ function New-Bundle {
   # it, an installer that silently did nothing would leave the data directory untouched and
   # the test would pass while proving the opposite of what it claims.
   [IO.File]::WriteAllText((Join-Path $dir 'VERSION'), "$Version`n", $utf8)
-  [IO.File]::WriteAllText((Join-Path $dir 'README.txt'), "throwaway app for #224`n", $utf8)
+  [IO.File]::WriteAllText((Join-Path $dir 'README.txt'), "throwaway app for #111`n", $utf8)
   $dir
 }
 
@@ -265,7 +265,7 @@ function New-Installer {
     # a named-group substitution, and naming the directory is the entire point of the line.
     $anchor = '  SetOutPath "$INSTDIR"'
     if (-not $src.Contains($anchor)) { Die "windows.nsi no longer contains the control's anchor line" }
-    $sabotageText = '  RMDir /r "$PROFILE\.${APPNAME}"   ; #224 CONTROL -- deliberate data loss' + "`n" + $anchor
+    $sabotageText = '  RMDir /r "$PROFILE\.${APPNAME}"   ; #111 CONTROL -- deliberate data loss' + "`n" + $anchor
     $patched = $src.Replace($anchor, $sabotageText)
     $nsi = Join-Path $Work 'control-windows.nsi'
     Set-Content -LiteralPath $nsi -Value $patched -NoNewline
@@ -286,7 +286,7 @@ function New-Installer {
     $sabotageText = @'
 
 [InstallDelete]
-; #224 CONTROL -- deliberate data loss
+; #111 CONTROL -- deliberate data loss
 Type: filesandordirs; Name: "{%USERPROFILE}\.{#APPNAME}"
 '@
     $patched = $src + $sabotageText
@@ -356,7 +356,7 @@ function Invoke-Run {
   if (-not $reg) { Die "the $Fmt installer did not write HKCU\Software\$App\InstallDir" }
   Good "installed $V1; HKCU\Software\$App\InstallDir = $reg"
   if ($reg.TrimEnd('\') -ne $installDir.TrimEnd('\')) {
-    # Not fatal to #224, but it IS the value the updater will act on, so say it loudly.
+    # Not fatal to #111, but it IS the value the updater will act on, so say it loudly.
     $script:runFailures += "the installer recorded InstallDir '$reg', not the directory it was given ('$installDir')"
   }
 
@@ -397,7 +397,7 @@ function Invoke-Run {
     # while build-installer.ps1 -Format inno writes its artifact under exactly the name the
     # generator's pattern matches -- so this harness had to rewrite the field and re-sign
     # in order to test the packaging the tree ships. The generator now DETECTS the
-    # packaging from the artifact's own bytes (#77), so the field is a statement about
+    # packaging from the artifact's own bytes (pre-publication issue 77), so the field is a statement about
     # what is being published rather than about what a table assumed.
     #
     # Asserted rather than trusted, because the alternative failure is silent: a manifest
@@ -414,7 +414,7 @@ function Invoke-Run {
     # NOT RENAMED ANY MORE. This used to move latest.json to stable.json, because the
     # generator wrote one name and the client asks for the other -- the third instance of
     # this subsystem's producing-and-consuming-a-contract-twice defect, and the harness
-    # was quietly papering over it. The generator now writes <channel>.json (#77).
+    # was quietly papering over it. The generator now writes <channel>.json (pre-publication issue 77).
 
     # --- the real apply ----------------------------------------------------
     $marker = Join-Path $runDir 'marker.txt'
@@ -491,7 +491,7 @@ function Invoke-Run {
     # --- and the uninstall -------------------------------------------------
     # windows.nsi's Uninstall section and windows.iss's empty [UninstallDelete] both
     # promise the same thing, and an uninstall is where RMDir /r actually appears. Not
-    # #224's stated scope, and cheap to ask while everything is standing.
+    # #111's stated scope, and cheap to ask while everything is standing.
     $uninst = if ($Fmt -eq 'nsis') { Join-Path $installDir 'uninstall.exe' } else { Join-Path $installDir 'unins000.exe' }
     if (Test-Path -LiteralPath $uninst) {
       Info "uninstalling"
@@ -551,7 +551,7 @@ if ($allFailures.Count -eq 0) {
     Info "CONTROL PASSED: the harness caught an installer that deleted ~/.<appname>, in every packaging tested."
   } else {
     Info "PASSED: a real update, a real installer, a populated ~/.<appname>, byte-identical afterwards."
-    Note "Windows only. macOS and Linux are blocked on #74 and are openly unrun."
+    Note "Windows only. macOS and Linux are blocked on #72 and are openly unrun."
   }
   exit 0
 }

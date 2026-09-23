@@ -54,7 +54,7 @@
 
 (require :uiop)
 
-;;; THE TREE IS THE CALLER'S, NOT THIS FILE'S (#480) -- see scripts/tree-root.lisp. The
+;;; THE TREE IS THE CALLER'S, NOT THIS FILE'S (pre-publication issue 480) -- see scripts/tree-root.lisp. The
 ;;; manifest this writes is the record of which upstream sources a pinned mbedtls build
 ;;; uses, so writing it into the wrong checkout puts one tree's answer in another tree's
 ;;; provenance, which is the one thing a manifest exists not to do.
@@ -100,7 +100,7 @@ NOT the whole crypto tree either. `find tf-psa-crypto -name '*.c'` returns 437 f
 4.1.1 and the library compiles 77 of them; the rest are tests, programs, examples, the
 vendored `framework` submodule, `psasim`, and the pqcp drivers. Counting the directory
 instead of reading the build files overstates it fivefold -- a mistake also already made on
-#292. Both errors were about the same object, in opposite directions.")
+#125. Both errors were about the same object, in opposite directions.")
 
 (defun %sources-in (tree dir)
   (let* ((abs (merge-pathnames (concatenate 'string dir "/") tree))

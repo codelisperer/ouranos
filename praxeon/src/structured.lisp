@@ -1,4 +1,4 @@
-;;;; structured.lisp --- ask for a record and get a record (#416).
+;;;; structured.lisp --- ask for a record and get a record (pre-publication issue 416).
 ;;;;
 ;;;; The problem this removes: the only way to get structured output before this was to
 ;;;; describe the shape in the system prompt and parse whatever text came back. That fails
@@ -128,7 +128,7 @@ is shown them and may well comply -- and none of them is read when the reply com
 REFUSING RATHER THAN DOCUMENTING. A schema declaration is not inert: it is sent to the
 provider, so a model shown `enum: [a, b]' usually returns a or b, and a caller watching that
 work concludes the constraint is enforced. It is the model's compliance doing the work, and
-it holds until the day it does not. Silence was the defect (#454), and a validator that
+it holds until the day it does not. Silence was the defect (pre-publication issue 454), and a validator that
 ignores half its input is not made safe by saying so in a docstring.
 
 NOT A CLAIM THAT THE VALIDATOR IS CORRECT. This checks that a spec declaring something
@@ -245,7 +245,7 @@ half-valid record is the failure this exists to remove."
   (check-tool-choice provider (list :tool (tool-spec-name spec)))
   ;; BEFORE THE FIRST REQUEST, not after a reply comes back. A schema declaring what nothing
   ;; checks is wrong on every call, so failing on the first one costs no tokens and points at
-  ;; the spec rather than at the model's answer (#454).
+  ;; the spec rather than at the model's answer (pre-publication issue 454).
   (check-schema-enforceable spec)
   (let ((conversation (copy-list messages))
         (attempt 0))

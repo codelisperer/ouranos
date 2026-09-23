@@ -65,7 +65,7 @@ webview never points at a not-yet-listening server."
 
 `aion/platform:executable-directory' is the implementation; this name is kept because it is
 exported and because a desktop reader looks for it here. It was MOVED rather than copied
-(#335): hyperion/update needs the same answer to say where a build is installed, and
+(pre-publication issue 335): hyperion/update needs the same answer to say where a build is installed, and
 ADR-0014's packaging argument -- \"there is nothing here that can disagree with the
 resolver\" -- holds only while there is one resolver. Two would have drifted in the dark,
 since the consumer that breaks is a shipped bundle on a user's machine.
@@ -179,7 +179,7 @@ BACKEND -- where the UI is served:
                    (APP may be NIL) -- the GitHub-Desktop model;
   (:hybrid URL)    embedded local surface + *REMOTE-BACKEND* bound to URL for the app.
 SHELL -- :webview (the native launcher) or :browser (default browser; dev/hot-reload).
-ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon (#79):
+ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon (#74):
   `.ico` on Windows, `.png` on Linux, anything NSImage reads on macOS. A caller supplying
   one format for every OS gets an icon on one of them, so pick per platform. Ignored by
   the :browser shell, which has no window of its own. It is NOT the executable's icon on

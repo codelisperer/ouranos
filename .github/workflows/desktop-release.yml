@@ -40,7 +40,7 @@ env:
   APP_NAME: coalton-repl
   # The manifest is one signed document PER CHANNEL, at a permanent URL, named for the
   # channel (design section 2). Stated once because the generator writes it and the upload
-  # step sends it, and those two disagreeing about a filename is #77's recurring defect.
+  # step sends it, and those two disagreeing about a filename is pre-publication issue 77's recurring defect.
   APP_CHANNEL: stable
   APP_SYSTEM: hyperion/examples/coalton-repl
   APP_ENTRY: hyperion/examples/coalton-repl:main
@@ -55,7 +55,7 @@ env:
   RELEASE_REPO: ${{ github.repository }}
   # WHAT THIS RELEASE IS SUPPOSED TO CARRY, checked against the manifest before anything
   # is published. macOS is absent because nothing builds its `.app.tar.gz' payload yet
-  # (#350) -- `build-dmg.sh' writes the human .dmg and the workflow never calls it. That
+  # (#135) -- `build-dmg.sh' writes the human .dmg and the workflow never calls it. That
   # is a real gap; the point of this line is that it is a STATED one rather than a silent
   # hole every Mac user falls into.
   APP_PLATFORMS: linux-x86-64 windows-x86-64
@@ -162,7 +162,7 @@ jobs:
             ./build.sh
           fi
 
-      # THE BUNDLE MUST BE ABLE TO CARRY WHAT THE IMAGE OPENS (#274). build-desktop-app.lisp
+      # THE BUNDLE MUST BE ABLE TO CARRY WHAT THE IMAGE OPENS (pre-publication issue 274). build-desktop-app.lisp
       # already copies every vendored native library the image has open, and its
       # *lazy-natives* registry exists precisely to wake libuv so the bundler learns the
       # VENDORED path rather than whatever the build machine happens to have installed. None
@@ -174,7 +174,7 @@ jobs:
       # alternative is a step that must be remembered at the moment ADR-0017 flips the
       # default, which is the class of thing nobody remembers.
       #
-      # Windows needs MSVC (#128) and it is on the runner; Linux uses the g++ installed
+      # Windows needs MSVC (pre-publication issue 128) and it is on the runner; Linux uses the g++ installed
       # above; macOS uses Xcode CLT, which the image ships.
       - name: Build the pinned libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
@@ -213,10 +213,10 @@ jobs:
       # THE test for a bundle: run it on a machine that has never seen this repo. A native
       # dependency the image will dlopen is invisible on the machine that built it, which is
       # how the first Linux artifact shipped and died on a user's box with
-      # `Error opening shared object "libev.so.4"` (#74, #94). See ADR-0013.
+      # `Error opening shared object "libev.so.4"` (#72, #78). See ADR-0013.
       #
       # BLOCKING on purpose. It failed when it was added -- the bundle still loaded Woo and
-      # therefore libev -- which is what #139 fixed by taking the HTTP backend out of the
+      # therefore libev -- which is what pre-publication issue 139 fixed by taking the HTTP backend out of the
       # framework entirely. It passes now: the image starts and serves on a machine with no
       # toolchain and no libraries of ours. Keep it blocking; a bundle that cannot start is
       # not one to publish, and `fail-fast: false` keeps a red Linux leg from hiding the
@@ -225,7 +225,7 @@ jobs:
       # What this does NOT cover: the WINDOW. hyperion-view links WebKitGTK/GTK, which
       # is DECLARED, not bundled (ECOSYSTEM decisions log, 2026-08-05) -- so in a bare
       # container the app starts, serves, and exits without a window. Verifying the window
-      # needs a runner with the GTK stack and a display, which is #87's business.
+      # needs a runner with the GTK stack and a display, which is pre-publication issue 87's business.
       #
       # macOS and Windows need their own clean room -- a runner with nothing installed, or a
       # fresh VM. The DESIGN they share is ADR-0013; this script is only the Linux half.
@@ -258,7 +258,7 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # --- the signed manifest (#75) ------------------------------------------------
+  # --- the signed manifest (pre-publication issue 75) ------------------------------------------------
   #
   # THE MANIFEST IS THE CONTRACT between this workflow and every installed app: one signed
   # JSON document per channel, at a permanent URL, listing each platform's artifact with its
@@ -335,7 +335,7 @@ jobs:
       # the generator's own file -- and called that "as a client would". A client does not
       # have that reader; it has hyperion/update. So the step could only ever confirm that
       # the producer was self-consistent, which it was through every producer/consumer
-      # defect this subsystem has had (#206's platform key, the `.sig' encoding, the
+      # defect this subsystem has had (pre-publication issue 206's platform key, the `.sig' encoding, the
       # hard-coded `format', the manifest filename). A self-check that looks conscientious
       # is worse than none: it occupies the slot where the real check would go.
       #
@@ -368,7 +368,7 @@ jobs:
             dist/VERIFIED.sha256
           if-no-files-found: error
 
-  # --- the publish (#332) -------------------------------------------------------
+  # --- the publish (pre-publication issue 332) -------------------------------------------------------
   #
   # Everything above this job was already real: the bundles, the installers, the signed
   # manifest, the client that can read all three. None of it reached anywhere an installed
@@ -442,7 +442,7 @@ jobs:
       #
       # So the absence is DECLARED instead of inferred. APP_PLATFORMS is what this release is
       # supposed to carry; a mismatch either way is a failure. A platform that silently stops
-      # building can no longer slip out, and the day macOS packaging lands (#350) this line
+      # building can no longer slip out, and the day macOS packaging lands (#135) this line
       # changes in the same commit as the step that produces it.
       - name: The manifest carries exactly the platforms this release declares
         shell: bash
@@ -479,13 +479,13 @@ jobs:
         run: |
           # The body a PERSON lands on. APP_PLATFORMS is already checked against the manifest
           # above, so coverage was declared to the machinery and not to a reader -- someone
-          # arriving on a platform with no asset saw no asset and no reason (#350).
+          # arriving on a platform with no asset saw no asset and no reason (#135).
           notes=$(printf '%s\n' \
             "Built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}. Signed with the Ouranos release key; verify with scripts/verify-release-as-client.lisp." \
             "" \
             "Platforms in this release: ${APP_PLATFORMS}." \
             "" \
-            "A platform not listed has no download here, and installed copies on it are not offered this version. macOS is absent because nothing builds its payload yet (#350).")
+            "A platform not listed has no download here, and installed copies on it are not offered this version. macOS is absent because nothing builds its payload yet (#135).")
           # --latest=false: this repository's "Latest release" is the framework's, and an app's
           # release must not take it over. Installed copies never read it; they poll the
           # channel pointer below.
@@ -523,7 +523,7 @@ jobs:
             "dist/${APP_CHANNEL}.json" "dist/${APP_CHANNEL}.json.sig"
           echo "channel URL: https://github.com/${RELEASE_REPO}/releases/download/${POINTER}/"
 
-  # --- and then read it back the way a customer would (#332) --------------------
+  # --- and then read it back the way a customer would (pre-publication issue 332) --------------------
   #
   # A SEPARATE JOB, ON A DIFFERENT MACHINE, WITH NO ACCESS TO `dist/'. That is the entire
   # point and it is structural rather than a matter of care: this job cannot accidentally

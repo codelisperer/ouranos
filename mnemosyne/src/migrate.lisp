@@ -13,7 +13,7 @@
 (defun %col1 (row)
   "The value of the single selected column in a CL-DBI result ROW (a plist).
 
-DELIBERATELY POSITIONAL, AND NOT TO BE CONVERTED TO MNEMOSYNE/PARAM:ROW-VALUE (#489). It
+DELIBERATELY POSITIONAL, AND NOT TO BE CONVERTED TO MNEMOSYNE/PARAM:ROW-VALUE (pre-publication issue 489). It
 avoids the driver's column-name casing by never naming a column -- and here there is no name
 worth relying on: every caller selects an unaliased `count(*)', whose result column is named
 `count' by Postgres and `count(*)' by SQLite. Reading it by key would put a backend-specific
@@ -79,7 +79,7 @@ and delete its `schema_migrations` row, each in a transaction. MIGRATIONS is the
             ;; which is exactly the kind of thing you want to see in a log.
             (log:warn "migrate: cannot roll back, migration not in the known set" :id id))))))
 
-;;; --- extensions, which are a deployment fact (#258) -------------------------
+;;; --- extensions, which are a deployment fact (pre-publication issue 258) -------------------------
 ;;;
 ;;; `CREATE EXTENSION' is privileged and the package has to be on the host. It is available
 ;;; on RDS, Cloud SQL and DigitalOcean's managed databases and not on every managed Postgres;

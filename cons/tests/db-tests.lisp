@@ -90,7 +90,7 @@ Skips when the build cannot write the environment — see ENV-WRITABLE-P in pack
                    (cons/db:db-url :env "dev" :reveal t))))
       (is (search "hunter2" shown)))))
 
-;;; --- #209: a resolved target must not print its password --------------------
+;;; --- pre-publication issue 209: a resolved target must not print its password --------------------
 
 (test db-target-printing-does-not-disclose-the-password
   ;; This struct was already careful twice over -- the URL it carries has the password
@@ -116,7 +116,7 @@ Skips when the build cannot write the environment — see ENV-WRITABLE-P in pack
     (is (string= "s3cret-do-not-log-me"
                  (aion/secret:reveal (cons/db::db-target-password tgt))))))
 
-;;; --- cons stays Coalton-free (#209) -----------------------------------------
+;;; --- cons stays Coalton-free (pre-publication issue 209) -----------------------------------------
 
 (defun %transitive-deps (system &optional (seen (make-hash-table :test #'equal)))
   "Every system SYSTEM depends on, transitively, as lowercased names."
@@ -131,7 +131,7 @@ Skips when the build cannot write the environment — see ENV-WRITABLE-P in pack
   seen)
 
 (test cons-does-not-depend-on-coalton
-  ;; #209 added aion/secret to cons so a DB password could be held opaquely. That was only
+  ;; pre-publication issue 209 added aion/secret to cons so a DB password could be held opaquely. That was only
   ;; admissible because aion/secret is `:depends-on ()' and Coalton-free -- cons's core is
   ;; meant to stay trivial to install, and aion/log is the standing example of an
   ;; intra-tree dep quietly making a framework pull Coalton (see docs/dependencies.md).

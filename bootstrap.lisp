@@ -15,7 +15,7 @@
 
 (require :asdf)
 
-;;; --- the heap this seed needs (#88) -----------------------------------------------
+;;; --- the heap this seed needs (pre-publication issue 88) -----------------------------------------------
 ;;;
 ;;; SHARED with scripts/build-desktop-app.lisp rather than written twice. The whole finding
 ;;; was that 4096 lived in three places and the only copy a reader could get wrong was the
@@ -117,7 +117,7 @@
                   "~&bootstrap: warm step exited ~A -- continuing; bin/cons is still built.~%")
             code)))
 
-;;; --- the host OS's platform package (#182) ---------------------------------
+;;; --- the host OS's platform package (pre-publication issue 182) ---------------------------------
 ;;; ECOSYSTEM.md: bootstrap compiles the host OS's platform package rather than leaving it
 ;;; opt-in the way aion/uv is. Opt-in there was BOUGHT by the C-toolchain requirement; a
 ;;; platform package has none (ADR-0003 s8), so deferring it buys nothing and costs a

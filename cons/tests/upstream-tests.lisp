@@ -1,4 +1,4 @@
-;;;; upstream-tests.lisp --- is the framework checkout behind? (#240)
+;;;; upstream-tests.lisp --- is the framework checkout behind? (pre-publication issue 240)
 ;;;;
 ;;;; The advisory's whole value is that it distinguishes three states the suggested
 ;;;; one-liner collapses into one number, so the matrix is what is tested -- and the
@@ -10,7 +10,7 @@
 ;; compiles, the tests exist, and the run reports success having executed none of them --
 ;; the exact non-evidence AGENTS.md opens with. It was missing on the first pass here, and
 ;; what caught it was the check COUNT not moving, not the exit status.
-(def-suite upstream :description "Framework-checkout drift advisory (#240)." :in all)
+(def-suite upstream :description "Framework-checkout drift advisory (pre-publication issue 240)." :in all)
 (in-suite upstream)
 
 ;;; --- the matrix, pure -------------------------------------------------------
@@ -29,7 +29,7 @@
               (format nil "~{~A~%~}" (cons/upstream:drift-lines :behind 1 :fetch-age 60)))))
 
 (test never-fetched-does-not-report-up-to-date
-  ;; THE correction to #240's suggested fix. `git rev-list --count HEAD..@{u}' compares
+  ;; THE correction to pre-publication issue 240's suggested fix. `git rev-list --count HEAD..@{u}' compares
   ;; against the last fetch, so a consumer who never fetches -- precisely the consumer this
   ;; exists for -- is told 0. Measured on a real pair of repositories: the check said
   ;; "0 commits behind" while the consumer was 3 behind, with no FETCH_HEAD at all.
@@ -45,7 +45,7 @@
 
 (test a-current-checkout-says-nothing
   ;; Silence has to be EARNED, or the advisory becomes noise that gets tuned out -- which
-  ;; is how the capability in #207 went unnoticed in the first place.
+  ;; is how the capability in pre-publication issue 207 went unnoticed in the first place.
   (is (null (cons/upstream:drift-lines :behind 0 :fetch-age 60))))
 
 (test the-boundary-between-fresh-and-stale-is-the-documented-one
@@ -68,7 +68,7 @@
   "Run git (optionally -C DIR) and SIGNAL on a non-zero exit.
 
 A fixture whose setup fails silently does not produce a failing test -- it produces a WRONG
-one. That is exactly what #284 was: a `git clone' into a leftover directory exits 128, the
+one. That is exactly what pre-publication issue 284 was: a `git clone' into a leftover directory exits 128, the
 old fixture passed :ignore-error-status t, and the test then ran against the PREVIOUS run's
 consumer, which had already fetched. The assertion demanding \"never fetched\" saw a real
 distance and reported a defect in code that was fine. Measured: exit 128, and the advisory
@@ -97,7 +97,7 @@ errors saying which command failed, rather than quietly measuring something else
 same 113500 -- and verify-tree gives every suite a fresh image, so a path built from it is
 not unique, it is a constant that collides with the previous run. On POSIX the cleanup
 below hides that; on Windows `delete-directory-tree' raises on git's read-only object store
-and the corpse persists, so the suite passes once per machine and fails forever after (#284).
+and the corpse persists, so the suite passes once per machine and fails forever after (pre-publication issue 284).
 
 Two defences, because entropy alone was what failed: the name is seeded from a random state
 built at RUNTIME (`make-random-state t'), and the directory is only used if it did not
@@ -118,7 +118,7 @@ a crashed run can no longer poison the next one."
 moves, the consumer never fetches, and nothing tells it.
 
 A FUNCTION rather than a test body so it can be run TWICE IN ONE IMAGE -- which is the
-control #284 asked for and the one the old fixture could not express. A test that only ever
+control pre-publication issue 284 asked for and the one the old fixture could not express. A test that only ever
 runs once per image cannot detect that it poisons the next run."
   (let* ((root (%fresh-temp-dir "cons-drift"))
          (up (merge-pathnames "upstream.git/" root))
@@ -168,7 +168,7 @@ runs once per image cannot detect that it poisons the next run."
              (is (search "hyperion" text) "and it should name what moved: ~S" text)))
       ;; Best-effort, and deliberately NOT load-bearing: the path above is fresh per run, so
       ;; a leftover cannot poison the next one. On Windows this raises on git's read-only
-      ;; object store, which is how #284 survived -- the error was swallowed and the corpse
+      ;; object store, which is how pre-publication issue 284 survived -- the error was swallowed and the corpse
       ;; persisted. Swallowing it is fine now; relying on it was not.
       (ignore-errors (uiop:delete-directory-tree root :validate t)))))
 
@@ -176,8 +176,8 @@ runs once per image cannot detect that it poisons the next run."
   (%drift-scenario))
 
 (test the-scenario-does-not-poison-its-own-next-run
-  ;; THE CONTROL #284 ASKED FOR, and the one the old fixture structurally could not run.
-  ;; #284 was not a Windows bug: the temp path came from `(random)', which is deterministic
+  ;; THE CONTROL pre-publication issue 284 ASKED FOR, and the one the old fixture structurally could not run.
+  ;; pre-publication issue 284 was not a Windows bug: the temp path came from `(random)', which is deterministic
   ;; in a fresh image, so every run used the same directory. POSIX cleanup hid it; Windows
   ;; cleanup failed silently and the second run measured the FIRST run's consumer -- which
   ;; had already fetched -- and reported a defect in working code.

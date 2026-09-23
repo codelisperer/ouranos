@@ -255,9 +255,9 @@ asserting the old answer. The fixture has to match the real caller's order."
       (is (not (search "2-space indent" claude)))    ; AGENTS.md owns house style
       (is (not (search "(A * B -> C)" claude))))))   ; AGENTS.md owns the Coalton gotchas
 
-;;; --- the data doctrine the pack teaches (#353) -----------------------------
+;;; --- the data doctrine the pack teaches (pre-publication issue 353) -----------------------------
 ;;; The generated text told every scaffolded project to write through `insert!'. Nothing in
-;;; the tree called it, because `insert!' cannot stamp entity metadata yet (#127). The
+;;; the tree called it, because `insert!' cannot stamp entity metadata yet (#93). The
 ;;; maintainer ruled that the text should say what is true today. These assert the generated
 ;;; files, not the source that generates them, because the file is what a reader gets.
 
@@ -296,7 +296,7 @@ scaffolded project is not handed a rule the framework does not keep."
     (dolist (f (%doctrine-files))
       (let ((text (%slurp root f)))
         (when (search "insert!" text)
-          (is (search "#127" text)
+          (is (search "#93" text)
               "~A mentions insert! without naming what blocks it" f))))))
 
 (test the-pack-names-the-builder-as-the-write-path

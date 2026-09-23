@@ -1,4 +1,4 @@
-;;;; changeset-tests.lisp --- the example's changeset path (#129).
+;;;; changeset-tests.lisp --- the example's changeset path (#94).
 ;;;;
 ;;;; WHY THIS FILE EXISTS AT ALL. `contacts/tests' was DECLARED with no components and no
 ;;;; `:perform (test-op ...)':
@@ -55,7 +55,7 @@ in review because the guard is the ABSENCE of a field from a list."
         "created_by must never move from params")))
 
 (test a-hash-table-is-accepted
-  "#129 assumed `nothing bridges a stamped hash-table to cast'. It does -- `%param-get'
+  "#94 assumed `nothing bridges a stamped hash-table to cast'. It does -- `%param-get'
 takes a plist, an alist or a hash-table. Asserted here because that assumption is what made
 the whole issue read as blocked."
   (let ((h (make-hash-table)))

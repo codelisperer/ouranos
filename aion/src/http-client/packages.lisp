@@ -3,14 +3,14 @@
 (cl:defpackage #:aion/http-client
   (:use #:cl)
   (:documentation
-   "An interceptor-shaped HTTP client for one outbound call (#202).
+   "An interceptor-shaped HTTP client for one outbound call (pre-publication issue 202).
 
     ENTER stages build the request (auth, content type), a single dexador round-trip is the
     one effect at the edge, LEAVE stages process the response in reverse so the outermost
     stage wraps everything. The same shape as `aion/interceptor`, in CL rather than Coalton
     because the stages here are effectful by nature.
 
-    It lives in aion for the reason `aion/interceptor` does (#177): the shape is
+    It lives in aion for the reason `aion/interceptor` does (pre-publication issue 177): the shape is
     request-response, not web. It had already been reimplemented twice before it moved --
     once inside hermes as an internal, once as three raw `dex:post` calls in praxeon with
     hand-rolled error decoding -- which is the same evidence that settled where the

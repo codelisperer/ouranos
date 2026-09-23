@@ -1,6 +1,6 @@
 ;;;; render.lisp --- markdown to HTML.
 ;;;;
-;;;; Part 2 item 4 of #359: this goes through `hyperion/markdown' rather than wrapping 3bmd
+;;;; Part 2 item 4 of pre-publication issue 359: this goes through `hyperion/markdown' rather than wrapping 3bmd
 ;;;; again. That module is already safe by default -- raw HTML in the source is escaped, so
 ;;;; author content cannot inject markup -- and a second path into the same library would be
 ;;;; a second escaping policy. The one that is wrong is the one nobody is looking at.
@@ -18,7 +18,7 @@
 Delegates to `hyperion/markdown:render'. ALLOW-HTML passes through for content the site owner
 has decided is trusted; leave it off for anything else.
 
-HIGHLIGHT applies klio's own Lisp highlighter to fenced Lisp blocks (#359 Q3). Two bindings
+HIGHLIGHT applies klio's own Lisp highlighter to fenced Lisp blocks (pre-publication issue 359 Q3). Two bindings
 make that possible and both are deliberate:
 
   3BMD-CODE-BLOCKS::*RENDERER* :NOHIGHLIGHT -- so a fenced block arrives as

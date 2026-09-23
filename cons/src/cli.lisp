@@ -230,7 +230,7 @@ args set its params -- with no target, the targets are listed. A leading `--fres
 forces the target to run in a subprocess sbcl instead of cons's warm image. With no
 `cons.lisp` and no built-in, clingon prints usage."
   ;; Early and once, before anything can meet a bare "Don't know how to REQUIRE SB-POSIX"
-  ;; (#161). Reported, not fatal: `cons version` and `cons help` must still answer on a
+  ;; (pre-publication issue 161). Reported, not fatal: `cons version` and `cons help` must still answer on a
   ;; broken toolchain, since that is when you need them most.
   (toolchain:check)
   (project:ensure-source-registry)

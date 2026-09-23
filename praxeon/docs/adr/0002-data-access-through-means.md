@@ -2,9 +2,9 @@
 
 **Status:** Accepted *(2026-09-21)*
 **Date:** 2026-09-21
-**Issue:** [#400](https://github.com/codelisperer/ouranos/issues/400). Orders
-[#372](https://github.com/codelisperer/ouranos/issues/372) (the semantic-search seam, deferred)
-and is the pattern [#258](https://github.com/codelisperer/ouranos/issues/258)'s praxeon half will
+**Issue:** pre-publication issue 400. Orders
+[#138](https://github.com/codelisperer/ouranos/issues/138) (the semantic-search seam, deferred)
+and is the pattern pre-publication issue 258's praxeon half will
 be built on.
 
 ## Context
@@ -18,7 +18,7 @@ decision to record rather than a thing to build — *nearly*, and the exception 
 `register-means` takes a name, a description, a
 function, a JSON-schema for its arguments, and a **capability**; `means-permitted-p` fails closed,
 and `agent-means-for` assembles the tool table from the caller's authority so a means the caller
-may not use is *absent* rather than filtered later (#122). Casting and binding are mnemosyne's:
+may not use is *absent* rather than filtered later (#90). Casting and binding are mnemosyne's:
 `(:select … :where (:= :name ?))` is data, and a value travels as a bind parameter, which
 mnemosyne's own suite asserts by reading back the parameter list.
 
@@ -60,9 +60,9 @@ what ran.
 asked. If generated SQL is ever wanted, there is a measured case for it rather than a guess — and
 the same logs say which means deserve an index.
 
-### One thing did need building, and #400's premise was wrong about it
+### One thing did need building, and pre-publication issue 400's premise was wrong about it
 
-#400 says *"Nothing needs building for an app to expose data to an agent safely."* Measured while
+pre-publication issue 400 says *"Nothing needs building for an app to expose data to an agent safely."* Measured while
 writing this ADR's own example: **`run-turn` took no `permit` and passed none.** `deliberate` and
 `act` both accept one, but the turn loop — the framework's main entry point — called them without,
 so a means declaring a capability was never described to the model and was refused as *no such
@@ -76,7 +76,7 @@ the delegation case matters because a subtask that silently lost it would be the
 level down.
 
 This is the third instance this week of a surface complete, documented as load-bearing, and
-unreachable from the path that matters (#435, #437), and the first found by *writing the document
+unreachable from the path that matters (#161, pre-publication issue 437), and the first found by *writing the document
 that recommends it*.
 
 ## Consequences
@@ -84,7 +84,7 @@ that recommends it*.
 - **A new question needs a new means.** That is the cost, and it is the point: the work of adding
   one is the review that generated SQL skips. An app that finds this friction unbearable has
   learned something about how many distinct questions it really has.
-- **The pattern is what makes #372 safe to build when its trigger fires.** A semantic-search seam
+- **The pattern is what makes #138 safe to build when its trigger fires.** A semantic-search seam
   is a means like any other — an embedding argument, a *k*, a filter the host constrains — so the
   two are ordered rather than alternatives.
 - **Nothing here is enforced by the framework.** An app can still hand a model a SQL string; no
@@ -92,7 +92,7 @@ that recommends it*.
 - Where a means must run several queries, it is still one means: the unit is the *question*, not
   the statement.
 - **A capability-bearing means needs `:permit` at the call site.** `run-turn` without one is the
-  no-authority case and is correctly refused; that is the fail-closed rule of #122 rather than a
+  no-authority case and is correctly refused; that is the fail-closed rule of #90 rather than a
   defect, and it is now reachable rather than unconditional.
 
 ## Alternatives considered
@@ -127,7 +127,7 @@ permit, so the ADR ships with the threading that makes its own recommendation ex
 claim is corrected here rather than deleted, because a reader who finds code in a decision record
 that says it added none would trust the record less, correctly.
 
-It ships with a test rather than only prose, and that is deliberate. #435 and #129 are both
+It ships with a test rather than only prose, and that is deliberate. #161 and #94 are both
 instances of *a mandated path nothing walks* — a surface complete, documented as load-bearing, and
 called from nowhere but its own suite. A pattern document with no exercised example is the same
 artefact one level up: it would be a document rather than a mandate on the day it landed. The

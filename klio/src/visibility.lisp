@@ -1,6 +1,6 @@
 ;;;; visibility.lisp --- whether a piece of content is published, and when.
 ;;;;
-;;;; Request-time scheduling (#359, Part 2 item 1). A post with a future `publish-at' becomes
+;;;; Request-time scheduling (pre-publication issue 359, Part 2 item 1). A post with a future `publish-at' becomes
 ;;;; visible when the time passes. No timer, no database, no deploy: a listing asks this
 ;;;; question when it is built, and the answer changes on its own.
 ;;;;

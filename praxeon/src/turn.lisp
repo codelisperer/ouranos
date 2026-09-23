@@ -1,7 +1,7 @@
-;;;; turn.lisp --- one agent turn, as a value a pipeline can operate on (#130).
+;;;; turn.lisp --- one agent turn, as a value a pipeline can operate on (pre-publication issue 130).
 ;;;;
 ;;;; `hyperion` has had a typed interceptor pipeline since before praxeon needed one, and
-;;;; it is now `aion/interceptor` (#177) precisely so an agent framework can reach it. What
+;;;; it is now `aion/interceptor` (pre-publication issue 177) precisely so an agent framework can reach it. What
 ;;;; was missing was never the pipeline -- it was a CONTEXT for it to be a pipeline OVER.
 ;;;; `execute` threads a `:c`; praxeon had no `:c`, so the composition collapsed into a
 ;;;; `let*` in the flagship example, and said so in its own docstring:
@@ -31,7 +31,7 @@
 ;;;; discards the Flow, so a LEAVE stage cannot short-circuit -- and does not need to. A
 ;;;; guardrail on the way out does not want to stop anything; it wants to REPLACE the
 ;;;; reply, which is what a leave stage does natively. `Halt` is for enter-side refusal --
-;;;; a budget check (#172) that must reject before the expensive call, and skip it.
+;;;; a budget check (pre-publication issue 172) that must reject before the expensive call, and skip it.
 
 (cl:in-package #:praxeon/turn)
 (named-readtables:in-readtable coalton:coalton)
@@ -133,6 +133,6 @@ no, and between a safety refusal that replaces an answer and one appended to it.
 
 EFFECT is supplied by the CL shell -- it is the LLM round trip, and it is the only thing
 here that touches the world. A stage that Halts on the way in SKIPS it entirely, which is
-what makes a budget refusal cost nothing (#172) and a safety refusal genuinely a refusal."
+what makes a budget refusal cost nothing (pre-publication issue 172) and a safety refusal genuinely a refusal."
     (aion/interceptor:flow-context
      (aion/interceptor:execute-effect chain effect tn))))

@@ -1,10 +1,10 @@
 ;;;; router.lisp --- URL dispatch: the effectful CL shell over hyperion/path.
 ;;;;
 ;;;; Before this, every Hyperion app hand-rolled the same `cond` over :request-method
-;;;; and :path-info -- five of them in the tree, including praxeon/web (#121). None
+;;;; and :path-info -- five of them in the tree, including praxeon/web (pre-publication issue 121). None
 ;;;; could express a path parameter, so no example had a detail view; all of them
 ;;;; answered 404 where 405 was correct; and none could be enumerated, which is what a
-;;;; route listing or an OpenAPI emit (#35) would need.
+;;;; route listing or an OpenAPI emit (#46) would need.
 ;;;;
 ;;;; The split (docs/adr/0012): hyperion/path owns pattern parsing and matching, which
 ;;;; is real logic and typed in Coalton. This file owns what cannot be pure -- handler

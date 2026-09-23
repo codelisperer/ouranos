@@ -1,4 +1,4 @@
-;;;; appdata-survival-probe.lisp --- dump the throwaway application #224's harness installs.
+;;;; appdata-survival-probe.lisp --- dump the throwaway application #111's harness installs.
 ;;;;
 ;;;;     sbcl --script scripts/appdata-survival-probe.lisp --out dist/probe/app.exe
 ;;;;
@@ -9,7 +9,7 @@
 ;;;; stand-in would make the install succeed while proving nothing about either.
 ;;;;
 ;;;; NOT `build-desktop-app.lisp'. That script builds a Hyperion desktop app -- the whole
-;;;; DAG, a native webview beside it, vendored libraries. #224 is a claim about a
+;;;; DAG, a native webview beside it, vendored libraries. #111 is a claim about a
 ;;;; DIRECTORY, and every one of those parts would be a way for the harness to fail for a
 ;;;; reason that has nothing to do with the claim. This is a bare SBCL image with no
 ;;;; dependency on the tree at all, which is why it can be built in a fresh worktree that
@@ -20,7 +20,7 @@
 ;;;; itself, then exits. Two things fall out of that:
 ;;;;
 ;;;;   - the marker proves the app was RELAUNCHED after the silent install (design §7), so
-;;;;     the harness also witnesses the property #76 measured for Inno;
+;;;;     the harness also witnesses the property pre-publication issue 76 measured for Inno;
 ;;;;   - the marker is written OUTSIDE `~/.<appname>', deliberately. The one thing this
 ;;;;     application must not do while the harness is watching is touch its own data
 ;;;;     directory -- so it does not have one.

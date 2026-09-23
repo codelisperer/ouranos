@@ -23,7 +23,7 @@
 ;;;; and the generator emits an empty package with no error anywhere.
 ;;;;
 ;;;; A SILENTLY EMPTY RESULT IS THE WORST FAILURE AVAILABLE HERE, because nothing reports that
-;;;; something did not happen -- the same shape as the platform-key defect in #206, where a
+;;;; something did not happen -- the same shape as the platform-key defect in pre-publication issue 206, where a
 ;;;; client that never matched the manifest reported itself up to date forever.
 ;;;;
 ;;;; The four helper structs are therefore not decoration. They are how the two offsets that

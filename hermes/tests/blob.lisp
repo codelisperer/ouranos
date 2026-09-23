@@ -439,7 +439,7 @@ a Windows runner reporting only its own name, which told nobody which of the thr
 returns a `\\' has made the two backends disagree about what a key IS -- the same app would
 produce different keys depending on which store it points at, and a key written on Windows
 would not match one written on Linux. Asserting the SHAPE of every key catches that class
-at its source, rather than one call site at a time (#186)."
+at its source, rather than one call site at a time (pre-publication issue 186)."
   (with-temp-store (s)
     (dolist (key '("a/1.txt" "a/deep/nested/3.txt" "top.txt"))
       (put-string s "media" key "hello"))

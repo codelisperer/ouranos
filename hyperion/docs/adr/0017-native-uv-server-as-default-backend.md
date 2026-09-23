@@ -7,12 +7,12 @@ the native server."* ADR-0011's Content-Length half is untouched and stands perm
 
 ## Context
 
-[#117](https://github.com/codelisperer/ouranos/issues/117) M2 lands the native libuv server —
+pre-publication issue 117 M2 lands the native libuv server —
 framing, timeouts, concurrency and streaming
-([#241](https://github.com/codelisperer/ouranos/pull/241),
-[#270](https://github.com/codelisperer/ouranos/pull/270)). ADR-0011 chose Hunchentoot for
+(pre-publication PR 241,
+pre-publication PR 270). ADR-0011 chose Hunchentoot for
 desktop bundles to remove libev, and the maintainer clarified on 2026-08-05 that this was a
-stop-gap: Hunchentoot and Woo are both to be removed as dependencies once #117 exists.
+stop-gap: Hunchentoot and Woo are both to be removed as dependencies once pre-publication issue 117 exists.
 
 The flip is mechanical. `hyperion/src/server.lisp:22`:
 
@@ -39,20 +39,20 @@ than ride in on a commit.
    desktop stops needing Hunchentoot. The platform asymmetry ADR-0011 removed by
    standardising *on* Hunchentoot is now removed by standardising off it.
 3. **The flip does not happen until both preconditions land:**
-   - [#273](https://github.com/codelisperer/ouranos/issues/273) — `%body-octets` has no
+   - pre-publication issue 273 — `%body-octets` has no
      `pathname` clause, so `hyperion/static` 500s on `:uv`. It returns a pathname for every
      file it serves; only `hyperion/assets` (octet vectors) works today, which is why this
      has stayed invisible.
-   - [#274](https://github.com/codelisperer/ouranos/issues/274) — `desktop-release.yml`
+   - pre-publication issue 274 — `desktop-release.yml`
      ships no libuv, so a `:uv` bundle would carry a runtime dependency it does not contain.
      Works on every build machine, fails on a user's.
 
-     **Landed as [#310](https://github.com/codelisperer/ouranos/pull/310), and what it
-     delivers is narrower than "#274 is closed" implies.** The workflow half is complete:
+     **Landed as pre-publication PR 310, and what it
+     delivers is narrower than "pre-publication issue 274 is closed" implies.** The workflow half is complete:
      every `desktop-release` leg now builds the pinned libuv, so a **CI-produced** release
      carries it. The guarantee half — `wake-lazy-natives` refusing to build a bundle that
      needs a native it cannot carry — has a hole
-     ([#325](https://github.com/codelisperer/ouranos/issues/325)): it refuses only when the
+     (pre-publication issue 325): it refuses only when the
      waker *errors*, so on a host with a **system** libuv the library resolves, is correctly
      declined as not ours to carry, and the guard is satisfied. The bundle ships without it.
 
@@ -62,10 +62,10 @@ than ride in on a commit.
      gate telling anyone to build their own, and it must be closed before this ADR is
      Accepted.
 
-     Why it was reported as complete: #310 measured all three directions on **Windows**,
+     Why it was reported as complete: pre-publication PR 310 measured all three directions on **Windows**,
      where there is no system libuv, so "resolves here" and "will be carried" coincide. The
      hub relayed that measurement as a general guarantee. It was found on macOS, by the
-     ticket ([#312](https://github.com/codelisperer/ouranos/issues/312)) filed specifically
+     ticket ([#130](https://github.com/codelisperer/ouranos/issues/130)) filed specifically
      to ask what the Windows verification could not see.
 4. **Removing Hunchentoot and Woo as dependencies is a separate, later change.** Changing the
    default and deleting the alternatives are different risks. The second should follow a
@@ -75,7 +75,7 @@ than ride in on a commit.
 
 - **Windows loses its last need for a third-party HTTP server**, which was the goal.
 - **libuv becomes a runtime dependency of the desktop artifact.** ADR-0013/0014 settled the
-  mechanism; #274 is the workflow actually doing it.
+  mechanism; pre-publication issue 274 is the workflow actually doing it.
 - **The default changes silently for existing apps.** An app that never set
   `HYPERION_SERVER` and happened to get Woo now gets `:uv`. `start` should log which backend
   it selected and why, so the change is visible in a log rather than inferred from behaviour.
@@ -94,7 +94,7 @@ than ride in on a commit.
   user rather than a developer.
 - **Flip for desktop only; leave server deployments defaulting to Woo.** A real option, and
   the narrower one, since the stated goal is desktop. Rejected as the *end* state because it
-  keeps two defaults and two code paths — but a reasonable intermediate if #274 proves slow,
+  keeps two defaults and two code paths — but a reasonable intermediate if pre-publication issue 274 proves slow,
   as desktop is where the Hunchentoot dependency actually hurts.
 - **Leave `:uv` opt-in indefinitely.** Rejected: it contradicts ADR-0011's clarified
   direction, and an opt-in default leaves the native server the least-exercised path in the
@@ -110,8 +110,8 @@ that is unchanged by this decision: `:uv` loses nothing, and gains nothing.
 Said plainly because the rest of this ADR reads as though the native server is a complete
 replacement for Hunchentoot, and on this axis both are equally empty — a reader planning an
 **on-prem** deployment would reasonably infer a capability neither has. Termination is
-[#292](https://github.com/codelisperer/ouranos/issues/292); an ACME client for it is
-[#294](https://github.com/codelisperer/ouranos/issues/294). Neither gates this flip.
+[#125](https://github.com/codelisperer/ouranos/issues/125); an ACME client for it is
+[#126](https://github.com/codelisperer/ouranos/issues/126). Neither gates this flip.
 
 ## What this decision does *not* rest on
 
@@ -144,5 +144,5 @@ mistake, reported eleven of them, and caught it only on reading the matched line
 
 Two lessons priced into this ADR. A finding about an absence has to name the symbol it
 searched for, because the near-miss is a homograph. And every entry in the preconditions list
-was checked against the branch head (`8a63a9b`), not `main` — #270 rewrites `%body-octets`,
+was checked against the branch head (`8a63a9b`), not `main` — pre-publication PR 270 rewrites `%body-octets`,
 so `main` would have proved nothing about either the defect or its absence.

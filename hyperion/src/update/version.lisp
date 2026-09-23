@@ -1,4 +1,4 @@
-;;;; version.lisp --- version algebra for the updater (Coalton, #76).
+;;;; version.lisp --- version algebra for the updater (Coalton, pre-publication issue 76).
 ;;;;
 ;;;; THIS FILE IS THE ANTI-ROLLBACK DEFENCE. Everything else in the updater is plumbing
 ;;;; around one question -- is the offered version strictly newer than the installed one --

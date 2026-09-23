@@ -362,7 +362,7 @@ typed REFUSAL when the spec cannot be lowered faithfully."))
 ```
 
 **The hazard is these two surfaces drifting**, and it is the same failure removed from
-`build-desktop-app` in #335, where one path resolver existed twice. The CL methods must *call*
+`build-desktop-app` in pre-publication issue 335, where one path resolver existed twice. The CL methods must *call*
 the typed core for every decision rather than reimplement a rule; here the consumer that
 notices a disagreement is a live campaign spending money. An app extending in CL writes a
 `render` method that calls the exported constraint functions, exactly as a Coalton instance

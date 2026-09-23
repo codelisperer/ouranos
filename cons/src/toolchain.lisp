@@ -1,4 +1,4 @@
-;;;; toolchain.lisp --- is the Lisp under us the one we think it is? (#161)
+;;;; toolchain.lisp --- is the Lisp under us the one we think it is? (pre-publication issue 161)
 ;;;;
 ;;;; When the runtime and its contrib tree disagree, the failure surfaces as:
 ;;;;

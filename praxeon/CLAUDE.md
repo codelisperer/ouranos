@@ -30,12 +30,12 @@ examples/elise/       Elise, the PoC agent
 - The LLM layer is one generic, `praxeon/llm:complete`; a provider is a new class, never a
   special case in the loop. Provider-neutral is a hard constraint.
 - Failure/approval is the condition system: restarts around every application of a means.
-- `praxeon/ceiling` (#172): per-session token/call cap in an Ed25519-signed grant, enforced
+- `praxeon/ceiling` (pre-publication issue 172): per-session token/call cap in an Ed25519-signed grant, enforced
   before the model call. **Means are assembled from the grant's capabilities** — a means the
   caller lacks is absent from the tool table, and the refusal is indistinguishable from "no
-  such means" (#122). Don't reintroduce prompt-side filtering.
+  such means" (#90). Don't reintroduce prompt-side filtering.
 - `praxeon/workflow` and `register-agent-as-means` exist and are unit-tested; **no
-  application uses either yet** (#149 would be the first). `Plan` is a type the loop does
+  application uses either yet** (#100 would be the first). `Plan` is a type the loop does
   not yet construct.
 
 ## Gotchas

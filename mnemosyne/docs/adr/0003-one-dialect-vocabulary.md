@@ -2,8 +2,8 @@
 
 **Status:** Accepted *(2026-09-21)*
 **Date:** 2026-09-21
-**Issue:** [#432](https://github.com/codelisperer/ouranos/issues/432), from the Linux/WSL
-lane's finding while building [#258](https://github.com/codelisperer/ouranos/issues/258)'s
+**Issue:** pre-publication issue 432, from the Linux/WSL
+lane's finding while building pre-publication issue 258's
 changeset slice. Extends [ADR-0001](0001-unsupported-field-types.md), which made the dialect
 a closed type for the field-type path and got adopted nowhere else.
 
@@ -13,7 +13,7 @@ Four modules branched on the dialect and three of them had their own idea of wha
 
 | module | held it as | compared with | an unrecognised value |
 |---|---|---|---|
-| `mnemosyne/query` | keyword | `eq` | refused (since #431) |
+| `mnemosyne/query` | keyword | `eq` | refused (since pre-publication PR 431) |
 | `mnemosyne/ddl` | string, via a private `%dialect-name` | `string=` | **rendered as Postgres** |
 | `mnemosyne/schema` | string | `string=` | partly refused, by accident |
 | `mnemosyne/field` | typed `Dialect` ADT | `==` on the **rendered name** | took the SQLite arm |
@@ -26,7 +26,7 @@ Postgres* that *the postgres backend has no vector column type at all*. Not an e
 wrong answer, delivered confidently, by a check whose logic was correct and whose input was
 a spelling it did not recognise.
 
-`%check-dialect` (#431) stopped that fall-through by refusing the other module's spelling at
+`%check-dialect` (pre-publication PR 431) stopped that fall-through by refusing the other module's spelling at
 `query`'s boundary. That was right while two vocabularies existed — quietly normalising
 would have hidden the inconsistency rather than naming it — but it left the inconsistency
 in place, and it is not the only instance.
@@ -82,7 +82,7 @@ Three rules:
    representation. Corollary, from the third dialect: a two-way `if` on a dialect is a
    defect unless something upstream has already excluded the third.
 
-### What this changes about #431's rule
+### What this changes about pre-publication PR 431's rule
 
 `query` now **accepts** `"postgres"` and compiles it identically to `:postgres`. The ticket
 proposed the acceptance bar as *pass the other module's spelling and assert a refusal*,
@@ -97,7 +97,7 @@ properties, and the second is the ticket's own, unchanged:
 
 `tests/query.lisp`'s `an-unknown-dialect-spelling-is-refused-rather-than-taking-the-sqlite-branch`
 was rewritten rather than deleted: the claim in its name is untouched, and the part that
-asserted `"postgres"` is refused — #431's contract — is gone, with the reason recorded in
+asserted `"postgres"` is refused — pre-publication PR 431's contract — is gone, with the reason recorded in
 the test.
 
 ## Consequences

@@ -108,7 +108,7 @@ define it.
   Eaten: a bare double-quoted body, or `$(cat <<EOF … EOF)` unquoted, which fails exactly as
   badly while looking safe. bash and zsh behave identically, so changing shell is not a defence.
   The signature of a deletion is a **doubled space** where the span closed up, which is greppable
-  in published text; the absence itself is not. Three symbol names were removed from a #434
+  in published text; the absence itself is not. Three symbol names were removed from a #160
   comment this way and the paragraph still scanned as prose.
 
 ## The board
@@ -125,12 +125,12 @@ tells you to proceed. (GitHub documents secondary rate limits as not reflected i
 `API rate limit exceeded` — not the mechanism.)
 Two sessions lost time to this on 2026-09-21, each diagnosing a token-scope problem that was
 not there. **A board write that returns quietly has not necessarily landed: read the field
-back before reporting it.** More of the same shape in [#478](https://github.com/codelisperer/ouranos/issues/478).
+back before reporting it.** More of the same shape in pre-publication issue 478.
 
 - Take from `Todo`. Respect `Agent`. Set `Agent` and `Status: In Progress` when you start.
 - `Blocked` needs its reason in an issue comment, **and the reason has an expiry nobody
-  checks** — re-read it before inheriting it. #142 sat blocked for a month on a condition
-  met two days later; #224 carried "blocked by #74" past the point where #74 stopped
+  checks** — re-read it before inheriting it. pre-publication issue 142 sat blocked for a month on a condition
+  met two days later; #111 carried "blocked by #72" past the point where #72 stopped
   blocking it.
 - `In Review` means **you believe the work finished**. It does not mean "I filed a finding
   and want a ruling" — a different state that has been living in it, and the reason a board
@@ -239,20 +239,20 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   `--update` over transcribing them. **Run `--update` after every rebase, not only when the
   check failed** — a rebase can leave the counts in sync and the provenance line naming a
   commit that never produced them, and in that state the check passes and prints
-  *"measured earlier, still true"* when it is not true (#438).
+  *"measured earlier, still true"* when it is not true (pre-publication issue 438).
   **That rule assumes the staleness is in your branch.** When a count-changing PR merges without
   its row — which happens if the merge races its own CI — `main` itself carries a stale row, and
   rebasing onto it pulls that staleness into your diff instead of curing it. Your `--update` then
   writes a row containing someone else's delta, the provenance line names one run while the rows
   came from two, and the other change's contribution stops being attributable to the commit that
   caused it. The lane that left the row behind fixes `main` first; the next count-changing PR
-  waits for that and then re-derives, so its diff shows only its own delta (#450, held behind
-  #474's row rather than merged with a +4 riding along).
+  waits for that and then re-derives, so its diff shows only its own delta (pre-publication issue 450, held behind
+  pre-publication issue 474's row rather than merged with a +4 riding along).
 - **The provenance SHA a pull-request run reports is not in the repository.** A `pull_request`
   run checks out `refs/pull/N/merge`, an ephemeral commit GitHub creates for the run, so
   `git cat-file -e <sha>` fails for it and a reader trying to resolve the line is told there is
   no such object. `push` and `workflow_dispatch` runs report real commits. Two unresolvable SHAs
-  have shipped this way. Tracked as #485; until it is fixed, do not spend a CI cycle re-deriving
+  have shipped this way. Tracked as pre-publication issue 485; until it is fixed, do not spend a CI cycle re-deriving
   to "fix" one, because a fresh pull-request run produces another unreachable SHA.
 - **Two PRs that both change check counts conflict by construction, so they merge serially.**
   The README carries one provenance line — *"Counts above are from the Linux CI leg at `<sha>`"* —
@@ -350,16 +350,16 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   earlier. Re-reading the status just before merging narrows the window without closing it,
   because the read and the merge are never the same operation. Pass
   `-f sha=<the SHA whose verify you read>` and the server returns 409 instead. This also catches
-  the case where there is no run to read: #443 sat open for thirteen hours showing a green
+  the case where there is no run to read: pre-publication PR 443 sat open for thirteen hours showing a green
   `copilot-pull-request-reviewer` and no `verify` run of any kind, which reads as a checked pull
   request in every interface that displays it.
 - **A job's conclusion is one bit, and it is about the job.** It cannot distinguish two failing
   suites from three, so a leg that is already red absorbs a new failure silently and
   indefinitely. The sentence you are most likely to write about it — *"that leg is red, it is
-  #446"* — is recall rather than a claim, which is why it does not feel like something to check.
+  pre-publication issue 446"* — is recall rather than a claim, which is why it does not feel like something to check.
   Read the failing-suite list. `CHECKERS/TESTS` joined the Windows leg's two known failures and
   was invisible for an hour, including to the person who had spent that hour writing up four
-  other examples of checks that answer about the wrong object (#482).
+  other examples of checks that answer about the wrong object (pre-publication issue 482).
 - **Every pull request runs on Linux, macOS and Windows**, plus the release-mode job. Before the
   repo went public, pull requests ran Linux alone because Actions minutes were billed at 2x for
   Windows and 10x for macOS; standard runners are free for public repositories. A leg that fails

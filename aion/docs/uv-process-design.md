@@ -76,7 +76,7 @@ reasoning that makes the rest of the binding classify errors by name instead of 
 unnamed keyword is refused; a number always works.
 
 **A started signal handle holds the loop open.** For a supervisor — the `service` target
-kind (#25) — that is exactly right. For a script it is the classic surprise, and
+kind (#37) — that is exactly right. For a script it is the classic surprise, and
 `(uv:describe-loop l)` names the handle responsible.
 
 **A trap worth knowing:** libuv restores `SIG_DFL` when the last handle for a signal
@@ -122,5 +122,5 @@ Two mitigations make this lower-risk than it looks:
   (no fork/exec, argument quoting is the caller's problem, `UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS`
   exists because of it), and named pipes are not unix domain sockets. The test suite is
   POSIX-only as written: it invokes `/bin/sh`, `/bin/echo` and `/bin/cat`. Making it
-  cross-platform is part of the CI matrix work (#87), and should be done by abstracting
+  cross-platform is part of the CI matrix work (pre-publication issue 87), and should be done by abstracting
   the test programs rather than by assuming they exist.

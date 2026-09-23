@@ -1,4 +1,4 @@
-;;;; field-shell.lisp --- the CL half of the field-type vocabulary (#334).
+;;;; field-shell.lisp --- the CL half of the field-type vocabulary (pre-publication issue 334).
 ;;;;
 ;;;; ADR-0001 decided that `field-type-sql' returns whether a backend can carry a type, and
 ;;;; that the CL shell turns a refusal into a condition. This is that shell. It exists as its
@@ -11,7 +11,7 @@
 
 (defparameter +dialects+
   (list mnemosyne/field:D-Sqlite mnemosyne/field:D-Postgres mnemosyne/field:D-Xtdb)
-  "Every dialect, as typed values. THE tree-wide list (#432, ADR-0003).
+  "Every dialect, as typed values. THE tree-wide list (pre-publication issue 432, ADR-0003).
 
 It lives here rather than in each module because a per-module list is the defect this ADR
 removes: MNEMOSYNE/QUERY kept `(:sqlite :postgres :xtdb)' and MNEMOSYNE/DDL kept the same
@@ -27,7 +27,7 @@ written out again, because a hand-kept second list is how the two come to disagr
   ((name :initarg :name :reader unknown-dialect-name))
   (:report
    (lambda (c s)
-     ;; The known names are READ FROM THE VOCABULARY, not written out again (#432). A
+     ;; The known names are READ FROM THE VOCABULARY, not written out again (pre-publication issue 432). A
      ;; message listing its own copy of the three names is a fourth place for them to
      ;; disagree, and the one place a reader would most trust.
      ;;
@@ -35,8 +35,8 @@ written out again, because a hand-kept second list is how the two come to disagr
      ;; `~<Return>' directive (CLAUDE.md), so the control strings stay folded onto one line.
      (format s "mnemosyne: unknown backend dialect ~S.~%~%" (unknown-dialect-name c))
      (format s "Known: ~{~A~^, ~}.~%" +dialect-names+)
-     (format s "This used to be a String that quietly meant \"not postgres\", so a typo produced SQLite affinities against a Postgres database with no error anywhere (ADR-0001, #334).~%")
-     (format s "Every module that branches on a dialect now refuses a spelling it does not recognise rather than treating it as the other one (ADR-0003, #432), and this is what the typo looks like.~%"))))
+     (format s "This used to be a String that quietly meant \"not postgres\", so a typo produced SQLite affinities against a Postgres database with no error anywhere (ADR-0001, pre-publication issue 334).~%")
+     (format s "Every module that branches on a dialect now refuses a spelling it does not recognise rather than treating it as the other one (ADR-0003, pre-publication issue 432), and this is what the typo looks like.~%"))))
 
 (define-condition unsupported-field-type (error)
   ((field :initarg :field :initform nil :reader unsupported-field-type-field)
@@ -50,7 +50,7 @@ Refusing at migration time is the DEFAULT this protocol chose, because the alter
 default is silence -- and silence is what the substrate gives: SQLite accepts a column type~%~
 it has never heard of and stores it with NUMERIC affinity, so the app finds out never.~%~
 ~:[~;~%Emulation is opt-in at the declaration site and that opt-in is not implemented yet~%~
-(#212); until it is, an emulated type is refused here rather than emulated silently.~%~]"
+(pre-publication issue 212); until it is, an emulated type is refused here rather than emulated silently.~%~]"
              (unsupported-field-type-backend c)
              (unsupported-field-type-field c)
              (unsupported-field-type-type c)
@@ -60,7 +60,7 @@ it has never heard of and stores it with NUMERIC affinity, so the app finds out 
 (defun dialect-for (dialect)
   "The typed Dialect for DIALECT, or signal UNKNOWN-DIALECT.
 
-THE ONE NORMALISER (#432, ADR-0003). Every module that branches on a dialect calls this at
+THE ONE NORMALISER (pre-publication issue 432, ADR-0003). Every module that branches on a dialect calls this at
 its entry point and branches on the value it returns, so that there is one answer tree-wide
 to `is this a dialect, and which one'.
 
@@ -114,7 +114,7 @@ DIALECT is a designator -- string, symbol or typed Dialect -- and is normalised 
 DIALECT-FOR, because the callers hold it in all three shapes and converting at each of them
 is three chances to convert differently. An unrecognised one signals UNKNOWN-DIALECT here
 rather than reaching Coalton, where it surfaced as `Pattern match not exhaustive' naming
-neither the dialect nor the caller (#432).
+neither the dialect nor the caller (pre-publication issue 432).
 
 REFUSES EMULATED AS WELL AS UNSUPPORTED, and that is deliberate rather than conservative:
 ADR-0001 makes emulation opt-in at the declaration site precisely so it is never implicit,

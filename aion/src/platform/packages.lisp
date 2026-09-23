@@ -1,4 +1,4 @@
-;;;; packages.lisp --- aion/platform: the platform key, in one place (#206).
+;;;; packages.lisp --- aion/platform: the platform key, in one place (pre-publication issue 206).
 ;;;;
 ;;;; THE CONTRACT HAS TWO HALVES AND ONLY ONE OF THEM WAS IN A LIBRARY. The build script
 ;;;; names the artifact; the update client looks it up. They must agree EXACTLY or no update

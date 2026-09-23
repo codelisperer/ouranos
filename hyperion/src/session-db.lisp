@@ -55,7 +55,7 @@ mnemosyne/conn:connect). DIALECT is :sqlite or :postgres. With :ENSURE, create t
 ;;; --- schema / DDL ---------------------------------------------------------
 (defun db-store-ddl (store)
   "The CREATE TABLE DDL for STORE's sessions table under its dialect."
-  ;; The designator goes straight through (#432, ADR-0003) -- see the note in auth-db.lisp.
+  ;; The designator goes straight through (pre-publication issue 432, ADR-0003) -- see the note in auth-db.lisp.
   (schema:schema-ddl (schema:find-schema 'hyperion-session)
                      :dialect (db-store-dialect store)))
 
@@ -77,7 +77,7 @@ mnemosyne/conn:connect). DIALECT is :sqlite or :postgres. With :ENSURE, create t
         (handler-case (read-from-string string) (error () nil))))))
 
 ;;; The local case-insensitive reader that used to live here is now
-;;; MNEMOSYNE/PARAM:ROW-VALUE (#489). One behaviour change comes with it, deliberately: a
+;;; MNEMOSYNE/PARAM:ROW-VALUE (pre-publication issue 489). One behaviour change comes with it, deliberately: a
 ;;; key that matches nothing now SIGNALS instead of returning NIL. Every key below is a
 ;;; column this store's own schema declares, or an alias it wrote itself, so a miss means
 ;;; the table is not the one this store made -- which is worth a condition rather than a

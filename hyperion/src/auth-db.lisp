@@ -38,7 +38,7 @@
            #:duplicate-email #:unknown-role #:unknown-role-role #:unknown-role-known
            #:role-update-conflict #:role-update-conflict-id
            #:role-update-conflict-attempts
-           ;; #166: the append-only role-change log.
+           ;; pre-publication issue 166: the append-only role-change log.
            #:role-history #:role-events-ddl #:events-table #:*events-table*
            #:missing-actor #:missing-actor-operation))
 (in-package #:hyperion/auth-db)
@@ -46,7 +46,7 @@
 (defvar *table* "hyperion_users" "Default table name for the identity store.")
 
 (defvar *events-table* "hyperion_role_events"
-  "Default table name for the append-only role-change log (#166).")
+  "Default table name for the append-only role-change log (pre-publication issue 166).")
 
 (defparameter *pbkdf2-iterations* 100000
   "PBKDF2 iteration count for password hashing (raise over time as hardware allows).")
@@ -64,7 +64,7 @@
   (:created_at    :integer)
   (:updated_at    :integer))
 
-;;; #166. An APPEND-ONLY log of role changes, and the reason it is a second table rather
+;;; pre-publication issue 166. An APPEND-ONLY log of role changes, and the reason it is a second table rather
 ;;; than more columns is that `roles' holds only CURRENT STATE -- so the questions actually
 ;;; asked after an incident ("who gave this account :super-admin, and when?", "was it
 ;;; escalated before or after?") are unanswerable from it. `updated_at' does not even
@@ -121,7 +121,7 @@ framework does not know an application's vocabulary and existing callers must ke
 app can fold the identity schema into its OWN migration timeline (mnemosyne make-migration)
 rather than call ENSURE-SCHEMA. The unique email index is a separate statement (see
 ENSURE-SCHEMA); an app owning its migrations adds that as its own step."
-  ;; The designator goes straight through (#432, ADR-0003). This used to be
+  ;; The designator goes straight through (pre-publication issue 432, ADR-0003). This used to be
   ;; `(string-downcase (symbol-name dialect))' -- a fourth hand-rolled conversion, written
   ;; here because hyperion holds the dialect as a KEYWORD and schema-ddl used to take only a
   ;; STRING. It also made this helper keyword-only: a caller with the string spelling hit a
@@ -132,7 +132,7 @@ ENSURE-SCHEMA); an app owning its migrations adds that as its own step."
   (users-ddl :dialect (dialect store)))
 
 (defun role-events-ddl (&key (dialect :sqlite))
-  "CREATE TABLE DDL for the append-only role-change log (#166)."
+  "CREATE TABLE DDL for the append-only role-change log (pre-publication issue 166)."
   (schema:schema-ddl (schema:find-schema 'hyperion-role-event) :dialect dialect))
 
 (defun ensure-schema (store)
@@ -342,7 +342,7 @@ is no such user. Signals ROLE-UPDATE-CONFLICT if it keeps losing the swap."
                  ;; must not write an AUDIT EVENT either -- a grant that changed nothing is
                  ;; not a role change, and a log full of them is a log nobody reads.
                  (when (equal next roles) (return t))
-                 ;; The event and the change commit TOGETHER or not at all (#166). An audit
+                 ;; The event and the change commit TOGETHER or not at all (pre-publication issue 166). An audit
                  ;; row that can survive a failed update -- or an update that can survive a
                  ;; failed audit -- is worse than no audit: it is a record that is wrong
                  ;; rather than missing, and nothing downstream can tell which.
@@ -371,7 +371,7 @@ is no such user. Signals ROLE-UPDATE-CONFLICT if it keeps losing the swap."
    (lambda (c s)
      (format s "hyperion/auth-db: ~A needs :ACTOR -- who is making this change.~%"
              (missing-actor-operation c))
-     (format s "~%A role change is recorded in an append-only log (#166), and a record that~%")
+     (format s "~%A role change is recorded in an append-only log (pre-publication issue 166), and a record that~%")
      (format s "cannot name who acted answers none of the questions the log exists for:~%")
      (format s "who granted :super-admin and when; who removed the moderator; whether the~%")
      (format s "account was escalated before or after the incident.~%")
@@ -379,9 +379,9 @@ is no such user. Signals ROLE-UPDATE-CONFLICT if it keeps losing the swap."
      (format s "id, or a name like \"system\" / \"cli\" for changes no person made:~%")
      (format s "~%  (grant-role store id :moderator :actor (current-user-id))~%")))
   (:documentation
-   "Signalled when GRANT-ROLE / REVOKE-ROLE is called without :ACTOR (#166).
+   "Signalled when GRANT-ROLE / REVOKE-ROLE is called without :ACTOR (pre-publication issue 166).
 
-REQUIRED rather than defaulted, deliberately, and it is the one deliberate break in #166.
+REQUIRED rather than defaulted, deliberately, and it is the one deliberate break in pre-publication issue 166.
 An optional audit field is an omitted audit field: the caller who most needs the record is
 the one who has not thought about it. This module already refuses to guess a caller's
 identity -- it does not authorise anyone and has no notion of a current user -- so the
@@ -394,7 +394,7 @@ actor is exactly the thing it cannot supply and must be told."))
 
 (defun role-history (store id)
   "Every recorded role change for user ID, oldest first, as plists:
-(:ROLE :ACTION :ACTOR :AT). The answer to the questions #166 was filed about.
+(:ROLE :ACTION :ACTOR :AT). The answer to the questions pre-publication issue 166 was filed about.
 
 Oldest-first because the reconstruction is chronological -- what happened to this account,
 in order -- and a reader scanning for \"when did this start\" reads forwards."
@@ -427,7 +427,7 @@ in order -- and a reader scanning for \"when did this start\" reads forwards."
 (defun grant-role (store id role &key actor)
   "Give user ID the ROLE, recording who did it. Returns T, or NIL if there is no such user.
 
-ACTOR is REQUIRED (#166) -- see MISSING-ACTOR for why an optional one would be no audit at
+ACTOR is REQUIRED (pre-publication issue 166) -- see MISSING-ACTOR for why an optional one would be no audit at
 all. It is an opaque application string: a user id, or a name like \"system\" for changes
 no person made.
 
@@ -447,7 +447,7 @@ ROLE is not in it, and ROLE-UPDATE-CONFLICT under sustained concurrent writes."
 (defun revoke-role (store id role &key actor)
   "Take ROLE away from user ID, recording who did it. Returns T, or NIL if no such user.
 
-ACTOR is REQUIRED (#166), as for GRANT-ROLE.
+ACTOR is REQUIRED (pre-publication issue 166), as for GRANT-ROLE.
 
 **This does not authorise the caller** -- see GRANT-ROLE. In particular nothing here knows
 that revoking the last administrator locks everybody out of the application: roles are

@@ -126,7 +126,7 @@
 ;;; RIGHT in the DAG: cons wants subprocess pipes, hermes depends on aion alone and will
 ;;; want an HTTP client, mnemosyne's Postgres wire is a named target. HTTP parsing and the
 ;;; request/response model stay in hyperion -- binding here, decisions there. See the
-;;; ECOSYSTEM decisions log, 2026-08-04 (#117).
+;;; ECOSYSTEM decisions log, 2026-08-04 (pre-publication issue 117).
 (defsystem "aion/uv/net"
   :description "Stream transport over libuv for Common Lisp: TCP, pipes and asynchronous DNS, with backpressure designed in and a typed Coalton core."
   :author "Bob <eternal.recursion@proton.me>"
@@ -158,7 +158,7 @@
 ;;; so it arrives as an ordinary CONNECTION with the stream layer's backpressure already
 ;;; attached. The consumer is `cons` at DAG position 2, which runs build and test targets
 ;;; as subprocesses and today blocks on uiop:run-program -- orchestration stays there,
-;;; the binding lives here (ECOSYSTEM decisions log, 2026-08-04, #117; issue #119).
+;;; the binding lives here (ECOSYSTEM decisions log, 2026-08-04, pre-publication issue 117; pre-publication issue 119).
 (defsystem "aion/uv/process"
   :description "Subprocesses and signals over libuv for Common Lisp: uv_spawn with streamed stdio, exit status decoded together with the terminating signal, and signal handling on a real Lisp stack."
   :author "Bob <eternal.recursion@proton.me>"
@@ -203,17 +203,17 @@
 
 ;;; aion/clock --- a monotonic Gregorian-100ns clock and the time-ordered v6 ids built on
 ;;; it. Dependency-free ON PURPOSE, and not merely by accident of being small: hermes may
-;;; depend on aion and nothing else, and it is one of the consumers (#96). Core aion stays
+;;; depend on aion and nothing else, and it is one of the consumers (pre-publication issue 96). Core aion stays
 ;;; coalton + alexandria; this adds neither.
 ;;;
 ;;; Extracted from mnemosyne/id, where it was DAG-legal but wrong: a monotonic clock is a
 ;;; floor primitive, not a persistence concern, and taking a data layer as a dependency to
 ;;; obtain one is the coupling aion exists to prevent. mnemosyne keeps TOUCH! and the
 ;;; entity-stamping convention and calls NEW-ID from here.
-;;; aion/http-client --- an interceptor-shaped HTTP client for one outbound call (#202).
+;;; aion/http-client --- an interceptor-shaped HTTP client for one outbound call (pre-publication issue 202).
 ;;; Lives here for the reason aion/interceptor does: the shape is request-response, not web.
 ;;; It had already been reimplemented twice before it moved -- internal to hermes, and three
-;;; raw dex:post calls in praxeon -- which is the same evidence that settled #177.
+;;; raw dex:post calls in praxeon -- which is the same evidence that settled pre-publication issue 177.
 (defsystem "aion/http-client"
   :description "An interceptor-shaped HTTP client: enter stages, one round-trip, leave stages."
   :author "Bob <eternal.recursion@proton.me>"
@@ -236,7 +236,7 @@
                 :components ((:file "http-client"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/http-client/tests :run-tests)))
 
-;;; aion/secret --- a credential that cannot be printed by accident (#209).
+;;; aion/secret --- a credential that cannot be printed by accident (pre-publication issue 209).
 ;;; DEPENDENCY-FREE on purpose, exactly like aion/csv: `cons` must be able to hold a DB
 ;;; password opaquely without its core gaining Coalton. The typed view is the opt-in
 ;;; aion/secret/types below.
@@ -325,7 +325,7 @@
   :perform (test-op (op c) (uiop:symbol-call :aion/windows/tests :run-tests)))
 
 (defsystem "aion/windows/registry"
-  :description "Reading one registry value in a NAMED bitness view (#319). Read-only, and deliberately not a registry API -- see src/windows/registry/registry.lisp."
+  :description "Reading one registry value in a NAMED bitness view (#132). Read-only, and deliberately not a registry API -- see src/windows/registry/registry.lisp."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -352,7 +352,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  ;; aion/windows/registry for CLASS-AVAILABLE-P alone (#306): CoCreateInstance cannot tell
+  ;; aion/windows/registry for CLASS-AVAILABLE-P alone (pre-publication issue 306): CoCreateInstance cannot tell
   ;; "not installed" from "installed for the other bitness" -- both are REGDB_E_CLASSNOTREG
   ;; under WOW64 -- and the registry can. Read-only and Windows-only, like this system.
   :depends-on ("aion/windows" "aion/windows/registry")
@@ -373,7 +373,7 @@
   ;; `aion/windows' is declared although `aion/windows/com' already pulls it in: this suite
   ;; uses AION/WINDOWS and AION/WINDOWS/FFI directly (apartment-tests, layout-tests), and a
   ;; system that names a package it reads must say so rather than reach it through a
-  ;; neighbour's dependency (#461, #449).
+  ;; neighbour's dependency (pre-publication issue 461, #162).
   :depends-on ("aion/windows" "aion/windows/com" "fiveam")
   :serial t
   :components ((:module "tests/windows/com"
@@ -434,7 +434,7 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/interceptor/tests :run-tests)))
 
 (defsystem "aion/signature"
-  :description "Ed25519 detached signatures over bytes: verify, sign, key encoding. Nothing else (#208)."
+  :description "Ed25519 detached signatures over bytes: verify, sign, key encoding. Nothing else (pre-publication issue 208)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -459,7 +459,7 @@
   :perform (test-op (op c) (uiop:symbol-call :aion/signature/tests :run-tests)))
 
 (defsystem "aion/platform"
-  :description "The platform key that names a build artifact -- <os>-<arch> -- and the set of platforms this project actually builds (#206, #145)."
+  :description "The platform key that names a build artifact -- <os>-<arch> -- and the set of platforms this project actually builds (pre-publication issue 206, pre-publication issue 145)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -490,7 +490,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  ;; aion/random for the 62 non-timestamp bits of a v6 id (#95). This is the one dependency
+  ;; aion/random for the 62 non-timestamp bits of a v6 id (pre-publication issue 95). This is the one dependency
   ;; aion/clock has, and it is not free: mnemosyne and hermes both depend on aion/clock, so
   ;; ironclad now loads with them. The cost is LOAD TIME ONLY -- ironclad is pure Common Lisp
   ;; (SBCL contribs + bordeaux-threads, no CFFI, no native library), so unlike the cl+ssl
@@ -517,7 +517,7 @@
 ;;; depend on aion/log. log4cl is the engine (gating, per-category levels, runtime control,
 ;;; SLIME); jzon renders the JSON layout for staging/prod stdout.
 (defsystem "aion/random"
-  :description "A cryptographically secure random source -- session ids, tokens, nonces (#95)."
+  :description "A cryptographically secure random source -- session ids, tokens, nonces (pre-publication issue 95)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -543,7 +543,7 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/random/tests :run-tests)))
 
 (defsystem "aion/dynamic"
-  :description "Dynamic bindings that should survive a thread boundary (#430)."
+  :description "Dynamic bindings that should survive a thread boundary (#158)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -577,7 +577,7 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/log/tests :run-tests)))
 
 (defsystem "aion/dynamic/tests"
-  :description "Tests for aion/dynamic, and the tree-wide thread-spawn sweep (#430)."
+  :description "Tests for aion/dynamic, and the tree-wide thread-spawn sweep (#158)."
   :depends-on ("aion/dynamic" "aion/log" "fiveam")
   :serial t
   :components ((:module "tests"

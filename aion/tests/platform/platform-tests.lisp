@@ -89,7 +89,7 @@ the guard would refuse a host it was written to permit."
           "~S has an arch half ~S that NORMALIZE-ARCH would rewrite to ~S"
           p arch (plat:normalize-arch arch)))))
 
-;;; --- where this executable lives (#335) --------------------------------------
+;;; --- where this executable lives (pre-publication issue 335) --------------------------------------
 ;;;
 ;;; MACOS-APP-BUNDLE is the half that can be tested from any image, because it is a pure
 ;;; function of a pathname. EXECUTABLE-DIRECTORY and the install-directory it feeds cannot
@@ -97,7 +97,7 @@ the guard would refuse a host it was written to permit."
 ;;; where the honest answer is "SBCL's own bin". Asserting against a constructed path here
 ;;; would be a producer verifying its own output -- the fixture would build the path the
 ;;; same way the code does and agree with itself on a machine where the real answer is
-;;; different. That direction is verified against a dumped executable instead; see #335.
+;;; different. That direction is verified against a dumped executable instead; see pre-publication issue 335.
 
 (test a-mac-app-bundle-is-recognised-by-its-ancestry
   "The shape scripts/build-dmg.sh produces: the bundle copied verbatim into
@@ -127,7 +127,7 @@ an over-match -- and an over-match names a parent directory an updater would rep
 (test executable-directory-is-absolute-when-it-answers-at-all
   "The weak assertion this image can honestly make. The STRONG one -- that the path is
 where the running executable actually is -- needs a dumped executable and is verified
-against one in #335, because a dev image's honest answer is SBCL's own bin."
+against one in pre-publication issue 335, because a dev image's honest answer is SBCL's own bin."
   (let ((d (plat:executable-directory)))
     (when d
       (is-true (uiop:absolute-pathname-p d))

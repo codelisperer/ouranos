@@ -1,7 +1,7 @@
 #!/bin/sh
 # publish-public.sh --- build the public repo as a single fresh commit (no history).
 #
-# The decision (#90): the private history names client and product work in 188 diff lines
+# The decision (pre-publication issue 90): the private history names client and product work in 188 diff lines
 # and 12 commit messages, spread from the first commit through the subtree-merged originals
 # -- including a merge commit whose title names a client organization. Rewriting 217 commits
 # would preserve provenance nobody reads, at the cost of invalidating every SHA and having
@@ -111,11 +111,11 @@ if [ -f .env ]; then
   say "  NOTE    a .env exists here; it is gitignored and will NOT be copied"
 fi
 
-# 4. A LICENSE is a publication prerequisite (#85).
+# 4. A LICENSE is a publication prerequisite (pre-publication issue 85).
 if [ -f LICENSE ] || [ -f LICENSE.md ] || [ -f LICENSE.txt ]; then
   pass "LICENSE present"
 else
-  bad "no LICENSE file (see issue #85) -- do not publish without one"
+  bad "no LICENSE file (see pre-publication issue 85) -- do not publish without one"
 fi
 
 # 4a. ...and one per framework. Each is its own ASDF system, each already declares

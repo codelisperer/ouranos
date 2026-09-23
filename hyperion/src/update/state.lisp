@@ -148,7 +148,7 @@ the bypass that stripping it cannot be."
     ;; The channel has moved to a manifest schema this build cannot read. Carries the
     ;; declared schema and the PERMANENT DOWNLOAD URL, which is what makes it actionable.
     ;;
-    ;; THIS IS THE ONE FAILURE AN UPDATER CANNOT FIX BY UPDATING, and it is why #75 asked
+    ;; THIS IS THE ONE FAILURE AN UPDATER CANNOT FIX BY UPDATING, and it is why pre-publication issue 75 asked
     ;; for a permanent download URL distinct from the update channel -- a connection not
     ;; drawn at the time. A client that refuses a newer schema does not refuse once; it
     ;; refuses EVERY check, forever, until a human intervenes. Rendered as a generic

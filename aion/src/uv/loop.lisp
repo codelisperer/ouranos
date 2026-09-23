@@ -196,7 +196,7 @@ The only safe way to touch a running loop from another thread. Returns immediate
 THUNK runs later. Signals LOOP-CLOSED if the loop is closed or closing, in which case
 THUNK was not queued and will never run.
 
-THE SEND IS INSIDE THE LOCK, AND THAT IS THE WHOLE POINT (#296). It used to be outside,
+THE SEND IS INSIDE THE LOCK, AND THAT IS THE WHOLE POINT (pre-publication issue 296). It used to be outside,
 guarded by nothing, while CLOSE-LOOP took no lock at any point -- so a submit racing a
 teardown landed in one of two windows:
 
@@ -205,7 +205,7 @@ teardown landed in one of two windows:
   after foreign-free                    -> uv_async_send on FREED memory
 
 The assertion was the good case, and it is the one that was observed: a modal MSVC
-dialog mid-suite on Windows, 55 tests in, with no verdict (#291). The second case is
+dialog mid-suite on Windows, 55 tests in, with no verdict (pre-publication issue 291). The second case is
 silent. M2 is what exposed it -- before the pool, the handler ran inline on the loop
 thread and this path never submitted from anywhere else.
 
@@ -264,7 +264,7 @@ stack, which is the property that makes foreign callbacks safe here."
   (ffi:uv-ref (loop-async loop))
   (setf (loop-thread loop)
         ;; THREAD-LIFETIME: independent -- the event loop outlives every caller that
-        ;; submits to it, so it belongs to no one unit of work (#430).
+        ;; submits to it, so it belongs to no one unit of work (#158).
         (sb-thread:make-thread
          (lambda ()
            ;; :DEFAULT would return as soon as no handles were active, which for a
@@ -316,7 +316,7 @@ like unrelated corruption much later."
 (defun close-loop (loop)
   "Close LOOP, its handles and its memory. Idempotent.
 
-CLAIMING THE FLAG IS AN ATOMIC TEST-AND-SET UNDER LOOP-LOCK (#296), for two reasons.
+CLAIMING THE FLAG IS AN ATOMIC TEST-AND-SET UNDER LOOP-LOCK (pre-publication issue 296), for two reasons.
 It is what makes SUBMIT's refusal a guarantee rather than a narrowing -- see there. And
 it makes the idempotence real: the old `unless' read the flag and set it in two steps,
 so two threads closing at once could both pass the test and both reach FOREIGN-FREE.

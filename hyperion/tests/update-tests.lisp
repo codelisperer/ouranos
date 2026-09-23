@@ -1,4 +1,4 @@
-;;;; update-tests.lisp --- the updater's typed core (#76).
+;;;; update-tests.lisp --- the updater's typed core (pre-publication issue 76).
 ;;;;
 ;;;; WHAT THIS SUITE IS FOR. The updater decides whether to replace a working program on
 ;;;; someone else's machine. Two of its branches are security boundaries -- the refusal of
@@ -323,7 +323,7 @@
 
 (test no-artifact-for-this-platform-is-its-own-state
   ;; The split this promotion introduced. The original reported "up-to-date" here, which
-  ;; is the silent shape of the #206 failure: a client that cannot find its own row says
+  ;; is the silent shape of the pre-publication issue 206 failure: a client that cannot find its own row says
   ;; nothing is available, forever, with no error and no log line.
   (is (string= "no-artifact" (fx:decide "1.2.3" "1.3.0" nil "")))
   ;; ...and only when something newer actually exists. Nothing newer is still up-to-date.
@@ -364,7 +364,7 @@
 (test unsupported-schema-carries-somewhere-to-click
   ;; THE ONE FAILURE AN UPDATER CANNOT FIX BY UPDATING. It recurs on every check until a
   ;; human acts, so the message has to name the schema AND carry the permanent download
-  ;; URL -- which is what #75's "permanent download URL, distinct from the update channel"
+  ;; URL -- which is what pre-publication issue 75's "permanent download URL, distinct from the update channel"
   ;; requirement is actually for.
   (let ((detail (fx:schema-block-detail 7 "https://example.test/App-Setup.exe")))
     (is (search "7" detail))
@@ -519,7 +519,7 @@
 (test the-generators-spelling-is-the-one-the-parser-accepts
   ;; A CANARY FOR THE PRODUCER HALF. `scripts/update-manifest.lisp' PUBLISHED-NOW emits
   ;; this exact FORMAT directive, and `parse-published' is the only thing that accepts it.
-  ;; Two halves of one contract in two files is the #206 shape, and the failure mode is
+  ;; Two halves of one contract in two files is the pre-publication issue 206 shape, and the failure mode is
   ;; the silent one: a generator that dropped a zero-pad would emit a 19-character
   ;; timestamp that every client refuses, forever, with no error at the producer.
   ;;

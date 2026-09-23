@@ -311,7 +311,7 @@ disagree on result-key case, so match the column name case-insensitively."
              (conn:disconnect cb)))
       (ignore-errors (delete-file path)))))
 
-;;; --- #166: role changes must be auditable ------------------------------------
+;;; --- pre-publication issue 166: role changes must be auditable ------------------------------------
 ;;;
 ;;; `roles' holds only CURRENT STATE, so the questions actually asked after an incident --
 ;;; who granted :super-admin and when, who removed the moderator, was the account escalated
@@ -366,7 +366,7 @@ disagree on result-key case, so match the column name case-insensitively."
       (is (eq :editor (getf (first (auth:role-history a two)) :role))))))
 
 (test an-actorless-change-is-refused-rather-than-recorded-as-unknown
-  ;; The one deliberate break in #166. An optional audit field is an omitted audit field:
+  ;; The one deliberate break in pre-publication issue 166. An optional audit field is an omitted audit field:
   ;; the caller who most needs the record is the one who has not thought about it.
   (with-auth (a)
     (let ((id (auth:user-id (auth:create-user a :email "noactor@example.com" :password "pw"))))

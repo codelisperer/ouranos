@@ -1,4 +1,4 @@
-;;;; memory.lisp --- observational memory: remember, supersede, recall (#60).
+;;;; memory.lisp --- observational memory: remember, supersede, recall (pre-publication issue 60).
 ;;;;
 ;;;; What an agent has learned about someone, across turns and across sessions, held as
 ;;;; observations rather than as transcript.
@@ -21,7 +21,7 @@
 ;;;; SUPERSESSION AND ERASURE ARE DIFFERENT OPERATIONS AND MUST STAY SO. Superseding keeps
 ;;;; the old observation so `recall ... :as-of' can still answer what was believed then.
 ;;;; Erasure destroys it, including from the historical view -- that is what makes it
-;;;; erasure rather than a tombstone, and the maintainer's note on #60 is that a store
+;;;; erasure rather than a tombstone, and the maintainer's note on pre-publication issue 60 is that a store
 ;;;; without a defensible erasure story is something a consuming app cannot retrofit.
 ;;;;
 ;;;; MEMORY IS SCOPED BY SUBJECT, NOT BY AGENT. The app runs several personas with a
@@ -42,7 +42,7 @@
 (defstruct (provenance (:constructor make-provenance (conversation turn &key at)))
   "Which conversation, which turn, and when -- the traceable source of an observation.
 
-REQUIRED ON EVERY WRITE (#415). Observational memory is personal data held indefinitely, and
+REQUIRED ON EVERY WRITE (#150). Observational memory is personal data held indefinitely, and
 a remembered claim that cannot be traced cannot be CORRECTED: a member disputing it has
 nothing to point at, and a persona repeating it has nothing to check. That is the
 rectification half of the same argument that makes erasure a first-class operation here
@@ -82,7 +82,7 @@ able to tell them apart."
   (superseded-by nil)                 ; id of the observation replacing this, or NIL
   (superseded-at nil)                 ; when that happened, or NIL
   ;; THE SOURCE, and it is not optional. See PROVENANCE above.
-  (provenance (error "an observation must carry its provenance (#415)") :type provenance))
+  (provenance (error "an observation must carry its provenance (#150)") :type provenance))
 
 (defun observation-current-p (observation)
   "Is OBSERVATION what the store believes now?
@@ -129,7 +129,7 @@ then, and superseded only if they were superseded by then. Without it, current b
 (defgeneric recall-similar (store subject embedding &key budget kind as-of limit)
   (:documentation "The observations about SUBJECT nearest to EMBEDDING, budgeted.
 
-A SECOND GENERIC RATHER THAN A MODE ON `RECALL', and that is the whole point (#415). The
+A SECOND GENERIC RATHER THAN A MODE ON `RECALL', and that is the whole point (#150). The
 consuming app that asked for this deliberately did NOT use similarity for its reference
 corpus -- that material is mostly figures, and the nearest neighbour to a payout is a
 different payout, so a near-miss there is worse than no answer because an agent quotes it
@@ -143,7 +143,7 @@ function is visible in a grep.
 
 EMBEDDING IS A VECTOR, NOT TEXT, so this path makes no provider call. Embedding the query is
 the caller's, on the caller's thread, with the caller's provider -- which is also what keeps
-#430 away from here.
+#158 away from here.
 
 NOT EVERY STORE HAS A METHOD. A store that cannot rank by distance does not answer this, and
 that absence is structural: the caller gets no applicable method rather than a store quietly
@@ -265,7 +265,7 @@ guaranteed rather than customary. Both stores went through their own inline cons
 before this existed -- two copies of the same five fields, which is how the two come to
 disagree about a sixth.
 
-THE SOURCE IS THE OBSERVATION ITSELF, not just its provenance. #415 asks for items a
+THE SOURCE IS THE OBSERVATION ITSELF, not just its provenance. #150 asks for items a
 persona can cite AND that a member can correct, and correcting means superseding, which
 needs the id. Provenance alone would answer `where did this come from' and leave `and how
 do I fix it' unanswerable."

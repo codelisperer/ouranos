@@ -1,7 +1,7 @@
 ;;;; probe-sf.lisp --- the OTHER half: SIGTERM to a real serve-forever, per backend.
 ;;;;
 ;;;; probe-sigterm.lisp isolates the transport by reproducing everything EXCEPT
-;;;; serve-forever. This one runs the actual production entry point, which is the row #25
+;;;; serve-forever. This one runs the actual production entry point, which is the row #37
 ;;;; depends on. FIRED here means a supervisor can stop a deployed app cleanly.
 ;;;;
 ;;;; PROBE_BACKEND=woo|hunchentoot|uv

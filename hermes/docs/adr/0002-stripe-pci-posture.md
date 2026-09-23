@@ -1,6 +1,6 @@
 # ADR-0002 — Stripe integration: hosted Checkout only, and the PCI posture that follows
 
-**Status:** Accepted (2026-09-02) · 2026-08-27 · issues #47, #50
+**Status:** Accepted (2026-09-02) · 2026-08-27 · issues pre-publication issue 47, pre-publication issue 50
 
 > **Not compliance advice.** This records an engineering decision and the reasoning behind
 > it. PCI scope is determined by your acquirer and your own attestation, and Stripe's
@@ -34,7 +34,7 @@ be the goal: PCI is **a shared responsibility** and a merchant **"must annually 
 SAQ A is *minimal* scope, not *no* scope — the win is avoiding the 300+ controls that apply
 when untokenized PANs reach your systems, not avoiding assessment.
 
-Second, **hosted Checkout and Elements are not equivalent**, and #50's checklist currently
+Second, **hosted Checkout and Elements are not equivalent**, and pre-publication issue 50's checklist currently
 lumps them ("Use hosted Checkout + Elements only"). Checkout redirects to a Stripe-hosted
 page; Elements embeds Stripe-controlled iframes in **our** page, which makes our page part of
 the payment flow. Both keep the PAN off our servers. They do **not** obviously carry the same
@@ -90,7 +90,7 @@ their own payment methods.
 
 Written because the maintainer asked whether his understanding of the token model was
 correct. It was — and checking rather than confirming from memory surfaced two things that
-would otherwise have been missed: that **#50's checklist treats Checkout and Elements as
+would otherwise have been missed: that **pre-publication issue 50's checklist treats Checkout and Elements as
 equivalent when they may not be**, and that **IP allowlisting and `js.stripe.com` script
 loading are obligations this library cannot discharge for its consumers**, so they have to be
 written down somewhere a consumer will read.

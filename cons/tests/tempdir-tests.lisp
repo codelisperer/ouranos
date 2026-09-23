@@ -1,4 +1,4 @@
-;;;; tempdir-tests.lisp --- scratch directories are created, not chosen (#204).
+;;;; tempdir-tests.lisp --- scratch directories are created, not chosen (pre-publication issue 204).
 ;;;;
 ;;;; The interesting test here is not "does it make a directory". It is the SYMLINK case,
 ;;;; because that is the defect: the old idiom handed a guessable name to
@@ -69,7 +69,7 @@
   "THE ATTACK, run. In a world-writable /tmp an attacker who can guess the name creates it
 first as a link to somewhere they would like written to. ENSURE-DIRECTORIES-EXIST follows
 it and reports success; MKDIR fails with EEXIST, because it does not resolve the final
-component. This is the whole reason #204 is not fixed by a better random number."
+component. This is the whole reason pre-publication issue 204 is not fixed by a better random number."
   (tempdir:with-temporary-directory (scratch "unit")
     (let ((elsewhere (merge-pathnames "elsewhere/" scratch))
           (bait (merge-pathnames "bait" scratch)))

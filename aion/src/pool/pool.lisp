@@ -179,7 +179,7 @@ nothing was the wrong answer, and why a reporter that signals still cannot kill 
                 ;; serves many unrelated callers. Inheriting the context bound at pool
                 ;; construction would stamp that one correlation id onto every request the
                 ;; worker ever handles: present, plausible and wrong, which is worse than
-                ;; the absent field it replaces (#430).
+                ;; the absent field it replaces (#158).
                 collect (sb-thread:make-thread
                          (lambda () (%worker pool))
                          :name (format nil "~A-~D" name i))))

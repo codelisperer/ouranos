@@ -1,12 +1,12 @@
 #!/usr/bin/env sh
-# ticket.sh --- what is #165, again?
+# ticket.sh --- what is pre-publication issue 165, again?
 #
 #   scripts/ticket.sh 165              one ticket
 #   scripts/ticket.sh 165 166 122      several
 #   scripts/ticket.sh 165 --body       the full body too
 #
 # A bare issue number is unreadable in a conversation, a commit message or a board row —
-# everyone ends up opening a browser tab to remember what "#165" was. This turns a number
+# everyone ends up opening a browser tab to remember what "pre-publication issue 165" was. This turns a number
 # back into a sentence, offline of the browser.
 #
 # POSIX sh + gh only, same constraint as board.sh: this has to work in git-bash on Windows.

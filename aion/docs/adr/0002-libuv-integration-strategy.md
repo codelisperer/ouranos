@@ -42,9 +42,9 @@ Two standing exclusions, both permanent:
 **3. Placement follows the DAG, abstractions follow the domain.**
 Recorded in the [`ECOSYSTEM.md`](../../../ECOSYSTEM.md) decisions log and not restated here.
 The consequence for uv specifically: `aion/uv` (loop, fs, timers, watch), `aion/uv/net`
-(streams, DNS — [#118](https://github.com/codelisperer/ouranos/issues/118)), `aion/uv/process`
-(spawn, signals — [#119](https://github.com/codelisperer/ouranos/issues/119)); the HTTP
-server in hyperion ([#117](https://github.com/codelisperer/ouranos/issues/117)).
+(streams, DNS — pre-publication issue 118), `aion/uv/process`
+(spawn, signals — pre-publication issue 119); the HTTP
+server in hyperion (pre-publication issue 117).
 
 **4. Sequenced so each step is provable before the next depends on it.**
 Filesystem, timers and watching first — no protocol, testable in isolation, and they gave us
@@ -67,9 +67,9 @@ restated.
 
 - **Aion must be correct on three platforms, and aion is leftmost in the DAG.** Accepted
   deliberately; mitigated only by (5). It also puts the Windows work
-  ([#107](https://github.com/codelisperer/ouranos/issues/107)) on more than one framework's
+  ([#84](https://github.com/codelisperer/ouranos/issues/84)) on more than one framework's
   critical path.
-- **If #117 proceeds, we own an HTTP security surface** — request smuggling, header
+- **If pre-publication issue 117 proceeds, we own an HTTP security surface** — request smuggling, header
   injection, slowloris, chunked-encoding edge cases. That is a standing obligation, not a
   one-time cost, and it is the strongest argument for a Coalton parser with exhaustive state
   handling rather than a hand-rolled CL state machine.
@@ -83,8 +83,8 @@ A strategy without an exit is a commitment, not a plan. Two, stated in advance:
 
 - **If the HTTP surface outgrows the maintainer** — the security obligation above is real
   and unbounded — fall back to Hunchentoot or Clack *over our own socket layer*. The
-  binding keeps its value; **the server is the optional part.** #117 is the piece to
-  abandon, not #118.
+  binding keeps its value; **the server is the optional part.** pre-publication issue 117 is the piece to
+  abandon, not pre-publication issue 118.
 - **If Windows cannot be made to work on the OS toolchain**, revisit the platform matrix —
   but do **not** resolve it by taking MSYS2. That trade was considered and rejected on
   adoption grounds, and reversing it silently would undo the point.

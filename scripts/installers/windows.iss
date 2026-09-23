@@ -19,7 +19,7 @@
 ; HKCU\Software\<APPNAME>\InstallDir to decide where to install an update, because that is
 ; where the app actually IS -- including when a user chose somewhere else. windows.nsi
 ; writes that value; SO MUST THIS. Two installers writing different keys is the
-; producer/consumer drift that #206 was, and the failure mode is an update that installs a
+; producer/consumer drift that pre-publication issue 206 was, and the failure mode is an update that installs a
 ; second copy elsewhere, leaves the running one untouched, and looks to the user like an
 ; update that silently did nothing.
 ;

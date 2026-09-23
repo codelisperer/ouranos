@@ -180,6 +180,6 @@ collects too."
 
 (test a-filter-that-matches-nothing-is-an-error-not-an-empty-package
   "A typo in :ONLY would otherwise produce a package with no constants and no complaint --
-the silently-empty result that the layout assertions and #206 were both about."
+the silently-empty result that the layout assertions and pre-publication issue 206 were both about."
   (signals com:typelib-error
     (com::%select (list (entry "xlUp" 1)) '("xlNoSuchConstant") '())))

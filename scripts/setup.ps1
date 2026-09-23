@@ -145,7 +145,7 @@ function Install-Sbcl {
   # so the flag that was here could not absorb the one failure it was added for: the
   # Linux lane measured `curl: (18) transfer closed with 11526315 bytes remaining to
   # read' on a clean-machine run, after 3m23s, with nothing installed, and proved it both
-  # directions against a server that truncates its first two responses (#198).
+  # directions against a server that truncates its first two responses (pre-publication issue 198).
   Get-Url -Url $url -OutFile $tmp
 
   # Verify it really is an MSI before handing it to msiexec: an MSI is an OLE compound
@@ -307,7 +307,7 @@ function Install-CoaltonDeps {
   Note "Coalton's Quicklisp dependencies are installed"
 }
 
-# --- 4. SQLite (#229) --------------------------------------------------------
+# --- 4. SQLite (pre-publication issue 229) --------------------------------------------------------
 #
 # mnemosyne's DEFAULT backend, and until this existed `setup.ps1` never mentioned it. On a
 # machine provisioned exactly as documented, `setup.ps1` exited 0, `bootstrap.lisp` exited
@@ -475,7 +475,7 @@ if ($Check) {
   else { Miss 'Coalton checkout' '.\scripts\setup.ps1' }
   Write-Host "      (deep check -- which Coalton actually LOADS: sbcl --script scripts/check-coalton.lisp)" -ForegroundColor DarkGray
 
-  # NAMES THE FILE, not just "present". The whole of #229 is that this machine reported
+  # NAMES THE FILE, not just "present". The whole of pre-publication issue 229 is that this machine reported
   # the sqlite backend green on a DLL supplied by an unrelated Delphi installation, so a
   # bare PASS here would be the same lie one level up. Say which file the loader will find
   # first, and warn when it is not the one this script provisioned.
@@ -494,11 +494,11 @@ if ($Check) {
     Write-Host '            fix: .\scripts\setup.ps1   (installs the pinned build where the loader looks first)' -ForegroundColor DarkGray
     # AND IT COUNTS AS MISSING. The WARN above is prose, and nothing downstream reads prose:
     # without this the summary still says "this machine is provisioned" and -Check still exits
-    # 0, which is #229's own defect one level up -- a machine carried by an unrelated Delphi
+    # 0, which is pre-publication issue 229's own defect one level up -- a machine carried by an unrelated Delphi
     # install reporting green, now with a paragraph explaining that the green means nothing.
     # This branch is reachable ONLY when the provisioned copy is absent (Find-SqliteDll looks
     # beside sbcl.exe first), so WARN here means NOT PROVISIONED, which is what missing is.
-    # The wording above is left exactly as it stands: verify-clean-machine.ps1 (#230) greps
+    # The wording above is left exactly as it stands: verify-clean-machine.ps1 (pre-publication issue 230) greps
     # for 'NOT provisioned by setup.ps1', so it is a contract, not just a message.
     $script:missing++
   }

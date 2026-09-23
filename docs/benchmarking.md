@@ -6,7 +6,7 @@ disables optimizations that obscure debugging; release freezes them into flatten
 `defstruct`s and optimizes. It is a property of the **build**, not of a system — Coalton's
 stdlib included — so it cannot be switched inside a running image.
 
-Until #98, **Ouranos ran entirely in development mode and had never been built in release
+Until pre-publication issue 98, **Ouranos ran entirely in development mode and had never been built in release
 mode.** Every performance number the project had was therefore measured in the slower of the
 two, and none of them said so.
 
@@ -74,7 +74,7 @@ Two things about reading this table:
 `README.md`, `ECOSYSTEM.md` and [`working-with-ai.md`](working-with-ai.md) quote the
 ADR-0011 delayed-ACK finding: **44.00 ms** per request against Woo's **0.15 ms**, and
 **0.17 ms** for the same server once a `Content-Length` header was added. Like everything
-else in this repo before #98, those were measured in development mode and do not say so.
+else in this repo before pre-publication issue 98, those were measured in development mode and do not say so.
 
 **They survive.** The router is the only Coalton on that request path, and at ~1 µs it is
 **0.7% of the 0.15 ms figure**; the mode moves it by 0.28 µs, or **0.19% of the claim**.
@@ -97,7 +97,7 @@ eval "$(scripts/test-postgres.sh env)"
 sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp
 ```
 
-This is worth stating as the **negative result** it is. #98 expected to find latent
+This is worth stating as the **negative result** it is. pre-publication issue 98 expected to find latent
 representation assumptions — code that inadvertently depends on development mode's
 behaviour, which is invisible until the mode flips. **None surfaced.** The §7 rule (a `lisp`
 block may only traffic in promised types) appears to have held across the tree.

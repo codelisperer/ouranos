@@ -4,7 +4,7 @@
 ;;;; widest reach per unit of work. WMI, the Shell, Task Scheduler, ADO, WSH and Office all
 ;;;; arrive through this one binding. It is the meta-API.
 ;;;;
-;;;; This is the BINDING. Office automation is Hades (#180), over this; an ADO backend is
+;;;; This is the BINDING. Office automation is Hades (pre-publication issue 180), over this; an ADO backend is
 ;;;; mnemosyne's. Neither is here.
 
 (cl:defpackage #:aion/windows/com/ffi
@@ -80,7 +80,7 @@
    ;; variants
    #:lisp-to-variant #:variant-to-lisp #:with-variant
    #:ole-date-to-universal-time #:universal-time-to-ole-date
-   ;; type libraries -- the server's own description, read and emitted (#181)
+   ;; type libraries -- the server's own description, read and emitted (pre-publication issue 181)
    #:typelib-constants #:typelib-information #:typelib-contents
    #:define-typelib-constants #:expand-typelib-constants
    #:check-typelib-version

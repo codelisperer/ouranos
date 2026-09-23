@@ -1,4 +1,4 @@
-;;;; upstream.lisp --- is the framework checkout you are building against current? (#240)
+;;;; upstream.lisp --- is the framework checkout you are building against current? (pre-publication issue 240)
 ;;;;
 ;;;; A capability shipped and two consuming applications went on hand-rolling around it for
 ;;;; three days, because nothing told them their framework checkout was behind. Both had

@@ -10,7 +10,7 @@
 ;;;; Exit 0 in sync, 1 on drift, 2 if the log cannot be trusted to answer the question.
 ;;;;
 ;;;; IT WRITES TO THE CHECKOUT YOU ARE STANDING IN, AND REFUSES IF THAT IS NOT ITS OWN
-;;;; (#450). The root used to come from `*load-truename*' alone, so running one checkout's
+;;;; (pre-publication issue 450). The root used to come from `*load-truename*' alone, so running one checkout's
 ;;;; copy from another rewrote the SCRIPT's README and left the caller's untouched -- while
 ;;;; reporting `VERDICT: UPDATED', because from where the script sat nothing had gone wrong.
 ;;;; It dirtied the hub's tree exactly that way. The caller's tree staying clean is the half
@@ -20,9 +20,9 @@
 ;;;; writer has to answer. The question is *which README did you mean*, and only the working
 ;;;; directory expresses that. So cwd decides, and a disagreement between the two is refused
 ;;;; rather than resolved -- nothing here can tell which was meant, and picking either is how
-;;;; it picked wrong before. The resolver is shared: scripts/tree-root.lisp (#480).
+;;;; it picked wrong before. The resolver is shared: scripts/tree-root.lisp (pre-publication issue 480).
 ;;;;
-;;;; THE READERS HAVE IT TOO, as of #480. It started here because a wrong write is not
+;;;; THE READERS HAVE IT TOO, as of pre-publication issue 480. It started here because a wrong write is not
 ;;;; recoverable, but `a wrong report can be read twice' did not survive contact with how a
 ;;;; green checker is actually treated, which is that nobody reads it at all.
 ;;;;
@@ -30,8 +30,8 @@
 ;;;; moved between the branch point and main -- including work somebody else merged in the
 ;;;; meantime. Those are true of the MERGE RESULT and false of your diff, and committing them
 ;;;; puts a change in your diff that your diff did not cause, leaving the next reader to work
-;;;; out which numbers were yours. (Found on #338: it correctly wanted praxeon 115 -> 130
-;;;; alongside that branch's own aion +9, because #256 landed after the branch was cut.
+;;;; out which numbers were yours. (Found on pre-publication PR 338: it correctly wanted praxeon 115 -> 130
+;;;; alongside that branch's own aion +9, because pre-publication PR 256 landed after the branch was cut.
 ;;;; Rebasing first gave the 9 alone.)
 ;;;;
 ;;;; FEEDING IT A CI LOG: `gh run view --log` does not always label the step -- one run
@@ -43,12 +43,12 @@
 ;;;; WHY THIS EXISTS. The Status table's counts were corrected three times in three days by
 ;;;; two sessions, and were stale again within the hour each time -- because every merge
 ;;;; invalidates them and nothing checked. Same shape as docs/dependencies.md being a
-;;;; serialisation point (#278): a hand-maintained number duplicating what a script already
+;;;; serialisation point (#118): a hand-maintained number duplicating what a script already
 ;;;; computes. The fix is the same one -- keep the number in one place and check the copy.
 ;;;;
 ;;;; IT DERIVES THE NUMBERS AND NOT THE PROSE, deliberately. The "Where it is" column is
 ;;;; judgement -- what is alpha, what is *(in progress)*, which caveat a reader needs -- and
-;;;; a generator would flatten it into an inventory, which is the mistake #278 warns against
+;;;; a generator would flatten it into an inventory, which is the mistake #118 warns against
 ;;;; for the dependency manifest. Only the Checks column and the total are mechanical.
 ;;;;
 ;;;; THE COUNTS ARE PLATFORM-SPECIFIC, SO ONE HOST HAS TO BE CANONICAL. The same tree at the
@@ -111,7 +111,7 @@ with a message about the wrong script."
           (return (when (plusp digits) (parse-integer tail :end digits))))))))
 
 (defun %labelled-string (lines label)
-  "The text after LABEL on the first line that BEGINS with it, or NIL (#385).
+  "The text after LABEL on the first line that BEGINS with it, or NIL (pre-publication issue 385).
 
 Anchored at position 0 on purpose: `total checks executed: 4400 (axes: base+uv)' contains
 `axes: ' too, and a search that matched it would read the human sentence rather than the
@@ -209,7 +209,7 @@ by nothing here and written by nothing here."
   "LINE with its LAST run of digits replaced by NEW.
 
 The last run, not the first, because a row's prose legitimately contains numbers -- issue
-references like (#172) and version strings like Bulma 1.x sit in the same line as the count.
+references like (pre-publication issue 172) and version strings like Bulma 1.x sit in the same line as the count.
 The count is always the final cell, so the final digit run is the one to touch, and the
 prose is returned byte-for-byte either side of it."
   (let ((end (position-if #'digit-char-p line :from-end t)))
@@ -227,7 +227,7 @@ prose is returned byte-for-byte either side of it."
 (defun headline-leg (line)
   "The platform the README's headline CLAIMS its figure came from, or NIL.
 
-Reading the prose is the point. #330 made the headline name its leg -- \"on the Linux CI
+Reading the prose is the point. pre-publication issue 330 made the headline name its leg -- \"on the Linux CI
 leg\" -- which fixed a number that was silently platform-specific. But the label is prose and
 the figure is derived, and until this function nothing checked that the two agreed: a macOS
 gate could be written straight into a line claiming Linux, producing a number that is wrong
@@ -258,7 +258,7 @@ falls back to local HEAD and says so."
   "Index of the line carrying the measured-at clause, or NIL.
 
 Anchored on its own opening words rather than on the headline count, because the count is
-gone (#330's successor) and because \"CI leg\" appears twice in README.md -- once in the
+gone (pre-publication issue 330's successor) and because \"CI leg\" appears twice in README.md -- once in the
 paragraph explaining which leg is canonical, once here. Anchoring on the ambiguous substring
 would stamp the explanation."
   (loop for l in lines
@@ -270,7 +270,7 @@ would stamp the explanation."
 
 A count without its commit is a rumour (AGENTS.md): a reader whose own number differs cannot
 tell whether the cause is the host, the tree, or a real defect. Platform was already recorded
-(#330); this is the other half."
+(pre-publication issue 330); this is the other half."
   (let ((p (search " at `" line)))
     (when p
       (let* ((start (+ p 5))
@@ -304,7 +304,7 @@ nothing, because a number that has not moved since it was measured is still that
   "Rewrite README's numbers in place from the gate. Returns the number of lines changed.
 
 It edits ONLY the digit runs it was asked to edit -- no reflowing, no regeneration. The
-prose in every row is judgement (#278) and a rewriter that touched it would be the very
+prose in every row is judgement (#118) and a rewriter that touched it would be the very
 generator this script exists not to be."
   (let ((out (copy-seq lines)) (changed 0))
     (dolist (row rows)
@@ -321,10 +321,10 @@ generator this script exists not to be."
                                 (format nil "**~D checks**" claimed-total)
                                 (format nil "**~D checks**" grand)))
       (incf changed))
-    ;; STAMPED WHENEVER THIS RUNS, not only when a count moved (#438). It used to require
+    ;; STAMPED WHENEVER THIS RUNS, not only when a count moved (pre-publication issue 438). It used to require
     ;; `(plusp changed)' or an absent clause, on the reasoning that "measured at X" stays true
     ;; and rewriting it every commit is churn. That reasoning is sound for the CHECK and wrong
-    ;; for the WRITE, and the difference cost a false line on #433:
+    ;; for the WRITE, and the difference cost a false line on #159:
     ;;
     ;;   two count-changing PRs measured at different commits merge; the second rebases; its
     ;;   rows are now IN SYNC with the merged tree, so nothing drifted, so the clause was left
@@ -394,7 +394,7 @@ verify-tree run, and nothing can be derived from it."))
 partially failing suite still contributes to the grand total, so publishing from this log ~
 would record numbers no green run will reproduce. Fix the tree, then re-check."
            (or verdict "missing")))
-    ;; A PARTIAL log is the same mistake as a red one, one axis over (#385). A run that
+    ;; A PARTIAL log is the same mistake as a red one, one axis over (pre-publication issue 385). A run that
     ;; declined an axis is green and correct and its total is simply not the tree's total:
     ;; 4065 and 4400 were both true of d0547d1, differing only by OURANOS_WITH_UV. This
     ;; script WRITES those figures into the README, so it is the last place the difference
@@ -404,18 +404,18 @@ would record numbers no green run will reproduce. Fix the tree, then re-check."
     ;; TWO refusals, not one message with a conditional clause, because they are different
     ;; claims and only one of them is knowable. A log that SAYS it declined uv is a measured
     ;; smaller tree. A log with no axes lines is UNKNOWN coverage -- it may well be a full
-    ;; run from before #385 -- and saying "smaller" about it would be the same overclaim
+    ;; run from before pre-publication issue 385 -- and saying "smaller" about it would be the same overclaim
     ;; this whole change exists to stop, made by the code that stops it.
     ;; Both messages below are ONE line each, not `~'-continued strings: on a CRLF checkout
     ;; the character after `~' is #\Return, an illegal directive that fails at COMPILE time
-    ;; (CLAUDE.md). The nine pre-existing continuations elsewhere in this file are #387 and
+    ;; (CLAUDE.md). The nine pre-existing continuations elsewhere in this file are #146 and
     ;; are deliberately left alone here -- rewriting other people's message text is not this
-    ;; change's business, and #387 wants a per-file review rather than a sweep.
-    ;; NEITHER MESSAGE NAMES THE AXES ANY MORE (#410). Both used to end "re-run the gate with
+    ;; change's business, and #146 wants a per-file review rather than a sweep.
+    ;; NEITHER MESSAGE NAMES THE AXES ANY MORE (pre-publication issue 410). Both used to end "re-run the gate with
     ;; every axis enabled (OURANOS_WITH_UV=1 for uv)", which was complete for exactly as long
-    ;; as uv was the only axis. #395 created a second one -- the native launcher -- and that
+    ;; as uv was the only axis. pre-publication PR 395 created a second one -- the native launcher -- and that
     ;; advice then pointed a reader whose log declined `view' at an unrelated variable. AN
-    ;; ENUMERATION OF KNOWN AXES CANNOT REPORT AN AXIS ADDED LATER, which is the defect #385
+    ;; ENUMERATION OF KNOWN AXES CANNOT REPORT AN AXIS ADDED LATER, which is the defect pre-publication issue 385
     ;; fixed in the gate's own output, reappearing one consumer over.
     ;;
     ;; So the reader is sent to the log's OWN `NOT COVERED' block. The gate builds that from
@@ -423,7 +423,7 @@ would record numbers no green run will reproduce. Fix the tree, then re-check."
     ;; including why each was off and how to enable it -- and it stays correct here without
     ;; anyone maintaining this sentence.
     (unless declined
-      (die 2 "the log has no `axes-declined:' line, so its coverage is UNKNOWN (#385). It may be a full run predating that line or a partial one; nothing in it distinguishes those, and treating unknown as full is the assumption that produced #385. Re-run the gate with every axis enabled; its own `NOT COVERED' block names each one and says how."))
+      (die 2 "the log has no `axes-declined:' line, so its coverage is UNKNOWN (pre-publication issue 385). It may be a full run predating that line or a partial one; nothing in it distinguishes those, and treating unknown as full is the assumption that produced pre-publication issue 385. Re-run the gate with every axis enabled; its own `NOT COVERED' block names each one and says how."))
     (unless (equal declined "none")
       (die 2 "the log declined: ~a (coverage `~a'). Its total is a real measurement of a SMALLER tree, so publishing it would record counts that no full run reproduces -- indistinguishable, afterwards, from a README that drifted. Re-run with those axes enabled; the log's own `NOT COVERED' block says why each was off and how to enable it."
            declined (or axes "unstated")))
@@ -501,7 +501,7 @@ trustworthy than the number it replaced, because it now carries a platform. Deri
         ;; THE HEADLINE IS OPTIONAL, AND ITS ABSENCE IS THE STRONGER STATE. A stored total is
         ;; a second copy of the Checks column, so it could disagree with the rows AND every
         ;; merge moving any row forced every open branch to edit one shared line -- a
-        ;; collision carrying no information. Removed (#330's successor), and what replaces
+        ;; collision carrying no information. Removed (pre-publication issue 330's successor), and what replaces
         ;; it is better evidence: with nothing stored, the rows are summed and compared
         ;; against THE GATE'S OWN grand total rather than against themselves restated.
         ;;
@@ -558,7 +558,7 @@ then re-run with --update to stamp it. A count without its commit is a rumour.~%
              ;; Writing is what makes this DERIVED rather than merely enforced. Enforcing a
              ;; hand-maintained number removes the staleness and adds contention: every
              ;; count-moving PR must now edit README.md, so two of them conflict by
-             ;; construction -- the docs/dependencies.md cost (#278) landing on a hotter
+             ;; construction -- the docs/dependencies.md cost (#118) landing on a hotter
              ;; file. Deriving removes the staleness AND the thinking; the edit is still a
              ;; commit, but nobody computes or transcribes a number. (Raised by the macOS
              ;; lane after this branch itself went red three times in one afternoon.)
@@ -572,7 +572,7 @@ then re-run with --update to stamp it. A count without its commit is a rumour.~%
              (format t "hand and quote it with its host: ~a.~%" host)
              (uiop:quit 1))
             (update
-             ;; IN SYNC ON THE COUNTS IS NOT NOTHING TO DO (#438). The provenance clause can
+             ;; IN SYNC ON THE COUNTS IS NOT NOTHING TO DO (pre-publication issue 438). The provenance clause can
              ;; still name a commit other than the one this log came from -- which is exactly
              ;; the state a rebase onto another count-changing PR produces -- so the write runs
              ;; and reports whether it found anything.

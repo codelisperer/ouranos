@@ -6,7 +6,7 @@
 # WHY THIS EXISTS: a native-dependency bug is INVISIBLE on the machine that built the
 # artifact, because that machine has every library the build needed. That is not a
 # hypothetical -- it is exactly how the first Linux bundle shipped and died on a user's box
-# with `Error opening shared object "libev.so.4"` (ADR-0011, #74, #94). So the acceptance
+# with `Error opening shared object "libev.so.4"` (ADR-0011, #72, #78). So the acceptance
 # test for ADR-0013 is not "it runs here"; it is "it runs THERE": a container with no
 # toolchain, no source tree, no Quicklisp, and no copy of the library we claim to carry.
 #
@@ -27,7 +27,7 @@
 # with OURANOS_CLEANROOM_IMAGE for an older floor once we build on an older base (the same
 # constraint .github/workflows/desktop-release.yml already documents for the runner).
 #
-# Linux only, deliberately: this is the Linux half of #94. macOS and Windows need their own
+# Linux only, deliberately: this is the Linux half of #78. macOS and Windows need their own
 # clean room (a fresh VM, or a runner with nothing installed) -- the DESIGN they share is
 # ADR-0013, not this script.
 

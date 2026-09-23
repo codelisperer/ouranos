@@ -1,4 +1,4 @@
-;;;; http-tests.lisp --- urlencoded parameter reading (#136).
+;;;; http-tests.lisp --- urlencoded parameter reading (pre-publication issue 136).
 ;;;;
 ;;;; The bug these pin is silent, partial data loss: FORM-PARAM returned the first value of
 ;;;; a repeated field and there was no error and no empty value to notice, so a checkbox
@@ -66,7 +66,7 @@
 (test a-pair-without-an-equals-sign-is-skipped
   ;; Long-standing behaviour, preserved deliberately: a bare `?debug` reads as ABSENT.
   ;; Making it read as "" would flip every (when (query-param env "debug") ...) in existing
-  ;; code from false to true, which is a larger change than #136 and not part of it.
+  ;; code from false to true, which is a larger change than pre-publication issue 136 and not part of it.
   (is (null (http:form-params "debug" "debug")))
   (is (equal '("1") (http:form-params "debug&x=1" "x"))))
 
@@ -120,7 +120,7 @@
   (is (not (http:wants-json (%http-env :headers '("Accept" "text/html")))))
   (is (not (http:wants-json (%http-env)))))
 
-;;; --- the request body has a ceiling (#211) ---------------------------------
+;;; --- the request body has a ceiling (pre-publication issue 211) ---------------------------------
 ;;;
 ;;; BODY-STRING allocated exactly what Content-Length claimed, before reading a byte. So an
 ;;; unauthenticated request consisting of a HEADER AND NO BODY could allocate arbitrarily
@@ -131,7 +131,7 @@
 ;;; process then dies as the pages are touched, and a large enough length aborts outright.
 ;;; So "it allocates a lot" understates it -- the failure mode is a dead worker.
 ;;;
-;;; It is also the defect I made visible: #143 put a ceiling on the multipart path fifteen
+;;; It is also the defect I made visible: pre-publication issue 143 put a ceiling on the multipart path fifteen
 ;;; lines below this one and did not extend it here. A bound on one body reader and none on
 ;;; its neighbour is worse than neither, because the presence of a limit reads as the
 ;;; question having been asked.

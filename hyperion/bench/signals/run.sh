@@ -12,7 +12,7 @@
 #
 #   toplevel       everything a real app does EXCEPT serve-forever. If a backend loses the
 #                  signal here, the fault is in the transport and serve-forever is innocent.
-#   serve-forever  the actual production entry point -- the row #25 depends on.
+#   serve-forever  the actual production entry point -- the row #37 depends on.
 #
 # The signal is sent by /bin/kill from THIS shell, i.e. from a genuinely external process.
 # A signal sent from inside the SBCL under test proves less and was already known to work.

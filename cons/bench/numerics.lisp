@@ -13,7 +13,7 @@
 ;;;; only large number here, and it has nothing to do with the numeric stack.
 ;;;;
 ;;;; MODE MATTERS. Coalton compiles in development mode unless :coalton-release is pushed
-;;;; onto *features* BEFORE Coalton loads (and the fasls are rebuilt -- see cons #98). The
+;;;; onto *features* BEFORE Coalton loads (and the fasls are rebuilt -- see cons pre-publication issue 98). The
 ;;;; header line reports which mode produced the numbers; quoting them without it is how a
 ;;;; benchmark becomes a lie.
 (require :asdf)

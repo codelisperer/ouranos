@@ -1,7 +1,7 @@
-;;;; update-ui.lisp --- the visible half of the updater (Hyperion aux system, #333).
+;;;; update-ui.lisp --- the visible half of the updater (Hyperion aux system, pre-publication issue 333).
 ;;;;
 ;;;; `hyperion/update' decides; this renders. Until now only the first half existed: the
-;;;; measurement in #333 was that `grep -rln "_hyperion/update"' returned ONE file and the
+;;;; measurement in pre-publication issue 333 was that `grep -rln "_hyperion/update"' returned ONE file and the
 ;;;; hit was inside a docstring. The classification existed, the surface did not, and the
 ;;;; surface is the half a user experiences.
 ;;;;
@@ -285,7 +285,7 @@ is what a per-session token requires."
        (router:route
         :post +apply-path+
         (lambda (env)
-          ;; APPLY-UPDATE signals `update-not-implemented' on every platform #74 has not
+          ;; APPLY-UPDATE signals `update-not-implemented' on every platform #72 has not
           ;; produced an artifact for, which today is macOS and Linux. That is an ordinary
           ;; answer with a sentence attached, not a 500: render it as a block so the user
           ;; reads the reason instead of a stack trace.

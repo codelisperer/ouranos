@@ -174,7 +174,7 @@ print them where the operator will see them, not only into a log."
       (:meta :charset "utf-8")
       (:meta :name "viewport" :content "width=device-width, initial-scale=1")
       (:title "Active Search (DB) — Hyperion + mnemosyne")
-      ;; Vendored and embedded in the image, not fetched from a CDN (#123): the
+      ;; Vendored and embedded in the image, not fetched from a CDN (pre-publication issue 123): the
       ;; examples are the argument for "no Node, no bundler, no asset pipeline", so
       ;; they should not be pulling their JavaScript off npm to make it.
       (:link :rel "stylesheet" :href (assets:url :bulma))
@@ -218,7 +218,7 @@ print them where the operator will see them, not only into a log."
   "This app's route table -- DATA. The vendored assets arrive as a MOUNT, so this app
 never names their paths. There is no dev wiring here: hyperion/dev:serve wraps the app in
 DEV:WRAP-DEV, which serves the reload endpoints, injects the poller, and registers both
-paths as QUIET so the polling does not bury the developer's own output (#132)."
+paths as QUIET so the polling does not bury the developer's own output (pre-publication issue 132)."
   (router:router
    (assets:mount)
    (router:route :get "/" (%handle-home) :name :home)
@@ -271,7 +271,7 @@ every reload, and migrating on each save would be both wrong and slow."
 The shape a DB-backed app should copy: bring the database up HERE, in the entry point, then
 hand the app to the framework. Bring-up stays out of MAKE-APP so a test suite can build the
 app without a database (docs/migrations.md), and the eleven lines of banner/interrupt/
-unwind that used to live here are SERVE-FOREVER's job now (#124)."
+unwind that used to live here are SERVE-FOREVER's job now (pre-publication issue 124)."
   (setf out:*output-style* :compact)
   (multiple-value-bind (applied seeded) (ensure-db)
     (%announce-db applied seeded))

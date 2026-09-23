@@ -74,7 +74,7 @@ the unsuffixed KEY, so a dictionary that has not been pluralised yet keeps worki
 SEPARATE FROM TRANSLATE ON PURPOSE. TRANSLATE is a total function with a settled meaning and
 callers throughout every app; adding a count-sensitive mode to it would change what an
 existing call does. Same reasoning as FORM-PARAM keeping its meaning while FORM-PARAMS
-carried the new one (#136)."))
+carried the new one (pre-publication issue 136)."))
 
 (defgeneric supported-locales (source)
   (:documentation "The list of locale keywords SOURCE provides."))

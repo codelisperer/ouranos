@@ -8,7 +8,7 @@ Three sites are wanted, all built on Ouranos, all dogfooding hyperion:
 
 | Site | Purpose | Domain |
 |---|---|---|
-| **codelisperer.org** | The framework site — docs, blog, demo hosting | **not yet registered** ([#101](https://github.com/codelisperer/ouranos/issues/101)); `.com` is held (Hashnode) |
+| **codelisperer.org** | The framework site — docs, blog, demo hosting | **not yet registered** (pre-publication issue 101); `.com` is held (Hashnode) |
 | Personal site | Blog, living CV, **AI resume/cover-letter fit generator** | held, resolving |
 | Company site | Consulting, **product sales**, Ouranos advocacy | held |
 
@@ -77,7 +77,7 @@ What this buys, in order of importance:
 **Amended 2026-09-16.** Two sites now need mnemosyne, for different reasons:
 
 - The **company site** needs it for products, orders and entitlements, plus
-  [hermes payments](https://github.com/codelisperer/ouranos/issues/47). It sells
+  hermes payments (pre-publication issue 47). It sells
   **wordcrafter** and **soloflow**. Unchanged from the original.
 - The **personal site's fit generator** needs it for whatever a recruiter session persists,
   and it needs praxeon's **ceilings** (`budget-guard`, `meter`, `capability-guard`) rather

@@ -16,6 +16,6 @@
   (:documentation
    "A console contacts app showcasing mnemosyne migrations + query: migrate / rollback /
     status, and add / list contacts. Console input reaches the table through the changeset
-    path the root AGENTS.md mandates -- cast, then validate, then insert (#129). `cons run`
+    path the root AGENTS.md mandates -- cast, then validate, then insert (#94). `cons run`
     starts it.")
   (:export #:version #:main #:run-console))

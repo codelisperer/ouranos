@@ -427,7 +427,7 @@
     (uv:close-loop l)
     (finishes (uv:close-loop l))))
 
-;;; --- #296: SUBMIT's refusal is a contract, so it gets asserted ----------------------
+;;; --- pre-publication issue 296: SUBMIT's refusal is a contract, so it gets asserted ----------------------
 ;;;
 ;;; The race these defend against is not testable and these do not try. A window that
 ;;; needs two threads to interleave inside four instructions is not something a green run

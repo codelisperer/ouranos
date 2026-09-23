@@ -27,7 +27,7 @@
 (in-suite mnemosyne)
 
 ;;; RUN-TESTS lives in tests/backends.lisp, next to the per-backend coverage banner it has
-;;; to print after the suite finishes (#176). The symbol is exported here because this file
+;;; to print after the suite finishes (pre-publication issue 176). The symbol is exported here because this file
 ;;; defines the package; where it is DEFINED is a separate question from where it is named.
 
 ;;; --- helpers --------------------------------------------------------------
@@ -144,7 +144,7 @@
   (is (equal (list "INSERT INTO t (_id, name) VALUES ($1, $2)" '(1 "a"))
              (gen '(:insert-into :t :values ((:_id 1 :name "a"))) :dialect :xtdb))))
 
-;;; --- pgvector distance operators (#258) ------------------------------------
+;;; --- pgvector distance operators (pre-publication issue 258) ------------------------------------
 ;;;
 ;;; pgvector has three distance operators and AN INDEX BUILT FOR ONE IS NOT USED BY A QUERY
 ;;; WRITTEN WITH ANOTHER. There is no error: the query returns correct rows and Postgres
@@ -229,7 +229,7 @@ index that does not serve their query, which is the failure this warning exists 
              :dialect :postgres))
     (is (null warned) "binding the flag to NIL must silence it")))
 
-;;; --- the dialect is a closed set here too (#258, found by a wrong spelling) --
+;;; --- the dialect is a closed set here too (pre-publication issue 258, found by a wrong spelling) --
 
 (test an-unknown-dialect-spelling-is-refused-rather-than-taking-the-sqlite-branch
   "Every comparison in mnemosyne/query is against ONE dialect, so a spelling it does not
@@ -237,9 +237,9 @@ recognise used to take the non-Postgres branch everywhere at once. The vector-di
 then told a caller on Postgres that `the postgres backend has no vector column type at all'.
 That is how this was found.
 
-WHAT THIS TEST NO LONGER CLAIMS (#432, ADR-0003). It used to assert that the STRING
+WHAT THIS TEST NO LONGER CLAIMS (pre-publication issue 432, ADR-0003). It used to assert that the STRING
 spelling of postgres is refused here and that the message names KEYWORD as the spelling this
-module wants. That was #431's fix -- correct while there were two vocabularies, because
+module wants. That was pre-publication PR 431's fix -- correct while there were two vocabularies, because
 quietly normalising would have hidden the inconsistency instead of naming it. ADR-0003
 removed the inconsistency itself: there is now one Dialect type and every module normalises
 its own designators through MNEMOSYNE/FIELD-SHELL:DIALECT-FOR, so the string spelling names
@@ -260,7 +260,7 @@ that is the property that prevents the recurrence."
   (is-true (q:sql '(:select (:id) :from ("t")) :dialect "postgres")
            "and so does the spelling ddl and schema take -- that is ADR-0003"))
 
-;;; --- ADR-0003 / #432: query speaks the tree's dialect vocabulary ------------
+;;; --- ADR-0003 / pre-publication issue 432: query speaks the tree's dialect vocabulary ------------
 
 (test query-accepts-the-other-modules-spelling-and-agrees-with-its-own
   "\"postgres\" and :postgres compile to the SAME SQL.
@@ -281,7 +281,7 @@ still disagree with the module that uses it. Identical output is the property."
             "~S must compile the same for ~S and ~S" form (car pair) (cdr pair))))))
 
 (test a-distance-operator-is-not-refused-on-postgres-however-it-is-spelled
-  "The exact wrong answer #432 was filed for, as a test.
+  "The exact wrong answer pre-publication issue 432 was filed for, as a test.
 
 The vector-distance check told a caller who was ON POSTGRES that \"the postgres backend has
 no vector column type at all\" -- because they held the string spelling. Not an error: a

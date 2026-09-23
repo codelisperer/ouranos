@@ -11,7 +11,7 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
   (:export #:version
            ;; visibility -- request-time scheduling
            #:visibility #:visible-p
-           ;; front-matter -- splitting only; what the keys mean is #359 Q1
+           ;; front-matter -- splitting only; what the keys mean is pre-publication issue 359 Q1
            #:split-front-matter #:parse-front-matter #:parse-front-matter-data
            #:unterminated-front-matter #:unsupported-front-matter
            #:content-meta #:content-meta-title #:content-meta-date #:content-meta-slug
@@ -22,7 +22,7 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:*field-weights*
            ;; rendering -- one path into 3bmd, via hyperion/markdown
            #:render-markdown
-           ;; highlighting -- a small CL highlighter, at load time (#359 Q3)
+           ;; highlighting -- a small CL highlighter, at load time (pre-publication issue 359 Q3)
            #:highlight-lisp #:highlight-code-blocks
            #:*lisp-languages* #:*highlight-classes*
            ;; dev mode -- preview is a flag, not a URL

@@ -4,7 +4,7 @@
 ;;;; app construction is the caller's concern -- and clacks it up on a background thread;
 ;;;; STOP stops it. Extracted from praxeon/src/web.lisp (default-server/start/stop).
 ;;;;
-;;;; HYPERION DECLARES NO BACKEND (#139; ECOSYSTEM decisions log, 2026-08-05). It used to
+;;;; HYPERION DECLARES NO BACKEND (pre-publication issue 139; ECOSYSTEM decisions log, 2026-08-05). It used to
 ;;;; depend on clack-handler-woo (Unix) / clack-handler-hunchentoot (Windows), which meant
 ;;;; every image loading hyperion also loaded Woo's libev -- and a dumped desktop bundle
 ;;;; then died at startup on a machine without it. A framework does not get to choose the
@@ -12,7 +12,7 @@
 ;;;; picks from what is actually in the image.
 ;;;;
 ;;;; Neither Woo nor Hunchentoot is a destination. ADR-0011's backend half is a waypoint
-;;;; until the native libuv server (#117), which will arrive here as one more entry in
+;;;; until the native libuv server (pre-publication issue 117), which will arrive here as one more entry in
 ;;;; +BACKENDS+ rather than as a change to any app.
 
 (in-package #:hyperion/server)
@@ -37,7 +37,7 @@ never will. Asking whether the PACKAGE exists costs nothing and is answered corr
 both directions: an app that declared the system gets the native server as an option, and
 one that did not is unaffected. No `:depends-on' anywhere had to move.
 
-ORDER IS PREFERENCE, and :UV is deliberately LAST (#117, commit 5). It is selectable --
+ORDER IS PREFERENCE, and :UV is deliberately LAST (pre-publication issue 117, commit 5). It is selectable --
 `HYPERION_SERVER=uv', or `:server :uv' -- and not yet selected: making it the default is a
 one-line move to the head of this list, and it waits for an app to have actually run it.")
 
@@ -62,7 +62,7 @@ scattered conditionals.")
            (format stream "hyperion/server: HYPERION_SERVER names ~S, whose Clack handler is not loaded.~%"
                    requested)
            (format stream "hyperion/server: no Clack backend is loaded.~%"))
-       (format stream "~%Hyperion deliberately declares no HTTP server (#139) -- the application chooses.~%")
+       (format stream "~%Hyperion deliberately declares no HTTP server (pre-publication issue 139) -- the application chooses.~%")
        (format stream "Add ONE of these to your system's :depends-on:~%")
        (format stream "  \"hyperion/server-uv\"          ; ours -- native, no Clack (needs a built libuv)~%")
        (format stream "  \"clack-handler-hunchentoot\"   ; pure CL, works on every platform~%")
@@ -253,7 +253,7 @@ where the answer is always yes cannot ask this question."
        #+win32   (format stream "  netstat -ano | findstr :~D~%" port)
        (format stream "~%Then pick another port, or pass :check-port nil to start anyway.~%"))))
   (:documentation
-   "Signalled by START when the requested port is already answering (#238)."))
+   "Signalled by START when the requested port is already answering (pre-publication issue 238)."))
 
 (defun port-answering-p (host port &key (timeout 0.5))
   "Is something already listening on HOST:PORT?
@@ -297,7 +297,7 @@ with. Pass :log nil to opt out (or if the app already wraps itself).
 CHECK-PORT (default T) refuses to start when PORT is already answering, signalling
 PORT-IN-USE. On by default because the failure it prevents does not look like a port
 problem: a dev window opens onto a SIBLING application and reads as a catastrophically
-broken build (#238). The probe CONNECTS rather than binding -- see PORT-ANSWERING-P for
+broken build (pre-publication issue 238). The probe CONNECTS rather than binding -- see PORT-ANSWERING-P for
 why that distinction is not pedantry on Windows. Pass :check-port nil to start anyway."
   (when (and check-port (port-answering-p host port))
     (error 'port-in-use :host host :port port))
@@ -340,7 +340,7 @@ them."
 ;;; START is the REPL-friendly primitive: it returns a handler and does not block. Every
 ;;; DEPLOYED app needs the other half, and until now the framework shipped only the dev
 ;;; loop -- so the production entry point was the one shape every app had to hand-roll.
-;;; Four did (issue #124), each independently getting the same five non-obvious things
+;;; Four did (pre-publication issue 124), each independently getting the same five non-obvious things
 ;;; right, and the fifth would not have.
 ;;;
 ;;; What the hand-rolls had to know, none of which is app knowledge:
@@ -369,15 +369,15 @@ returns. For flushing a log, closing a pool, removing a pid file.")
 ;;;
 ;;; SIGTERM is how a process manager, a container runtime and systemd all ask for a clean
 ;;; exit, and NO app in this tree handles it today -- they are killed mid-request and rely
-;;; on the OS to reclaim the socket. #25's `service` target cannot ship without it.
+;;; on the OS to reclaim the socket. #37's `service` target cannot ship without it.
 ;;;
 ;;; It does not work yet on this transport either (docs/signals-and-shutdown.md): the
 ;;; handler is installed and correct, and Woo swallows the signal. That is a reason to
-;;; define the seam now, not a reason to leave the shape of the API undecided -- when #117
+;;; define the seam now, not a reason to leave the shape of the API undecided -- when pre-publication issue 117
 ;;; lands, every app that already calls SERVE-FOREVER gets working SIGTERM without an edit.
 ;;;
 ;;; This is deliberately ONE function behind a variable, because the transport underneath
-;;; is going to change. #117 replaces the Clack server with a native libuv loop, and
+;;; is going to change. pre-publication issue 117 replaces the Clack server with a native libuv loop, and
 ;;; aion/uv/process already binds uv_signal_t -- whose whole advantage is that the handler
 ;;; runs as an ordinary loop callback with a full Lisp stack, rather than in a signal
 ;;; context where the set of safe operations is small and exceeding it produces no error
@@ -398,7 +398,7 @@ failed to READ, taking hyperion and everything downstream of it with it. A reade
 conditional cannot protect a symbol in a package that lacks it unless the condition is on
 the platform. Ctrl-C still works there: it arrives as SB-SYS:INTERACTIVE-INTERRUPT, which
 SERVE-FOREVER handles separately. A supervisor-initiated stop on Windows is a console
-control event or a service STOP, which belongs with the `service` target kind (#25)."
+control event or a service STOP, which belongs with the `service` target kind (#37)."
   #+(and sbcl unix)
   (let ((previous '()))
     (dolist (signum (list sb-unix:sigterm sb-unix:sigint))
@@ -415,7 +415,7 @@ control event or a service STOP, which belongs with the `service` target kind (#
 (defvar *install-signal-handlers* #'%install-posix-signal-handlers
   "How SERVE-FOREVER installs signal handling. Called with a REQUEST-STOP thunk; must
 return a thunk that restores what was there before. Rebind to swap the mechanism -- a
-uv_signal_t handler (#117), or (constantly (lambda () nil)) to opt out entirely.")
+uv_signal_t handler (pre-publication issue 117), or (constantly (lambda () nil)) to opt out entirely.")
 
 (defstruct (server-session (:constructor %make-server-session) (:copier nil))
   "A running foreground server: the Clack handler, and the flag that ends it."

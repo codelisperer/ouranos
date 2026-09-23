@@ -2,9 +2,9 @@
 
 **Status:** Accepted *(2026-09-19)*
 **Date:** 2026-09-19
-**Issue:** [#402](https://github.com/codelisperer/ouranos/issues/402). Constrained by
-[#401](https://github.com/codelisperer/ouranos/issues/401) (the cacheable prefix, landed);
-related to [#372](https://github.com/codelisperer/ouranos/issues/372) (the retrieval seam,
+**Issue:** pre-publication issue 402. Constrained by
+pre-publication issue 401 (the cacheable prefix, landed);
+related to [#138](https://github.com/codelisperer/ouranos/issues/138) (the retrieval seam,
 deferred).
 
 ## Context
@@ -38,7 +38,7 @@ than a message count, because a message cap makes the typical case fine and the 
 unbounded — fifty short turns and fifty long ones differ by an order of magnitude. That work is
 correct, and it duplicates what `context.lisp` was written to do.
 
-So #402 asks a design question with two candidate answers: does the turn loop own assembly, so
+So pre-publication issue 402 asks a design question with two candidate answers: does the turn loop own assembly, so
 history becomes context items and `assemble` chooses what is sent — or is `context.lisp` for
 retrieved facts only, with history budgeted elsewhere?
 
@@ -56,7 +56,7 @@ prompt fragment. A retrieved fact satisfies that. A conversation turn does not.
 what is remembered.
 
 **3. Both are wired into the turn loop in the same commit as this ADR.** Whichever answer was
-chosen, the state #402 objected to — a budget, an accounting, a comparator, and no caller — is
+chosen, the state pre-publication issue 402 objected to — a budget, an accounting, a comparator, and no caller — is
 not one this repo leaves behind.
 
 ### Why history cannot go through `assemble`
@@ -78,7 +78,7 @@ For a set of facts that is a cosmetic risk; for a dialogue it is a scrambled con
 would be intermittent. (`assemble` now uses `stable-sort` regardless; this ADR does not rely on
 that fix.)
 
-**The cacheable prefix has to be pinned, and ranking has no notion of position.** #401's
+**The cacheable prefix has to be pinned, and ranking has no notion of position.** pre-publication issue 401's
 commentary states the constraint from the other end: a cached prefix is a saving only while its
 bytes do not change, so trimming from the front defeats caching completely — every turn writes a
 new entry at 1.25× and reads none. A value-density selection will drop something inside the
@@ -99,7 +99,7 @@ does directly, in one pass, with the invariants respected.
   exchange. Trimming drops whole exchanges, so a `tool_use` cannot be separated from its
   `tool_result` by construction rather than by a check someone has to remember.
 - **The pinned prefix is never dropped.** Every message up to and including the last one carrying
-  a `:cache t` part is pinned (rounded out to its exchange boundary). What #401 marked as
+  a `:cache t` part is pinned (rounded out to its exchange boundary). What pre-publication issue 401 marked as
   cacheable stays byte-identical across turns, which is the entire point of having marked it.
 - **Measured in tokens, from an estimate that says so.** `estimate-tokens` is a character-based
   approximation, named as one. The provider's reported `input-tokens` is the measurement; the
@@ -120,7 +120,7 @@ does directly, in one pass, with the invariants respected.
   `actor` is its only consumer inside the framework. `praxeon/context` stays free of `llm` — it
   is the Kairos seed and remains plain data.
 - **`agent` gains a `history-budget` slot, defaulting to 120000 estimated tokens.** A default,
-  not `nil`, because an unbounded default *is* the defect #402 filed: an opt-in bound that no
+  not `nil`, because an unbounded default *is* the defect pre-publication issue 402 filed: an opt-in bound that no
   existing agent opts into leaves every consumer quadratic and leaves this module with no
   caller in practice. `nil` remains available and means "send everything", for a caller who
   measures its own bound.
@@ -134,8 +134,8 @@ does directly, in one pass, with the invariants respected.
 - `studio:agent-summary` reports both budgets and what each governs. The single `:budget` key it
   used to expose was the false claim; it is now `:history-budget` and `:context-budget`.
 - `ctx-item-value` still has to come from somewhere, and for retrieved facts that somewhere is
-  #372 (provenance, chunking, source language). This ADR does not settle it; it makes
-  `assemble`'s precondition explicit so #372 designs against a stated contract.
+  #138 (provenance, chunking, source language). This ADR does not settle it; it makes
+  `assemble`'s precondition explicit so #138 designs against a stated contract.
 - A better history policy — summarise the dropped exchanges rather than discarding them — is now
   a change to one function with one caller, instead of a redesign.
 
@@ -162,7 +162,7 @@ does directly, in one pass, with the invariants respected.
 ## Provenance
 
 The decision inverted once. The module's shape — items, value, a budget, a greedy selector —
-reads as an argument for option 1, and that is how #402 describes it ("what the module's shape
+reads as an argument for option 1, and that is how pre-publication issue 402 describes it ("what the module's shape
 implies"). What moved it was asking what `assemble` would actually *do* to a history containing a
 tool call: drop the assistant message that requested it while keeping the result, because a
 `tool_result` part carrying a long payload has low value density. The resulting request is
@@ -170,7 +170,7 @@ invalid, and nothing in this tree would have caught it — `%part->json` validat
 suite had no history-shaped test to fail.
 
 The `stable-sort` detail was found while writing the third reason and is a defect in `assemble`
-for its *intended* use as well, independent of #402.
+for its *intended* use as well, independent of pre-publication issue 402.
 
 The hub's brief supplied the constraint that the app has already solved its half and that
 upstream should not fight it, which is why the trim's shape deliberately matches the app's rather

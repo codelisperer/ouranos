@@ -1,4 +1,4 @@
-# The mbedTLS release this tree builds TLS termination against (#292).
+# The mbedTLS release this tree builds TLS termination against (#125).
 #
 # Same doctrine as libuv.pin: the REPO declares the version, so adopting a new
 # one is an ordinary commit that propagates through git. A native dependency
@@ -17,7 +17,7 @@
 
 # --- why 4.1 and not 3.6 LTS -----------------------------------------------
 #
-# Counter-intuitive, and measured rather than assumed (#292):
+# Counter-intuitive, and measured rather than assumed (#125):
 #
 #   3.6 LTS  released March 2024, three-year lifetime -> ends MARCH 2027
 #   4.1      the first 4.x LTS, released March 2026   -> ends ~MARCH 2029

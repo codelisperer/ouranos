@@ -12,7 +12,7 @@ directory. An architectural decision that nothing tracks is indistinguishable fr
 made, and the maintainer reasonably asked whether it had been lost.
 
 The decided part is the split: **OS-specific *bindings* are aion; OS-specific *functionality* is
-Hades.** `aion/windows` (#170) binds UTF-16 marshalling, `GetLastError`/`HRESULT` as conditions,
+Hades.** `aion/windows` (pre-publication issue 170) binds UTF-16 marshalling, `GetLastError`/`HRESULT` as conditions,
 handle lifetime, COM. Hades is the layer that makes those pleasant to use, and makes porting
 between platforms a non-event.
 
@@ -104,7 +104,7 @@ the bar — with the app's desktop surface needing exactly the three that fail, 
 the same data point that motivated the bar. It does not prove the bar is right. What it
 establishes is that iteration 1 is not a guess.
 
-### 5. The prerequisite, which is not #170
+### 5. The prerequisite, which is not pre-publication issue 170
 
 **`aion/windows/service` does not exist.** Hades has nothing to be ergonomic *over* for the
 service surface until that binding lands — `StartServiceCtrlDispatcher`,
@@ -148,7 +148,7 @@ the one hard rule.
 - **`bootstrap.lisp` compiles the host platform package** — `hades/windows` on Windows,
   `hades/darwin` on macOS — rather than leaving it opt-in the way `aion/uv` is. Opt-in there was
   *bought* by the C-toolchain requirement; a Hades platform package has none, so deferring buys
-  nothing. The mechanism exists already: `scripts/platform-packages.lisp` (#182), where
+  nothing. The mechanism exists already: `scripts/platform-packages.lisp` (pre-publication issue 182), where
   `hades/windows` is currently registered `:planned`.
 - **A verify-tree run that never loads `hades/windows` on Windows is a defect, not a skip**, and
   the platform axis already reports it as such.

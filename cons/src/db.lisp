@@ -68,7 +68,7 @@ form for display.
 The password is wrapped rather than stored as a String because this struct was ALREADY
 careful in two ways -- the URL it carries has the password stripped out, and DISPLAY is a
 separately redacted form -- and still disclosed it, because SBCL prints a structure by
-printing its slots and a backtrace prints the frame's arguments (#209). Handling a
+printing its slots and a backtrace prints the frame's arguments (pre-publication issue 209). Handling a
 credential carefully in every path you think of does not cover printing, which is the
 path nobody thinks of."
   (kind :postgres :type keyword)
@@ -210,7 +210,7 @@ Returns the client's exit code."
                        (when (and (eq kind :postgres) (db-target-password target))
                          ;; The one disclosure point in cons: the child process needs the
                          ;; plaintext in its environment. Still never argv -- ps is
-                         ;; world-readable (#209 keeps the wrapper; this line predates it).
+                         ;; world-readable (pre-publication issue 209 keeps the wrapper; this line predates it).
                          (list (format nil "PGPASSWORD=~A"
                                        (sec:reveal (db-target-password target)))))
                        (when (and (eq kind :postgres) read-only)

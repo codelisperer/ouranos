@@ -1,4 +1,4 @@
-;;;; dynamic.lisp --- tests for aion/dynamic, and the tree-wide spawn sweep (#430).
+;;;; dynamic.lisp --- tests for aion/dynamic, and the tree-wide spawn sweep (#158).
 
 (cl:defpackage #:aion/dynamic/tests
   (:use #:cl #:fiveam)

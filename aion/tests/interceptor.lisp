@@ -1,16 +1,16 @@
-;;;; tests/interceptor.lisp --- the typed interceptor pipeline (#177).
+;;;; tests/interceptor.lisp --- the typed interceptor pipeline (pre-publication issue 177).
 ;;;;
 ;;;; This code was written, exported, documented, and shipped inside a system reporting
 ;;;; green -- with NO TEST OF ANY KIND. 146 lines of short-circuiting control flow, and
 ;;;; nothing in any suite referenced `execute`, `Halt`, or `Proceed`. That is the adjacent
-;;;; case to #116: not a suite that cannot run, but code that no suite covers, inside a
+;;;; case to pre-publication issue 116: not a suite that cannot run, but code that no suite covers, inside a
 ;;;; system whose green said nothing about it. It is about to carry budget enforcement for
-;;;; a public agent endpoint (#172), so it gets covered before it carries anything.
+;;;; a public agent endpoint (pre-publication issue 172), so it gets covered before it carries anything.
 ;;;;
 ;;;; The properties worth pinning are the ones a chain can get subtly wrong and still
 ;;;; appear to work: that `leave` runs in REVERSE, that a `Halt` unwinds the stages that
 ;;;; already entered (and only those), and that `execute-effect` SKIPS the effect on a
-;;;; short-circuit -- which is the whole point of a guard, and the property #172 depends
+;;;; short-circuit -- which is the whole point of a guard, and the property pre-publication issue 172 depends
 ;;;; on for a refusal that actually refuses rather than being appended to a reply.
 ;;;;
 ;;;; Contexts here are String and Integer rather than a define-type: parametricity is
@@ -131,7 +131,7 @@
     (is (not (search "<c" result)) "and must not leave")))
 
 (test halt-is-reported-as-halt-not-as-success
-  ;; A caller has to be able to tell "refused" from "completed" -- #172 depends on this
+  ;; A caller has to be able to tell "refused" from "completed" -- pre-publication issue 172 depends on this
   ;; to render a refusal rather than an empty reply.
   (is (string= "halt" (fx:outcome fx:halt-chain ""))))
 
@@ -151,7 +151,7 @@
       "enter (+10), then the CL-supplied effect (+1000)"))
 
 (test a-halt-skips-the-effect-entirely
-  ;; THE property #172 is built on. A guard that rejects a request must not spend the
+  ;; THE property pre-publication issue 172 is built on. A guard that rejects a request must not spend the
   ;; expensive thing -- an LLM call, a payment, a send. If this ever regresses, a budget
   ;; refusal would still bill the caller.
   (let ((spent 0))

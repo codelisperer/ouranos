@@ -58,7 +58,7 @@ failed check is a result, and the caller decides whether that is fatal."
   (let* ((template (cons/init:resolve-template designator))
          ;; CREATED, not chosen: see cons/src/tempdir.lisp. This used to build a name from
          ;; (random ...) and hand it to ENSURE-DIRECTORIES-EXIST, which succeeds on a
-         ;; directory that already exists and follows a symlink to it (#204).
+         ;; directory that already exists and follows a symlink to it (pre-publication issue 204).
          (work (tempdir:make-temporary-directory
                 (string-downcase (cons/init:template-name template))))
          (root (merge-pathnames (format nil "~A/" name) work))

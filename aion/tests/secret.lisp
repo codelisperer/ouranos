@@ -1,4 +1,4 @@
-;;;; tests/secret.lisp --- the opaque credential wrapper (#209).
+;;;; tests/secret.lisp --- the opaque credential wrapper (pre-publication issue 209).
 ;;;;
 ;;;; Every test here asserts BOTH directions, because a redaction test is unusually easy
 ;;;; to pass for the wrong reason: a wrapper that lost the value entirely, or one built

@@ -1,4 +1,4 @@
-;;;; parser.lisp --- an HTTP/1.1 request head, parsed into a typed value (#117, commit 1).
+;;;; parser.lisp --- an HTTP/1.1 request head, parsed into a typed value (pre-publication issue 117, commit 1).
 ;;;;
 ;;;; The boundary-decoder pattern at its most consequential: untyped bytes off a socket
 ;;;; become a checked Request, or a status code saying why they will not. Everything here is

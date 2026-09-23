@@ -26,7 +26,7 @@ unevidenced:
 
 > A local `docker build --platform linux/amd64` on Apple Silicon **proves nothing about
 > amd64**. It runs under QEMU, which mis-emulates SBCL's compile-time 64-bit overflow
-> folding and produces *spurious* failures in Coalton's `library/math/bounded` (#110). A
+> folding and produces *spurious* failures in Coalton's `library/math/bounded` (pre-publication issue 110). A
 > red local amd64 build is not evidence of an incompatibility, and a green one is not
 > evidence of compatibility. The `ubuntu-24.04` leg is the only native amd64 signal this
 > project has.
@@ -48,8 +48,8 @@ macOS ran only on the weekly cron and on dispatch. The release-mode job skipped 
 requests for the same reason.
 
 Note that CI does **not** gate the first public release. `docs/launch/release-scope.md`
-still lists it under "Hard blockers", but the #91 decision recorded in `ECOSYSTEM.md`
-(2026-08-24) supersedes that: CI and clean-machine bootstrap (#88) *follow* the launch,
+still lists it under "Hard blockers", but the pre-publication issue 91 decision recorded in `ECOSYSTEM.md`
+(2026-08-24) supersedes that: CI and clean-machine bootstrap (pre-publication issue 88) *follow* the launch,
 because they are evidence aimed at **contributors**, and v0.1 is aimed at the thesis.
 
 ## CI is a caller, not a place where build knowledge lives
@@ -126,11 +126,11 @@ That is the same gate the matrix runs. `OURANOS_WITH_UV=1` requires
 
 A system with no `:perform (test-op …)` loads its files, **runs nothing, and exits 0** —
 aion was reported green through an entire Coalton upgrade having executed zero checks
-(#116). A workflow built on exit status alone would reproduce that failure faithfully and
+(pre-publication issue 116). A workflow built on exit status alone would reproduce that failure faithfully and
 call it success.
 
 `scripts/verify-tree.lisp` fails on: a system that will not load, a suite that ran **zero**
-checks, a deferred compile `WARNING`, a failing check, and — since #176 — a suite that
+checks, a deferred compile `WARNING`, a failing check, and — since pre-publication issue 176 — a suite that
 reports per-backend coverage which never reached Postgres. Every system and every suite
 runs in **its own fresh SBCL**, so one system cannot silently satisfy another's undeclared
 dependency.
@@ -164,7 +164,7 @@ This costs wall-clock and buys truth twice over:
 - Mixing fasls compiled against one dependency set with sources from another makes CI
   intermittently red for reasons that look like nothing. Observed as `The class
   <DBD-POSTGRES-QUERY> is being redefined to be a DEFTYPE` — did not reproduce in
-  isolation, passed 6/6 on an identical re-run (#87).
+  isolation, passed 6/6 on an identical re-run (pre-publication issue 87).
 - **Only a cold build surfaces Coalton's deferred `WARNING`s.** Once a fasl exists the file
   is merely *loaded*, so an unused binding passes locally forever and fails on someone
   else's fresh clone ([`coalton-patterns.md`](coalton-patterns.md) §8a).
@@ -186,7 +186,7 @@ suite runs, so a pgvector that did not install fails the step instead of letting
 tests skip.
 
 **No leg sets `OURANOS_ALLOW_NO_PG`.** Every check mnemosyne had ever reported green ran
-against SQLite alone — the one backend the docs do not tell you to deploy on — and #165 is
+against SQLite alone — the one backend the docs do not tell you to deploy on — and pre-publication issue 165 is
 what that cost: 2645 green checks at the same commit that silently stored the four
 characters `"false"` in a Postgres text column. A matrix that excuses Postgres on the
 awkward platforms re-acquires that blind spot one leg at a time, and it would be

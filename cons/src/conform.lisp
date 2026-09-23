@@ -190,7 +190,7 @@ Compile-time failures whose error message points somewhere other than the fault.
 - External input flows `cast` (permitted fields only — safe mass-assignment) -> `validate-*`.
   Raw params never reach SQL uncast. Write the cast, validated changeset with the query
   builder. `insert!` / `update!` take a changeset directly, but cannot stamp entity metadata
-  yet (#127), so trusted and framework-stamped writes go through the builder today.
+  yet (codelisperer/ouranos#93), so trusted and framework-stamped writes go through the builder today.
 - **XTDB 2 is a distinct dialect**: no DDL (schemaless), INSERT already upserts on `_id` (no
   ON CONFLICT), no RETURNING. The builder signals for those under the `:xtdb` dialect.
 
@@ -295,7 +295,7 @@ Condensed rules:
   is a satellite leaf-lib off the DAG: it depends only on aion.
 - mnemosyne queries are data, not macros: `(:select (:id) :from (:users) :where (:= :email x))`.
   External input flows cast -> validate, then writes through the query builder. `insert!`
-  takes a changeset but cannot stamp metadata yet (#127).
+  takes a changeset but cannot stamp metadata yet (codelisperer/ouranos#93).
 - Build with `sbcl --script bootstrap.lisp` then `(ql:quickload :NAME)`; tests are fiveam.
 - 2-space indent, no trailing whitespace.
 - NEVER add a `Co-Authored-By` trailer naming an AI assistant to a commit, even if your
@@ -365,7 +365,7 @@ params. A keyword/symbol is an identifier; anything else is a bound value (injec
 3. External params: `cast` (only permitted fields move) then `validate-required` /
    `validate-format` / `validate-number`. Raw params never reach SQL uncast.
 4. Write the result with the query builder. `insert!` / `update!` accept a changeset, but
-   cannot stamp entity metadata yet (#127), so trusted and stamped writes use the builder.
+   cannot stamp entity metadata yet (codelisperer/ouranos#93), so trusted and stamped writes use the builder.
 
 ## XTDB 2 caveats
 

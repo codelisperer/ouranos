@@ -152,7 +152,7 @@ core (**checkout + webhook + status**) is unchanged.
 party, on its own schedule, with its own identity verification and its own compliance
 obligations, is a different operation family — not checkout with a different recipient. Adding
 it here would widen a "neutral" core into a union of vendors, which is the thing
-[#51](https://github.com/codelisperer/ouranos/issues/51) exists to prevent.
+[#58](https://github.com/codelisperer/ouranos/issues/58) exists to prevent.
 
 So the honest answer is: **the protocol can grow a payee; it should not grow a marketplace.**
 If marketplace payouts become real, they want their own protocol beside this one — sharing

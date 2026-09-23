@@ -58,7 +58,7 @@ the remaining exposure is enumeration rather than classification.")
 ASKS ASDF WHERE THE SYSTEM LIVES, and falls back to the name list only when ASDF cannot
 find it. The name test alone was wrong for any system whose name does not begin with a
 framework: `contacts' -- the mnemosyne example, which keeps its own contacts.asd because
-being a standalone project is the thing it demonstrates (#357) -- was reported as an
+being a standalone project is the thing it demonstrates (pre-publication issue 357) -- was reported as an
 UNDOCUMENTED EXTERNAL DEPENDENCY the moment anything in the tree depended on it. It is a
 directory away from the file making the claim.
 
@@ -104,7 +104,7 @@ a git checkout -- an unpacked tarball, or a container that copied the sources in
 (defun asd-files ()
   "Every .asd file in this tree, DISCOVERED rather than constructed.
 
-WHY NOT `<fw>/<fw>.asd' FOR EACH NAME IN *FRAMEWORKS*, which is what this replaced (#358):
+WHY NOT `<fw>/<fw>.asd' FOR EACH NAME IN *FRAMEWORKS*, which is what this replaced (pre-publication issue 358):
 that made two assumptions and both were false. The list of names was incomplete -- klio
 owns klio/klio.asd and was never in it -- and not every .asd sits at `<name>/<name>.asd',
 which mnemosyne/examples/contacts/contacts.asd does not. Seven files were read where the
@@ -148,7 +148,7 @@ A PROPERTY, NOT A PATH. Excluding `cons/templates/' by location would be a secon
 hand-maintained claim about where things live -- the shape this whole change removes. A
 name carrying `{{' cannot be a system under any layout.
 
-These files are NOT checked, and that is #361's subject rather than an oversight: the real
+These files are NOT checked, and that is pre-publication issue 361's subject rather than an oversight: the real
 template dependency surface is `cons/templates/<t>/template.lisp', whose `:dependencies'
 are substituted for `{{deps}}' at scaffold time, so it is not a .asd file at all and no
 amount of .asd enumeration reaches it."
@@ -216,7 +216,7 @@ DEP-NAME-AND-GUARD."
           ;; `{{deps}}'. Resolving first therefore SUCCEEDS and reports `{{deps}}' as an
           ;; undocumented third-party dependency -- which is what this did on its first
           ;; run. A placeholder is scaffolding whether or not ASDF can build something
-          ;; out of it (#361).
+          ;; out of it (pre-publication issue 361).
           ((template-name-p name))
           (t
            (let ((sys (ignore-errors (asdf:find-system name nil))))
@@ -243,7 +243,7 @@ DEP-NAME-AND-GUARD."
             (nreverse unresolved))))
 
 (defun template-asd-files ()
-  "The .asd files whose systems are all placeholders -- scaffolding, not systems (#361).
+  "The .asd files whose systems are all placeholders -- scaffolding, not systems (pre-publication issue 361).
 
 Reported by `check-deps.lisp' rather than silently dropped, so that `we do not check these'
 is a visible statement each run rather than an absence a reader has to infer."

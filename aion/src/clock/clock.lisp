@@ -9,7 +9,7 @@
 ;;;; timestamp field collides en masse -- so the clock is owned here and the 16-octet v6
 ;;;; assembled by hand. Pure bit-work, no dependency.
 ;;;;
-;;;; Extracted intact from mnemosyne/id (#96). It is not a persistence concern: the
+;;;; Extracted intact from mnemosyne/id (pre-publication issue 96). It is not a persistence concern: the
 ;;;; sortability comes from a clock, and a clock is a floor primitive. mnemosyne/id keeps
 ;;;; TOUCH! and NEW-STAMP, which are about entity metadata and column names, and calls
 ;;;; NEW-ID from here rather than owning one.
@@ -51,7 +51,7 @@ promise this format cannot make:
   A TIME-ORDERED ID IS NOT A SECRET. The timestamp half stays guessable no matter what
   seeds the rest. If you need an unguessable value, use AION/RANDOM directly.
 
-(#95. The first pass left this on `cl:random', arguing a CSPRNG \"would change nothing an
+(pre-publication issue 95. The first pass left this on `cl:random', arguing a CSPRNG \"would change nothing an
 attacker cares about\". That was overstated -- 62 bits per published id is not nothing --
 and it is the note above that carries the not-a-secret meaning, not a weaker generator.)"
   (let ((octets (rnd:random-octets 8)))
