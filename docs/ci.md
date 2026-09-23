@@ -4,7 +4,7 @@ Two workflows, and they answer different questions.
 
 | Workflow | Question it answers | When |
 |---|---|---|
-| [`verify.yml`](../.github/workflows/verify.yml) | *Does the whole tree build and pass on Linux, macOS and Windows?* | Linux on every PR; all three on `main`, weekly, and on demand |
+| [`verify.yml`](../.github/workflows/verify.yml) | *Does the whole tree build and pass on Linux, macOS and Windows?* | all three on every PR, every push to `main`, weekly, and on demand |
 | [`desktop-release.yml`](../.github/workflows/desktop-release.yml) | *Does a desktop bundle build and run on a machine that has never seen this repo?* | app-scoped tags, manual |
 
 This page is about the first. The second is documented at
