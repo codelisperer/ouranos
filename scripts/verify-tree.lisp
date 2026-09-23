@@ -411,6 +411,10 @@ directly is what every other line of this file already does."
             (format t "checkout: ~a commit(s) BEHIND ~a -- this tree is not what ~a says now~%"
                     (or behind "?") upstream upstream))))))))
 
+(defvar *postgres-excused* '()
+  "(suite . reason) for each suite whose Postgres checks were skipped and excused by
+OURANOS_ALLOW_NO_PG. Filled while the suites run; REPORT-NOT-COVERED lists them.")
+
 (defun report-not-covered ()
   "What this run could have covered and did not.
 
@@ -421,15 +425,25 @@ nothing happened, and absence is precisely what they cannot distinguish from sil
 NOT \"caller's choice\" ANY MORE, which was the heading until #410. `uv' is off only when
 somebody chooses; `view' is off when a host has no C++ toolchain, when the 9 MB SDK fetch had
 no network, or when the caller said skip -- three causes, one of them a choice. A heading
-that named the cause was fine while there was one cause. Each entry now says its own."
+that named the cause was fine while there was one cause. Each entry now says its own.
+
+A SKIPPED POSTGRES IS LISTED HERE TOO, when OURANOS_ALLOW_NO_PG excused it (#171). Without
+the excuse the run fails, so this only happens on a run that passed. Until this was added,
+such a run printed \"nothing declined\" here while suites that need Postgres had skipped
+their checks, and the only sign was one NOTE line in the summary."
   (format t "~%========== NOT COVERED ==========~%")
   (let ((declined (axes-declined)))
     (if (null declined)
-        (format t "  nothing declined -- every optional axis ran (~a)~%" (axes-tag))
+        (if *postgres-excused*
+            (format t "  every optional axis ran (~a), but Postgres did not:~%" (axes-tag))
+            (format t "  nothing declined -- every optional axis ran (~a)~%" (axes-tag)))
         (dolist (entry declined)
           (destructuring-bind (name pred disclose) entry
             (declare (ignore pred))
-            (funcall disclose name))))))
+            (funcall disclose name)))))
+  (dolist (cell (reverse *postgres-excused*))
+    (format t "  off     postgres in ~a~34t~a~%" (car cell) (cdr cell))
+    (format t "          OURANOS_ALLOW_NO_PG excused it. Its Postgres checks did not run and are NOT in the total below.~%")))
 
 (defun report-uv-declined (name)
   "The uv axis is off. One cause only: the caller did not ask for it."
@@ -1018,6 +1032,11 @@ let this run claim `view' while the five assertions skipped."
           (when coverage
             (dolist (cell coverage)
               (format t "          backend ~a: ~a~%" (car cell) (cdr cell)))
+            ;; An excused skip is not a problem for the verdict, but it is a gap in what the
+            ;; run covered, so NOT COVERED names it (#171).
+            (let ((pg (assoc "postgres" coverage :test #'string=)))
+              (when (and pg (allow-no-pg-p) (uiop:string-prefix-p "SKIPPED" (cdr pg)))
+                (push (cons s (cdr pg)) *postgres-excused*)))
             (dolist (problem (coverage-problems coverage))
               (format t "  COVER   ~a -- ~a~%" s problem)
               (fail "~a: ~a" s problem))))))
