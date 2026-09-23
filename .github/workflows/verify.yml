@@ -123,6 +123,7 @@ jobs:
       # the only build that surfaces Coalton's deferred WARNINGs (AGENTS.md, "Green is not
       # evidence"). An exact-match-or-nothing cache is a slower CI and a truthful one.
       - name: Cache the Lisp toolchain (downloads)
+        id: cache-the-lisp-toolchain-downloads
         uses: actions/cache@v6
         with:
           path: |
@@ -133,6 +134,7 @@ jobs:
             toolchain-${{ matrix.platform }}-
 
       - name: Cache compiled fasls (exact match only)
+        id: cache-compiled-fasls-exact-match-only
         uses: actions/cache@v6
         with:
           path: ${{ matrix.fasl }}
@@ -140,6 +142,7 @@ jobs:
 
       # --- toolchain ----------------------------------------------------------------
       - name: Provision the Lisp toolchain
+        id: provision-the-lisp-toolchain
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -149,6 +152,7 @@ jobs:
           fi
 
       - name: Verify the toolchain
+        id: verify-the-toolchain
         shell: bash
         run: |
           sbcl --version
@@ -164,6 +168,7 @@ jobs:
       # runs isolated images to prevent. What is wanted from bootstrap is the ASDF
       # source-registry drop-in and bin/cons.
       - name: Bootstrap the tree
+        id: bootstrap-the-tree
         env:
           OURANOS_NO_WARM: "1"
         run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
@@ -184,12 +189,14 @@ jobs:
       # blind to the exact class of defect it exists to catch. The gate must do the
       # compiling, so this installs THIRD-PARTY SYSTEMS ONLY.
       - name: Install external dependencies (third-party only)
+        id: install-external-dependencies-third-party-only
         run: sbcl --dynamic-space-size 4096 --script scripts/install-deps.lisp
 
       # Which Coalton actually LOADS, not which one is checked out -- a Quicklisp dist
       # release or a second checkout on the source-registry silently wins otherwise, and
       # stale fasls can produce an image built from a commit nobody pinned.
       - name: Check the Coalton pin
+        id: check-the-coalton-pin
         run: sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
 
       # Every pin says where its advisories live and when a human last read them. Presence
@@ -197,6 +204,7 @@ jobs:
       # check that goes red on a calendar boundary turns unrelated PRs red and gets
       # ignored. See docs/versioning-and-pinning.md.
       - name: Check the pins declare an advisory source
+        id: check-the-pins-declare-an-advisory-source
         run: sbcl --script scripts/check-pins.lisp --report
 
       # From the committed libuv.pin, with the platform's own first-party toolchain and no
@@ -204,6 +212,7 @@ jobs:
       # only cross-platform proof that the pinned libuv builds at all -- which is what the
       # bundling story in #78/ADR-0013 rests on.
       - name: Build the pinned libuv
+        id: build-the-pinned-libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
       # --- the native webview launcher (pre-publication issue 276) ---------------------------------------
@@ -253,6 +262,7 @@ jobs:
       # The 4.0 fallback matches desktop-release.yml: runner images have moved between
       # webkit2gtk 4.1 and 4.0, and build.sh probes for the same pair.
       - name: Build the native webview launcher (Linux)
+        id: build-the-native-webview-launcher-linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -285,6 +295,7 @@ jobs:
       # nothing. The invariant is the URL in $GITHUB_ENV, which is all the suite contracts
       # for (mnemosyne/tests/backends.lisp).
       - name: Postgres (Linux) -- the repo's own script
+        id: postgres-linux-the-repo-s-own-script
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -292,6 +303,7 @@ jobs:
           echo "MNEMOSYNE_TEST_PG_URL=$(./scripts/test-postgres.sh url)" >> "$GITHUB_ENV"
 
       - name: Postgres (macOS) -- Homebrew
+        id: postgres-macos-homebrew
         if: runner.os == 'macOS'
         shell: bash
         run: |
@@ -335,6 +347,7 @@ jobs:
           echo "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" >> "$GITHUB_ENV"
 
       - name: Postgres (Windows) -- the preinstalled service, plus pgvector from a pinned tag
+        id: postgres-windows-the-preinstalled-service-plus-p
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -405,6 +418,7 @@ jobs:
           "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Show what Postgres we got
+        id: show-what-postgres-we-got
         shell: bash
         run: |
           echo "MNEMOSYNE_TEST_PG_URL=${MNEMOSYNE_TEST_PG_URL:-<unset>}"
@@ -423,6 +437,7 @@ jobs:
       # built above -- real checks over a real event loop that, until this workflow, were
       # verified by nothing that ran automatically.
       - name: Verify the tree
+        id: verify-the-tree
         shell: bash
         env:
           OURANOS_WITH_UV: "1"
@@ -446,14 +461,28 @@ jobs:
       # It reads the log rather than re-running anything: a second gate run would be forty
       # minutes to re-derive figures the first one already printed.
       - name: Check the README's counts against the gate
+        id: check-the-readme-s-counts-against-the-gate
         if: matrix.platform == 'linux-x86-64'
         shell: bash
-        run: sbcl --script scripts/check-readme-counts.lisp --from verify.log
+        run: |
+          set -o pipefail
+          sbcl --script scripts/check-readme-counts.lisp --from verify.log 2>&1 | tee readme.log
 
       - name: Stop Postgres (Linux)
+        id: stop-postgres-linux
         if: always() && runner.os == 'Linux'
         shell: bash
         run: ./scripts/test-postgres.sh down || true
+
+      # WHICH STEP FAILED, AND WHICH SUITES, where the pull request's checks page shows it
+      # (#167). The job's conclusion is one bit and cannot tell two failing suites from three.
+      # Runs on success too, so two runs can be compared without opening either log.
+      - name: Job summary
+        if: always()
+        shell: bash
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: bash scripts/ci-job-summary.sh "${{ matrix.platform }}" verify.log readme.log
 
   # --- release mode ---------------------------------------------------------------
   #
@@ -483,6 +512,7 @@ jobs:
       # ASDF's output translations do not encode features in the fasl path, and a release
       # run against development fasls reports a release result for a development build.
       - name: Cache the Lisp toolchain (downloads)
+        id: cache-the-lisp-toolchain-downloads
         uses: actions/cache@v6
         with:
           path: |
@@ -493,26 +523,31 @@ jobs:
             toolchain-linux-x86-64-
 
       - name: Cache release-mode fasls (exact match only)
+        id: cache-release-mode-fasls-exact-match-only
         uses: actions/cache@v6
         with:
           path: ~/.cache/ouranos/fasl-release
           key: fasl-release-linux-x86-64-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
 
       - name: Provision the Lisp toolchain
+        id: provision-the-lisp-toolchain
         run: ./scripts/setup.sh --ci
 
       - name: Bootstrap the tree
+        id: bootstrap-the-tree
         env:
           OURANOS_NO_WARM: "1"
         run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 
       - name: Install external dependencies (third-party only)
+        id: install-external-dependencies-third-party-only
         run: sbcl --dynamic-space-size 4096 --script scripts/install-deps.lisp
 
       # Needed BEFORE the verify step, because that step sets OURANOS_WITH_UV=1 and the uv
       # systems will not load without vendor/libuv/. Not run under with-mode: libuv is a C
       # library and Coalton's mode has nothing to say about it.
       - name: Build the pinned libuv
+        id: build-the-pinned-libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
       # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (pre-publication issue 276). Without it
@@ -528,6 +563,7 @@ jobs:
       # the gate's own build is deliberately best-effort. Same argument as the matrix leg's
       # copy of this step; see the long comment there.
       - name: Build the native webview launcher
+        id: build-the-native-webview-launcher
         shell: bash
         run: |
           start=$(date +%s)
@@ -540,6 +576,7 @@ jobs:
           echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
 
       - name: Postgres -- the repo's own script
+        id: postgres-the-repo-s-own-script
         run: |
           ./scripts/test-postgres.sh up
           echo "MNEMOSYNE_TEST_PG_URL=$(./scripts/test-postgres.sh url)" >> "$GITHUB_ENV"
@@ -552,17 +589,32 @@ jobs:
       # re-finding (pre-publication issue 116, praxeon/web, pre-publication issue 176); this one was a false EQUIVALENCE rather than a
       # false green, which is harder to see because both halves were individually honest.
       - name: Verify the tree in RELEASE mode
+        id: verify-the-tree-in-release-mode
+        shell: bash
         env:
           OURANOS_WITH_UV: "1"
-        run: sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp
+        run: |
+          set -o pipefail
+          sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
+            2>&1 | tee verify.log
 
       # Not a gate -- a record. The numbers land in the job log with their mode attached,
       # so "what is release mode worth on this commit" is answerable without anyone
       # rebuilding the tree twice by hand. It runs after the gate deliberately: a benchmark
       # of a tree that does not pass is a measurement of nothing.
       - name: Benchmark (release)
+        id: benchmark-release
         run: sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/bench.lisp
 
       - name: Stop Postgres
+        id: stop-postgres
         if: always()
         run: ./scripts/test-postgres.sh down || true
+
+      # The same summary as the matrix legs above (#167).
+      - name: Job summary
+        if: always()
+        shell: bash
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: bash scripts/ci-job-summary.sh "release-mode (linux-x86-64)" verify.log
