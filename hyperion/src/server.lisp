@@ -422,6 +422,9 @@ SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIM
   (let* ((failure nil)
          (out *standard-output*)
          (err *error-output*)
+         ;; THREAD-LIFETIME: independent -- the server runs for as long as it serves, not
+         ;; for the START call that created it; the only bindings it needs, the caller's
+         ;; output streams, are passed to it explicitly below.
          (thread
            (sb-thread:make-thread
             (lambda ()
