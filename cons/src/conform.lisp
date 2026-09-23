@@ -101,6 +101,36 @@ is the top of its own repository."
                              "update-index" "--add" "--chmod=+x" ".githooks/commit-msg")
                        :output nil :error-output nil :ignore-error-status t))))
 
+(defparameter +hook-eol-line+ ".githooks/* text eol=lf"
+  "The .gitattributes line that keeps hooks LF-only in every checkout.")
+
+(defun %ensure-hook-eol (root)
+  "Make ROOT/.gitattributes contain +HOOK-EOL-LINE+. Returns :CREATED, :ADDED or :PRESENT.
+
+Without it a hook's line endings follow each machine's core.autocrlf, so a Windows checkout
+with core.autocrlf=true gets the hook with CRLF line endings (#194). Git for Windows' sh runs
+that hook correctly, but Linux git working in the same checkout -- WSL, a container with the
+directory mounted, a dual-boot machine -- runs it with the Linux sh, and the shebang line
+ending in a carriage return fails as \"env: 'sh\\r': No such file or directory\". Every commit
+from there was refused, including ones the hook should accept. Measured on Windows 11 with
+WSL2 Ubuntu. An existing .gitattributes is extended, never replaced."
+  (let* ((path (merge-pathnames ".gitattributes" root))
+         (existing (when (probe-file path) (uiop:read-file-string path))))
+    (cond
+      ((and existing
+            (some (lambda (line) (string= +hook-eol-line+ (string-trim '(#\Space #\Tab #\Return) line)))
+                  (uiop:split-string existing :separator '(#\Newline))))
+       :present)
+      (t
+       (with-open-file (s path :direction :output :if-exists :append :if-does-not-exist :create)
+         (when (and existing (plusp (length existing))
+                    (char/= #\Newline (char existing (1- (length existing)))))
+           (terpri s))
+         (unless existing
+           (format s "# Hooks must keep LF line endings in every checkout, or a Linux sh cannot run them.~%"))
+         (format s "~a~%" +hook-eol-line+))
+       (if existing :added :created)))))
+
 (defun %emit (root relpath content &key force executable)
   "Write CONTENT to ROOT/RELPATH, creating dirs. Skip (and report) if it exists and not
 FORCE, so a user's edits are never clobbered. EXECUTABLE sets the mode (see
@@ -460,6 +490,11 @@ Existing files are skipped unless FORCE. Returns ROOT."
       ;; Printed, not just written: the hook is inert until core.hooksPath points at it,
       ;; and a hook that never runs is worse than none -- it reads as enforcement.
       (when (%emit root ".githooks/commit-msg" *commit-msg-hook* :force force :executable t)
+        ;; Before staging, so the attribute already applies when the hook enters the index.
+        (ecase (%ensure-hook-eol root)
+          (:created (format t "  create .gitattributes (~a)~%" +hook-eol-line+))
+          (:added   (format t "  update .gitattributes (added ~a)~%" +hook-eol-line+))
+          (:present nil))
         (multiple-value-bind (status detail) (%arm-hooks root)
           ;; Whenever ROOT is its own repository, record the hook as executable, including
           ;; when another hook manager owns core.hooksPath: the mode is what a clone gets.

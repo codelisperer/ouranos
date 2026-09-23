@@ -341,3 +341,53 @@ scaffolded project is not handed a rule the framework does not keep."
       ;; is correct. AGENTS.md wrapped exactly there on the first run.
       (is (search "builder" (%slurp root f))
           "~A should name the builder as today's write path" f))))
+
+;;; --- the hook's line endings (#194) ------------------------------------------
+;;;
+;;; A generated project had no .gitattributes, so a Windows clone with core.autocrlf=true
+;;; checked the hook out with CRLF line endings. Linux git working in that checkout (WSL, a
+;;; mounted container) then refused every commit: "env: 'sh\r': No such file or directory".
+
+(defun %octets (path)
+  (with-open-file (s path :element-type '(unsigned-byte 8))
+    (let* ((buf (make-array (file-length s) :element-type '(unsigned-byte 8)))
+           (n (read-sequence buf s)))
+      (subseq buf 0 n))))
+
+(test a-hook-checked-out-with-autocrlf-has-no-carriage-returns
+  ;; core.autocrlf=true is set on the CLONE, so this runs the Windows default on every
+  ;; platform: git converts on checkout wherever the setting says to.
+  (with-temp-dir (root)
+    (%conform-repo root)
+    (%git-checked root "add" "-A")
+    (%git-checked root "commit" "-q" "-m" "generated")
+    (with-temp-dir (clone-parent)
+      (let ((clone (merge-pathnames "clone/" clone-parent)))
+        (%git-checked clone-parent "clone" "-q" "-c" "core.autocrlf=true"
+                      (uiop:native-namestring root) (uiop:native-namestring clone))
+        ;; Both values are computed before asserting, so each check reports on its own: the
+        ;; carriage-return count is the property, and it must show even when the attribute is
+        ;; missing, which is exactly when it goes wrong.
+        (let* ((attrs (merge-pathnames ".gitattributes" clone))
+               (has-line (and (probe-file attrs)
+                              (search ".githooks/* text eol=lf" (uiop:read-file-string attrs))
+                              t))
+               (crs (count 13 (%octets (merge-pathnames ".githooks/commit-msg" clone)))))
+          (is-true has-line "the generated project must carry the attribute that keeps hooks LF")
+          (is (zerop crs)
+              "the hook was checked out with ~D carriage returns; a Linux sh cannot run it" crs))))))
+
+(test an-existing-gitattributes-is-extended-not-replaced
+  (with-temp-dir (root)
+    (with-open-file (s (merge-pathnames ".gitattributes" root) :direction :output)
+      (write-string "*.png binary" s))            ; no trailing newline, on purpose
+    (cons/conform:install-conformance root)
+    (cons/conform:install-conformance root :force t)
+    (let ((lines (remove "" (uiop:split-string (%slurp root ".gitattributes")
+                                               :separator '(#\Newline))
+                         :test #'string=)))
+      (is (equal "*.png binary" (first lines))
+          "the project's own line must survive, on a line of its own: ~S" lines)
+      (is (= 1 (count ".githooks/* text eol=lf" lines :test #'string=))
+          "the hook line must be added exactly once, however often the pack is installed: ~S"
+          lines))))
