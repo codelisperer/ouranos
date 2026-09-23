@@ -825,8 +825,9 @@ proceed because it could not tidy up."
 ;;; the ticket's premise is TRUE: /tmp really is world-writable, and its sticky bit stops
 ;;; another user REPLACING a file they do not own but is a different guarantee from the one
 ;;; established here. The apply path does not exist on those platforms yet -- `apply-update'
-;;; refuses outside Windows because #72 has produced no .dmg, no .app.tar.gz and no AppImage
-;;; -- so the mode bits belong with whoever writes those strategies, next to #113's
+;;; refuses outside Windows because the `appimage' and `app-targz' strategies are not written
+;;; (the release workflow builds both payloads; nothing here unpacks and swaps one) -- so the
+;;; mode bits belong with whoever writes those strategies, next to #113's
 ;;; stage-and-rename. A reader who finds a careful DACL assertion here and no POSIX
 ;;; equivalent should read that as NOT YET, not as weighed and dismissed.
 
@@ -1388,8 +1389,9 @@ window between checking and applying is exactly where a channel gets a security 
 (defun apply-update (&key (source *update-source*) (channel "stable") (product nil))
   "Install the available update.
 
-WINDOWS ONLY. macOS and Linux refuse, because #72 has produced no .dmg, no .app.tar.gz
-and no AppImage -- there is literally nothing to launch. A green run here is evidence
+WINDOWS ONLY. macOS and Linux refuse, because their apply strategies, `app-targz' and
+`appimage', are not written. The release workflow builds both payloads (the macOS one
+since #135), but nothing here unpacks and swaps one yet. A green run here is evidence
 about Windows and about nothing else.
 
 The order, and every step of it is load-bearing:
