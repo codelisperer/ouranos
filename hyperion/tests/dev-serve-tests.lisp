@@ -14,8 +14,9 @@
 ;;;; rather than falsifying a header.
 ;;;;
 ;;;; There is a mechanical reason pointing the same way, and it is the stronger one:
-;;;; `dev-tests' loads BEFORE `server-tests' in hyperion.asd, and the port helpers this
-;;;; needs -- %SRV-FREE-PORT, %SRV-LISTENING-P, %SRV-AWAIT -- are defined in the latter.
+;;;; `dev-tests' loads BEFORE `server-tests' in hyperion.asd, and the helpers this
+;;;; needs -- %SRV-OK-APP and %SRV-AWAIT -- are defined in the latter; the port helpers are
+;;;; in hyperion/test-ports.
 ;;;; Reusing them means loading after them. The alternative was a second copy of each under
 ;;;; a %DEV- prefix, which is the duplicated-fact defect this tree has now found three
 ;;;; times in one day (AGENTS.md: a check that exists is not a check that runs).
@@ -94,12 +95,17 @@ developer's output, not the suite's."
   (sb-thread:make-thread
    (lambda ()
      (let ((*standard-output* (make-broadcast-stream)))
-       (hyperion/dev:serve #'%srv-ok-app
-                           :paths (list root)
-                           :port port
-                           :host "127.0.0.1"
-                           :interval 0.2
-                           :block block)))
+       ;; A taken port signals PORT-IN-USE on THIS thread (#159). Returned rather than left
+       ;; unhandled, because unhandled on a thread it ends the whole test image; the test
+       ;; then fails by name when the server never comes up.
+       (handler-case
+           (hyperion/dev:serve #'%srv-ok-app
+                               :paths (list root)
+                               :port port
+                               :host "127.0.0.1"
+                               :interval 0.2
+                               :block block)
+         (srv:port-in-use (c) c))))
    :name "dev-serve-test"))
 
 (defmacro %with-dev-serve ((thread port &key block) &body body)
@@ -113,16 +119,16 @@ CORRECTED (#159): this used to say the JOIN was \"what makes the NEXT test's fre
 genuinely free\". It is not, and that claim was the defect rather than a description of it.
 The join is on the thread that called SERVE; the socket is held by the backend's acceptor,
 which gives it back a moment later. So the port could still be accepting when this returned,
-and the next test -- handed that number by `%srv-free-port', which releases what it probes --
-would meet the old listener. `%srv-await-released' is the check the claim needed."
+and the next test -- handed that number by `%srv-free-port' (now PORTS:CANDIDATE-PORT), which releases what it probes --
+would meet the old listener. `ports:await-released' is the check the claim needed."
   (let ((root (gensym "ROOT")))
     `(let* ((,root (%dev-serve-root))
-            (,port (%srv-free-port))
+            (,port (ports:candidate-port))
             (,thread (%dev-serve-thread ,root ,port :block ,block)))
        (unwind-protect (progn ,@body)
          (ignore-errors (hyperion/dev:unwatch))
          (ignore-errors (sb-thread:join-thread ,thread :timeout 10 :default nil))
-         (is (%srv-await-released ,port)
+         (is (ports:await-released ,port)
              "the port was still accepting after teardown -- the next test's free port is not free")
          (ignore-errors (uiop:delete-directory-tree ,root :validate t
                                                           :if-does-not-exist :ignore))))))
@@ -144,11 +150,11 @@ halves matter: that it returned, and that returning was not the server stopping.
 Without this, a green `does-not-return' test below would be satisfied by a SERVE that is
 simply slower than the timeout."
   (%with-dev-serve (thread port :block nil)
-    (is (%srv-await (lambda () (%srv-listening-p port)))
+    (is (%srv-await (lambda () (ports:listening-p port)))
         "the server never came up, so nothing below is about :BLOCK")
     (is (%dev-serve-returned-p thread)
         "SERVE without :BLOCK must return rather than park the caller")
-    (is (%srv-listening-p port)
+    (is (ports:listening-p port)
         "SERVE returned and the server stopped with it -- then :BLOCK is not what the caller needs")))
 
 ;;; --- it blocks --------------------------------------------------------------
@@ -161,13 +167,13 @@ The wait is +BLOCK-HOLDS+ rather than something brisk because this is half of th
 described in the header: it is what rules out a SERVE that releases itself on a timer and
 would otherwise make the UNWATCH test below pass for the wrong reason."
   (%with-dev-serve (thread port :block t)
-    (is (%srv-await (lambda () (%srv-listening-p port)))
+    (is (%srv-await (lambda () (ports:listening-p port)))
         "the server never came up")
     (is (not (%dev-serve-returned-p thread :timeout +block-holds+))
         "SERVE :BLOCK T returned on its own while the watcher was still running")
     ;; Still serving while parked -- blocking that wedged the server would satisfy the
     ;; assertion above and be useless.
-    (is (%srv-listening-p port)
+    (is (ports:listening-p port)
         "the call blocked but the server is not answering")))
 
 ;;; --- and stops blocking -----------------------------------------------------
@@ -181,7 +187,7 @@ parked process that can be stopped and one that can only be killed. UNWATCH is c
 no argument on purpose -- that is the REPL spelling the docstring offers, and it resolves
 through *DEV*, so this also asserts SERVE published its handle there."
   (%with-dev-serve (thread port :block t)
-    (is (%srv-await (lambda () (%srv-listening-p port))) "the server never came up")
+    (is (%srv-await (lambda () (ports:listening-p port))) "the server never came up")
     (is (not (%dev-serve-returned-p thread :timeout 1)) "it was not blocking to begin with")
     (is (hyperion/dev:unwatch) "UNWATCH with no argument found no active watcher in *DEV*")
     (is (%dev-serve-returned-p thread :timeout +release-window+)
@@ -195,9 +201,9 @@ reachable without sending a signal: after UNWATCH releases the block, nothing is
 The signal case -- a Ctrl-C out of a blocking entry point -- is the same UNWIND-PROTECT and
 is NOT covered here; asserting it needs a signal this suite should not raise in-process."
   (%with-dev-serve (thread port :block t)
-    (is (%srv-await (lambda () (%srv-listening-p port))) "the server never came up")
+    (is (%srv-await (lambda () (ports:listening-p port))) "the server never came up")
     (hyperion/dev:unwatch)
     (is (%dev-serve-returned-p thread :timeout +release-window+)
         "the blocked call never returned")
-    (is (%srv-await (lambda () (not (%srv-listening-p port))))
+    (is (%srv-await (lambda () (not (ports:listening-p port))))
         "the port is still held after the blocking call returned")))

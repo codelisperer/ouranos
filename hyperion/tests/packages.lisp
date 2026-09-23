@@ -9,6 +9,7 @@
 (cl:defpackage #:hyperion/tests
   (:use #:cl #:fiveam)
   (:local-nicknames (#:srv     #:hyperion/server)
+                    (#:ports   #:hyperion/test-ports)
                     (#:plural  #:hyperion/plural)
                     (#:i18n    #:hyperion/i18n)
                     (#:rt      #:hyperion/router)

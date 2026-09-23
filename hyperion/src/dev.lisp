@@ -388,9 +388,20 @@ Returns the dev handle; stop with UNWATCH."
                         :excluded-dirs exclude-directories
                         :excluded-types exclude-types)))
       (setf (dev-snapshot d) (%snapshot roots :excluded-dirs exclude-directories
-                                              :excluded-types exclude-types)
-            (dev-handler d) (funcall builder)
-            *dev* d)
+                                              :excluded-types exclude-types))
+      ;; *DEV* IS SET BEFORE THE BUILDER RUNS (#159). HYPERION/SERVER:START now returns only
+      ;; once the port is listening, so the port can answer a moment before the builder
+      ;; returns. Set afterwards, an UNWATCH arriving in that moment found *DEV* NIL and did
+      ;; nothing, and a blocking SERVE then never returned. Set first, that UNWATCH clears
+      ;; DEV-RUNNING, the watcher below exits at once, and SERVE's cleanup stops the server.
+      ;; If the builder fails, *DEV* is put back to what it was, so it does not name a
+      ;; server that never ran.
+      (let ((previous *dev*) (built nil))
+        (setf *dev* d)
+        (unwind-protect (progn (setf (dev-handler d) (funcall builder))
+                               (setf built t))
+          (unless built
+            (when (eq *dev* d) (setf *dev* previous)))))
       (setf (dev-thread d)
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
             ;; server, not for the call that started it (#158).

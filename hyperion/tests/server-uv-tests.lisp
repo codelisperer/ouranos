@@ -1483,3 +1483,25 @@ socket-level answer to :SHORT is %CLOSE-AFTER, the same close an aborted chunked
         "a complete body on a keep-alive connection keeps it")
     (is (eq :close (hyperion/server-uv::%file-outcome whole-close))
         "and a complete body on a closing connection closes it")))
+
+;;; --- a taken port, through the seam (#159) ---------------------------------
+
+(test a-taken-port-is-port-in-use-through-the-seam
+  ;; The native backend binds in the caller's thread, so a taken port always signalled
+  ;; there -- as libuv's UV-ERROR. HYPERION/SERVER:START now translates it, so a caller
+  ;; handles one condition whichever backend it runs. The port is bound WITHOUT listening,
+  ;; so CHECK-PORT's connect cannot see it and only the bind fails.
+  (let* ((squatter (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
+         (port (progn (sock:socket-bind squatter #(127 0 0 1) 0)
+                      (nth-value 1 (sock:socket-name squatter)))))
+    (unwind-protect
+         (let ((c (handler-case
+                      (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv
+                                                                         :port port :log nil)))
+                        (ignore-errors (hsrv:stop h))
+                        :started)
+                    (hsrv:port-in-use (c) c))))
+           (is (typep c 'hsrv:port-in-use) "expected PORT-IN-USE, got ~S" c)
+           (when (typep c 'hsrv:port-in-use)
+             (is (hsrv:port-in-use-cause c) "libuv's own error must be kept")))
+      (sock:socket-close squatter))))
