@@ -16,7 +16,7 @@ an image for the host platform only — so must every release be hand-built by a
 each OS?* If true, a self-updating app is impractical: releases would be irregular, and
 irregular releases make the updater pointless.
 
-The target pattern is the one proven in the author's Tauri app (AiTP): signed artifacts,
+The target pattern is the one proven in the author's Tauri app: signed artifacts,
 a tag-driven pipeline, and an app that notices a new version and installs it in one click.
 
 ## Decision

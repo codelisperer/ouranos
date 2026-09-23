@@ -138,14 +138,14 @@ per the M1 decision the native window is stood up **first**, not last.
 | Menus, clipboard, notifications, drag-drop | **In the page** (HTMX / `navigator.clipboard` / `Notification`) — no FFI. |
 | System tray, macOS menu bar | Genuinely native per-OS; deferred until an app needs them. |
 
-## cons `desktop` scaffold target (the AiTP playbook, in CL — M3)
+## cons `desktop` scaffold target (the Tauri app playbook, in CL — M3)
 
 `cons init myapp --template desktop` (a `desktop` target kind, [cons-vision §10](../../cons/docs/cons-vision.md))
 emits the shippable skeleton:
 
 - the Hyperion app + a `run-app` main; the **VSCode-style shell as Hyperion generic
   components** (Navigation / Properties / Main / AI-Assistant panels — ties to roadmap §1);
-- a **`~/.myapp` schema-versioned config** module (AiTP's `config.rs` load→detect→migrate→
+- a **`~/.myapp` schema-versioned config** module (the Tauri app's `config.rs` load→detect→migrate→
   restamp ported to CL; `cons/env` already closes the env loop);
 - `hyperion-view/` (the C above + per-OS build recipe);
 - `update/` (Ed25519 + `latest.json` publish script) and `installer/` (NSIS/WiX/create-dmg
@@ -153,7 +153,7 @@ emits the shippable skeleton:
 
 ## Distribution (M4)
 
-Mirror AiTP's proven pipeline in CL: signed artifacts on S3 (`updates/latest.json` +
+Mirror the Tauri app's proven pipeline in CL: signed artifacts on S3 (`updates/latest.json` +
 a permanent `download/<App>-Setup.exe`), tag-driven CI. The updater: fetch `latest.json`
 → compare version → download the signed artifact → **verify Ed25519 (Ironclad)** → atomic
 swap (with the Windows locked-exe rename/`MoveFileEx` dance) → relaunch. Installers via
@@ -190,5 +190,5 @@ notarization** is an unavoidable tax, identical for Tauri/Electron.
 
 - [ADR-0008](adr/0008-desktop-shell-cl-native-webview.md) — the decision + rejected alternatives.
 - `webview/webview` (MIT) — the OS-webview shim. `tinyfiledialogs` (MIT) — dialogs.
-- The Tauri app playbook + AiTP (`c:\projects\aitp`) — the requirements this mirrors in CL:
+- The Tauri app playbook, and the Tauri app it describes — the requirements this mirrors in CL:
   `~/.<app>` config, signed-S3 auto-update, NSIS/MSI installer, the panel shell vocabulary.
