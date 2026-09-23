@@ -31,23 +31,21 @@ unevidenced:
 > evidence of compatibility. The `ubuntu-24.04` leg is the only native amd64 signal this
 > project has.
 
-## Which legs run, and why that is a billing decision
+## Which legs run
 
-| Event | Legs |
-|---|---|
-| `pull_request` | `ubuntu-24.04` |
-| push to `main`, the weekly cron, `workflow_dispatch` | all three |
+Every event — a pull request, a push to `main`, the weekly cron and `workflow_dispatch` —
+runs all three legs, and the release-mode job on Linux. Standard GitHub-hosted runners are
+free for public repositories, so there is no cost reason to run fewer.
 
-While this repo is **private**, Actions minutes carry a **10× multiplier for macOS** and 2×
-for Windows, on a matrix whose cold-cache legs run tens of minutes. Linux is the leg to
-keep on PRs, and not merely because it is cheapest: it is the **native amd64** signal, the
-one piece of evidence that cannot be obtained any other way. The breaks the other two
-catch — a CRLF checkout, a path separator — are real, but they surface on `main` within one
-merge rather than never.
+The `ubuntu-24.04` leg is the **native amd64** signal, the one piece of evidence that cannot
+be obtained any other way. The breaks the other two catch — a CRLF checkout, a path
+separator, anything specific to arm64 — now show up on the pull request that causes them,
+rather than after it merges.
 
-**When the repo goes public (#91), standard runners are free and this reverts to all three
-on everything**: delete the conditional in `strategy.matrix.include` and keep the second
-array.
+**Before the repo went public**, Actions minutes carried a 10× multiplier for macOS and 2×
+for Windows. Pull requests ran `ubuntu-24.04` alone, pushes to `main` added Windows, and
+macOS ran only on the weekly cron and on dispatch. The release-mode job skipped pull
+requests for the same reason.
 
 Note that CI does **not** gate the first public release. `docs/launch/release-scope.md`
 still lists it under "Hard blockers", but the #91 decision recorded in `ECOSYSTEM.md`

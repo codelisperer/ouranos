@@ -352,12 +352,11 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   Read the failing-suite list. `CHECKERS/TESTS` joined the Windows leg's two known failures and
   was invisible for an hour, including to the person who had spent that hour writing up four
   other examples of checks that answer about the wrong object (#482).
-- **A pull request is tested on Linux alone.** Windows runs on push to `main`; macOS runs only on
-  the weekly cron and `workflow_dispatch`. `verify.yml` documents this as a billing decision —
-  while the repo is private, Actions minutes carry a 2x multiplier for Windows and 10x for macOS.
-  So no pull request can catch a Windows-only regression and nothing catches a macOS-only one
-  inside a week. When a change is plausibly platform-sensitive, say so in the PR and watch the
-  push run.
+- **Every pull request runs on Linux, macOS and Windows**, plus the release-mode job. Before the
+  repo went public, pull requests ran Linux alone because Actions minutes were billed at 2x for
+  Windows and 10x for macOS; standard runners are free for public repositories. A leg that fails
+  for a reason your change cannot reach is still red, so read its failing-suite list (the rule
+  above) before deciding whether the pull request is green.
 - **A marker that identifies a tree must be older than the change that reads it.** When a script
   locates its own root by looking for landmark files, a landmark introduced by that same change
   makes every older checkout read as "not a checkout at all", and the refusal then blames the
