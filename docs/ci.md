@@ -141,7 +141,7 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 `coalton.pin` — one set for CI and dev machines both.
 
 - **Linux** — the official SBCL binary tarball at the pinned version. That pin sets a
-  **glibc floor**: SBCL 2.6.7's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
+  **glibc floor**: SBCL 2.6.8's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
   (2.35) does not have, so the matrix runs `ubuntu-24.04` and binaries produced here need
   glibc 2.39+. Lowering that means building SBCL from source.
 - **macOS** — **Homebrew, not the pin.** Upstream publishes no macOS SBCL binaries, so

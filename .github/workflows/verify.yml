@@ -68,7 +68,7 @@ jobs:
         #
         # The same triple desktop-release.yml builds, deliberately: two workflows
         # disagreeing about which platforms are supported is worse than either answer. The
-        # Linux floor is set by SBCL's own binary -- 2.6.7 needs GLIBC_2.38 and
+        # Linux floor is set by SBCL's own binary -- 2.6.8 needs GLIBC_2.38 and
         # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-14+
         # are arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
         # matters.
