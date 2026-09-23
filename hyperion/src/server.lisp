@@ -420,6 +420,8 @@ timeout path happen on demand.")
 PORT-IN-USE if the bind fails, the backend's own error for any other failure, and
 SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*."
   (let* ((failure nil)
+         (started nil)
+         (lock (sb-thread:make-mutex :name "hyperion-server-start"))
          (out *standard-output*)
          (err *error-output*)
          ;; THREAD-LIFETIME: independent -- the server runs for as long as it serves, not
@@ -437,9 +439,28 @@ SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIM
               ;; and would replace the address-in-use error with one about a slot. The
               ;; HANDLER-BIND is INSIDE the HANDLER-CASE because the innermost handler runs
               ;; first: outside, the HANDLER-CASE would unwind before it was ever asked.
+              ;;
+              ;; AFTER START HAS RETURNED, the same error is LOGGED instead. Nothing is
+              ;; waiting for FAILURE any more, and under Woo the event loop itself runs on
+              ;; this thread, so a loop that fails ends the thread and the server stops
+              ;; serving. Unlogged, that would be a server that stops without a word, which
+              ;; is worse for an application than the crash it replaced. STARTED and FAILURE
+              ;; are read and written under LOCK, so an error cannot fall between START
+              ;; deciding it is ready and START returning.
               (let ((*standard-output* out) (*error-output* err))
                 (handler-case
-                    (handler-bind ((error (lambda (e) (unless failure (setf failure e)))))
+                    (handler-bind
+                        ((error (lambda (e)
+                                  (let ((after-start nil))
+                                    (sb-thread:with-mutex (lock)
+                                      (if started
+                                          (setf after-start t)
+                                          (unless failure (setf failure e))))
+                                    (when after-start
+                                      (log:error "hyperion/server: the backend failed after it started, and has stopped serving"
+                                                 :backend (string-downcase (symbol-name server))
+                                                 :host host :port port
+                                                 :condition-type (prin1-to-string (type-of e))))))))
                       (clack:clackup app :server server :port port :address host
                                          :use-thread nil :debug debug))
                   (error () nil))))
@@ -457,7 +478,11 @@ SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIM
          ;; Ended without recording an error: the backend returned without serving.
          (error "hyperion/server: the ~(~A~) backend on ~A:~D stopped before it started listening"
                 server host port))
-        ((funcall *listening-probe* host port)
+        ((and (funcall *listening-probe* host port)
+              ;; Ready, unless an error was recorded in the moment before STARTED is set;
+              ;; if one was, the next iteration takes the FAILURE branch.
+              (sb-thread:with-mutex (lock)
+                (unless failure (setf started t))))
          (return (%make-clack-server :thread thread :server server :host host :port port)))
         ((> (get-internal-real-time) deadline)
          (%stop-clack-server thread)

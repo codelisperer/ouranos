@@ -91,6 +91,7 @@
 ;;; --- The configurable Clack server backend ------------------------------
 (cl:defpackage #:hyperion/server
   (:use #:cl)
+  (:local-nicknames (#:log #:aion/log))
   (:documentation
    "The web-server backend behind a neutral protocol. Hyperion declares NO backend
     (pre-publication issue 139): the application depends on the one it wants, and DEFAULT-SERVER picks from

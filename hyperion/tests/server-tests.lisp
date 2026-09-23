@@ -459,3 +459,32 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
     (is (typep c 'srv:server-start-timeout) "expected a timeout, got ~S" c)
     (is (ports:await-released port)
         "the server START gave up on must not be left holding the port")))
+
+(test an-error-on-the-backend-thread-after-start-is-logged
+  ;; Once START has returned nothing is waiting for the backend thread's errors, so one that
+  ;; ends the thread must be logged, or the server stops serving without a word. The error
+  ;; is forced by interrupting that thread, which is the only way to make one happen after
+  ;; readiness on demand. Logging is captured the way logging-tests does it, and the quiet
+  ;; test default is restored afterwards.
+  (let* ((port nil)
+         (h (ports:call-with-port
+             (lambda (p)
+               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                 (setf port p)))))
+         (thread (srv::clack-server-thread h))
+         (s (make-string-output-stream)))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :error :stream s)
+           (sb-thread:interrupt-thread thread (lambda () (error "forced after start")))
+           (is (%srv-await (lambda () (not (sb-thread:thread-alive-p thread))))
+               "the backend thread should have ended on the forced error")
+           (let ((out (get-output-stream-string s)))
+             (is (search "failed after it started" out)
+                 "an error after START must be logged, got: ~S" out)
+             (is (and (search "hunchentoot" out) (search (princ-to-string port) out)
+                      (not (search "forced after start" out)))
+                 "the line names the backend and port, and not the condition's message: ~S"
+                 out)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*)
+      (ignore-errors (srv:stop h)))))
