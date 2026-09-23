@@ -317,9 +317,12 @@ jobs:
           createdb -h 127.0.0.1 -O ouranos ouranos_test || true
           echo "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" >> "$GITHUB_ENV"
 
-      - name: Postgres (Windows) -- the preinstalled service
+      - name: Postgres (Windows) -- the preinstalled service, plus pgvector from a pinned tag
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          PGVECTOR_VERSION: "0.8.6"
+          PGVECTOR_COMMIT: "8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c"
         run: |
           $ErrorActionPreference = 'Stop'
           # The runner image ships PostgreSQL installed but STOPPED, and the major version
@@ -343,6 +346,45 @@ jobs:
           }
           & "$pgbin\psql.exe" -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=0 -c "CREATE ROLE ouranos LOGIN SUPERUSER PASSWORD 'ouranos'"
           & "$pgbin\psql.exe" -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=0 -c "CREATE DATABASE ouranos_test OWNER ouranos"
+          # pgvector. The runner image's Postgres does not ship it, and without it
+          # mnemosyne's vector operator and index tests skip on this leg and
+          # praxeon/memory-db fails. It is built from the pinned tag with the image's
+          # Visual Studio C++ toolset, following pgvector's own Windows instructions
+          # (nmake /F Makefile.win). 0.8.6 is the version the Linux leg's image
+          # (pgvector/pgvector:pg17) and Homebrew both shipped on 2026-09-23. The commit is
+          # checked after the clone, so a tag that has moved stops the build rather than
+          # building something else. Installing into the running server is enough: Postgres
+          # reads extension files when an extension is listed or created, which is what the
+          # probe below checks.
+          $env:PGROOT = Split-Path $pgbin -Parent
+          $src = Join-Path $env:RUNNER_TEMP 'pgvector'
+          git clone --quiet --depth 1 --branch "v$env:PGVECTOR_VERSION" https://github.com/pgvector/pgvector.git $src
+          if ($LASTEXITCODE -ne 0) { throw "could not clone pgvector v$env:PGVECTOR_VERSION" }
+          $got = (git -C $src rev-parse HEAD).Trim()
+          if ($got -ne $env:PGVECTOR_COMMIT) {
+            throw "pgvector v$env:PGVECTOR_VERSION resolves to $got, but the pin is $env:PGVECTOR_COMMIT. Refusing to build a tag that has moved."
+          }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio C++ toolset on this runner image" }
+          # A .cmd file rather than a quoted `cmd /c` string: vcvars64.bat has to run in the
+          # same cmd.exe as nmake, and a command line with nested quotes depends on how
+          # PowerShell and cmd.exe each re-quote it.
+          $bat = Join-Path $env:RUNNER_TEMP 'build-pgvector.cmd'
+          Set-Content -Path $bat -Encoding ascii -Value @(
+            '@echo off',
+            "call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul || exit /b 1",
+            "cd /d `"$src`" || exit /b 1",
+            'nmake /NOLOGO /F Makefile.win || exit /b 1',
+            'nmake /NOLOGO /F Makefile.win install || exit /b 1'
+          )
+          & cmd.exe /d /c $bat
+          if ($LASTEXITCODE -ne 0) { throw "building or installing pgvector failed" }
+          # Assert the probe, not the install; the macOS step explains why.
+          $n = (& "$pgbin\psql.exe" -h 127.0.0.1 -U postgres -d postgres -tAc "select count(*) from pg_available_extensions where name = 'vector'").Trim()
+          if ($n -ne '1') {
+            throw "pgvector was installed but this server cannot see it (pg_available_extensions returned '$n'). The vector suites would skip, so failing instead."
+          }
+          Write-Host "pgvector $env:PGVECTOR_VERSION is available to this server."
           "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Show what Postgres we got
