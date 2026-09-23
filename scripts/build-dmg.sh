@@ -172,8 +172,9 @@ rm -rf "$APP/Contents/_CodeSignature"
 # on unpack: measured, a plain archive of this .app unpacked with com.apple.provenance on
 # every file plus any attribute set on the build machine, where --no-xattrs unpacked with
 # none. The design has the client strip the quarantine attribute after unpacking; an
-# attribute it does not know about would still reach the installed app. COPYFILE_DISABLE and --no-mac-metadata stop
-# the other macOS additions (AppleDouble `._' entries) for any tar that makes them.
+# attribute it does not know about would still reach the installed app. COPYFILE_DISABLE
+# and --no-mac-metadata stop the other macOS additions (AppleDouble `._' entries) for any
+# tar that makes them.
 TGZ="$OUT/$BIN-$VERSION-macos-$(uname -m).app.tar.gz"
 rm -f "$TGZ"
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$OUT" -czf "$TGZ" "$DISPLAY_NAME.app"
@@ -224,7 +225,8 @@ rm -f "$DMG"
 # staged size, plus 20 MB for the filesystem's own structures. If creation still fails, the
 # free space is printed, so that a full disk shows up as one.
 SIZE_MB=$(( $(du -sm "$STAGE" | cut -f1) * 5 / 4 + 20 ))
-hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$STAGE" -size "${SIZE_MB}m" -ov -format UDZO "$DMG" >/dev/null || {
+hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$STAGE" -size "${SIZE_MB}m" \
+  -ov -format UDZO "$DMG" >/dev/null || {
   echo "build-dmg: hdiutil create failed for a ${SIZE_MB} MB image; free space:" >&2
   df -h "$OUT" "$STAGE" >&2
   exit 1
