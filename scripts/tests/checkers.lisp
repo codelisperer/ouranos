@@ -1135,6 +1135,30 @@ the machine's global setting."
       (is (not (zerop code)) "a name was committed from a linked worktree:~%~a" out)
       (is (search "lane.md:1" out) "the refusal does not give the path and line:~%~a" out))))
 
+(test name-check-ignores-line-endings-and-trailing-whitespace-in-the-list
+  ;; A list saved by a Windows editor has CRLF line endings. The hooks used to keep the CR, so
+  ;; each entry became the name followed by an invisible character that no text contains, and
+  ;; every entry except an unterminated last line matched nothing, without any error. A
+  ;; trailing space or tab did the same. Here every line ends in CRLF, the last one included,
+  ;; and the first entry also carries a trailing space and tab, so without the fix neither
+  ;; name is found. The two names are tried in separate commits because pre-commit runs
+  ;; first: a refused added line would stop the commit before commit-msg read the message.
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (repo (%hooked-repo
+                :names (format nil "# names invented for the hook tests~a~azorbocorp ~c~aquux-feathers~a"
+                               crlf crlf #\Tab crlf crlf))))
+    (%stage repo "notes.md" (format nil "# Notes~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Notes for ZorboCorp")
+      (is (not (zerop code)) "the first entry of a CRLF list did not match the message")
+      (is (search "Line 1 of the message" out) "the refusal does not say where:~%~a" out)
+      (is (not (%repeats-a-name-p out)) "the refusal repeats the name"))
+    (%stage repo "docs/notes.md" (format nil "# Notes~%Built for Quux-Feathers.~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add notes")
+      (is (not (zerop code)) "the last entry of a CRLF list did not match an added line")
+      (is (search "docs/notes.md:2" out) "the refusal does not give the path and line:~%~a" out)
+      (is (not (%repeats-a-name-p out)) "the refusal repeats the name"))
+    (is (= 0 (%commit-count repo)) "a commit got past a list with CRLF line endings")))
+
 (test name-check-refuses-everything-when-the-configured-list-is-missing
   ;; Configuring a list is how a machine says it needs the check. If the list has gone, a
   ;; commit must not look the same as one that was checked and found clean.

@@ -72,7 +72,10 @@ if [ ! -f "$NAMES_FILE" ]; then
   echo "  Create it (it is gitignored), one name or regex per line." >&2
   exit 1
 fi
-PATTERN=$(grep -vE '^\s*(#|$)' "$NAMES_FILE" | paste -sd '|' -)
+# sed removes trailing whitespace, including the carriage return a Windows editor saves at
+# the end of each line; left in place, it makes that entry match nothing, without any error.
+# Same fix as .githooks/private-names.sh.
+PATTERN=$(sed 's/[[:space:]]*$//' "$NAMES_FILE" | grep -vE '^\s*(#|$)' | paste -sd '|' -)
 if [ -z "$PATTERN" ]; then
   echo "publish-public.sh: $NAMES_FILE is empty -- refusing to run a check that cannot fail" >&2
   exit 1

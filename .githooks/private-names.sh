@@ -24,7 +24,7 @@
 #
 # The list's format is the one publish-public.sh reads: one extended regular expression per
 # line, matched case-insensitively anywhere in the text. Blank lines and lines starting with #
-# are ignored.
+# are ignored, and so is trailing whitespace on a line, including Windows line endings.
 #
 # WHAT A REFUSAL PRINTS: where the match is -- a line of the message, a path and line number,
 # a commit -- and never the matching text. Refusals get pasted into issues, pull requests and
@@ -77,7 +77,11 @@ pn_load() {
       return 0
     fi
   fi
-  PN_PATTERN=$(grep -vE '^[[:space:]]*(#|$)' "$PN_FILE" | paste -sd '|' -)
+  # sed removes trailing whitespace from every line before anything else reads it, including
+  # the carriage return a Windows editor saves at the end of each line. Left in place, either
+  # one ends the entry with a character the text does not contain, and that entry matches
+  # nothing without any error. Doing it first also makes a line holding only a CR blank.
+  PN_PATTERN=$(sed 's/[[:space:]]*$//' "$PN_FILE" | grep -vE '^[[:space:]]*(#|$)' | paste -sd '|' -)
   if [ -z "$PN_PATTERN" ]; then
     pn_refuse_intro "the private-names list is empty, so the check could not fail."
     printf '  %s has no entries. Add them, or delete the file if this machine has no list.\n\n' "$PN_FILE" >&2
