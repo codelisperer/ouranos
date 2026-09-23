@@ -30,7 +30,8 @@ set -u
 TITLE="${1:-verify}"
 LOG="${2:-verify.log}"
 README_LOG="${3:-readme.log}"
-OUT="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+OUT="${GITHUB_STEP_SUMMARY:-}"
+BODY=$(mktemp)
 
 {
   echo "### ${TITLE}"
@@ -100,6 +101,14 @@ OUT="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
     fi
     echo
   fi
-} >> "$OUT" 2>/dev/null || echo "ci-job-summary: could not write the summary to $OUT" >&2
+} > "$BODY"
+
+# Printed to the step's log as well. The summary page has no API to read it back, so the
+# log is where a script, or a reader without the page, can check what was reported.
+cat "$BODY"
+if [ -n "$OUT" ]; then
+  cat "$BODY" >> "$OUT" 2>/dev/null || echo "ci-job-summary: could not write the summary to $OUT" >&2
+fi
+rm -f "$BODY"
 
 exit 0
