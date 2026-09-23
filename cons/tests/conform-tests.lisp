@@ -391,3 +391,34 @@ scaffolded project is not handed a rule the framework does not keep."
       (is (= 1 (count ".githooks/* text eol=lf" lines :test #'string=))
           "the hook line must be added exactly once, however often the pack is installed: ~S"
           lines))))
+
+(test re-running-conform-repairs-a-project-generated-before-the-fixes
+  "A project generated before #143 and #194 has its hook committed as 100644 and no eol line.
+Re-running `cons conform' without --force is how it picks the fixes up, and that used to
+change nothing, because the hook already existed and every step after writing it was skipped."
+  (with-temp-dir (root)
+    (%git-checked root "init" "-q")
+    (%git-checked root "config" "user.name" "Hook Test")
+    (%git-checked root "config" "user.email" "hook-test@example.invalid")
+    (%git-checked root "config" "commit.gpgsign" "false")
+    ;; The old state, built directly: a hook of the project's own, committed as 100644.
+    (let ((hook (merge-pathnames ".githooks/commit-msg" root)))
+      (ensure-directories-exist hook)
+      (with-open-file (s hook :direction :output)
+        (format s "#!/bin/sh~%# the project's own hook~%exit 0~%")))
+    (%git-checked root "add" "-A")
+    (%git-checked root "update-index" "--chmod=-x" ".githooks/commit-msg")
+    (%git-checked root "commit" "-q" "-m" "generated before the fixes")
+    (cons/conform:install-conformance root)                  ; no :force
+    (let* ((staged (%git-in root "ls-files" "-s" ".githooks/commit-msg"))
+           (mode (subseq staged 0 (min 6 (length staged))))
+           (attrs (merge-pathnames ".gitattributes" root))
+           ;; A missing file reads as empty, so the check below reports instead of erroring.
+           (lines (uiop:split-string (if (probe-file attrs) (uiop:read-file-string attrs) "")
+                                     :separator '(#\Newline))))
+      (is (string= "100755" mode)
+          "a re-run must record the existing hook as executable; git ls-files -s says: ~S" staged)
+      (is (= 1 (count ".githooks/* text eol=lf" lines :test #'string=))
+          "a re-run must add the eol line exactly once: ~S" lines)
+      (is (search "the project's own hook" (%slurp root ".githooks/commit-msg"))
+          "without --force the existing hook's content must be left alone"))))

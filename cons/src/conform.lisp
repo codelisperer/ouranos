@@ -489,7 +489,12 @@ Existing files are skipped unless FORCE. Returns ROOT."
       ;; nothing checks is not a rule, so the pack ships the check with the spec.
       ;; Printed, not just written: the hook is inert until core.hooksPath points at it,
       ;; and a hook that never runs is worse than none -- it reads as enforcement.
-      (when (%emit root ".githooks/commit-msg" *commit-msg-hook* :force force :executable t)
+      (%emit root ".githooks/commit-msg" *commit-msg-hook* :force force :executable t)
+      ;; Whenever the hook EXISTS, not only when this run wrote it. %EMIT skips an existing
+      ;; hook unless FORCE, and re-running `cons conform' is how a project generated before
+      ;; #143 and #194 picks up their fixes: its hook was committed as 100644 and it has no
+      ;; eol line, and a plain re-run used to leave both as they were.
+      (when (probe-file (merge-pathnames ".githooks/commit-msg" root))
         ;; Before staging, so the attribute already applies when the hook enters the index.
         (ecase (%ensure-hook-eol root)
           (:created (format t "  create .gitattributes (~a)~%" +hook-eol-line+))
