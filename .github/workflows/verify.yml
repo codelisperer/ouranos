@@ -39,9 +39,26 @@ on:
   schedule:
     - cron: "17 6 * * 1"
 
+# A newer push to a pull request supersedes the run on the older one, so that run is
+# cancelled. A run on main is the record of whether that commit passed, so it is never
+# cancelled and never waits behind another run (#123). Before #123 every push to main
+# cancelled the run still going on the previous commit, and the slowest leg, Windows, was
+# the one that never finished.
+#
+# Turning cancel-in-progress off for main is not enough on its own. A concurrency group
+# holds one running and at most one PENDING run, and a third arrival cancels the pending
+# one, so a burst of three merges would still leave the middle commit with no result.
+# Measured on a branch with three workflow_dispatch runs: the second went `pending' and was
+# cancelled when the third arrived. So every run that is not a pull request gets a group of
+# its own, keyed on its run id, and nothing ever queues behind it or cancels it. This
+# covers push, workflow_dispatch and schedule.
+#
+# The test is on the event name, not the ref: a comparison written against 'main' rather
+# than the full 'refs/heads/main' would never match, and would silently stop cancellation
+# everywhere.
 concurrency:
-  group: verify-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('verify-{0}', github.ref) || format('verify-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
