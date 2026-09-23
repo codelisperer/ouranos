@@ -18,10 +18,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "webview.h"
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <shellapi.h>  // CommandLineToArgvW; webview.h includes windows.h in lean mode, without it
 #elif defined(__APPLE__)
 #include <objc/objc-runtime.h>
 #else
@@ -190,8 +192,9 @@ static void set_window_icon(webview_t w, const char *path) {
     return;
   }
 #if defined(_WIN32)
-  // LoadImageW, not LoadImageA: argv arrives as UTF-8, and a path with non-ASCII in it
-  // (a user directory, typically) would otherwise fail to resolve.
+  // LoadImageW, not LoadImageA: PATH is UTF-8 (main converts the command line on Windows,
+  // see utf8_argv), and a path with non-ASCII in it (a user directory, typically) would
+  // otherwise fail to resolve.
   int wide_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
   if (wide_len <= 0) {
     return;
@@ -279,7 +282,53 @@ static void print_usage(std::FILE *out) {
                "server on localhost and launches this pointed at it.\n");
 }
 
+#if defined(_WIN32)
+// The command line as UTF-8 strings (#116). On Windows the C runtime builds main's argv in
+// the ANSI code page, while everything below treats the strings as UTF-8: webview.h widens
+// the title with CP_UTF8, and set_window_icon does the same for the icon path. A non-ASCII
+// character therefore emptied the window title and stopped the icon loading, with no error.
+// Measured before this change on Windows 11 (code page 1252): a title containing an e with
+// an acute accent, an em dash, two Japanese characters and a Greek omega came back empty from
+// GetWindowTextW, and an .ico under a directory whose name had a u-umlaut and Japanese
+// characters in it was not set, while an all-ASCII title and icon path worked.
+//
+// So the arguments are read as UTF-16 from the command line the process was given and
+// converted to UTF-8 once, here, leaving the rest of the file unchanged.
+static std::vector<std::string> utf8_argv() {
+  std::vector<std::string> out;
+  int n = 0;
+  LPWSTR *wide = CommandLineToArgvW(GetCommandLineW(), &n);
+  if (wide == nullptr) {
+    return out;
+  }
+  for (int i = 0; i < n; i++) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0, nullptr, nullptr);
+    std::string s(len > 0 ? static_cast<size_t>(len - 1) : 0, '\0');
+    if (len > 1) {
+      WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, &s[0], len, nullptr, nullptr);
+    }
+    out.push_back(s);
+  }
+  LocalFree(wide);
+  return out;
+}
+#endif
+
 int main(int argc, char **argv) {
+#if defined(_WIN32)
+  // Static so the pointers stay valid for the life of the process: the title and the icon
+  // path are read after webview_run starts.
+  static std::vector<std::string> utf8_args = utf8_argv();
+  static std::vector<char *> utf8_ptrs;
+  if (!utf8_args.empty()) {
+    for (std::string &s : utf8_args) {
+      utf8_ptrs.push_back(&s[0]);
+    }
+    utf8_ptrs.push_back(nullptr);
+    argc = static_cast<int>(utf8_args.size());
+    argv = utf8_ptrs.data();
+  }
+#endif
   const char *icon = nullptr;
   const char *positional[4] = {nullptr, nullptr, nullptr, nullptr};
   int n = 0;
