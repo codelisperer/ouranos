@@ -21,7 +21,9 @@
 # the process actually found and what it got wrong.
 #
 # The same rule ships to every generated project as a string in cons/src/conform.lisp
-# (*COMMIT-MSG-HOOK*) -- edit both, or neither.
+# (*COMMIT-MSG-HOOK*) -- edit both, or neither. The private-name check at the end of this
+# file is not part of that rule and must not be copied there: a generated project is an
+# app, and an app's own name is not private in its own repository.
 #
 # Armed by bootstrap.lisp, or by hand:   git config core.hooksPath .githooks
 
@@ -65,5 +67,12 @@ if grep -qiE '^Co-Authored-By:.*(claude|anthropic|gpt|openai|copilot|cursor|code
 MSG
   exit 1
 fi
+
+# --- private names: this repository only ---------------------------------------------------
+#
+# Not part of the rule above, and not shipped to generated projects (see the top of this
+# file). What it checks and where the list comes from: .githooks/private-names.sh.
+. "$(dirname "$0")/private-names.sh"
+pn_check_message "$msg_file" || exit 1
 
 exit 0

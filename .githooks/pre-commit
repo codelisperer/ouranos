@@ -1,5 +1,10 @@
 #!/usr/bin/env sh
-# pre-commit --- the integration hub only ever commits to main.
+# pre-commit --- nothing staged carries a private name, and the integration hub only ever
+# commits to main.
+#
+# THE PRIVATE-NAME CHECK runs first and applies everywhere, worktrees included. What it checks
+# and where the list comes from: .githooks/private-names.sh. The rest of this header is about
+# the hub guard.
 #
 # AGENTS.md, "One agent, one working tree": the main checkout is the integration hub and
 # belongs to the PM session; every lane works in its own worktree on its own branch. That
@@ -12,7 +17,7 @@
 #
 # How it tells a hub from a worktree, without knowing any machine's paths: git puts a
 # `.git` DIRECTORY in the main checkout and a `.git` FILE in every linked worktree. So a
-# lane is never affected by this hook, on any machine, with no configuration.
+# lane is never affected by the hub guard, on any machine, with no configuration.
 #
 # Escape: OURANOS_ALLOW_HUB_BRANCH=1, affirmative only -- the same shape as the guard in
 # build-desktop-app.lisp, because a guard an empty string can switch off will be switched
@@ -20,10 +25,20 @@
 
 set -eu
 
+# The private-name check runs before anything below can exit early. The next check sends a
+# linked worktree -- where every lane commits -- straight to `exit 0`, so a name check placed
+# after it would never run for a lane.
+. "$(dirname "$0")/private-names.sh"
+pn_check_staged || exit 1
+
 git_dir_entry="$(git rev-parse --show-toplevel)/.git"
 [ -d "$git_dir_entry" ] || exit 0          # linked worktree: not the hub, nothing to say
 
-branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+# symbolic-ref, not `rev-parse --abbrev-ref`: on a repository with no commits yet, rev-parse
+# prints HEAD *and* fails, so an `|| echo HEAD` fallback made the branch read as two lines,
+# matched neither case below, and the guard refused the first commit of every new repository.
+# symbolic-ref names the branch before its first commit and fails cleanly when detached.
+branch="$(git symbolic-ref --short -q HEAD || echo HEAD)"
 [ "$branch" = "main" ] && exit 0
 [ "$branch" = "HEAD" ] && exit 0           # detached: a deliberate verification checkout
 
