@@ -2916,3 +2916,92 @@ Both directions: an item built outside memory has NIL, and no memory path produc
     (is (notany (lambda (i) (null (ctx:ctx-item-source i)))
                 (mem:recall s "member-3" :budget 1000))
         "and no recalled item ever lacks one")))
+
+;;; --------------------------------------------------------------------------
+;;; #161: the :usage event carries what the ledger can accept.
+;;;
+;;; `ceiling:meter' has taken four counts since pre-publication PR 419. This event is the ONLY
+;;; programmatic route by which usage escapes a turn -- `run-turn' returns text, and the completion is appended to
+;;; history as messages and then dropped -- so until it carried four, a caller wiring the spend
+;;; guard had no source at all for two of them.
+;;;
+;;; Driven through the REAL path: a provider returning a real completion with counts on it,
+;;; `run-turn' doing the turn, and an observer reading the event. Not a lambda returning a
+;;; constant, which is what #161 asks for and what the ceiling's own tests do -- correctly for
+;;; what they test, and it is why nothing discovered the seam.
+;;; --------------------------------------------------------------------------
+
+(defclass counted (llm:provider)
+  ((completion :initarg :completion :reader counted-completion))
+  (:documentation "A provider that answers once with a completion the test built, counts and all."))
+
+(defmethod llm:complete ((p counted) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (counted-completion p))
+
+(defun %usage-event-for (completion)
+  "Run a real turn whose provider answers with COMPLETION; return the :usage event, or NIL."
+  (let ((seen nil))
+    (evt:with-observer ((lambda (e) (when (eq (getf e :type) :usage) (setf seen e))))
+      (actor:run-turn (actor:make-agent :name "u" :provider
+                                        (make-instance 'counted :completion completion))
+                      "go"))
+    seen))
+
+(test the-usage-event-carries-all-four-counts
+  "What the provider reported arrives on the event -- including the two the ledger gained in
+pre-publication PR 419 and this seam did not carry."
+  (let ((e (%usage-event-for
+            (llm:make-completion :text "ok" :stop-reason :end
+                                 :input-tokens 100 :output-tokens 20
+                                 :cache-read-tokens 900 :cache-write-tokens 7))))
+    (is-true e "no :usage event was emitted at all")
+    (is (= 100 (evt:event-get e :input)))
+    (is (= 20 (evt:event-get e :output)))
+    (is (= 900 (evt:event-get e :cache-read))
+        "the cache-read count did not reach the event: ~S" e)
+    (is (= 7 (evt:event-get e :cache-write))
+        "the cache-write count did not reach the event: ~S" e)))
+
+(test a-provider-that-reports-no-cache-counts-sends-nil-not-zero
+  "THE CONTROL, and it is the pre-publication issue 401 distinction rather than a formality.
+NIL means the provider did not report; 0 means it reported a miss. Collapsing them would make a cache breakpoint one
+message too late indistinguishable from a provider with no cache at all -- and a reader summing
+the event would see a cached turn as a free one either way, which is the failure `completion's
+own docstring exists to prevent."
+  (let ((e (%usage-event-for
+            (llm:make-completion :text "ok" :stop-reason :end
+                                 :input-tokens 100 :output-tokens 20))))
+    (is-true e)
+    (is (= 100 (evt:event-get e :input)))
+    (is (null (evt:event-get e :cache-read))
+        "an unreported cache-read arrived as ~S rather than NIL" (evt:event-get e :cache-read))
+    (is (null (evt:event-get e :cache-write))
+        "an unreported cache-write arrived as ~S rather than NIL" (evt:event-get e :cache-write))))
+
+(test a-provider-reporting-only-cache-counts-still-emits
+  "The gate widened with the payload. Before, `(when (or in out))' meant a provider that
+reported cache counts and nothing else emitted NOTHING -- the same silence the clause exists to
+avoid, reached from the side nobody had needed yet."
+  (let ((e (%usage-event-for
+            (llm:make-completion :text "ok" :stop-reason :end
+                                 :cache-read-tokens 512))))
+    (is-true e "a completion carrying only cache counts emitted no :usage event")
+    (is (= 512 (evt:event-get e :cache-read)))
+    ;; Widening the gate is what makes this case reachable at all: before, an event fired only
+    ;; when input or output was reported. Input and output were not reported here, so they must
+    ;; arrive as NIL. `:input 0' would be a measurement nobody made, which the emit site stopped
+    ;; producing for partial reports before this change (pre-publication issue 444).
+    (is (null (evt:event-get e :input))
+        "an unreported input arrived as ~S rather than NIL" (evt:event-get e :input))
+    (is (null (evt:event-get e :output))
+        "an unreported output arrived as ~S rather than NIL" (evt:event-get e :output))))
+
+(test a-provider-reporting-nothing-still-emits-nothing
+  "The other end of the gate, unchanged by #161 and asserted because widening a condition is
+exactly where an existing refusal gets lost. A provider with no usage at all must still emit no
+:usage event -- otherwise a renderer summing input+output shows a running total of zero as
+though it were the cost."
+  (is (null (%usage-event-for (llm:make-completion :text "ok" :stop-reason :end)))
+      "a completion with no counts at all emitted a :usage event"))
