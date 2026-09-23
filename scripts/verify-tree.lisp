@@ -1110,7 +1110,11 @@ types meaning to turn a thing OFF, and a check written as \"is it set\" reads th
     ;; refuse nothing. An unarmed guard and an armed one look identical until the moment
     ;; one matters, which is the whole reason the gate has to ask.
     ;;
-    ;; TWO hooks are checked, not one. `commit-msg' refuses a Co-Authored-By trailer naming
+    ;; THREE hooks are checked. `pre-push' refuses to push a commit, a branch name or a tag
+    ;; that carries a private name (.githooks/private-names.sh); it is the one check that a
+    ;; commit made by `git am', `cherry-pick', `rebase' or --no-verify cannot skip.
+    ;;
+    ;; `commit-msg' refuses a Co-Authored-By trailer naming
     ;; an AI assistant -- a rule every harness in use here actively instructs the model to
     ;; break, in the same breath as telling it to follow the repo's conventions. It held in
     ;; this tree for six weeks on review discipline and then broke in a satellite repo that
@@ -1118,7 +1122,7 @@ types meaning to turn a thing OFF, and a check written as \"is it set\" reads th
     ;; MISSING hook is as inert as an unarmed one and is reported separately, because the
     ;; two have different fixes.
     (let* ((root (namestring *root*))
-           (hooks '(".githooks/pre-commit" ".githooks/commit-msg"))
+           (hooks '(".githooks/pre-commit" ".githooks/commit-msg" ".githooks/pre-push"))
            (main-checkout-p (probe-file (merge-pathnames ".git/HEAD" *root*)))
            (present (remove-if-not (lambda (h) (probe-file (merge-pathnames h *root*))) hooks))
            (configured (string-trim '(#\Space #\Newline #\Return)

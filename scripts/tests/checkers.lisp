@@ -990,3 +990,210 @@ with the producer."
                 "the caller's tree must be named in its canonical spelling, not the alias the caller used:~%~A" out)
             (is (search (uiop:native-namestring (truename theirs)) out)
                 "and the script's tree alongside it, in the same spelling:~%~A" out)))))))
+
+;;; --- the private-name hooks (.githooks/private-names.sh) ------------------------
+;;;
+;;; What they exist to detect: a client or product name entering this repository through a
+;;; commit message, an added line, a new file path, a branch name, or a commit that skipped
+;;; the commit hooks on its way out.
+;;;
+;;; Each test builds a real git repository, installs THIS tree's hooks, and drives them
+;;; through git rather than running the scripts directly. A hook then runs the way it runs for
+;;; a lane: through the same git, with the same environment, and on Windows through the sh
+;;; that git supplies.
+;;;
+;;; The names are invented and cannot occur in real text. Every fixture names its own list in
+;;; its own repository config, or clears the setting with `-c ouranos.privateNames=', so no
+;;; test depends on what the machine running it has configured globally.
+
+(defparameter +invented-names+
+  (format nil "# names invented for the hook tests~%~%zorbocorp~%quux-feathers~%")
+  "A list in the real format: a comment, a blank line, and two entries.")
+
+(defun %git (dir &rest args)
+  "Run git in DIR. Returns (values exit-code output), with stdout and stderr together."
+  (let ((out (make-string-output-stream)))
+    (let ((code (nth-value 2 (uiop:run-program
+                              (list* "git" "-C" (uiop:native-namestring dir) args)
+                              :output out :error-output out :ignore-error-status t))))
+      (values code (get-output-stream-string out)))))
+
+(defun %git! (dir &rest args)
+  "Run git in DIR for fixture setup, and signal if it fails.
+
+Setup that fails quietly produces a fixture that is not what the test thinks it is."
+  (multiple-value-bind (code out) (apply #'%git dir args)
+    (unless (zerop code)
+      (error "fixture setup failed: git ~{~a~^ ~} exited ~a~%~a" args code out))
+    out))
+
+(defun %hooked-repo (&key (names +invented-names+) (configure t))
+  "A fresh repository on branch main with this tree's hooks installed and armed.
+
+NAMES, when non-nil, becomes the repository's gitignored .private-names. CONFIGURE also points
+ouranos.privateNames at that file in the repository's own config, which takes precedence over
+the machine's global setting."
+  (let ((dir (%fresh-tree)))
+    (%git! dir "init" "-q" "-b" "main")
+    (%git! dir "config" "user.name" "Hook Test")
+    (%git! dir "config" "user.email" "hook-test@example.invalid")
+    (%git! dir "config" "commit.gpgsign" "false")
+    (%git! dir "config" "core.hooksPath" ".githooks")
+    (dolist (name '("commit-msg" "pre-commit" "pre-push" "private-names.sh"))
+      (let ((target (merge-pathnames (concatenate 'string ".githooks/" name) dir)))
+        (ensure-directories-exist target)
+        (uiop:copy-file (merge-pathnames (concatenate 'string ".githooks/" name) td-root) target)
+        ;; A copied file loses its mode, and git skips a hook that is not executable.
+        (unless (uiop:os-windows-p)
+          (uiop:run-program (list "chmod" "755" (uiop:native-namestring target))))))
+    (%write (merge-pathnames ".gitignore" dir) (format nil ".private-names~%"))
+    (when names
+      (let ((list-file (merge-pathnames ".private-names" dir)))
+        (%write list-file names)
+        (when configure
+          (%git! dir "config" "ouranos.privateNames" (uiop:native-namestring list-file)))))
+    dir))
+
+(defun %stage (repo path contents)
+  "Write CONTENTS to PATH under REPO, then stage everything."
+  (%write (merge-pathnames path repo) contents)
+  (%git! repo "add" "-A"))
+
+(defun %commit-count (repo)
+  "How many commits REPO's current branch has; 0 before the first."
+  (multiple-value-bind (code out) (%git repo "rev-list" "--count" "HEAD")
+    (if (zerop code) (or (parse-integer out :junk-allowed t) 0) 0)))
+
+(defun %repeats-a-name-p (output)
+  "Whether OUTPUT contains either invented name, in any case."
+  (or (search "zorbocorp" output :test #'char-equal)
+      (search "quux-feathers" output :test #'char-equal)))
+
+(test name-check-passes-a-clean-commit
+  ;; The control for every refusal below: a hook that refused everything would pass all of
+  ;; them. It is also the first commit of a new repository, which the hub guard in pre-commit
+  ;; used to refuse (it read the branch of a repository with no commits as two lines).
+  (let ((repo (%hooked-repo)))
+    (%stage repo "notes.md" (format nil "# Notes~%A consuming app asked for this.~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add notes")
+      (is (zerop code) "a commit with no name in it was refused:~%~a" out)
+      (is (= 1 (%commit-count repo))))))
+
+(test name-check-refuses-a-name-in-the-commit-message
+  (let ((repo (%hooked-repo)))
+    (%stage repo "notes.md" (format nil "Notes~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Notes for ZorboCorp")
+      (is (not (zerop code)) "a name in the message was committed")
+      (is (= 0 (%commit-count repo)))
+      (is (search "Line 1 of the message" out) "the refusal does not say where:~%~a" out)
+      (is (not (%repeats-a-name-p out)) "the refusal repeats the name"))))
+
+(test name-check-refuses-a-name-on-an-added-line
+  (let ((repo (%hooked-repo)))
+    (%stage repo "docs/notes.md" (format nil "# Notes~%Built for Quux-Feathers.~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add notes")
+      (is (not (zerop code)) "a name on an added line was committed")
+      (is (= 0 (%commit-count repo)))
+      (is (search "docs/notes.md:2" out) "the refusal does not give the path and line:~%~a" out)
+      (is (not (%repeats-a-name-p out)) "the refusal repeats the name"))))
+
+(test name-check-refuses-a-name-in-a-new-file-path
+  ;; The path is counted, not printed, because printing it would print the name.
+  (let ((repo (%hooked-repo)))
+    (%stage repo "docs/zorbocorp-plan.md" (format nil "A plan.~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add a plan")
+      (is (not (zerop code)) "a name in a file path was committed")
+      (is (= 0 (%commit-count repo)))
+      (is (not (%repeats-a-name-p out)) "the refusal printed the path, and the path is the name"))))
+
+(test name-check-lets-a-commit-remove-a-name
+  ;; Only ADDED lines are checked. The commit that removes a name is the fix, and a check that
+  ;; refused it would make the fix impossible to commit.
+  (let ((repo (%hooked-repo)))
+    (%stage repo "notes.md" (format nil "one~%for ZORBOCORP~%three~%"))
+    (%git! repo "commit" "-q" "--no-verify" "-m" "setup: a file that already has a name in it")
+    (%stage repo "notes.md" (format nil "one~%three~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Remove the name")
+      (is (zerop code) "removing a name was refused:~%~a" out)
+      (is (= 2 (%commit-count repo))))))
+
+(test name-check-runs-in-a-linked-worktree
+  ;; The case lanes are in. The list is untracked and sits in the MAIN checkout, so a linked
+  ;; worktree does not have it, and the hooks have to find it through git's common directory.
+  ;; `-c ouranos.privateNames=' clears the setting for these commands, which leaves that
+  ;; lookup as the only way the list can be found.
+  (let* ((repo (%hooked-repo :configure nil))
+         (lane (merge-pathnames "lane/" (%fresh-tree))))
+    (%stage repo "README.md" (format nil "x~%"))
+    (%git! repo "-c" "ouranos.privateNames=" "commit" "-q" "-m" "first")
+    (%git! repo "worktree" "add" "-q" "-b" "work/lane" (uiop:native-namestring lane))
+    (is (not (probe-file (merge-pathnames ".private-names" lane)))
+        "the fixture is wrong: the worktree has a list of its own")
+    (%stage lane "lane.md" (format nil "for quux-feathers~%"))
+    (multiple-value-bind (code out)
+        (%git lane "-c" "ouranos.privateNames=" "commit" "-q" "-m" "lane work")
+      (is (not (zerop code)) "a name was committed from a linked worktree:~%~a" out)
+      (is (search "lane.md:1" out) "the refusal does not give the path and line:~%~a" out))))
+
+(test name-check-refuses-everything-when-the-configured-list-is-missing
+  ;; Configuring a list is how a machine says it needs the check. If the list has gone, a
+  ;; commit must not look the same as one that was checked and found clean.
+  (let ((repo (%hooked-repo :names nil)))
+    (%git! repo "config" "ouranos.privateNames"
+           (uiop:native-namestring (merge-pathnames "no-such-list" repo)))
+    (%stage repo "notes.md" (format nil "nothing private here~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add notes")
+      (is (not (zerop code)) "a machine configured for the check committed without it:~%~a" out)
+      (is (= 0 (%commit-count repo)))
+      (is (search "does not exist" out) "the refusal does not say the list is missing:~%~a" out))))
+
+(test name-check-does-nothing-where-there-is-no-list
+  ;; A contributor's clone: no list, and nothing configured. `-c ouranos.privateNames=' clears
+  ;; any global setting on the machine running this test.
+  (let ((repo (%hooked-repo :names nil)))
+    (%stage repo "notes.md" (format nil "zorbocorp is not a private name to a contributor~%"))
+    (multiple-value-bind (code out)
+        (%git repo "-c" "ouranos.privateNames=" "commit" "-q" "-m" "Add notes")
+      (is (zerop code) "a clone with no list refused a commit:~%~a" out)
+      (is (= 1 (%commit-count repo))))))
+
+(defun %bare-remote (repo)
+  "A bare repository in its own fresh directory, added to REPO as `origin'."
+  (let ((remote (merge-pathnames "remote.git/" (%fresh-tree))))
+    (%git! repo "init" "-q" "--bare" (uiop:native-namestring remote))
+    (%git! repo "remote" "add" "origin" (uiop:native-namestring remote))
+    remote))
+
+(defun %ref (repo ref)
+  "The object REF names in REPO, or NIL if REF does not exist there."
+  (multiple-value-bind (code out) (%git repo "rev-parse" "-q" "--verify" ref)
+    (and (zerop code) (string-trim '(#\Newline #\Return #\Space) out))))
+
+(test pre-push-refuses-a-commit-that-skipped-the-commit-hooks
+  ;; `git am', cherry-pick, rebase and --no-verify all make commits without running pre-commit
+  ;; or commit-msg. pre-push is the check such a commit cannot avoid on its way out, so this
+  ;; makes one with --no-verify and tries to push it, after a clean push as the control.
+  (let* ((repo (%hooked-repo))
+         (remote (%bare-remote repo)))
+    (%stage repo "a.md" (format nil "clean~%"))
+    (%git! repo "commit" "-q" "-m" "clean")
+    (multiple-value-bind (code out) (%git repo "push" "-q" "origin" "main")
+      (is (zerop code) "a clean push was refused:~%~a" out))
+    (let ((pushed (%ref remote "refs/heads/main")))
+      (%stage repo "b.md" (format nil "for Quux-Feathers~%"))
+      (%git! repo "commit" "-q" "--no-verify" "-m" "skipped the commit hooks")
+      (multiple-value-bind (code out) (%git repo "push" "-q" "origin" "main")
+        (is (not (zerop code)) "a commit carrying a name was pushed:~%~a" out)
+        (is (search "b.md:1" out) "the refusal does not give the path and line:~%~a" out)
+        (is (not (%repeats-a-name-p out)) "the refusal repeats the name")
+        (is (equal pushed (%ref remote "refs/heads/main")) "the remote's main moved")))))
+
+(test pre-push-refuses-a-branch-name-that-contains-a-name
+  (let* ((repo (%hooked-repo))
+         (remote (%bare-remote repo)))
+    (%stage repo "a.md" (format nil "clean~%"))
+    (%git! repo "commit" "-q" "-m" "clean")
+    (multiple-value-bind (code out)
+        (%git repo "push" "-q" "origin" "main:refs/heads/work/zorbocorp")
+      (is (not (zerop code)) "a branch named after a client was pushed:~%~a" out)
+      (is (null (%ref remote "refs/heads/work/zorbocorp")) "the branch exists on the remote"))))

@@ -201,9 +201,9 @@ this page and the tree, stated rather than left to be discovered.
 | **elenchon** | **design only** — the typed CEG ADT and five ADRs exist; the reasoning engine *(in progress)* | 46 |
 | **klio** | **scaffold** *(in progress)* — a satellite the site program instantiates; the system loads and the suite guards that, and nothing else is built yet | 169 |
 | **hades** | **planned** *(in progress)* — a charter ADR and nothing else; blocked on `aion/windows/service`, which does not exist yet | 0 |
-| **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 72 |
+| **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 102 |
 
-Counts above are from the Linux CI leg at `361f002`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `c679ccd`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.

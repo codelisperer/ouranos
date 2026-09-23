@@ -90,9 +90,17 @@ define it.
   a consuming-app session by app when it is the maintainer's own (`app:soloflow`,
   `app:wordcrafter`, …). A **client's** app is never named anywhere in this repo — code,
   docs, commits, issues; say "a consuming app" and label `app:client`.
-- `.private-names` (gitignored) is the detector for the tracked tree; `publish-public.sh`
-  fails closed on it. Issues and labels never become public (the public repo is one fresh
-  commit of the tree).
+- **Private names are checked on every commit and every push.** `.githooks/commit-msg` checks
+  the message, `.githooks/pre-commit` checks added lines and new file paths, and
+  `.githooks/pre-push` checks every commit, branch name and tag about to leave the machine,
+  including commits made with `git am`, `cherry-pick`, `rebase` or `--no-verify`. The list is
+  the file `git config ouranos.privateNames` names, or else `.private-names` (gitignored) in
+  the main checkout. On each of the maintainer's machines, set it once with
+  `git config --global ouranos.privateNames <path>`: that covers every clone and worktree on
+  the machine, and a missing or empty list then refuses commits instead of skipping the
+  check. A refusal gives locations, never the matching text, so it is safe to quote. The
+  hooks cannot see pull-request text, issues or comments; the rule above is the only guard
+  there. Details: `.githooks/private-names.sh`.
 - **Post issue and PR text from a file, because backticks inside a double-quoted shell body are
   command substitution.** `--body "… \`foo\` …"` runs every inline code span as a command and
   substitutes empty, which deletes the span, leaves grammatical prose behind and exits 0. Safe:
