@@ -133,7 +133,7 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
         (%srv-spawn-serve-forever out :name "Test App")
       (when session (srv:request-shutdown session))
       (ignore-errors (sb-thread:join-thread thread :timeout 10))
-      ;; The socket, not just the thread (#433) -- these two teardowns never waited.
+      ;; The socket, not just the thread (#159) -- these two teardowns never waited.
       (is (ports:await-released port)
           "the port was still accepting after teardown -- the next test's free port is not free")
       (let ((text (get-output-stream-string out)))
@@ -147,7 +147,7 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
         (%srv-spawn-serve-forever out :banner nil)
       (when session (srv:request-shutdown session))
       (ignore-errors (sb-thread:join-thread thread :timeout 10))
-      ;; The socket, not just the thread (#433) -- these two teardowns never waited.
+      ;; The socket, not just the thread (#159) -- these two teardowns never waited.
       (is (ports:await-released port)
           "the port was still accepting after teardown -- the next test's free port is not free")
       (is (not (search "serving at" (get-output-stream-string out)))))))
