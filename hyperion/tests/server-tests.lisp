@@ -488,3 +488,22 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
                  out)))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*)
       (ignore-errors (srv:stop h)))))
+
+(test a-normal-stop-logs-no-backend-failure
+  ;; The control for the test above. STOP ends the backend thread by unwinding it, and the
+  ;; backend's own cleanup runs inside the handler that logs errors after START. If that
+  ;; cleanup signalled on every clean shutdown, the error line would appear on every stop and
+  ;; people would learn to ignore it. Three cycles, because one clean stop could be luck.
+  (let ((s (make-string-output-stream)))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :error :stream s)
+           (dotimes (i 3)
+             (let ((h (ports:call-with-port
+                       (lambda (p) (srv:start (%srv-ok-app) :port p :server :hunchentoot
+                                                              :log nil)))))
+               (srv:stop h)))
+           (let ((out (get-output-stream-string s)))
+             (is (not (search "failed after it started" out))
+                 "a normal STOP must not log a backend failure, got: ~S" out)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
