@@ -43,6 +43,18 @@ $Root = Split-Path -Parent $Here
 function Info($m) { Write-Host "==> $m" -ForegroundColor Blue }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function Die($m) { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
+function Get-Sha256Hex($path) {
+  # .NET directly, not Get-FileHash. Windows PowerShell 5.1 started with the PSModulePath of
+  # a PowerShell 7 session (a pwsh terminal, or a shell that inherited its environment)
+  # cannot find Get-FileHash, because that cmdlet lives in a module 5.1 then fails to load.
+  # Measured on Windows 11 with 5.1.26100: Get-Command Get-FileHash is null with the
+  # inherited path and found with PSModulePath unset.
+  $stream = [IO.File]::OpenRead($path)
+  try {
+    $bytes = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
+  } finally { $stream.Dispose() }
+  return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+}
 
 # --- the pins ---------------------------------------------------------------
 $Pins = @{}
@@ -374,7 +386,7 @@ function Install-Sqlite {
   & curl.exe -fsSL --retry 4 --retry-delay 2 -o $zip $url
   if ($LASTEXITCODE -ne 0) { Die "downloading $url failed (curl exit $LASTEXITCODE)" }
 
-  $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+  $got = Get-Sha256Hex $zip
   if ($got -ne $want.ToLower()) {
     Remove-Item $zip -Force -ErrorAction SilentlyContinue
     Die "sqlite checksum mismatch for $url`n  expected $want`n  got      $got"

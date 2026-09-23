@@ -101,6 +101,18 @@ $SdkSha256 = $SdkSha256.ToLower()
 function Info($m) { Write-Host "==> $m" -ForegroundColor Blue }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function Die($m) { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
+function Get-Sha256Hex($path) {
+  # .NET directly, not Get-FileHash. Windows PowerShell 5.1 started with the PSModulePath of
+  # a PowerShell 7 session (a pwsh terminal, or a shell that inherited its environment)
+  # cannot find Get-FileHash, because that cmdlet lives in a module 5.1 then fails to load.
+  # Measured on Windows 11 with 5.1.26100: Get-Command Get-FileHash is null with the
+  # inherited path and found with PSModulePath unset.
+  $stream = [IO.File]::OpenRead($path)
+  try {
+    $bytes = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
+  } finally { $stream.Dispose() }
+  return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+}
 
 # The prerequisite report. Each check appends one row; PASS/WARN/FAIL + how to fix.
 $script:Checks = @()
@@ -239,7 +251,7 @@ function Get-WebView2Sdk {
   }
   # Checked before anything is unpacked. A mismatch means the file is not the one pinned in
   # scripts/versions.env, whatever the cause, so it is deleted and the build stops.
-  $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+  $sha = Get-Sha256Hex $zip
   if ($sha -ne $SdkSha256) {
     Remove-Item $zip -Force -ErrorAction SilentlyContinue
     Die ("WebView2 SDK $Sdk checksum mismatch for $got`n" +
