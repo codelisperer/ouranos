@@ -39,12 +39,17 @@ Coalton is a git checkout, not a Quicklisp system, so its commit is pinned separ
 `coalton.pin` at the repository root. `setup.sh` and `setup.ps1` read it from there. To
 change the Coalton version, edit `coalton.pin`; `versions.env` has no Coalton setting.
 
-**A macOS caveat worth internalizing:** upstream SBCL publishes binaries for Linux
+**A macOS caveat worth internalizing:** upstream SBCL publishes binaries for Linux x86-64
 (tarball) and Windows (MSI) only — there are **no macOS binaries**. So on macOS the
 provisioning script installs SBCL from **Homebrew** and you get whatever version brew
-currently carries, regardless of what `SBCL_VERSION` says. The pin is honored on Linux and
-Windows; on macOS it's documentation of intent. If two machines produce subtly different
+currently carries, regardless of what `SBCL_VERSION` says. The pin is honored on Linux x86-64
+and Windows; on macOS it's documentation of intent. If two machines produce subtly different
 builds, this is the first place to look.
+
+**arm64 Linux has no upstream binary either** (none in 2.6.0 to 2.6.8; #9). There,
+`setup.sh` stops and asks you to install an SBCL yourself, from your distribution's package
+(`sudo apt install sbcl`) or built from source, and on the next run it uses that SBCL and
+warns that its version differs from the pin.
 
 ### Provisioning a bare machine
 
