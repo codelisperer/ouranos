@@ -63,7 +63,7 @@ wrong browser)."
         (threads '()))
     (dotimes (i 50)
       (push (bt:make-thread (lambda () (channel:publish ch :x))) threads))
-    (mapc #'bt:join-thread threads)
+    (aion/test-threads:join-all threads)
     (is (= 50 (channel:channel-length ch)))))
 
 ;;; --- the window is a decision, not an accident (pre-publication issue 231) --------------------

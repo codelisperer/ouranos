@@ -69,29 +69,6 @@ is not tighter is that a loaded CI box is slow in ways a hang is not. What matte
 it is FINITE: the failure this suite most wants to catch is a request that never gets an
 answer, and without a deadline that failure looks like a stuck test run.")
 
-(defparameter +join-timeout+ 20
-  "Seconds a test waits for a client thread it started to finish.
-
-Longer than +IO-TIMEOUT+, because the thread's own request is bounded by that and should
-always finish first. This is the bound for the case where it does not: a thread that never
-returns.")
-
-(defun %join-client (thread)
-  "Wait for THREAD to finish and return its value, or signal an error after +JOIN-TIMEOUT+.
-
-A plain join waits forever, so a thread that never finishes would stop the whole run until
-CI kills the job, and the log would not say which test was waiting. An error here fails the
-test that called it, by name, and the run continues."
-  (multiple-value-bind (value outcome)
-      (sb-thread:join-thread thread :timeout +join-timeout+ :default nil)
-    (case outcome
-      (:timeout (error "the client thread ~A did not finish within ~D seconds"
-                       (sb-thread:thread-name thread) +join-timeout+))
-      ;; An aborted thread has no value to return. A plain join signals an error here too.
-      (:abort (error "the client thread ~A ended without returning a value"
-                     (sb-thread:thread-name thread)))
-      (t value))))
-
 (defun %wait-until (predicate &key (seconds +io-timeout+))
   "Call PREDICATE every 5 ms until it returns true or SECONDS have passed. Returns its last value.
 
@@ -883,7 +860,7 @@ exists to make possible, and the thing that was impossible before M2."
                (is (string= "fast" (body-of (get* port "GET /fast HTTP/1.1" "Host: x")))
                    "answered while a handler was blocked -- impossible on one loop thread")
                (sb-thread:signal-semaphore gate)
-               (is (string= "slow" (body-of (%join-client slow)))))))
+               (is (string= "slow" (body-of (aion/test-threads:join slow)))))))
       (sb-thread:signal-semaphore gate 10)
       (pool:stop-pool p))))
 
@@ -908,7 +885,7 @@ exists to make possible, and the thing that was impossible before M2."
                  (is (string= "1" (header-of r "Retry-After"))
                      "and it says when to come back"))
                (sb-thread:signal-semaphore gate)
-               (is (= 200 (status-of (%join-client parked)))))))
+               (is (= 200 (status-of (aion/test-threads:join parked)))))))
       (sb-thread:signal-semaphore gate 10)
       (pool:stop-pool p))))
 

@@ -44,7 +44,7 @@ backwards for a single caller), and ACROSS all threads no value may ever be issu
 (the mutex is what makes the read-then-bump atomic). Drop the lock and the first still
 passes while the second fails."
   (let* ((per 2000) (threads 6) (lock (sb-thread:make-mutex)) (locals '()))
-    (mapc #'sb-thread:join-thread
+    (aion/test-threads:join-all
           (loop repeat threads
                 collect (sb-thread:make-thread
                          (lambda ()

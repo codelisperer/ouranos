@@ -26,7 +26,7 @@ prove only that the mechanism does something, not that anything needed it."
   (let ((seen nil))
     (let ((*test-var* :bound))
       (let ((thread (sb-thread:make-thread (lambda () (setf seen *test-var*)))))
-        (sb-thread:join-thread thread)))
+        (aion/test-threads:join thread)))
     (is (eq :global seen)
         "the child reads the GLOBAL value, not the binding that was live when it spawned")))
 
@@ -37,7 +37,7 @@ prove only that the mechanism does something, not that anything needed it."
          (let ((*test-var* :bound))
            (let ((thread (sb-thread:make-thread
                           (dyn:inheriting (lambda () (setf seen *test-var*))))))
-             (sb-thread:join-thread thread)))
+             (aion/test-threads:join thread)))
          (is (eq :bound seen)
              "a registered variable bound on the parent is visible on the child; saw ~S" seen))
     (dyn:unregister-inheritable '*test-var*)))
@@ -49,7 +49,7 @@ carrying bindings nobody asked to share."
     (let ((*test-var* :bound))
       (let ((thread (sb-thread:make-thread
                      (dyn:inheriting (lambda () (setf seen *test-var*))))))
-        (sb-thread:join-thread thread)))
+        (aion/test-threads:join thread)))
     (is (eq :global seen)
         "an UNregistered variable must not cross; the child should see the global, saw ~S" seen)))
 
@@ -64,7 +64,7 @@ never left the binding."
            (setf wrapped (dyn:inheriting (lambda () (setf seen *test-var*)))))
          ;; the binding is gone here; the wrapper must still carry it
          (let ((thread (sb-thread:make-thread wrapped)))
-           (sb-thread:join-thread thread))
+           (aion/test-threads:join thread))
          (is (eq :bound seen)
              "the capture is taken where INHERITING was called, not where the thunk ran; saw ~S"
              seen))
@@ -82,7 +82,7 @@ would prove nothing."
     (log:with-context (:request-id id)
       (let ((thread (sb-thread:make-thread
                      (dyn:inheriting (lambda () (setf seen (getf log:*context* :request-id)))))))
-        (sb-thread:join-thread thread)))
+        (aion/test-threads:join thread)))
     (is (string= id seen) "the child sees the request-id the seam bound")))
 
 (test the-same-field-is-absent-without-the-wrapper
@@ -93,7 +93,7 @@ drift away from the other."
     (log:with-context (:request-id id)
       (let ((thread (sb-thread:make-thread
                      (lambda () (setf seen (getf log:*context* :request-id))))))
-        (sb-thread:join-thread thread)))
+        (aion/test-threads:join thread)))
     (is (null seen) "unwrapped, the child's context is empty and the field is simply gone")))
 
 (defvar *other-var* :global-other)
@@ -115,7 +115,7 @@ afterwards, would break that site while passing every inheritance test."
                              (let ((*other-var* :installed-by-child))
                                (setf seen-inherited *test-var*
                                      seen-overridden *other-var*)))))))
-             (sb-thread:join-thread thread)))
+             (aion/test-threads:join thread)))
          (is (eq :from-caller seen-inherited) "the member it did not touch is inherited")
          (is (eq :installed-by-child seen-overridden) "the member it rebound is its own"))
     (dyn:unregister-inheritable '*test-var*)
@@ -131,7 +131,7 @@ afterwards, would break that site while passing every inheritance test."
                          (lambda () (let ((*other-var* :installed-by-child))
                                       (declare (ignorable *other-var*))
                                       nil))))))
-           (sb-thread:join-thread thread))
+           (aion/test-threads:join thread))
          (is (eq :from-caller *other-var*)
              "the child's rebinding must stay on the child; the caller now sees ~S"
              *other-var*))
