@@ -175,9 +175,15 @@ This costs wall-clock and buys truth twice over:
 is one way to satisfy it and a server the runner already ships is another.
 
 - **Linux** calls the repo's own `scripts/test-postgres.sh up`.
-- **macOS** installs and starts `postgresql@17` via Homebrew.
+- **macOS** installs and starts `postgresql@17` via Homebrew, and installs pgvector from
+  Homebrew.
 - **Windows** starts the PostgreSQL service the runner image already ships, discovering
-  the major version rather than hardcoding a path that will rot.
+  the major version rather than hardcoding a path that will rot. The image does not ship
+  pgvector, so the leg builds it from a pinned tag and checks the tag's commit.
+
+The macOS and Windows legs both check that the running server can see pgvector before any
+suite runs, so a pgvector that did not install fails the step instead of letting the vector
+tests skip.
 
 **No leg sets `OURANOS_ALLOW_NO_PG`.** Every check mnemosyne had ever reported green ran
 against SQLite alone — the one backend the docs do not tell you to deploy on — and #165 is

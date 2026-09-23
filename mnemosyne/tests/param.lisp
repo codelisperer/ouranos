@@ -398,7 +398,7 @@ green run on a leg without pgvector says what it did not cover."
          (let ((,conn (conn:connect (mnemosyne/url:backend-from-url url))))
            (unwind-protect
                 (if (not (%pgvector-available-p ,conn))
-                    (skip "no pgvector on this host: the extension is not available, so operator and index coverage is Linux-only (#258, macOS #371)")
+                    (skip "no pgvector on this host: the extension is not available, so the operator and index tests cannot run here. Every CI leg provisions it.")
                     (progn
                       (conn:exec ,conn "CREATE EXTENSION IF NOT EXISTS vector")
                       ,@body))
@@ -502,7 +502,7 @@ reporting both as `no pgvector' sends half the readers to the wrong place."
 ask for it, rather than one having to run first and the rest assuming."
   (%with-pg-conn (c)
     (if (not (%pgvector-available-p c))
-        (skip "no pgvector on this host: extension-creation coverage is Linux-only (#258, macOS #371)")
+        (skip "no pgvector on this host: the extension-creation tests cannot run here. Every CI leg provisions it.")
         (progn
           (is (string= "vector" (string-downcase (string (mig:require-extension c "vector")))))
           (is-true (mig:extension-present-p c "vector")

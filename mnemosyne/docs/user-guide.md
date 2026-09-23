@@ -548,14 +548,13 @@ data.
 
 #### Where this is tested
 
-Against a real pgvector, on Linux. `docker-compose.test.yml` carries
-`pgvector/pgvector:pg17` for exactly this. The macOS and Windows CI legs provision Postgres
-by Homebrew and by the runner's preinstalled service and have no pgvector, so these tests
-**skip there with a named reason** rather than passing —
-[#371](https://github.com/codelisperer/ouranos/issues/371) covers macOS. **Windows is a
-documented exclusion**: installing pgvector against the runner's preinstalled service is a
-different and much larger job, and the platform axis already names what a host cannot
-answer.
+Against a real pgvector, on all three CI legs. The Linux leg uses
+`pgvector/pgvector:pg17` from `docker-compose.test.yml`. The macOS leg installs pgvector
+from Homebrew, and the Windows leg builds it from a pinned tag against the runner's
+preinstalled Postgres. Both of those check that the running server can see the extension
+before any suite runs, so a missing pgvector fails the step instead of letting these tests
+skip. On a development machine without pgvector, the tests **skip with a named reason**
+rather than passing.
 
 The praxeon-side seam — semantic search as something an agent calls — is
 [#258](https://github.com/codelisperer/ouranos/issues/258)'s remaining half and is deferred
