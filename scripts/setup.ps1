@@ -280,6 +280,21 @@ function Install-Coalton {
   if ($LASTEXITCODE -ne 0) { Die "commit $CoaltonRef not found in $CoaltonDir (wrong remote, or the fetch failed)" }
 }
 
+# Install the Quicklisp releases Coalton's compiler depends on, before anything loads Coalton.
+# Coalton is a git checkout, not a dist system, so Quicklisp finds its dependencies one
+# MISSING-DEPENDENCY error at a time while ASDF reads coalton.asd, and SBCL prints "While
+# evaluating the form starting at line 23 ... compilation unit aborted" for each one (#8).
+# Harmless, but it looks exactly like a real error. The list is read from
+# coalton-compiler.asd, so it follows the Coalton pin. The same step is in setup.sh.
+function Install-CoaltonDeps {
+  $asd = (Join-Path $CoaltonDir 'coalton-compiler.asd') -replace '\\', '/'
+  $setup = Join-Path $QlHome 'setup.lisp'
+  $rc = Invoke-SbclForm -PreLoad $setup `
+    -Form "(progn (asdf:load-asd `"$asd`") (ql:quickload (asdf:system-depends-on (asdf:find-system `"coalton-compiler`")) :silent t))"
+  if ($rc -ne 0) { Die "installing the Quicklisp releases Coalton depends on failed (sbcl exit $rc)" }
+  Note "Coalton's Quicklisp dependencies are installed"
+}
+
 # --- 4. SQLite (#229) --------------------------------------------------------
 #
 # mnemosyne's DEFAULT backend, and until this existed `setup.ps1` never mentioned it. On a
@@ -502,6 +517,7 @@ Export-SbclEnv
 if (-not (Test-Path (Join-Path $QlHome 'setup.lisp'))) { Install-Quicklisp }
 Set-QlDist
 Install-Coalton
+Install-CoaltonDeps
 Install-Sqlite
 
 Info "provisioned. Next: sbcl --dynamic-space-size 4096 --script bootstrap.lisp   (from $Root)"
