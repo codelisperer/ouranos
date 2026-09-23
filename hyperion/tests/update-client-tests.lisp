@@ -450,8 +450,8 @@ the artifact lookup is the real one rather than a hard-coded guess."
 ;;; each a path where launching anyway is the actual harm, and a test that only checks the
 ;;; reported state would pass while the installer ran.
 ;;;
-;;; WHY EVERY ONE OF THEM IS `#+win32'. `apply-update' REFUSES on macOS and Linux -- #72
-;;; has produced no .dmg, no .app.tar.gz and no AppImage, so there is nothing to launch --
+;;; WHY EVERY ONE OF THEM IS `#+win32'. `apply-update' REFUSES on macOS and Linux -- their
+;;; apply strategies, `app-targz' and `appimage', are not written, so there is nothing to launch --
 ;;; and the refusal is a READER CONDITIONAL, resolved before any behaviour these tests
 ;;; describe. Without the guard every test below would signal `update-not-implemented' on
 ;;; two of the three platforms, and this suite would arrive RED in the Mac and Linux lanes

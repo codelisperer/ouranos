@@ -54,11 +54,10 @@ env:
   # place (hyperion/docs/desktop-distribution-design.md, section 5a).
   RELEASE_REPO: ${{ github.repository }}
   # WHAT THIS RELEASE IS SUPPOSED TO CARRY, checked against the manifest before anything
-  # is published. macOS is absent because nothing builds its `.app.tar.gz' payload yet
-  # (#135) -- `build-dmg.sh' writes the human .dmg and the workflow never calls it. That
-  # is a real gap; the point of this line is that it is a STATED one rather than a silent
-  # hole every Mac user falls into.
-  APP_PLATFORMS: linux-x86-64 windows-x86-64
+  # is published. A platform that stops producing its payload fails the publish instead of
+  # silently dropping out of the manifest. macOS joined with #135, in the same commit as the
+  # step that builds its `.app.tar.gz'; the two should never move apart.
+  APP_PLATFORMS: linux-x86-64 windows-x86-64 macos-arm64
 
 jobs:
   build:
@@ -251,6 +250,18 @@ jobs:
           choco install nsis -y --no-progress
           powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1 \
             "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+
+      # The .app is packed twice from one build: as the .app.tar.gz update payload the
+      # manifest lists for macos-arm64, and as the .dmg a person downloads (#135).
+      # build-dmg.sh checks the payload's layout before this step can pass: one .app at the
+      # archive root, no extended attributes, and the same binary as the bundle.
+      - name: Package the .app and its update payload (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ./scripts/build-dmg.sh "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}" \
+            --display-name "Coalton REPL" \
+            --icon hyperion/examples/coalton-repl/assets/lambda.png
+          test -f "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}.app.tar.gz"
 
       - uses: actions/upload-artifact@v7
         with:

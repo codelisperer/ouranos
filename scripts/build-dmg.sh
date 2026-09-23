@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# build-dmg.sh --- package a macOS bundle as a .app inside a .dmg (#78).
+# build-dmg.sh --- package a macOS bundle as a .app inside a .dmg (#78), and the same .app
+# as the updater's .app.tar.gz payload (#135).
 #
 #     scripts/build-dmg.sh dist/coalton-repl-0.1.0-macos-arm64 \
 #         [--display-name "Coalton REPL"] \
@@ -157,6 +158,54 @@ PLIST
 # separate files, where the runtime is an ordinary signable Mach-O -- which is a real
 # trade against the single-binary property the updater relies on.
 rm -rf "$APP/Contents/_CodeSignature"
+
+# --- the update payload (#135) ---------------------------------------------------------
+# scripts/update-manifest.lisp lists macOS as format `app-targz', file
+# <name>-<version>-macos-arm64.app.tar.gz. The client unpacks it beside the installed .app
+# and swaps the whole bundle (hyperion/docs/desktop-distribution-design.md, "macOS --
+# app-targz"), so the archive holds exactly one entry at its root: the .app built above.
+# The .dmg below packs the same .app, so the human download and the update payload are two
+# packagings of one bundle, not two builds.
+#
+# --no-xattrs keeps the build machine's extended attributes out of the payload. Without it,
+# macOS tar (bsdtar 3.5.3) stores every file's attributes as pax headers and restores them
+# on unpack: measured, a plain archive of this .app unpacked with com.apple.provenance on
+# every file plus any attribute set on the build machine, where --no-xattrs unpacked with
+# none. The design has the client strip the quarantine attribute after unpacking; an
+# attribute it does not know about would still reach the installed app. COPYFILE_DISABLE and --no-mac-metadata stop
+# the other macOS additions (AppleDouble `._' entries) for any tar that makes them.
+TGZ="$OUT/$BIN-$VERSION-macos-$(uname -m).app.tar.gz"
+rm -f "$TGZ"
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$OUT" -czf "$TGZ" "$DISPLAY_NAME.app"
+
+# The archive has to unpack to a .app the client can use. Checked here, where it is made,
+# rather than first on a user's machine.
+roots=$(tar -tzf "$TGZ" | cut -d/ -f1 | sort -u)
+[ "$roots" = "$DISPLAY_NAME.app" ] || {
+  echo "build-dmg: $TGZ has root entries other than $DISPLAY_NAME.app:" >&2
+  echo "$roots" >&2
+  exit 1
+}
+if tar -tzf "$TGZ" | grep -q '/\._'; then
+  echo "build-dmg: $TGZ contains AppleDouble (._) files" >&2
+  exit 1
+fi
+if gzip -dc "$TGZ" | grep -a -q 'SCHILY\.xattr\.'; then
+  echo "build-dmg: $TGZ carries extended attributes from this machine" >&2
+  exit 1
+fi
+CHECK=$(mktemp -d)
+tar -xzf "$TGZ" -C "$CHECK"
+[ -x "$CHECK/$DISPLAY_NAME.app/Contents/MacOS/$BIN" ] || {
+  echo "build-dmg: $TGZ does not unpack to an executable Contents/MacOS/$BIN" >&2
+  exit 1
+}
+cmp -s "$CHECK/$DISPLAY_NAME.app/Contents/MacOS/$BIN" "$BUNDLE_ABS/$BIN" || {
+  echo "build-dmg: the $BIN inside $TGZ differs from the bundle's" >&2
+  exit 1
+}
+rm -rf "$CHECK"
+echo "build-dmg: $TGZ"
 
 # --- the disk image ----------------------------------------------------------------------
 # A staging directory with the .app and a symlink to /Applications is the conventional
