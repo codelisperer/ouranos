@@ -316,9 +316,30 @@ pattern was unexecutable through the path every reader would use."
       ;; would show a running total of zero as though it were the cost. When there is no
       ;; measurement, the estimate travels on :context-trimmed / :context-overflow instead,
       ;; which is where it matters -- beside the budget it was enforced against.
+      ;;
+      ;; ALL FOUR COUNTS, not two (#161). `ceiling:meter' has accepted four since
+      ;; pre-publication PR 419 -- input, output, cache-read, cache-write -- and this event is
+      ;; the ONLY programmatic route by which usage escapes a turn: `run-turn' returns text and
+      ;; the completion is appended to history as messages and then dropped. So a caller wiring
+      ;; the spend guard could supply `input-fn' and `output-fn' from here and had NO SOURCE AT
+      ;; ALL for the other two. The provider had them, `llm.lisp' logged all four, and the seam
+      ;; between producer and consumer carried half. `praxeon/web' reads (+ :input :output) off
+      ;; this event for its own counter, so the one real consumer in the tree was
+      ;; under-reporting a cached turn for the same reason.
+      ;;
+      ;; The cache fields are passed through as reported, like :input and :output below: NIL
+      ;; means the provider did not report the count, 0 means it reported a miss.
+      ;; Collapsing them would make a misplaced cache breakpoint indistinguishable from a
+      ;; provider with no cache, which is what pre-publication issue 401 built the distinction
+      ;; to prevent, and `ceiling:record-usage' already passes them through without an `or'.
+      ;;
+      ;; The gate widens with the payload: a provider reporting only cache counts would
+      ;; otherwise emit nothing, which is the same silence this clause exists to avoid.
       (let ((in (llm:completion-input-tokens completion))
-            (out (llm:completion-output-tokens completion)))
-        (when (or in out)
+            (out (llm:completion-output-tokens completion))
+            (cache-read (llm:completion-cache-read-tokens completion))
+            (cache-write (llm:completion-cache-write-tokens completion)))
+        (when (or in out cache-read cache-write)
           ;; NO `(or in 0)'. NIL and 0 ARE DIFFERENT ANSWERS and the distinction is the
           ;; whole point -- `completion's own docstring says so, and `ceiling:record-usage'
           ;; already honours it for the cache fields, which it passes with no `or'. NIL
@@ -331,6 +352,7 @@ pattern was unexecutable through the path every reader would use."
           ;; renderer summing input+output then shows a total that is short by an unknown
           ;; amount rather than absent, and short-by-unknown reads as a real number (#444).
           (evt:emit :usage :input in :output out
+                           :cache-read cache-read :cache-write cache-write
                            :estimated-input estimate)))
       (%append-history agent (%assistant-message completion))
       (let ((calls (llm:completion-tool-calls completion)))
