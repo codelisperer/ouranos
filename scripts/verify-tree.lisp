@@ -910,7 +910,7 @@ let this run claim `view' while the five assertions skipped."
   "Build the native webview launcher, best effort, recording WHY when it does not happen."
   (format t "~%========== NATIVE LAUNCHER (#410) ==========~%")
   ;; PREREQUISITES FIRST, inside run-build, so a host with no C++ toolchain DECLINES the axis
-  ;; instead of failing the gate. That host is measured, not hypothetical (#382).
+  ;; instead of failing the gate. That host is measured, not hypothetical (pre-publication issue 382).
   (let ((start (get-internal-real-time)))
     (multiple-value-bind (state reason out err)
         (ouranos-view:run-build *root* :output '(:string :stripped t))
