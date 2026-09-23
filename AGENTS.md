@@ -119,7 +119,10 @@ define it.
   number of a list: a body reading "Closes #A and #B" closes A and leaves B open, which kept
   pre-publication issue 448 open for a month after its fix merged. To mention an issue without
   closing it, write "part of #N" or "step one of #N". To close several, repeat the keyword
-  for each one. After a merge, read the state of every issue the pull request names.
+  for each one. Before merging, `gh pr view <N> --json closingIssuesReferences` lists the
+  issues GitHub has linked for closing; compare it with what the pull request is meant to
+  close. After the merge, read the state of every issue the pull request names, because a
+  keyword in a commit message can close an issue that list did not show.
 
 ## The board
 
