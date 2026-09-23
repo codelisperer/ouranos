@@ -10,8 +10,8 @@
 
     1. CHECKS the toolchain (MSVC or mingw-w64), the WebView2 SDK headers and the
        WebView2 runtime, printing an install command for anything missing;
-    2. FETCHES the WebView2 SDK headers (pinned, from NuGet -- Microsoft-licensed,
-       so never vendored in the repo);
+    2. FETCHES the WebView2 SDK headers from NuGet, at the version and SHA-256 pinned
+       in scripts/versions.env (Microsoft-licensed, so never vendored in the repo);
     3. COMPILES hyperion-view.cc -> hyperion-view.exe, statically linked so
        the only runtime requirement on the target machine is WebView2 itself.
 
@@ -27,7 +27,13 @@
   auto (default -- MSVC, else mingw), msvc, or mingw.
 
 .PARAMETER Sdk
-  WebView2 SDK version to fetch. Pinned; override to move it.
+  WebView2 SDK version to fetch. Default: WEBVIEW2_SDK_VERSION in scripts/versions.env.
+  Overriding it requires -SdkSha256 as well, because the pinned checksum only matches the
+  pinned version.
+
+.PARAMETER SdkSha256
+  SHA-256 of the .nupkg for -Sdk. Default: WEBVIEW2_SDK_SHA256 in scripts/versions.env. A
+  download whose checksum differs is deleted and the build stops.
 
 .PARAMETER Out
   Output path. Default: .\hyperion-view.exe beside this script (where
@@ -47,7 +53,8 @@
 param(
   [switch]$Check,
   [ValidateSet('auto', 'msvc', 'mingw')][string]$Compiler = 'auto',
-  [string]$Sdk = '1.0.4078.44',
+  [string]$Sdk,
+  [string]$SdkSha256,
   [string]$Out,
   [switch]$Refresh
 )
@@ -59,6 +66,37 @@ $Src = Join-Path $Here 'hyperion-view.cc'
 if (-not $Out) { $Out = Join-Path $Here 'hyperion-view.exe' }
 $SdkDir = Join-Path $Here '.webview2-sdk'
 $SdkInc = Join-Path $SdkDir 'build\native\include'
+# Records which pin the unpacked headers came from, so a changed pin fetches again rather
+# than reusing headers from another version.
+$SdkMarker = Join-Path $SdkDir '.pin'
+
+# The SDK version and the SHA-256 of its .nupkg are pinned in scripts/versions.env, beside
+# the other native downloads (#175). bootstrap.lisp runs this script on every Windows machine
+# with a C++ toolchain, so the download is checked against the pin rather than trusted.
+if ($Sdk -and -not $SdkSha256) {
+  Write-Host "ERROR: -Sdk $Sdk needs -SdkSha256 too: the checksum in scripts/versions.env is for the pinned version only." -ForegroundColor Red
+  exit 1
+}
+if (-not $Sdk) {
+  $versionsEnv = Join-Path $Here '..\..\scripts\versions.env'
+  if (-not (Test-Path $versionsEnv)) {
+    Write-Host "ERROR: $versionsEnv not found; it pins the WebView2 SDK. Pass -Sdk and -SdkSha256 to build outside the repository." -ForegroundColor Red
+    exit 1
+  }
+  $pins = @{}
+  Get-Content $versionsEnv | ForEach-Object {
+    if ($_ -match '^\s*([A-Z0-9_]+)\s*=\s*(.+?)\s*$') { $pins[$matches[1]] = $matches[2] }
+  }
+  foreach ($k in 'WEBVIEW2_SDK_VERSION', 'WEBVIEW2_SDK_SHA256') {
+    if (-not $pins.ContainsKey($k)) {
+      Write-Host "ERROR: scripts/versions.env: $k missing" -ForegroundColor Red
+      exit 1
+    }
+  }
+  $Sdk = $pins['WEBVIEW2_SDK_VERSION']
+  $SdkSha256 = $pins['WEBVIEW2_SDK_SHA256']
+}
+$SdkSha256 = $SdkSha256.ToLower()
 
 function Info($m) { Write-Host "==> $m" -ForegroundColor Blue }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -179,8 +217,11 @@ function Get-WebView2Sdk {
     Invoke-WebRequest + Expand-Archive -- no curl/unzip needed. Not vendored in
     the repo: the SDK is Microsoft-licensed.
   #>
-  if ((Test-Path (Join-Path $SdkInc 'WebView2.h')) -and -not $Refresh) { return $SdkInc }
+  if ((Test-SdkCurrent) -and -not $Refresh) { return $SdkInc }
   Info "fetching WebView2 SDK $Sdk (headers only) ..."
+  # Start from an empty directory, so headers from another version or a failed download
+  # cannot be mixed with these.
+  if (Test-Path $SdkDir) { Remove-Item -Recurse -Force $SdkDir }
   New-Item -ItemType Directory -Force -Path $SdkDir | Out-Null
   $zip = Join-Path $SdkDir 'webview2.zip'      # .zip: Expand-Archive rejects .nupkg
   Get-Tls12
@@ -196,11 +237,31 @@ function Get-WebView2Sdk {
       "       Offline or behind a proxy? Fetch the nupkg elsewhere and unpack it here:`n" +
       "       Expand-Archive microsoft.web.webview2.$Sdk.nupkg.zip -DestinationPath '$SdkDir'")
   }
+  # Checked before anything is unpacked. A mismatch means the file is not the one pinned in
+  # scripts/versions.env, whatever the cause, so it is deleted and the build stops.
+  $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+  if ($sha -ne $SdkSha256) {
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+    Die ("WebView2 SDK $Sdk checksum mismatch for $got`n" +
+      "       expected $SdkSha256`n" +
+      "       got      $sha`n" +
+      "       scripts/versions.env is the pin; a mismatch means the downloaded file is not the pinned one.")
+  }
+  Note "sha256 $sha matches the pin"
   Expand-Archive -Path $zip -DestinationPath $SdkDir -Force
   Remove-Item $zip -Force -ErrorAction SilentlyContinue
   if (-not (Test-Path (Join-Path $SdkInc 'WebView2.h'))) { Die "WebView2.h missing after extracting $got" }
+  Set-Content -Path $SdkMarker -Value "$Sdk $SdkSha256" -Encoding ASCII
   Note "headers: $SdkInc"
   return $SdkInc
+}
+
+function Test-SdkCurrent {
+  # The unpacked headers are reused only when they came from the current pin. Headers
+  # unpacked before the pin was checksummed have no marker, so they are fetched again once.
+  if (-not (Test-Path (Join-Path $SdkInc 'WebView2.h'))) { return $false }
+  if (-not (Test-Path $SdkMarker)) { return $false }
+  return ((Get-Content $SdkMarker -TotalCount 1).Trim() -eq "$Sdk $SdkSha256")
 }
 
 function Get-WebView2Runtime {
@@ -251,10 +312,10 @@ function Invoke-Doctor {
     Add-Check 'C++ toolchain' 'FAIL' 'neither MSVC nor mingw-w64 available -- install ONE of the two above' $FixMsvc
   }
 
-  if (Test-Path (Join-Path $SdkInc 'WebView2.h')) {
-    Add-Check "WebView2 SDK headers" 'PASS' ".webview2-sdk (pinned $Sdk)" ''
+  if (Test-SdkCurrent) {
+    Add-Check "WebView2 SDK headers" 'PASS' ".webview2-sdk (pinned $Sdk, sha256 checked)" ''
   } else {
-    if (Test-NugetReachable) { Add-Check 'WebView2 SDK headers' 'PASS' "absent; will be fetched from NuGet on build (pinned $Sdk)" '' }
+    if (Test-NugetReachable) { Add-Check 'WebView2 SDK headers' 'PASS' "absent, or from another pin; will be fetched from NuGet on build (pinned $Sdk)" '' }
     else { Add-Check 'WebView2 SDK headers' 'FAIL' 'absent and nuget.org is unreachable' "fetch Microsoft.Web.WebView2 $Sdk elsewhere and Expand-Archive it into $SdkDir" }
   }
 

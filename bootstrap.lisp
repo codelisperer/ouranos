@@ -212,7 +212,7 @@
 ;;;
 ;;; The build is scripts/view-launcher.lisp, shared with verify-tree.lisp. It runs as a child
 ;;; process, so nothing from it enters the bin/cons image. Measured on Windows (MSVC): about
-;;; 5 s cold, including a 45 MB WebView2 SDK fetch, and about 3 s once the SDK is cached.
+;;; 5 s cold, including a 9 MB WebView2 SDK fetch (46 MB unpacked), and about 3 s once the SDK is cached.
 (load (merge-pathnames "scripts/view-launcher.lisp" *root*))
 
 (let ((windows (uiop:os-windows-p)))

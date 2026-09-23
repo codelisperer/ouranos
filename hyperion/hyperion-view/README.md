@@ -100,7 +100,7 @@ cd hyperion\hyperion-view
 If the machine's execution policy blocks scripts:
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`.
 
-Options: `-Compiler msvc|mingw|auto` · `-Check` · `-Sdk <version>` · `-Out <path>` · `-Refresh`
+Options: `-Compiler msvc|mingw|auto` · `-Check` · `-Sdk <version> -SdkSha256 <sha256>` · `-Out <path>` · `-Refresh`
 (re-fetch the SDK headers).
 
 What it does, and why:
@@ -109,7 +109,7 @@ What it does, and why:
 |------|--------|
 | **MSVC discovery** | `vswhere` finds any VS edition **or the standalone Build Tools** carrying the C++ workload, then the environment `vcvarsall.bat` sets is imported into the session — so **no Developer Command Prompt is required**. Already in one (`cl.exe` on `PATH`)? That is used as-is. |
 | **mingw discovery** | UCRT64/MINGW64/CLANG64, choco, scoop, `$CXX`, `PATH`. Each candidate is vetted with `g++ -dumpmachine`: **`x86_64-w64-mingw32` is accepted, `x86_64-pc-msys` is rejected** — MSYS2's `/usr/bin/g++` targets the POSIX-emulation runtime (`msys-2.0.dll`) and cannot build a native Win32 GUI binary, and it is usually the one first on `PATH`. |
-| **WebView2 SDK headers** | A `.nupkg` is a zip, so `Invoke-WebRequest` + `Expand-Archive` (NuGet v3 flat container, v2 as fallback) into gitignored `.webview2-sdk/`. Pinned `1.0.4078.44`; Microsoft-licensed, hence fetched, never committed. |
+| **WebView2 SDK headers** | A `.nupkg` is a zip, so `Invoke-WebRequest` + `Expand-Archive` (NuGet v3 flat container, v2 as fallback) into gitignored `.webview2-sdk/`. The version and the SHA-256 of the `.nupkg` are pinned in `scripts/versions.env` (`WEBVIEW2_SDK_VERSION`, `WEBVIEW2_SDK_SHA256`); a download that does not match the checksum is deleted and the build stops. `.webview2-sdk/.pin` records the pin the headers came from, and headers from any other pin are fetched again. Microsoft-licensed, hence fetched, never committed. |
 | **WebView2 runtime** | Probed in the registry (`EdgeUpdate\Clients\{F3017226-…}`, per-machine and per-user). Missing is a **warning**, not an error: the build still succeeds, but no window will open at run time. |
 | **compile (MSVC)** | `cl /std:c++17 /EHsc /O2 /MT … /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup oleaut32.lib`. `/MT` = static CRT, so **no VC++ redistributable** on target machines; `/SUBSYSTEM:WINDOWS` + `mainCRTStartup` = a GUI app (no console window) with an ordinary `main()`. `webview.h` `#pragma`-links advapi32/ole32/shell32/shlwapi/user32/version itself; `oleaut32` is the one it does not. → ~170 KB. |
 | **compile (mingw)** | `-std=c++17 -O2 -mwindows -static` + the same libs. The compiler's own `bin\` is prepended to `PATH` first: a full-path mingw `g++` needs it to find `cc1plus`/`as`/`ld`, and **fails silently (exit 1, no message)** without it. → ~1 MB. |
