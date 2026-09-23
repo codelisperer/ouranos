@@ -11,8 +11,9 @@
 #   macOS  : Xcode command-line tools (clang++; WebKit.framework is built in)
 #   Windows: MSVC (preferred) or mingw-w64 g++, + the Edge WebView2 RUNTIME.
 #            Handled by build.ps1, which this script delegates to -- it also
-#            fetches the WebView2 SDK headers (pinned, Microsoft-licensed, so
-#            never vendored) with no curl/unzip needed.
+#            fetches the WebView2 SDK headers (pinned and checksummed in
+#            scripts/versions.env; Microsoft-licensed, so never vendored).
+#            No curl/unzip needed.
 # Override the compiler with $CXX.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)

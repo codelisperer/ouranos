@@ -419,7 +419,7 @@ A block that appears only when there is bad news teaches readers that its absenc
 nothing happened, and absence is precisely what they cannot distinguish from silence.
 
 NOT \"caller's choice\" ANY MORE, which was the heading until #410. `uv' is off only when
-somebody chooses; `view' is off when a host has no C++ toolchain, when a 45 MB SDK fetch had
+somebody chooses; `view' is off when a host has no C++ toolchain, when the 9 MB SDK fetch had
 no network, or when the caller said skip -- three causes, one of them a choice. A heading
 that named the cause was fine while there was one cause. Each entry now says its own."
   (format t "~%========== NOT COVERED ==========~%")
@@ -842,7 +842,7 @@ code we do not own, and a gate that cries wolf gets switched off."
 ;;;    MEASURED rather than estimated -- Windows, MSVC, this machine:
 ;;;
 ;;;      prerequisite check                          3.3 s
-;;;      cold: SDK fetch (45 MB, NuGet) + compile    5.5 s
+;;;      cold: SDK fetch (9 MB, NuGet) + compile     5.5 s
 ;;;      SDK already cached                          3.4 s
 ;;;
 ;;;    Cheap enough to be unconditional, which is what makes this option viable at all. #410
@@ -853,7 +853,7 @@ code we do not own, and a gate that cries wolf gets switched off."
 ;;;
 ;;;      no C++ toolchain            #382 measured this host class directly: a Windows box
 ;;;                                  with only Build Tools, and one with no MSVC at all.
-;;;      no network                  the Windows SDK fetch is 45 MB from NuGet, and the cache
+;;;      no network                  the Windows SDK fetch is 9 MB from NuGet, and the cache
 ;;;                                  is gitignored and PER-WORKTREE -- so every cold gate in
 ;;;                                  a fresh detached worktree pays it, which is precisely
 ;;;                                  the run AGENTS.md requires before claiming anything
