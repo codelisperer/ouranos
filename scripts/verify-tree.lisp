@@ -434,7 +434,9 @@ their checks, and the only sign was one NOTE line in the summary."
   (format t "~%========== NOT COVERED ==========~%")
   (let ((declined (axes-declined)))
     (if (null declined)
-        (format t "  nothing declined -- every optional axis ran (~a)~%" (axes-tag))
+        (if *postgres-excused*
+            (format t "  every optional axis ran (~a), but Postgres did not:~%" (axes-tag))
+            (format t "  nothing declined -- every optional axis ran (~a)~%" (axes-tag)))
         (dolist (entry declined)
           (destructuring-bind (name pred disclose) entry
             (declare (ignore pred))
