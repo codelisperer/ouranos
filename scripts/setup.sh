@@ -113,17 +113,53 @@ fetch() {
 }
 
 # --- 1. SBCL ----------------------------------------------------------------
+
+# Set arch, sbcl_arch, tarball and url for the pinned Linux binary. Returns 1 when SBCL has
+# no name for this machine's architecture at all.
+linux_sbcl_url() {
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64) sbcl_arch=x86-64;;
+    aarch64|arm64) sbcl_arch=arm64;;
+    *) return 1;;
+  esac
+  tarball="sbcl-$SBCL_VERSION-$sbcl_arch-linux-binary.tar.bz2"
+  url="https://downloads.sourceforge.net/project/sbcl/sbcl/$SBCL_VERSION/$tarball"
+}
+
+# Whether SBCL publishes no Linux binary for this machine at the pinned version. SBCL does
+# not build a Linux binary for every architecture: no 2.6.x release up to 2.6.8 has one for
+# arm64 (#9). This asks the download server rather than keeping a list, so it stays right
+# when a release adds or drops one. Only a 404 counts as "not published"; any other failure
+# is left for the download itself to report, because it is usually a mirror problem that a
+# re-run fixes.
+pinned_linux_binary_missing() {
+  linux_sbcl_url || return 0
+  _code=$(curl -sIL -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 2 \
+               --connect-timeout 20 --max-time 60 "$url" 2>/dev/null || true)
+  [ "$_code" = "404" ]
+}
+
+# Explain that there is no binary to install, and what to do instead. The fix is the
+# reader's to choose, so this names both and exits rather than picking one.
+refuse_missing_linux_binary() {
+  {
+    echo "setup.sh: SBCL does not publish a Linux binary for $arch at version $SBCL_VERSION, the version"
+    echo "         scripts/versions.env pins, so there is nothing for setup.sh to download."
+    [ -n "${url:-}" ] && echo "         (checked $url: not found)"
+    echo "         Install an SBCL yourself, then run setup.sh again. It will use that SBCL and"
+    echo "         warn that its version differs from the pin. Either of these works:"
+    echo "           - your distribution's package:  sudo apt install sbcl   |  sudo dnf install sbcl"
+    echo "           - SBCL $SBCL_VERSION built from source: https://www.sbcl.org/getting.html"
+    echo "             (building needs an existing Lisp; the distribution's sbcl will do)"
+  } >&2
+  exit 1
+}
+
 install_sbcl() {
   case "$os" in
     Linux)
-      arch=$(uname -m)
-      case "$arch" in
-        x86_64) sbcl_arch=x86-64;;
-        aarch64|arm64) sbcl_arch=arm64;;
-        *) echo "setup.sh: no upstream SBCL binary for $arch -- build from source" >&2; exit 1;;
-      esac
-      tarball="sbcl-$SBCL_VERSION-$sbcl_arch-linux-binary.tar.bz2"
-      url="https://downloads.sourceforge.net/project/sbcl/sbcl/$SBCL_VERSION/$tarball"
+      if pinned_linux_binary_missing; then refuse_missing_linux_binary; fi
       # The upstream tarball is .tar.bz2, and tar shells out to the bzip2 BINARY to unpack
       # it. A minimal image (WSL, containers, CI base images) often has tar but not bzip2,
       # and the failure -- "tar (child): bzip2: Cannot exec" -- names tar, not the missing
@@ -360,6 +396,10 @@ if [ "$os" = "Linux" ] && ! have bzip2; then need "bzip2 (to unpack the SBCL tar
 v=$(sbcl_version)
 if [ -z "$v" ]; then
   install_sbcl
+elif [ "$v" != "$SBCL_VERSION" ] && [ "$os" = "Linux" ] && pinned_linux_binary_missing; then
+  # The SBCL already here is the one the refusal above tells the reader to install, so
+  # keep it. The doctor at the end prints the version mismatch as a WARN.
+  note "SBCL $v found, pin is $SBCL_VERSION, and SBCL publishes no $SBCL_VERSION Linux binary for $arch -- keeping $v"
 elif [ "$v" != "$SBCL_VERSION" ] && [ "$os" = "Linux" ]; then
   note "SBCL $v found, pin is $SBCL_VERSION -- installing the pinned build alongside it"
   install_sbcl
