@@ -275,6 +275,29 @@ install_coalton() {
   }
 }
 
+# Install the Quicklisp releases Coalton's compiler depends on, before anything loads Coalton.
+#
+# Quicklisp installs a dist system's dependencies before loading it, because the dist lists
+# them. Coalton is a git checkout, not a dist system, so Quicklisp finds its dependencies one
+# error at a time. `coalton/library' has `:defsystem-depends-on ("coalton-asdf")', which loads
+# coalton-compiler while ASDF is still reading coalton.asd, so each missing release raises
+# MISSING-DEPENDENCY inside that form. Quicklisp installs the release and retries, and SBCL
+# prints "While evaluating the form starting at line 23 ... compilation unit aborted" for
+# each one: four times on a fresh machine, twice in the release job (#8). It is harmless, but
+# it looks exactly like a real error. The list is read from coalton-compiler.asd, so it
+# follows the Coalton pin. Loading that .asd does not load its dependencies, and on a machine
+# that already has them this step only checks.
+install_coalton_deps() {
+  sbcl --non-interactive --no-userinit --load "$ql_home/setup.lisp" \
+       --eval "(asdf:load-asd \"$coalton_dir/coalton-compiler.asd\")" \
+       --eval '(ql:quickload (asdf:system-depends-on (asdf:find-system "coalton-compiler")) :silent t)' \
+       >/dev/null || {
+    echo "setup.sh: installing the Quicklisp releases Coalton depends on failed" >&2
+    exit 1
+  }
+  note "Coalton's Quicklisp dependencies are installed"
+}
+
 # --- report / act -----------------------------------------------------------
 info "Ouranos setup on $os ($(uname -m)) -- pins: SBCL $SBCL_VERSION, QL dist $QUICKLISP_DIST, Coalton $COALTON_REF"
 
@@ -371,6 +394,7 @@ install_system_libs
 [ -f "$ql_home/setup.lisp" ] || install_quicklisp
 pin_quicklisp_dist
 install_coalton
+install_coalton_deps
 
 # ASK THE DOCTOR RATHER THAN ASSERTING SUCCESS. "Exited 0" and "it worked" are different
 # claims, and this script used to make the first while sounding like the second.
