@@ -203,7 +203,7 @@ this page and the tree, stated rather than left to be discovered.
 | **hades** | **planned** *(in progress)* — a charter ADR and nothing else; blocked on `aion/windows/service`, which does not exist yet | 0 |
 | **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 72 |
 
-Counts above are from the Linux CI leg at `1205a72`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `361f002`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.
