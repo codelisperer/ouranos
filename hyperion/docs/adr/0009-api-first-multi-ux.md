@@ -58,7 +58,7 @@ several targets"): the UX surfaces *are* those targets, now enumerated.
 - The desktop shell ([ADR-0008](0008-desktop-shell-cl-native-webview.md)) gains an escape
   hatch: `run-app` supports `:embedded` (default — local in-process server, the one-off
   app), `:remote <url>` (the GitHub-Desktop model — webview points at a remote backend),
-  and `:hybrid`. **The localhost default is no longer hardcoded** (as the AiTP playbook
+  and `:hybrid`. **The localhost default is no longer hardcoded** (as the Tauri app playbook
   already warned: "make the host configurable").
 - Implies a new **`hyperion/api`** capability (Coalton DTO → JSON codec + route helpers +
   OpenAPI emit), likely leaning on aion for the type/serialization machinery. Real work;

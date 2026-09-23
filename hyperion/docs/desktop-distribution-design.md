@@ -8,7 +8,7 @@
 
 A Hyperion desktop app **knows when a build for its own OS is available, fetches it,
 verifies it, installs it and restarts into it** — one click, no browser, no reinstall.
-That pattern (proven in the Tauri world, and in the author's AiTP app) is what makes a
+That pattern (proven in the Tauri world, and in one of the author's Tauri apps) is what makes a
 desktop app maintainable at all: without it, every fix strands users on old versions.
 
 Everything below exists to serve that sentence. CI is not the goal — CI is the link that
@@ -255,7 +255,7 @@ knows nothing about where updates live:
 - **`s3-source`** — `https://<bucket>.s3.<region>.amazonaws.com/updates/<channel>.json`,
   with `updates/*` public-read, plus a permanent human link
   `download/<App>-Setup.exe` that each release overwrites. Costs pennies; works for private
-  products; the pattern already proven in AiTP.
+  products; the pattern already proven in the author's Tauri app.
 
 Both are implemented from day one so the protocol is real rather than aspirational, and an
 app picks one (or a list, tried in order — a useful fallback when a host is down).
