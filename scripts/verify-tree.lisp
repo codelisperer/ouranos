@@ -1031,10 +1031,13 @@ let this run claim `view' while the five assertions skipped."
             ;; Which SQLite library those checks ran on (#129). Reported, never judged: the
             ;; pinned version is provisioned only on Windows, and elsewhere the OS copy is the
             ;; expected one, so there is no single right answer for the gate to enforce. What
-            ;; it prevents is a leg whose SQLite nobody can name.
-            (let ((lib (sqlite-library-line text)))
+            ;; it prevents is a leg whose SQLite nobody can name. Only for a suite that ran
+            ;; SQLite checks: praxeon/memory-db reports Postgres coverage alone and has no
+            ;; SQLite to name.
+            (when (assoc "sqlite" coverage :test #'string=)
               (format t "          sqlite library: ~a~%"
-                      (or lib "NOT REPORTED (the suite printed no SQLITE-LIBRARY line)")))
+                      (or (sqlite-library-line text)
+                          "NOT REPORTED (the suite ran SQLite checks and printed no SQLITE-LIBRARY line)")))
             ;; An excused skip is not a problem for the verdict, but it is a gap in what the
             ;; run covered, so NOT COVERED names it (#171).
             (let ((pg (assoc "postgres" coverage :test #'string=)))
