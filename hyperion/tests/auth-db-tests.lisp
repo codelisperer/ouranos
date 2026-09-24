@@ -416,3 +416,61 @@ disagree on result-key case, so match the column name case-insensitively."
         ;; is exercising the tiebreaker rather than passing on distinct timestamps.
         (is (= 1 (length (remove-duplicates (mapcar (lambda (e) (getf e :at)) history))))
             "the events had distinct timestamps, so the tie was never tested")))))
+
+;;; --- the role-event log is checked at construction (#139) ------------------------------
+;;;
+;;; An app that follows docs/migrations.md owns its timeline and does not pass :ENSURE. Until
+;;; #139 the documented set created only hyperion_users, and the missing role log surfaced as
+;;; "no such table" the first time an operator changed a role. These run the timeline through
+;;; mnemosyne's own MIGRATE, as an app does, rather than calling the DDL directly.
+
+(defun %users-migration ()
+  (be:make-migration "20260729_003_hyperion_users" "identity store"
+                     (auth:users-ddl :dialect :sqlite)
+                     "DROP TABLE hyperion_users"))
+
+(defun %role-log-migrations ()
+  (list (be:make-migration "20260729_004_hyperion_role_events" "role-change log"
+                           (auth:role-events-ddl :dialect :sqlite)
+                           "DROP TABLE hyperion_role_events")
+        (be:make-migration "20260729_005_hyperion_role_events_index" "role-change log index"
+                           (auth:role-events-index-ddl)
+                           "DROP INDEX idx_hyperion_role_events_user_at")))
+
+(defmacro %with-migrated ((conn migrations) &body body)
+  `(let ((,conn (conn:connect (be:make-sqlite ":memory:"))))
+     (unwind-protect
+          (progn (mnemosyne/migrate:migrate (be:make-sqlite ":memory:") ,conn ,migrations)
+                 ,@body)
+       (conn:disconnect ,conn))))
+
+(test the-documented-migration-set-gives-a-store-whose-role-changes-work
+  (%with-migrated (c (cons (%users-migration) (%role-log-migrations)))
+    (let* ((store (auth:make-db-auth c :dialect :sqlite))
+           (id (auth:user-id (auth:create-user store :email "doc@x.com" :roles '(:member)))))
+      (auth:grant-role store id :moderator :actor "test")
+      (is (= 1 (length (auth:role-history store id)))
+          "the grant must be recorded in the role log the migrations created"))))
+
+(test a-timeline-without-the-role-log-is-refused-at-construction
+  ;; The pre-#139 documented set: users only.
+  (%with-migrated (c (list (%users-migration)))
+    (let ((err (handler-case (progn (auth:make-db-auth c :dialect :sqlite) nil)
+                 (auth:missing-role-log (e) e))))
+      (is (typep err 'auth:missing-role-log) "expected MISSING-ROLE-LOG, got ~S" err)
+      (when err
+        (is (string= "hyperion_role_events" (auth:missing-role-log-table err)))
+        (is (auth:missing-role-log-cause err) "the database's own error is kept")
+        (let ((report (princ-to-string err)))
+          (is (search "role-events-ddl" report) "the report names the migration's DDL")
+          (is (search "role-events-index-ddl" report) "and the index's"))))))
+
+(test require-role-log-nil-constructs-without-the-table
+  (%with-migrated (c (list (%users-migration)))
+    (is (typep (auth:make-db-auth c :dialect :sqlite :require-role-log nil) 'auth:db-auth))))
+
+(test ensure-still-creates-the-role-log
+  (let ((c (conn:connect (be:make-sqlite ":memory:"))))
+    (unwind-protect
+         (is (typep (auth:make-db-auth c :dialect :sqlite :ensure t) 'auth:db-auth))
+      (conn:disconnect c))))

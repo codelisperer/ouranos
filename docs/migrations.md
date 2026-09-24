@@ -92,11 +92,31 @@ that migrates behind the app's back:
 (be:make-migration "20260729_003_hyperion_users" "identity store"
                    (auth:users-ddl :dialect :sqlite)      ; store-less accessor
                    "DROP TABLE hyperion_users")
+(be:make-migration "20260729_004_hyperion_role_events" "role-change log"
+                   (auth:role-events-ddl :dialect :sqlite)
+                   "DROP TABLE hyperion_role_events")
+(be:make-migration "20260729_005_hyperion_role_events_index" "role-change log index"
+                   (auth:role-events-index-ddl)
+                   "DROP INDEX idx_hyperion_role_events_user_at")
 ```
+
+`hyperion/auth-db` owns two tables. `hyperion_users` holds the accounts. `hyperion_role_events`
+is the append-only log that `grant-role` and `revoke-role` write on every call, and its
+`(user_id, at)` index serves "this account's history". `make-db-auth` checks at construction
+that the log can be read, and signals `missing-role-log`, naming the migration above, if it
+cannot, so a missing migration shows at boot rather than the first time an operator changes a
+role. An app that never changes roles can pass `:require-role-log nil` instead.
 
 `hyperion/auth-db:users-ddl` is the reference for this pattern. **Any aux system that owns
 a table should provide one**: the app's timeline stays the single source of truth for what
 exists in its database, and `schema_migrations` stays an honest record.
+
+**Adding a table to an aux system is a breaking change for an app that owns its timeline**,
+even when no function's signature changes. The app has to add a migration, and nothing in its
+build tells it so. An aux system that adds a table should therefore export its DDL, check for
+the table where it is first needed and name the migration in the error, and say so in this
+section. `hyperion_role_events` was added without the check and was found in an admin screen
+at run time (#139).
 
 The convenience path (`:ensure t`, which creates tables on connect) is for tests and quick
 starts. An app that owns migrations should not use it — two things creating tables is how

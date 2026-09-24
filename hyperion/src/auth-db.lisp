@@ -39,7 +39,8 @@
            #:role-update-conflict #:role-update-conflict-id
            #:role-update-conflict-attempts
            ;; pre-publication issue 166: the append-only role-change log.
-           #:role-history #:role-events-ddl #:events-table #:*events-table*
+           #:role-history #:role-events-ddl #:role-events-index-ddl #:events-table #:*events-table*
+           #:missing-role-log #:missing-role-log-table #:missing-role-log-cause
            #:missing-actor #:missing-actor-operation))
 (in-package #:hyperion/auth-db)
 
@@ -101,9 +102,17 @@
   (:documentation "An identity store over a mnemosyne connection (one connection, locked)."))
 
 (defun make-db-auth (connection &key (dialect :sqlite) (table *table*)
-                                     (events-table *events-table*) ensure known-roles)
+                                     (events-table *events-table*) ensure known-roles
+                                     (require-role-log t))
   "An identity store over an open mnemosyne CONNECTION. DIALECT is :sqlite or :postgres.
-With :ENSURE, create the users table + unique email index.
+With :ENSURE, create the users table, its unique email index, and the role-event log.
+
+THE ROLE-EVENT LOG IS CHECKED HERE, at construction (#139). GRANT-ROLE and REVOKE-ROLE write
+to it on every call, so a store without it fails the first time an operator changes a role,
+in an admin screen, long after boot. An app that owns its migration timeline creates it with
+ROLE-EVENTS-DDL and ROLE-EVENTS-INDEX-DDL (docs/migrations.md, section 5); if it has not,
+this signals MISSING-ROLE-LOG naming that migration. Pass :REQUIRE-ROLE-LOG NIL only for an
+app that never grants or revokes a role, and so deliberately runs without the table.
 
 KNOWN-ROLES is an optional vocabulary: when NIL (the default) any keyword is accepted, which
 is the historical behaviour and means a typo like :MODERATER is stored happily and silently
@@ -114,7 +123,38 @@ framework does not know an application's vocabulary and existing callers must ke
                                        :events-table events-table
                                        :known-roles known-roles)))
     (when ensure (ensure-schema store))
+    (when require-role-log (%check-role-log store))
     store))
+
+(define-condition missing-role-log (error)
+  ((table :initarg :table :reader missing-role-log-table)
+   (dialect :initarg :dialect :reader missing-role-log-dialect)
+   (cause :initarg :cause :initform nil :reader missing-role-log-cause))
+  (:report
+   (lambda (c s)
+     (format s "hyperion/auth-db: the role-event log table ~A could not be read (~A).~%"
+             (missing-role-log-table c) (missing-role-log-cause c))
+     (format s "~%GRANT-ROLE and REVOKE-ROLE write to it on every call, so without it the first role change~%")
+     (format s "fails at run time. Add a migration to your timeline that creates it:~%~%")
+     (format s "  (be:make-migration \"<your-id>_hyperion_role_events\" \"role-change log\"~%")
+     (format s "                     (auth:role-events-ddl :dialect ~S)~%" (missing-role-log-dialect c))
+     (format s "                     \"DROP TABLE ~A\")~%" (missing-role-log-table c))
+     (format s "  (be:make-migration \"<your-id>_hyperion_role_events_index\" \"role-change log index\"~%")
+     (format s "                     (auth:role-events-index-ddl)~%")
+     (format s "                     \"DROP INDEX idx_~A_user_at\")~%" (missing-role-log-table c))
+     (format s "~%See docs/migrations.md, section 5. An app that never changes roles can pass~%")
+     (format s ":REQUIRE-ROLE-LOG NIL to MAKE-DB-AUTH instead.~%")))
+  (:documentation
+   "Signalled by MAKE-DB-AUTH when the role-event log table cannot be read (#139). CAUSE is the
+database's own error. The report names the migration that creates the table."))
+
+(defun %check-role-log (store)
+  "Signal MISSING-ROLE-LOG unless STORE's role-event table can be read. A query that returns no
+rows, so it costs one round trip and reads nothing."
+  (handler-case
+      (conn:query (conn store) (format nil "SELECT 1 FROM ~A WHERE 1 = 0" (events-table store)))
+    (error (e)
+      (error 'missing-role-log :table (events-table store) :dialect (dialect store) :cause e))))
 
 (defun users-ddl (&key (dialect :sqlite))
   "The CREATE TABLE SQL for the users table under DIALECT, **store-less** -- so a consuming
@@ -135,6 +175,12 @@ ENSURE-SCHEMA); an app owning its migrations adds that as its own step."
   "CREATE TABLE DDL for the append-only role-change log (pre-publication issue 166)."
   (schema:schema-ddl (schema:find-schema 'hyperion-role-event) :dialect dialect))
 
+(defun role-events-index-ddl (&key (table *events-table*))
+  "CREATE INDEX DDL for the role-event log, store-less like ROLE-EVENTS-DDL, so an app that owns
+its migrations can add it as its own step. Indexed by (user_id, at) because the question is
+always \"this account's history\", ordered."
+  (format nil "CREATE INDEX IF NOT EXISTS idx_~A_user_at ON ~A (user_id, at)" table table))
+
 (defun ensure-schema (store)
   "Create the users table, its unique email index, and the role-event log if absent.
 Returns STORE."
@@ -143,11 +189,8 @@ Returns STORE."
              (format nil "CREATE UNIQUE INDEX IF NOT EXISTS idx_~A_email ON ~A (email)"
                      (table store) (table store)))
   (conn:exec (conn store) (role-events-ddl :dialect (dialect store)))
-  ;; Indexed by (user_id, at) because the question is always "this account's history",
-  ;; ordered -- never "every role event ever", which is why there is no index on `at' alone.
-  (conn:exec (conn store)
-             (format nil "CREATE INDEX IF NOT EXISTS idx_~A_user_at ON ~A (user_id, at)"
-                     (events-table store) (events-table store)))
+  ;; Never an index on `at' alone: the question is never "every role event ever".
+  (conn:exec (conn store) (role-events-index-ddl :table (events-table store)))
   store)
 
 ;;; --- passwords (pure; PBKDF2 self-describing combined string) --------------
