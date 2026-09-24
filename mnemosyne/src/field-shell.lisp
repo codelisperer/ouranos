@@ -45,12 +45,7 @@ written out again, because a hand-kept second list is how the two come to disagr
    (support :initarg :support :reader unsupported-field-type-support))
   (:report
    (lambda (c s)
-     (format s "mnemosyne: backend ~A cannot store ~@[field ~A of ~]type ~A (~A).~%~%~
-Refusing at migration time is the DEFAULT this protocol chose, because the alternative~%~
-default is silence -- and silence is what the substrate gives: SQLite accepts a column type~%~
-it has never heard of and stores it with NUMERIC affinity, so the app finds out never.~%~
-~:[~;~%Emulation is opt-in at the declaration site and that opt-in is not implemented yet~%~
-(pre-publication issue 212); until it is, an emulated type is refused here rather than emulated silently.~%~]"
+     (format s "mnemosyne: backend ~A cannot store ~@[field ~A of ~]type ~A (~A).~%~%Refusing at migration time is the DEFAULT this protocol chose, because the alternative~%default is silence -- and silence is what the substrate gives: SQLite accepts a column type~%it has never heard of and stores it with NUMERIC affinity, so the app finds out never.~%~:[~;~%Emulation is opt-in at the declaration site and that opt-in is not implemented yet~%(pre-publication issue 212); until it is, an emulated type is refused here rather than emulated silently.~%~]"
              (unsupported-field-type-backend c)
              (unsupported-field-type-field c)
              (unsupported-field-type-type c)

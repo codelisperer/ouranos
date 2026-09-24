@@ -544,10 +544,7 @@ nobody greps."
 The row shape is the real one, prose and all -- including an issue reference in the prose,
 because %REPLACE-LAST-INTEGER exists to not be fooled by it. A row without one would be a
 fixture easier than production."
-  (format nil "# Fixture~%~%| framework | where it is | checks |~%|---|---|---|~%~
-| **aion** | **mixed** -- `aion/log` and `aion/csv` are real; the collections core *(in progress)* (pre-publication issue 172) | ~D |~%~
-| **cons** | **alpha** -- the bootstrap seed and the task runner work | ~D |~%~%~
-Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own image.~%"
+  (format nil "# Fixture~%~%| framework | where it is | checks |~%|---|---|---|~%| **aion** | **mixed** -- `aion/log` and `aion/csv` are real; the collections core *(in progress)* (pre-publication issue 172) | ~D |~%| **cons** | **alpha** -- the bootstrap seed and the task runner work | ~D |~%~%Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own image.~%"
           aion cons-checks))
 
 (defun %fixture-log (aion cons-checks &key (host "linux") (sha "deadbee"))
@@ -556,16 +553,7 @@ Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own 
 Built rather than captured because a captured log is 5000 lines of another tree's numbers,
 and every line this checker reads is here. The formats are verify-tree's own -- `ok' suite
 rows, the PLATFORM banner, the SUMMARY block and the verdict."
-  (format nil "========== SUITES (each in its own image) ==========~%~
-  ok      AION/TESTS              ~D checks~%~
-  ok      CONS/TESTS              ~D checks~%~%~
-========== PLATFORM (host: ~A) ==========~%~%~
-========== SUMMARY ==========~%~
-commit: ~A~%~
-total checks executed: ~D (axes: base+uv+view)~%~
-axes: base+uv+view~%~
-axes-declined: none~%~%~
-VERDICT: PASS~%"
+  (format nil "========== SUITES (each in its own image) ==========~%ok      AION/TESTS              ~D checks~%ok      CONS/TESTS              ~D checks~%~%========== PLATFORM (host: ~A) ==========~%~%========== SUMMARY ==========~%commit: ~A~%total checks executed: ~D (axes: base+uv+view)~%axes: base+uv+view~%axes-declined: none~%~%VERDICT: PASS~%"
           aion cons-checks host sha (+ aion cons-checks)))
 
 (defun %readme-fixture-tree (aion cons-checks)

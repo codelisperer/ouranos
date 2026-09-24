@@ -196,11 +196,7 @@ failed' are different events and a caller needs to be able to handle one without
   ((tool :initarg :tool :reader structured-result-not-called-tool))
   (:report
    (lambda (c s)
-     (format s "The model did not call ~S, although it was required to.~%~%~
-This is not the same failure as bad arguments: the provider accepted a forced tool choice ~
-and then returned something else, so either the provider did not honour it or the reply was ~
-not what it claimed. Returning the model's prose here would hand a caller expecting a record ~
-a paragraph instead."
+     (format s "The model did not call ~S, although it was required to.~%~%This is not the same failure as bad arguments: the provider accepted a forced tool choice and then returned something else, so either the provider did not honour it or the reply was not what it claimed. Returning the model's prose here would hand a caller expecting a record a paragraph instead."
              (structured-result-not-called-tool c))))
   (:documentation "A forced tool choice produced a reply with no call to that tool."))
 
@@ -208,8 +204,7 @@ a paragraph instead."
 
 (defun %repair-message (problems)
   "The message appended when re-asking. Names every problem, in the model's own terms."
-  (format nil "The previous call was rejected for these reasons:~%~{- ~A~%~}~
-Call the tool again with corrected arguments. Change only what is listed."
+  (format nil "The previous call was rejected for these reasons:~%~{- ~A~%~}Call the tool again with corrected arguments. Change only what is listed."
           problems))
 
 (defun %find-call (completion name)

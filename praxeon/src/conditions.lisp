@@ -61,10 +61,7 @@
    (requested :initarg :requested :initform nil :reader tool-choice-unsupported-requested))
   (:report
    (lambda (c s)
-     (format s "~A cannot honour the tool choice ~S.~%~%~
-This is signalled rather than falling back to :auto on purpose. A caller that forced a tool ~
-is about to treat the reply as a record; letting the model answer freely instead returns ~
-prose, and nothing downstream can tell the difference until it is stored."
+     (format s "~A cannot honour the tool choice ~S.~%~%This is signalled rather than falling back to :auto on purpose. A caller that forced a tool is about to treat the reply as a record; letting the model answer freely instead returns prose, and nothing downstream can tell the difference until it is stored."
              (or (tool-choice-unsupported-provider c) "This provider")
              (tool-choice-unsupported-requested c))))
   (:documentation "Signalled when a forced TOOL-CHOICE reaches a provider that cannot do it."))

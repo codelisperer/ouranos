@@ -226,13 +226,7 @@ server and record the error. Returns :reloaded / :no-change / :error."
              ;; meet "X is not of type X" with nothing to connect it to.
              (when redefined
                (format *error-output*
-                       "~&[dev] REDEFINED TYPE~P: ~{~A~^ ~}~%~
-                        [dev]   dependents were NOT recompiled -- this image now holds two ~
-                        layouts for the same type.~%~
-                        [dev]   if you see \"the value #S(...) is not of type ...\", that is ~
-                        this: restart, or ql:quickload the system.~%~
-                        [dev]   it also SELF-HEALS once the last dependent is recompiled, ~
-                        which is why it looks intermittent.~%"
+                       "~&[dev] REDEFINED TYPE~P: ~{~A~^ ~}~%[dev]   dependents were NOT recompiled -- this image now holds two layouts for the same type.~%[dev]   if you see \"the value #S(...) is not of type ...\", that is this: restart, or ql:quickload the system.~%[dev]   it also SELF-HEALS once the last dependent is recompiled, which is why it looks intermittent.~%"
                        (length redefined) redefined)
                (finish-output *error-output*))
              (cond
@@ -421,9 +415,7 @@ Returns the dev handle; stop with UNWATCH."
         (unless (some #'%lisp-file-p
                       (%watched-files (list r) :excluded-dirs exclude-directories
                                                :excluded-types exclude-types))
-          (warn "hyperion/dev: watching ~A, which contains no .lisp files.~%~
-                 If your sources are elsewhere, pass :PATHS -- the watcher will otherwise ~
-                 run and never fire." (namestring r))))
+          (warn "hyperion/dev: watching ~A, which contains no .lisp files.~%If your sources are elsewhere, pass :PATHS -- the watcher will otherwise run and never fire." (namestring r))))
       d)))
 
 (defun unwatch (&optional (d *dev*))
@@ -520,15 +512,7 @@ fine and had no way to say so."
   (list 500
         '(:content-type "text/html; charset=utf-8")
         (list
-         (format nil "<!doctype html>~
-<html><head><meta charset=\"utf-8\"><title>Application error (dev)</title>~
-<style>body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;~
-padding:2rem;background:#1c1b22;color:#e8e6e3}h1{font-size:1rem;color:#ff7b72;~
-margin:0 0 1rem}pre{white-space:pre-wrap;word-break:break-word;background:#26252d;~
-padding:1rem;border-radius:6px;overflow-x:auto}p{color:#9b9aa3}</style></head>~
-<body><h1>~A</h1><pre>~A</pre>~@[<pre>~A</pre>~]~
-<p>hyperion/dev — this page polls for reloads, so fixing the error refreshes it.</p>~
-~A</body></html>"
+         (format nil "<!doctype html><html><head><meta charset=\"utf-8\"><title>Application error (dev)</title><style>body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;padding:2rem;background:#1c1b22;color:#e8e6e3}h1{font-size:1rem;color:#ff7b72;margin:0 0 1rem}pre{white-space:pre-wrap;word-break:break-word;background:#26252d;padding:1rem;border-radius:6px;overflow-x:auto}p{color:#9b9aa3}</style></head><body><h1>~A</h1><pre>~A</pre>~@[<pre>~A</pre>~]<p>hyperion/dev — this page polls for reloads, so fixing the error refreshes it.</p>~A</body></html>"
                  (%escape-html (string (type-of condition)))
                  (%escape-html (princ-to-string condition))
                  (and trace (plusp (length trace)) (%escape-html trace))

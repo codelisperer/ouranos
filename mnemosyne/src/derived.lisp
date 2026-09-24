@@ -31,10 +31,7 @@
   ()
   (:report (lambda (c s)
              (declare (ignore c))
-             (format s "mnemosyne/derived: CONTENT-FINGERPRINT needs a :HASH function.~%~
-There is deliberately no default: a fingerprint function is a compatibility promise, and two ~
-consumers that disagree about the hash disagree about staleness without either noticing. Pass ~
-your own -- ironclad's sha256 over the framed octets is the usual choice (ADR-0002).")))
+             (format s "mnemosyne/derived: CONTENT-FINGERPRINT needs a :HASH function.~%There is deliberately no default: a fingerprint function is a compatibility promise, and two consumers that disagree about the hash disagree about staleness without either noticing. Pass your own -- ironclad's sha256 over the framed octets is the usual choice (ADR-0002).")))
   (:documentation
    "Signalled when CONTENT-FINGERPRINT is called without a hash function. Its own condition
 rather than a program error, because the absence is a decision a reader needs explained."))
