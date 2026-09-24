@@ -36,7 +36,8 @@
   be absent on a user's machine and present on yours.
 
 .PARAMETER Control
-  Hide the provisioned sqlite3.dll and require this harness to FAIL. A clean-machine test
+  Hide the provisioned SQLite DLLs (libsqlite3.dll and sqlite3.dll) and require this
+  harness to FAIL. A clean-machine test
   that has never been shown to fail is indistinguishable from one that cannot.
 
 .PARAMETER KeepWork
@@ -93,7 +94,7 @@ Info 'pre-publication issue 230 -- would this tree load on a Windows machine wit
 Note "tree        : $Root"
 Note "sbcl        : $Sbcl"
 Note "clean PATH  : $CleanPath"
-Note ("mode        : " + $(if ($Control) { 'CONTROL -- the provisioned sqlite3.dll is hidden and this run MUST fail' } else { 'normal' }))
+Note ("mode        : " + $(if ($Control) { 'CONTROL -- the provisioned SQLite DLLs are hidden and this run MUST fail' } else { 'normal' }))
 
 # ---------------------------------------------------------------------------
 # where a name resolves, and what put it there
@@ -141,16 +142,23 @@ function Get-LibraryOrigin {
 # the run
 # ---------------------------------------------------------------------------
 
-$hidden = $null
+# BOTH names are hidden. setup.ps1 installs the pinned DLL as libsqlite3.dll and as
+# sqlite3.dll (#239), and cl-sqlite loads either, so hiding one leaves the other to load and
+# the control would pass for the wrong reason.
+$hidden = @()
 if ($Control) {
-  $dll = Join-Path $SbclDir 'sqlite3.dll'
-  if (-not (Test-Path -LiteralPath $dll)) {
-    Write-Host "ERROR: -Control needs the provisioned sqlite3.dll to hide; run scripts/setup.ps1" -ForegroundColor Red
+  $dlls = @(@('libsqlite3.dll', 'sqlite3.dll') | ForEach-Object { Join-Path $SbclDir $_ } |
+              Where-Object { Test-Path -LiteralPath $_ })
+  if ($dlls.Count -eq 0) {
+    Write-Host "ERROR: -Control needs a provisioned SQLite DLL beside sbcl.exe to hide; run scripts/setup.ps1" -ForegroundColor Red
     exit 2
   }
-  $hidden = "$dll.hidden-by-clean-machine-control"
-  Move-Item -LiteralPath $dll -Destination $hidden -Force
-  Note "hid $dll"
+  foreach ($dll in $dlls) {
+    $h = "$dll.hidden-by-clean-machine-control"
+    Move-Item -LiteralPath $dll -Destination $h -Force
+    $hidden += [pscustomobject]@{ From = $dll; To = $h }
+    Note "hid $dll"
+  }
 }
 
 try {
@@ -163,7 +171,11 @@ try {
   # A WARN about an unprovisioned sqlite3.dll is a finding here even though -Check tolerates
   # it: that is the whole of pre-publication issue 229, and this harness exists to stop tolerating it.
   if ($check | Select-String -Pattern 'NOT provisioned by setup.ps1' -Quiet) {
-    Fail 'sqlite3.dll on this machine comes from somewhere setup.ps1 did not put it'
+    Fail 'the SQLite DLL on this machine comes from somewhere setup.ps1 did not put it'
+  }
+  # The same finding when setup.ps1 did provision a copy but a different file loads first (#239).
+  if ($check | Select-String -Pattern 'provisioned by setup.ps1, but loaded from elsewhere' -SimpleMatch -Quiet) {
+    Fail 'setup.ps1 provisioned SQLite, but the DLL that loads is a different file'
   }
 
   # --- 2. load the tree, with the loader restricted -------------------------
@@ -213,7 +225,7 @@ try {
     }
   }
 } finally {
-  if ($hidden) { Move-Item -LiteralPath $hidden -Destination (Join-Path $SbclDir 'sqlite3.dll') -Force }
+  foreach ($h in $hidden) { Move-Item -LiteralPath $h.To -Destination $h.From -Force }
   if ($KeepWork) { Note "work kept at $Work" } else { Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue }
 }
 
@@ -222,11 +234,11 @@ try {
 Write-Host ''
 if ($Control) {
   if ($script:Failures.Count -eq 0) {
-    Write-Host 'CONTROL FAILED: the harness passed with the provisioned sqlite3.dll hidden.' -ForegroundColor Red
+    Write-Host 'CONTROL FAILED: the harness passed with the provisioned SQLite DLLs hidden.' -ForegroundColor Red
     Write-Host '  It cannot fail, so its green runs mean nothing.' -ForegroundColor Red
     exit 1
   }
-  Info "CONTROL PASSED: $($script:Failures.Count) failure(s) with sqlite3.dll hidden:"
+  Info "CONTROL PASSED: $($script:Failures.Count) failure(s) with the SQLite DLLs hidden:"
   $script:Failures | ForEach-Object { Note "- $_" }
   exit 0
 }
