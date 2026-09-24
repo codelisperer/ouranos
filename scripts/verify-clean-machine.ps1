@@ -90,9 +90,16 @@ $Sbcl = $sbclCmd.Source
 $SbclDir = Split-Path -Parent $Sbcl
 $Sys32 = Join-Path $env:WINDIR 'System32'
 
-# PATH = SBCL + System32 + WINDIR, and nothing else. Not a clean machine -- a clean LOADER
-# ENVIRONMENT, which is the part that decides whether a user can run what we ship.
-$CleanPath = "$SbclDir;$Sys32;$env:WINDIR"
+# setup.ps1's SQLite fallback directory, used when it cannot write beside sbcl.exe; it puts
+# that directory on the user PATH, so a machine provisioned that way has it there (#267).
+# Must match Get-SqliteFallbackDir in setup.ps1.
+$SqliteFallbackDir = Join-Path $env:LOCALAPPDATA 'Ouranos\lib'
+$HasFallback = Test-Path -LiteralPath $SqliteFallbackDir
+
+# PATH = SBCL + System32 + WINDIR, plus setup.ps1's fallback directory when it exists, and
+# nothing else. Not a clean machine -- a clean LOADER ENVIRONMENT, which is the part that
+# decides whether a user can run what we ship.
+$CleanPath = "$SbclDir;$Sys32;$env:WINDIR" + $(if ($HasFallback) { ";$SqliteFallbackDir" } else { '' })
 
 $Work = Join-Path $env:TEMP "ouranos-clean-$PID"
 if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }
@@ -112,7 +119,7 @@ function Resolve-OnCleanPath {
   param([string]$Name)
   # The loader's own order: the executable's directory first, then System32, then the rest
   # of PATH. Everything this tree runs is sbcl.exe or an image dumped beside its libraries.
-  foreach ($d in @($SbclDir, $Sys32, $env:WINDIR)) {
+  foreach ($d in @(@($SbclDir, $Sys32, $env:WINDIR) + $(if ($HasFallback) { @($SqliteFallbackDir) } else { @() }))) {
     $p = Join-Path $d $Name
     if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) { return $p }
   }
@@ -125,6 +132,9 @@ function Get-LibraryOrigin {
   $dir = (Split-Path -Parent $Path).TrimEnd('\')
   if ($dir -ieq $SbclDir.TrimEnd('\')) {
     return [pscustomobject]@{ Kind = 'PROVISIONED'; Detail = 'beside sbcl.exe' }
+  }
+  if ($HasFallback -and $dir -ieq $SqliteFallbackDir.TrimEnd('\')) {
+    return [pscustomobject]@{ Kind = 'PROVISIONED'; Detail = "setup.ps1's fallback directory (#267)" }
   }
   if ($Path -like "$Root\vendor\*") {
     return [pscustomobject]@{ Kind = 'PROVISIONED'; Detail = "the tree's vendor/" }
