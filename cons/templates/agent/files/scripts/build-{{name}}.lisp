@@ -10,8 +10,15 @@
 (ql:quickload "{{name}}")
 
 (ensure-directories-exist "bin/")
+;; UIOP's dump hook runs before the dump, and its restore hook runs first when the binary
+;; starts. Without them the binary keeps this machine's temporary directory and fasl cache:
+;; built on a CI runner, it looks for the runner's temp directory on a user's machine and
+;; fails where it needs one (measured on the framework's issue #107).
+(uiop:call-image-dump-hook)
 ;; Add :compression t if this SBCL was built with core compression (smaller binary).
 (sb-ext:save-lisp-and-die
  "bin/{{name}}"
  :executable t
- :toplevel #'{{name}}:main)
+ :toplevel (lambda ()
+             (uiop:call-image-restore-hook)
+             ({{name}}:main)))
