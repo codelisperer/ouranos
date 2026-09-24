@@ -172,37 +172,78 @@ reach for it; it is present on every Windows and costs nothing if unused.")
 
 ;;; -------------------------------------------------------------------- helpers
 
+(defparameter *command-timeout* 600
+  "Seconds any external command may run before it is stopped, unless its call gives its own
+limit. A command that hangs then fails in minutes, naming itself, rather than as a CI job
+cancelled at its own limit with nothing said about which command it was waiting for. That
+is what #273's first Windows run did: tar ran for 38 minutes until the job's 40-minute limit
+killed everything.")
+
+(defun %describe (command)
+  "COMMAND for a message: its first few words, whether it is a list or a cmd.exe string."
+  (let ((text (if (stringp command) command (format nil "~{~A~^ ~}" command))))
+    (if (> (length text) 160) (concatenate 'string (subseq text 0 160) " ...") text)))
+
+(defun %run-bounded (command &key directory capture (timeout *command-timeout*)
+                                  ignore-error-status)
+  "Run COMMAND -- a list, or a string that cmd.exe runs -- and return (values OUTPUT CODE).
+OUTPUT is its standard output as a string when CAPTURE is true, trailing whitespace removed,
+and NIL otherwise, when the output goes straight to ours. Signals if it exits non-zero, unless
+IGNORE-ERROR-STATUS, and if it has not finished within TIMEOUT seconds, after stopping it.
+
+Captured output goes through a temporary file, not a pipe, so the wait below cannot deadlock
+against a child blocked on a full pipe. Standard input is the null device, so a child that
+reads it gets end-of-file rather than waiting. On Windows, stopping a cmd.exe string stops
+cmd.exe; a child it started may outlive it, but the build has already failed by then."
+  (uiop:with-temporary-file (:pathname out :type "txt")
+    (let ((process (uiop:launch-program command :directory directory :input nil
+                                                :output (if capture out :interactive)
+                                                :if-output-exists :supersede
+                                                :error-output :interactive))
+          (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+      (loop while (uiop:process-alive-p process)
+            do (when (> (get-internal-real-time) deadline)
+                 (ignore-errors (uiop:terminate-process process :urgent t))
+                 (error "This command did not finish within ~D seconds and was stopped:~%  ~A"
+                        timeout (%describe command)))
+               (sleep 0.1))
+      (let ((code (uiop:wait-process process)))
+        (unless (or ignore-error-status (eql code 0))
+          (error "This command exited with code ~A:~%  ~A" code (%describe command)))
+        (values (when capture
+                  (string-right-trim '(#\Space #\Tab #\Return #\Newline)
+                                     (uiop:read-file-string out :external-format :latin-1)))
+                code)))))
+
 (defun which (&rest candidates)
   "First of CANDIDATES on PATH, or NIL. `where' on Windows, `command -v' elsewhere --
 there is no sh on a stock Windows, which is the same split build-libuv.lisp makes."
   (dolist (c candidates)
     (let ((found (ignore-errors
-                  (uiop:run-program (if (uiop:os-windows-p)
-                                        (list "where" c)
-                                        (list "sh" "-c" (format nil "command -v ~A" c)))
-                                    :output '(:string :stripped t)
-                                    :ignore-error-status t))))
+                  (%run-bounded (if (uiop:os-windows-p)
+                                    (list "where" c)
+                                    (list "sh" "-c" (format nil "command -v ~A" c)))
+                                :capture t :ignore-error-status t :timeout 30))))
       (when (and found (plusp (length found))) (return c)))))
 
-(defun run (program args)
+(defun run (program args &key (timeout *command-timeout*))
   (format t "~&  ~A ~{~A~^ ~}~%" program (if (> (length args) 6)
                                              (append (subseq args 0 6) (list "...")) args))
   (finish-output)
-  (uiop:run-program (cons program args) :output t :error-output t))
+  (%run-bounded (cons program args) :timeout timeout))
 
 (defun sha256-of (file)
   (flet ((first-word (s) (subseq s 0 (or (position #\Space s) (length s)))))
     (cond
       ((which "sha256sum")
-       (first-word (uiop:run-program (list "sha256sum" (namestring file))
-                                     :output '(:string :stripped t))))
+       (first-word (%run-bounded (list "sha256sum" (namestring file)) :capture t :timeout 120)))
       ((which "shasum")
-       (first-word (uiop:run-program (list "shasum" "-a" "256" (namestring file))
-                                     :output '(:string :stripped t))))
+       (first-word (%run-bounded (list "shasum" "-a" "256" (namestring file))
+                                 :capture t :timeout 120)))
       ((and (uiop:os-windows-p) (which "certutil"))
        ;; certutil prints a banner, the hex on line 2, then a trailer.
-       (let* ((out (uiop:run-program (list "certutil" "-hashfile" (namestring file) "SHA256")
-                                     :output '(:string :stripped t)))
+       (let* ((out (%run-bounded (list "certutil" "-hashfile" (namestring file) "SHA256")
+                                 :capture t :timeout 120))
               (lines (uiop:split-string out :separator '(#\Newline))))
          (string-downcase (remove #\Space (or (second lines) "")))))
       (t (error "No sha256 tool found (looked for sha256sum, shasum, certutil).")))))
@@ -258,9 +299,25 @@ escape the closing quote, which is how a path with a space in it silently become
         (error "mbedTLS tarball checksum mismatch.~%  expected ~A~%  actual   ~A~%The tarball has been deleted. Either upstream was substituted, or mbedtls.pin is stale."
                expected-sha actual)))
     (format t "~&  sha256 ok~%")
-    (run "tar" (list "xjf" (namestring tarball) "-C"
-                     (namestring (merge-pathnames "src/" *vendor*))))
+    ;; WHICH tar, and what it can decompress, printed before it runs. On Windows it is the
+    ;; bsdtar in System32, by absolute path, so a GNU tar earlier on PATH (Git's, which reads
+    ;; "D:/..." as a remote host) cannot be picked up instead.
+    (let ((tar (tar-program)))
+      (format t "~&  ~A~%"
+              (or (ignore-errors (%run-bounded (list tar "--version") :capture t :timeout 30))
+                  "(tar --version printed nothing)"))
+      (run tar (list "xjf" (namestring tarball) "-C"
+                     (namestring (merge-pathnames "src/" *vendor*)))
+           :timeout 600))
     srcdir))
+
+(defun tar-program ()
+  (if (uiop:os-windows-p)
+      (let ((system32 (merge-pathnames "System32/tar.exe"
+                                       (uiop:ensure-directory-pathname
+                                        (or (uiop:getenv "SystemRoot") "C:\\Windows")))))
+        (if (probe-file system32) (uiop:native-namestring system32) "tar"))
+      "tar"))
 
 (defun verify-sources (srcdir)
   "Refuse to build a source set that is not the set mbedtls.sources records.
@@ -274,10 +331,10 @@ more file under tf-psa-crypto/ than 4.2.0.
 mbedtls-sources.lisp also checks the manifest against mbedtls.pin's sources-count and
 sources-digest, so a stale pin fails here too rather than in a reader's head."
   (let ((script (merge-pathnames "scripts/mbedtls-sources.lisp" *root*)))
-    (multiple-value-bind (out err code)
-        (uiop:run-program (list "sbcl" "--script" (namestring script) (namestring srcdir))
-                          :output t :error-output t :ignore-error-status t)
-      (declare (ignore out err))
+    (multiple-value-bind (out code)
+        (%run-bounded (list "sbcl" "--script" (namestring script) (namestring srcdir))
+                      :ignore-error-status t :timeout 300)
+      (declare (ignore out))
       (unless (zerop code)
         (error "The mbedTLS source set does not match mbedtls.sources. See above.")))))
 
@@ -328,11 +385,12 @@ carrying only the .NET workload answers vswhere but cannot compile this."
     (when vswhere
       (let* ((path (string-trim
                     '(#\Space #\Tab #\Newline #\Return)
-                    (uiop:run-program
-                     (list (namestring vswhere) "-latest" "-products" "*"
-                           "-requires" "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
-                           "-property" "installationPath")
-                     :output '(:string :stripped t) :ignore-error-status t)))
+                    (or (%run-bounded
+                         (list (namestring vswhere) "-latest" "-products" "*"
+                               "-requires" "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+                               "-property" "installationPath")
+                         :capture t :ignore-error-status t :timeout 60)
+                        "")))
              (install (when (plusp (length path)) (uiop:ensure-directory-pathname path))))
         (when install
           (probe-file (merge-pathnames "VC/Auxiliary/Build/vcvarsall.bat" install)))))))
@@ -362,10 +420,11 @@ vswhere.exe by bare name and prints `'vswhere.exe' is not recognized' when it is
             (vcvarsall-arch)
             inner)))
 
-(defun %msvc-run (inner &key (output t))
-  (uiop:run-program (msvc-command inner) :directory *vendor*
-                                         :output output :error-output t
-                                         :ignore-error-status t))
+(defun %msvc-run (inner &key capture (timeout *command-timeout*))
+  "INNER in the MSVC environment, from vendor/mbedtls/. Returns (values OUTPUT CODE), OUTPUT
+only when CAPTURE is true."
+  (%run-bounded (msvc-command inner) :directory *vendor* :capture capture
+                                     :ignore-error-status t :timeout timeout))
 
 (defun %write-response-file (path lines)
   ;; Response file rather than a command line: 110 absolute source paths plus flags runs to
@@ -393,8 +452,7 @@ and for one merely referenced, SECT3 reads UNDEF. We take External + not-UNDEF, 
 the prefixes in *EXPORT-PREFIXES* so we are not exporting the CRT's symbols along with ours.
 A 32-bit build decorates cdecl names with a leading underscore; a .def wants the
 undecorated name, so one is stripped if present."
-  (let ((out (nth-value 0 (%msvc-run "dumpbin /nologo /symbols obj\\*.obj"
-                                     :output '(:string :stripped t))))
+  (let ((out (%msvc-run "dumpbin /nologo /symbols obj\\*.obj" :capture t :timeout 300))
         (seen (make-hash-table :test #'equal))
         (names '()))
     (with-input-from-string (in (or out ""))
@@ -452,7 +510,9 @@ has one, for the reason in the header."
     (format t "~&  compiling ~D sources and ouranos_tls.c with MSVC cl.exe (~A)~%"
             (length sources) (vcvarsall-arch))
     (finish-output)
-    (let ((code (nth-value 2 (%msvc-run "cl @msvc-compile.rsp"))))
+    ;; 111 files, one cl.exe, no /MP: the slowest step on the slowest leg, so it gets more
+    ;; than the default.
+    (let ((code (nth-value 1 (%msvc-run "cl @msvc-compile.rsp" :timeout 1800))))
       (unless (zerop code)
         (error "cl.exe failed with exit code ~D (arguments in vendor/mbedtls/msvc-compile.rsp)."
                code)))
@@ -463,7 +523,7 @@ has one, for the reason in the header."
                    (format nil "/OUT:lib\\~A" (output-name))
                    "obj\\*.obj")
              *windows-libs*))
-    (let ((code (nth-value 2 (%msvc-run "link @msvc-link.rsp"))))
+    (let ((code (nth-value 1 (%msvc-run "link @msvc-link.rsp"))))
       (unless (zerop code)
         (error "link.exe failed with exit code ~D (arguments in vendor/mbedtls/msvc-link.rsp)."
                code)))
@@ -514,9 +574,8 @@ The tools disagree, so this is per-platform rather than one command with a flag:
   Windows  dumpbin /exports, which is inside the toolchain environment, not on PATH."
   (flet ((lines (cmd)
            (let ((out (ignore-errors
-                       (uiop:run-program (list "sh" "-c" cmd)
-                                         :output '(:string :stripped t)
-                                         :ignore-error-status t))))
+                       (%run-bounded (list "sh" "-c" cmd)
+                                     :capture t :ignore-error-status t :timeout 120))))
              (when out (uiop:split-string out :separator '(#\Newline))))))
     (ecase (platform)
       (:linux
@@ -532,9 +591,9 @@ The tools disagree, so this is per-platform rather than one command with a flag:
              when (and name (plusp (length name)))
                collect (if (char= #\_ (char name 0)) (subseq name 1) name)))
       (:windows
-       (let ((out (nth-value 0 (%msvc-run (format nil "dumpbin /nologo /exports \"~A\""
-                                                  (uiop:native-namestring library))
-                                          :output '(:string :stripped t)))))
+       (let ((out (%msvc-run (format nil "dumpbin /nologo /exports \"~A\""
+                                     (uiop:native-namestring library))
+                             :capture t :timeout 300)))
          (when out
            (loop for l in (uiop:split-string out :separator '(#\Newline))
                  for fields = (remove "" (uiop:split-string
@@ -558,11 +617,10 @@ under the name it asks for, and that the entry points we are about to bind are i
       (error "The built library is implausibly small (~:D bytes)." size)))
   (when (eq (platform) :linux)
     (let ((soname (ignore-errors
-                   (uiop:run-program (list "sh" "-c"
-                                           (format nil "readelf -d ~A | grep -i soname"
-                                                   (uiop:native-namestring library)))
-                                     :output '(:string :stripped t)
-                                     :ignore-error-status t))))
+                   (%run-bounded (list "sh" "-c"
+                                       (format nil "readelf -d ~A | grep -i soname"
+                                               (uiop:native-namestring library)))
+                                 :capture t :ignore-error-status t :timeout 60))))
       (when (and soname (plusp (length soname)))
         (format t "  ~A~%" (string-trim '(#\Space #\Tab) soname))
         (unless (search (output-name) soname)
@@ -580,9 +638,9 @@ under the name it asks for, and that the entry points we are about to bind are i
   (when (eq (toolchain) :msvc)
     ;; The bundling claim, checked rather than asserted: a /MD build names vcruntime140.dll
     ;; here and dies on a clean machine, which is exactly ADR-0011's failure again.
-    (let ((deps (nth-value 0 (%msvc-run (format nil "dumpbin /nologo /dependents \"~A\""
-                                                (uiop:native-namestring library))
-                                        :output '(:string :stripped t)))))
+    (let ((deps (%msvc-run (format nil "dumpbin /nologo /dependents \"~A\""
+                                   (uiop:native-namestring library))
+                           :capture t :timeout 300)))
       (when deps
         (if (search "VCRUNTIME" (string-upcase deps))
             (error "The DLL depends on the VC++ runtime -- /MT did not take effect. It would fail on a clean machine.")
