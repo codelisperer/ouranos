@@ -21,13 +21,21 @@ separate repos with their own — not counted here.
 
 ## Headline
 
-- **25** ASDF systems defined across the six core frameworks + hermes (incl. `/tests`,
-  `/cli`, aux) — hermes adds 2 (`hermes`, `hermes/tests`).
-- **28** distinct **external** (third-party / Quicklisp) deps — 3 are foundation/test
+The three counts below are measured by `scripts/check-deps.lisp`, which fails when one of
+them is wrong (#118). Each sentence says what it counts. Everything else in these sentences,
+such as which frameworks carry which dependencies, is written by hand and is not checked.
+
+- **98** ASDF systems: every system defined in a `.asd` file git tracks, excluding the
+  `{{name}}` placeholders in the four `cons` templates. That includes `/tests`, `/cli` and aux
+  systems, the satellites (`hermes`, `klio`), the contacts example and `scripts/checkers.asd`.
+- **24** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
+  are counted on the next line). The tables below also document `hunchentoot`, `woo` and
+  `clack-handler-woo`, which no `.asd` in this tree names in a `:depends-on`, so they are not
+  in this count. Of the 24 — 3 are foundation/test
   (`coalton`, `alexandria`, `fiveam`), **~13 are hyperion's web stack**, **3 are the
   mnemosyne data layer** (CL-DBI + two drivers), and **2 arrived with hermes** (`cl-base64`,
   `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (pre-publication issue 164)). One (`lass`) is example-only.
-- **3** SBCL contribs (`sb-concurrency`, `sb-bsd-sockets`, `sb-posix` — ship with SBCL, zero install cost).
+- **3** SBCL contribs named in a `:depends-on` (`sb-concurrency`, `sb-bsd-sockets`, `sb-posix` — ship with SBCL, zero install cost).
 - Every framework **except hyperion and mnemosyne** (the two that inherently carry a
   surface — web, DB) runs on just **2–4** external libs (hermes, the integrations leaf, is
   the 4).
