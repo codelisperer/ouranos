@@ -996,14 +996,16 @@ Idempotent, and the only place a connection's handle is closed."
 
 (defun %linger (conn state)
   "Our half-close is done and the peer has not ended its side yet. Give it
-*KEEP-ALIVE-TIMEOUT-MS* to do so, then close regardless."
+*KEEP-ALIVE-TIMEOUT-MS* to do so, then close regardless. Does nothing for a connection
+already finished, whose timer %FINISH could no longer release."
   (%timer-release state)
-  (let ((timer (uv:make-timer (net:connection-loop conn)
-                              (lambda (tm)
-                                (declare (ignore tm))
-                                (%finish conn state)))))
-    (setf (conn-state-timer state) timer)
-    (ignore-errors (uv:start-timer timer :after *keep-alive-timeout-ms*))))
+  (unless (conn-state-closed state)
+    (let ((timer (uv:make-timer (net:connection-loop conn)
+                                (lambda (tm)
+                                  (declare (ignore tm))
+                                  (%finish conn state)))))
+      (setf (conn-state-timer state) timer)
+      (ignore-errors (uv:start-timer timer :after *keep-alive-timeout-ms*)))))
 
 (defun %shutdown (conn state)
   "Half-close CONN once its queued writes have gone out, then end it: at once if the peer has
@@ -1015,9 +1017,14 @@ already ended its side, otherwise when it does or after a grace period. Once onl
                             :on-complete (lambda (size)
                                            (declare (ignore size))
                                            (setf (conn-state-shutdown state) :done)
-                                           (if (conn-state-peer-ended state)
-                                               (%finish conn state)
-                                               (%linger conn state)))
+                                           ;; Already finished -- by STOP, or by an error
+                                           ;; while the shutdown was pending: nothing to
+                                           ;; wait for, and a linger timer made now would
+                                           ;; never be released.
+                                           (unless (conn-state-closed state)
+                                             (if (conn-state-peer-ended state)
+                                                 (%finish conn state)
+                                                 (%linger conn state))))
                             :on-error (lambda (e)
                                         (declare (ignore e))
                                         (%finish conn state)))
