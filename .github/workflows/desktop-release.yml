@@ -233,6 +233,25 @@ jobs:
         if: runner.os == 'Linux'
         run: ./scripts/verify-bundle.sh "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
 
+      # The Windows check (#78). Windows has no container to run the bundle in, so this runs
+      # the app with PATH limited to the bundle, System32 and the Windows directory, records
+      # every DLL the loader maps into it, and fails on any DLL that is neither in the
+      # bundle nor an operating-system binary.
+      #
+      # NOT BLOCKING YET, and this is the only reason: it fails on today's coalton-repl
+      # bundle, which opens OpenSSL at startup without carrying it (#249). A blocking step
+      # would stop every Windows release until #249 is decided. Make it blocking by deleting
+      # the continue-on-error line in the pull request that fixes #249. Until then the
+      # failure shows only as an ##[error] annotation on the run: with continue-on-error,
+      # the step and the job both report success, in the UI and in the jobs API.
+      - name: Verify the bundle loads only what it carries (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-bundle-windows.ps1 \
+            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+
       # The installer is BOTH the human download and the update payload (ADR-0010), so it
       # is built here beside the bundle rather than in a later job -- it needs the bundle's
       # files, and shipping a bundle without its installer would publish something users
