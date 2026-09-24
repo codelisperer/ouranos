@@ -189,7 +189,11 @@ This costs wall-clock and buys truth twice over:
 `MNEMOSYNE_TEST_PG_URL` is the contract (see `mnemosyne/tests/backends.lisp`); a container
 is one way to satisfy it and a server the runner already ships is another.
 
-- **Linux** calls the repo's own `scripts/test-postgres.sh up`.
+- **Linux** calls the repo's own `scripts/test-postgres.sh up`. It pulls the image before
+  starting the container and tries the pull up to four times, with pauses of 10, 20 and 30
+  seconds, because Docker Hub once refused the pull and re-running the same job at the same
+  commit passed (#245). When every try fails, the step's last line, which is also added to the
+  job summary, names the image and says that this is a registry failure and not a test result.
 - **macOS** installs and starts `postgresql@17` via Homebrew, and installs pgvector from
   Homebrew.
 - **Windows** starts the PostgreSQL service the runner image already ships, discovering
