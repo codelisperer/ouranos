@@ -240,7 +240,7 @@ trace rendered at them."
 
 (test apply-on-a-platform-with-no-apply-strategy-explains-itself
   "APPLY-UPDATE signals `update-not-implemented' wherever the apply strategy is not written
-(#251) -- today macOS and Linux. That is an ordinary answer with a sentence attached, and the route
+(#251) -- today macOS. That is an ordinary answer with a sentence attached, and the route
 renders the sentence rather than letting the condition escape as a 500.
 
 The status is deliberately NOT `available' here, so the refusal this exercises is the one

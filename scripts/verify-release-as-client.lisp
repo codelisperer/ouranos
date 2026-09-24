@@ -269,7 +269,7 @@
              (error (e) (fail "the apply path signalled: ~A" e))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t))))
   #-win32
-  (format t "~&  --  the whole-apply check is Windows-only: apply-update refuses on ~A until its apply strategy is written (#251)~%"
+  (format t "~&  --  the whole-apply check runs on Windows; on ~A it is not run here (Linux: scripts/verify-appimage-update.sh, #251; macOS's strategy is not written)~%"
           (platform:platform-key))
 
   ;; 4. WHAT WAS ACTUALLY READ. Design section 10: Authenticode MUTATES the artifact, so a

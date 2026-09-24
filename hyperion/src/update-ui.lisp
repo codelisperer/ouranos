@@ -286,7 +286,7 @@ is what a per-session token requires."
         :post +apply-path+
         (lambda (env)
           ;; APPLY-UPDATE signals `update-not-implemented' on every platform whose apply
-          ;; strategy is not written (#251), which today is macOS and Linux. That is an ordinary
+          ;; strategy is not written (#251), which today is macOS. That is an ordinary
           ;; answer with a sentence attached, not a 500: render it as a block so the user
           ;; reads the reason instead of a stack trace.
           (render (handler-case (up:apply-update)

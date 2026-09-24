@@ -301,7 +301,12 @@
                ;; contract into `aion/http-client', so the HTTP call is now made
                ;; through the shared client and nothing here names dexador. It still
                ;; arrives transitively, which is the point: declared where it is used.
-               "aion/random" "com.inuoe.jzon" "cl-base64")
+               "aion/random" "com.inuoe.jzon" "cl-base64"
+               ;; sb-posix for the Linux strategy (#251): chmod, link and rename(2), which the
+               ;; AppImage replacement needs and CL does not provide, and for the private
+               ;; staging directory. Unix only, as in cons: SBCL's Windows sb-posix is thinner,
+               ;; and nothing on Windows calls it. An SBCL contrib, so nothing is installed.
+               (:feature :unix (:require "sb-posix")))
   :serial t
   :components ((:module "src/update"
                 :serial t
@@ -325,10 +330,14 @@
   :depends-on ("hyperion/update" "aion/platform"   ; update-client-tests.lisp calls platform:
                "aion/random"   ; ...and aion/random:random-hex, for a fresh ACL test directory (#166)
                "fiveam" "aion/signature" "cl-base64"
-               (:require "sb-bsd-sockets"))
+               (:require "sb-bsd-sockets")
+               ;; sb-posix for update-appimage-tests.lisp, which checks file modes and makes a
+               ;; directory read-only (#251). An SBCL contrib; Unix only, like its tests.
+               (:feature :unix (:require "sb-posix")))
   :serial t
   :components ((:file "tests/update-tests")
-               (:file "tests/update-client-tests"))
+               (:file "tests/update-client-tests")
+               (:file "tests/update-appimage-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/update/tests :run-tests)))
 
 (defsystem "hyperion/update-ui"
