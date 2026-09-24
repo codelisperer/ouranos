@@ -237,3 +237,117 @@ that defines only the old protocol methods."
          (funcall h (%req "/out" id))
          (is (equal "NIL" (%body (funcall h (%req "/who" id))))
              "~a: signed out by ~a on the next request" kind how))))))
+
+;;; --- server-side expiry (#121) ---------------------------------------------------------
+;;;
+;;; Time is controlled by writing CREATED and ACCESSED on a stored session, never by sleeping.
+;;; Each test runs on the memory store, the DB store, and a store defining only the old
+;;; protocol, which exercises the default STORE-SWEEP.
+
+(defun %age (store id &key accessed-ago created-ago)
+  "Set session ID's ACCESSED and/or CREATED in STORE to that many seconds ago."
+  (let ((s (sess:store-ref store id)) (now (get-universal-time)))
+    (when accessed-ago (setf (sess:session-accessed s) (- now accessed-ago)))
+    (when created-ago (setf (sess:session-created s) (- now created-ago)))
+    (sess:store-add store s)))
+
+(defun %echo-id-app ()
+  (lambda (env) (list 200 nil (list (sess:session-id (sess:request-session env))))))
+
+(test an-expired-session-is-refused-even-when-no-sweep-has-run
+  ;; Where correctness lives: with sweeping off, a request presenting an expired session must
+  ;; get a NEW session, and the old one must be gone.
+  (dolist (limit '(:idle :absolute))
+    (%call-with-each-store
+     (lambda (kind store)
+       (let* ((sess:*session-sweep-interval* nil)
+              (h (sess:wrap-session (%echo-id-app) store))
+              (old (%cookie-of (funcall h (%req "/" nil)))))
+         (ecase limit
+           (:idle (%age store old :accessed-ago (1+ sess:*session-idle-timeout*)))
+           (:absolute (%age store old :created-ago (1+ sess:*session-absolute-timeout*)
+                                      :accessed-ago 0)))
+         (let* ((r (funcall h (%req "/" old)))
+                (new (%cookie-of r)))
+           (is-true new "~a/~a: a new session is minted" kind limit)
+           (is (and new (not (equal new old))) "~a/~a: under a different id" kind limit)
+           (is (equal new (%body r)) "~a/~a: and it is the one the handler got" kind limit)
+           (is (null (sess:store-ref store old)) "~a/~a: the expired one is deleted" kind limit)))))))
+
+(test a-session-inside-both-limits-is-kept
+  ;; The control for the test above.
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((sess:*session-sweep-interval* nil)
+            (h (sess:wrap-session (%echo-id-app) store))
+            (id (%cookie-of (funcall h (%req "/" nil)))))
+       (%age store id :accessed-ago (- sess:*session-idle-timeout* 60)
+                      :created-ago (- sess:*session-absolute-timeout* 60))
+       (let ((r (funcall h (%req "/" id))))
+         (is (null (%cookie-of r)) "~a: no new session" kind)
+         (is (equal id (%body r)) "~a: the same session" kind))))))
+
+(test a-sweep-removes-expired-sessions-and-keeps-the-rest
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((sess:*session-sweep-interval* nil)
+            (h (sess:wrap-session (%echo-id-app) store))
+            (idle (%cookie-of (funcall h (%req "/" nil))))
+            (old (%cookie-of (funcall h (%req "/" nil))))
+            (fresh (%cookie-of (funcall h (%req "/" nil)))))
+       (%age store idle :accessed-ago (1+ sess:*session-idle-timeout*))
+       (%age store old :created-ago (1+ sess:*session-absolute-timeout*) :accessed-ago 0)
+       (is (= 2 (sess:sweep-sessions store)) "~a: two removed" kind)
+       (is (null (sess:store-ref store idle)) "~a: idle one gone" kind)
+       (is (null (sess:store-ref store old)) "~a: too-old one gone" kind)
+       (is-true (sess:store-ref store fresh) "~a: fresh one kept" kind)))))
+
+(test wrap-session-sweeps-when-due-and-not-before
+  ;; A sweep that is never called and one that reaps nothing look the same at the exit code,
+  ;; so this checks the call: an expired session held by NO request is removed only by a sweep.
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((sess:*session-sweep-interval* 3600)
+            (h (sess:wrap-session (%echo-id-app) store))
+            (idle (%cookie-of (funcall h (%req "/" nil)))))   ; first request sweeps (nothing due)
+       (%age store idle :accessed-ago (1+ sess:*session-idle-timeout*))
+       (funcall h (%req "/" nil))
+       (is-true (sess:store-ref store idle) "~a: inside the interval, no sweep" kind)
+       (let ((sess:*session-sweep-interval* 0))
+         (funcall h (%req "/" nil)))
+       (is (null (sess:store-ref store idle)) "~a: once due, the sweep removes it" kind)))))
+
+(test sign-in-starts-a-new-absolute-window-and-a-plain-rotation-does-not
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((sess:*session-sweep-interval* nil)
+            (h (sess:wrap-session
+                (lambda (env)
+                  (let ((s (sess:request-session env)) (path (getf env :path-info)))
+                    (cond ((string= path "/sign-in") (sess:sign-in! store env :user-id 1))
+                          ((string= path "/rotate") (sess:rotate-session store s))
+                          ((string= path "/step-up") (sess:rotate-session store s :reset-created t)))
+                    (list 200 nil (list (sess:session-id s)))))
+                store))
+            (day 86400))
+       (dolist (case '(("/sign-in" t) ("/rotate" nil) ("/step-up" t)))
+         (destructuring-bind (path resets) case
+           (let ((id (%cookie-of (funcall h (%req "/" nil)))))
+             (%age store id :created-ago day :accessed-ago 0)
+             (let* ((new (%body (funcall h (%req path id))))
+                    (age (- (get-universal-time) (sess:session-created (sess:store-ref store new)))))
+               (if resets
+                   (is (< age 60) "~a: ~a starts a new absolute window (age ~a)" kind path age)
+                   (is (>= age day) "~a: ~a keeps the absolute window (age ~a)" kind path age))))))))))
+
+(test a-nil-timeout-disables-that-limit
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((sess:*session-sweep-interval* nil)
+            (sess:*session-idle-timeout* nil)
+            (sess:*session-absolute-timeout* nil)
+            (h (sess:wrap-session (%echo-id-app) store))
+            (id (%cookie-of (funcall h (%req "/" nil)))))
+       (%age store id :accessed-ago (* 400 86400) :created-ago (* 400 86400))
+       (is (equal id (%body (funcall h (%req "/" id)))) "~a: kept with both limits off" kind)
+       (is (zerop (sess:sweep-sessions store)) "~a: and not swept" kind)))))

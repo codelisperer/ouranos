@@ -242,6 +242,32 @@ with `ensure-session` directly, outside `wrap-session`, must call `store-save` i
 changing it. A store written before `store-save` existed keeps working: the default method
 writes through `store-add`, after checking with `store-ref` that the session is still there.
 
+**Sessions expire on the server.** The cookie's `Max-Age` only tells the browser when to stop
+sending the id, so the server keeps its own limits: a session unused for
+`*session-idle-timeout*` seconds (default 24 hours), or older than
+`*session-absolute-timeout*` (default 7 days), is refused. `ensure-session` deletes it and
+mints a new one, exactly as for an unknown cookie, so no handler ever sees an expired session.
+`sign-in!` starts a new absolute window; a plain `rotate-session`, for a role change say, keeps
+it, and `(rotate-session store s :reset-created t)` starts one for a step-up
+re-authentication. Set either limit to `nil` to turn it off.
+
+A sensitive application shortens both, for example:
+
+```lisp
+(setf session:*session-idle-timeout* 3600          ; an hour unused
+      session:*session-absolute-timeout* 43200)    ; twelve hours in all
+```
+
+The idle limit is measured against the `accessed` the store holds, which is written at most
+once per `*accessed-save-interval*` (60 s). That does not matter at hours, but an idle limit of
+a few minutes should lower `*accessed-save-interval*` as well.
+
+Expired sessions are removed from the store by a sweep that `wrap-session` runs at most once
+per `*session-sweep-interval*` seconds (default 300), in the request that finds it due; there is
+no background thread. To sweep on your own schedule instead, set it to `nil` and call
+`(session:sweep-sessions store)`. A custom store gets a default `store-sweep` that loads every
+session; implement `store-sweep` to do it in one query.
+
 **Wrap the app once; the middleware owns the cookie.**
 
 ```lisp

@@ -194,6 +194,8 @@
            #:restore-session #:session-alist
            #:store-ref #:store-add #:store-del #:store-count #:store-list
            #:store-save #:*accessed-save-interval*
+           #:store-sweep #:sweep-sessions #:session-expired-p
+           #:*session-idle-timeout* #:*session-absolute-timeout* #:*session-sweep-interval*
            #:memory-store #:make-memory-store
            #:ensure-session #:rotate-session #:new-id #:set-cookie-header
            ;; the privilege change, rotation included by construction (#120)
