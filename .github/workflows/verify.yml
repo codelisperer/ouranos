@@ -108,10 +108,12 @@ jobs:
       # TWO caches, keyed differently on purpose, and this is the one place where CI
       # carries real reasoning rather than calling a script.
       #
-      # The DOWNLOADS (Quicklisp dist, the Coalton checkout) are content-addressed by the
-      # pins: given the same versions.env and coalton.pin you want the same bytes, and a
-      # restore-keys fallback is safe because setup.{sh,ps1} re-check and re-fetch what
-      # does not match.
+      # The DOWNLOADS (Quicklisp dist, the Coalton checkout) are keyed on the pins, and a
+      # restore-keys fallback is safe for them because setup.{sh,ps1} re-pin the dist and
+      # re-check the Coalton commit. It is NOT a re-check of everything: setup installs
+      # Quicklisp only when ~/quicklisp is missing, so a restored cache means the pinned
+      # quicklisp.lisp is never downloaded or verified here. See docs/ci.md, "The two
+      # caches" (#212).
       #
       # The FASLS are not, and they get NO restore-keys. A first build after a dependency
       # moves can fail where a rebuild succeeds -- observed as `The class

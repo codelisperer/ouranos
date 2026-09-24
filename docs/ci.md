@@ -152,9 +152,24 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 
 ## The two caches, and why one has no fallback
 
-**Downloads** (`~/quicklisp`, `~/common-lisp/coalton`) are content-addressed by the pins
-and carry `restore-keys`. A near-miss restore is safe because `setup.{sh,ps1}` re-check
-and re-fetch anything that does not match.
+**Downloads** (`~/quicklisp`, `~/common-lisp/coalton`), in the step *Cache the Lisp toolchain
+(downloads)*, are keyed on a hash of `scripts/versions.env` and `coalton.pin`, and carry
+`restore-keys`. When the exact key misses, the fallback restores the newest cache with the same
+prefix, so a changed pin does **not** by itself empty this cache. What happens next depends on
+what changed, in the step *Provision the Lisp toolchain* (`setup.sh --ci`, or `setup.ps1 -CI`
+on Windows):
+
+- **The Quicklisp dist or the Coalton commit:** setup re-pins the dist, or checks out the new
+  commit, so these are re-fetched.
+- **The `quicklisp.lisp` installer's pin (`QUICKLISP_LISP_SHA256`):** nothing. Setup installs
+  Quicklisp only when `~/quicklisp/setup.lisp` is missing, and a restored cache has it, so the
+  installer is neither downloaded nor checked against its pin. That pin is exercised on a
+  runner with no cache, and on any fresh machine, which is where it matters (#211, #212).
+- **SBCL:** not in this cache at all. It is downloaded, and on Linux checked against
+  `SBCL_SHA256_X86_64_LINUX`, on every run.
+
+So a changed pin is verified in CI only if the thing it pins is not already in the restored
+cache.
 
 **Fasls** get **no `restore-keys` at all** — exact key or cold build. The key names both
 pins and every `.asd` in the tree.
