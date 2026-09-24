@@ -99,5 +99,6 @@
                              (:file "entity")
                              (:file "url")
                              (:file "param")
+                             (:file "sqlite-busy")
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))
