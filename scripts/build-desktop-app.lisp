@@ -130,6 +130,26 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
       (warn "build-desktop-app: could not patch the runtime (~A); the image will keep its build-machine library paths." (type-of e))
       nil)))
 
+;;; THE PATCHED RUNTIME IS A BUILD INTERMEDIATE (#270). Both re-runs below, macOS's for linked
+;;; libraries and Windows's for the icon, build under a copy of the runtime in <out>/.runtime.
+;;; The dump copies that runtime INTO the image, so nothing reads the copy once the child has
+;;; exited. Left in <out> it rode along in every release artifact, which uploads all of dist/
+;;; (2,404,352 bytes on Windows), and in any dist/ someone packaged by hand. So the parent
+;;; removes it after the child exits, whatever the child's result.
+(defun %remove-patched-runtime (patched)
+  "Delete the .runtime directory holding PATCHED. A failure is reported, not raised: the build
+itself already finished, and its exit code is what the caller returns."
+  (let ((dir (uiop:pathname-directory-pathname patched)))
+    (handler-case
+        (progn
+          (uiop:delete-directory-tree dir :if-does-not-exist :ignore
+                                          :validate (lambda (d) (equal ".runtime" (car (last (pathname-directory d))))))
+          (format t "~&build-desktop-app: removed the patched runtime (~A)~%" (uiop:native-namestring dir)))
+      (error (e)
+        (format t "~&build-desktop-app: could not remove the patched runtime ~A (~A); delete it before packaging ~A~%"
+                (uiop:native-namestring dir) e *out*)))
+    (finish-output)))
+
 ;;; --- the heap this bundle is born with (pre-publication issue 88) ---------------------------------
 ;;;
 ;;; A SHIPPED artifact, which is what makes this worse here than in bootstrap.lisp. The
@@ -191,6 +211,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
                                                           (some (lambda (p) (uiop:string-prefix-p p e))
                                                                 '("OURANOS_PATCHED_RUNTIME=" "OURANOS_CARRY_DYLIBS=" "SBCL_HOME=")))
                                                         (sb-ext:posix-environ)))))))
+          (%remove-patched-runtime patched)
           (sb-ext:exit :code code))
         (format t "~&build-desktop-app: continuing UNPATCHED -- this bundle will not run on a Mac without those libraries.~%"))))
 
@@ -236,8 +257,7 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
              (format t "~&build-desktop-app: re-running the build under a runtime that carries ~A,~%" (file-namestring icon))
              (format t "~&                   so the dumped image has it as its icon (#72).~%")
              (finish-output)
-             (sb-ext:exit
-              :code (nth-value
+             (let ((code (nth-value
                      2 (uiop:run-program
                         (list (namestring patched) "--core" core
                               "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
@@ -253,6 +273,8 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
                                                           (some (lambda (p) (uiop:string-prefix-p p e))
                                                                 '("OURANOS_PATCHED_RUNTIME=" "SBCL_HOME=")))
                                                         (sb-ext:posix-environ)))))))
+               (%remove-patched-runtime patched)
+               (sb-ext:exit :code code)))
             (t
              (format t "~&build-desktop-app: continuing WITHOUT an icon -- the executable will show the default one.~%")))))))
 
