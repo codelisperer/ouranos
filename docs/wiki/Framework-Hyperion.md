@@ -584,6 +584,8 @@ sbcl --dynamic-space-size 4096 --script bootstrap.lisp   # → bin/cons + ASDF (
         (list "…")))
 ```
 
+To sign a visitor in, use `(session:sign-in! *store* env :user-id id)`, not `ensure-session`: it rotates the session id as part of the sign-in, so a cookie the visitor held beforehand stops working (#120).
+
 **Interceptors** — the same chain runs pure or with one impure pivot in the middle:
 
 ```lisp
