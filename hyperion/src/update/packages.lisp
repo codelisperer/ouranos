@@ -144,6 +144,8 @@
    #:check-for-update #:update-status #:banner-worthy-p #:+quiet-statuses+
    ;; applying
    #:apply-update #:install-directory #:install-writable-p #:stage-payload
+   ;; the Linux strategy (#251): the AppImage file this process counts as its installation
+   #:*appimage-path* #:appimage-path #:replace-appimage
    #:launch-installer #:unknown-payload-format #:unknown-payload-format-name
    ;; conditions
    #:update-source-error #:update-source-error-detail

@@ -711,14 +711,38 @@ host until then -- no branch at all -- so `install-writable-p' answered NIL for 
 could not report, and the Not-Writable path could never be reached off Windows.
 
 APP is unused off Windows: there is no per-application record to look up, only the image's
-own location, which is the same answer whatever the app is called."
+own location, which is the same answer whatever the app is called.
+
+On Linux, an AppImage comes first (#251): inside one, the running image lives in the
+AppImage's read-only mount, so the directory derived from it is not where the application
+is installed. The AppImage file is, and its directory is what an update writes to."
   (or *install-directory*
       #+win32
       (when app
         (or (%registry-install-dir app)
             (let ((local (uiop:getenv "LOCALAPPDATA")))
               (when local (format nil "~A\\Programs\\~A" local app)))))
-      #-win32 (progn app (%derived-install-dir))))
+      #-win32 (progn app (or (%appimage-directory) (%derived-install-dir)))))
+
+;;; --- the AppImage this process is running from (#251) ------------------------------
+;;;
+;;; The AppImage runtime mounts the image and runs the program inside the mount, with
+;;; $APPIMAGE set to the absolute path of the AppImage FILE. That file is what an update
+;;; replaces; nothing inside the mount can be written.
+
+(defvar *appimage-path* nil
+  "Overrides $APPIMAGE: the AppImage file this process counts as its installation. For
+tests and harnesses, which run outside an AppImage.")
+
+(defun appimage-path ()
+  "The AppImage file this process is running from, as a native namestring, or NIL."
+  (let ((path (or *appimage-path* (uiop:getenv "APPIMAGE"))))
+    (and path (plusp (length path)) path)))
+
+(defun %appimage-directory ()
+  (let ((path (appimage-path)))
+    (and path (uiop:native-namestring
+               (uiop:pathname-directory-pathname (uiop:parse-native-namestring path))))))
 
 (defun install-writable-p (&optional (dir (install-directory)))
   "Can this process write to its own install directory?
@@ -821,15 +845,12 @@ proceed because it could not tidy up."
 ;;; defence and holds regardless of any of this: it re-reads the file and re-checks the
 ;;; signature immediately before the hand-off. This narrows who can reach the file at all.
 ;;;
-;;; POSIX DOES NOT DO THIS, AND IT IS DEFERRED RATHER THAN CONSIDERED AND REJECTED. On POSIX
-;;; the ticket's premise is TRUE: /tmp really is world-writable, and its sticky bit stops
-;;; another user REPLACING a file they do not own but is a different guarantee from the one
-;;; established here. The apply path does not exist on those platforms yet -- `apply-update'
-;;; refuses outside Windows because the `appimage' and `app-targz' strategies are not written
-;;; (the release workflow builds both payloads; nothing here unpacks and swaps one) -- so the
-;;; mode bits belong with whoever writes those strategies, next to #113's
-;;; stage-and-rename. A reader who finds a careful DACL assertion here and no POSIX
-;;; equivalent should read that as NOT YET, not as weighed and dismissed.
+;;; ON POSIX (#251, with the Linux strategy): /tmp is world-writable, and its sticky bit stops
+;;; another user REPLACING a file they do not own, which is a different guarantee from the
+;;; one established here. So the staging directory is made mode 700 and then CHECKED, as the
+;;; DACL is above: `%harden-staging-directory-posix' stats it afterwards and refuses unless
+;;; it is owned by this process's user with no group or other access. Establishing without
+;;; checking would be the same mistake it is on Windows, one filesystem along.
 
 #+win32
 (defparameter +acl-allowed-aliases+ '("BA" "SY")
@@ -1095,6 +1116,20 @@ already has better options than flipping this flag."
                                          ""))))))
       directory)))
 
+#+unix
+(defun %harden-staging-directory-posix (directory)
+  "Make DIRECTORY mode 700, then check that it is: owned by this user, no group or other bits.
+Signals `update-source-error' otherwise, before anything is written into it."
+  (let ((name (uiop:native-namestring directory)))
+    (sb-posix:chmod name #o700)
+    (let ((st (sb-posix:stat name)))
+      (unless (and (= (sb-posix:stat-uid st) (sb-posix:getuid))
+                   (zerop (logand (sb-posix:stat-mode st) #o077)))
+        (error 'update-source-error
+               :detail (format nil "the staging directory ~A is not private to this user (mode ~O); nothing was staged"
+                               name (logand (sb-posix:stat-mode st) #o7777)))))
+    directory))
+
 (defun %staging-directory ()
   "Where a payload is downloaded before it is run. NEVER the live bundle.
 
@@ -1135,6 +1170,7 @@ unique is worse than no suffix, because it reads as a guarantee."
              ;; still empty -- afterwards would leave the installer carrying the permissions
              ;; we just decided were not good enough. A refusal here has nothing to clean up.
              #+win32 (%harden-staging-directory candidate)
+             #+unix (%harden-staging-directory-posix candidate)
              (return candidate)))
 
 (defun %write-bytes (bytes path)
@@ -1188,7 +1224,8 @@ IT NARROWS THE WINDOW; IT DOES NOT CLOSE IT. What remains is the interval betwee
 and the OS's own open-for-execute, which on Windows is a separate process whose loader does
 its own open. Closing it needs either a handle held across the hand-off or #113's
 stage-and-rename, where the verified artefact never sits at the path that gets executed.
-That decision belongs with the macOS and Linux strategies (#251) rather than before them.
+The Linux strategy (#251) has the same window between this read and its own read of the
+staged file; the macOS strategy is not written. Closing the window is #113.
 
 MEASURE THE PRECONDITION BEFORE COSTING THE REST: on Windows the staged file lives under
 `uiop:temporary-directory', which is the PER-USER temp (`%LOCALAPPDATA%\\Temp'), not
@@ -1368,6 +1405,70 @@ Inno installer and a real per-user install, and asserts the bundle actually chan
 afterwards. Before that assertion existed, this method exited 3 and installed nothing."
   (uiop:launch-program (%inno-arguments installer install-dir)))
 
+;;; --- Linux: replace the AppImage file (#251, design section 7) ---------------------
+;;;
+;;; The payload IS the new AppImage. Design section 7: write it beside the old one, make it
+;;; executable, rename() it over the old one, relaunch. rename() within one directory is
+;;; atomic, so the path always names either the old file or the whole new one; and replacing
+;;; the file a process is running from is allowed on Linux, because the kernel keeps the old
+;;; inode alive until that process exits.
+;;;
+;;; The previous file is kept, as `<name>.previous', by a hard link made before the rename
+;;; (the section's common invariant: keep the previous version until the new one has
+;;; started). Nothing yet removes it after a successful start, or rolls back to it after a
+;;; failed one; that is recorded on #251.
+;;;
+;;; THE BYTES WRITTEN ARE READ BACK AND COMPARED before the rename. They come from the staged
+;;; file, which APPLY-UPDATE re-verified against the payload's signature immediately before
+;;; calling this. What remains between that re-verification and this read is the same window
+;;; the Windows strategies have between it and the installer's own open.
+
+#+linux
+(defun %appimage-sibling (target suffix)
+  (uiop:parse-native-namestring (concatenate 'string (uiop:native-namestring target) suffix)))
+
+#+linux
+(defun replace-appimage (staged target)
+  "Replace the AppImage file TARGET with the bytes of STAGED. Returns TARGET's pathname.
+
+Leaves the old file as `<TARGET>.previous'. Signals `update-source-error' if what was
+written does not read back as what was staged."
+  (let* ((target (uiop:parse-native-namestring target))
+         (bytes (%read-staged-bytes staged))
+         (new (%appimage-sibling target (format nil ".update-~A" (rand:random-hex 16))))
+         (previous (%appimage-sibling target ".previous")))
+    (handler-bind ((error (lambda (e) (declare (ignore e)) (ignore-errors (delete-file new)))))
+      (%write-bytes bytes new)
+      (sb-posix:chmod (uiop:native-namestring new) #o755)
+      (unless (equalp bytes (%read-staged-bytes new))
+        (error 'update-source-error
+               :detail "the new AppImage did not read back as the verified payload; it was not installed"))
+      (when (probe-file target)
+        (when (probe-file previous) (delete-file previous))
+        (sb-posix:link (uiop:native-namestring target) (uiop:native-namestring previous)))
+      (sb-posix:rename (uiop:native-namestring new) (uiop:native-namestring target)))
+    target))
+
+#+linux
+(defmethod launch-installer ((format (eql :appimage)) installer install-dir)
+  "Replace the AppImage this process runs from with INSTALLER, then start the new one.
+
+INSTALL-DIR is the AppImage's directory, which APPLY-UPDATE has already found writable; the
+file replaced is `appimage-path'. The new process inherits this one's standard output and
+error, so a terminal or a harness that started the old one sees the new one."
+  (declare (ignore install-dir))
+  (let ((target (or (appimage-path)
+                    (error 'update-not-implemented
+                           :detail "this process is not running from an AppImage ($APPIMAGE is not set)"))))
+    (replace-appimage installer target)
+    (uiop:launch-program (list target) :output :interactive :error-output :interactive)))
+
+(defun %host-strategies ()
+  "The payload formats this host can apply."
+  #+win32 '(:nsis :inno)
+  #+linux '(:appimage)
+  #-(or win32 linux) '())
+
 (defun %apply-inputs (source channel product)
   "Re-fetch and re-verify, returning (VALUES SOURCE PLATFORM-ENTRY).
 
@@ -1389,10 +1490,10 @@ window between checking and applying is exactly where a channel gets a security 
 (defun apply-update (&key (source *update-source*) (channel "stable") (product nil))
   "Install the available update.
 
-WINDOWS ONLY. macOS and Linux refuse, because their apply strategies, `app-targz' and
-`appimage', are not written. The release workflow builds both payloads (the macOS one
-since #135), but nothing here unpacks and swaps one yet. A green run here is evidence
-about Windows and about nothing else.
+WINDOWS AND LINUX. macOS refuses, because its apply strategy, `app-targz', is not written
+(#251): the release workflow builds its payload, but nothing here unpacks and swaps a
+`.app' yet. Each host applies only its own formats (`%host-strategies'): a manifest entry
+declaring another platform's packaging is refused rather than handed to the wrong tool.
 
 The order, and every step of it is load-bearing:
 
@@ -1409,11 +1510,11 @@ The order, and every step of it is load-bearing:
     (unless (string= "available" (getf status :status))
       (error 'update-not-implemented
              :detail (format nil "no update to apply (~A)" (getf status :status))))
-    #-win32
+    #-(or win32 linux)
     (error 'update-not-implemented
            :detail (format nil "the ~A apply strategy is not written yet (#251)"
                            (platform:platform-key)))
-    #+win32
+    #+(or win32 linux)
     (let ((dir (install-directory)))
       (unless dir
         (error 'update-not-implemented
@@ -1457,6 +1558,14 @@ The order, and every step of it is load-bearing:
             ;; A safety check reachable only through the thing it guards is not a check.
             (unless strategy
               (error 'unknown-payload-format :format-name (platform-format entry)))
+            ;; A format this build knows but this host cannot run: an `nsis' entry reaching
+            ;; a Linux client, say. Refused here, before the launch, for the same reason the
+            ;; unknown format is -- it is policy, and a replaced `*launch-installer*' must
+            ;; not take it away.
+            (unless (member strategy (%host-strategies))
+              (error 'update-not-implemented
+                     :detail (format nil "a `~(~A~)' payload cannot be applied on ~A"
+                                     strategy (platform:platform-key))))
             ;; LAST THING BEFORE THE IRREVERSIBLE STEP, and deliberately after the format
             ;; refusal and the application's shutdown -- both of those can take arbitrary
             ;; time, and every moment between the write and the launch is window (pre-publication issue 264). The

@@ -122,7 +122,7 @@ rule survives intact.
 |---|---|---|
 | `sb-concurrency` | thread-safe mailbox | praxeon/web (SSE channel) |
 | `sb-bsd-sockets` | port probing / socket checks | `hyperion/desktop` (localhost lifecycle) |
-| `sb-posix` | `mkdir` — atomic create-or-fail | `cons` (`cons/tempdir`, **Unix only**: `(:feature :unix …)`) |
+| `sb-posix` | `mkdir` — atomic create-or-fail; `chmod`, `link`, `rename`, `stat` | `cons` (`cons/tempdir`), `hyperion/update` (the Linux AppImage strategy and the private staging directory, #251) — **Unix only** in both: `(:feature :unix …)` |
 
 `sb-posix` is there for exactly one call. A scratch directory must be **created**, never
 chosen-then-written-to, and `mkdir` is the only atomic create-or-fail CL exposes — it refuses

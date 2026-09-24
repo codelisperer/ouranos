@@ -451,13 +451,11 @@ the artifact lookup is the real one rather than a hard-coded guess."
 ;;; each a path where launching anyway is the actual harm, and a test that only checks the
 ;;; reported state would pass while the installer ran.
 ;;;
-;;; WHY EVERY ONE OF THEM IS `#+win32'. `apply-update' REFUSES on macOS and Linux -- their
-;;; apply strategies, `app-targz' and `appimage', are not written, so there is nothing to launch --
-;;; and the refusal is a READER CONDITIONAL, resolved before any behaviour these tests
-;;; describe. Without the guard every test below would signal `update-not-implemented' on
-;;; two of the three platforms, and this suite would arrive RED in the Mac and Linux lanes
-;;; as a side effect of a Windows feature landing. The non-Windows claim is a real one and
-;;; is asserted directly instead, immediately below.
+;;; WHY EVERY ONE OF THEM IS `#+win32'. They describe the Windows strategies: NSIS and Inno
+;;; payloads, which `apply-update' refuses on any other host (`%host-strategies'). Linux has
+;;; its own strategy, `appimage', tested in update-appimage-tests.lisp against a file that is
+;;; really replaced and really started (#251). macOS REFUSES -- its `app-targz' strategy is
+;;; not written -- and that refusal is asserted directly, immediately below.
 
 (defun staging-directories ()
   "Every staging directory currently in the temp directory, as namestrings."
@@ -529,10 +527,10 @@ shared literal that could collide with a real directory in somebody's home."
          (dolist (d (set-difference (staging-directories) before :test #'equal))
            (ignore-errors (uiop:delete-directory-tree d :validate t)))))))
 
-#-win32
+#-(or win32 linux)
 (test on-a-platform-with-no-apply-strategy-apply-refuses-and-says-which-platform
-  ;; The other side of the guard, and not a placeholder: "macOS and Linux refuse" is a
-  ;; DECISION (neither apply strategy is written, #251), and a decision nothing asserts is
+  ;; The other side of the guard, and not a placeholder: "macOS refuses" is a DECISION
+  ;; (its apply strategy is not written, #251), and a decision nothing asserts is
   ;; how a half-built apply path ships. The detail names the platform key, so the refusal
   ;; a user or a log sees says WHICH platform is unbuilt rather than merely that one is.
   (with-apply ()
