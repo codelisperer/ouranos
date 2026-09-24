@@ -102,6 +102,7 @@
                              (:file "platform-tests")
                              (:file "failure-origin-tests")
                              (:file "fiveam-report-tests")
+                             (:file "caught-errors-tests")
                              (:file "not-covered-tests")
                              (:file "view-launcher-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :cons/tests :run-tests)))

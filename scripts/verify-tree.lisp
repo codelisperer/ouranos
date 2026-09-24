@@ -111,6 +111,11 @@
 (load (merge-pathnames "fiveam-report.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; Each `caught ERROR' in a child's output (#263). Split out for the same reason, so the
+;;; control in cons/tests/caught-errors-tests.lisp exercises the function the gate calls.
+(load (merge-pathnames "caught-errors.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; The NOT COVERED section (#182). Split out for the same reason as the two above, so a test
 ;;; can hand the printer known inputs; REPORT-NOT-COVERED below passes it this run's state.
 (load (merge-pathnames "not-covered.lisp"
@@ -832,6 +837,31 @@ code we do not own, and a gate that cries wolf gets switched off."
     out))
 
 
+;;; --- caught ERROR fails the gate (#263) -----------------------------------------------
+;;;
+;;; WARNINGS-IN above matches `caught WARNING' only. A FiveAM test body is compiled when its
+;;; fasl loads, so a body SBCL cannot compile prints `caught ERROR' where neither compile-file
+;;; nor ASDF sees it, and this scan is its only compile check. scripts/caught-errors.lisp
+;;; explains the mechanism and records the measurement taken before this became a failure:
+;;; one occurrence, on Windows, since fixed.
+;;;
+;;; No allowance list, unlike +KNOWN-WARNINGS+. A form that cannot compile is never correct,
+;;; and no dependency has produced one. If one ever does, whether to excuse it is a decision
+;;; for an issue of its own, not an entry added here in passing.
+
+(defvar *caught-errors* '()
+  "(LABEL . COUNT) for every child whose output had a `caught ERROR', newest first.")
+
+(defun report-caught-errors (label output)
+  "Print OUTPUT's `caught ERROR's under LABEL, record them, and fail the run for them."
+  (let ((errors (ouranos-caught-errors:errors-in output)))
+    (when errors
+      (push (cons label (length errors)) *caught-errors*)
+      (format t "  ERROR   ~a: ~D caught ERROR~:P while compiling (#263)~%" label (length errors))
+      (dolist (e errors)
+        (format t "~{            | ~a~%~}" e))
+      (fail "~a: ~D caught ERROR~:P while compiling" label (length errors)))))
+
 ;;; --- the native launcher axis (pre-publication issue 410) ---------------------------------------
 ;;;
 ;;; pre-publication PR 395 moved the hyperion-view build OUT of this gate and INTO verify.yml. The SUITE stayed
@@ -979,7 +1009,8 @@ let this run claim `view' while the five assertions skipped."
           (warned
            (format t "  WARN    ~a~%~{          ~a~%~}" s warned)
            (fail "~a compiled with ~D warning~:P" s (length warned)))
-          (t (format t "  ok      ~a~%" s))))))
+          (t (format t "  ok      ~a~%" s)))
+        (report-caught-errors (format nil "load ~(~a~)" s) out))))
 
   (format t "~%========== SUITES (each in its own image) ==========~%")
   (let ((grand 0))
@@ -1045,7 +1076,8 @@ let this run claim `view' while the five assertions skipped."
                 (push (cons s (cdr pg)) *postgres-excused*)))
             (dolist (problem (coverage-problems coverage))
               (format t "  COVER   ~a -- ~a~%" s problem)
-              (fail "~a: ~a" s problem))))))
+              (fail "~a: ~a" s problem))))
+        (report-caught-errors (format nil "suite ~(~a~)" s) text)))
 
     ;; --- the platform axis (pre-publication issue 182) ------------------------------------------
     ;; Printed as its own block, ALWAYS, on every OS -- including the ones that own
@@ -1162,6 +1194,12 @@ let this run claim `view' while the five assertions skipped."
     ;; of d0547d1 and only one of them is the tree's count. The suffix is after the digits,
     ;; so check-readme-counts.lisp's `%labelled-integer' still parses it.
     (format t "total checks executed: ~a (axes: ~a)~%" grand (axes-tag))
+    ;; Printed on every run, including a run with none, so that a zero is a measurement
+    ;; and not an absence (#263). Each one has already failed the run above.
+    (let ((caught (reverse *caught-errors*)))
+      (format t "caught ERROR (#263): ~D in ~D child image~:P~@[: ~{~a~^, ~}~]~%"
+              (reduce #'+ caught :key #'cdr) (length caught)
+              (mapcar (lambda (c) (format nil "~a x~D" (car c) (cdr c))) caught)))
     ;; The same fact on lines of their own, from the same functions, for a consumer that
     ;; should not have to parse a parenthetical out of a human sentence.
     ;;

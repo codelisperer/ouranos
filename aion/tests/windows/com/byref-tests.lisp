@@ -154,6 +154,8 @@ machine that HAS ACE, which is the point: the absence is fabricated rather than 
 If the skip aborts as it must, this test reports SKIPPED and the assertion never runs. If it
 returns instead, the body executes and the assertion fails immediately -- so a regression is
 a red test rather than a type error three frames later."
+  ;; No DECLARE here: WITH-CSV-CONNECTION puts the body inside a PROGN, where a declaration
+  ;; is compiled as a call to a function named DECLARE (#263). CONN and DIR need none anyway:
+  ;; the macro itself uses both, to close the connection and delete the directory.
   (with-csv-connection (conn dir :connection +absent-provider-connection+)
-    (declare (ignore conn dir))
     (is nil "the body must never run when the provider could not be opened")))
