@@ -229,8 +229,18 @@ plural suffixes exist — existing calls behave exactly as before.
 Cookie-based sessions. A `session` is an id + a thread-safe key/value bag that's
 **opaque to Hyperion** — store whatever the app needs (e.g. which conversation a
 browser is attached to). Backends sit behind a small `store` protocol;
-`make-memory-store` is the in-memory default (a DB-backed store slots in behind the
-same protocol later). Nickname it: `(:local-nicknames (#:session #:hyperion/session))`.
+`make-memory-store` is the in-memory default and `hyperion/session-db` is the DB-backed one.
+Nickname it: `(:local-nicknames (#:session #:hyperion/session))`.
+
+**Changes are written back by `wrap-session`.** A DB-backed store hands out a fresh copy of the
+session on every request, so `wrap-session` writes the session back through `store-save`
+after the handler: every change to the data bag (`session-set`, `session-del`,
+`reset-session`, `sign-in!`), and `accessed` at most once per `*accessed-save-interval*`
+seconds (default 60). `store-save` only updates a session that is still in the store, so a
+session the handler removed with `kill-session` stays removed. Code that resolves a session
+with `ensure-session` directly, outside `wrap-session`, must call `store-save` itself after
+changing it. A store written before `store-save` existed keeps working: the default method
+writes through `store-add`, after checking with `store-ref` that the session is still there.
 
 **Wrap the app once; the middleware owns the cookie.**
 

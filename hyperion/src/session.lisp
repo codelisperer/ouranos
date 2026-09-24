@@ -33,7 +33,11 @@ reader."
   (data (make-hash-table :test 'equal))
   (lock (bt:make-lock "hyperion-session"))
   (created 0 :type unsigned-byte)
-  (accessed 0 :type unsigned-byte))
+  (accessed 0 :type unsigned-byte)
+  ;; What WRAP-SESSION needs to know to write a session back (#230). DIRTY is set by every
+  ;; change to the data bag; SAVED-ACCESSED is the ACCESSED value the store last received.
+  (dirty nil)
+  (saved-accessed 0 :type unsigned-byte))
 
 (defun session-id (session)
   "SESSION's id -- the bearer credential the browser holds in its cookie.
@@ -50,11 +54,13 @@ any other way."
 (defun session-set (session key value)
   "Set KEY to VALUE in SESSION's data bag; return VALUE."
   (bt:with-lock-held ((session-lock session))
+    (setf (session-dirty session) t)
     (setf (gethash key (session-data session)) value)))
 
 (defun session-del (session key)
   "Remove KEY from SESSION's data bag."
   (bt:with-lock-held ((session-lock session))
+    (setf (session-dirty session) t)
     (remhash key (session-data session))))
 
 (defun session-keys (session)
@@ -74,6 +80,7 @@ a reviewer skimming the handler sees a reset and moves on (pre-publication issue
 
 At a privilege boundary -- sign-in above all -- you want ROTATE-SESSION."
   (bt:with-lock-held ((session-lock session))
+    (setf (session-dirty session) t)
     (clrhash (session-data session)))
   session)
 
@@ -81,7 +88,8 @@ At a privilege boundary -- sign-in above all -- you want ROTATE-SESSION."
   "Reconstruct a SESSION from persisted parts -- for a pluggable STORE backend loading a
 row (e.g. a mnemosyne-backed store). DATA is an alist of (key . value) copied into a fresh
 data bag. The in-memory store never needs this; a DB store does."
-  (let ((s (%make-session :%id id :created created :accessed accessed)))
+  (let ((s (%make-session :%id id :created created :accessed accessed
+                          :saved-accessed accessed)))
     (loop for (k . v) in data do (setf (gethash k (session-data s)) v))
     s))
 
@@ -105,6 +113,23 @@ data bag. The in-memory store never needs this; a DB store does."
   (:documentation "How many sessions STORE holds."))
 (defgeneric store-list (store)
   (:documentation "All sessions in STORE, as a list (order unspecified)."))
+(defgeneric store-save (store session)
+  (:documentation "Write SESSION's current data and ACCESSED to STORE if STORE still holds a
+session under its id, and return T; if it does not, write nothing and return NIL.
+
+WRAP-SESSION calls this after the handler (#230). A store that hands out a fresh object
+from every STORE-REF, as a database-backed one does, loses every change a handler makes to
+its session unless it is written back here. It must NOT insert: a handler that removed its
+session (KILL-SESSION, at sign-out) must not have it restored by the write-back."))
+
+(defmethod store-save (store session)
+  "The default, for a store that defines only the other methods: write through STORE-ADD, but
+only when the session is still present, so a removed session stays removed. A store can do
+better (the DB store updates the row in place), but one written before STORE-SAVE existed
+keeps working without change."
+  (when (store-ref store (session-id session))
+    (store-add store session)
+    t))
 
 ;;; --- the in-memory store ---
 (defclass memory-store ()
@@ -126,6 +151,15 @@ data bag. The in-memory store never needs this; a DB store does."
   (bt:with-lock-held ((ms-lock s)) (remhash id (ms-table s))))
 (defmethod store-count ((s memory-store))
   (bt:with-lock-held ((ms-lock s)) (hash-table-count (ms-table s))))
+(defmethod store-save ((s memory-store) session)
+  ;; The table holds this very object, so every change is already in the store. Write only
+  ;; when a different object is under the id, and never when none is.
+  (bt:with-lock-held ((ms-lock s))
+    (let ((current (gethash (session-id session) (ms-table s))))
+      (when current
+        (unless (eq current session)
+          (setf (gethash (session-id session) (ms-table s)) session))
+        t))))
 (defmethod store-list ((s memory-store))
   (bt:with-lock-held ((ms-lock s))
     (loop for v being the hash-values of (ms-table s) collect v)))
@@ -194,7 +228,8 @@ keys as part of the same call."
       (create
        (let* ((new (new-id))
               (now (get-universal-time))
-              (session (%make-session :%id new :created now :accessed now)))
+              (session (%make-session :%id new :created now :accessed now
+                                      :saved-accessed now)))
          (store-add store session)
          (values session (set-cookie-header new :name cookie-name))))
       (t (values nil nil)))))
@@ -333,6 +368,25 @@ Set-Cookie on a response is ordinary HTTP, and ours going last is what a client 
   (destructuring-bind (status headers body) response
     (list status (append headers (list :set-cookie value)) body)))
 
+(defparameter *accessed-save-interval* 60
+  "Seconds ACCESSED may advance before WRAP-SESSION writes it back on a request that changed
+nothing else (#230). A change to the data bag is written after the request that made it,
+always. An ACCESSED-only change is written at most this often, so a database-backed store does
+not take a write on every request just to record that the visitor is still there; it is
+enough for an idle timeout measured in minutes.")
+
+(defun %save-if-changed (store session)
+  "Write SESSION back through STORE-SAVE when its data changed or its ACCESSED is at least
+*ACCESSED-SAVE-INTERVAL* past what the store last received; then mark it saved."
+  (let ((due (bt:with-lock-held ((session-lock session))
+               (or (session-dirty session)
+                   (>= (- (session-accessed session) (session-saved-accessed session))
+                       *accessed-save-interval*)))))
+    (when (and due (store-save store session))
+      (bt:with-lock-held ((session-lock session))
+        (setf (session-dirty session) nil
+              (session-saved-accessed session) (session-accessed session))))))
+
 (defun wrap-session (app store &key (cookie-name *cookie-name*)
                                     (max-age *cookie-max-age*)
                                     (path "/") (http-only t)
@@ -359,6 +413,11 @@ a rotation as much as for a mint."
              (response (funcall app (list* +session-key+ session env)))
              (owed (or (and minted t)
                        (not (string= entry-id (session-id session))))))
+        ;; WRITE BACK WHAT THE HANDLER CHANGED (#230). A store that returns a fresh object
+        ;; from STORE-REF (the DB store) otherwise keeps the session as it was at mint or at
+        ;; the last rotation, and loses every SESSION-SET, SESSION-DEL and RESET-SESSION made
+        ;; since. STORE-SAVE never inserts, so a session the handler killed stays killed.
+        (%save-if-changed store session)
         (if owed
             (%attach-set-cookie
              response
