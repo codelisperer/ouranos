@@ -66,7 +66,10 @@
 
 (defsystem "praxeon/memory-db/tests"
   :description "Observational memory in a real Postgres with pgvector (#138)."
-  :depends-on ("praxeon/memory-db" "fiveam")
+  ;; praxeon and mnemosyne are named directly by the suite (praxeon/memory, praxeon/llm,
+  ;; mnemosyne/conn, ...), so they are declared here rather than reached through
+  ;; praxeon/memory-db (#166).
+  :depends-on ("praxeon/memory-db" "praxeon" "mnemosyne" "fiveam")
   :components ((:module "tests"
                 :components ((:file "memory-db-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/memory-db/tests '#:run-tests)))

@@ -846,6 +846,61 @@ the script got past the root guard and then looked in the caller's tree."
       (is (search (namestring tree) out)
           "and must have searched the FIXTURE, naming it:~%~A" out))))
 
+;;; --- does check-source-deps find an undeclared use? (#163, #166) ----------------------
+;;;
+;;; The two tests above are about WHERE the checker roots, not WHAT it finds. These build a
+;;; tree with two systems, one naming the other's package, and change only whether the
+;;; using system declares it. The names carry a prefix no real system has, because the
+;;; checker's source registry inherits the machine's configuration and a fixture system
+;;; sharing a name with a real one would resolve to the real one.
+
+(defun %source-deps-tree (&key declared)
+  "A checkout-shaped tree where system srcdepsfx-app calls srcdepsfx-lib:thing, and declares
+srcdepsfx-lib in its :depends-on only when DECLARED."
+  (let ((tree (%install-root-markers (%fresh-tree))))
+    (%install-checker tree "check-source-deps.lisp")
+    (uiop:copy-file (merge-pathnames "tree-deps.lisp" *scripts*)
+                    (merge-pathnames "scripts/tree-deps.lisp" tree))
+    (%write (merge-pathnames "lib/srcdepsfx-lib.asd" tree)
+            (%lines "(defsystem \"srcdepsfx-lib\""
+                    "  :description \"fixture\" :version \"0.0.0\""
+                    "  :components ((:file \"lib\")))"))
+    (%write (merge-pathnames "lib/lib.lisp" tree)
+            (%lines "(defpackage #:srcdepsfx-lib (:use #:cl) (:export #:thing))"
+                    "(in-package #:srcdepsfx-lib)"
+                    "(defun thing () 1)"))
+    (%write (merge-pathnames "app/srcdepsfx-app.asd" tree)
+            (%lines "(defsystem \"srcdepsfx-app\""
+                    "  :description \"fixture\" :version \"0.0.0\""
+                    (if declared
+                        "  :depends-on (\"srcdepsfx-lib\")"
+                        "  :depends-on ()")
+                    "  :components ((:file \"app\")))"))
+    (%write (merge-pathnames "app/app.lisp" tree)
+            (%lines "(defpackage #:srcdepsfx-app (:use #:cl))"
+                    "(in-package #:srcdepsfx-app)"
+                    "(defun f () (srcdepsfx-lib:thing))"))
+    tree))
+
+(test check-source-deps-reports-a-use-its-system-does-not-declare
+  (let ((tree (%source-deps-tree :declared nil)))
+    (multiple-value-bind (code out)
+        (%run-in tree (merge-pathnames "scripts/check-source-deps.lisp" tree))
+      (is (= 1 code) "an undeclared use must fail the check, exit was ~D:~%~A" code out)
+      (is (search "srcdepsfx-app" out) "the finding names the using system:~%~A" out)
+      (is (search "uses srcdepsfx-lib" out) "and the system it uses:~%~A" out))))
+
+(test check-source-deps-passes-the-same-use-once-it-is-declared
+  "The control. Same tree, same reference, with srcdepsfx-lib added to the :depends-on.
+Without this, the test above would also pass for a checker that reported every qualified
+reference, declared or not."
+  (let ((tree (%source-deps-tree :declared t)))
+    (multiple-value-bind (code out)
+        (%run-in tree (merge-pathnames "scripts/check-source-deps.lisp" tree))
+      (is (= 0 code) "a declared use must pass, exit was ~D:~%~A" code out)
+      (is (search "Every system declares what its source uses." out)
+          "and say so:~%~A" out))))
+
 ;;; --- which DRIVE does a checker root at? (pre-publication issue 482) -----------------------------
 ;;;
 ;;; What these exist to detect: a checker that resolves its root with `(make-pathname

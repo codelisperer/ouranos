@@ -297,6 +297,7 @@
   ;; 404 is a status Dexador SIGNALS rather than returns -- and no CLOS stub standing
   ;; in for a source can state it (pre-publication issue 332). An SBCL contrib, so nothing new is pulled in.
   :depends-on ("hyperion/update" "aion/platform"   ; update-client-tests.lisp calls platform:
+               "aion/random"   ; ...and aion/random:random-hex, for a fresh ACL test directory (#166)
                "fiveam" "aion/signature" "cl-base64"
                (:require "sb-bsd-sockets"))
   :serial t
