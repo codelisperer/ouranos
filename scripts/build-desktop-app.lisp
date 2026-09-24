@@ -741,16 +741,18 @@ nothing."
   (format out "~A~%" *version*))
 
 ;;; --- dump ---------------------------------------------------------------------
-;;; :save-runtime-options t so the app's OWN argv reaches it (without it SBCL parses its
-;;; runtime flags first) and the heap size in effect here is baked in.
+;;; Through scripts/dump-image.lisp, which keeps :save-runtime-options t (so the app's OWN
+;;; argv reaches it, and the heap size in effect here is baked in) and also runs UIOP's dump
+;;; and restore hooks. Without them the app kept this machine's temporary directory and fasl
+;;; cache: an app built with the CI runner's TEMP and run by another user reported
+;;; `C:\Users\runneradmin\AppData\Local\Temp\' as its temporary directory, and the updater
+;;; failed to stage with "Can't create directory C:\Users\runneradmin" (#107).
+(load (merge-pathnames "dump-image.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 (let ((bin (merge-pathnames (if (uiop:os-windows-p)
                                 (format nil "~A.exe" *name*)
                                 *name*)
                             *bundle*)))
   (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path bin))
   (finish-output)
-  (sb-ext:save-lisp-and-die
-   bin
-   :toplevel (fdefinition (read-from-string *entry*))
-   :executable t
-   :save-runtime-options t))
+  (funcall (read-from-string "ouranos-dump:dump-executable")
+           bin (fdefinition (read-from-string *entry*))))
