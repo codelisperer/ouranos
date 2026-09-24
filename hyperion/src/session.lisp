@@ -111,16 +111,34 @@ created and last used in 1900, and ENSURE-SESSION refuses it as expired (#121)."
 ;;; them, whether or not a sweep has run, and STORE-SWEEP reclaims the storage.
 
 (defparameter *session-idle-timeout* 86400
-  "Seconds a session may go unused before it expires, or NIL for no idle limit. Default 24 h,
-the same as *COOKIE-MAX-AGE*. Measured against the ACCESSED the store holds, which #231 writes
-at most once per *ACCESSED-SAVE-INTERVAL* (60 s): a limit much shorter than a few minutes
-should lower that interval too.")
+  "Seconds a session may go unused before it expires, or NIL for no idle limit. Default 24 h.
+Measured against the ACCESSED the store holds, which ENSURE-SESSION writes at most once per
+*ACCESSED-SAVE-INTERVAL* (60 s) whether or not WRAP-SESSION is in use (#243): a limit much
+shorter than a few minutes should lower that interval too.
+
+The browser does not enforce this limit. The session cookie lasts as long as
+*SESSION-ABSOLUTE-TIMEOUT* (see *COOKIE-MAX-AGE*), and it is never renewed, so this limit is
+the only thing that ends an unused session before the absolute one does (#244).")
 
 (defparameter *session-absolute-timeout* 604800
   "Seconds a session may exist, however active, before it expires, or NIL for no absolute
 limit. Default 7 days. Counted from CREATED, which SIGN-IN! resets: a new authentication
 starts a new window. A sensitive application shortens both, for example an hour idle and
-twelve hours absolute.")
+twelve hours absolute.
+
+Unless *COOKIE-MAX-AGE* is set, this is also the session cookie's Max-Age, so the browser
+keeps the cookie for as long as the server could accept the session (#244). With this NIL
+and *COOKIE-MAX-AGE* NIL, the cookie has no Max-Age and the browser drops it when it
+closes.")
+
+(defparameter *accessed-save-interval* 60
+  "Seconds ACCESSED may advance before ENSURE-SESSION writes it to the store through
+STORE-TOUCH (#243). A store that hands out a fresh session from every STORE-REF, as the
+database store does, would otherwise keep ACCESSED at its last explicit save, and the idle
+limit would count from then. Writing at most this often means a database store does not take
+a write on every request just to record that the visitor is still there; it is enough for an
+idle timeout measured in minutes. A change to the data bag is written by WRAP-SESSION after
+the request that made it, always (#230).")
 
 (defun session-expired-p (session &optional (now (get-universal-time)))
   "Whether SESSION is past *SESSION-IDLE-TIMEOUT* or *SESSION-ABSOLUTE-TIMEOUT* at NOW."
@@ -163,6 +181,23 @@ keeps working without change."
   (:documentation "Remove every session in STORE that SESSION-EXPIRED-P says is expired at NOW,
 and return how many were removed (#121)."))
 
+(defgeneric store-touch (store id accessed)
+  (:documentation "Write ACCESSED as the stored ACCESSED of the session under ID, and nothing
+else, and return T; if STORE holds no session under ID, write nothing and return NIL.
+
+ENSURE-SESSION calls this, at most once per *ACCESSED-SAVE-INTERVAL* (#243). Only ACCESSED is
+written, so a concurrent request's change to the data bag is not overwritten by this
+request's older copy. Like STORE-SAVE, it must NOT insert."))
+
+(defmethod store-touch (store id accessed)
+  "The default, for a store that defines only the other methods: load the session, set its
+ACCESSED, and write it back through STORE-SAVE. This writes the whole session, so a store
+that can write one field should implement STORE-TOUCH, as the DB store does."
+  (let ((session (store-ref store id)))
+    (when session
+      (setf (session-accessed session) accessed)
+      (store-save store session))))
+
 (defmethod store-sweep (store now)
   "The default, for a store that defines only the other methods: load every session and
 delete the expired ones. Correct, but it reads the whole store; a store should do better."
@@ -198,6 +233,14 @@ delete the expired ones. Correct, but it reads the whole store; a store should d
       (when current
         (unless (eq current session)
           (setf (gethash (session-id session) (ms-table s)) session))
+        t))))
+(defmethod store-touch ((s memory-store) id accessed)
+  ;; The table holds the object ENSURE-SESSION already touched, so there is nothing to copy.
+  ;; Set it anyway, so a caller that passed only an id gets what the protocol promises.
+  (bt:with-lock-held ((ms-lock s))
+    (let ((current (gethash id (ms-table s))))
+      (when current
+        (setf (session-accessed current) accessed)
         t))))
 (defmethod store-sweep ((s memory-store) now)
   (bt:with-lock-held ((ms-lock s))
@@ -242,23 +285,61 @@ of ours for two threads to race over."
 ;;; The HTTP seam: cookie <-> session.
 ;;; ------------------------------------------------------------------------
 (defparameter *cookie-name* "hyperion-session" "Name of the session cookie.")
-(defparameter *cookie-max-age* 86400 "Session cookie Max-Age, in seconds.")
+(defparameter *cookie-max-age* nil
+  "Session cookie Max-Age in seconds, or NIL to use *SESSION-ABSOLUTE-TIMEOUT* (the default).
+
+The cookie is sent only when a session is created or rotated, and a browser counts Max-Age
+from then, so the cookie cannot be what ends an active session: it would end it that many
+seconds after sign-in however much the visitor used it. Until #244 the default was 86400, and
+every signed-in visitor was signed out 24 hours after signing in. The server enforces both
+limits itself (ENSURE-SESSION), so the cookie only has to last as long as the longest of
+them, which is the absolute one.
+
+A number is used exactly. With this NIL and *SESSION-ABSOLUTE-TIMEOUT* NIL, the cookie has
+no Max-Age: the browser keeps it until it closes, which can end a session sooner than an
+application with no absolute limit might expect. The server still enforces
+*SESSION-IDLE-TIMEOUT*.")
+
+(defun %cookie-max-age (max-age)
+  "The Max-Age a session cookie carries: MAX-AGE when it is a number, otherwise the absolute
+limit as it is when the header is built, or NIL for none."
+  (or max-age *session-absolute-timeout*))
 
 (defun set-cookie-header (id &key (name *cookie-name*) (max-age *cookie-max-age*)
                                   (path "/") (http-only t) (same-site "Lax") secure)
   "A Set-Cookie header *value* binding cookie NAME to session ID. HttpOnly and
-SameSite=Lax by default; pass SECURE for HTTPS-only."
+SameSite=Lax by default; pass SECURE for HTTPS-only. MAX-AGE NIL means
+*SESSION-ABSOLUTE-TIMEOUT*, and when that is NIL too the header has no Max-Age (see
+*COOKIE-MAX-AGE*)."
   (with-output-to-string (s)
-    (format s "~A=~A; Path=~A; Max-Age=~D; SameSite=~A" name id path max-age same-site)
+    (format s "~A=~A; Path=~A" name id path)
+    (let ((seconds (%cookie-max-age max-age)))
+      (when seconds (format s "; Max-Age=~D" seconds)))
+    (format s "; SameSite=~A" same-site)
     (when http-only (write-string "; HttpOnly" s))
     (when secure (write-string "; Secure" s))))
+
+(defun %touch (store session now)
+  "Set SESSION's ACCESSED to NOW, and write it through STORE-TOUCH when it is at least
+*ACCESSED-SAVE-INTERVAL* past what the store last received."
+  (let ((due (bt:with-lock-held ((session-lock session))
+               (setf (session-accessed session) now)
+               (>= (- now (session-saved-accessed session)) *accessed-save-interval*))))
+    (when (and due (store-touch store (session-id session) now))
+      (bt:with-lock-held ((session-lock session))
+        (setf (session-saved-accessed session) now)))))
 
 (defun ensure-session (env store &key (cookie-name *cookie-name*) (create t))
   "Resolve the browser's session for Clack request ENV against STORE. Returns
  (values SESSION SET-COOKIE): the session named by the request's cookie, or -- when
 absent/unknown and CREATE is true -- a freshly minted one; SET-COOKIE is a
-Set-Cookie header string to emit when a new session was created, else NIL. Touches
-the resolved session's ACCESSED time.
+Set-Cookie header string to emit when a new session was created, else NIL.
+
+Sets the resolved session's ACCESSED to now, and writes it to STORE through STORE-TOUCH when
+it is at least *ACCESSED-SAVE-INTERVAL* past what the store holds (#243). This happens here
+rather than in WRAP-SESSION so that an application calling this directly keeps its idle limit
+counting from the last request. Before, ACCESSED was only set on the object, and a store that
+hands out fresh objects (the DB store) kept the value from the last explicit save.
 
 NOT FOR SIGN-IN. This returns the session the request already has, so a sign-in built on
 it keeps the id the visitor held before authenticating, which is session fixation (#120).
@@ -274,7 +355,7 @@ keys as part of the same call."
       (setf existing nil))
     (cond
       (existing
-       (setf (session-accessed existing) (get-universal-time))
+       (%touch store existing (get-universal-time))
        (values existing nil))
       (create
        (let* ((new (new-id))
@@ -426,20 +507,12 @@ Set-Cookie on a response is ordinary HTTP, and ours going last is what a client 
   (destructuring-bind (status headers body) response
     (list status (append headers (list :set-cookie value)) body)))
 
-(defparameter *accessed-save-interval* 60
-  "Seconds ACCESSED may advance before WRAP-SESSION writes it back on a request that changed
-nothing else (#230). A change to the data bag is written after the request that made it,
-always. An ACCESSED-only change is written at most this often, so a database-backed store does
-not take a write on every request just to record that the visitor is still there; it is
-enough for an idle timeout measured in minutes.")
-
 (defun %save-if-changed (store session)
-  "Write SESSION back through STORE-SAVE when its data changed or its ACCESSED is at least
-*ACCESSED-SAVE-INTERVAL* past what the store last received; then mark it saved."
+  "Write SESSION back through STORE-SAVE when its data changed, then mark it saved. ACCESSED
+alone is not a reason to write here: ENSURE-SESSION already wrote it through STORE-TOUCH when
+it was due (#243)."
   (let ((due (bt:with-lock-held ((session-lock session))
-               (or (session-dirty session)
-                   (>= (- (session-accessed session) (session-saved-accessed session))
-                       *accessed-save-interval*)))))
+               (session-dirty session))))
     (when (and due (store-save store session))
       (bt:with-lock-held ((session-lock session))
         (setf (session-dirty session) nil

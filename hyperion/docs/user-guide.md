@@ -234,22 +234,39 @@ Nickname it: `(:local-nicknames (#:session #:hyperion/session))`.
 
 **Changes are written back by `wrap-session`.** A DB-backed store hands out a fresh copy of the
 session on every request, so `wrap-session` writes the session back through `store-save`
-after the handler: every change to the data bag (`session-set`, `session-del`,
-`reset-session`, `sign-in!`), and `accessed` at most once per `*accessed-save-interval*`
-seconds (default 60). `store-save` only updates a session that is still in the store, so a
-session the handler removed with `kill-session` stays removed. Code that resolves a session
-with `ensure-session` directly, outside `wrap-session`, must call `store-save` itself after
-changing it. A store written before `store-save` existed keeps working: the default method
-writes through `store-add`, after checking with `store-ref` that the session is still there.
+after the handler whenever the data bag changed (`session-set`, `session-del`,
+`reset-session`, `sign-in!`). `store-save` only updates a session that is still in the store,
+so a session the handler removed with `kill-session` stays removed. Code that resolves a
+session with `ensure-session` directly, outside `wrap-session`, must call `store-save` itself
+after changing the data bag. A store written before `store-save` existed keeps working: the
+default method writes through `store-add`, after checking with `store-ref` that the session is
+still there.
 
-**Sessions expire on the server.** The cookie's `Max-Age` only tells the browser when to stop
-sending the id, so the server keeps its own limits: a session unused for
+**`accessed` is written by `ensure-session`**, with or without `wrap-session`, at most once per
+`*accessed-save-interval*` seconds (default 60), through `store-touch`. The DB store's
+`store-touch` updates that one column, so it cannot overwrite a change another request saved.
+A custom store gets a default `store-touch` that loads the session and writes it whole through
+`store-save`; implement `store-touch` to write one field. Before #243, `accessed` was written
+only by `wrap-session`, so an application calling `ensure-session` directly had its idle limit
+counted from its last explicit save.
+
+**Sessions expire on the server.** The server keeps two limits: a session unused for
 `*session-idle-timeout*` seconds (default 24 hours), or older than
 `*session-absolute-timeout*` (default 7 days), is refused. `ensure-session` deletes it and
 mints a new one, exactly as for an unknown cookie, so no handler ever sees an expired session.
 `sign-in!` starts a new absolute window; a plain `rotate-session`, for a role change say, keeps
 it, and `(rotate-session store s :reset-created t)` starts one for a step-up
 re-authentication. Set either limit to `nil` to turn it off.
+
+**The cookie lasts as long as the absolute limit.** The session cookie is sent only when a
+session is created or rotated, and the browser counts its `Max-Age` from then, so the cookie
+cannot be what ends an active session. Its `Max-Age` is therefore `*session-absolute-timeout*`,
+read when the header is built, and the server enforces both limits. Set `*cookie-max-age*` to a
+number to use that number instead. With `*cookie-max-age*` and `*session-absolute-timeout*` both
+`nil`, the cookie has no `Max-Age` and the browser drops it when it closes, which can end a
+session sooner than an application with no absolute limit expects. Before #244 the cookie's
+`Max-Age` was a fixed 86400, and every signed-in visitor was signed out 24 hours after signing
+in, however active they were.
 
 A sensitive application shortens both, for example:
 
@@ -258,8 +275,8 @@ A sensitive application shortens both, for example:
       session:*session-absolute-timeout* 43200)    ; twelve hours in all
 ```
 
-The idle limit is measured against the `accessed` the store holds, which is written at most
-once per `*accessed-save-interval*` (60 s). That does not matter at hours, but an idle limit of
+The idle limit is measured against the `accessed` the store holds, which `ensure-session`
+writes at most once per `*accessed-save-interval*` (60 s). That does not matter at hours, but an idle limit of
 a few minutes should lower `*accessed-save-interval*` as well.
 
 Expired sessions are removed from the store by a sweep that `wrap-session` runs at most once

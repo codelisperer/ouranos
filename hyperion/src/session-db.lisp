@@ -139,6 +139,18 @@ mnemosyne/conn:connect). DIALECT is :sqlite or :postgres. With :ENSURE, create t
                     :dialect (db-store-dialect store))))
       (and (integerp n) (plusp n)))))
 
+(defmethod sess:store-touch ((store db-store) id accessed)
+  ;; One column (#243): a whole-session write here would put this request's copy of the data
+  ;; bag over a change another request saved in the meantime. An UPDATE, so a removed session
+  ;; stays removed.
+  (bt:with-lock-held ((db-store-lock store))
+    (let ((n (q:run (db-store-connection store)
+                    (list :update (db-store-table store)
+                          :set (list :accessed accessed)
+                          :where (list := :id id))
+                    :dialect (db-store-dialect store))))
+      (and (integerp n) (plusp n)))))
+
 (defmethod sess:store-sweep ((store db-store) now)
   ;; One DELETE, loading no sessions (#121). The same limits as SESS:SESSION-EXPIRED-P: idle
   ;; is measured from `accessed', absolute from `created', and a NIL timeout adds no clause.

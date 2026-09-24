@@ -182,6 +182,52 @@
     (is (string= before (session:session-id s)))
     (is (null (session:session-get s :user-id)))))
 
+;;; --- the cookie lasts as long as the absolute limit (#244) ----------------------------
+;;;
+;;; The cookie is sent only at a mint or a rotation, and a browser counts Max-Age from then.
+;;; With the old fixed 86400 every signed-in visitor was signed out 24 hours after signing in,
+;;; however active. The server enforces both limits, so the cookie only has to outlive them.
+
+(defun %max-age (set-cookie)
+  "The Max-Age a Set-Cookie value carries, as a string, or NIL when it has none."
+  (let ((at (search "Max-Age=" set-cookie)))
+    (and at (subseq set-cookie (+ at 8) (position #\; set-cookie :start at)))))
+
+(defun %every-session-cookie (store)
+  "The Set-Cookie of each way a session cookie is made: a mint, a rotation, SIGN-IN!, and a
+mint under WRAP-SESSION."
+  (list (nth-value 1 (session:ensure-session (%env) store))
+        (nth-value 1 (session:rotate-session store (session:ensure-session (%env) store)))
+        (nth-value 1 (session:sign-in! store (%env) :user-id 1))
+        (getf (second (funcall (%wrapped store #'%ok) (%env))) :set-cookie)))
+
+(test the-session-cookie-lasts-as-long-as-the-absolute-limit
+  (let ((store (session:make-memory-store)))
+    (is (equal '("604800" "604800" "604800" "604800")
+               (mapcar #'%max-age (%every-session-cookie store)))
+        "the default Max-Age is the default absolute limit, 7 days")
+    (let ((session:*session-absolute-timeout* 3600))
+      (is (equal '("3600" "3600" "3600" "3600")
+                 (mapcar #'%max-age (%every-session-cookie store)))
+          "and follows the absolute limit as it is when the header is built"))))
+
+(test a-cookie-max-age-that-is-set-is-used-exactly
+  (let ((store (session:make-memory-store))
+        (session:*cookie-max-age* 1234))
+    (is (equal '("1234" "1234" "1234" "1234")
+               (mapcar #'%max-age (%every-session-cookie store))))))
+
+(test with-no-absolute-limit-and-no-max-age-the-cookie-has-none
+  (let ((store (session:make-memory-store))
+        (session:*cookie-max-age* nil)
+        (session:*session-absolute-timeout* nil))
+    (let ((cookies (%every-session-cookie store)))
+      (is (every #'null (mapcar #'%max-age cookies)) "no Max-Age: ~S" cookies)
+      (is (every (lambda (c) (and (search "; Path=/" c) (search "; SameSite=Lax" c)
+                                  (search "; HttpOnly" c)))
+                 cookies)
+          "the rest of the header is intact: ~S" cookies))))
+
 ;;; --- the middleware: a Set-Cookie a handler cannot drop (pre-publication issue 207) ------------
 
 (defun %wrapped (store handler &rest options)
