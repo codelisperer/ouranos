@@ -1,8 +1,8 @@
 # Middleware & security posture (design)
 
-*Design capture — mostly not built. The safe-output posture (Spinneret escaping,
-`hyperion/markdown:render`) is already in force. Bundles with the session/auth
-subsystem on the roadmap.*
+*Partly built. The safe-output posture (Spinneret escaping, `hyperion/markdown:render`) is in
+force, the security headers are sent by default (#119, section "Security headers" below), and
+CSRF refusal is `hyperion/csrf:wrap-csrf`. The rest is a design capture.*
 
 ## The question
 
@@ -49,6 +49,57 @@ XSS is defended primarily at **output**, with transport headers as defense-in-de
   (`Secure`, `HttpOnly`, `SameSite`). Ties into the coming auth / user-preference
   work — the i18n `resolve-locale` seam already reserves `user-pref`.
 
+## Security headers (built, #119)
+
+`hyperion/server:start` wraps every app in `hyperion/security-headers:wrap-security-headers`
+unless it is started with `:security-headers nil`. `serve-forever` takes the same option. Every
+response then carries:
+
+| header | default | why |
+|---|---|---|
+| `X-Content-Type-Options` | `nosniff` | a response is never sniffed into a type it was not sent as |
+| `X-Frame-Options` | `DENY` | no page can be framed by another site (clickjacking); for older browsers |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | a cross-origin request carries the origin, never the path |
+| `Content-Security-Policy` | `frame-ancestors 'none'; base-uri 'self'; object-src 'none'` | the directives that do not depend on the page's markup |
+| `Strict-Transport-Security` | not sent | opt-in; see below |
+
+**The CSP has no `script-src` or `style-src` by default, on purpose.** Measured on the tree's
+own pages served through `start`: active-search and active-search-db each inline one
+compiled-Parenscript `<script>` and load Alpine, whose standard build evaluates expressions at
+run time; coalton-repl inlines three `<script>` blocks; praxeon/web inlines its chat script;
+and `hyperion/dev` injects an inline poller. `script-src 'self'` would break every one of
+them. An application that emits no inline script should set a full policy.
+
+**Overriding.** Each header has a special variable and a keyword of the same name without
+earmuffs: `*content-type-options*`, `*frame-options*`, `*referrer-policy*`,
+`*content-security-policy*`, `*hsts*`. A string replaces the default, and `nil` turns the header
+off. Pass keywords through `start`:
+
+```lisp
+(srv:start app :security-headers
+           '(:content-security-policy "default-src 'self'; frame-ancestors 'none'"
+             :hsts "max-age=31536000; includeSubDomains"))
+```
+
+A header the application sets on its own response is never replaced, so one route can loosen
+or tighten a header (a page that must be framed by a known origin, say) without the wrapper
+knowing about it.
+
+**HSTS** is off by default because it binds browsers to HTTPS for the whole host for
+`max-age`, and hyperion does not terminate TLS itself (#125), so it cannot know the deployment
+is HTTPS-only. `(hyperion/security-headers:hsts-value)` builds a value: one year and
+`includeSubDomains` by default, and `preload` only with `:preload t`, because a preload-list
+entry is close to irreversible.
+
+**What does not get the headers.** A handler that signals an error, rather than returning a
+500 itself, gets the backend's own error page, which the wrapper never sees: measured, that
+500 carries none of these headers. An app that wants them on error pages returns its own error
+response.
+
+**Asserting them.** The failure mode for this category is a header that quietly stops being
+sent. `hyperion/tests/security-headers-tests.lisp` asserts them on a real socket through
+`start`; an application can do the same against its own routes.
+
 ## Proposed shape
 
 A `hyperion` middleware module exposing a curated **`secure-app` wrapper** —
@@ -60,13 +111,17 @@ app-neutral (a framework capability, not app logic).
 
 - Interceptors vs middleware (above) — adopt an interceptor layer, or stay with
   Lack middleware?
-- CSP policy shape (nonce-based for any inline? we mostly have none).
+- CSP policy shape. Answered for now by measurement (see "Security headers"): the tree's pages
+  DO inline script, so the default leaves script-src to the app. A nonce-based `script-src`,
+  with the page shell adding the nonce to hyperion's own inline scripts, is the way to a strict
+  default and is not built.
 - Session store: signed cookie now; server-side (DB) later.
 - How CSRF tokens compose with the Coalton-typed HTMX vocabulary + forms.
 
 ## Status
 
-Captured; **not built** except the escape-by-default output posture (already in
-force). Bundles with the **session management + secure cookies + user-pref**
-subsystem already on the roadmap (Phase 4-adjacent). A future ADR records the
+**Built:** the escape-by-default output posture, the security headers (#119, above), and the
+CSRF refusal (`hyperion/csrf`). **Not built:** a single `secure-app` wrapper composing headers,
+CSRF and session in one call; a nonce-based strict CSP. Bundles with the **session
+management + secure cookies + user-pref** subsystem already on the roadmap (Phase 4-adjacent). A future ADR records the
 middleware/interceptor decision when we build it.

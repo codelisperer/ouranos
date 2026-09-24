@@ -59,6 +59,7 @@
                              (:file "path")     ; path templates + matching (Coalton)
                              (:file "html")     ; rendering the vocabulary (CL)
                              (:file "logging")  ; request id + request logging
+                             (:file "security-headers") ; default security headers (#119)
                              (:file "server")   ; configurable Clack backend
                              (:file "http")     ; request/response utils
                              (:file "router")   ; URL dispatch over the typed paths (CL)
@@ -455,6 +456,7 @@
                              (:file "plural-tests")
                              (:file "router-tests")
                              (:file "server-tests")
+                             (:file "security-headers-tests") ; uses server-tests' helpers (#119)
                              ;; AFTER server-tests, which is not alphabetical and not an
                              ;; accident: it reuses that file's %SRV-OK-APP and %SRV-AWAIT
                              ;; rather than keeping a second copy of them (pre-publication issue 336). The port
