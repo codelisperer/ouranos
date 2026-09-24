@@ -20,10 +20,16 @@
 a test is expected to make, so a thread that is merely slow finishes first.")
 
 (defun %join-by (thread deadline timeout)
-  (let ((left (max 0 (/ (- deadline (get-internal-real-time))
-                        internal-time-units-per-second))))
+  (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
     (multiple-value-bind (value outcome)
-        (sb-thread:join-thread thread :timeout left :default nil)
+        (cond ((plusp left) (sb-thread:join-thread thread :timeout left :default nil))
+              ;; No time left: a TIMEOUT of 0, or a JOIN-ALL deadline that passed while an
+              ;; earlier thread was being joined. JOIN-THREAD refuses a timeout of 0 with a
+              ;; TYPE-ERROR that names no thread (#246), so decide here instead. A thread still
+              ;; running has missed the deadline; a finished one is joined with no timeout,
+              ;; which returns at once.
+              ((sb-thread:thread-alive-p thread) (values nil :timeout))
+              (t (sb-thread:join-thread thread :default nil)))
       (case outcome
         (:timeout (error "the thread ~A did not finish within ~D seconds"
                          (sb-thread:thread-name thread) timeout))
