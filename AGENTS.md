@@ -267,9 +267,13 @@ not about an expression inside it; an `ok` line is about failures, not about cov
 - **The provenance SHA a pull-request run reports is not in the repository.** A `pull_request`
   run checks out `refs/pull/N/merge`, an ephemeral commit GitHub creates for the run, so
   `git cat-file -e <sha>` fails for it and a reader trying to resolve the line is told there is
-  no such object. `push` and `workflow_dispatch` runs report real commits. Two unresolvable SHAs
-  have shipped this way. Tracked as pre-publication issue 485; until it is fixed, do not spend a CI cycle re-deriving
-  to "fix" one, because a fresh pull-request run produces another unreachable SHA.
+  no such object. `push` and `workflow_dispatch` runs report real commits. Three unresolvable SHAs
+  have shipped this way, the third in #264's row. Tracked as pre-publication issue 485; until it is fixed, do not spend a CI cycle re-deriving
+  to "fix" one, because a fresh pull-request run produces another unreachable SHA. **To avoid
+  one in the first place, take the row from a dispatched run, not from the pull request's own
+  run:** rebase onto current `main`, push, run `gh workflow run verify.yml --ref <branch>`, and pass
+  that run's Linux log to `check-readme-counts.lisp --update`. A dispatched run checks out the
+  branch's head, which is a real commit.
 - **Two PRs that both change check counts conflict by construction, so they merge serially.**
   The README carries one provenance line — *"Counts above are from the Linux CI leg at `<sha>`"* —
   and every count-changing PR rewrites it, so any two of them collide on that line whatever
