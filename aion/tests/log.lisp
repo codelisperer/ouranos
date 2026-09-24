@@ -178,6 +178,24 @@
       ;; a float must round-trip as a number, not a quoted string
       (is (numberp (gethash "f" obj))))))
 
+(test render-checks-the-field-list-before-it-enters-coalton
+  ;; #110: Coalton checks that the fields argument is a list, not what is in it. %FIELDS only
+  ;; ever builds Fields, so it is replaced here with one that returns a non-Field second.
+  (let ((real (fdefinition 'aion/log::%fields)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/log::%fields)
+                 (lambda (extra)
+                   (declare (ignore extra))
+                   (list (aion/log/types:mk-field-string "k" "v") :not-a-field)))
+           (let ((e (handler-case (progn (aion/log::render :info "C" "m" '()) nil)
+                      (aion/boundary:boundary-type-error (e) e))))
+             (is (typep e 'aion/boundary:boundary-type-error) "render did not signal")
+             (is (eql 1 (and e (aion/boundary:boundary-type-error-index e))))
+             (is (eq 'aion/log/types:render-event-line
+                     (and e (aion/boundary:boundary-type-error-function e))))))
+      (setf (fdefinition 'aion/log::%fields) real))))
+
 (defun run-tests ()
   "Run the aion/log suite; return T on success (for `asdf:test-system`).
 Named RUN-TESTS, not RUN -- FiveAM already exports RUN."

@@ -83,13 +83,16 @@ a nil field is absent rather than false."
 enabled (the level macros guard it via log4cl), so its cost is paid only for emitted events.
 
 Every argument crosses into Coalton as a promised representation -- strings and a list of
-opaque Fields -- and a String comes back."
+opaque Fields -- and a String comes back. Coalton checks the strings on entry but not the
+list's elements, so the list is checked here (#110)."
   (types:render-event-line (%name *layout*)
                            (%name level)
                            cat
                            (princ-to-string message)
                            (%iso-now)
-                           (%fields fields)))
+                           (boundary:check-elements (%fields fields) 'types:field
+                                                    :function 'types:render-event-line
+                                                    :argument 'fields)))
 
 ;;; --- the leveled macros (thin wrappers over log4cl's, preserving its gating +
 ;;;     source-derived category) ---------------------------------------------

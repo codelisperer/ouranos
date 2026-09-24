@@ -79,6 +79,16 @@ functions — call the constructor directly (`(Interceptor n e l)`), no helper n
 - Constructing a Coalton value from a **runtime** CL value inside `(coalton …)`
   needs a `lisp` escape with proper `(-> Type)` syntax — usually easier to expose a
   Coalton wrapper `(UFix -> String)` and call it from CL with the scalar.
+- **Entry checks each argument's outer type, not what is inside it** (#110, patterns §5y).
+  `:foo` for a `String` signals; `(list :foo)` for a `(List String)` does not, and neither
+  does anything for an `(Optional String)`, because `(Some x)` is `x`. The wrong element then
+  meets code compiled to trust it — `("Retry-After" 30)` into
+  `hyperion/http1:encode-head-flat` is a memory fault. So wrap a list or `Optional` argument
+  in the call form:
+  `(boundary:check-elements xs 'string :function 'f :argument 'xs)` or
+  `(boundary:check-optional x 'string …)` from `aion/boundary`. Each returns its value and
+  signals `boundary-type-error` (a `type-error`) naming the element and index.
+  `sbcl --script scripts/coalton-boundary.lisp` lists the functions that need it.
 
 ## 6. Verify scripts: defer Coalton symbol resolution
 

@@ -51,6 +51,16 @@ catch-all.
 - ADTs the CL shell builds or reads need a CL-facing constructor plus **total** accessors —
   every variant handled, returning a harmless default — so the shell never pattern-matches
   and the accessor can never signal.
+- **A list or an `Optional` passed from CL into Coalton must be checked by the CL caller**
+  (patterns §5y, #110). Coalton checks each argument's outer type on entry, but not a list's
+  elements, and not an `Optional` at all (`(Some x)` is `x`). A CL call that passes either
+  wraps that argument in `aion/boundary:check-elements` or `check-optional`. Without it, a
+  wrong element reaches code compiled on the promise that it is right: a header value of `30`
+  in `hyperion/http1:encode-head-flat`'s string list is a memory fault. For a new Coalton
+  function with a `(List …)` or `(Optional …)` parameter, check every CL call site;
+  `sbcl --script scripts/coalton-boundary.lisp` lists them. Any other code that reads a
+  Coalton representation is a finding; `aion/boundary` is the one sanctioned exception
+  (patterns §7).
 
 **8. No IO in the Coalton core.** `format`, `print`, connections, random, clock, file
 access. These belong in the CL shell. This is a house rule, not a Coalton limitation, and

@@ -15,6 +15,7 @@
 (cl:defpackage #:praxeon/elise
   (:use #:cl)
   (:local-nicknames (#:config #:praxeon/config)
+                    (#:boundary #:aion/boundary)
                     (#:llm #:praxeon/llm)
                     (#:actor #:praxeon/actor)
                     (#:turn #:praxeon/turn)
@@ -162,7 +163,9 @@ whether a stage refused."
 (defun respond-turn (agent user-input &optional (locale :en))
   "RESPOND, but returning the TURN -- so a caller can ask whether it was refused
 (TURN:TURN-HALTED) and why (TURN:TURN-NOTE) rather than parsing the reply."
-  (turn:run-chain (list (crisis-guardrail))
+  (turn:run-chain (boundary:check-elements (list (crisis-guardrail))
+                                          'aion/interceptor:interceptor
+                                          :function 'turn:run-chain :argument 'chain)
                   (%elise-effect agent)
                   (turn:make-turn user-input (string-downcase (symbol-name locale)))))
 

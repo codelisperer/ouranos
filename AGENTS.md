@@ -66,7 +66,10 @@ The rules that bite: function-type `declare`s and `define-class` sigs are uncurr
 `foo` collide); `match` on a nullary constructor needs parens `((None) …)`; don't redefine
 prelude names (`continue Fail Some None Ok Err Tuple map into`); a typeclass-constrained
 function needs a monomorphic wrapper to be called from CL; an unused binding is a build
-failure. CL has its own silent-collision hazard — grep a file for a helper name before you
+failure. A Coalton function called from CL checks each argument's outer type but not a list's
+elements, and not an `Optional` at all; CL code that passes either into Coalton wraps it in
+`aion/boundary:check-elements` or `check-optional`, or a wrong element can corrupt the image
+(patterns §5y, #110). CL has its own silent-collision hazard — grep a file for a helper name before you
 define it.
 
 ## Pointers

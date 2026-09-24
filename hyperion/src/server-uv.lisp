@@ -36,6 +36,7 @@
 (cl:defpackage #:hyperion/server-uv
   (:use #:cl)
   (:local-nicknames (#:h1  #:hyperion/http1)
+                    (#:boundary #:aion/boundary)
                     (#:uv  #:aion/uv)
                     (#:pool #:aion/pool)
                     (#:net #:aion/uv/net)
@@ -295,9 +296,20 @@ cannot disagree with the bytes that follow."
         collect (if (stringp name) name (string-capitalize (symbol-name name)))
         collect (if (stringp value) value (princ-to-string value))))
 
+(defun %head-strings (headers encoder)
+  "HEADERS as the flat list of strings ENCODER takes, checked element by element.
+
+%RING-HEADERS-FLAT already turns every name and value into a string, and that conversion is
+what stopped a handler's header from crashing the loop thread (see its docstring). The check
+is here because Coalton does not check a list's elements (#110): if the conversion ever lets
+a non-string through, the result is a BOUNDARY-TYPE-ERROR naming the element, not a memory
+fault."
+  (boundary:check-elements (%ring-headers-flat headers) 'string
+                           :function encoder :argument 'headers))
+
 (defun %write-response (conn status headers body-octets keep-alive)
   "Encode the head, refuse it if it is dangerous, and write head+body as one buffer."
-  (let ((encoded (h1:encode-head-flat status (%ring-headers-flat headers)
+  (let ((encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
                                       (length body-octets) keep-alive)))
     (cond
       ((h1:encode-ok? encoded)
@@ -528,7 +540,8 @@ argument -- the writer.
 The head is encoded and refused HERE, before anything is written, because it is the last
 moment a refusal can still become a 500. After it, the only report available is a truncated
 message."
-  (let ((encoded (h1:encode-head-chunked-flat status (%ring-headers-flat headers)
+  (let ((encoded (h1:encode-head-chunked-flat status
+                                              (%head-strings headers 'h1:encode-head-chunked-flat)
                                               keep-alive)))
     (cond
       ;; AN SSE STREAM ON THE LOOP THREAD IS NOT A TRADE-OFF, IT IS A DEAD SERVER, and it
@@ -762,7 +775,7 @@ handler turns it into a 500; after the head there is no status left to change."
       (error "hyperion/server-uv: the response body names a file that is not readable: ~A"
              path))
     (let* ((size (file-length stream))
-           (encoded (h1:encode-head-flat status (%ring-headers-flat headers)
+           (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
                                          size keep-alive)))
       (cond
         ((not (h1:encode-ok? encoded))

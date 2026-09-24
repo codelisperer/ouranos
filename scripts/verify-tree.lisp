@@ -123,7 +123,7 @@
 
 (defparameter +systems+
   '(;; core
-    :aion :aion/csv :aion/platform :aion/clock :aion/log :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
+    :aion :aion/csv :aion/platform :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
     ;; aux systems -- these hold real code and were previously never compiled here,
@@ -156,7 +156,7 @@ scripts/build-libuv.lisp first, so their absence here is not evidence of anythin
 Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ below.")
 
 (defparameter +test-systems+
-  '(:aion/tests :aion/dynamic/tests :aion/platform/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
+  '(:aion/tests :aion/boundary/tests :aion/dynamic/tests :aion/platform/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests

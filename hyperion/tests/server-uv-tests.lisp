@@ -1505,3 +1505,24 @@ socket-level answer to :SHORT is %CLOSE-AFTER, the same close an aborted chunked
            (when (typep c 'hsrv:port-in-use)
              (is (hsrv:port-in-use-cause c) "libuv's own error must be kept")))
       (sock:socket-close squatter))))
+
+(test the-header-list-is-checked-before-it-enters-the-encoder
+  ;; #110: Coalton checks that the header argument is a list, not that its elements are
+  ;; strings. %RING-HEADERS-FLAT always makes strings, so it is replaced here with one that
+  ;; lets an integer value through -- (:retry-after 30) unconverted. Passed to the encoder
+  ;; without the check, that exact list is a memory fault and "The integrity of this image
+  ;; is possibly compromised" (measured in a separate process for #110). %WRITE-RESPONSE
+  ;; builds the head before it touches the connection, so no connection is needed.
+  (let ((real (fdefinition 'hyperion/server-uv::%ring-headers-flat)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'hyperion/server-uv::%ring-headers-flat)
+                 (lambda (headers) (declare (ignore headers)) (list "Retry-After" 30)))
+           (let ((e (handler-case
+                        (progn (hyperion/server-uv::%write-response nil 200 '() #() nil) nil)
+                      (aion/boundary:boundary-type-error (e) e))))
+             (is (typep e 'aion/boundary:boundary-type-error) "%write-response did not signal")
+             (is (eql 1 (and e (aion/boundary:boundary-type-error-index e))))
+             (is (eq 'hyperion/http1:encode-head-flat
+                     (and e (aion/boundary:boundary-type-error-function e))))))
+      (setf (fdefinition 'hyperion/server-uv::%ring-headers-flat) real))))

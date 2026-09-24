@@ -14,6 +14,7 @@
   :depends-on ("aion/log"      ; neutral logging facade
                "aion/dynamic"  ; bindings that cross a thread (#158); used in workflow, event
                "aion/interceptor"  ; the typed pipeline a turn is threaded through (pre-publication issue 130)
+               "aion/boundary"     ; RUN-TURN-THROUGH checks its CHAIN before it enters Coalton (#110)
                "aion/http-client"  ; the shared outbound client (pre-publication issue 202)
                "coalton"
                "alexandria"
@@ -115,6 +116,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("praxeon" "praxeon/web"      ; web enables `bin/elise --server`
+               "aion/boundary"              ; RESPOND-TURN checks its chain (#110)
+               "aion/interceptor"           ; the element type of that check
                "hyperion"                   ; elise.lisp calls i18n:translate directly
                "praxeon/web-search"         ; gives Elise the web-search means
                "praxeon/translate"          ; lets Elise converse in the user's locale
@@ -131,7 +134,7 @@
 
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
-  :depends-on ("praxeon" "praxeon/web-search" "fiveam")
+  :depends-on ("praxeon" "praxeon/web-search" "aion/boundary" "fiveam")
   :serial t
   :components ((:module "tests"
                 :serial t

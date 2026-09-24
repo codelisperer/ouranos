@@ -35,6 +35,7 @@
   (:use #:cl)
   (:shadow #:trace #:debug #:warn #:error)   ; our leveled macros shadow the CL symbols
   (:local-nicknames (#:types #:aion/log/types)   ; the typed core: Level/Layout/Event
+                    (#:boundary #:aion/boundary) ; list checks before a call into Coalton (#110)
                     (#:lm   #:log)       ; log4cl's user macros (info/trace/... , config)
                     (#:l4   #:log4cl)    ; log4cl's appender/layout/logger config API
                     (#:jzon #:com.inuoe.jzon))
