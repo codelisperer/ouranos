@@ -306,7 +306,15 @@ escape the closing quote, which is how a path with a space in it silently become
       (format t "~&  ~A~%"
               (or (ignore-errors (%run-bounded (list tar "--version") :capture t :timeout 30))
                   "(tar --version printed nothing)"))
-      (run tar (list "xjf" (namestring tarball) "-C"
+      ;; THE mldsa-native EXAMPLES ARE NOT EXTRACTED. They hold the archive's 147 symlinks,
+      ;; some to directories, and on Windows without symlink privilege both bsdtar and GNU
+      ;; tar fail on them and exit non-zero, having extracted everything else (measured by
+      ;; the Windows lane for #273: bsdtar 3.8.8 exit 1, Git's GNU tar exit 2). Nothing
+      ;; under drivers/pqcp/ is compiled or on an include path (see *INCLUDE-DIRS* and
+      ;; scripts/mbedtls-sources.lisp's *SOURCE-DIRS*), so leaving them out changes
+      ;; nothing that is built.
+      (run tar (list "--exclude=*/mldsa-native/examples"
+                     "-xjf" (namestring tarball) "-C"
                      (namestring (merge-pathnames "src/" *vendor*)))
            :timeout 600))
     srcdir))
