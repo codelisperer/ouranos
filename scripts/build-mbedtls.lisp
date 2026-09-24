@@ -6,13 +6,13 @@
 ;;;;     sbcl --script scripts/build-mbedtls.lisp --where    # print the library path, build nothing
 ;;;;
 ;;;; Exit 0 on success, 1 on failure. Produces vendor/mbedtls/lib/<the platform soname>,
-;;;; which is what hyperion/tls loads and what the desktop bundler carries.
+;;;; which is what aion/tls loads and what the desktop bundler carries.
 ;;;;
 ;;;; Same doctrine as build-libuv.lisp, and for the same reason: a native dependency we do
 ;;;; not build is a native dependency we cannot bundle. ADR-0011's libev story is the whole
 ;;;; argument -- Woo bound it at load time and every desktop bundle died on a clean machine
 ;;;; with "libev.so.4: cannot open shared object file". Two .asd files already refuse cl+ssl
-;;;; in those words (mnemosyne.asd:26, aion.asd:492), so `hyperion/tls' being an OPT-IN aux
+;;;; in those words (mnemosyne.asd:26, aion.asd:492), so `aion/tls' being an OPT-IN aux
 ;;;; system built from a vendored source is precedent being applied, not a new decision.
 ;;;;
 ;;;; ONE LIBRARY, NOT THREE. Upstream builds libmbedtls, libmbedx509 and libmbedcrypto. We
@@ -66,7 +66,7 @@
 ;;;;      and the failure is a syntax error deep in the arguments, not an honest "too long".
 ;;;;
 ;;;; What makes this safe to land unverified: `verify-built' on Windows COUNTS the exports
-;;;; and insists on the five symbols hyperion/tls will bind. A wrong .def produces a DLL
+;;;; and insists on the symbols aion/tls will bind. A wrong .def produces a DLL
 ;;;; exporting nothing, and that is the one failure this script must not be silent about --
 ;;;; the same guard build-libuv.lisp grew, for the same reason.
 ;;;; ---------------------------------------------------------------------------------
@@ -117,10 +117,44 @@ are written down rather than left to the next failed build.")
 
 (defparameter *required-symbols*
   '("mbedtls_ssl_handshake" "mbedtls_ssl_set_bio" "mbedtls_ssl_conf_own_cert"
-    "psa_crypto_init" "mbedtls_x509_crt_parse_file")
-  "The entry points hyperion/tls binds. Asserting these rather than `the file exists' is
+    "psa_crypto_init" "mbedtls_x509_crt_parse_file"
+    ;; Ours, from aion/src/tls/c/ouranos_tls.c (#125). One per reason the file exists:
+    ;; allocation, inline wrappers, threading. A .def that dropped the ouranos_tls_ prefix
+    ;; would build a DLL missing all of them, which is the failure this list is for.
+    "ouranos_tls_shim_version" "ouranos_tls_threading_kind" "ouranos_tls_setup"
+    "ouranos_tls_ssl_new" "ouranos_tls_conf_version_range"
+    ;; Exported only when MBEDTLS_THREADING_C is on, so its presence shows that
+    ;; ouranos_tls_config.h reached the compile.
+    "mbedtls_mutex_init")
+  "The entry points aion/tls binds. Asserting these rather than `the file exists' is
 what distinguishes a library from a file of the right size: on Windows a missing export
 table is the expected failure mode, not an exotic one.")
+
+(defparameter *export-prefixes* '("mbedtls_" "psa_" "tf_psa_crypto_" "ouranos_tls_")
+  "The prefixes of the names the library exports: mbedTLS's own, and ours. The Windows .def
+is written from these, so a name with any other prefix is not exported there.
+
+tf_psa_crypto_ covers the three tf_psa_crypto_version_* functions. The Linux library exports
+them, and they are the only names it exports outside the other three prefixes (nm -D, #273).
+Without this prefix the first Windows build exported 1,245 names to Linux's 1,251, so one
+library would have offered a different API on one OS.")
+
+(defun %exported-name-p (name)
+  (some (lambda (prefix) (eql 0 (search prefix name))) *export-prefixes*))
+
+(defparameter *shim-dir*
+  (merge-pathnames "aion/src/tls/c/" *root*)
+  "Our C (#125): ouranos_tls.c, compiled into the library, and the two headers it and
+mbedTLS read. ouranos_tls_config.h switches on threading; threading_alt.h declares the
+Windows threading types.")
+
+(defparameter *config-define* "TF_PSA_CRYPTO_USER_CONFIG_FILE=<ouranos_tls_config.h>"
+  "How ouranos_tls_config.h reaches every mbedTLS source. Angle brackets rather than quotes
+so the value needs no escaping on either toolchain; the file is found through the -I to
+*SHIM-DIR*.")
+
+(defun shim-source ()
+  (namestring (merge-pathnames "ouranos_tls.c" *shim-dir*)))
 
 (defparameter *windows-libs* '("ws2_32.lib" "bcrypt.lib" "advapi32.lib")
   "Transcribed from tf-psa-crypto/core/CMakeLists.txt:79 -- `if(WIN32) set(libs ${libs}
@@ -143,37 +177,78 @@ reach for it; it is present on every Windows and costs nothing if unused.")
 
 ;;; -------------------------------------------------------------------- helpers
 
+(defparameter *command-timeout* 600
+  "Seconds any external command may run before it is stopped, unless its call gives its own
+limit. A command that hangs then fails in minutes, naming itself, rather than as a CI job
+cancelled at its own limit with nothing said about which command it was waiting for. That
+is what #273's first Windows run did: tar ran for 38 minutes until the job's 40-minute limit
+killed everything.")
+
+(defun %describe (command)
+  "COMMAND for a message: its first few words, whether it is a list or a cmd.exe string."
+  (let ((text (if (stringp command) command (format nil "~{~A~^ ~}" command))))
+    (if (> (length text) 160) (concatenate 'string (subseq text 0 160) " ...") text)))
+
+(defun %run-bounded (command &key directory capture (timeout *command-timeout*)
+                                  ignore-error-status)
+  "Run COMMAND -- a list, or a string that cmd.exe runs -- and return (values OUTPUT CODE).
+OUTPUT is its standard output as a string when CAPTURE is true, trailing whitespace removed,
+and NIL otherwise, when the output goes straight to ours. Signals if it exits non-zero, unless
+IGNORE-ERROR-STATUS, and if it has not finished within TIMEOUT seconds, after stopping it.
+
+Captured output goes through a temporary file, not a pipe, so the wait below cannot deadlock
+against a child blocked on a full pipe. Standard input is the null device, so a child that
+reads it gets end-of-file rather than waiting. On Windows, stopping a cmd.exe string stops
+cmd.exe; a child it started may outlive it, but the build has already failed by then."
+  (uiop:with-temporary-file (:pathname out :type "txt")
+    (let ((process (uiop:launch-program command :directory directory :input nil
+                                                :output (if capture out :interactive)
+                                                :if-output-exists :supersede
+                                                :error-output :interactive))
+          (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+      (loop while (uiop:process-alive-p process)
+            do (when (> (get-internal-real-time) deadline)
+                 (ignore-errors (uiop:terminate-process process :urgent t))
+                 (error "This command did not finish within ~D seconds and was stopped:~%  ~A"
+                        timeout (%describe command)))
+               (sleep 0.1))
+      (let ((code (uiop:wait-process process)))
+        (unless (or ignore-error-status (eql code 0))
+          (error "This command exited with code ~A:~%  ~A" code (%describe command)))
+        (values (when capture
+                  (string-right-trim '(#\Space #\Tab #\Return #\Newline)
+                                     (uiop:read-file-string out :external-format :latin-1)))
+                code)))))
+
 (defun which (&rest candidates)
   "First of CANDIDATES on PATH, or NIL. `where' on Windows, `command -v' elsewhere --
 there is no sh on a stock Windows, which is the same split build-libuv.lisp makes."
   (dolist (c candidates)
     (let ((found (ignore-errors
-                  (uiop:run-program (if (uiop:os-windows-p)
-                                        (list "where" c)
-                                        (list "sh" "-c" (format nil "command -v ~A" c)))
-                                    :output '(:string :stripped t)
-                                    :ignore-error-status t))))
+                  (%run-bounded (if (uiop:os-windows-p)
+                                    (list "where" c)
+                                    (list "sh" "-c" (format nil "command -v ~A" c)))
+                                :capture t :ignore-error-status t :timeout 30))))
       (when (and found (plusp (length found))) (return c)))))
 
-(defun run (program args)
+(defun run (program args &key (timeout *command-timeout*))
   (format t "~&  ~A ~{~A~^ ~}~%" program (if (> (length args) 6)
                                              (append (subseq args 0 6) (list "...")) args))
   (finish-output)
-  (uiop:run-program (cons program args) :output t :error-output t))
+  (%run-bounded (cons program args) :timeout timeout))
 
 (defun sha256-of (file)
   (flet ((first-word (s) (subseq s 0 (or (position #\Space s) (length s)))))
     (cond
       ((which "sha256sum")
-       (first-word (uiop:run-program (list "sha256sum" (namestring file))
-                                     :output '(:string :stripped t))))
+       (first-word (%run-bounded (list "sha256sum" (namestring file)) :capture t :timeout 120)))
       ((which "shasum")
-       (first-word (uiop:run-program (list "shasum" "-a" "256" (namestring file))
-                                     :output '(:string :stripped t))))
+       (first-word (%run-bounded (list "shasum" "-a" "256" (namestring file))
+                                 :capture t :timeout 120)))
       ((and (uiop:os-windows-p) (which "certutil"))
        ;; certutil prints a banner, the hex on line 2, then a trailer.
-       (let* ((out (uiop:run-program (list "certutil" "-hashfile" (namestring file) "SHA256")
-                                     :output '(:string :stripped t)))
+       (let* ((out (%run-bounded (list "certutil" "-hashfile" (namestring file) "SHA256")
+                                 :capture t :timeout 120))
               (lines (uiop:split-string out :separator '(#\Newline))))
          (string-downcase (remove #\Space (or (second lines) "")))))
       (t (error "No sha256 tool found (looked for sha256sum, shasum, certutil).")))))
@@ -229,9 +304,72 @@ escape the closing quote, which is how a path with a space in it silently become
         (error "mbedTLS tarball checksum mismatch.~%  expected ~A~%  actual   ~A~%The tarball has been deleted. Either upstream was substituted, or mbedtls.pin is stale."
                expected-sha actual)))
     (format t "~&  sha256 ok~%")
-    (run "tar" (list "xjf" (namestring tarball) "-C"
-                     (namestring (merge-pathnames "src/" *vendor*))))
+    ;; DECOMPRESSED IN LISP, then extracted as a plain tar (#273). Windows' bsdtar varies by
+    ;; build: the windows-2022 runner's 3.8.4 has no bz2lib, so it pipes the archive through an
+    ;; external bzip2, which failed on the pipe and left tar waiting until it was stopped. A
+    ;; 3.8.8 elsewhere has bz2lib and works. What a machine's tar can decompress is not
+    ;; something this script can rely on, and a clean Windows has no bzip2 of its own, so the
+    ;; bzip2 stream is decoded by chipz, on every OS, and tar only ever reads a plain archive,
+    ;; which every bsdtar and GNU tar handles itself. The sha256 above is on the .bz2, which
+    ;; is what mbedtls.pin records.
+    (let ((plain (make-pathname :type nil :defaults tarball))   ; mbedtls-4.1.1.tar
+          (tar (tar-program)))
+      (decompress-bzip2 tarball plain)
+      (format t "~&  ~A~%"
+              (or (ignore-errors (%run-bounded (list tar "--version") :capture t :timeout 30))
+                  "(tar --version printed nothing)"))
+      (unwind-protect
+           ;; THE mldsa-native EXAMPLES ARE NOT EXTRACTED. They hold the archive's 147
+           ;; symlinks, some to directories, and on Windows without symlink privilege both
+           ;; bsdtar and GNU tar fail on them and exit non-zero, having extracted everything
+           ;; else (measured by the Windows lane for #273: bsdtar 3.8.8 exit 1, Git's GNU tar
+           ;; exit 2). Nothing under drivers/pqcp/ is compiled or on an include path (see
+           ;; *INCLUDE-DIRS* and scripts/mbedtls-sources.lisp's *SOURCE-DIRS*), so leaving
+           ;; them out changes nothing that is built.
+           (run tar (list "--exclude=*/mldsa-native/examples"
+                          ;; NATIVE-NAMESTRING, not NAMESTRING: SBCL escapes the dots of a
+                          ;; name that has no type, and tar was handed mbedtls-4\.1\.1\.tar.
+                          "-xf" (uiop:native-namestring plain) "-C"
+                          (uiop:native-namestring (merge-pathnames "src/" *vendor*)))
+                :timeout 600)
+        ;; 67 MB that is only ever an intermediate.
+        (when (probe-file plain) (delete-file plain))))
     srcdir))
+
+(defun decompress-bzip2 (from to)
+  "Decode the bzip2 file FROM into TO with chipz, a pure-Lisp decompressor.
+
+chipz comes through Quicklisp, which setup.sh and setup.ps1 install before any build script
+runs. It is already in the tree as a dependency of dexador, so this adds no external
+dependency (docs/dependencies.md). Measured on Linux/WSL: mbedtls-4.1.1.tar.bz2 decodes in
+about a second to the same bytes as `bzip2 -dc'."
+  (let ((setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+    (unless (probe-file setup)
+      (error "Quicklisp is not installed (no ~A), and this script needs its chipz to decompress the mbedTLS tarball. Run scripts/setup.sh, or scripts/setup.ps1 on Windows, first."
+             (uiop:native-namestring setup)))
+    (handler-case
+        (progn (load setup)
+               (uiop:symbol-call :ql :quickload :chipz :silent t))
+      (error (e)
+        (error "Could not load chipz through Quicklisp, which this script needs to decompress the mbedTLS tarball: ~A~%Run scripts/setup.sh, or scripts/setup.ps1 on Windows, to provision Quicklisp."
+               e))))
+  (format t "~&  decompressing ~A with chipz~%" (file-namestring from))
+  (finish-output)
+  (with-open-file (in from :element-type '(unsigned-byte 8))
+    (with-open-file (out to :direction :output :element-type '(unsigned-byte 8)
+                            :if-exists :supersede)
+      (uiop:symbol-call :chipz :decompress out (uiop:find-symbol* :bzip2 :chipz) in)))
+  (format t "~&  ~:D bytes of tar~%"
+          (with-open-file (s to :element-type '(unsigned-byte 8)) (file-length s)))
+  to)
+
+(defun tar-program ()
+  (if (uiop:os-windows-p)
+      (let ((system32 (merge-pathnames "System32/tar.exe"
+                                       (uiop:ensure-directory-pathname
+                                        (or (uiop:getenv "SystemRoot") "C:\\Windows")))))
+        (if (probe-file system32) (uiop:native-namestring system32) "tar"))
+      "tar"))
 
 (defun verify-sources (srcdir)
   "Refuse to build a source set that is not the set mbedtls.sources records.
@@ -245,10 +383,10 @@ more file under tf-psa-crypto/ than 4.2.0.
 mbedtls-sources.lisp also checks the manifest against mbedtls.pin's sources-count and
 sources-digest, so a stale pin fails here too rather than in a reader's head."
   (let ((script (merge-pathnames "scripts/mbedtls-sources.lisp" *root*)))
-    (multiple-value-bind (out err code)
-        (uiop:run-program (list "sbcl" "--script" (namestring script) (namestring srcdir))
-                          :output t :error-output t :ignore-error-status t)
-      (declare (ignore out err))
+    (multiple-value-bind (out code)
+        (%run-bounded (list "sbcl" "--script" (namestring script) (namestring srcdir))
+                      :ignore-error-status t :timeout 300)
+      (declare (ignore out))
       (unless (zerop code)
         (error "The mbedTLS source set does not match mbedtls.sources. See above.")))))
 
@@ -299,11 +437,12 @@ carrying only the .NET workload answers vswhere but cannot compile this."
     (when vswhere
       (let* ((path (string-trim
                     '(#\Space #\Tab #\Newline #\Return)
-                    (uiop:run-program
-                     (list (namestring vswhere) "-latest" "-products" "*"
-                           "-requires" "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
-                           "-property" "installationPath")
-                     :output '(:string :stripped t) :ignore-error-status t)))
+                    (or (%run-bounded
+                         (list (namestring vswhere) "-latest" "-products" "*"
+                               "-requires" "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+                               "-property" "installationPath")
+                         :capture t :ignore-error-status t :timeout 60)
+                        "")))
              (install (when (plusp (length path)) (uiop:ensure-directory-pathname path))))
         (when install
           (probe-file (merge-pathnames "VC/Auxiliary/Build/vcvarsall.bat" install)))))))
@@ -333,10 +472,11 @@ vswhere.exe by bare name and prints `'vswhere.exe' is not recognized' when it is
             (vcvarsall-arch)
             inner)))
 
-(defun %msvc-run (inner &key (output t))
-  (uiop:run-program (msvc-command inner) :directory *vendor*
-                                         :output output :error-output t
-                                         :ignore-error-status t))
+(defun %msvc-run (inner &key capture (timeout *command-timeout*))
+  "INNER in the MSVC environment, from vendor/mbedtls/. Returns (values OUTPUT CODE), OUTPUT
+only when CAPTURE is true."
+  (%run-bounded (msvc-command inner) :directory *vendor* :capture capture
+                                     :ignore-error-status t :timeout timeout))
 
 (defun %write-response-file (path lines)
   ;; Response file rather than a command line: 110 absolute source paths plus flags runs to
@@ -361,11 +501,10 @@ A dumpbin /symbols row for a defined external looks like
   008 00000000 SECT3  notype ()    External     | mbedtls_ssl_handshake
 
 and for one merely referenced, SECT3 reads UNDEF. We take External + not-UNDEF, then keep
-the mbedtls_/psa_ prefixes so we are not exporting the CRT's symbols along with ours.
+the prefixes in *EXPORT-PREFIXES* so we are not exporting the CRT's symbols along with ours.
 A 32-bit build decorates cdecl names with a leading underscore; a .def wants the
 undecorated name, so one is stripped if present."
-  (let ((out (nth-value 0 (%msvc-run "dumpbin /nologo /symbols obj\\*.obj"
-                                     :output '(:string :stripped t))))
+  (let ((out (%msvc-run "dumpbin /nologo /symbols obj\\*.obj" :capture t :timeout 300))
         (seen (make-hash-table :test #'equal))
         (names '()))
     (with-input-from-string (in (or out ""))
@@ -381,13 +520,12 @@ undecorated name, so one is stripped if present."
                                     (subseq raw 1)
                                     raw)))
                      (when (and (plusp (length name))
-                                (or (eql 0 (search "mbedtls_" name))
-                                    (eql 0 (search "psa_" name)))
+                                (%exported-name-p name)
                                 (not (gethash name seen)))
                        (setf (gethash name seen) t)
                        (push name names)))))))
     (when (null names)
-      (error "dumpbin /symbols yielded no mbedtls_/psa_ externals. The .def would be empty and the DLL would export nothing -- see this file's header, item 1."))
+      (error "dumpbin /symbols yielded no mbedtls_/psa_/ouranos_tls_ externals. The .def would be empty and the DLL would export nothing -- see this file's header, item 1."))
     (setf names (sort names #'string<))
     (with-open-file (out-file def-path :direction :output :if-exists :supersede
                                        :external-format :latin-1)
@@ -414,13 +552,19 @@ has one, for the reason in the header."
                    ;; costume. Asserted in `verify-built', not just intended here.
                    "/MT"
                    "/c"
-                   "/Foobj\\")
+                   "/Foobj\\"
+                   (format nil "/D~A" *config-define*)
+                   (format nil "/I\"~A\"" (no-trailing-separator
+                                           (uiop:native-namestring *shim-dir*))))
              (include-args srcdir "/I" :quote t)
-             (mapcar (lambda (s) (format nil "\"~A\"" (uiop:native-namestring s))) sources)))
-    (format t "~&  compiling ~D sources with MSVC cl.exe (~A)~%"
+             (mapcar (lambda (s) (format nil "\"~A\"" (uiop:native-namestring s)))
+                     (append sources (list (shim-source))))))
+    (format t "~&  compiling ~D sources and ouranos_tls.c with MSVC cl.exe (~A)~%"
             (length sources) (vcvarsall-arch))
     (finish-output)
-    (let ((code (nth-value 2 (%msvc-run "cl @msvc-compile.rsp"))))
+    ;; 111 files, one cl.exe, no /MP: the slowest step on the slowest leg, so it gets more
+    ;; than the default.
+    (let ((code (nth-value 1 (%msvc-run "cl @msvc-compile.rsp" :timeout 1800))))
       (unless (zerop code)
         (error "cl.exe failed with exit code ~D (arguments in vendor/mbedtls/msvc-compile.rsp)."
                code)))
@@ -431,7 +575,7 @@ has one, for the reason in the header."
                    (format nil "/OUT:lib\\~A" (output-name))
                    "obj\\*.obj")
              *windows-libs*))
-    (let ((code (nth-value 2 (%msvc-run "link @msvc-link.rsp"))))
+    (let ((code (nth-value 1 (%msvc-run "link @msvc-link.rsp"))))
       (unless (zerop code)
         (error "link.exe failed with exit code ~D (arguments in vendor/mbedtls/msvc-link.rsp)."
                code)))
@@ -446,16 +590,20 @@ has one, for the reason in the header."
          (out (merge-pathnames (output-name) libdir))
          (sources (sources-in srcdir))
          (args (append
-                (list "-shared" "-fPIC" "-O2" "-o" (namestring out))
+                ;; -pthread because ouranos_tls_config.h selects MBEDTLS_THREADING_PTHREAD.
+                (list "-shared" "-fPIC" "-O2" "-pthread" "-o" (namestring out)
+                      (format nil "-D~A" *config-define*)
+                      (format nil "-I~A" (no-trailing-separator (namestring *shim-dir*))))
                 ;; The built file must BE the soname: the loader resolves the soname, not
                 ;; the path it was linked from. This is also what keeps pre-publication issue 329 inapplicable.
                 (ecase (platform)
                   (:linux (list (format nil "-Wl,-soname,~A" (output-name))))
                   (:macos (list "-install_name" (namestring out))))
                 (include-args srcdir "-I")
-                sources)))
+                sources
+                (list (shim-source)))))
     (ensure-directories-exist libdir)
-    (format t "~&  compiling ~D sources with ~A~%" (length sources) cc)
+    (format t "~&  compiling ~D sources and ouranos_tls.c with ~A~%" (length sources) cc)
     (finish-output)
     (run cc args)
     out))
@@ -478,9 +626,8 @@ The tools disagree, so this is per-platform rather than one command with a flag:
   Windows  dumpbin /exports, which is inside the toolchain environment, not on PATH."
   (flet ((lines (cmd)
            (let ((out (ignore-errors
-                       (uiop:run-program (list "sh" "-c" cmd)
-                                         :output '(:string :stripped t)
-                                         :ignore-error-status t))))
+                       (%run-bounded (list "sh" "-c" cmd)
+                                     :capture t :ignore-error-status t :timeout 120))))
              (when out (uiop:split-string out :separator '(#\Newline))))))
     (ecase (platform)
       (:linux
@@ -496,20 +643,18 @@ The tools disagree, so this is per-platform rather than one command with a flag:
              when (and name (plusp (length name)))
                collect (if (char= #\_ (char name 0)) (subseq name 1) name)))
       (:windows
-       (let ((out (nth-value 0 (%msvc-run (format nil "dumpbin /nologo /exports \"~A\""
-                                                  (uiop:native-namestring library))
-                                          :output '(:string :stripped t)))))
+       (let ((out (%msvc-run (format nil "dumpbin /nologo /exports \"~A\""
+                                     (uiop:native-namestring library))
+                             :capture t :timeout 300)))
          (when out
            (loop for l in (uiop:split-string out :separator '(#\Newline))
                  for fields = (remove "" (uiop:split-string
                                           (string-trim '(#\Space #\Tab #\Return) l))
                                       :test #'string=)
                  ;; An exports row is `ordinal hint rva name'; the name is last and, for
-                 ;; this library, always starts mbedtls_ or psa_.
+                 ;; this library, always starts with one of *EXPORT-PREFIXES*.
                  for name = (car (last fields))
-                 when (and name (= 4 (length fields))
-                           (or (eql 0 (search "mbedtls_" name))
-                               (eql 0 (search "psa_" name))))
+                 when (and name (= 4 (length fields)) (%exported-name-p name))
                    collect name)))))))
 
 (defun verify-built (library)
@@ -524,11 +669,10 @@ under the name it asks for, and that the entry points we are about to bind are i
       (error "The built library is implausibly small (~:D bytes)." size)))
   (when (eq (platform) :linux)
     (let ((soname (ignore-errors
-                   (uiop:run-program (list "sh" "-c"
-                                           (format nil "readelf -d ~A | grep -i soname"
-                                                   (uiop:native-namestring library)))
-                                     :output '(:string :stripped t)
-                                     :ignore-error-status t))))
+                   (%run-bounded (list "sh" "-c"
+                                       (format nil "readelf -d ~A | grep -i soname"
+                                               (uiop:native-namestring library)))
+                                 :capture t :ignore-error-status t :timeout 60))))
       (when (and soname (plusp (length soname)))
         (format t "  ~A~%" (string-trim '(#\Space #\Tab) soname))
         (unless (search (output-name) soname)
@@ -546,9 +690,9 @@ under the name it asks for, and that the entry points we are about to bind are i
   (when (eq (toolchain) :msvc)
     ;; The bundling claim, checked rather than asserted: a /MD build names vcruntime140.dll
     ;; here and dies on a clean machine, which is exactly ADR-0011's failure again.
-    (let ((deps (nth-value 0 (%msvc-run (format nil "dumpbin /nologo /dependents \"~A\""
-                                                (uiop:native-namestring library))
-                                        :output '(:string :stripped t)))))
+    (let ((deps (%msvc-run (format nil "dumpbin /nologo /dependents \"~A\""
+                                   (uiop:native-namestring library))
+                           :capture t :timeout 300)))
       (when deps
         (if (search "VCRUNTIME" (string-upcase deps))
             (error "The DLL depends on the VC++ runtime -- /MT did not take effect. It would fail on a clean machine.")
@@ -574,10 +718,17 @@ under the name it asks for, and that the entry points we are about to bind are i
         (format *error-output* "build-mbedtls: mbedtls.pin is missing version, url or sha256.~%")
         (uiop:quit 1))
       (format t "~&mbedTLS ~A (~A) -> ~A~%" version (platform) (namestring *vendor*))
+      ;; AN EXISTING LIBRARY IS VERIFIED, NOT TRUSTED. One built before ouranos_tls.c existed
+      ;; is a file of the right name that lacks every symbol aion/tls needs, and "already
+      ;; built" would have accepted it. It passes VERIFY-BUILT or it is rebuilt.
       (when (and (probe-file (library-path)) (not force))
-        (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                (namestring (library-path)))
-        (uiop:quit 0))
+        (handler-case
+            (progn (verify-built (library-path))
+                   (format t "~&  already built: ~A~%  (--force to rebuild)~%"
+                           (namestring (library-path)))
+                   (uiop:quit 0))
+          (error (e)
+            (format t "~&  the library already there fails verification, so it is rebuilt:~%  ~A~%" e))))
       (handler-case
           (progn
             ;; BEFORE the fetch. A machine with no compiler should not spend a download and
