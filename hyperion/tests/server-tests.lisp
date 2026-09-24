@@ -275,8 +275,12 @@ it is the only direction of this guard that can be made to happen on purpose."
                      (lambda (env) (declare (ignore env)) nil)
                      :port port :check-port nil)
                     (is-true t "started without consulting the probe"))
-           (hyperion/server:port-in-use ()
-             (is-true nil ":check-port nil still ran the preflight"))
+           ;; PORT-IN-USE can now come from the backend's own bind (#159), which is correct
+           ;; here: the port IS taken. The preflight's refusal carries no CAUSE; a failed
+           ;; bind carries the backend's error. Only the first means the preflight ran.
+           (hyperion/server:port-in-use (c)
+             (is-true (hyperion/server:port-in-use-cause c)
+                      ":check-port nil still ran the preflight"))
            (error () (is-true t "failed for some other reason, which is fine here")))
       (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 

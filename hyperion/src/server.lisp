@@ -374,13 +374,23 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
 ;;; records the error, and waits until the port answers, the thread records an error, or
 ;;; the thread ends. A bind failure becomes PORT-IN-USE in the caller.
 ;;;
-;;; THE REMAINING RACE. Readiness is a connect to HOST:PORT, because neither Clack backend
-;;; exposes a "now listening" signal to the caller: Clack keeps the Hunchentoot acceptor
-;;; inside its own thread, and Woo has no hook. A different process that starts listening
-;;; on the same port between CHECK-PORT and our bind would answer that connect, START
-;;; would return, and our bind would then fail -- as a recorded error on our thread now,
-;;; not a dead process, but after START had already reported success. With CHECK-PORT on,
-;;; that needs another process to take the port inside a window of milliseconds.
+;;; READINESS COMES FROM THE SERVER, NOT THE PORT (#188). Neither Clack backend exposes a
+;;; "now listening" signal to the caller (Clack keeps the Hunchentoot acceptor inside its own
+;;; thread, and Woo has no hook), and a bare connect to the port is answered by ANY listener:
+;;; measured on Linux, a program already listening there, or a second hyperion server, made
+;;; START report success while requests reached the other one. So START asks for a path
+;;; carrying a random nonce that only its own server knows (%START-PROBE-ANSWERED-P), and a
+;;; different listener cannot give the answer.
+;;;
+;;; WHAT THAT LEAVES, PER PLATFORM, when another socket holds the port before the bind:
+;;;   Linux    the backend's bind fails, and START signals PORT-IN-USE.
+;;;   Windows  if the holder did NOT set SO_REUSEADDR, the bind fails with WSAEACCES and
+;;;            START signals PORT-IN-USE. If it DID -- as a second Hunchentoot server does --
+;;;            Windows lets both sockets bind and listen, with no error anywhere (measured by
+;;;            Ouranos Claude (Windows) on #188). START then either gets its own nonce back,
+;;;            and returns with the port still shared, or never does and signals
+;;;            SERVER-START-TIMEOUT. A shared port cannot be prevented or detected from here.
+;;;   macOS    pending the macOS measurement on #188.
 
 (defstruct (clack-server (:constructor %make-clack-server) (:copier nil))
   "What START returns for a Clack backend. STOP takes it."
@@ -389,39 +399,105 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
   (host nil)
   (port nil))
 
-(defconstant +eaddrinuse+ #+linux 98 #+darwin 48 #-(or linux darwin) nil
-  "EADDRINUSE on this OS. Woo reports a taken port only as an OS-ERROR carrying this errno.")
+(defparameter +address-taken-errnos+
+  #+linux '(98) #+darwin '(48)
+  #+win32 '(10048 10013)
+  #-(or linux darwin win32) '()
+  "Socket error numbers that mean the port is taken, on this OS.
+
+EADDRINUSE on Linux (98) and macOS (48). On Windows, WSAEADDRINUSE (10048) is what a plain
+second bind gets, but a bind WITH SO_REUSEADDR -- which is how usocket, and therefore
+Hunchentoot, binds -- gets WSAEACCES (10013) when another socket holds the port without it.
+Measured by Ouranos Claude (Windows) on #188. 10013 can also mean a port in a range Windows
+reserves, which to a caller is the same answer: this port cannot be had.")
 
 (defun %errno-slot (condition)
-  "The value of CONDITION's slot named CODE, whatever its package, or NIL. Woo's OS-ERROR
-keeps the errno there and has no reader for it."
-  (let ((slot (find "CODE" (sb-mop:class-slots (class-of condition))
-                    :key (lambda (s) (symbol-name (sb-mop:slot-definition-name s)))
-                    :test #'string=)))
-    (when slot
-      (let ((name (sb-mop:slot-definition-name slot)))
-        (and (slot-boundp condition name) (slot-value condition name))))))
+  "The socket error number CONDITION carries, or NIL. Woo's OS-ERROR keeps it in a slot
+named CODE and SB-BSD-SOCKETS:SOCKET-ERROR in one named ERRNO; neither exports a reader."
+  (dolist (slot (sb-mop:class-slots (class-of condition)) nil)
+    (let ((name (sb-mop:slot-definition-name slot)))
+      (when (and (member (symbol-name name) '("CODE" "ERRNO") :test #'string=)
+                 (slot-boundp condition name)
+                 (integerp (slot-value condition name)))
+        (return (slot-value condition name))))))
 
 (defun %address-in-use-p (condition)
-  "Whether CONDITION is a backend saying the address is taken. Each backend signals its own
-condition: USOCKET:ADDRESS-IN-USE-ERROR under Hunchentoot, an OS-ERROR whose code is
-EADDRINUSE under Woo, and a UV-ERROR saying \"address already in use\" under :uv."
+  "Whether CONDITION is a backend saying the port is taken. Each backend signals its own
+condition: USOCKET:ADDRESS-IN-USE-ERROR under Hunchentoot on Unix, a SOCKET-ERROR whose errno
+is WSAEACCES under Hunchentoot on Windows, an OS-ERROR whose code is EADDRINUSE under Woo, and
+a UV-ERROR saying \"address already in use\" under :uv."
   (or (search "ADDRESS-IN-USE" (symbol-name (type-of condition)))
       (search "address already in use" (princ-to-string condition) :test #'char-equal)
-      (and +eaddrinuse+ (eql (%errno-slot condition) +eaddrinuse+))))
+      (and (member (%errno-slot condition) +address-taken-errnos+) t)))
 
-(defvar *listening-probe* 'port-answering-p
-  "How %CLACK-START asks whether the server is listening: a function of HOST and PORT.
-Internal; a test binds it to a probe that never answers, which is the only way to make the
-timeout path happen on demand.")
+(defun %start-probe-answered-p (host port path nonce)
+  "Send one HTTP/1.0 GET for PATH to HOST:PORT and report whether the reply contains NONCE.
+
+This is START's readiness check, and it asks the SERVER rather than the port: only the
+server START just started knows NONCE, so a different program listening on the same port
+cannot answer it. A raw socket rather than an HTTP client library, because hyperion/server
+takes no HTTP-client dependency. Connecting and reading each have a one-second limit, so a
+listener that accepts and never answers costs one poll, not the whole of *START-TIMEOUT*.
+Never signals: anything unexpected is simply not an answer."
+  (let ((sock (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (handler-case
+             (progn
+               (sb-sys:with-deadline (:seconds 1)
+                 (sb-bsd-sockets:socket-connect
+                  sock (sb-bsd-sockets:make-inet-address
+                        (if (string= host "0.0.0.0") "127.0.0.1" host))
+                  port))
+               (let ((stream (sb-bsd-sockets:socket-make-stream
+                              sock :input t :output t :timeout 1
+                                   :element-type 'character :external-format :latin-1)))
+                 (format stream "GET ~A HTTP/1.0~C~CHost: ~A~C~C~C~C"
+                         path #\Return #\Newline host #\Return #\Newline #\Return #\Newline)
+                 (finish-output stream)
+                 ;; A reply is a few hundred characters; stop well past that rather than
+                 ;; read whatever an unknown listener chooses to send.
+                 (let ((reply (make-string-output-stream)))
+                   (loop repeat 4096
+                         for c = (read-char stream nil nil)
+                         while c do (write-char c reply))
+                   (and (search nonce (get-output-stream-string reply)) t))))
+           (sb-sys:deadline-timeout () nil)
+           (error () nil))
+      (ignore-errors (sb-bsd-sockets:socket-close sock)))))
+
+(defvar *listening-probe* '%start-probe-answered-p
+  "How %CLACK-START asks whether its own server is answering: a function of HOST, PORT,
+PATH and NONCE. Internal; a test binds it to a probe that never answers, which is the only
+way to make the timeout path happen on demand.")
+
+(defun %start-nonce ()
+  "128 random bits as hex, from aion/random rather than CL:RANDOM, which hyperion/src does
+not use (pre-publication issue 95). Secrecy is not the point here -- the nonce only has to
+be something no other program on the port would reply with."
+  (aion/random:random-hex 128))
 
 (defun %clack-start (app server host port debug)
-  "Start APP on a Clack backend and return a CLACK-SERVER once the port answers. Signals
+  "Start APP on a Clack backend and return a CLACK-SERVER once that server answers. Signals
 PORT-IN-USE if the bind fails, the backend's own error for any other failure, and
-SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*."
+SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*.
+
+APP is wrapped OUTERMOST so that, until START returns, one path answers with a random nonce
+and nothing else: the probe request never reaches APP or any of its middleware, so it
+creates no session, is not logged and meets no CSRF or auth check. After START returns,
+every request is forwarded to APP, that path included; what remains is one check of a flag
+per request."
   (let* ((failure nil)
          (started nil)
          (lock (sb-thread:make-mutex :name "hyperion-server-start"))
+         (nonce (%start-nonce))
+         (probe-path (format nil "/.hyperion-start-probe/~A" nonce))
+         (probe-reply (list 200 (list :content-type "text/plain"
+                                      :content-length (length nonce))
+                            (list nonce)))
+         (served (lambda (env)
+                   (if (and (not started) (equal (getf env :path-info) probe-path))
+                       probe-reply
+                       (funcall app env))))
          (out *standard-output*)
          (err *error-output*)
          ;; THREAD-LIFETIME: independent -- the server runs for as long as it serves, not
@@ -461,8 +537,8 @@ SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIM
                                                  :backend (string-downcase (symbol-name server))
                                                  :host host :port port
                                                  :condition-type (prin1-to-string (type-of e))))))))
-                      (clack:clackup app :server server :port port :address host
-                                         :use-thread nil :debug debug))
+                      (clack:clackup served :server server :port port :address host
+                                            :use-thread nil :debug debug))
                   (error () nil))))
             :name (format nil "hyperion-server-~(~A~)" server)))
          (deadline (+ (get-internal-real-time)
@@ -478,7 +554,7 @@ SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIM
          ;; Ended without recording an error: the backend returned without serving.
          (error "hyperion/server: the ~(~A~) backend on ~A:~D stopped before it started listening"
                 server host port))
-        ((and (funcall *listening-probe* host port)
+        ((and (funcall *listening-probe* host port probe-path nonce)
               ;; Ready, unless an error was recorded in the moment before STARTED is set;
               ;; if one was, the next iteration takes the FAILURE branch.
               (sb-thread:with-mutex (lock)
