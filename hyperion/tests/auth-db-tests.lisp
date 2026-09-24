@@ -402,8 +402,12 @@ disagree on result-key case, so match the column name case-insensitively."
   ;; `at' is whole seconds and these will share one. Ordering is THE property the log
   ;; exists for -- before or after the incident -- so a tie that resolves arbitrarily is a
   ;; wrong answer, not a cosmetic one. The tiebreaker is _id, a time-ordered UUID v6.
+  ;; ONE SECOND BY CONSTRUCTION (#232). The three writes used to share a second only when no
+  ;; second boundary fell between them, which a slow runner's release-mode leg hit. The role
+  ;; log's clock is fixed here instead, so the premise asserted below always holds.
   (with-auth (a)
-    (let ((id (auth:user-id (auth:create-user a :email "sameseC@x.com" :password "pw"))))
+    (let ((id (auth:user-id (auth:create-user a :email "sameseC@x.com" :password "pw")))
+          (hyperion/auth-db::*role-event-clock* (let ((at (get-universal-time))) (lambda () at))))
       (auth:grant-role a id :moderator :actor "alice")
       (auth:revoke-role a id :moderator :actor "bob")
       (auth:grant-role a id :moderator :actor "carol")
@@ -416,6 +420,29 @@ disagree on result-key case, so match the column name case-insensitively."
         ;; is exercising the tiebreaker rather than passing on distinct timestamps.
         (is (= 1 (length (remove-duplicates (mapcar (lambda (e) (getf e :at)) history))))
             "the events had distinct timestamps, so the tie was never tested")))))
+
+(test ties-in-at-are-ordered-by-id-whatever-order-the-rows-were-stored-in
+  ;; The test above cannot tell whether the _id tiebreaker exists: with `at' tied, SQLite
+  ;; returns rows in the order they were stored, which there is also _id order, so it passes
+  ;; with the tiebreaker removed (measured, #232). Here the rows are stored in REVERSE _id
+  ;; order with one `at', so only the tiebreaker puts them back in the order they happened.
+  (with-auth (a)
+    (let* ((id (auth:user-id (auth:create-user a :email "tie@x.com" :password "pw")))
+           (at (get-universal-time))
+           (ids (loop repeat 3 collect (mnemosyne/id:new-id)))   ; generated in order
+           (rows (mapcar #'list ids '("grant" "revoke" "grant") '("alice" "bob" "carol"))))
+      (is (equal ids (sort (copy-list ids) #'string<)) "premise: the ids sort in the order made")
+      (dolist (row (reverse rows))                               ; stored last-first
+        (destructuring-bind (event-id action actor) row
+          (conn:exec (hyperion/auth-db::conn a)
+                     (format nil "INSERT INTO ~A (_id, user_id, role, action, actor, at) VALUES (?, ?, ?, ?, ?, ?)"
+                             (auth:events-table a))
+                     event-id id "MODERATOR" action actor at)))
+      (let ((history (auth:role-history a id)))
+        (is (= 1 (length (remove-duplicates (mapcar (lambda (e) (getf e :at)) history))))
+            "premise: one `at' for all three")
+        (is (equal '("alice" "bob" "carol") (mapcar (lambda (e) (getf e :actor)) history))
+            "ties must come back in _id order, got ~S" (mapcar (lambda (e) (getf e :actor)) history))))))
 
 ;;; --- the role-event log is checked at construction (#139) ------------------------------
 ;;;

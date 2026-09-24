@@ -374,6 +374,11 @@ eight is contention no retry count will fix -- better to report it than to spin.
       (values (%to-int (%rget (first rows) :vid))
               (%read-roles (%rget (first rows) :roles))))))
 
+(defvar *role-event-clock* #'get-universal-time
+  "The function %RECORD-ROLE-EVENT calls for an event's `at' (#232). Always GET-UNIVERSAL-TIME
+outside tests; a test binds it to a constant so that several events share one second by
+construction rather than by luck.")
+
 (defun %record-role-event (store user-id role action actor)
   "Append one row to the role-change log. Called INSIDE the transaction that makes the
 change, never beside it -- see %UPDATE-ROLES."
@@ -384,7 +389,7 @@ change, never beside it -- see %UPDATE-ROLES."
                                    :role (symbol-name role)
                                    :action action
                                    :actor actor
-                                   :at (get-universal-time))))
+                                   :at (funcall *role-event-clock*))))
          :dialect (dialect store)))
 
 (defun %update-roles (store id transform &key action role actor)
