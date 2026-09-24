@@ -584,7 +584,7 @@ surfaces -- it just is not confused with a failing test."
     ("check-assets.lisp" () nil
      "vendored browser assets still hash to ASSETS.pin")
     ("check-deps.lisp" () t
-     "docs/dependencies.md matches the .asd files")
+     "docs/dependencies.md's rows and Headline counts match the .asd files (#118)")
     ("check-asd-collisions.lisp" () nil
      "no system name is defined by two .asd files")
     ("check-format-continuations.lisp" () nil

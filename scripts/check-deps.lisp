@@ -24,6 +24,12 @@
 ;;;;     decision the thesis promises, and a new user's install instructions are wrong.
 ;;;;   STALE -- documented but no longer used. Harmless to a build, but it inflates the
 ;;;;     count we cite publicly, so it is still a failure.
+;;;;
+;;;; STALE IS NOT CHECKED, despite the paragraph above (found while working on #118). There is
+;;;; no branch for it, and one written naively would fail today on correct rows: the manifest
+;;;; documents `hunchentoot', `woo' and `clack-handler-woo', which no .asd in this tree names
+;;;; in a :depends-on. What does protect the count we cite is the HEADLINE check below, which
+;;;; compares the Headline's numbers with the tree (#118).
 
 (require :asdf)
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
@@ -130,6 +136,86 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
                   (pushnew n names :test #'string=))))))))))
 
 
+;;; --- the Headline's counts (#118) ------------------------------------------
+;;;
+;;; Until #118 nothing compared the Headline's counts with the tree: the drift check above
+;;; compares table ROWS, so a count could be wrong while this script said IN SYNC. On the day
+;;; this was added the Headline said 28 third-party dependencies where the .asd files name 24,
+;;; and 25 ASDF systems where the tree defines 98. Each count below is now measured here and
+;;; compared with the number the Headline states. A Headline line that cannot be found is a
+;;; failure too, because deleting a wrong number would otherwise pass, and so is a manifest
+;;; with no Headline section at all.
+;;;
+;;; THE SYSTEM COUNT IS NOT IN THE HEADLINE, by the ruling on #118. It changes with every new
+;;; test suite, so checking it would make a large share of pull requests edit the same line,
+;;; and it says nothing about the file's subject, which is third-party dependencies. It is
+;;; still measured and printed, so anyone who wants the number has it.
+;;;
+;;; Only the counts are checked. The rest of each Headline sentence (which frameworks carry
+;;; which dependencies, and why) is a judgement written by hand, and stays that way.
+
+(defparameter +headline-counts+
+  '((:externals "distinct third-party"
+     "distinct third-party systems named in a :depends-on, SBCL contribs excluded")
+    (:contribs  "SBCL contribs"
+     "SBCL contribs named in a :depends-on"))
+  "(key phrase meaning) for each checked count. PHRASE identifies the Headline line: it must
+appear right after the bold number, as in `- **24** distinct third-party systems ...'.")
+
+(defun %contrib-p (name) (uiop:string-prefix-p "sb-" name))
+
+(defun measured-headline-counts (actual-names)
+  "Plist of each Headline count as measured from the tree, plus :SYSTEMS, which is printed but
+not in the Headline. ACTUAL-NAMES is every external system name the .asd files declare,
+contribs included."
+  (list :systems (loop for asd in (tree-deps:asd-files)
+                       sum (count-if-not #'tree-deps:template-name-p
+                                         (tree-deps:system-names-in asd)))
+        :externals (count-if-not #'%contrib-p actual-names)
+        :contribs (count-if #'%contrib-p actual-names)))
+
+(defun claimed-headline-counts ()
+  "Plist of each count the Headline states, read from `- **N** <phrase>' lines in the
+`## Headline' section. A count whose line is absent is missing from the plist."
+  (let ((claims '()) (in-headline nil))
+    (dolist (line (uiop:split-string
+                   (uiop:read-file-string (merge-pathnames "docs/dependencies.md" *root*))
+                   :separator '(#\Newline))
+                  claims)
+      (let ((line (string-right-trim '(#\Return) line)))
+        (when (uiop:string-prefix-p "#" line)
+          (setf in-headline (string-equal (string-trim "# " line) "Headline")))
+        (when (and in-headline (uiop:string-prefix-p "- **" line))
+          (let* ((end (search "**" line :start2 4))
+                 (n (and end (ignore-errors (parse-integer line :start 4 :end end)))))
+            (when n
+              (dolist (spec +headline-counts+)
+                (destructuring-bind (key phrase meaning) spec
+                  (declare (ignore meaning))
+                  (when (and (uiop:string-prefix-p phrase
+                                                   (string-left-trim " " (subseq line (+ end 2))))
+                             (not (getf claims key)))
+                    (setf (getf claims key) n)))))))))))
+
+(defun headline-problems (actual-names)
+  "One string per Headline count that is missing or differs from the tree. Empty means every
+count is right."
+  (let ((measured (measured-headline-counts actual-names))
+        (claimed (claimed-headline-counts))
+        (problems '()))
+    (dolist (spec +headline-counts+ (nreverse problems))
+      (destructuring-bind (key phrase meaning) spec
+        (let ((m (getf measured key)) (c (getf claimed key)))
+          (cond
+            ((null c)
+             (push (format nil "no `- **N** ~A' line in the Headline; the tree has ~D (~A)"
+                           phrase m meaning)
+                   problems))
+            ((/= c m)
+             (push (format nil "~A: the Headline says ~D, the tree has ~D (~A)"
+                           phrase c m meaning)
+                   problems))))))))
+
 (let* ((list-only (member "--list" (uiop:command-line-arguments) :test #'string=))
        (actual (actual-externals))
        (documented (documented-externals))
@@ -152,6 +238,13 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
         (format t "  ~A~%" (enough-namestring f *root*)))
       (format t "  Placeholder system names; the real dependency surface is~%")
       (format t "  cons/templates/<t>/template.lisp, substituted at scaffold time. See pre-publication issue 361.~%")))
+
+  (let ((measured (measured-headline-counts actual-names)))
+    (format t "~%=== Headline counts, measured ===~%")
+    (dolist (spec +headline-counts+)
+      (format t "  ~4D  ~A~%" (getf measured (first spec)) (third spec)))
+    (format t "  ~4D  ~A~%" (getf measured :systems)
+            "every system defined in a tracked .asd file, template placeholders excluded (printed only; not in the Headline)"))
 
   (format t "~%=== drift ===~%")
   (cond
@@ -176,7 +269,17 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
      (format t "  instructions are now wrong. Update docs/dependencies.md.~%")
      (format t "~%VERDICT: DRIFT~%")
      (uiop:quit 1))
+    ((headline-problems actual-names)
+     (format t "  none -- every external dependency in the code is documented.~%")
+     (format t "~%=== Headline ===~%")
+     (dolist (p (headline-problems actual-names))
+       (format t "  WRONG   ~A~%" p))
+     (format t "~%  Correct the number in docs/dependencies.md's Headline. The figures above~%")
+     (format t "  under `Headline counts, measured' are the ones to use.~%")
+     (format t "~%VERDICT: HEADLINE WRONG~%")
+     (uiop:quit 1))
     (t
      (format t "  none -- every external dependency in the code is documented.~%")
+     (format t "  Headline counts match the tree.~%")
      (format t "~%VERDICT: IN SYNC~%")
      (uiop:quit 0))))
