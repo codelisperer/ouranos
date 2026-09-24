@@ -118,3 +118,15 @@ two tests above describe what those two produce."
     (let ((text (uiop:read-file-string (merge-pathnames file td-root))))
       (is (search "ouranos-dump:dump-executable" text) "~A must dump through ouranos-dump:dump-executable" file)
       (is (not (search "(sb-ext:save-lisp-and-die" text)) "~A calls save-lisp-and-die itself, so its image skips UIOP's hooks" file))))
+
+(test cons-templates-dump-with-uiops-hooks
+  "The build script every `cons init' project gets must run UIOP's dump hook before its dump
+and the restore hook first in its toplevel (#107). A generated project cannot load
+scripts/dump-image.lisp, which lives in this tree, so each template writes the two calls
+itself, and this checks all three. The behaviour of those two calls is what the tests above
+measure."
+  (dolist (template '("agent" "cli" "web"))
+    (let* ((file (format nil "cons/templates/~A/files/scripts/build-{{name}}.lisp" template))
+           (text (uiop:read-file-string (merge-pathnames file td-root))))
+      (is (search "(uiop:call-image-dump-hook)" text) "~A must call uiop:call-image-dump-hook before it dumps" file)
+      (is (search "(uiop:call-image-restore-hook)" text) "~A's toplevel must call uiop:call-image-restore-hook first" file))))
