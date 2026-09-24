@@ -293,8 +293,10 @@ A timeout that actually stops the connect. SB-SYS:WITH-DEADLINE around a blockin
 does not: on macOS a connect to a port that is bound but not listening is neither accepted
 nor refused, and the blocking connect ran about 7.8 seconds whatever the deadline (measured
 by Ouranos Claude (macOS) on #188). So on Unix the connect is non-blocking, and the wait for
-it is SB-SYS:WAIT-UNTIL-FD-USABLE with a timeout. Windows keeps the blocking connect under a
-deadline, because this non-blocking path has not been measured there."
+it is SB-SYS:WAIT-UNTIL-FD-USABLE with a timeout. Windows keeps the blocking connect: there
+a non-blocking connect signals INTERRUPTED-ERROR rather than OPERATION-IN-PROGRESS, and a
+blocking connect to a bound-but-not-listening port is refused after about 2.05 s rather than
+hanging (both measured by Ouranos Claude (Windows) on #188)."
   (handler-case
       #-win32
       (progn
@@ -467,33 +469,56 @@ a UV-ERROR saying \"address already in use\" under :uv."
       (search "address already in use" (princ-to-string condition) :test #'char-equal)
       (and (member (%errno-slot condition) +address-taken-errnos+) t)))
 
+(defun %receive-within (sock seconds limit)
+  "Read from SOCK until the peer closes, LIMIT octets have arrived, or SECONDS have passed,
+and return what arrived as a string. Never signals.
+
+Each read is preceded by SB-SYS:WAIT-UNTIL-FD-USABLE with what is left of one overall
+deadline, because that wait is the only bound that works on every platform: on Windows a
+stream's :TIMEOUT does not bound a socket read, and neither does SB-SYS:WITH-DEADLINE -- the
+readiness probe read from a listener that never answered for over fifteen minutes, while
+the wait timed out after 1.015 s (measured by Ouranos Claude (Windows) on #188)."
+  (let ((fd (sb-bsd-sockets:socket-file-descriptor sock))
+        (buffer (make-array 1024 :element-type '(unsigned-byte 8)))
+        (got (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+        (deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (handler-case
+        (loop
+          (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+            (when (or (<= left 0) (>= (length got) limit)
+                      (not (sb-sys:wait-until-fd-usable fd :input left)))
+              (return))
+            (multiple-value-bind (buf n) (sb-bsd-sockets:socket-receive sock buffer nil)
+              (declare (ignore buf))
+              (when (or (null n) (zerop n)) (return))
+              (loop for i below n do (vector-push-extend (aref buffer i) got)))))
+      (error () nil))
+    (sb-ext:octets-to-string (coerce got '(simple-array (unsigned-byte 8) (*)))
+                             :external-format :latin-1)))
+
 (defun %start-probe-answered-p (host port path nonce)
   "Send one HTTP/1.0 GET for PATH to HOST:PORT and report whether the reply contains NONCE.
 
 This is START's readiness check, and it asks the SERVER rather than the port: only the
 server START just started knows NONCE, so a different program listening on the same port
 cannot answer it. A raw socket rather than an HTTP client library, because hyperion/server
-takes no HTTP-client dependency. Connecting and reading each have a one-second limit, so a
-listener that accepts and never answers costs one poll, not the whole of *START-TIMEOUT*.
-Never signals: anything unexpected is simply not an answer."
+takes no HTTP-client dependency, and no stream, because a stream's read timeout does not hold
+on Windows (%RECEIVE-WITHIN). The connect and the read each have a limit of about a second,
+so a listener that accepts and never answers costs one poll, not the whole of
+*START-TIMEOUT*. Never signals: anything unexpected is simply not an answer."
   (let ((sock (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
          (handler-case
              (when (%connect-within sock (%connect-address host) port 1)
-               (let ((stream (sb-bsd-sockets:socket-make-stream
-                              sock :input t :output t :timeout 1
-                                   :element-type 'character :external-format :latin-1)))
-                 (format stream "GET ~A HTTP/1.0~C~CHost: ~A~C~C~C~C"
-                         path #\Return #\Newline host #\Return #\Newline #\Return #\Newline)
-                 (finish-output stream)
-                 ;; A reply is a few hundred characters; stop well past that rather than
-                 ;; read whatever an unknown listener chooses to send.
-                 (let ((reply (make-string-output-stream)))
-                   (loop repeat 4096
-                         for c = (read-char stream nil nil)
-                         while c do (write-char c reply))
-                   (and (search nonce (get-output-stream-string reply)) t))))
-           (sb-sys:deadline-timeout () nil)
+               (sb-bsd-sockets:socket-send
+                sock (sb-ext:string-to-octets
+                      (format nil "GET ~A HTTP/1.0~C~CHost: ~A~C~C~C~C"
+                              path #\Return #\Newline host #\Return #\Newline #\Return #\Newline)
+                      :external-format :latin-1)
+                nil)
+               ;; A reply is a few hundred octets; stop well past that rather than read
+               ;; whatever an unknown listener chooses to send.
+               (and (search nonce (%receive-within sock 1 4096)) t))
            (error () nil))
       (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
