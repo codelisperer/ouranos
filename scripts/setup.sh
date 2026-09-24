@@ -32,7 +32,7 @@ done
 
 # --- the pins ---------------------------------------------------------------
 # shellcheck disable=SC2046  # deliberate: KEY=VALUE lines, no quoting/expansion
-eval $(grep -E '^[A-Z_]+=' "$here/versions.env")
+eval $(grep -E '^[A-Z][A-Z0-9_]*=' "$here/versions.env")
 : "${SBCL_VERSION:?versions.env: SBCL_VERSION missing}"
 : "${QUICKLISP_DIST:?versions.env: QUICKLISP_DIST missing}"
 
@@ -112,6 +112,33 @@ fetch() {
          exit 1; }
 }
 
+# The SHA-256 of a file, as lowercase hex. sha256sum on Linux, shasum on macOS.
+sha256_of() {
+  if have sha256sum; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+# Check a download against its pin in versions.env BEFORE anything unpacks or loads it (#211).
+# On a mismatch, or when there is no pin for it, delete the file and stop: a download that
+# cannot be checked is not run.
+verify_sha256() {
+  _file=$1; _want=$2; _what=$3
+  if [ -z "$_want" ]; then
+    rm -f "$_file"
+    echo "setup.sh: no pinned SHA-256 for $_what in scripts/versions.env -- refusing to use it unchecked" >&2
+    exit 1
+  fi
+  _got=$(sha256_of "$_file")
+  if [ "$_got" != "$_want" ]; then
+    rm -f "$_file"
+    echo "setup.sh: $_what does not match its pinned SHA-256 -- deleted, not used" >&2
+    echo "         expected $_want  (scripts/versions.env)" >&2
+    echo "         got      $_got" >&2
+    exit 1
+  fi
+  note "$_what: SHA-256 verified"
+}
+
 # --- 1. SBCL ----------------------------------------------------------------
 
 # Set arch, sbcl_arch, tarball and url for the pinned Linux binary. Returns 1 when SBCL has
@@ -168,6 +195,11 @@ install_sbcl() {
       info "installing SBCL $SBCL_VERSION -> $prefix"
       need_scratch
       fetch "$url" "$scratch/$tarball" "SBCL $SBCL_VERSION"
+      case "$sbcl_arch" in
+        x86-64) sbcl_sha=${SBCL_SHA256_X86_64_LINUX:-};;
+        *)      sbcl_sha="";;
+      esac
+      verify_sha256 "$scratch/$tarball" "$sbcl_sha" "the SBCL $SBCL_VERSION tarball ($tarball)"
       tar -xjf "$scratch/$tarball" -C "$scratch"
       (cd "$scratch/sbcl-$SBCL_VERSION-$sbcl_arch-linux" && INSTALL_ROOT="$prefix" sh install.sh >/dev/null)
       note "sbcl -> $prefix/bin/sbcl   (SBCL_HOME=$prefix/lib/sbcl)"
@@ -272,6 +304,7 @@ install_quicklisp() {
   info "installing Quicklisp -> $ql_home"
   need_scratch
   fetch https://beta.quicklisp.org/quicklisp.lisp "$scratch/quicklisp.lisp" "quicklisp.lisp"
+  verify_sha256 "$scratch/quicklisp.lisp" "${QUICKLISP_LISP_SHA256:-}" "quicklisp.lisp"
   sbcl --non-interactive --no-userinit --load "$scratch/quicklisp.lisp" \
        --eval "(quicklisp-quickstart:install :path \"$ql_home/\")" >/dev/null
 }
