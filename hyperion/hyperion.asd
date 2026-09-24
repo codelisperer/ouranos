@@ -153,7 +153,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion/http1" "aion/uv/net" "aion/log" "aion/pool"
-               "aion/uv")   ; server-uv.lisp calls uv: directly, not only through uv/net
+               "aion/uv"    ; server-uv.lisp calls uv: directly, not only through uv/net
+               "aion/boundary") ; the header list is checked before it enters the encoder (#110)
   :serial t
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
@@ -172,6 +173,8 @@
   ;; precisely the seam BETWEEN them -- hyperion/server:start choosing and starting this
   ;; backend. A suite that could not load both could not test the join.
   :depends-on ("hyperion/server-uv" "hyperion" "aion/pool" "aion/uv"  ; server-uv-tests.lisp calls pool: and uv:
+               "aion/boundary"                                        ; and names its condition (#110)
+               "hyperion/http1"                                       ; and the encoder it names (#110)
                "fiveam" "aion/test-threads" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/server-uv-tests"))

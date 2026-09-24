@@ -118,6 +118,43 @@ makes this easy to get wrong. Put the prose in a `;;` comment above the form.
 
 ## 5. The CL ↔ Coalton boundary
 
+### 5y. The boundary checks an argument, not what is inside it (#110)
+
+A Coalton function called from CL checks the outer type of each argument when it is entered.
+It does not check the elements of a list, and it does not check an `Optional` argument at all.
+Measured in development and release mode:
+
+| call from CL | result |
+|---|---|
+| `:foo` where `String` is declared | `TYPE-ERROR` |
+| `:foo` where `(List String)` is declared | `TYPE-ERROR` |
+| `(list :foo)` where `(List String)` is declared | not checked on entry |
+| anything where `(Optional String)` is declared, even `:foo` | not checked on entry: `(Some x)` is represented as `x` |
+
+An unchecked wrong value reaches code compiled on the promise that it is right. Depending on
+the value and the code, that is an unrelated error, a wrong answer, or a memory fault with
+*"The integrity of this image is possibly compromised"*. Passing the header list
+`("Retry-After" 30)` to `hyperion/http1:encode-head-flat` is a memory fault.
+
+So a CL function that passes a list or an `Optional` into Coalton wraps that argument with
+[`aion/boundary`](../aion/src/boundary/boundary.lisp), in the call form:
+
+```lisp
+(turn:run-chain (boundary:check-elements chain 'aion/interceptor:interceptor
+                                         :function 'turn:run-chain :argument 'chain)
+                effect turn)
+(money:money-ok? (boundary:check-optional amount 'money:money
+                                          :function 'money:money-ok? :argument 'amount))
+```
+
+Both return the value, and on a wrong one signal `boundary:boundary-type-error`, a
+`type-error` whose datum is the offending element and which names the function, the argument
+and the index. The element type is a CL type: `string` for `String`, and the type's own name
+for a `define-type` or `define-struct` (see §7 for why that is allowed). A type parameter of an
+element, such as the `Turn` in `(Interceptor Turn)`, does not exist at run time and is not
+checked. `scripts/coalton-boundary.lisp` lists the Coalton functions that take a list or an
+`Optional` and are called from CL.
+
 ### 5z. Coalton's `None` is TRUE in Common Lisp
 
 ```lisp
@@ -209,6 +246,24 @@ something like `cl:identity` in one mode and a CLOS instance in another.
 So never inspect, construct, or destructure a `define-type` value's representation from
 CL. Cross the seam through Coalton accessors, or pass promised scalars. The failure mode
 is nasty: it works in development mode and breaks everywhere at once on a mode switch.
+
+**The sanctioned exceptions: `aion/boundary` (#110).** One module reads Coalton's
+representation, on purpose, because nothing else can check what §5y shows goes unchecked:
+
+- `check-optional` recognises `None` with `coalton-impl/runtime/optional:cl-none-p`, a Coalton
+  runtime internal, and relies on `(Some x)` being `x`. That dependency is kept in one function,
+  `%coalton-none-p`, and `aion/boundary/tests` tests it with `Some` and `None` values Coalton
+  itself constructs, so a Coalton that boxes `Some` fails that suite and one that removes
+  `cl-none-p` fails the build.
+- `check-elements` tests an element of a `define-type` or `define-struct` with `typep` against
+  the type's name, which relies on Coalton making that type a CL class. The types checked this
+  way are `aion/log/types:Field` and `aion/interceptor:Interceptor`. The suites that pass real
+  values of them through a check (`aion/log/tests`, `praxeon/tests`) run on the release-mode
+  CI leg too, so a mode in which either is not a class fails there. A single-field
+  `define-type` is the case the rule above warns about; do not check one this way without
+  measuring it in both modes.
+
+No other code reads a representation.
 
 ### 7a. `print-object` on a `define-type` is a representation dependency (pre-publication issue 209)
 

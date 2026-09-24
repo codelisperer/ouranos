@@ -466,7 +466,9 @@ Returns the turn so the caller can distinguish an answer from a refusal -- ask
 TURN:TURN-HALTED, and read TURN:TURN-NOTE for the reason. Callers wanting only the text
 can take TURN:TURN-REPLY."
   (turn:run-chain
-   chain
+   ;; Coalton checks that CHAIN is a list, not what is in it (#110).
+   (boundary:check-elements chain 'aion/interceptor:interceptor
+                            :function 'turn:run-chain :argument 'chain)
    (lambda (tn)
      ;; The one impure pivot. It reads the turn's INPUT rather than the argument, so an
      ;; enter stage that rewrote the input (translation, redaction, a system preamble) is

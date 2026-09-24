@@ -236,6 +236,7 @@
 (defpackage #:praxeon/actor
   (:use #:cl)
   (:local-nicknames (#:px #:praxeon/praxeology)
+                    (#:boundary #:aion/boundary)
                     (#:cnd #:praxeon/conditions)
                     (#:ctx #:praxeon/context)
                     (#:llm #:praxeon/llm)

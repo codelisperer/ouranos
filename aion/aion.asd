@@ -561,12 +561,27 @@
                 :components ((:file "packages")
                              (:file "dynamic")))))
 
+(defsystem "aion/boundary"
+  :description "Checks for what the CL-to-Coalton boundary does not check: list elements and Optional values (#110)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; coalton for one symbol: COALTON-IMPL/RUNTIME/OPTIONAL:CL-NONE-P, which CHECK-OPTIONAL
+  ;; needs to recognise None. See %COALTON-NONE-P.
+  :depends-on ("coalton")
+  :serial t
+  :components ((:module "src/boundary"
+                :serial t
+                :components ((:file "packages")
+                             (:file "boundary")))))
+
 (defsystem "aion/log"
   :description "Neutral leveled + structured logging over log4cl: pretty for dev, one-line JSON to stdout for staging/prod."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  :depends-on ("coalton" "log4cl" "com.inuoe.jzon" "aion/dynamic")
+  :depends-on ("coalton" "log4cl" "com.inuoe.jzon" "aion/dynamic"
+               "aion/boundary")  ; RENDER checks the Field list it passes into Coalton (#110)
   :serial t
   :components ((:module "src/log"
                 :serial t
@@ -577,12 +592,21 @@
 
 (defsystem "aion/log/tests"
   :description "Tests for aion/log (rendering, context, level gating)."
-  :depends-on ("aion/log" "fiveam")
+  :depends-on ("aion/log" "aion/boundary" "fiveam")
   :serial t
   :components ((:module "tests"
                 :serial t
                 :components ((:file "log"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/log/tests :run-tests)))
+
+(defsystem "aion/boundary/tests"
+  :description "Tests for aion/boundary (#110)."
+  :depends-on ("aion/boundary" "coalton" "fiveam")
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "boundary"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/boundary/tests :run-tests)))
 
 (defsystem "aion/dynamic/tests"
   :description "Tests for aion/dynamic, and the tree-wide thread-spawn sweep (#158)."

@@ -3005,3 +3005,16 @@ exactly where an existing refusal gets lost. A provider with no usage at all mus
 though it were the cost."
   (is (null (%usage-event-for (llm:make-completion :text "ok" :stop-reason :end)))
       "a completion with no counts at all emitted a :usage event"))
+
+(test run-turn-through-checks-its-chain-before-it-enters-coalton
+  ;; #110: CHAIN comes from the caller, and Coalton checks that it is a list but not what is in
+  ;; it. The check runs before the model is called, so no agent is needed.
+  (let ((e (handler-case
+               (progn (praxeon/actor:run-turn-through
+                       nil "hi" :chain (list (praxeon/turn:guard-stage "g" (lambda (tn) tn))
+                                             :not-a-stage))
+                      nil)
+             (aion/boundary:boundary-type-error (e) e))))
+    (is (typep e 'aion/boundary:boundary-type-error) "run-turn-through did not signal")
+    (is (eql 1 (and e (aion/boundary:boundary-type-error-index e))))
+    (is (eq :not-a-stage (and e (type-error-datum e))))))
