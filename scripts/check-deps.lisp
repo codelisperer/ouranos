@@ -138,31 +138,36 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
 
 ;;; --- the Headline's counts (#118) ------------------------------------------
 ;;;
-;;; The Headline states three counts, and until #118 nothing compared them with the tree:
-;;; the drift check above compares table ROWS, so a count could be wrong while this script
-;;; said IN SYNC. That is how the Headline came to say 25 systems while the tree defined 98.
-;;; Each count is now measured here and compared with the number the Headline states. A
-;;; Headline line that cannot be found is a failure too, because deleting a wrong number would
-;;; otherwise pass.
+;;; Until #118 nothing compared the Headline's counts with the tree: the drift check above
+;;; compares table ROWS, so a count could be wrong while this script said IN SYNC. On the day
+;;; this was added the Headline said 28 third-party dependencies where the .asd files name 24,
+;;; and 25 ASDF systems where the tree defines 98. Each count below is now measured here and
+;;; compared with the number the Headline states. A Headline line that cannot be found is a
+;;; failure too, because deleting a wrong number would otherwise pass, and so is a manifest
+;;; with no Headline section at all.
+;;;
+;;; THE SYSTEM COUNT IS NOT IN THE HEADLINE, by the ruling on #118. It changes with every new
+;;; test suite, so checking it would make a large share of pull requests edit the same line,
+;;; and it says nothing about the file's subject, which is third-party dependencies. It is
+;;; still measured and printed, so anyone who wants the number has it.
 ;;;
 ;;; Only the counts are checked. The rest of each Headline sentence (which frameworks carry
 ;;; which dependencies, and why) is a judgement written by hand, and stays that way.
 
 (defparameter +headline-counts+
-  '((:systems   "ASDF systems"
-     "every system defined in a tracked .asd file, template placeholders excluded")
-    (:externals "distinct third-party"
+  '((:externals "distinct third-party"
      "distinct third-party systems named in a :depends-on, SBCL contribs excluded")
     (:contribs  "SBCL contribs"
      "SBCL contribs named in a :depends-on"))
   "(key phrase meaning) for each checked count. PHRASE identifies the Headline line: it must
-appear right after the bold number, as in `- **98** ASDF systems ...'.")
+appear right after the bold number, as in `- **24** distinct third-party systems ...'.")
 
 (defun %contrib-p (name) (uiop:string-prefix-p "sb-" name))
 
 (defun measured-headline-counts (actual-names)
-  "Plist of each Headline count as measured from the tree. ACTUAL-NAMES is every external
-system name the .asd files declare, contribs included."
+  "Plist of each Headline count as measured from the tree, plus :SYSTEMS, which is printed but
+not in the Headline. ACTUAL-NAMES is every external system name the .asd files declare,
+contribs included."
   (list :systems (loop for asd in (tree-deps:asd-files)
                        sum (count-if-not #'tree-deps:template-name-p
                                          (tree-deps:system-names-in asd)))
@@ -237,7 +242,9 @@ count is right."
   (let ((measured (measured-headline-counts actual-names)))
     (format t "~%=== Headline counts, measured ===~%")
     (dolist (spec +headline-counts+)
-      (format t "  ~4D  ~A~%" (getf measured (first spec)) (third spec))))
+      (format t "  ~4D  ~A~%" (getf measured (first spec)) (third spec)))
+    (format t "  ~4D  ~A~%" (getf measured :systems)
+            "every system defined in a tracked .asd file, template placeholders excluded (printed only; not in the Headline)"))
 
   (format t "~%=== drift ===~%")
   (cond

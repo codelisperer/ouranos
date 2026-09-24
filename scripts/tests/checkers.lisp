@@ -471,9 +471,24 @@ built to be agreeable."
 ;;;
 ;;; IT DETECTS ONE OF THE TWO DRIFTS ITS OWN HEADER NAMES. See
 ;;; `deps-does-not-detect-a-documented-dependency-nothing-uses' below.
+;;;
+;;; EVERY FIXTURE MANIFEST CARRIES A HEADLINE THAT MATCHES ITS TREE (#118). check-deps fails a
+;;; manifest whose Headline counts are wrong or missing, so a fixture without one would fail
+;;; every test for that reason, and a test expecting a failure could pass for the wrong one.
+;;; The counts are the fixture's own: its .asd files, not the real tree's.
 
-(defun %deps-tree (&key (depends "alexandria") (documented '("alexandria")))
-  "A tree whose one .asd depends on DEPENDS and whose manifest lists DOCUMENTED."
+(defun %headline (externals &optional (contribs 0))
+  "A `## Headline' section stating EXTERNALS third-party systems and CONTRIBS SBCL contribs,
+in the form check-deps reads."
+  (format nil "## Headline~%~%- **~D** distinct third-party systems named in a `:depends-on`.~%- **~D** SBCL contribs named in a `:depends-on`.~%~%"
+          externals contribs))
+
+(defun %deps-tree (&key (depends "alexandria") (documented '("alexandria")) (externals 1)
+                        (headline t))
+  "A tree whose one .asd depends on DEPENDS and whose manifest lists DOCUMENTED. The manifest's
+Headline states EXTERNALS third-party systems, which is right for this tree's one .asd; a
+test that adds an .asd passes the number for the tree it builds. HEADLINE NIL leaves the
+section out."
   (let ((tree (%fresh-tree)))
     (%install-checker tree "tree-deps.lisp")
     (%write (merge-pathnames "pkg/thing.asd" tree)
@@ -484,8 +499,8 @@ built to be agreeable."
     ;; than the artefact and stopped working the moment the parser was scoped (pre-publication issue 474). A
     ;; manifest with no `## External deps by role' documents nothing, which is now correct.
     (%write (merge-pathnames "docs/dependencies.md" tree)
-            (format nil "# Dependency manifest~%~%## External deps by role~%~%| Name | What |~%|---|---|~%~{| `~A` | fixture |~%~}"
-                    documented))
+            (format nil "# Dependency manifest~%~%~A## External deps by role~%~%| Name | What |~%|---|---|~%~{| `~A` | fixture |~%~}"
+                    (if headline (%headline externals) "") documented))
     tree))
 
 (test deps-reads-every-asd-not-only-the-first
@@ -498,7 +513,7 @@ says nothing broke only because the unread files happened to depend on documente
 This is the check. The undocumented dependency is introduced by the SECOND .asd, so a
 checker that reads one file reports IN SYNC and exits 0 -- a subtly wrong dependency set
 rather than a crash, which is the shape a real regression has."
-  (let ((tree (%deps-tree :documented '("alexandria"))))
+  (let ((tree (%deps-tree :documented '("alexandria") :externals 2)))
     (%write (merge-pathnames "other/second.asd" tree)
             (format nil "(defsystem \"second\"~%  :description \"fixture\"~%  :version \"0.0.0\"~%  :depends-on (\"cl-ppcre\"))~%"))
     (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
@@ -513,8 +528,8 @@ rather than a crash, which is the shape a real regression has."
     (%write (merge-pathnames "pkg/thing.asd" tree)
             (format nil "(defsystem \"thing\"~%  :description \"fixture\"~%  :version \"0.0.0\"~%  :depends-on (\"alexandria\"))~%"))
     (%write (merge-pathnames "docs/dependencies.md" tree)
-            (format nil "# Dependency manifest~%~%## External deps by role~%~%| Name | What |~%|---|---|~%~%~A~%~%| Name | What |~%|---|---|~%| `alexandria` | fixture |~%"
-                    section))
+            (format nil "# Dependency manifest~%~%~A## External deps by role~%~%| Name | What |~%|---|---|~%~%~A~%~%| Name | What |~%|---|---|~%| `alexandria` | fixture |~%"
+                    (%headline 1) section))
     tree))
 
 (test deps-does-not-accept-a-version-snapshot-as-documentation
@@ -559,6 +574,24 @@ every tree it is handed."
   (let ((tree (%deps-tree)))
     (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
       (is (= 0 code) "agreement must pass; exit was ~D~%~A" code output))))
+
+(test deps-fails-a-manifest-with-no-headline
+  "#118. Without this, a manifest could lose its Headline section and pass, and the counts it
+states would be unchecked again. The tree and its rows agree, so the missing Headline is the
+only thing wrong; `deps-passes-when-the-asd-and-the-manifest-agree' is the same tree with one."
+  (let ((tree (%deps-tree :headline nil)))
+    (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
+      (is (= 1 code) "a manifest with no Headline must fail; exit was ~D~%~A" code output)
+      (is (search "HEADLINE WRONG" output) "and say it is the Headline: ~A" output))))
+
+(test deps-fails-a-headline-count-the-tree-does-not-have
+  "#118. The tree has one third-party dependency and the Headline says two. The rows agree, so
+the count is the only thing wrong."
+  (let ((tree (%deps-tree :externals 2)))
+    (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
+      (is (= 1 code) "a wrong Headline count must fail; exit was ~D~%~A" code output)
+      (is (search "the Headline says 2, the tree has 1" output)
+          "and name both numbers: ~A" output))))
 
 (test deps-does-not-detect-a-documented-dependency-nothing-uses
   "ASSERTS A DEFECT, DELIBERATELY, so the gap is visible in the gate rather than in a comment.

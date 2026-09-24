@@ -21,13 +21,12 @@ separate repos with their own — not counted here.
 
 ## Headline
 
-The three counts below are measured by `scripts/check-deps.lisp`, which fails when one of
-them is wrong (#118). Each sentence says what it counts. Everything else in these sentences,
-such as which frameworks carry which dependencies, is written by hand and is not checked.
+The first two counts below are measured by `scripts/check-deps.lisp`, which fails when one
+of them is wrong (#118). Each sentence says what it counts. Everything else in these
+sentences, such as which frameworks carry which dependencies, is written by hand and is not
+checked. The number of ASDF systems is not given here, because it changes with every new
+test suite; `scripts/check-deps.lisp` prints it.
 
-- **98** ASDF systems: every system defined in a `.asd` file git tracks, excluding the
-  `{{name}}` placeholders in the four `cons` templates. That includes `/tests`, `/cli` and aux
-  systems, the satellites (`hermes`, `klio`), the contacts example and `scripts/checkers.asd`.
 - **24** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
   are counted on the next line). The tables below also document `hunchentoot`, `woo` and
   `clack-handler-woo`, which no `.asd` in this tree names in a `:depends-on`, so they are not
