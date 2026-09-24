@@ -20,6 +20,7 @@
 ;;;;                             unless OURANOS_MSVC_PATH overrides it (pre-publication issue 382)
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defparameter *build-libuv*
   (merge-pathnames "build-libuv.lisp"
@@ -53,12 +54,14 @@
                (push (second form) defined))))
   (unless (= (length defined) (length *wanted*))
     (format *error-output* "~&vswhere-probe: could not find ~S in ~A -- it has been renamed~%"
-            (set-difference *wanted* defined) *build-libuv*)
+            (set-difference *wanted* defined) (human-path:human-path *build-libuv*))
     (finish-output *error-output*)
     (sb-ext:quit :unix-status 2)))
 
 (flet ((line (label value)
-         (format t "~&~A : ~:[NOT FOUND~;~:*~A~]~%" label value)))
+         ;; A found install is a pathname; a refusal is a sentence, printed as it is.
+         (format t "~&~A : ~:[NOT FOUND~;~:*~A~]~%" label
+                 (if (pathnamep value) (human-path:human-path value) value))))
   (let ((vswhere (funcall (read-from-string "cl-user::find-vswhere"))))
     (line "find-vswhere         " vswhere)
     (line "find-msvc-via-vswhere"

@@ -74,6 +74,7 @@
 ;;;; upload step can assert it is sending those bytes rather than assuming a step order.
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 (funcall (read-from-string "ql:quickload") '(:hyperion/update :ironclad) :silent t)
 
@@ -153,7 +154,7 @@
   ;; PROVENANCE, not decoration. The two modes produce near-identical output and answer
   ;; different questions, so which one a log came from has to be IN the log.
   (if dist
-      (format t "source: the directory ~A, BEFORE the upload~%" dist)
+      (format t "source: the directory ~A, BEFORE the upload~%" (human-path:human-path dist))
       (format t "source: ~A -- over the network, unauthenticated, AFTER the upload~%"
               base-url))
   (format t "as the CLIENT reads it -- hyperion/update, not the generator's own reader~%~%")
@@ -295,7 +296,7 @@
          (dolist (pair (sort (copy-list checked) #'string< :key #'car))
            (format s "~A  ~A~%" (cdr pair) (car pair))))
        (format t "~&~%wrote ~A -- the upload step must send exactly these bytes~%"
-               (namestring path)))))
+               (human-path:human-path path)))))
 
   (format t "~&~%VERDICT: ~:[PASS~;FAIL~] (~D failure~:P)~%" *failures* (length *failures*))
   (sb-ext:quit :unix-status (if *failures* 1 0)))

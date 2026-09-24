@@ -21,6 +21,7 @@
 
 (require :asdf)
 (require :uiop)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defpackage #:tree-deps
   (:use #:cl)
@@ -138,7 +139,7 @@ loses its only real danger, which was being silently incomplete."
                  fw fw (length found)
                  (mapcar #'file-namestring found)))))
     (when (null found)
-      (error "tree-deps: found no .asd files at all under ~A." (namestring *root*)))
+      (error "tree-deps: found no .asd files at all under ~A." (human-path:human-path *root*)))
     found))
 
 (defun template-name-p (name)

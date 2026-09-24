@@ -27,6 +27,7 @@
 
 (require :asdf)
 (require :uiop)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defun argv-value (name &optional default)
   (let ((tail (member name (rest sb-ext:*posix-argv*) :test #'string=)))
@@ -49,7 +50,7 @@
       (ignore-errors
        (with-open-file (s marker :direction :output :external-format :utf-8
                                  :if-exists :append :if-does-not-exist :create)
-         (format s "launched version=~A from=~A~%" version (namestring dir)))))
+         (format s "launched version=~A from=~A~%" version (human-path:human-path dir)))))
     (sb-ext:quit :unix-status 0)))
 
 (ensure-directories-exist *out*)

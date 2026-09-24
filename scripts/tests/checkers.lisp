@@ -98,15 +98,16 @@ one left its directory behind."
 This is what makes the fixture work rather than a trick around it: the checkers locate their
 tree from where the script file is, so a checker placed in the fixture analyses the fixture.
 
-`tree-root.lisp' travels with it (pre-publication issue 480). Four scripts LOAD it, so a fixture without it is a
-fixture the script cannot run in -- and the ones that do not load it are unaffected by its
-presence, which is cheaper than a per-checker list that would go stale."
+`tree-root.lisp' travels with it (pre-publication issue 480), and so does `human-path.lisp'
+(#168). Scripts LOAD them, so a fixture without them is a fixture the script cannot run in --
+and the ones that do not load them are unaffected by their presence, which is cheaper than a
+per-checker list that would go stale."
   (let* ((scripts (merge-pathnames "scripts/" tree))
          (target (merge-pathnames name scripts)))
     (ensure-directories-exist scripts)
     (uiop:copy-file (merge-pathnames name *scripts*) target)
-    (uiop:copy-file (merge-pathnames "tree-root.lisp" *scripts*)
-                    (merge-pathnames "tree-root.lisp" scripts))
+    (dolist (helper '("tree-root.lisp" "human-path.lisp"))
+      (uiop:copy-file (merge-pathnames helper *scripts*) (merge-pathnames helper scripts)))
     target))
 
 (defun %install-root-markers (tree)
@@ -810,11 +811,9 @@ a code passes against a script that refuses AFTER writing, which is the shape of
         (is (= 2 code) "~A must refuse with exit 2, got ~D:~%~A" script code out)
         (is (search "which tree" out) "~A must say the two answers disagree:~%~A" script out)
         ;; native-namestring, for the reason recorded in the readme-counts test above: the
-        ;; producer here is also tree-root.lisp:89-90. Which function is correct depends on
-        ;; WHICH producer's message is being searched, so read the producer before changing
-        ;; one of these. The other path assertion in this file, in
-        ;; check-source-deps-roots-at-the-callers-tree-inside-its-own-tree, must stay
-        ;; `namestring': it matches tree-deps.lisp:141, which prints plain namestring.
+        ;; producer here is also tree-root.lisp:89-90. Every script now prints an absolute
+        ;; path in the native spelling (scripts/human-path.lisp, #168), so every path
+        ;; assertion in this file uses native-namestring.
         (is (search (uiop:native-namestring (truename ours)) out) "~A must name the tree the caller is in" script)
         (is (search (uiop:native-namestring (truename theirs)) out) "~A must name the tree it lives in" script))
       (loop for f in files for b in before
@@ -876,7 +875,10 @@ the script got past the root guard and then looked in the caller's tree."
       (is (not (search "which tree" out)) "must not refuse on the root:~%~A" out)
       (is (search "found no .asd files" out)
           "must reach tree-deps' own discovery guard, got:~%~A" out)
-      (is (search (namestring tree) out)
+      ;; native-namestring: tree-deps prints the directory it searched with
+      ;; scripts/human-path.lisp, like every other script (#168). Before that it printed
+      ;; plain `namestring', and this was the one assertion in the file that had to differ.
+      (is (search (uiop:native-namestring tree) out)
           "and must have searched the FIXTURE, naming it:~%~A" out))))
 
 ;;; --- does check-source-deps find an undeclared use? (#163, #166) ----------------------

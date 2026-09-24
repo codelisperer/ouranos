@@ -28,6 +28,7 @@
 ;;;; restate it. Recorded here so it is a known debt rather than a discovery.
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 (funcall (read-from-string "ql:quickload") '(:aion/signature :com.inuoe.jzon :ironclad) :silent t)
 
@@ -285,7 +286,7 @@ than the others, and the client already treats an absent entry as `nothing for m
                          platform (file-namestring file) format)))
     (when (zerop (hash-table-count platforms))
       (die "no artifacts found under ~A for ~A ~A -- refusing to write an empty manifest"
-           dist product version))
+           (human-path:human-path dist) product version))
     (let ((m (make-hash-table :test #'equal)))
       (setf (gethash "schema" m) *schema*
             (gethash "product" m) product
@@ -328,7 +329,7 @@ than the others, and the client already treats an absent entry as `nothing for m
             (unless (verify-detached public f)
               (die "the signature just written for ~A does not verify -- refusing to publish"
                    (file-namestring f)))))
-        (format t "~&wrote ~A and ~:*~A.sig (every signature verified)~%" (namestring path))))))
+        (format t "~&wrote ~A and ~:*~A.sig (every signature verified)~%" (human-path:human-path path))))))
 
 (defun published-now ()
   "RFC-3339 UTC, which is what the client parses."

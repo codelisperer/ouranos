@@ -25,6 +25,7 @@
 ;;;; docs/versioning-and-pinning.md.
 
 (require :uiop)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defparameter *root* (uiop:pathname-parent-directory-pathname
                       (uiop:pathname-directory-pathname *load-truename*)))
@@ -53,7 +54,7 @@ integrity check. Requiring them would fail a pin that is already stronger.")
 (defun read-pin (path)
   "PATH's `name value' lines as an alist. Blank lines and # comments ignored."
   (with-open-file (in path :if-does-not-exist nil)
-    (unless in (error "cannot open ~A" path))
+    (unless in (error "cannot open ~A" (human-path:human-path path)))
     (loop for line = (read-line in nil nil)
           while line
           for trimmed = (string-trim '(#\Space #\Tab #\Return) line)
@@ -79,9 +80,9 @@ integrity check. Requiring them would fail a pin that is already stronger.")
         (bad 0)
         (report (member "--report" (uiop:command-line-arguments) :test #'string=)))
     (when (null pins)
-      (format *error-output* "check-pins: no *.pin files found under ~A~%" *root*)
+      (format *error-output* "check-pins: no *.pin files found under ~A~%" (human-path:human-path *root*))
       (uiop:quit 2))
-    (format t "~&Pins under ~A~%~%" (namestring *root*))
+    (format t "~&Pins under ~A~%~%" (human-path:human-path *root*))
     (dolist (path pins)
       (let* ((name (file-namestring path))
              (fields (handler-case (read-pin path)

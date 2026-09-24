@@ -60,6 +60,7 @@
 ;;; provenance, which is the one thing a manifest exists not to do.
 (defparameter *script* (or *load-truename* *load-pathname*))
 (load (merge-pathnames "tree-root.lisp" (uiop:pathname-directory-pathname *script*)))
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname *script*)))
 
 (defparameter *root* (tree-root:resolve-or-die *script* "mbedtls-sources"))
 
@@ -211,7 +212,7 @@ second, and it was the only unenforced one:
         ;; the character after `~' is #\Return, which is an illegal directive and fails at
         ;; COMPILE time, not at the point of use (AGENTS.md).
         (format *error-output* "mbedtls-sources: no sources found under ~A.~%"
-                (namestring tree))
+                (human-path:human-path tree))
         (format *error-output*
                 "Expected the directories ~{~A~^, ~} -- is this an unpacked mbedTLS 4.x tree?~%"
                 *source-dirs*)
@@ -229,7 +230,7 @@ second, and it was the only unenforced one:
          (let* ((expected (read-manifest)))
            (unless expected
              (format *error-output* "mbedtls-sources: ~A is missing or empty. Run --record.~%"
-                     (namestring *manifest*))
+                     (human-path:human-path *manifest*))
              (uiop:quit 2))
            (let ((added (set-difference found expected :test #'string=))
                  (gone (set-difference expected found :test #'string=)))

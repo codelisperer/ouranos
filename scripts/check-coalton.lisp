@@ -14,6 +14,7 @@
 ;;;; exists at/after the pinned commit.
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defparameter *root*
   (uiop:pathname-parent-directory-pathname
@@ -50,7 +51,7 @@
        (head (git-head dir))
        (pin (pin-sha))
        (ok t))
-  (format t "~&ASDF resolves to  : ~A~%" dir)
+  (format t "~&ASDF resolves to  : ~A~%" (human-path:human-path dir))
   (format t "~&that checkout HEAD: ~A~%" (or head "NOT A GIT CHECKOUT (a Quicklisp release?)"))
   ;; A short pin must match a prefix of the full HEAD sha, not equal it.
   (cond ((null pin) (format t "~&VERDICT: no pin to compare against.~%") (setf ok nil))

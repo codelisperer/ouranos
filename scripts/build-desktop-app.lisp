@@ -22,6 +22,7 @@
 ;;;; This is scripting, not framework: `cons desktop build` absorbs it (ADR-0007).
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 ;;; --- argv -------------------------------------------------------------------
 (defun argv-value (name &optional default)
@@ -417,8 +418,8 @@ empty string or by \"0\" is a guard that will be switched off by accident."
              (unless (uiop:os-windows-p)
                (ignore-errors (uiop:run-program (list "chmod" "+x" (namestring dst))
                                                 :ignore-error-status t)))
-             (format t "~&build-desktop-app: launcher -> ~A~%" dst))
-      (warn "build-desktop-app: no hyperion-view at ~A -- run hyperion/hyperion-view/build.{sh,ps1} first; the app will not open a window." src)))
+             (format t "~&build-desktop-app: launcher -> ~A~%" (human-path:human-path dst)))
+      (warn "build-desktop-app: no hyperion-view at ~A -- run hyperion/hyperion-view/build.{sh,ps1} first; the app will not open a window." (human-path:human-path src))))
 
 ;;; --- native libraries (ADR-0013) ----------------------------------------------
 ;;; A dumped image is self-contained Lisp, not self-contained native code: every CFFI
@@ -546,7 +547,7 @@ shows up as an app that cannot start on a machine without its own copy."
     (when (and expected (not (member carried-name expected :test #'string=)))
       (let ((*standard-output* *error-output*))
         (format t "~&build-desktop-app: carried ~A under a name nothing will ask for.~%~%" carried-name)
-        (format t "  requested: ~A~%" path)
+        (format t "  requested: ~A~%" (human-path:human-path path))
         (format t "  carried as: ~A~%" carried-name)
         (format t "  searched for: ~{~A~^, ~}~%~%" expected)
         (format t "The shipped app looks beside its own executable for those names. A file~%")
@@ -591,11 +592,11 @@ natives, so they never reach this pass."
                (format t "Cannot show the bundle will carry it, so refusing (pre-publication issue 325).~%"))
              (sb-ext:exit :code 3))
             ((and resolved (uiop:subpathp resolved vendor))
-             (format t "~&  will carry  ~A  <- ~A~%" package path))
+             (format t "~&  will carry  ~A  <- ~A~%" package (human-path:human-path path)))
             (t
              (let ((*standard-output* *error-output*))
                (format t "~&build-desktop-app: ~A resolved to a SYSTEM library.~%~%" package)
-               (format t "  ~A~%~%" path)
+               (format t "  ~A~%~%" (human-path:human-path path))
                (if resolved
                    (format t "That path is outside vendor/, so CARRY-NATIVE-LIBRARIES will not copy it.~%")
                    (format t "That is a bare soname: the OS loader found a copy of its own and never~%said where, so CARRY-NATIVE-LIBRARIES has no path to copy.~%"))
@@ -668,7 +669,7 @@ be missing from a step named for waking."
                    (incf carried)
                    ;; NAME is CFFI's synthetic symbol for a library loaded by path
                    ;; (LIBUV.SO.1-459) -- true and useless. Report the files.
-                   (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) truename)
+                   (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) (human-path:human-path truename))
                    (dolist (license (license-files truename))
                      (let ((dst (merge-pathnames
                                  (format nil "LICENSES/~A-~A"
@@ -679,7 +680,7 @@ be missing from a step named for waking."
                        (uiop:copy-file license dst)
                        (format t "~&            + LICENSES/~A~%" (file-namestring dst))))))
                 (truename
-                 (format t "~&  system    ~A (~A) -- not ours to carry~%" name truename))
+                 (format t "~&  system    ~A (~A) -- not ours to carry~%" name (human-path:human-path truename)))
                 (t
                  (format t "~&  system    ~A -- resolved by the OS loader, not carried~%"
                          name)))))))
@@ -705,7 +706,7 @@ nothing."
              (let ((dst (merge-pathnames (file-namestring dep) *bundle*)))
                (uiop:copy-file source dst)
                (uiop:run-program (list "chmod" "+x" (namestring dst)) :ignore-error-status t)
-               (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) source)
+               (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) (human-path:human-path source))
                ;; Homebrew keeps the license at the formula prefix: <prefix>/lib/x.dylib
                ;; -> <prefix>/LICENSE*. We ship the code, so we ship the license.
                (let* ((prefix (uiop:pathname-parent-directory-pathname
@@ -746,7 +747,7 @@ nothing."
                                 (format nil "~A.exe" *name*)
                                 *name*)
                             *bundle*)))
-  (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* bin)
+  (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path bin))
   (finish-output)
   (sb-ext:save-lisp-and-die
    bin
