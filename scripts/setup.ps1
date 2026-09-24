@@ -475,6 +475,12 @@ function Find-SqliteDll {
   return $null
 }
 
+# Where Install-Sqlite puts the pinned DLL when it cannot write beside sbcl.exe (a per-machine
+# SBCL under Program Files, run without elevation). One definition, because -Check and
+# verify-clean-machine.ps1 have to recognise this directory as provisioned: -Check looked only
+# beside sbcl.exe and reported a machine provisioned here as "NOT provisioned" (#267).
+function Get-SqliteFallbackDir { Join-Path $env:LOCALAPPDATA 'Ouranos\lib' }
+
 function Install-Sqlite {
   $cmd = Get-Command sbcl -ErrorAction SilentlyContinue
   if (-not $cmd) { Note 'no sbcl on PATH yet -- skipping sqlite'; return }
@@ -530,7 +536,7 @@ function Install-Sqlite {
     # A per-machine SBCL under Program Files is not writable without elevation. Fall back
     # rather than demanding admin -- but say so, because a PATH entry is LATER in the
     # search order than the machine PATH, so another sqlite3.dll can still win.
-    $lib = Join-Path $env:LOCALAPPDATA 'Ouranos\lib'
+    $lib = Get-SqliteFallbackDir
     New-Item -ItemType Directory -Force -Path $lib | Out-Null
     foreach ($n in $SqliteDllNames) { Copy-Item $dll (Join-Path $lib $n) -Force }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -609,13 +615,15 @@ if ($Check) {
   # The provisioned copy UNDER THE NAME THAT WAS FOUND. Comparing against sqlite3.dll alone
   # passed on the CI runner while libsqlite3.dll from PHP was the file that loaded (#239).
   $ours = if ($sbclDir -and $dll) { Join-Path $sbclDir (Split-Path -Leaf $dll) } else { $null }
-  # What setup.ps1 put beside sbcl.exe, under either name. Separates "provisioned, but
-  # another file loads first" from "never provisioned".
-  $provisioned = @()
-  if ($sbclDir) {
-    $provisioned = @($SqliteDllNames | ForEach-Object { Join-Path $sbclDir $_ } |
-                       Where-Object { Test-Path -LiteralPath $_ })
-  }
+  # The same file in the fallback directory Install-Sqlite uses when it cannot write beside
+  # sbcl.exe (#267).
+  $fallback = Get-SqliteFallbackDir
+  $oursFallback = if ($dll) { Join-Path $fallback (Split-Path -Leaf $dll) } else { $null }
+  # What setup.ps1 put beside sbcl.exe or in the fallback directory, under either name.
+  # Separates "provisioned, but another file loads first" from "never provisioned".
+  $provisioned = @(@($sbclDir, $fallback) | Where-Object { $_ } | ForEach-Object {
+                     $d = $_; $SqliteDllNames | ForEach-Object { Join-Path $d $_ } } |
+                   Where-Object { Test-Path -LiteralPath $_ })
   # Name what the search passed over and why, so the file reported below is not mistaken for
   # the first SQLite DLL on PATH (#201).
   foreach ($s in $script:SkippedSqlite) {
@@ -627,6 +635,13 @@ if ($Check) {
     Write-Host '            Windows ships winsqlite3.dll, which WORKS but is a name cl-sqlite never tries.' -ForegroundColor DarkGray
   }
   elseif ($ours -and $dll -eq $ours) { Pass "$(Split-Path -Leaf $dll) (provisioned) -- $dll" }
+  elseif ($oursFallback -and $dll -eq $oursFallback) {
+    # Provisioned, through the fallback (#267). It passes, and says why it is weaker: this
+    # copy is found through the user PATH, which Windows searches after the machine PATH, so
+    # a copy there can still win. Re-running setup.ps1 elevated installs beside sbcl.exe.
+    Pass "$(Split-Path -Leaf $dll) (provisioned, in setup.ps1's fallback directory) -- $dll"
+    Write-Host '            found through the user PATH, after the machine PATH; setup.ps1 run elevated installs it beside sbcl.exe instead' -ForegroundColor DarkGray
+  }
   elseif ($provisioned.Count -gt 0) {
     # PROVISIONED, BUT ANOTHER FILE LOADS FIRST (#239). The usual cause is a machine set up
     # before setup.ps1 installed libsqlite3.dll: its sqlite3.dll beside sbcl.exe is searched
