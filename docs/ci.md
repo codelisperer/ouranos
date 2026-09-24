@@ -219,9 +219,13 @@ onto another port is fragility bought for nothing.
 - **The desktop window.** `hyperion-view` links WebKitGTK/GTK, which is *declared, not
   bundled*. In a bare container the app starts, serves, and exits without a window;
   verifying the window needs a runner with the GTK stack and a display.
-- **Clean-room bundle verification on macOS and Windows.** Only the Linux half exists
-  (`scripts/verify-bundle.sh`, in `desktop-release.yml`); the other two need a runner with
-  nothing installed, or a fresh VM. The shared design is ADR-0013.
+- **Clean-room bundle verification on macOS and Windows.** Only Linux runs the bundle on a
+  machine with nothing installed (`scripts/verify-bundle.sh`, in `desktop-release.yml`).
+  macOS and Windows have scripts that check which file the loader actually opened, which
+  is weaker: `scripts/verify-bundle-macos.sh`, not run by any workflow, and
+  `scripts/verify-bundle-windows.ps1`, run in `desktop-release.yml` without blocking until
+  #249 is fixed. A real clean room on those two needs a runner with nothing installed, or
+  a fresh VM. The shared design is ADR-0013.
 - **`elenchon/tests`.** Deliberately unwired — a `:perform` over an empty suite relocates
   the dishonesty rather than removing it.
 - **Anything on a `+known-warnings+` or `+known-empty+` line** in `verify-tree.lisp`. Those
