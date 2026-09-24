@@ -80,6 +80,17 @@ if [ -z "$PATTERN" ]; then
   echo "publish-public.sh: $NAMES_FILE is empty -- refusing to run a check that cannot fail" >&2
   exit 1
 fi
+# A list grep cannot parse would match nothing, and every name check below would pass while
+# checking nothing (#169). grep exits 2 on a pattern it cannot parse; refuse on that, as
+# .githooks/private-names.sh does. The checks below also read each grep's exit status, because
+# git grep's regex engine is not guaranteed to accept exactly what grep -E accepts.
+pattern_status=0
+printf '\n' | grep -iE "$PATTERN" >/dev/null 2>&1 || pattern_status=$?
+if [ "$pattern_status" -eq 2 ]; then
+  echo "publish-public.sh: $NAMES_FILE is not a valid extended regular expression." >&2
+  echo "  One bad entry disables the check for every name, so this refuses. Check the entries." >&2
+  exit 1
+fi
 
 fail=0
 
@@ -97,12 +108,20 @@ else
 fi
 
 # 2. No client/product names anywhere in the tracked tree. This is the whole point.
-hits=$(git grep -inE "$PATTERN" -- . 2>/dev/null | grep -viE 'example\.com' || true)
-if [ -n "$hits" ]; then
-  bad "client/product names in the tree:"
-  printf '%s\n' "$hits" | head -20 | sed 's/^/            /'
+# git grep exits 0 on a match, 1 on none, and above 1 when it could not run the pattern. Only
+# 1 means the tree is clean; before #169 the error was discarded and read as "no match".
+grep_status=0
+raw_hits=$(git grep -inE "$PATTERN" -- . 2>/dev/null) || grep_status=$?
+if [ "$grep_status" -gt 1 ]; then
+  bad "git grep could not run the private-names pattern (exit $grep_status) -- the tree was NOT checked"
 else
-  pass "no client or product names in the tracked tree"
+  hits=$(printf '%s\n' "$raw_hits" | grep -viE 'example\.com' || true)
+  if [ -n "$hits" ]; then
+    bad "client/product names in the tree:"
+    printf '%s\n' "$hits" | head -20 | sed 's/^/            /'
+  else
+    pass "no client or product names in the tracked tree"
+  fi
 fi
 
 # 3. Untracked-but-present files are not published, but a stray .env would be a disaster
@@ -171,7 +190,13 @@ git add -A
 
 # Belt and braces: check the STAGED content too, in case .gitattributes or export-ignore
 # rules changed what actually landed.
-staged_hits=$(git diff --cached | grep -inE "$PATTERN" | grep -viE 'example\.com' || true)
+staged_status=0
+staged_raw=$(git diff --cached | grep -inE "$PATTERN") || staged_status=$?
+if [ "$staged_status" -gt 1 ]; then
+  say "  FAIL    grep could not run the private-names pattern (exit $staged_status) -- the staged tree was NOT checked"
+  exit 1
+fi
+staged_hits=$(printf '%s\n' "$staged_raw" | grep -viE 'example\.com' || true)
 if [ -n "$staged_hits" ]; then
   say "  FAIL    client/product names survived into the staged tree:"
   printf '%s\n' "$staged_hits" | head -20 | sed 's/^/            /'
