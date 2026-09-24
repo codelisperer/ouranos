@@ -92,3 +92,56 @@
            (is (< (%seconds-since t0) 2)
                "one 1 s deadline for the group; took ~,2F s" (%seconds-since t0)))
       (%stop-all threads))))
+
+;;; --- no time left (#246) ------------------------------------------------------------
+;;;
+;;; SB-THREAD:JOIN-THREAD refuses :TIMEOUT 0, so a helper that passed it on signalled a
+;;; TYPE-ERROR naming no thread, the one failure this file exists to prevent.
+
+(defun %finished-thread (value name)
+  "A thread that has already returned VALUE and has not been joined."
+  (let ((th (sb-thread:make-thread (lambda () value) :name name)))
+    (loop while (sb-thread:thread-alive-p th) do (sleep 0.01))
+    th))
+
+(test join-with-no-time-left-names-a-running-thread
+  (let ((th (%sleeper 10 "no-time-left-worker")))
+    (unwind-protect
+         (let ((e (handler-case (progn (tt:join th :timeout 0) nil)
+                    (error (e) e))))
+           (is (and e (not (typep e 'type-error)))
+               "the helper's own error, not JOIN-THREAD's TYPE-ERROR, got: ~A" e)
+           (is (and e (search "no-time-left-worker" (princ-to-string e)))
+               "and it names the thread, got: ~A" e))
+      (%stop-all (list th)))))
+
+(test join-with-no-time-left-returns-a-finished-thread-s-value
+  (is (= 7 (tt:join (%finished-thread 7 "already-done") :timeout 0))))
+
+(test join-all-whose-deadline-has-passed-names-the-thread-still-running
+  ;; The deadline passing between two joins, made deterministic: with a TIMEOUT of 0 it has
+  ;; passed before the first join. The finished thread is joined; the running one is named.
+  (let ((running (%sleeper 10 "still-running-second")))
+    (unwind-protect
+         (let ((message (handler-case
+                            (progn (tt:join-all (list (%finished-thread 1 "done-first") running)
+                                                :timeout 0)
+                                   nil)
+                          (error (e) (princ-to-string e)))))
+           (is (and message (search "still-running-second" message))
+               "JOIN-ALL names the thread that had not finished, got: ~S" message))
+      (%stop-all (list running)))))
+
+;;; --- a thread's own second value is not an outcome ---------------------------------
+;;;
+;;; JOIN-THREAD returns the thread's values when it finishes, and (DEFAULT problem) when it
+;;; does not. A helper that read the second value as the problem took a thread returning
+;;; (VALUES 1 :TIMEOUT) for one that timed out.
+
+(test a-thread-s-own-second-value-is-not-read-as-an-outcome
+  (dolist (second '(:timeout :abort))
+    (let* ((th (sb-thread:make-thread (lambda () (values 1 second))
+                                      :name (format nil "returns-1-and-~(~A~)" second)))
+           (got (handler-case (tt:join th :timeout 5)
+                  (error (e) (princ-to-string e)))))
+      (is (eql 1 got) "a thread returning (VALUES 1 ~S) returned 1, got: ~S" second got))))
