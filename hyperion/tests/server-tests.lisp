@@ -451,6 +451,34 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
                  "the backend's own error must be kept, not replaced")))
       (sb-bsd-sockets:socket-close squatter))))
 
+(test a-listener-already-on-the-port-is-never-taken-for-our-server
+  ;; Another program LISTENING on the port, with SO_REUSEADDR, before START binds it, and the
+  ;; preflight off so that only the bind and the readiness check decide. Each platform's
+  ;; outcome is asserted as measured on #188, not a weaker "either" (Linux here; macOS by
+  ;; Ouranos Claude (macOS); Windows by Ouranos Claude (Windows)):
+  ;;   Linux, macOS  the backend's bind fails: PORT-IN-USE.
+  ;;   Windows       both sockets bind and listen, sharing the port with no error; the
+  ;;                 readiness nonce never comes back from the other listener, so START
+  ;;                 gives up with SERVER-START-TIMEOUT. Before #188 it reported success.
+  (let ((squatter (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address squatter) t)
+    (sb-bsd-sockets:socket-bind squatter #(127 0 0 1) 0)
+    (sb-bsd-sockets:socket-listen squatter 5)
+    (unwind-protect
+         (let* ((port (nth-value 1 (sb-bsd-sockets:socket-name squatter)))
+                (c (let ((srv:*start-timeout* 3))
+                     (handler-case
+                         (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
+                                                           :log nil :check-port nil)))
+                           (ignore-errors (srv:stop h))
+                           :started)
+                       (srv:port-in-use (c) c)
+                       (srv:server-start-timeout (c) c)))))
+           #-win32 (is (typep c 'srv:port-in-use) "expected PORT-IN-USE, got ~S" c)
+           #+win32 (is (typep c 'srv:server-start-timeout)
+                       "expected SERVER-START-TIMEOUT on a shared port, got ~S" c))
+      (sb-bsd-sockets:socket-close squatter))))
+
 (test start-returns-once-the-port-is-listening-and-stop-once-it-is-released
   ;; No poll on either side: START's return means listening, and STOP's return means the
   ;; socket is closed, because STOP now waits for the backend's thread.

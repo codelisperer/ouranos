@@ -600,6 +600,14 @@ per request."
             :name (format nil "hyperion-server-~(~A~)" server)))
          (deadline (+ (get-internal-real-time)
                       (* *start-timeout* internal-time-units-per-second))))
+    ;; A bind that fails does so within milliseconds of the thread starting. Give it up to
+    ;; 200 ms to say so before the first probe, because a probe can itself cost seconds: on
+    ;; Windows a connect to a port that is bound but not listening is refused only after
+    ;; about 2.05 s, and a first probe sent before the failure was recorded made START take
+    ;; 4.11 s to report a taken port (measured by Ouranos Claude (Windows) on #188).
+    (loop repeat 10
+          until (or failure (not (sb-thread:thread-alive-p thread)))
+          do (sleep 0.02))
     (loop
       (cond
         (failure
