@@ -846,8 +846,8 @@ code we do not own, and a gate that cries wolf gets switched off."
 ;;; one occurrence, on Windows, since fixed.
 ;;;
 ;;; No allowance list, unlike +KNOWN-WARNINGS+. A form that cannot compile is never correct,
-;;; and there has been no case of one in a dependency. If one appears, list it here the same
-;;; way, with the reason it is not ours to fix.
+;;; and no dependency has produced one. If one ever does, whether to excuse it is a decision
+;;; for an issue of its own, not an entry added here in passing.
 
 (defvar *caught-errors* '()
   "(LABEL . COUNT) for every child whose output had a `caught ERROR', newest first.")
