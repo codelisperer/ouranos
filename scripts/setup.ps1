@@ -412,15 +412,32 @@ function Get-PeMachineName($machine) {
   }
 }
 
-# The sqlite3.dll files the search passed over because SBCL cannot load them (#201). Filled by
+# The SQLite DLL files the search passed over because SBCL cannot load them (#201). Filled by
 # Find-SqliteDll, reported by the check.
 $script:SkippedSqlite = @()
 
+# The names cl-sqlite asks for, in the order it asks. Its library definition in
+# cl-sqlite-20190813-git's sqlite-ffi.lisp is
+#   (t (:or (:default "libsqlite3") (:default "sqlite3")))
+# so CFFI tries libsqlite3.dll first, and tries sqlite3.dll only when no libsqlite3.dll can
+# be loaded from anywhere on the search path (#239).
+$SqliteDllNames = @('libsqlite3.dll', 'sqlite3.dll')
+
 function Find-SqliteDll {
-  # WHERE THE LOADER WOULD ACTUALLY FIND ONE, in the order it looks: the directory of the
-  # executable (sbcl.exe, for everything this tree runs), then System32, then PATH. Windows
-  # ships winsqlite3.dll in System32 under a name cl-sqlite never asks for, so that copy is
-  # invisible here on purpose -- this reports what the LOADER sees, not what exists.
+  # WHERE THE LOADER WOULD ACTUALLY FIND ONE, searching the way CFFI and Windows do: NAME
+  # FIRST. CFFI hands LoadLibrary one bare name, and Windows looks for that name through its
+  # whole search order before CFFI tries the next name. The search order, with
+  # SafeDllSearchMode on (the default): the executable's directory (sbcl.exe, for everything
+  # this tree runs), System32, the 16-bit System directory, the Windows directory, the
+  # current directory, then PATH.
+  #
+  # The loop used to run the other way, directory first and both names in each, so it found
+  # sqlite3.dll beside sbcl.exe and reported it, while cl-sqlite loaded a libsqlite3.dll from
+  # PHP further down PATH (#239). A file in the executable's directory wins only for the name
+  # being searched for.
+  #
+  # Windows ships winsqlite3.dll in System32 under a name cl-sqlite never asks for, so that
+  # copy is invisible here on purpose -- this reports what the LOADER sees, not what exists.
   #
   # A DLL BUILT FOR ANOTHER ARCHITECTURE IS SKIPPED, as the loader skips it (#201). On a
   # machine with Embarcadero Delphi, the first sqlite3.dll on PATH is Delphi's 32-bit copy; a
@@ -438,9 +455,12 @@ function Find-SqliteDll {
     $want = Get-PeMachine $cmd.Source
   }
   $dirs += [Environment]::SystemDirectory
+  $dirs += (Join-Path $env:WINDIR 'System')
+  $dirs += $env:WINDIR
+  $dirs += (Get-Location).ProviderPath
   $dirs += ($env:PATH -split ';' | Where-Object { $_ })
-  foreach ($d in $dirs) {
-    foreach ($n in @('sqlite3.dll', 'libsqlite3.dll')) {
+  foreach ($n in $SqliteDllNames) {
+    foreach ($d in $dirs) {
       try { $p = Join-Path $d $n } catch { continue }
       if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) {
         $m = Get-PeMachine $p
@@ -460,12 +480,24 @@ function Install-Sqlite {
   if (-not $cmd) { Note 'no sbcl on PATH yet -- skipping sqlite'; return }
   $sbclDir = Split-Path -Parent $cmd.Source
 
-  # BESIDE sbcl.exe, because the executable's own directory is the FIRST thing Windows
-  # searches -- so the copy this script provisions wins over whatever else a developer's
-  # machine happens to carry. That determinism is the point: "two machines stand up the
-  # same toolchain" is not true if the answer depends on whether Delphi is installed.
-  $target = Join-Path $sbclDir 'sqlite3.dll'
-  if (Test-Path -LiteralPath $target) { Note "sqlite3.dll present beside sbcl.exe"; return }
+  # BESIDE sbcl.exe, because the executable's own directory is the FIRST place Windows
+  # searches for a name. That makes the copy this script provisions win over whatever else a
+  # developer's machine carries, but only under the name cl-sqlite tries first: Windows
+  # searches every directory for libsqlite3.dll before cl-sqlite asks for sqlite3.dll, so a
+  # sqlite3.dll here loses to a libsqlite3.dll anywhere on PATH. The CI runner's PHP install
+  # carries one, and it was what the Windows leg tested against (#239). So the pinned DLL is
+  # installed under both names. libsqlite3.dll is the one that loads; sqlite3.dll is kept so
+  # that nothing written against the earlier layout finds it gone.
+  #
+  # That determinism is the point: "two machines stand up the same toolchain" is not true if
+  # the answer depends on whether Delphi or PHP is installed.
+  $targets = @($SqliteDllNames | ForEach-Object { Join-Path $sbclDir $_ })
+  # Every name is tested, not only the old one, so a machine provisioned before #239 (which
+  # has sqlite3.dll and nothing else) gets libsqlite3.dll on the next run.
+  if (-not ($targets | Where-Object { -not (Test-Path -LiteralPath $_) })) {
+    Note "$($SqliteDllNames -join ' and ') present beside sbcl.exe"
+    return
+  }
 
   $url = Get-SqliteUrl
   $want = Get-SqliteSha
@@ -490,15 +522,17 @@ function Install-Sqlite {
   if (-not (Test-Path $dll)) { Die "$url did not contain sqlite3.dll" }
 
   try {
-    Copy-Item $dll $target -Force
-    Note "sqlite3.dll -> $target"
+    foreach ($t in $targets) {
+      Copy-Item $dll $t -Force
+      Note "sqlite3.dll -> $t"
+    }
   } catch {
     # A per-machine SBCL under Program Files is not writable without elevation. Fall back
     # rather than demanding admin -- but say so, because a PATH entry is LATER in the
     # search order than the machine PATH, so another sqlite3.dll can still win.
     $lib = Join-Path $env:LOCALAPPDATA 'Ouranos\lib'
     New-Item -ItemType Directory -Force -Path $lib | Out-Null
-    Copy-Item $dll (Join-Path $lib 'sqlite3.dll') -Force
+    foreach ($n in $SqliteDllNames) { Copy-Item $dll (Join-Path $lib $n) -Force }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (($userPath -split ';') -notcontains $lib) {
       [Environment]::SetEnvironmentVariable('Path', (@($lib, $userPath) | Where-Object { $_ }) -join ';', 'User')
@@ -506,7 +540,7 @@ function Install-Sqlite {
     }
     $env:PATH = "$lib;$env:PATH"
     Write-Host "    WARN could not write beside sbcl.exe ($sbclDir) -- installed to $lib instead." -ForegroundColor Yellow
-    Write-Host "         Another sqlite3.dll earlier on PATH would still win; run -Check to see which one does." -ForegroundColor DarkGray
+    Write-Host "         Another libsqlite3.dll earlier on PATH would still win; run -Check to see which one does." -ForegroundColor DarkGray
   }
   Remove-Item $zip -Force -ErrorAction SilentlyContinue
   Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
@@ -571,20 +605,46 @@ if ($Check) {
   # first, and warn when it is not the one this script provisioned.
   $dll = Find-SqliteDll
   $cmd = Get-Command sbcl -ErrorAction SilentlyContinue
-  $ours = if ($cmd) { Join-Path (Split-Path -Parent $cmd.Source) 'sqlite3.dll' } else { $null }
+  $sbclDir = if ($cmd) { Split-Path -Parent $cmd.Source } else { $null }
+  # The provisioned copy UNDER THE NAME THAT WAS FOUND. Comparing against sqlite3.dll alone
+  # passed on the CI runner while libsqlite3.dll from PHP was the file that loaded (#239).
+  $ours = if ($sbclDir -and $dll) { Join-Path $sbclDir (Split-Path -Leaf $dll) } else { $null }
+  # What setup.ps1 put beside sbcl.exe, under either name. Separates "provisioned, but
+  # another file loads first" from "never provisioned".
+  $provisioned = @()
+  if ($sbclDir) {
+    $provisioned = @($SqliteDllNames | ForEach-Object { Join-Path $sbclDir $_ } |
+                       Where-Object { Test-Path -LiteralPath $_ })
+  }
   # Name what the search passed over and why, so the file reported below is not mistaken for
-  # the first sqlite3.dll on PATH (#201).
+  # the first SQLite DLL on PATH (#201).
   foreach ($s in $script:SkippedSqlite) {
     Write-Host ("  note    skipped {0} -- built for {1}; sbcl.exe is {2}, so it cannot load it" -f `
         $s.Path, (Get-PeMachineName $s.Machine), (Get-PeMachineName (Get-PeMachine $cmd.Source))) -ForegroundColor DarkGray
   }
   if (-not $dll) {
-    Miss 'sqlite3.dll (cl-sqlite needs it; mnemosyne cannot load without it)' '.\scripts\setup.ps1'
+    Miss 'libsqlite3.dll or sqlite3.dll (cl-sqlite needs one; mnemosyne cannot load without it)' '.\scripts\setup.ps1'
     Write-Host '            Windows ships winsqlite3.dll, which WORKS but is a name cl-sqlite never tries.' -ForegroundColor DarkGray
   }
-  elseif ($ours -and $dll -eq $ours) { Pass "sqlite3.dll (provisioned) -- $dll" }
+  elseif ($ours -and $dll -eq $ours) { Pass "$(Split-Path -Leaf $dll) (provisioned) -- $dll" }
+  elseif ($provisioned.Count -gt 0) {
+    # PROVISIONED, BUT ANOTHER FILE LOADS FIRST (#239). The usual cause is a machine set up
+    # before setup.ps1 installed libsqlite3.dll: its sqlite3.dll beside sbcl.exe is searched
+    # for only after every directory has been searched for libsqlite3.dll, so a libsqlite3.dll
+    # on PATH (PHP ships one) wins. Worded differently from the unprovisioned case below
+    # because the fix is different: re-run setup.ps1, rather than provision for the first time.
+    Write-Host "  WARN    SQLite loads from $dll" -ForegroundColor Yellow
+    Write-Host '            provisioned by setup.ps1, but loaded from elsewhere. The copy beside sbcl.exe is:' -ForegroundColor DarkGray
+    $provisioned | ForEach-Object { Write-Host "              $_" -ForegroundColor DarkGray }
+    Write-Host '            cl-sqlite asks for libsqlite3.dll before sqlite3.dll, and Windows searches every' -ForegroundColor DarkGray
+    Write-Host '            directory for the first name before the second one is tried.' -ForegroundColor DarkGray
+    Write-Host '            fix: .\scripts\setup.ps1   (installs the pinned build as libsqlite3.dll beside sbcl.exe)' -ForegroundColor DarkGray
+    # Counted as missing for the reason given in the branch below: nothing downstream reads
+    # the WARN text, and -Check must not exit 0 while the pinned build is not the one in use.
+    $script:missing++
+  }
   else {
-    Write-Host "  WARN    sqlite3.dll comes from $dll" -ForegroundColor Yellow
+    Write-Host "  WARN    SQLite loads from $dll" -ForegroundColor Yellow
     Write-Host '            NOT provisioned by setup.ps1. mnemosyne loads because something else on this' -ForegroundColor DarkGray
     Write-Host '            machine supplies it, so a green sqlite backend here says nothing about a clean box.' -ForegroundColor DarkGray
     Write-Host '            fix: .\scripts\setup.ps1   (installs the pinned build where the loader looks first)' -ForegroundColor DarkGray
@@ -592,8 +652,9 @@ if ($Check) {
     # without this the summary still says "this machine is provisioned" and -Check still exits
     # 0, which is pre-publication issue 229's own defect one level up -- a machine carried by an unrelated Delphi
     # install reporting green, now with a paragraph explaining that the green means nothing.
-    # This branch is reachable ONLY when the provisioned copy is absent (Find-SqliteDll looks
-    # beside sbcl.exe first), so WARN here means NOT PROVISIONED, which is what missing is.
+    # This branch is reachable ONLY when nothing is provisioned beside sbcl.exe under either
+    # name; the branch above takes the case where something is. So WARN here means NOT
+    # PROVISIONED, which is what missing is.
     # The wording above is left exactly as it stands: verify-clean-machine.ps1 (pre-publication issue 230) greps
     # for 'NOT provisioned by setup.ps1', so it is a contract, not just a message.
     $script:missing++
