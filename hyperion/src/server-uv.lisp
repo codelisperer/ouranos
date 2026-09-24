@@ -850,7 +850,15 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   (in-flight nil)
   ;; %RESUME is running. A SYNCHRONOUS dispatcher completes inside %SERVE-ONE and calls
   ;; back into %RESUME, which without this would recurse once per pipelined request.
-  (draining nil))
+  (draining nil)
+  ;; How the connection ends (#262). SHUTDOWN is NIL, :PENDING while our half-close waits for
+  ;; queued writes to flush, or :DONE. PEER-ENDED is set when the peer's end-of-stream
+  ;; arrives. CLOSED is set once, by %FINISH, when the handle is closed. LIVE is the server's
+  ;; table of open connections, which STOP walks.
+  (shutdown nil)
+  (peer-ended nil)
+  (closed nil)
+  (live nil))
 
 (defun %append-octets (state chunk)
   (let ((buf (conn-state-buffer state)))
@@ -953,19 +961,91 @@ names that, and telling the peer beats leaving it to guess."
         (log:debug "server-uv: idle connection closed"
                    :requests (conn-state-requests state)))
     (%timer-release state)
-    (ignore-errors (net:shutdown-write conn))))
+    (%shutdown conn state)))
 
-(defun %conn-end (state)
-  "The peer finished. Release what the connection was holding."
-  (setf (conn-state-done state) t)
-  (%timer-release state))
+;;; --- the end of a connection (#262) ------------------------------------------
+;;;
+;;; Until #262 nothing here closed a connection's handle. Every path marked the connection done
+;;; and at most half-closed it, so each finished connection kept its handle, its socket and its
+;;; read buffer until the server stopped, and a server under a 1024-descriptor limit stopped
+;;; accepting after about a thousand connections. %FINISH is now the one place a connection is
+;;; closed, and every way a connection ends reaches it exactly once:
+;;;
+;;;   the peer resets, or a read fails   -> %FINISH at once; nothing more can be written
+;;;   the peer ends its side             -> %SHUTDOWN, then %FINISH when it completes
+;;;   we end it (%CLOSE-AFTER, timeout)  -> %SHUTDOWN, then %FINISH on the peer's end-of-stream
+;;;                                         or after *KEEP-ALIVE-TIMEOUT-MS*, whichever is first
+;;;   STOP with the connection open      -> %FINISH, on the loop thread, before the loop closes
+;;;
+;;; THE HALF-CLOSE COMES FIRST ON EVERY ORDERLY PATH, because libuv completes a shutdown only
+;;; after the writes queued before it have gone out. Closing the handle directly would cancel
+;;; a response still queued. And we do not close the moment our half-close completes: a
+;;; socket closed with unread input sends a reset, which can make the peer discard a response
+;;; it has received and not yet read. So we wait for its end-of-stream, for a bounded time.
+
+(defun %finish (conn state)
+  "End CONN's life: mark it done, release its timer, forget it, and close its handle.
+Idempotent, and the only place a connection's handle is closed."
+  (unless (conn-state-closed state)
+    (setf (conn-state-closed state) t
+          (conn-state-done state) t)
+    (%timer-release state)
+    (let ((live (conn-state-live state)))
+      (when live (remhash conn live)))
+    (ignore-errors (uv:close-handle conn))))
+
+(defun %linger (conn state)
+  "Our half-close is done and the peer has not ended its side yet. Give it
+*KEEP-ALIVE-TIMEOUT-MS* to do so, then close regardless. Does nothing for a connection
+already finished, whose timer %FINISH could no longer release."
+  (%timer-release state)
+  (unless (conn-state-closed state)
+    (let ((timer (uv:make-timer (net:connection-loop conn)
+                                (lambda (tm)
+                                  (declare (ignore tm))
+                                  (%finish conn state)))))
+      (setf (conn-state-timer state) timer)
+      (ignore-errors (uv:start-timer timer :after *keep-alive-timeout-ms*)))))
+
+(defun %shutdown (conn state)
+  "Half-close CONN once its queued writes have gone out, then end it: at once if the peer has
+already ended its side, otherwise when it does or after a grace period. Once only."
+  (unless (or (conn-state-closed state) (conn-state-shutdown state))
+    (setf (conn-state-shutdown state) :pending)
+    (handler-case
+        (net:shutdown-write conn
+                            :on-complete (lambda (size)
+                                           (declare (ignore size))
+                                           (setf (conn-state-shutdown state) :done)
+                                           ;; Already finished -- by STOP, or by an error
+                                           ;; while the shutdown was pending: nothing to
+                                           ;; wait for, and a linger timer made now would
+                                           ;; never be released.
+                                           (unless (conn-state-closed state)
+                                             (if (conn-state-peer-ended state)
+                                                 (%finish conn state)
+                                                 (%linger conn state))))
+                            :on-error (lambda (e)
+                                        (declare (ignore e))
+                                        (%finish conn state)))
+      (error () (%finish conn state)))))
+
+(defun %peer-ended (conn state)
+  "The peer's end-of-stream arrived. Nothing further will be read, and a request still in
+flight gets no response (%COMPLETE sees DONE), so flush what is queued and close."
+  (setf (conn-state-peer-ended state) t
+        (conn-state-done state) t)
+  (ecase (conn-state-shutdown state)
+    ((nil) (%timer-release state) (%shutdown conn state))
+    (:pending)                          ; its completion closes, now that the peer has ended
+    (:done (%finish conn state))))      ; we were lingering for exactly this
 
 ;;; --- serving ---------------------------------------------------------------
 
 (defun %close-after (conn state)
   (setf (conn-state-done state) t)
   (%timer-release state)
-  (net:shutdown-write conn))
+  (%shutdown conn state))
 
 (defun %fail (conn state status reason)
   "Answer STATUS and close. Every rejection closes, and not as a convenience: H1:ENCODE-ERROR
@@ -1160,7 +1240,10 @@ one level up."
 ;;; --- lifecycle -------------------------------------------------------------
 
 (defstruct (server (:constructor %make-server) (:copier nil))
-  loop thread listener host port)
+  loop thread listener host port
+  ;; The open connections, CONN -> CONN-STATE. Touched only on the loop thread: added at
+  ;; accept, removed by %FINISH, walked by STOP (#262).
+  live)
 
 (defun start (app &key (host "127.0.0.1") (port 8080))
   "Serve APP -- a Ring handler, (lambda (env) -> (status headers body)) -- on HOST:PORT.
@@ -1172,41 +1255,63 @@ TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
 Clack -- owning the socket is what makes it available at all."
   (let* ((loop (uv:make-loop))
+         (live (make-hash-table :test 'eq))
          (listener (net:listen-tcp
                     loop host port
                     :on-connection
                     (lambda (conn)
-                      (let ((state (%make-conn-state)))
+                      (let ((state (%make-conn-state :live live)))
+                        (setf (gethash conn live) state)
                         (net:start-reading
                          conn
                          (lambda (octets connection)
                            (%serve connection app state octets))
-                         ;; A persistent connection owns a timer handle, and a live timer
-                         ;; holds the loop open. Both ends of the connection's life have to
-                         ;; release it or a server that ran for a day cannot be stopped.
+                         ;; Both ways the peer can end the connection reach %FINISH, which
+                         ;; releases the timer (a live timer holds the loop open) and closes
+                         ;; the handle (#262). The orderly one goes through %SHUTDOWN first.
                          :on-end (lambda (connection)
-                                   (declare (ignore connection))
-                                   (%conn-end state))
+                                   (%peer-ended connection state))
                          :on-error (lambda (e connection)
-                                     (declare (ignore connection))
-                                     (%conn-end state)
+                                     (%finish connection state)
                                      (log:debug "server-uv: connection error"
                                                 :condition (princ-to-string e)))))))))
     (multiple-value-bind (bound-host bound-port) (net:listener-address listener)
       (let ((thread (uv:start-loop-thread loop)))
         (log:info "server-uv: listening" :host bound-host :port bound-port)
         (%make-server :loop loop :thread thread :listener listener
-                      :host bound-host :port bound-port)))))
+                      :host bound-host :port bound-port :live live)))))
+
+(defparameter *stop-wait-seconds* 5
+  "How long STOP waits for the loop thread to close the listener and the open connections
+before it closes the loop regardless.")
 
 (defun stop (server)
-  "Stop SERVER and release its loop. Idempotent."
+  "Stop SERVER and release its loop. Idempotent.
+
+Connections still open are closed through %FINISH, on the loop thread, before the loop is
+closed (#262). CLOSE-LOOP would otherwise close their handles as bare pointers, which never
+runs a connection's own close and so never frees its read buffer."
   (when (server-loop server)
     ;; A loop already closed by another route leaves nothing to close the listener ON --
     ;; and CLOSE-LOOP below is what frees it in that case. Refusing to stop because the
     ;; loop is already gone would make STOP fail exactly when it has least to do.
-    (%on-loop (server-loop server)
-              (lambda () (net:close-listener (server-listener server)))
-              "the listener close")
+    (let* ((done (sb-thread:make-semaphore))
+           (queued (%on-loop (server-loop server)
+                             (lambda ()
+                               (unwind-protect
+                                    (progn
+                                      (net:close-listener (server-listener server))
+                                      (let ((open '()))
+                                        (maphash (lambda (conn state) (push (cons conn state) open))
+                                                 (server-live server))
+                                        (loop for (conn . state) in open
+                                              do (%finish conn state))))
+                                 (sb-thread:signal-semaphore done)))
+                             "the listener close and the open connections")))
+      ;; Waited for, not only queued: CLOSE-LOOP stops the loop thread first, and work still
+      ;; in its queue then never runs.
+      (when queued
+        (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)))
     (uv:close-loop (server-loop server))
     (setf (server-loop server) nil))
   server)

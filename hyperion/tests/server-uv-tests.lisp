@@ -1526,3 +1526,128 @@ socket-level answer to :SHORT is %CLOSE-AFTER, the same close an aborted chunked
              (is (eq 'hyperion/http1:encode-head-flat
                      (and e (aion/boundary:boundary-type-error-function e))))))
       (setf (fdefinition 'hyperion/server-uv::%ring-headers-flat) real))))
+
+;;; --- a finished connection releases its handle (#262) --------------------------------
+;;;
+;;; Until #262 the server never closed a connection's libuv handle. Each finished connection
+;;; kept its handle, its socket and its read buffer until the server stopped. Every other test
+;;; here starts and stops its own server, and STOP closes the loop and everything on it, so
+;;; none of them could see it. These tests keep ONE server running across many connections
+;;; and count what the loop still owns.
+;;;
+;;; COUNT THE POINTERS THE LOOP OWNS. The first measurement of this defect counted
+;;; NET:CONNECTION objects in UV:LOOP-OWNED, found none, and read that as "nothing leaks";
+;;; the list holds foreign pointers, so that count was always 0.
+
+(defun %owned (server)
+  "How many handle pointers SERVER's loop owns: the listener, plus one per live connection
+and per live timer."
+  (length (uv:loop-owned (srv::server-loop server))))
+
+(defun %open-descriptors ()
+  "This process's open file descriptors, counted the platform's own way, or NIL on a
+platform this test has no way to count them on (Windows)."
+  (let ((dir (cond ((probe-file "/proc/self/fd/") "/proc/self/fd/*")   ; Linux
+                   ((probe-file "/dev/fd/") "/dev/fd/*"))))           ; macOS
+    (and dir (length (directory dir :resolve-symlinks nil)))))
+
+(defun %finish-one (port how)
+  "One connection to PORT, ended in the way HOW names:
+  :SERVER-CLOSES -- the request says Connection: close, so the server ends it;
+  :CLIENT-CLOSES -- a keep-alive request, then the client closes;
+  :CLIENT-RESETS -- the client closes WITHOUT reading the response, which makes its kernel
+                    send a reset rather than an orderly close, on every platform we run on."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (sb-ext:with-timeout +io-timeout+
+           (sock:socket-connect s #(127 0 0 1) port)
+           (let ((stream (sock:socket-make-stream s :input t :output t
+                                                    :element-type '(unsigned-byte 8))))
+             (write-sequence (sb-ext:string-to-octets
+                              (if (eq how :server-closes)
+                                  (req "GET / HTTP/1.1" "Host: h" "Connection: close")
+                                  (req "GET / HTTP/1.1" "Host: h"))
+                              :external-format :latin-1)
+                             stream)
+             (force-output stream)
+             (ecase how
+               (:server-closes (read-response stream) (peer-closed-p stream))
+               (:client-closes (read-response stream))
+               (:client-resets (%wait-until (lambda () (listen stream)))))))
+      (ignore-errors (sock:socket-close s)))))
+
+(defmacro with-running-server ((server app) &body body)
+  `(let ((,server (srv:start ,app :port 0)))
+     (unwind-protect (progn ,@body) (srv:stop ,server))))
+
+(test several-hundred-finished-connections-leave-no-handle-or-descriptor-behind
+  ;; 300 connections through one server, a third ended each way. Afterwards the loop must own
+  ;; exactly what it owned before the first one, and so must the process's descriptor table.
+  (with-running-server (server (const-app 200 +ok+ '("ok")))
+    (let ((port (srv:server-port server))
+          (handles (%owned server))
+          (descriptors (%open-descriptors)))
+      (dotimes (i 300)
+        (%finish-one port (nth (mod i 3) '(:server-closes :client-closes :client-resets))))
+      (is (%wait-until (lambda () (= handles (%owned server))))
+          "the loop owned ~D handles before 300 connections and ~D after" handles (%owned server))
+      (if descriptors
+          (is (%wait-until (lambda () (= descriptors (%open-descriptors))))
+              "~D open descriptors before 300 connections and ~D after"
+              descriptors (%open-descriptors))
+          (skip "no way to count open descriptors on this platform; the handle count above still ran")))))
+
+(test each-way-a-connection-ends-releases-its-handle
+  ;; The same property, one path at a time, so a failure names the path.
+  (with-short-idle-clock (200)
+    (with-running-server (server (const-app 200 +ok+ '("ok")))
+      (let ((port (srv:server-port server))
+            (handles (%owned server)))
+        (dolist (how '(:server-closes :client-closes :client-resets))
+          (dotimes (i 5) (%finish-one port how))
+          (is (%wait-until (lambda () (= handles (%owned server))))
+              "~A: ~D handles before, ~D after" how handles (%owned server)))
+        ;; The idle timeout: a keep-alive connection the client leaves open and silent.
+        (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+          (unwind-protect
+               (sb-ext:with-timeout +io-timeout+
+                 (sock:socket-connect s #(127 0 0 1) port)
+                 (let ((stream (sock:socket-make-stream s :input t :output t
+                                                          :element-type '(unsigned-byte 8))))
+                   (write-sequence (sb-ext:string-to-octets (req "GET / HTTP/1.1" "Host: h")
+                                                            :external-format :latin-1)
+                                   stream)
+                   (force-output stream)
+                   (read-response stream)
+                   (is (%wait-until (lambda () (= handles (%owned server))))
+                       "idle timeout: ~D handles before, ~D after, with the client still connected"
+                       handles (%owned server))))
+            (ignore-errors (sock:socket-close s))))))))
+
+(test stopping-the-server-releases-a-connection-still-open
+  ;; A connection the client holds open while the server stops. STOP has to close it the way
+  ;; every other path does, so its read buffer is freed, rather than leave it to CLOSE-LOOP,
+  ;; which closes the bare pointer and never runs the connection's own close.
+  (let* ((server (srv:start (const-app 200 +ok+ '("ok")) :port 0))
+         (s (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
+         (closed '()))
+    (unwind-protect
+         (sb-ext:with-timeout +io-timeout+
+           (sock:socket-connect s #(127 0 0 1) (srv:server-port server))
+           (let ((stream (sock:socket-make-stream s :input t :output t
+                                                    :element-type '(unsigned-byte 8))))
+             (write-sequence (sb-ext:string-to-octets (req "GET / HTTP/1.1" "Host: h")
+                                                      :external-format :latin-1)
+                             stream)
+             (force-output stream)
+             (read-response stream)
+             (let ((method (defmethod uv:close-handle :before ((c aion/uv/net:connection))
+                             (push c closed))))
+               (unwind-protect (srv:stop server)
+                 (remove-method #'uv:close-handle method)))
+             ;; Not "LOOP-OWNED is empty afterwards": CLOSE-LOOP empties that list whether or not
+             ;; anything was closed properly, so it would pass on the defect too.
+             (is (= 1 (length closed))
+                 "STOP closed ~D connection~:P through the connection's own close" (length closed))))
+      (ignore-errors (sock:socket-close s))
+      (srv:stop server))))
