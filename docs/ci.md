@@ -227,9 +227,11 @@ onto another port is fragility bought for nothing.
   machine with nothing installed (`scripts/verify-bundle.sh`, in `desktop-release.yml`).
   macOS and Windows have scripts that check which file the loader actually opened, which
   is weaker: `scripts/verify-bundle-macos.sh`, not run by any workflow, and
-  `scripts/verify-bundle-windows.ps1`, run in `desktop-release.yml` without blocking until
-  #249 is fixed. A real clean room on those two needs a runner with nothing installed, or
-  a fresh VM. The shared design is ADR-0013.
+  `scripts/verify-bundle-windows.ps1`, run in `desktop-release.yml` as a blocking step. The
+  Windows script also traces `hyperion-view.exe` and the WebView2 runtime's processes, judges
+  only the processes whose program is in the bundle, and reports whether the window opened
+  (#268). A real clean room on those two needs a runner with nothing installed, or a fresh
+  VM. The shared design is ADR-0013.
 - **`elenchon/tests`.** Deliberately unwired — a `:perform` over an empty suite relocates
   the dishonesty rather than removing it.
 - **Anything on a `+known-warnings+` line** in `scripts/compile-warnings.lisp`, **or a `+known-empty+` line** in `verify-tree.lisp`. Those

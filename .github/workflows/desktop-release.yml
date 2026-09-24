@@ -236,7 +236,9 @@ jobs:
       # The Windows check (#78). Windows has no container to run the bundle in, so this runs
       # the app with PATH limited to the bundle, System32 and the Windows directory, records
       # every DLL the loader maps into it, and fails on any DLL that is neither in the
-      # bundle nor an operating-system binary.
+      # bundle nor an operating-system binary. It follows the processes the app starts, and
+      # judges hyperion-view.exe the same way; the WebView2 runtime's own processes are
+      # listed and not judged, and the report says whether the window opened (#268).
       #
       # BLOCKING. It was added non-blocking because coalton-repl opened OpenSSL at startup
       # without carrying it, and quit before `main' on a runner with no OpenSSL on the

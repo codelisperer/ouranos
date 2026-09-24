@@ -14,6 +14,11 @@
     CARRIED    -- inside the bundle directory. The build put it there (ADR-0013).
     WINDOWS    -- under the Windows directory, with a valid signature that marks it as an
                   operating-system binary (IsOSBinary). Every Windows installation has it.
+    WEBVIEW2   -- under the WebView2 runtime's directory
+                  (...\Microsoft\EdgeWebView\Application\<version>\) with a valid signature
+                  from Microsoft Corporation. The bundle declares the runtime rather than
+                  carrying it, and the installer installs it, so each such file is reported
+                  by name and version rather than failed (#268).
     FINDING    -- anything else. It exists on this machine and may not exist on a user's.
 
   Being in System32 is not enough to be WINDOWS: other installers put DLLs there (OpenSSL
@@ -23,8 +28,8 @@
 
   Checks:
 
-    1. Static imports. Every .exe and .dll in the bundle, including hyperion-view.exe,
-       which check 2 does not run: each imported DLL name is resolved the way the loader
+    1. Static imports. Every .exe and .dll in the bundle, including ones check 2 may not
+       reach: each imported DLL name is resolved the way the loader
        would on a clean machine (the file's own directory, System32, the Windows directory)
        and classified. API-set names (api-ms-win-*, ext-ms-win-*) are resolved by Windows
        itself and count as WINDOWS.
@@ -37,6 +42,20 @@
        found only through a developer's PATH fails to load instead of passing. The app
        passes if it exits 0, or if it is still running after -Seconds (a server or a
        window); it fails if it exits with any other code.
+
+       The debugger follows every process the app starts, and every process those start
+       (#268). All of them are listed with their program and exit code, but only the ones
+       whose program is in the bundle are judged: the app, and hyperion-view.exe when the
+       app opens a window. The WebView2 runtime's msedgewebview2.exe processes and
+       Windows' conhost.exe are followed and not judged, because what they load (GPU
+       drivers, for one) depends on the runtime and the machine, not on the bundle. The
+       report says whether the window opened: hyperion-view.exe had a visible window and
+       the WebView2 runtime started. If it did not open, the report says so, and what was
+       judged for hyperion-view.exe is what it loaded before it stopped.
+
+       Software that loads itself into every process on a machine (some audio utilities
+       do) shows up as a FINDING, because the verifier cannot tell it from a DLL our code
+       asked for. Off CI, a failing report says so; the CI runner's report decides.
 
     3. The control. For each carried DLL the app loaded in check 2, a copy of the bundle
        without that DLL is run the same way, and that run must not pass: the app has to
@@ -84,6 +103,9 @@ function Bad($m) { Write-Host "  FAILED  $m" -ForegroundColor Red }
 # the end, as in verify-clean-machine.ps1.
 $script:Failures = @()
 function Fail($m) { $script:Failures += $m; Bad $m }
+function Warn($m) { Write-Host "  NOTE    $m" -ForegroundColor Yellow }
+$script:LoadFindings = 0
+$OnCI = ($env:GITHUB_ACTIONS -eq 'true') -or [bool]$env:CI
 
 if ($env:OS -ne 'Windows_NT') { Write-Host 'ERROR: Windows only; see verify-bundle.sh and verify-bundle-macos.sh' -ForegroundColor Red; exit 2 }
 if (-not (Test-Path -LiteralPath $Bundle -PathType Container)) { Write-Host "ERROR: no such bundle directory: $Bundle" -ForegroundColor Red; exit 2 }
@@ -101,10 +123,14 @@ if ($apps.Count -ne 1) {
 $AppExe = $apps[0].FullName
 
 # --- the debugger loop -------------------------------------------------------------
-# DEBUG_ONLY_THIS_PROCESS: the app's children (hyperion-view) are not debugged, and are
-# stopped by process id afterwards. Every exception except the loader's initial breakpoint
-# is passed back to the app unhandled, so its own handlers run exactly as they would
-# without a debugger (SBCL raises exceptions in normal operation).
+# DEBUG_PROCESS: the app and every process it starts, and every process those start, are
+# debugged, so hyperion-view.exe and the WebView2 runtime's msedgewebview2.exe processes are
+# traced too (#268). Every exception except each process's initial loader breakpoint is
+# passed back unhandled, so the processes' own handlers run exactly as they would without a
+# debugger (SBCL and Chromium both raise exceptions in normal operation). When the app exits,
+# or -Seconds runs out, every process still running is stopped, and the loop waits up to 20 s
+# for their exit events. Once a second the loop records which traced processes own a visible
+# top-level window, which is how the report says whether the window opened.
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -112,9 +138,20 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 namespace OuranosVerify {
-  public class LoadTrace {
+  public class TracedProcess {
+    public int Pid;
+    public string Image = "";
     public List<string> Dlls = new List<string>();
-    public bool Exited;
+    public bool Exited;          // an exit event arrived
+    public bool Stopped;         // it was still running when the verifier stopped the run
+    public int ExitCode;
+    public bool Window;          // it owned a visible top-level window at some point
+  }
+
+  public class LoadTrace {
+    public List<TracedProcess> Procs = new List<TracedProcess>();
+    public List<string> Dlls = new List<string>();     // the app's own, as before #268
+    public bool Exited;                                // the app exited before it was stopped
     public int ExitCode;
     public int Pid;
     public string[] OutputTail = new string[0];
@@ -125,6 +162,7 @@ namespace OuranosVerify {
     struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int pid, tid; }
     [StructLayout(LayoutKind.Sequential)]
     struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public bool bInheritHandle; }
+    delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lparam);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
@@ -135,13 +173,21 @@ namespace OuranosVerify {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ContinueDebugEvent(int pid, int tid, uint status);
     [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool TerminateProcess(IntPtr h, uint code);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern uint GetFinalPathNameByHandleW(IntPtr h, StringBuilder buf, uint len, uint flags);
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lparam);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
 
-    const uint DEBUG_ONLY_THIS_PROCESS = 0x2, CREATE_NEW_CONSOLE = 0x10;
+    const uint DEBUG_PROCESS = 0x1, CREATE_NEW_CONSOLE = 0x10, PROCESS_TERMINATE = 0x1;
     const uint DBG_CONTINUE = 0x00010002, DBG_EXCEPTION_NOT_HANDLED = 0x80010001;
 
     // DEBUG_EVENT on x64: code, pid, tid, then the union at offset 16. The file handle is the
@@ -157,6 +203,22 @@ namespace OuranosVerify {
       if (s.StartsWith(@"\\?\UNC\")) return @"\\" + s.Substring(8);
       if (s.StartsWith(@"\\?\")) return s.Substring(4);
       return s;
+    }
+
+    static void MarkWindows(Dictionary<int, TracedProcess> procs, HashSet<int> live) {
+      EnumWindows(delegate(IntPtr hwnd, IntPtr unused) {
+        int pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        if (live.Contains(pid) && IsWindowVisible(hwnd)) procs[pid].Window = true;
+        return true;
+      }, IntPtr.Zero);
+    }
+
+    static void StopAll(HashSet<int> live) {
+      foreach (int victim in new List<int>(live)) {
+        IntPtr h = OpenProcess(PROCESS_TERMINATE, false, victim);
+        if (h != IntPtr.Zero) { TerminateProcess(h, 0); CloseHandle(h); }
+      }
     }
 
     // OUTPUT is a file that receives the app's stdout and stderr, so that a failure to start
@@ -178,39 +240,60 @@ namespace OuranosVerify {
       si.o = log; si.e = log; si.i = IntPtr.Zero;
       var cmd = new StringBuilder("\"" + exe + "\"" + (string.IsNullOrEmpty(args) ? "" : " " + args));
       PROCESS_INFORMATION pi;
-      bool ok = CreateProcessW(exe, cmd, IntPtr.Zero, IntPtr.Zero, true, DEBUG_ONLY_THIS_PROCESS | CREATE_NEW_CONSOLE, IntPtr.Zero, cwd, ref si, out pi);
+      bool ok = CreateProcessW(exe, cmd, IntPtr.Zero, IntPtr.Zero, true, DEBUG_PROCESS | CREATE_NEW_CONSOLE, IntPtr.Zero, cwd, ref si, out pi);
       int err = Marshal.GetLastWin32Error();
       CloseHandle(log);
       if (!ok) throw new System.ComponentModel.Win32Exception(err, "CreateProcess " + exe);
       t.Pid = pi.pid;
+      var procs = new Dictionary<int, TracedProcess>();
+      var live = new HashSet<int>();
+      var sawLoaderBreak = new HashSet<int>();
       var ev = new byte[256];
       var deadline = DateTime.UtcNow.AddSeconds(seconds);
-      bool stopped = false, sawLoaderBreak = false;
+      var nextLook = DateTime.UtcNow;
+      DateTime stopBy = DateTime.MaxValue;
+      bool stopping = false;
       while (true) {
-        if (!stopped && DateTime.UtcNow > deadline) { TerminateProcess(pi.hProcess, 0); stopped = true; }
+        if (!stopping && DateTime.UtcNow > deadline) {
+          MarkWindows(procs, live);
+          stopping = true; stopBy = DateTime.UtcNow.AddSeconds(20); StopAll(live);
+        }
+        if (stopping && (live.Count == 0 || DateTime.UtcNow > stopBy)) break;
+        if (!stopping && DateTime.UtcNow >= nextLook) { MarkWindows(procs, live); nextLook = DateTime.UtcNow.AddSeconds(1); }
         if (!WaitForDebugEvent(ev, 200)) continue;
         uint code = BitConverter.ToUInt32(ev, 0);
         int pid = BitConverter.ToInt32(ev, 4), tid = BitConverter.ToInt32(ev, 8);
         uint status = DBG_CONTINUE;
         if (code == 1) {                                   // EXCEPTION_DEBUG_EVENT
           uint ecode = BitConverter.ToUInt32(ev, 16);
-          if (ecode == 0x80000003 && !sawLoaderBreak) sawLoaderBreak = true;
+          if (ecode == 0x80000003 && !sawLoaderBreak.Contains(pid)) sawLoaderBreak.Add(pid);
           else status = DBG_EXCEPTION_NOT_HANDLED;
         } else if (code == 3) {                            // CREATE_PROCESS_DEBUG_EVENT
-          PathOf(new IntPtr(BitConverter.ToInt64(ev, 16)));
+          var p = new TracedProcess();
+          p.Pid = pid;
+          p.Image = PathOf(new IntPtr(BitConverter.ToInt64(ev, 16))) ?? "";
+          procs[pid] = p; t.Procs.Add(p); live.Add(pid);
         } else if (code == 6) {                            // LOAD_DLL_DEBUG_EVENT
-          string p = PathOf(new IntPtr(BitConverter.ToInt64(ev, 16)));
-          t.Dlls.Add(p ?? "");
+          string path = PathOf(new IntPtr(BitConverter.ToInt64(ev, 16)));
+          if (procs.ContainsKey(pid)) procs[pid].Dlls.Add(path ?? "");
         } else if (code == 5) {                            // EXIT_PROCESS_DEBUG_EVENT
-          t.ExitCode = BitConverter.ToInt32(ev, 16);
-          t.Exited = !stopped;
-          ContinueDebugEvent(pid, tid, DBG_CONTINUE);
-          CloseHandle(pi.hThread);
-          CloseHandle(pi.hProcess);
-          return t;
+          if (procs.ContainsKey(pid)) {
+            var p = procs[pid];
+            p.Exited = true; p.Stopped = stopping; p.ExitCode = BitConverter.ToInt32(ev, 16);
+          }
+          live.Remove(pid);
+          // The app's end is the run's end: whatever it started is stopped with it.
+          if (pid == pi.pid && !stopping) { stopping = true; stopBy = DateTime.UtcNow.AddSeconds(20); StopAll(live); }
         }
         ContinueDebugEvent(pid, tid, status);
       }
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+      if (procs.ContainsKey(pi.pid)) {
+        var root = procs[pi.pid];
+        t.Dlls = root.Dlls; t.Exited = root.Exited && !root.Stopped; t.ExitCode = root.ExitCode;
+      }
+      return t;
     }
   }
 }
@@ -218,6 +301,14 @@ namespace OuranosVerify {
 
 # --- classification ------------------------------------------------------------------
 function Test-Under($path, $dir) { $path.StartsWith($dir + '\', [StringComparison]::OrdinalIgnoreCase) }
+
+# The version of the WebView2 runtime a path is under, or $null. The runtime is installed per
+# machine under Program Files (x86), or per user under LOCALAPPDATA, in both cases as
+# ...\Microsoft\EdgeWebView\Application\<four-part version>\.
+function Get-WebView2Version([string]$Path) {
+  if ($Path -match '\\Microsoft\\EdgeWebView\\Application\\(\d+\.\d+\.\d+\.\d+)\\') { return $Matches[1] }
+  return $null
+}
 
 function Get-DllClass([string]$Path, [string]$Carrier) {
   if (-not $Path) { return [pscustomobject]@{ Kind = 'FINDING'; Detail = 'the debugger was given no file handle for it, so its location is unknown' } }
@@ -228,6 +319,13 @@ function Get-DllClass([string]$Path, [string]$Carrier) {
   }
   $vi = (Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue).VersionInfo
   $signer = if ($sig -and $sig.SignerCertificate) { $sig.SignerCertificate.Subject -replace '^CN=([^,]+).*', '$1' } else { 'none' }
+  # The WebView2 runtime is a declared dependency, which the installer installs (#268). A file
+  # counts as part of it only if it is in the runtime's directory AND has a valid signature
+  # from Microsoft Corporation; either one alone is a finding.
+  $wv = Get-WebView2Version $Path
+  if ($wv -and $sig -and $sig.Status -eq 'Valid' -and $signer -eq 'Microsoft Corporation') {
+    return [pscustomobject]@{ Kind = 'WEBVIEW2'; Detail = "WebView2 runtime $wv, file version $($vi.FileVersion)" }
+  }
   $status = if ($sig) { $sig.Status } else { 'unreadable' }
   return [pscustomobject]@{
     Kind   = 'FINDING'
@@ -306,10 +404,11 @@ function Invoke-Traced([string]$Dir, [string]$Exe) {
       $lines = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
       $t.OutputTail = if ($lines.Count -le 12) { $lines } else { @($lines[0..7]) + @("... ($($lines.Count - 11) lines omitted)") + @($lines[-3..-1]) }
     }
-    # The app's children are not debugged, so they outlive it; stop them.
+    # The loop stops every traced process and waits 20 s for it to go. One that has still
+    # not reported its exit is stopped again here, so no run leaves a process behind.
     if ($t) {
-      Get-CimInstance Win32_Process -Filter "ParentProcessId=$($t.Pid)" -ErrorAction SilentlyContinue |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      $t.Procs | Where-Object { -not $_.Exited } |
+        ForEach-Object { Stop-Process -Id $_.Pid -Force -ErrorAction SilentlyContinue }
     }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
   }
@@ -330,6 +429,7 @@ Note "app     : $(Split-Path -Leaf $AppExe)"
 $carriedFiles = @(Get-ChildItem -LiteralPath $BundleDir -Filter *.dll -File -Recurse)
 Note ("carried : " + $(if ($carriedFiles) { ($carriedFiles | ForEach-Object { $_.FullName.Substring($BundleDir.Length + 1) }) -join ', ' } else { '(no DLLs)' }))
 Note "PATH    : $BundleDir;$Sys32;$WinDir"
+Note "judged  : the processes whose program is in the bundle; every other process is followed and listed"
 
 # --- check 1 -------------------------------------------------------------------------
 Write-Host ''
@@ -349,32 +449,80 @@ foreach ($f in @(Get-ChildItem -LiteralPath $BundleDir -File -Recurse | Where-Ob
 
 # --- check 2 -------------------------------------------------------------------------
 Write-Host ''
-Info "check 2: what $(Split-Path -Leaf $AppExe) loads when it runs"
+Info "check 2: what $(Split-Path -Leaf $AppExe), and the processes it starts, load when they run"
 $trace = Invoke-Traced $BundleDir $AppExe
 $run = Get-RunVerdict $trace
 if ($run.Ok) { Good "the app $($run.Text)" } else { Fail "the app $($run.Text), so it does not start with only the bundle and Windows$($run.Said)" }
 
-# The instrument has to show it saw something before its silence about the rest is trusted.
-# Every Windows process maps ntdll.dll and kernel32.dll; a trace without them recorded nothing.
-$loaded = @($trace.Dlls | Sort-Object -Unique)
-if (-not ($loaded | Where-Object { $_ -like '*\ntdll.dll' }) -or -not ($loaded | Where-Object { $_ -like '*\kernel32.dll' })) {
-  Fail "the load trace has no ntdll.dll or kernel32.dll ($($loaded.Count) entries), so it recorded nothing and this check saw nothing"
+# Every process the run started is listed, judged or not (#268). A process is judged when its
+# program is in the bundle: the app, and hyperion-view.exe when the app opens a window. The
+# others belong to Windows (conhost.exe) or to the WebView2 runtime (msedgewebview2.exe).
+# What those load is decided by Windows, the runtime and this machine's drivers, and nothing
+# in the bundle could change it.
+function Get-ProcState($p) {
+  if (-not $p.Exited) { return 'did not exit within 20 s of being stopped' }
+  if ($p.Stopped) { return 'stopped by the verifier' }
+  return ('exited with code {0} (0x{0:X8})' -f $p.ExitCode)
 }
-$counts = @{ CARRIED = 0; WINDOWS = 0; FINDING = 0 }
+$judged = @($trace.Procs | Where-Object { $_.Image -and (Test-Under $_.Image $BundleDir) })
+Note "processes traced: $($trace.Procs.Count), of which $($judged.Count) judged"
+foreach ($p in $trace.Procs) {
+  $role = if ($judged -contains $p) { 'judged' } else { 'followed, not judged: its program is not in the bundle' }
+  Note ("  pid {0,-6} {1} -- {2}; {3}" -f $p.Pid, $(if ($p.Image) { $p.Image } else { '(image unknown)' }), (Get-ProcState $p), $role)
+}
+
+# Exit codes that mean Windows could not load the program or a DLL it needs.
+$loaderStatus = @{ -1073741515 = 'STATUS_DLL_NOT_FOUND'; -1073741511 = 'STATUS_ENTRYPOINT_NOT_FOUND'; -1073741701 = 'STATUS_INVALID_IMAGE_FORMAT' }
 $loadedCarried = @()
-foreach ($p in $loaded) {
-  $c = Get-DllClass $p $BundleDir
-  $counts[$c.Kind]++
-  switch ($c.Kind) {
-    'CARRIED' { Good "carried  $p"; $loadedCarried += $p }
-    'WINDOWS' { }
-    default { Fail "loaded $p -- $($c.Detail)" }
+$webview2 = @{}
+foreach ($p in $judged) {
+  $leaf = Split-Path -Leaf $p.Image
+  # The instrument has to show it saw something before its silence about the rest is
+  # trusted. Every Windows process maps ntdll.dll and kernel32.dll; a trace without them
+  # recorded nothing.
+  $loaded = @($p.Dlls | Sort-Object -Unique)
+  if (-not ($loaded | Where-Object { $_ -like '*\ntdll.dll' }) -or -not ($loaded | Where-Object { $_ -like '*\kernel32.dll' })) {
+    Fail "the load trace of $leaf (pid $($p.Pid)) has no ntdll.dll or kernel32.dll ($($loaded.Count) entries), so it recorded nothing and this check saw nothing"
+  }
+  $n = @{ CARRIED = 0; WINDOWS = 0; WEBVIEW2 = 0; FINDING = 0 }
+  foreach ($d in $loaded) {
+    $c = Get-DllClass $d $BundleDir
+    $n[$c.Kind]++
+    switch ($c.Kind) {
+      'CARRIED' { Good "$leaf loaded carried $d"; $loadedCarried += $d }
+      'WINDOWS' { }
+      'WEBVIEW2' { $webview2[$d] = $c.Detail }
+      default { $script:LoadFindings++; Fail "$leaf loaded $d -- $($c.Detail)" }
+    }
+  }
+  Good "${leaf}: $($n.WINDOWS) Windows DLLs, $($n.CARRIED) carried, $($n.WEBVIEW2) from the WebView2 runtime, $($n.FINDING) neither"
+  if ($p.Pid -ne $trace.Pid -and $p.Exited -and -not $p.Stopped -and $loaderStatus.ContainsKey($p.ExitCode)) {
+    Fail "$leaf exited with $($loaderStatus[$p.ExitCode]), so Windows could not load it or a DLL it needs"
   }
 }
-Good "$($counts.WINDOWS) Windows DLLs, $($counts.CARRIED) carried, $($counts.FINDING) neither"
+$loadedCarried = @($loadedCarried | Sort-Object -Unique)
+# The WebView2 runtime is a dependency the bundle declares rather than carries, so each file
+# of it that was loaded is recorded by name and version.
+foreach ($d in ($webview2.Keys | Sort-Object)) { Good "WebView2 runtime: $(Split-Path -Leaf $d), $($webview2[$d]) -- $d" }
 foreach ($f in $carriedFiles) {
   if (-not ($loadedCarried | Where-Object { $_ -ieq $f.FullName })) {
     Note "$($f.Name) is carried but was not loaded on this run (another code path, or other -AppArgs, may need it)"
+  }
+}
+
+# Whether the window opened (#268). If it did not, the DLLs judged for hyperion-view.exe are
+# the ones it loaded before it stopped, and the report says so rather than passing quietly.
+$views = @($judged | Where-Object { (Split-Path -Leaf $_.Image) -ieq 'hyperion-view.exe' })
+$runtimeProcs = @($trace.Procs | Where-Object { $_.Image -and (Get-WebView2Version $_.Image) })
+if (-not $views) { Note 'no hyperion-view.exe process started on this run, so there was no window to check' }
+foreach ($v in $views) {
+  if ($v.Window -and $runtimeProcs.Count -gt 0) {
+    Good "the window opened: hyperion-view.exe (pid $($v.Pid)) had a visible window, and the WebView2 runtime started $($runtimeProcs.Count) processes"
+  } else {
+    $why = @()
+    if (-not $v.Window) { $why += 'hyperion-view.exe never had a visible window' }
+    if ($runtimeProcs.Count -eq 0) { $why += 'the WebView2 runtime started no processes' }
+    Warn "the window did not open: $($why -join ', and '). hyperion-view.exe (pid $($v.Pid)) $(Get-ProcState $v). What was judged for it above is what it loaded before that."
   }
 }
 
@@ -394,7 +542,7 @@ foreach ($dll in $loadedCarried) {
     $t = Invoke-Traced $copy (Join-Path $copy (Split-Path -Leaf $AppExe))
     $v = Get-RunVerdict $t
     $leaf = Split-Path -Leaf $name
-    $outside = @($t.Dlls | Where-Object { $_ -and (Split-Path -Leaf $_) -ieq $leaf -and -not (Test-Under $_ $copy) })
+    $outside = @($t.Procs | Where-Object { $_.Image -and (Test-Under $_.Image $copy) } | ForEach-Object { $_.Dlls } | Where-Object { $_ -and (Split-Path -Leaf $_) -ieq $leaf -and -not (Test-Under $_ $copy) })
     if ($outside) { Good "without $name the app loaded $($outside[0]) instead, which check 2 would report as a finding" }
     elseif (-not $v.Ok) { Good "without $name the app $($v.Text)" }
     else { Fail "without $name the app still $($v.Text) and loaded no other copy, so it is not using the carried one" }
@@ -412,4 +560,12 @@ if ($script:Failures.Count -eq 0) {
 }
 Write-Host "verify-bundle-windows: FAIL ($($script:Failures.Count)):" -ForegroundColor Red
 $script:Failures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+if ($script:LoadFindings -gt 0 -and -not $OnCI) {
+  # The verifier cannot tell a DLL that other software puts into every process (an audio
+  # utility did this on the machine #268 was measured on) from one our code asked for.
+  Write-Host ''
+  Note "This did not run on CI. A DLL reported as neither carried nor part of Windows may come"
+  Note "from software installed on this machine that loads itself into other programs. The CI"
+  Note "runner has no such software, so its report is the one that decides."
+}
 exit 1
