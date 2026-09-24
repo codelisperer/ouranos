@@ -6,13 +6,13 @@
 ;;;;     sbcl --script scripts/build-mbedtls.lisp --where    # print the library path, build nothing
 ;;;;
 ;;;; Exit 0 on success, 1 on failure. Produces vendor/mbedtls/lib/<the platform soname>,
-;;;; which is what hyperion/tls loads and what the desktop bundler carries.
+;;;; which is what aion/tls loads and what the desktop bundler carries.
 ;;;;
 ;;;; Same doctrine as build-libuv.lisp, and for the same reason: a native dependency we do
 ;;;; not build is a native dependency we cannot bundle. ADR-0011's libev story is the whole
 ;;;; argument -- Woo bound it at load time and every desktop bundle died on a clean machine
 ;;;; with "libev.so.4: cannot open shared object file". Two .asd files already refuse cl+ssl
-;;;; in those words (mnemosyne.asd:26, aion.asd:492), so `hyperion/tls' being an OPT-IN aux
+;;;; in those words (mnemosyne.asd:26, aion.asd:492), so `aion/tls' being an OPT-IN aux
 ;;;; system built from a vendored source is precedent being applied, not a new decision.
 ;;;;
 ;;;; ONE LIBRARY, NOT THREE. Upstream builds libmbedtls, libmbedx509 and libmbedcrypto. We
@@ -66,7 +66,7 @@
 ;;;;      and the failure is a syntax error deep in the arguments, not an honest "too long".
 ;;;;
 ;;;; What makes this safe to land unverified: `verify-built' on Windows COUNTS the exports
-;;;; and insists on the five symbols hyperion/tls will bind. A wrong .def produces a DLL
+;;;; and insists on the symbols aion/tls will bind. A wrong .def produces a DLL
 ;;;; exporting nothing, and that is the one failure this script must not be silent about --
 ;;;; the same guard build-libuv.lisp grew, for the same reason.
 ;;;; ---------------------------------------------------------------------------------
@@ -117,10 +117,39 @@ are written down rather than left to the next failed build.")
 
 (defparameter *required-symbols*
   '("mbedtls_ssl_handshake" "mbedtls_ssl_set_bio" "mbedtls_ssl_conf_own_cert"
-    "psa_crypto_init" "mbedtls_x509_crt_parse_file")
-  "The entry points hyperion/tls binds. Asserting these rather than `the file exists' is
+    "psa_crypto_init" "mbedtls_x509_crt_parse_file"
+    ;; Ours, from aion/src/tls/c/ouranos_tls.c (#125). One per reason the file exists:
+    ;; allocation, inline wrappers, threading. A .def that dropped the ouranos_tls_ prefix
+    ;; would build a DLL missing all of them, which is the failure this list is for.
+    "ouranos_tls_shim_version" "ouranos_tls_threading_kind" "ouranos_tls_setup"
+    "ouranos_tls_ssl_new" "ouranos_tls_conf_version_range"
+    ;; Exported only when MBEDTLS_THREADING_C is on, so its presence shows that
+    ;; ouranos_tls_config.h reached the compile.
+    "mbedtls_mutex_init")
+  "The entry points aion/tls binds. Asserting these rather than `the file exists' is
 what distinguishes a library from a file of the right size: on Windows a missing export
 table is the expected failure mode, not an exotic one.")
+
+(defparameter *export-prefixes* '("mbedtls_" "psa_" "ouranos_tls_")
+  "The prefixes of the names the library exports: mbedTLS's own, and ours. The Windows .def
+is written from these, so a name with any other prefix is not exported there.")
+
+(defun %exported-name-p (name)
+  (some (lambda (prefix) (eql 0 (search prefix name))) *export-prefixes*))
+
+(defparameter *shim-dir*
+  (merge-pathnames "aion/src/tls/c/" *root*)
+  "Our C (#125): ouranos_tls.c, compiled into the library, and the two headers it and
+mbedTLS read. ouranos_tls_config.h switches on threading; threading_alt.h declares the
+Windows threading types.")
+
+(defparameter *config-define* "TF_PSA_CRYPTO_USER_CONFIG_FILE=<ouranos_tls_config.h>"
+  "How ouranos_tls_config.h reaches every mbedTLS source. Angle brackets rather than quotes
+so the value needs no escaping on either toolchain; the file is found through the -I to
+*SHIM-DIR*.")
+
+(defun shim-source ()
+  (namestring (merge-pathnames "ouranos_tls.c" *shim-dir*)))
 
 (defparameter *windows-libs* '("ws2_32.lib" "bcrypt.lib" "advapi32.lib")
   "Transcribed from tf-psa-crypto/core/CMakeLists.txt:79 -- `if(WIN32) set(libs ${libs}
@@ -361,7 +390,7 @@ A dumpbin /symbols row for a defined external looks like
   008 00000000 SECT3  notype ()    External     | mbedtls_ssl_handshake
 
 and for one merely referenced, SECT3 reads UNDEF. We take External + not-UNDEF, then keep
-the mbedtls_/psa_ prefixes so we are not exporting the CRT's symbols along with ours.
+the prefixes in *EXPORT-PREFIXES* so we are not exporting the CRT's symbols along with ours.
 A 32-bit build decorates cdecl names with a leading underscore; a .def wants the
 undecorated name, so one is stripped if present."
   (let ((out (nth-value 0 (%msvc-run "dumpbin /nologo /symbols obj\\*.obj"
@@ -381,13 +410,12 @@ undecorated name, so one is stripped if present."
                                     (subseq raw 1)
                                     raw)))
                      (when (and (plusp (length name))
-                                (or (eql 0 (search "mbedtls_" name))
-                                    (eql 0 (search "psa_" name)))
+                                (%exported-name-p name)
                                 (not (gethash name seen)))
                        (setf (gethash name seen) t)
                        (push name names)))))))
     (when (null names)
-      (error "dumpbin /symbols yielded no mbedtls_/psa_ externals. The .def would be empty and the DLL would export nothing -- see this file's header, item 1."))
+      (error "dumpbin /symbols yielded no mbedtls_/psa_/ouranos_tls_ externals. The .def would be empty and the DLL would export nothing -- see this file's header, item 1."))
     (setf names (sort names #'string<))
     (with-open-file (out-file def-path :direction :output :if-exists :supersede
                                        :external-format :latin-1)
@@ -414,10 +442,14 @@ has one, for the reason in the header."
                    ;; costume. Asserted in `verify-built', not just intended here.
                    "/MT"
                    "/c"
-                   "/Foobj\\")
+                   "/Foobj\\"
+                   (format nil "/D~A" *config-define*)
+                   (format nil "/I\"~A\"" (no-trailing-separator
+                                           (uiop:native-namestring *shim-dir*))))
              (include-args srcdir "/I" :quote t)
-             (mapcar (lambda (s) (format nil "\"~A\"" (uiop:native-namestring s))) sources)))
-    (format t "~&  compiling ~D sources with MSVC cl.exe (~A)~%"
+             (mapcar (lambda (s) (format nil "\"~A\"" (uiop:native-namestring s)))
+                     (append sources (list (shim-source))))))
+    (format t "~&  compiling ~D sources and ouranos_tls.c with MSVC cl.exe (~A)~%"
             (length sources) (vcvarsall-arch))
     (finish-output)
     (let ((code (nth-value 2 (%msvc-run "cl @msvc-compile.rsp"))))
@@ -446,16 +478,20 @@ has one, for the reason in the header."
          (out (merge-pathnames (output-name) libdir))
          (sources (sources-in srcdir))
          (args (append
-                (list "-shared" "-fPIC" "-O2" "-o" (namestring out))
+                ;; -pthread because ouranos_tls_config.h selects MBEDTLS_THREADING_PTHREAD.
+                (list "-shared" "-fPIC" "-O2" "-pthread" "-o" (namestring out)
+                      (format nil "-D~A" *config-define*)
+                      (format nil "-I~A" (no-trailing-separator (namestring *shim-dir*))))
                 ;; The built file must BE the soname: the loader resolves the soname, not
                 ;; the path it was linked from. This is also what keeps pre-publication issue 329 inapplicable.
                 (ecase (platform)
                   (:linux (list (format nil "-Wl,-soname,~A" (output-name))))
                   (:macos (list "-install_name" (namestring out))))
                 (include-args srcdir "-I")
-                sources)))
+                sources
+                (list (shim-source)))))
     (ensure-directories-exist libdir)
-    (format t "~&  compiling ~D sources with ~A~%" (length sources) cc)
+    (format t "~&  compiling ~D sources and ouranos_tls.c with ~A~%" (length sources) cc)
     (finish-output)
     (run cc args)
     out))
@@ -505,11 +541,9 @@ The tools disagree, so this is per-platform rather than one command with a flag:
                                           (string-trim '(#\Space #\Tab #\Return) l))
                                       :test #'string=)
                  ;; An exports row is `ordinal hint rva name'; the name is last and, for
-                 ;; this library, always starts mbedtls_ or psa_.
+                 ;; this library, always starts with one of *EXPORT-PREFIXES*.
                  for name = (car (last fields))
-                 when (and name (= 4 (length fields))
-                           (or (eql 0 (search "mbedtls_" name))
-                               (eql 0 (search "psa_" name))))
+                 when (and name (= 4 (length fields)) (%exported-name-p name))
                    collect name)))))))
 
 (defun verify-built (library)
@@ -574,10 +608,17 @@ under the name it asks for, and that the entry points we are about to bind are i
         (format *error-output* "build-mbedtls: mbedtls.pin is missing version, url or sha256.~%")
         (uiop:quit 1))
       (format t "~&mbedTLS ~A (~A) -> ~A~%" version (platform) (namestring *vendor*))
+      ;; AN EXISTING LIBRARY IS VERIFIED, NOT TRUSTED. One built before ouranos_tls.c existed
+      ;; is a file of the right name that lacks every symbol aion/tls needs, and "already
+      ;; built" would have accepted it. It passes VERIFY-BUILT or it is rebuilt.
       (when (and (probe-file (library-path)) (not force))
-        (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                (namestring (library-path)))
-        (uiop:quit 0))
+        (handler-case
+            (progn (verify-built (library-path))
+                   (format t "~&  already built: ~A~%  (--force to rebuild)~%"
+                           (namestring (library-path)))
+                   (uiop:quit 0))
+          (error (e)
+            (format t "~&  the library already there fails verification, so it is rebuilt:~%  ~A~%" e))))
       (handler-case
           (progn
             ;; BEFORE the fetch. A machine with no compiler should not spend a download and

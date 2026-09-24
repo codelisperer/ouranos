@@ -217,6 +217,18 @@ jobs:
         id: build-the-pinned-libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
+      # From the committed mbedtls.pin, with the same first-party toolchains as libuv and no
+      # cmake (#125, step 1). Nothing loads this library yet: the step is here because it is
+      # the only cross-platform proof that the pinned mbedTLS and our aion/src/tls/c/ build at
+      # all. build-mbedtls.lisp fails unless the result exports every symbol aion/tls will bind,
+      # ours included. On Windows that is the check that matters, because the export table
+      # comes from a .def this script writes, and a wrong one links cleanly and exports nothing.
+      # Not cached, like libuv: about 12 s on Linux, and a rebuild from the pin every run is
+      # what makes a pass here mean the pinned source builds.
+      - name: Build the pinned mbedTLS
+        id: build-the-pinned-mbedtls
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
+
       # --- the native webview launcher (pre-publication issue 276) ---------------------------------------
       #
       # WHY AT ALL. hyperion-view is the launcher every desktop app shells out to, and

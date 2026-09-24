@@ -5,8 +5,8 @@
 # each machine resolves independently is the "works on mine, not on yours"
 # hazard, and for a C ABI mismatch it does not fail politely.
 #
-# We do NOT depend on a distro or system OpenSSL. `hyperion/tls` is an OPT-IN
-# aux system: nothing that merely uses hyperion gets a crypto library on its
+# We do NOT depend on a distro or system OpenSSL. `aion/tls` is an OPT-IN
+# aux system: nothing that merely uses aion or hyperion gets a crypto library on its
 # load path. That is not a new decision -- mnemosyne.asd and aion.asd both
 # already refuse cl+ssl in those words, both citing ADR-0011's failure, where
 # Woo's load-time libev made every desktop bundle die on a clean machine.
@@ -106,5 +106,5 @@ sources-digest 44997596e6cfd039f7c203be27925ad4d29e656a72b1824cb61692bd58deac5a
 #         accepting them; a GONE file is one we silently stop compiling
 #   4. --record the tree, update `sources-count` and `sources-digest`
 #   5. bump `reviewed` -- you have just read the release notes, that IS the review
-#   6. delete vendor/mbedtls/, rebuild, run the hyperion/tls suite on all three
+#   6. delete vendor/mbedtls/, rebuild, run the aion/tls suite on all three
 #      OSes before committing
