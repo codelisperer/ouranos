@@ -232,7 +232,7 @@ onto another port is fragility bought for nothing.
   a fresh VM. The shared design is ADR-0013.
 - **`elenchon/tests`.** Deliberately unwired — a `:perform` over an empty suite relocates
   the dishonesty rather than removing it.
-- **Anything on a `+known-warnings+` or `+known-empty+` line** in `verify-tree.lisp`. Those
+- **Anything on a `+known-warnings+` line** in `scripts/compile-warnings.lisp`, **or a `+known-empty+` line** in `verify-tree.lisp`. Those
   are exceptions someone *made*, each with its reason recorded, and they are the first
   place to look when a green run feels too easy.
 
