@@ -155,6 +155,35 @@ the commit-msg hook accepts it, 1 when the hook refuses it."
     ;; The `^' anchor earns its keep: prose ABOUT the rule is not a trailer.
     (is (= 0 (%commit-exit root (format nil "docs: say why we add no Co-Authored-By trailer~%"))))))
 
+(defun %refusal-text (hook)
+  "The text between `cat >&2 <<'MSG'' and the closing `MSG' in HOOK, or NIL."
+  (let* ((open-marker (format nil "cat >&2 <<'MSG'~%"))
+         (start (search open-marker hook))
+         (body (and start (+ start (length open-marker))))
+         (end (and body (search (format nil "~%MSG~%") hook :start2 body))))
+    (and end (subseq hook body end))))
+
+(test the-generated-hook-refuses-with-the-tree-hooks-text
+  ;; The two copies drifted once (#149): the generated one sent a refused agent to AGENTS.md,
+  ;; which a project whose instruction file is only CLAUDE.md does not have, while this
+  ;; tree's hook names the rule instead. Both files say "edit both, or neither"; this is
+  ;; what makes that true rather than advice.
+  (let* ((tree-hook (uiop:read-file-string
+                     (merge-pathnames "../.githooks/commit-msg"
+                                      (asdf:system-source-directory :cons))))
+         (generated cons/conform::*commit-msg-hook*)
+         (tree-text (%refusal-text tree-hook))
+         (generated-text (%refusal-text generated)))
+    (is-true tree-text "the tree hook's refusal text was not found")
+    (is (equal tree-text generated-text)
+        "the generated hook's refusal text differs from .githooks/commit-msg")
+    (is (not (search "AGENTS.md" (or generated-text "")))
+        "the refusal must name the rule, not a file a generated project may not have")
+    ;; The tree hook ends with a private-names check. A generated project has no list, so
+    ;; that part must never be copied into the generated hook.
+    (is (not (search "private-names" generated))
+        "the generated hook must not carry this tree's private-names check")))
+
 
 ;;; --- arming (#the hook that refuses nothing) --------------------------------
 ;;;
