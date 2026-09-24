@@ -387,7 +387,8 @@
                              (:file "live-tests")
                              (:file "byref-tests")
                              (:file "put-tests")
-                             (:file "capability-tests"))))
+                             (:file "capability-tests")
+                             (:file "describe-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :aion/windows/com/tests :run-tests)))
 
 (defsystem "aion/pool"
