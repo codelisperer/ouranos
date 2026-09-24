@@ -100,7 +100,7 @@ requires the directory to be byte-identical afterwards. It asserts the update *l
 first, because an installer that silently did nothing leaves the data perfectly intact;
 and `-Control` rebuilds the installer with a deliberate `RMDir /r` so the harness has to
 be shown catching the loss it exists to catch. Windows, both packagings. **macOS and Linux
-are blocked on §7's unwritten strategies (#72) and are openly unrun** — a guarantee kept
+are blocked on §7's unwritten strategies (#251) and are openly unrun** — a guarantee kept
 on one platform is not a guarantee. The client half of the same claim, covering every
 refusal path on every platform, is in `hyperion/tests/update-client-tests.lisp`.
 
