@@ -183,7 +183,8 @@ jobs:
         run: |
           sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp \
             --system "$APP_SYSTEM" --entry "$APP_ENTRY" \
-            --name "$APP_NAME" --version "$APP_VERSION"
+            --name "$APP_NAME" --version "$APP_VERSION" \
+            --icon hyperion/examples/coalton-repl/assets/lambda.ico
 
       # save-lisp-and-die writes a CONSOLE-subsystem PE, so a desktop app would drag a
       # console window behind it. editbin (MSVC, already on the runner) rewrites the one
@@ -249,7 +250,8 @@ jobs:
         run: |
           choco install nsis -y --no-progress
           powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1 \
-            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}" \
+            -Icon hyperion/examples/coalton-repl/assets/lambda.ico
 
       # The .app is packed twice from one build: as the .app.tar.gz update payload the
       # manifest lists for macos-arm64, and as the .dmg a person downloads (#135).

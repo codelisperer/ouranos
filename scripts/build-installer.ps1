@@ -21,6 +21,13 @@
 .PARAMETER Out
   Output installer path. Defaults to <bundle-parent>\<app>-<version>-setup.exe.
 
+.PARAMETER Icon
+  A .ico file. It becomes the installer's and the uninstaller's own icon, and is installed
+  beside the app as <app>.ico, where the Start menu shortcut and the Add/Remove Programs
+  entry point at it. Without it all of these show the packager's default icon. This is the
+  Windows counterpart of --icon on build-appimage.sh and build-dmg.sh (#72), which take a
+  .png; Windows needs the .ico, which holds several sizes.
+
 .PARAMETER Check
   Report whether this machine can build an installer, and exit.
 
@@ -28,6 +35,8 @@
   .\scripts\build-installer.ps1 -Check
 .EXAMPLE
   .\scripts\build-installer.ps1 dist\coalton-repl-0.1.0-windows-x86-64
+.EXAMPLE
+  .\scripts\build-installer.ps1 dist\coalton-repl-0.1.0-windows-x86-64 -Icon hyperion\examples\coalton-repl\assets\lambda.ico
 #>
 [CmdletBinding()]
 param(
@@ -44,6 +53,7 @@ param(
   # Name of a SignTool configured in Inno (ISCC /S<name>=<command>) or in the Inno IDE.
   # Ignored for -Format nsis, which has no signing support of its own.
   [string]$SignTool,
+  [string]$Icon,
   [switch]$Check,
   [switch]$NoWebView2      # skip embedding the WebView2 bootstrapper (smaller, but a
                            # machine without the runtime gets no window)
@@ -183,6 +193,21 @@ if (-not $NoWebView2) {
   Note "WebView2 bootstrapper: skipped (-NoWebView2)"
 }
 
+# Same define name for both packagers, for the reason given where the Inno arguments are
+# built below. A named
+# icon that is missing or is not an .ico stops the build: the caller asked for an icon, and
+# an installer that quietly shows the default one instead is the outcome that goes unnoticed.
+$iconArgs = @()
+if ($Icon) {
+  if (-not (Test-Path -LiteralPath $Icon -PathType Leaf)) { Die "no such icon file: $Icon" }
+  if ([IO.Path]::GetExtension($Icon) -ne '.ico') { Die "-Icon needs a .ico file (Windows reads several sizes from it): $Icon" }
+  $IconPath = (Resolve-Path -LiteralPath $Icon).Path
+  $iconArgs = @("/DICON=$IconPath")
+  Note "icon: $IconPath"
+} else {
+  Note "icon: none given, so the installer, shortcut and Add/Remove entry use the default"
+}
+
 Info "building installer for $app $version"
 Note "bundle: $BundleDir"
 Note "out:    $Out"
@@ -190,7 +215,7 @@ if ($Format -eq 'nsis') {
   & $makensis /NOCD `
     "/DAPPNAME=$app" "/DVERSION=$version" "/DVIVERSION=$viversion" `
     "/DSRCDIR=$BundleDir" "/DOUTFILE=$Out" "/DEXENAME=$exe" `
-    @wv2Args `
+    @wv2Args @iconArgs `
     $Nsi
   if ($LASTEXITCODE -ne 0) { Die "makensis exited $LASTEXITCODE" }
 } else {
@@ -205,6 +230,7 @@ if ($Format -eq 'nsis') {
   # Same flag spelling as the NSIS path on purpose: two packagings with two names for the
   # same input is how one of them silently stops embedding the runtime.
   $issArgs += $wv2Args
+  $issArgs += $iconArgs
   if ($SignTool) {
     $issArgs += "/DSIGNTOOL=$SignTool"
     Note "signing with SignTool '$SignTool' (installer and uninstaller)"

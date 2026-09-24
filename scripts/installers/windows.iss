@@ -37,6 +37,8 @@
 ;   EXENAME         the launched binary, e.g. "coalton-repl.exe"
 ;   WV2BOOTSTRAPPER optional path to MicrosoftEdgeWebview2Setup.exe
 ;   SIGNTOOL        optional name of a SignTool configured via ISCC /S<name>=...
+;   ICON            optional .ico path: the installer's and the uninstaller's own icon, also
+;                   installed as {app}\<APPNAME>.ico for the shortcuts and Add/Remove Programs
 
 #ifndef APPNAME
   #error "windows.iss: -DAPPNAME is required"
@@ -85,6 +87,13 @@ WizardStyle=modern
 SignTool={#SIGNTOOL}
 SignedUninstaller=yes
 #endif
+; SetupIconFile sets the installer's icon, and Inno gives the uninstaller the same one.
+; UninstallDisplayIcon is what Add/Remove Programs shows. It points at the installed .ico
+; rather than the exe, so the entry has the icon whether or not one is embedded in the exe.
+#ifdef ICON
+SetupIconFile={#ICON}
+UninstallDisplayIcon={app}\{#APPNAME}.ico
+#endif
 
 [Files]
 Source: "{#SRCDIR}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -92,10 +101,19 @@ Source: "{#SRCDIR}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs 
 Source: "{#WV2BOOTSTRAPPER}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebview2Setup.exe"; \
   Flags: deleteafterinstall
 #endif
+#ifdef ICON
+Source: "{#ICON}"; DestDir: "{app}"; DestName: "{#APPNAME}.ico"; Flags: ignoreversion
+#endif
 
 [Icons]
+#ifdef ICON
+Name: "{group}\{#APPNAME}"; Filename: "{app}\{#EXENAME}"; IconFilename: "{app}\{#APPNAME}.ico"
+Name: "{userdesktop}\{#APPNAME}"; Filename: "{app}\{#EXENAME}"; IconFilename: "{app}\{#APPNAME}.ico"; \
+  Tasks: desktopicon
+#else
 Name: "{group}\{#APPNAME}"; Filename: "{app}\{#EXENAME}"
 Name: "{userdesktop}\{#APPNAME}"; Filename: "{app}\{#EXENAME}"; Tasks: desktopicon
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
