@@ -73,6 +73,10 @@
 
 ;;; --- recursive-descent parser (over a dynamic token list) -----------------
 (defvar *toks*)
+;; *TOKS* is the parser's position in one statement, bound by PARSE for that one call, and it
+;; is DELIBERATELY NOT CARRIED across a thread boundary nor registered with aion/dynamic
+;; (#158): PARSE never starts a thread, and a thread started elsewhere during a parse has no
+;; business reading another call's token stream.
 (defun %peek () (car *toks*))
 (defun %peek-type () (car (%peek)))
 (defun %peek2 () (cadr *toks*))

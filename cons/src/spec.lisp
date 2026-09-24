@@ -17,7 +17,12 @@
 
 (defvar *current-spec* nil
   "Bound to NIL by LOAD-SPEC; the (cons:project ...) form installs the parsed SPEC
-here via INSTALL-SPEC.")
+here via INSTALL-SPEC.
+
+DELIBERATELY NOT CARRIED ACROSS A THREAD BOUNDARY (#158), and not registered with
+aion/dynamic. It exists only for the length of LOAD-SPEC, as the place the (cons:project ...)
+form in a loaded cons.lisp leaves its result; LOAD-SPEC then RETURNS the spec. Code that
+needs the spec, on any thread, takes that return value.")
 
 ;;; --- the parsed shapes ----------------------------------------------------
 

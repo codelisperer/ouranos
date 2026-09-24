@@ -3018,3 +3018,42 @@ though it were the cost."
     (is (typep e 'aion/boundary:boundary-type-error) "run-turn-through did not signal")
     (is (eql 1 (and e (aion/boundary:boundary-type-error-index e))))
     (is (eq :not-a-stage (and e (type-error-datum e))))))
+
+;;; --- a parallel group logs with the caller's context (#160) ------------------
+
+(in-suite praxeon)
+
+(defclass %failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails, so each child logs the failure."))
+
+(defmethod llm:complete ((p %failing-provider) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (error "the provider is unavailable"))
+
+(test a-parallel-group-logs-with-the-caller-s-context
+  ;; Each child of WF:PARALLEL runs on its own thread (`%run-group'), and a LET binding does
+  ;; not cross a thread. Both children fail at the provider, so each logs "llm request
+  ;; failed" from its own thread; both lines must carry the context the caller bound.
+  (let ((out (make-string-output-stream))
+        (flow (wf:make-workflow
+               :fan "fan out"
+               (wf:parallel
+                (wf:step :a (actor:make-agent :name "a" :provider (make-instance '%failing-provider)) "x")
+                (wf:step :b (actor:make-agent :name "b" :provider (make-instance '%failing-provider)) "y")))))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :warn :stream out)
+           (aion/log:with-context (:request-id "req-160" :workflow "fan-160")
+             (handler-case (wf:run-workflow flow)
+               (cnd:parallel-child-failure () nil)))
+           (let ((lines (remove-if-not (lambda (line) (search "llm request failed" line))
+                                       (uiop:split-string (get-output-stream-string out)
+                                                          :separator '(#\Newline)))))
+             (is (= 2 (length lines))
+                 "each of the two children should log its provider failure, got ~S" lines)
+             (is (every (lambda (l) (search "request-id=req-160" l)) lines)
+                 "every child thread's line must carry the request id: ~S" lines)
+             (is (every (lambda (l) (search "workflow=fan-160" l)) lines)
+                 "and the rest of the caller's context: ~S" lines)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
