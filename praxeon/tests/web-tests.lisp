@@ -251,3 +251,19 @@ used to add nothing for it, so the page showed no count at all."
   "The control: with no cache counts reported, the counter is input plus output, as it was."
   (is (= 120 (%tokens-after-turn (llm:make-completion :text "ok" :stop-reason :end
                                                       :input-tokens 100 :output-tokens 20)))))
+
+;;; --------------------------------------------------------------------------
+;;; A javascript: link in a chat message does not become an href (#66)
+;;; --------------------------------------------------------------------------
+;;;
+;;; The bubbles put the rendered Markdown into the page raw, so this is where a script URL
+;;; would reach a viewer. hyperion/tests covers the renderer itself; this asserts it where the
+;;; chat uses it, for both the user's bubble and the model's.
+
+(test a-javascript-link-in-a-chat-message-is-not-an-href
+  (dolist (html (list (web::%user-bubble "look [here](javascript:alert(1)) and [there](https://example.com)")
+                      (web::%assistant-bubble "Model" "look [here](javascript:alert(1)) and [there](https://example.com)")))
+    (is (null (search "href=\"javascript" html)) "a javascript: href reached the bubble: ~S" html)
+    (is (null (search "javascript:" html)) "the script URL must not appear at all: ~S" html)
+    (is (search "href=\"https://example.com\"" html)
+        "the ordinary link beside it must still render, or the test proves nothing: ~S" html)))
