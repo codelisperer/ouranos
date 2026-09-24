@@ -21,11 +21,23 @@
 ;;; at 128 on the first gate run of this change, where 142 was predicted.
 (in-suite checkers)
 
+(defparameter +cache-overrides+ '("ASDF_OUTPUT_TRANSLATIONS")
+  "Variables that override where fasls go, removed from both environments of a test.
+
+scripts/with-mode.lisp sets ASDF_OUTPUT_TRANSLATIONS for the gate's release-mode run, so every
+child of that run inherits it, and an image honouring its run-time environment then puts fasls
+where that variable says rather than under XDG_CACHE_HOME. That is correct behaviour, and it
+made the first version of these tests fail on the release-mode leg only, because the fixture
+controlled XDG_CACHE_HOME and not this.")
+
 (defun %environment-with (pairs)
-  "This process's environment with PAIRS, (NAME . VALUE), replacing any existing NAME."
+  "This process's environment with PAIRS, (NAME . VALUE), replacing any existing NAME, and
+without the variables in +CACHE-OVERRIDES+."
   (append (mapcar (lambda (p) (format nil "~A=~A" (car p) (cdr p))) pairs)
           (remove-if (lambda (e)
-                       (some (lambda (p) (uiop:string-prefix-p (format nil "~A=" (car p)) e)) pairs))
+                       (or (some (lambda (p) (uiop:string-prefix-p (format nil "~A=" (car p)) e)) pairs)
+                           (some (lambda (name) (uiop:string-prefix-p (format nil "~A=" name) e))
+                                 +cache-overrides+)))
                      (sb-ext:posix-environ))))
 
 (defun %where-it-looks (temp cache)
