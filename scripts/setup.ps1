@@ -157,6 +157,25 @@ function Install-Sbcl {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     Die "what downloaded from $url is not an MSI ($($bytes.Length) bytes). First bytes:`n$head"
   }
+  # THE CHECK THAT DECIDES (#211). The signature bytes above only say the download is an MSI,
+  # which any MSI is. msiexec installs for the whole machine, possibly elevated, so the file
+  # must be the one pinned in versions.env before it runs. An architecture with no pin is
+  # refused too: installing an unverified MSI is what this check exists to prevent.
+  $pinKey = if ($Arch -eq 'arm64') { 'SBCL_SHA256_ARM64_WINDOWS' } else { 'SBCL_SHA256_X86_64_WINDOWS' }
+  $want = $Pins[$pinKey]
+  if (-not $want) {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Die "versions.env has no $pinKey, so $msi cannot be verified; refusing to install it"
+  }
+  $got = Get-Sha256Hex $tmp
+  if ($got -ne $want.ToLower()) {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Die ("SBCL installer checksum mismatch for $msi`n" +
+      "       expected $($want.ToLower())`n" +
+      "       got      $got`n" +
+      "       scripts/versions.env is the pin; a mismatch means the downloaded file is not the pinned one. Nothing was installed.")
+  }
+  Note "sha256 $got matches $pinKey"
   Info "installing (msiexec, per-machine -- may prompt for elevation) ..."
   $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$tmp`"", '/quiet', '/norestart' -Wait -PassThru
   if ($p.ExitCode -ne 0) { Die "msiexec exited $($p.ExitCode) installing $msi" }
