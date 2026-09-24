@@ -463,8 +463,42 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
 (defparameter *quicklisp*
   (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 
+;;; --- a git configuration of our own for every child (#271) ------------------------------
+;;;
+;;; A test that runs `git init' without naming a branch gets whatever init.defaultBranch the
+;;; machine sets: `main' on a Mac with Xcode (its bundled system gitconfig), `master' in Git
+;;; for Windows's system gitconfig, and git's built-in default where nothing is set. A fixture
+;;; that assumes one of those passes where it holds and fails elsewhere, which is how
+;;; pre-publication PR 251 passed on every developer machine and failed on the runner (#117,
+;;; #271). So every child gets GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pointing at a file that
+;;; sets init.defaultBranch to a name no test uses, and such a fixture fails on every machine.
+;;;
+;;; WHAT THAT FILE DROPS, deliberately: everything else the machine's configuration would have
+;;; supplied, including user.name and user.email, and core.autocrlf (Git for Windows's system
+;;; gitconfig sets it to true). Every test in the tree that commits sets its own identity in
+;;; its repository, and none depends on core.autocrlf: the one that tests it sets it itself.
+;;; Measured on #271: cons/tests and checkers/tests pass under this configuration on Windows.
+;;; Each repository's own configuration (.git/config) is still read.
+;;;
+;;; GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM need git 2.32 or later. An older git ignores them,
+;;; which would turn this into a check that silently does nothing, so ARM-GATE-GITCONFIG below
+;;; asks git what it sees before any suite runs.
+
+(defparameter +gate-default-branch+ "ouranos-gate-no-default-branch"
+  "The init.defaultBranch every child's git sees. Chosen so no test can be expecting it.")
+
+(defparameter *gate-gitconfig*
+  (let ((path (merge-pathnames (format nil "ouranos-gate-gitconfig-~36R"
+                                       (random (expt 36 8) (make-random-state t)))
+                               (uiop:temporary-directory))))
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (format out "[init]~%~CdefaultBranch = ~A~%" #\Tab +gate-default-branch+))
+    path)
+  "The configuration file every child's git reads instead of the machine's.")
+
 (defun child-environment ()
-  "The child's environment, with CL_SOURCE_REGISTRY pinned to THIS tree.
+  "The child's environment, with CL_SOURCE_REGISTRY pinned to THIS tree, and git reading the
+gate's own configuration file instead of the machine's (see above).
 
 Passed explicitly rather than relying on the ASDF drop-in bootstrap.lisp writes: the
 drop-in is global machine state that can point at a different checkout, and a verifier
@@ -478,10 +512,34 @@ The entry separator is `:` on Unix but `;` on Windows -- a colon there would be 
 part of the `d:` drive letter, which is why UIOP varies it. Hardcoding `:` made every one
 of the 36 children fail to resolve ANY system on Windows, so the whole tree reported FAIL
 with zero checks executed. Ask UIOP rather than assuming."
-  (cons (format nil "CL_SOURCE_REGISTRY=~A//~A"
-                (namestring *root*) (uiop:inter-directory-separator))
-        (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
-                   (sb-ext:posix-environ))))
+  (list* (format nil "CL_SOURCE_REGISTRY=~A//~A"
+                 (namestring *root*) (uiop:inter-directory-separator))
+         (format nil "GIT_CONFIG_GLOBAL=~A" (uiop:native-namestring *gate-gitconfig*))
+         (format nil "GIT_CONFIG_SYSTEM=~A" (uiop:native-namestring *gate-gitconfig*))
+         (remove-if (lambda (e)
+                      (some (lambda (p) (uiop:string-prefix-p p e))
+                            '("CL_SOURCE_REGISTRY=" "GIT_CONFIG_GLOBAL=" "GIT_CONFIG_SYSTEM=")))
+                    (sb-ext:posix-environ))))
+
+(defun arm-gate-gitconfig ()
+  "Print the default branch every child's git sees, and fail the run unless git really sees it.
+
+Asked of git itself, in the environment the children get, so a git too old to honour
+GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM is reported instead of quietly reading the machine's
+configuration."
+  (multiple-value-bind (out err code)
+      (uiop:run-program '("git" "config" "--get" "init.defaultBranch")
+                        :output :string :error-output :string :ignore-error-status t
+                        :environment (child-environment))
+    (declare (ignore err))
+    (let ((seen (string-trim '(#\Space #\Newline #\Return) (or out ""))))
+      (if (and (zerop code) (string= seen +gate-default-branch+))
+          (format t "  git in every child reads ~A only: init.defaultBranch=~A, no user identity, no core.autocrlf (#271)~%"
+                  (uiop:native-namestring *gate-gitconfig*) seen)
+          (progn
+            (format t "  FAIL    git in the children sees init.defaultBranch=~S, not ~S -- is git older than 2.32? (#271)~%"
+                    seen +gate-default-branch+)
+            (fail "git ignores GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM, so the suites would read this machine's git configuration (#271)"))))))
 
 (defun signal-death-p (code)
   "Was the child killed by a signal rather than exiting on its own?
@@ -956,6 +1014,7 @@ let this run claim `view' while the five assertions skipped."
         (report-caught-errors (format nil "load ~(~a~)" s) out))))
 
   (format t "~%========== SUITES (each in its own image) ==========~%")
+  (arm-gate-gitconfig)
   (let ((grand 0))
     (dolist (s (all-test-systems))
       (multiple-value-bind (code text)
