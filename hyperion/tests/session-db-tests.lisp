@@ -351,3 +351,29 @@ that defines only the old protocol methods."
        (%age store id :accessed-ago (* 400 86400) :created-ago (* 400 86400))
        (is (equal id (%body (funcall h (%req "/" id)))) "~a: kept with both limits off" kind)
        (is (zerop (sess:sweep-sessions store)) "~a: and not swept" kind)))))
+
+(defclass stampless-store (old-protocol-store) ()
+  (:documentation "A hand-written store that restores sessions WITHOUT their timestamps --
+the mistake RESTORE-SESSION's docstring warns about."))
+(defmethod sess:store-ref ((s stampless-store) id)
+  (let ((v (gethash id (ops-table s))))
+    (and v (sess:restore-session (sess:session-id v) :data (sess:session-alist v)))))
+
+(test a-store-that-drops-the-timestamps-has-every-session-refused
+  ;; The trap, shown rather than described: CREATED and ACCESSED default to 0, so every
+  ;; session such a store returns reads as last used in 1900 and is refused. The fix is to
+  ;; persist and pass both; until then an app can set both timeouts to NIL.
+  (let* ((store (make-instance 'stampless-store))
+         (sess:*session-sweep-interval* nil)
+         (h (sess:wrap-session (%echo-id-app) store))
+         (id (%cookie-of (funcall h (%req "/" nil)))))
+    (let ((again (%cookie-of (funcall h (%req "/" id)))))
+      (is (and again (not (equal again id)))
+          "the session came back without timestamps and was refused as expired"))
+    ;; A fresh session, because the refusal above deleted the first one.
+    (let* ((sess:*session-idle-timeout* nil)
+           (sess:*session-absolute-timeout* nil)
+           (fresh (%cookie-of (funcall h (%req "/" nil))))
+           (kept (funcall h (%req "/" fresh))))
+      (is (null (%cookie-of kept)) "with both limits off, it is kept")
+      (is (equal fresh (%body kept))))))
