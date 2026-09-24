@@ -35,9 +35,11 @@
 ;;;; TEMPLATE `.asd' FILES ARE SKIPPED BY NAME, and the check for `{{' happens BEFORE any
 ;;;; resolution, which is the pre-publication issue 358 trap: a template `.asd' is perfectly valid Lisp, so
 ;;;; anything that resolves first gets a system genuinely named `{{name}}' and no error.
-;;;; The four `cons/templates/*/files/{{name}}.asd' are the ONLY duplicate names in the
-;;;; tracked tree, so a checker that did not skip them would fire on a clean tree on day
-;;;; one -- and a checker that cries wolf on a clean tree gets switched off.
+;;;; The four built-in templates used to ship `cons/templates/*/files/{{name}}.asd', which
+;;;; were the only duplicate names in the tracked tree, so a checker that did not skip them
+;;;; fired on a clean tree. Since #108 they ship as `{{name}}.asd.tmpl' and ASDF does not see
+;;;; them at all; the skip stays for a template that ships an `.asd' again, which `cons init'
+;;;; still accepts.
 ;;;;
 ;;;; It reads the files as TEXT and never loads them. Loading a `.asd' to find out what it
 ;;;; defines runs code from an untracked directory that arrived by unknown means, which is

@@ -134,10 +134,25 @@ success; the target is empty (pre-publication issue 185)."
            (push (uiop:native-namestring rel) files)))))
     (sort files #'string<)))
 
+(defparameter +inert-suffix+ ".tmpl"
+  "A template file whose name ends in this is written without it: `{{name}}.asd.tmpl' becomes
+`myapp.asd'.
+
+It exists for files that a tool would otherwise pick up from inside the template directory.
+The built-in templates ship their system definition as `{{name}}.asd.tmpl' because a file
+named `{{name}}.asd' is one ASDF finds: with the repository on the source registry, the four
+built-ins defined four systems named `{{name}}', and every Lisp session that loaded a system
+printed a warning for each (#108). Any template file can use the suffix; a file without it is
+written under its own name, so an existing template that ships `{{name}}.asd' still works.")
+
 (defun %substitute-path (relpath subs)
-  "Fill markers in a RELATIVE PATH. Templates carry {{name}} in file names as well as in
-contents -- `{{name}}.asd` is the obvious one."
-  (%fill (substitute #\/ #\\ relpath) subs))
+  "Fill markers in a RELATIVE PATH, and drop +INERT-SUFFIX+ from its end. Templates carry
+{{name}} in file names as well as in contents -- `{{name}}.asd.tmpl` is the obvious one."
+  (let ((filled (%fill (substitute #\/ #\\ relpath) subs)))
+    (if (and (> (length filled) (length +inert-suffix+))
+             (string= +inert-suffix+ filled :start2 (- (length filled) (length +inert-suffix+))))
+        (subseq filled 0 (- (length filled) (length +inert-suffix+)))
+        filled)))
 
 (defun %copy-file (source destination subs)
   "Copy SOURCE to DESTINATION, filling markers in its contents.
