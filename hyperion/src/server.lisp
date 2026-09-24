@@ -276,6 +276,38 @@ holds the backend's error."))
    "Signalled by START when a Clack backend has not started listening within
 *START-TIMEOUT* seconds and has not reported an error either. START stops it first."))
 
+(define-condition woo-server-running (error)
+  ((host :initarg :host :reader woo-server-running-host)
+   (port :initarg :port :reader woo-server-running-port)
+   (running-host :initarg :running-host :reader woo-server-running-running-host)
+   (running-port :initarg :running-port :reader woo-server-running-running-port))
+  (:report
+   (lambda (c stream)
+     (format stream "hyperion/server: a Woo server started by hyperion is still running on ~A:~D, so ~A:~D cannot be started on Woo in this image.~%"
+             (woo-server-running-running-host c) (woo-server-running-running-port c)
+             (woo-server-running-host c) (woo-server-running-port c))
+     (format stream "~%Each Woo server runs its own libev loop, and libev lets only one loop hold the~%")
+     (format stream "signal watchers Woo installs, so a second one would abort the whole process~%")
+     (format stream "with SIGABRT, where no handler runs (#198). Stop the running one first, or~%")
+     (format stream "start this one with :server :hunchentoot or :server :uv.~%")))
+  (:documentation
+   "Signalled by START when asked for a Woo server while another Woo server that START
+started is still running in this image.
+
+WHAT IT PROTECTS AGAINST (#198). Every Woo server runs its own libev event loop and installs
+signal watchers on it, and libev allows a signal to be watched from only one loop. A second
+Woo server therefore fails an assertion inside libev, which aborts the process with SIGABRT:
+no Lisp condition, no handler and no UNWIND-PROTECT, measured on Linux and macOS. START
+refuses in the caller instead, before Clack reaches libev.
+
+A STOPPED SERVER DOES NOT COUNT. Woo releases the watchers as its thread unwinds, and STOP
+waits for that thread to end, so a Woo server can be started again as soon as STOP returns.
+Measured on macOS: 200 start-stop-start cycles, none aborted.
+
+ONLY SERVERS STARTED THROUGH START ARE SEEN. A Woo server started by other code in the same
+image, by calling CLACK:CLACKUP or WOO:RUN directly, is invisible to hyperion, and starting
+a hyperion Woo server beside it still aborts inside libev."))
+
 (defvar *start-timeout* 10
   "Seconds START waits for a Clack backend to start listening before it gives up and
 signals SERVER-START-TIMEOUT.")
@@ -540,10 +572,53 @@ not use (pre-publication issue 95). Secrecy is not the point here -- the nonce o
 be something no other program on the port would reply with."
   (aion/random:random-hex 128))
 
+;;; --- one Woo server at a time (#198) --------------------------------------------
+;;;
+;;; The Woo server threads START created and that have not yet ended, as (thread host port).
+;;; The check and the registration happen under one lock, so two concurrent STARTs cannot
+;;; both see an empty list. An entry leaves when its thread has ended, which is what frees
+;;; Woo's signal watchers; STOP and the timeout path both wait for that.
+
+(defvar *woo-servers* '())
+(defvar *woo-servers-lock* (sb-thread:make-mutex :name "hyperion-woo-servers"))
+
+(defun %live-woo-servers ()
+  "The registered Woo servers whose thread is still alive, dropping the rest. Call it with
+*WOO-SERVERS-LOCK* held."
+  (setf *woo-servers*
+        (remove-if-not (lambda (entry) (sb-thread:thread-alive-p (first entry)))
+                       *woo-servers*)))
+
+(defun %refuse-second-woo (host port)
+  "Signal WOO-SERVER-RUNNING if a Woo server START started is still running. Call it with
+*WOO-SERVERS-LOCK* held."
+  (let ((running (first (%live-woo-servers))))
+    (when running
+      (error 'woo-server-running :host host :port port
+                                 :running-host (second running)
+                                 :running-port (third running)))))
+
+(defun %spawn-backend-thread (server host port function name)
+  "Start FUNCTION on a new thread named NAME and return the thread. For Woo, refuse first
+when another Woo server is running, and register the new thread, in one critical section."
+  (if (eq server :woo)
+      (sb-thread:with-mutex (*woo-servers-lock*)
+        (%refuse-second-woo host port)
+        ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
+        ;; call in %CLACK-START.
+        (let ((thread (sb-thread:make-thread function :name name)))
+          (push (list thread host port) *woo-servers*)
+          thread))
+      ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
+      ;; call in %CLACK-START.
+      (sb-thread:make-thread function :name name)))
+
 (defun %clack-start (app server host port debug)
   "Start APP on a Clack backend and return a CLACK-SERVER once that server answers. Signals
 PORT-IN-USE if the bind fails, the backend's own error for any other failure, and
-SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*.
+SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*, and
+WOO-SERVER-RUNNING, before any thread is started, if SERVER is :WOO and another Woo server
+START started is still running (#198).
 
 APP is wrapped OUTERMOST so that, until START returns, one path answers with a random nonce
 and nothing else: the probe request never reaches APP or any of its middleware, so it
@@ -564,11 +639,13 @@ per request."
                        (funcall app env))))
          (out *standard-output*)
          (err *error-output*)
-         ;; THREAD-LIFETIME: independent -- the server runs for as long as it serves, not
-         ;; for the START call that created it; the only bindings it needs, the caller's
-         ;; output streams, are passed to it explicitly below.
+         ;; The thread's lifetime is independent: the server runs for as long as it serves,
+         ;; not for the START call that created it; the only bindings it needs, the caller's
+         ;; output streams, are passed to it explicitly below. %SPAWN-BACKEND-THREAD, which
+         ;; creates it, points back here.
          (thread
-           (sb-thread:make-thread
+           (%spawn-backend-thread
+            server host port
             (lambda ()
               ;; A dynamic binding does not cross into a new thread, so the caller's
               ;; streams are passed explicitly, as `clackup :use-thread t' did.
@@ -604,7 +681,7 @@ per request."
                       (clack:clackup served :server server :port port :address host
                                             :use-thread nil :debug debug))
                   (error () nil))))
-            :name (format nil "hyperion-server-~(~A~)" server)))
+            (format nil "hyperion-server-~(~A~)" server)))
          (deadline (+ (get-internal-real-time)
                       (* *start-timeout* internal-time-units-per-second))))
     ;; A bind that fails does so within milliseconds of the thread starting. Give it up to

@@ -534,6 +534,76 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
       (aion/log:setup :env :dev :level :warn :stream *standard-output*)
       (ignore-errors (srv:stop h)))))
 
+;;; --- one Woo server at a time (#198) ---------------------------------------------
+;;;
+;;; A second Woo server in one image aborts the process inside libev with SIGABRT, which no
+;;; test can survive, and this suite does not load Woo, because loading it would make Woo
+;;; the default backend for every test here. So these tests exercise START's guard with a
+;;; STAND-IN: a thread registered as a running Woo server, which is exactly what the guard
+;;; reads. The real abort and the real refusal were measured in child processes on #198.
+
+(defun %srv-call-with-standin-woo (port function)
+  "Register a live thread as a Woo server START started on PORT, call FUNCTION with that
+thread, then end the thread and wait for it."
+  (let* ((release (sb-thread:make-semaphore))
+         ;; THREAD-LIFETIME: scoped -- ended and joined before this function returns.
+         (thread (sb-thread:make-thread (lambda () (sb-thread:wait-on-semaphore release))
+                                        :name "standin-woo-server")))
+    (sb-thread:with-mutex (srv::*woo-servers-lock*)
+      (push (list thread "127.0.0.1" port) srv::*woo-servers*))
+    (unwind-protect (funcall function thread)
+      (sb-thread:signal-semaphore release)
+      (aion/test-threads:join thread))))
+
+(test a-second-woo-server-is-refused-while-one-runs
+  (let ((running (ports:candidate-port))
+        (asked (ports:candidate-port)))
+    (%srv-call-with-standin-woo
+     running
+     (lambda (thread)
+       (declare (ignore thread))
+       (let ((c (handler-case
+                    (progn (srv:start (%srv-ok-app) :port asked :server :woo :log nil)
+                           :started)
+                  (srv:woo-server-running (c) c))))
+         (is (typep c 'srv:woo-server-running)
+             "a second Woo server must be refused in the caller, got ~S" c)
+         (when (typep c 'srv:woo-server-running)
+           (is (= running (srv:woo-server-running-running-port c)))
+           (is (= asked (srv:woo-server-running-port c))))
+         ;; Refused before anything bound: the guard runs before Clack is called.
+         (is (not (ports:listening-p asked))))))))
+
+(test a-woo-server-whose-thread-has-ended-does-not-block-the-next
+  ;; The other direction. Woo frees its libev signal watchers as its thread unwinds, and
+  ;; STOP waits for the thread, so an ended thread must not count. Checked on the guard
+  ;; itself, because a real START here would need Woo loaded.
+  (let ((port (ports:candidate-port)))
+    (%srv-call-with-standin-woo port (lambda (thread) (declare (ignore thread)))))
+  (is (null (sb-thread:with-mutex (srv::*woo-servers-lock*)
+              (srv::%live-woo-servers)))
+      "an ended Woo server thread is still counted as running")
+  (is (null (handler-case
+                (sb-thread:with-mutex (srv::*woo-servers-lock*)
+                  (srv::%refuse-second-woo "127.0.0.1" (ports:candidate-port)))
+              (srv:woo-server-running (c) c)))
+      "the guard refused although no Woo server is running"))
+
+(test the-woo-guard-does-not-refuse-other-backends
+  ;; Only Woo installs libev signal watchers. A running Woo server must not stop a
+  ;; Hunchentoot server from starting beside it.
+  (%srv-call-with-standin-woo
+   (ports:candidate-port)
+   (lambda (thread)
+     (declare (ignore thread))
+     (let* ((port nil)
+            (h (ports:call-with-port
+                (lambda (p)
+                  (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                    (setf port p))))))
+       (unwind-protect (is (ports:listening-p port))
+         (srv:stop h))))))
+
 (test a-normal-stop-logs-no-backend-failure
   ;; The control for the test above. STOP ends the backend thread by unwinding it, and the
   ;; backend's own cleanup runs inside the handler that logs errors after START. If that
