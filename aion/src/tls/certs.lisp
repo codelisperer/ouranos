@@ -32,10 +32,32 @@ DESCRIPTION is mbedtls_strerror's text for it."))
   (:documentation "The handshake failed because the peer's certificate chain did not verify.
 FLAGS are mbedTLS's verification flags; DESCRIPTION is mbedtls_x509_crt_verify_info's text."))
 
+(defparameter +psa-status-names+
+  '((-132 . "PSA_ERROR_GENERIC_ERROR") (-133 . "PSA_ERROR_NOT_PERMITTED")
+    (-134 . "PSA_ERROR_NOT_SUPPORTED") (-135 . "PSA_ERROR_INVALID_ARGUMENT")
+    (-136 . "PSA_ERROR_INVALID_HANDLE") (-137 . "PSA_ERROR_BAD_STATE")
+    (-138 . "PSA_ERROR_BUFFER_TOO_SMALL") (-139 . "PSA_ERROR_ALREADY_EXISTS")
+    (-140 . "PSA_ERROR_DOES_NOT_EXIST") (-141 . "PSA_ERROR_INSUFFICIENT_MEMORY")
+    (-142 . "PSA_ERROR_INSUFFICIENT_STORAGE") (-143 . "PSA_ERROR_INSUFFICIENT_DATA")
+    (-144 . "PSA_ERROR_SERVICE_FAILURE") (-145 . "PSA_ERROR_COMMUNICATION_FAILURE")
+    (-146 . "PSA_ERROR_STORAGE_FAILURE") (-147 . "PSA_ERROR_HARDWARE_FAILURE")
+    (-148 . "PSA_ERROR_INSUFFICIENT_ENTROPY") (-149 . "PSA_ERROR_INVALID_SIGNATURE")
+    (-150 . "PSA_ERROR_INVALID_PADDING") (-151 . "PSA_ERROR_CORRUPTION_DETECTED")
+    (-152 . "PSA_ERROR_DATA_CORRUPT") (-153 . "PSA_ERROR_DATA_INVALID"))
+  "PSA status codes, from tf-psa-crypto/include/psa/crypto_values.h in mbedTLS 4.1.1.")
+
+(defun %psa-status-name (code)
+  "PSA's name for status CODE, or NIL if CODE is not one of PSA's error statuses."
+  (cdr (assoc code +psa-status-names+)))
+
 (defun %strerror (code)
-  (cffi:with-foreign-object (buf :char 256)
-    (%mbedtls-strerror code buf 256)
-    (cffi:foreign-string-to-lisp buf)))
+  "A description of the negative return value CODE. PSA statuses are small negative numbers
+that mbedtls_strerror does not know and splits into meaningless high and low parts, so they
+are named from +PSA-STATUS-NAMES+ instead."
+  (or (%psa-status-name code)
+      (cffi:with-foreign-object (buf :char 256)
+        (%mbedtls-strerror code buf 256)
+        (cffi:foreign-string-to-lisp buf))))
 
 (defun %check (code operation)
   "Signal TLS-ERROR unless CODE is 0 or positive. Returns CODE."
