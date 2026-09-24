@@ -73,3 +73,167 @@
     (sess:store-add s (%sess "e" :data nil))
     (let ((got (sess:store-ref s "e")))
       (is (null (sess:session-keys got))))))
+
+;;; --- a handler's changes are written back (#230) ----------------------------------------
+;;;
+;;; The DB store hands out a fresh session from every STORE-REF, so until #230 every change a
+;;; handler made to its session -- data, sign-in, sign-out, the CSRF token -- was lost on the
+;;; next request. Each test below runs through WRAP-SESSION on BOTH stores; the memory store,
+;;; which always worked because it shares one object, is the control.
+
+(defclass old-protocol-store ()
+  ((table :initform (make-hash-table :test 'equal) :reader ops-table))
+  (:documentation "A store written before STORE-SAVE existed: it defines only the old
+methods, and copies on the way in and out the way a database-backed store does."))
+
+(defun %ops-copy (s)
+  (sess:restore-session (sess:session-id s) :created (sess:session-created s)
+                        :accessed (sess:session-accessed s) :data (sess:session-alist s)))
+(defmethod sess:store-ref ((s old-protocol-store) id)
+  (let ((v (gethash id (ops-table s)))) (and v (%ops-copy v))))
+(defmethod sess:store-add ((s old-protocol-store) session)
+  (setf (gethash (sess:session-id session) (ops-table s)) (%ops-copy session)) session)
+(defmethod sess:store-del ((s old-protocol-store) id) (remhash id (ops-table s)))
+(defmethod sess:store-count ((s old-protocol-store)) (hash-table-count (ops-table s)))
+(defmethod sess:store-list ((s old-protocol-store))
+  (loop for v being the hash-values of (ops-table s) collect (%ops-copy v)))
+
+(defun %call-with-each-store (function)
+  "Call FUNCTION with a label and a fresh store: memory, DB (in-memory SQLite), and a store
+that defines only the old protocol methods."
+  (funcall function :memory (sess:make-memory-store))
+  (with-store (s) (funcall function :db s))
+  (funcall function :old-protocol (make-instance 'old-protocol-store)))
+
+(defun %cookie-of (res)
+  (let ((sc (getf (second res) :set-cookie)))
+    (and sc (subseq sc (1+ (position #\= sc)) (position #\; sc)))))
+
+(defun %req (path id &key (method :get) headers)
+  (list :request-method method :path-info path :content-length 0
+        :headers (let ((ht (make-hash-table :test 'equal)))
+                   (when id (setf (gethash "cookie" ht) (format nil "hyperion-session=~a" id)))
+                   (loop for (k v) on headers by #'cddr do (setf (gethash k ht) v))
+                   ht)))
+
+(defun %body (res) (first (third res)))
+
+(test a-change-a-handler-makes-is-still-there-on-the-next-request
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((h (sess:wrap-session
+                (lambda (env)
+                  (let ((s (sess:request-session env)))
+                    (sess:session-set s :n (1+ (or (sess:session-get s :n) 0)))
+                    (list 200 nil (list (princ-to-string (sess:session-get s :n))))))
+                store))
+            (r1 (funcall h (%req "/" nil)))
+            (id (%cookie-of r1)))
+       (is (equal "2" (%body (funcall h (%req "/" id)))) "~a: second request sees the first's write" kind)
+       (is (eql 2 (sess:session-get (sess:store-ref store id) :n)) "~a: and the store holds it" kind)))))
+
+(defun %sign-in-out-app (store how)
+  (lambda (env)
+    (let ((s (sess:request-session env)) (path (getf env :path-info)))
+      (cond ((string= path "/in") (sess:sign-in! store env :user-id 42) (list 200 nil (list "in")))
+            ((string= path "/out")
+             (ecase how
+               (:session-del (sess:session-del s :user-id))
+               (:reset-session (sess:reset-session s))
+               (:kill-session (sess:kill-session store s)))
+             (list 200 nil (list "out")))
+            (t (list 200 nil (list (princ-to-string (sess:session-get s :user-id)))))))))
+
+(test sign-in-and-every-sign-out-are-kept-by-the-store
+  (dolist (how '(:session-del :reset-session :kill-session))
+    (%call-with-each-store
+     (lambda (kind store)
+       (let* ((h (sess:wrap-session (%sign-in-out-app store how) store))
+              (id0 (%cookie-of (funcall h (%req "/" nil))))
+              (id (or (%cookie-of (funcall h (%req "/in" id0))) id0)))
+         (is (equal "42" (%body (funcall h (%req "/who" id))))
+             "~a: SIGN-IN! is kept (sign-out by ~a to follow)" kind how)
+         (funcall h (%req "/out" id))
+         ;; Computed first: FIVEAM's IS evaluates each argument of its form, so an OR inside
+         ;; it would not short-circuit.
+         (let* ((after (sess:store-ref store id))
+                (user (and after (sess:session-get after :user-id))))
+           (is (null user)
+               "~a: after sign-out by ~a the store no longer names a user, got ~s" kind how user)))))))
+
+(test a-killed-session-is-not-restored-by-the-write-back
+  ;; STORE-SAVE must never insert: a handler that kills its session and then changed it
+  ;; (a sign-out that also clears a key) must not have it brought back.
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((h (sess:wrap-session
+                (lambda (env)
+                  (let ((s (sess:request-session env)))
+                    (when (string= (getf env :path-info) "/out")
+                      (sess:kill-session store s)
+                      (sess:session-set s :after-kill t))
+                    (list 200 nil (list "ok"))))
+                store))
+            (id (%cookie-of (funcall h (%req "/" nil)))))
+       (funcall h (%req "/out" id))
+       (is (null (sess:store-ref store id)) "~a: the killed session stays gone" kind)))))
+
+(test the-csrf-token-a-page-was-given-is-accepted-on-post
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((h (sess:wrap-session
+                (hyperion/csrf:wrap-csrf
+                 (lambda (env)
+                   (list 200 nil (list (if (eq (getf env :request-method) :get)
+                                           (hyperion/csrf:ensure-token (sess:request-session env))
+                                           "posted")))))
+                store))
+            (r1 (funcall h (%req "/form" nil)))
+            (id (%cookie-of r1))
+            (r2 (funcall h (%req "/submit" id :method :post :headers (list "x-csrf-token" (%body r1))))))
+       (is (= 200 (first r2)) "~a: POST with the page's token, got ~a" kind (first r2))))))
+
+(test accessed-is-written-back-at-most-once-per-interval
+  ;; A request that changes nothing but ACCESSED is written only when ACCESSED is at least
+  ;; *ACCESSED-SAVE-INTERVAL* past what the store holds.
+  (with-store (store)
+    (let* ((h (sess:wrap-session (lambda (env) (declare (ignore env)) (list 200 nil (list "r"))) store))
+           (id (%cookie-of (funcall h (%req "/" nil))))
+           (stored (sess:session-accessed (sess:store-ref store id))))
+      (sleep 1.1)
+      (let ((sess:*accessed-save-interval* 3600))
+        (funcall h (%req "/" id))
+        (is (= stored (sess:session-accessed (sess:store-ref store id)))
+            "inside the interval, an ACCESSED-only change is not written"))
+      (let ((sess:*accessed-save-interval* 0))
+        (funcall h (%req "/" id))
+        (is (> (sess:session-accessed (sess:store-ref store id)) stored)
+            "past the interval, it is")))))
+
+(test a-sign-out-by-changing-the-session-is-kept-after-a-sign-in-that-rotated
+  ;; The sign-in here is written by ROTATE-SESSION itself (set, then rotate), so it was kept
+  ;; even before #230; the sign-out, a change to the session, was not. This isolates the
+  ;; sign-out: the other test's SIGN-IN! failed first on the DB store, which hid it.
+  (dolist (how '(:session-del :reset-session))
+    (%call-with-each-store
+     (lambda (kind store)
+       (let* ((h (sess:wrap-session
+                  (lambda (env)
+                    (let ((s (sess:request-session env)) (path (getf env :path-info)))
+                      (cond ((string= path "/in")
+                             (sess:session-set s :user-id 42)
+                             (sess:rotate-session store s)
+                             (list 200 nil (list "in")))
+                            ((string= path "/out")
+                             (ecase how
+                               (:session-del (sess:session-del s :user-id))
+                               (:reset-session (sess:reset-session s)))
+                             (list 200 nil (list "out")))
+                            (t (list 200 nil (list (princ-to-string (sess:session-get s :user-id))))))))
+                  store))
+              (id0 (%cookie-of (funcall h (%req "/" nil))))
+              (id (or (%cookie-of (funcall h (%req "/in" id0))) id0)))
+         (is (equal "42" (%body (funcall h (%req "/who" id)))) "~a: signed in" kind)
+         (funcall h (%req "/out" id))
+         (is (equal "NIL" (%body (funcall h (%req "/who" id))))
+             "~a: signed out by ~a on the next request" kind how))))))

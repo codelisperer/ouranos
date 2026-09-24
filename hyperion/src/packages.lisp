@@ -193,6 +193,7 @@
            #:session-get #:session-set #:session-del #:session-keys #:reset-session
            #:restore-session #:session-alist
            #:store-ref #:store-add #:store-del #:store-count #:store-list
+           #:store-save #:*accessed-save-interval*
            #:memory-store #:make-memory-store
            #:ensure-session #:rotate-session #:new-id #:set-cookie-header
            ;; the privilege change, rotation included by construction (#120)

@@ -127,6 +127,18 @@ mnemosyne/conn:connect). DIALECT is :sqlite or :postgres. With :ENSURE, create t
                     :dialect (db-store-dialect store))))
       (and (integerp n) (plusp n)))))
 
+(defmethod sess:store-save ((store db-store) session)
+  ;; An UPDATE, never an upsert (#230): a session the handler removed must stay removed, so
+  ;; this writes only to a row that is still there, and reports whether it was.
+  (bt:with-lock-held ((db-store-lock store))
+    (let ((n (q:run (db-store-connection store)
+                    (list :update (db-store-table store)
+                          :set (list :data (%serialize session)
+                                     :accessed (sess:session-accessed session))
+                          :where (list := :id (sess:session-id session)))
+                    :dialect (db-store-dialect store))))
+      (and (integerp n) (plusp n)))))
+
 (defmethod sess:store-count ((store db-store))
   (bt:with-lock-held ((db-store-lock store))
     (let ((rows (q:fetch (db-store-connection store)
