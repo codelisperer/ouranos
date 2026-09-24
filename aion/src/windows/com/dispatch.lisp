@@ -51,12 +51,76 @@ own description usually tells them everything."))
 
 ;;; --- objects -------------------------------------------------------------------
 
-(defstruct (com-object (:constructor %make-com-object (pointer)))
-  "An IDispatch pointer and the one reference it owns."
+(defstruct (com-object (:constructor %%make-com-object (pointer origin serial)))
+  "An IDispatch pointer and the one reference it owns, with where it came from."
   (pointer (cffi:null-pointer) :read-only t)
-  (released nil))
+  (released nil)
+  (origin nil :read-only t)
+  (serial 0 :read-only t))
 
-(defun wrap-interface (pointer)
+;;; --- which references are still held (#109) --------------------------------------
+;;;
+;;; RELEASING AN INTERFACE IS NOT THE SAME AS STOPPING ITS SERVER, and a reference nobody
+;;; released is invisible. Measured on #109 with Office: an Excel whose `Workbooks' object
+;;; was never released survived `Quit' and kept running, and after the Lisp process exited it
+;;; stayed another 401 s. The caller never named that object -- it came back from a property
+;;; -- so no amount of discipline at the call site finds it.
+;;;
+;;; So, as aion/uv's DESCRIBE-LOOP does for handles, every COM-OBJECT is recorded here from
+;;; the moment it is made until RELEASE spends its reference, with where it came from: the
+;;; ProgID for CREATE-OBJECT, or the parent's origin and the member name for an object a call
+;;; returned. DESCRIBE-COM-OBJECTS then names each one still held. Nothing here changes when
+;;; anything is released; it only makes an unreleased reference visible.
+;;;
+;;; The table is process-wide and touched from every thread that creates or releases, so it
+;;; is guarded by a lock. RELEASE may be called from any thread: the Release itself runs in
+;;; the apartment through CALL-IN-APARTMENT.
+
+(defvar *%live-objects* (make-hash-table :test 'eq)
+  "Every COM-OBJECT that still owns its reference, keyed by the object.")
+(defvar *%live-lock* (sb-thread:make-mutex :name "com-live-objects"))
+(defvar *%serial* 0 "The serial number of the last COM-OBJECT made. Guarded by *%LIVE-LOCK*.")
+
+(defvar *%wrap-origin* nil
+  "The origin to record for a COM-OBJECT made while a call's results are converted. Bound by
+%INVOKE, on the apartment thread, around that conversion.")
+
+(defun %make-com-object (pointer &optional (origin (or *%wrap-origin* "(origin not recorded)")))
+  "Make a COM-OBJECT owning POINTER's reference, and record it as live. A null POINTER owns
+no reference and RELEASE does nothing with it, so it is not recorded."
+  (sb-thread:with-mutex (*%live-lock*)
+    (let ((object (%%make-com-object pointer origin (incf *%serial*))))
+      (unless (cffi:null-pointer-p pointer)
+        (setf (gethash object *%live-objects*) t))
+      object)))
+
+(defun %forget (object)
+  (sb-thread:with-mutex (*%live-lock*)
+    (remhash object *%live-objects*)))
+
+(defun live-com-objects ()
+  "The COM-OBJECTs that still own a reference, oldest first."
+  (sort (sb-thread:with-mutex (*%live-lock*)
+          (loop for object being the hash-keys of *%live-objects* collect object))
+        #'< :key #'com-object-serial))
+
+(defun describe-com-objects (&optional (stream *standard-output*))
+  "Print every COM reference this process still holds, and where each came from.
+
+Each one keeps its object alive in the server. For an out-of-process server that can mean
+the server itself keeps running: an Excel with one unreleased child object survives `Quit'
+(#109). Returns the list of live COM-OBJECTs, oldest first."
+  (let ((objects (live-com-objects)))
+    (format stream "~&~D unreleased COM reference~:P~%" (length objects))
+    (dolist (o objects)
+      (format stream "  #~D  ~A  (interface ~X)~%"
+              (com-object-serial o) (com-object-origin o)
+              (cffi:pointer-address (com-object-pointer o))))
+    (when objects
+      (format stream "~&Each keeps its object alive in the server; RELEASE them, or a server may keep running.~%"))
+    objects))
+
+(defun wrap-interface (pointer &key (origin "WRAP-INTERFACE"))
   "Adopt an interface POINTER as a COM-OBJECT. THE REFERENCE IS TAKEN OVER, not borrowed.
 
 The mirror of COM-OBJECT-POINTER, and the other half of what extending this binding requires:
@@ -67,20 +131,36 @@ either leak it or reach into this package.
 OWNERSHIP: the caller must NOT also release POINTER. Every interface arrives owing exactly one
 RELEASE, and after this call the COM-OBJECT owes it. If you need a reference of your own as
 well, ADD-REF first -- which is what VARIANT-TO-LISP does when it hands out a VT_DISPATCH,
-precisely because the VARIANT it came from will be cleared underneath it."
-  (%make-com-object pointer))
+precisely because the VARIANT it came from will be cleared underneath it.
+
+ORIGIN is what DESCRIBE-COM-OBJECTS reports for it while it is unreleased."
+  (%make-com-object pointer origin))
 
 (defun release (object)
-  "Release OBJECT's reference. Idempotent; returns T when it actually released."
+  "Release OBJECT's reference. Idempotent; returns T when it actually released.
+
+Callable from any thread: the Release runs in the apartment. The object leaves
+LIVE-COM-OBJECTS as it is marked released, before the Release call, so a Release that
+signals is not reported as a reference still held -- the reference is spent either way."
   (when (and (com-object-p object)
              (not (com-object-released object))
              (not (cffi:null-pointer-p (com-object-pointer object))))
     (setf (com-object-released object) t)
+    (%forget object)
     (call-in-apartment (lambda () (ffi:iunknown-release (com-object-pointer object))))
     t))
 
 (defmacro with-com-object ((var form) &body body)
-  "Bind VAR to the COM-OBJECT from FORM, releasing it however BODY exits."
+  "Bind VAR to the COM-OBJECT from FORM, releasing it however BODY exits.
+
+This promises INTERFACE lifetime: exactly one Release of the reference VAR holds. It promises
+nothing about the SERVER, because each out-of-process server decides for itself when to exit.
+Measured on #109: HotDocs exits when its last reference is released; Word keeps running with
+no reference held by anyone until it is told `Quit'; Excel exits only after `Quit' AND the
+release of every reference, including objects that came back from properties and were never
+named (an unreleased `Workbooks' kept Excel running after `Quit'). An object that came back
+from a call is a COM-OBJECT of its own, and this macro does not release it. Use
+DESCRIBE-COM-OBJECTS to see what is still held."
   `(let ((,var ,form))
      (unwind-protect (progn ,@body)
        (release ,var))))
@@ -121,7 +201,7 @@ Runs in the apartment, so the object belongs to the STA thread from the moment i
         (let ((p (cffi:mem-ref ppv :pointer)))
           (when (cffi:null-pointer-p p)
             (error 'com-error :detail (format nil "CoCreateInstance succeeded but returned NULL for ~S" prog-id)))
-          (%make-com-object p))))))
+          (%make-com-object p prog-id))))))
 
 (defun create-object (prog-id)
   "OBJECT-FROM-PROG-ID, under the name the rest of the world uses for it."
@@ -367,12 +447,17 @@ folded into the cleanup form."
                            ;; failed Invoke may have written nothing, and reporting a stale
                            ;; or half-written referent as a result would be worse than the
                            ;; error the caller is about to see.
-                           (loop for cell in refs
-                                 for j from 0
-                                 do (setf (by-ref-value cell)
-                                          (variant-to-lisp
-                                           (cffi:mem-aptr referents '(:struct ffi:variant) j))))
-                           (variant-to-lisp result))
+                           ;; An object that comes back is recorded as "<parent> -> <member>",
+                           ;; so DESCRIBE-COM-OBJECTS can name one nobody assigned (#109).
+                           (let ((*%wrap-origin* (format nil "~A -> ~A (by-ref argument)"
+                                                         (com-object-origin object) name)))
+                             (loop for cell in refs
+                                   for j from 0
+                                   do (setf (by-ref-value cell)
+                                            (variant-to-lisp
+                                             (cffi:mem-aptr referents '(:struct ffi:variant) j)))))
+                           (let ((*%wrap-origin* (format nil "~A -> ~A" (com-object-origin object) name)))
+                             (variant-to-lisp result)))
                           ;; DISP_E_EXCEPTION: the server raised. Its own description is
                           ;; worth more than the HRESULT, so it is preferred.
                           ((= (logand hr #xFFFFFFFF) #x80020009)

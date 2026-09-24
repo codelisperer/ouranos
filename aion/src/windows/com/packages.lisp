@@ -73,6 +73,8 @@
    ;; put one back under management once you have it.
    #:com-object #:com-object-p #:com-object-pointer #:wrap-interface
    #:release #:with-com-object
+   ;; which references are still held, and where each came from (#109)
+   #:live-com-objects #:describe-com-objects #:com-object-origin #:com-object-serial
    #:create-object #:object-from-prog-id #:class-available-p
    ;; calling
    #:invoke #:invoke-method #:get-property #:set-property
