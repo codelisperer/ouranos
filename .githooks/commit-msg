@@ -21,9 +21,12 @@
 # the process actually found and what it got wrong.
 #
 # The same rule ships to every generated project as a string in cons/src/conform.lisp
-# (*COMMIT-MSG-HOOK*) -- edit both, or neither. The private-name check at the end of this
-# file is not part of that rule and must not be copied there: a generated project is an
-# app, and an app's own name is not private in its own repository.
+# (*COMMIT-MSG-HOOK*). Two parts are shared: the patterns, and the refusal text between the
+# MSG markers, which must stay identical -- edit both, or neither. cons/tests/conform-tests.lisp
+# compares the refusal text, so a change to one alone fails that suite (#149). The header
+# comments differ on purpose. The private-name check at the end of this file is not part of
+# the rule and must not be copied there: a generated project is an app, and an app's own
+# name is not private in its own repository.
 #
 # Armed by bootstrap.lisp, or by hand:   git config core.hooksPath .githooks
 
