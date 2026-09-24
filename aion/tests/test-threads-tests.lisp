@@ -44,8 +44,11 @@
            (is (stringp message) "JOIN of a thread still running after its timeout must signal")
            (is (and message (search "a-slow-worker" message))
                "and the error must name the thread, got: ~S" message)
-           (is (< (%seconds-since t0) 3)
-               "and it must give up at about its 1 s timeout, not wait for the thread"))
+           ;; Both bounds: under 0.9 s means JOIN gave up without honouring the timeout, and
+           ;; 3 s or more means it waited for the thread instead of the timeout.
+           (let ((elapsed (%seconds-since t0)))
+             (is (<= 0.9 elapsed 3)
+                 "and it must give up at about its 1 s timeout; took ~,2F s" elapsed)))
       (%stop-all (list th)))))
 
 (test join-of-an-aborted-thread-is-an-error-not-a-value
@@ -79,7 +82,12 @@
                           (error (e) (princ-to-string e)))))
            (is (stringp message)
                "the group was not finished at 1 s, so JOIN-ALL must signal; a per-thread deadline would not")
-           (is (and message (search "group-worker-2" message))
+           ;; Worker 2 cannot have finished: it started before T0 and sleeps 1.4 s. Worker 1
+           ;; sleeps 0.7 s, so it is normally done by the deadline, but a loaded runner can
+           ;; delay it past 1 s, and then it is correctly the one named. Workers 3 to 5 are
+           ;; never the first unfinished thread, so naming one of them is a defect.
+           (is (and message (or (search "group-worker-1" message)
+                                (search "group-worker-2" message)))
                "and name the first thread not finished by the deadline, got: ~S" message)
            (is (< (%seconds-since t0) 2)
                "one 1 s deadline for the group; took ~,2F s" (%seconds-since t0)))
