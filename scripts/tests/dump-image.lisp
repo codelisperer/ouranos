@@ -15,6 +15,12 @@
 
 (in-package #:checkers/tests)
 
+;;; The suite is named here as well as in checkers.lisp. FiveAM's current suite does not carry
+;;; over from one file to the next, so without this line the tests below were registered but
+;;; were not in `checkers', and the gate's run of that suite did not run them: its count stayed
+;;; at 128 on the first gate run of this change, where 142 was predicted.
+(in-suite checkers)
+
 (defun %environment-with (pairs)
   "This process's environment with PAIRS, (NAME . VALUE), replacing any existing NAME."
   (append (mapcar (lambda (p) (format nil "~A=~A" (car p) (cdr p))) pairs)
