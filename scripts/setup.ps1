@@ -347,19 +347,73 @@ function Get-SqliteSha {
   return $Pins['SQLITE_SHA256_X64']
 }
 
+function Get-PeMachine($path) {
+  # The Machine field of a PE file's COFF header, read from the file rather than guessed from
+  # its name or directory: 0x014c is x86, 0x8664 is x64, 0xAA64 is ARM64. $null if PATH is not
+  # a PE file. The DOS header's e_lfanew (offset 0x3C) points at the 'PE\0\0' signature, and
+  # the Machine field is the two bytes after it.
+  try {
+    $fs = [IO.File]::OpenRead($path)
+    try {
+      $br = New-Object IO.BinaryReader($fs)
+      if ($fs.Length -lt 0x40) { return $null }
+      $fs.Position = 0x3C
+      $pe = $br.ReadInt32()
+      if ($pe -lt 0 -or $pe + 6 -gt $fs.Length) { return $null }
+      $fs.Position = $pe
+      if ($br.ReadUInt32() -ne 0x00004550) { return $null }     # 'PE\0\0'
+      return [int]$br.ReadUInt16()
+    } finally { $fs.Dispose() }
+  } catch { return $null }
+}
+
+function Get-PeMachineName($machine) {
+  switch ($machine) {
+    0x014c { 'x86 (32-bit)' }
+    0x8664 { 'x64' }
+    0xAA64 { 'ARM64' }
+    default { if ($null -eq $machine) { 'not a PE file' } else { '0x{0:X4}' -f $machine } }
+  }
+}
+
+# The sqlite3.dll files the search passed over because SBCL cannot load them (#201). Filled by
+# Find-SqliteDll, reported by the check.
+$script:SkippedSqlite = @()
+
 function Find-SqliteDll {
   # WHERE THE LOADER WOULD ACTUALLY FIND ONE, in the order it looks: the directory of the
   # executable (sbcl.exe, for everything this tree runs), then System32, then PATH. Windows
   # ships winsqlite3.dll in System32 under a name cl-sqlite never asks for, so that copy is
   # invisible here on purpose -- this reports what the LOADER sees, not what exists.
+  #
+  # A DLL BUILT FOR ANOTHER ARCHITECTURE IS SKIPPED, as the loader skips it (#201). On a
+  # machine with Embarcadero Delphi, the first sqlite3.dll on PATH is Delphi's 32-bit copy; a
+  # 64-bit SBCL cannot load it, and Windows goes on to the next one on PATH, which on that
+  # machine is Delphi's 64-bit copy. Measured: SBCL loaded ...\Studio\37.0\bin64\sqlite3.dll
+  # (3.45.3) while this function, before this change, reported ...\Studio\37.0\bin\sqlite3.dll.
+  # The architecture wanted is sbcl.exe's own, read from its header, because an x64 SBCL can
+  # run on an ARM64 machine and would load x64 DLLs there.
+  $script:SkippedSqlite = @()
   $dirs = @()
   $cmd = Get-Command sbcl -ErrorAction SilentlyContinue
-  if ($cmd) { $dirs += (Split-Path -Parent $cmd.Source) }
+  $want = $null
+  if ($cmd) {
+    $dirs += (Split-Path -Parent $cmd.Source)
+    $want = Get-PeMachine $cmd.Source
+  }
+  $dirs += [Environment]::SystemDirectory
   $dirs += ($env:PATH -split ';' | Where-Object { $_ })
   foreach ($d in $dirs) {
     foreach ($n in @('sqlite3.dll', 'libsqlite3.dll')) {
       try { $p = Join-Path $d $n } catch { continue }
-      if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) { return $p }
+      if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) {
+        $m = Get-PeMachine $p
+        if ($want -and $m -ne $want) {
+          $script:SkippedSqlite += [pscustomobject]@{ Path = $p; Machine = $m }
+          continue
+        }
+        return $p
+      }
     }
   }
   return $null
@@ -482,6 +536,12 @@ if ($Check) {
   $dll = Find-SqliteDll
   $cmd = Get-Command sbcl -ErrorAction SilentlyContinue
   $ours = if ($cmd) { Join-Path (Split-Path -Parent $cmd.Source) 'sqlite3.dll' } else { $null }
+  # Name what the search passed over and why, so the file reported below is not mistaken for
+  # the first sqlite3.dll on PATH (#201).
+  foreach ($s in $script:SkippedSqlite) {
+    Write-Host ("  note    skipped {0} -- built for {1}; sbcl.exe is {2}, so it cannot load it" -f `
+        $s.Path, (Get-PeMachineName $s.Machine), (Get-PeMachineName (Get-PeMachine $cmd.Source))) -ForegroundColor DarkGray
+  }
   if (-not $dll) {
     Miss 'sqlite3.dll (cl-sqlite needs it; mnemosyne cannot load without it)' '.\scripts\setup.ps1'
     Write-Host '            Windows ships winsqlite3.dll, which WORKS but is a name cl-sqlite never tries.' -ForegroundColor DarkGray
