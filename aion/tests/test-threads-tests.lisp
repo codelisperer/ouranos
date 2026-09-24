@@ -131,3 +131,17 @@
            (is (and message (search "still-running-second" message))
                "JOIN-ALL names the thread that had not finished, got: ~S" message))
       (%stop-all (list running)))))
+
+;;; --- a thread's own second value is not an outcome ---------------------------------
+;;;
+;;; JOIN-THREAD returns the thread's values when it finishes, and (DEFAULT problem) when it
+;;; does not. A helper that read the second value as the problem took a thread returning
+;;; (VALUES 1 :TIMEOUT) for one that timed out.
+
+(test a-thread-s-own-second-value-is-not-read-as-an-outcome
+  (dolist (second '(:timeout :abort))
+    (let* ((th (sb-thread:make-thread (lambda () (values 1 second))
+                                      :name (format nil "returns-1-and-~(~A~)" second)))
+           (got (handler-case (tt:join th :timeout 5)
+                  (error (e) (princ-to-string e)))))
+      (is (eql 1 got) "a thread returning (VALUES 1 ~S) returned 1, got: ~S" second got))))

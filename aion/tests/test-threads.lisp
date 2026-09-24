@@ -20,23 +20,28 @@
 a test is expected to make, so a thread that is merely slow finishes first.")
 
 (defun %join-by (thread deadline timeout)
-  (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+  ;; NONE is what JOIN-THREAD returns in place of a value when the thread did not finish.
+  ;; Only then is its second value the reason. When the thread finished, JOIN-THREAD returns
+  ;; the thread's own values, so a thread returning (VALUES 1 :TIMEOUT) is a normal return of
+  ;; 1; reading the second value alone mistook it for a timeout.
+  (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second))
+        (none '#:none))
     (multiple-value-bind (value outcome)
-        (cond ((plusp left) (sb-thread:join-thread thread :timeout left :default nil))
+        (cond ((plusp left) (sb-thread:join-thread thread :timeout left :default none))
               ;; No time left: a TIMEOUT of 0, or a JOIN-ALL deadline that passed while an
               ;; earlier thread was being joined. JOIN-THREAD refuses a timeout of 0 with a
               ;; TYPE-ERROR that names no thread (#246), so decide here instead. A thread still
               ;; running has missed the deadline; a finished one is joined with no timeout,
               ;; which returns at once.
-              ((sb-thread:thread-alive-p thread) (values nil :timeout))
-              (t (sb-thread:join-thread thread :default nil)))
-      (case outcome
-        (:timeout (error "the thread ~A did not finish within ~D seconds"
-                         (sb-thread:thread-name thread) timeout))
-        ;; An aborted thread has no value to return. A plain join signals an error here too.
-        (:abort (error "the thread ~A ended without returning a value"
-                       (sb-thread:thread-name thread)))
-        (t value)))))
+              ((sb-thread:thread-alive-p thread) (values none :timeout))
+              (t (sb-thread:join-thread thread :default none)))
+      (cond ((not (eq value none)) value)
+            ((eq outcome :timeout)
+             (error "the thread ~A did not finish within ~D seconds"
+                    (sb-thread:thread-name thread) timeout))
+            ;; An aborted thread has no value to return. A plain join signals an error here too.
+            (t (error "the thread ~A ended without returning a value"
+                      (sb-thread:thread-name thread)))))))
 
 (defun join (thread &key (timeout +default-timeout+))
   "Wait for THREAD and return its value. Signal an error naming it if it has not finished
