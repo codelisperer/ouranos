@@ -878,7 +878,13 @@ the script got past the root guard and then looked in the caller's tree."
       ;; native-namestring: tree-deps prints the directory it searched with
       ;; scripts/human-path.lisp, like every other script (#168). Before that it printed
       ;; plain `namestring', and this was the one assertion in the file that had to differ.
-      (is (search (uiop:native-namestring tree) out)
+      ;; TRUENAME, for the reason the readme-counts test above records (pre-publication
+      ;; issue 510): the fixture's path keeps TEMP's spelling, which on GitHub's Windows
+      ;; runners is the 8.3 alias `C:\Users\RUNNER~1\...', while the message names the tree
+      ;; by its long name. The first push of #168 matched the alias here and failed on that
+      ;; runner only. Computed here rather than by calling human-path, so the two sides
+      ;; cannot move together.
+      (is (search (uiop:native-namestring (truename tree)) out)
           "and must have searched the FIXTURE, naming it:~%~A" out))))
 
 ;;; --- does check-source-deps find an undeclared use? (#163, #166) ----------------------
