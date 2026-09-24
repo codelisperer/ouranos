@@ -5,8 +5,8 @@
 ;;;;   elenchon/ceg        -- the typed Cause-Effect Graph ADT (causes, effects,
 ;;;;                          AND/OR/NOT, and the E/I/O/R/M constraints)  [Coalton]
 ;;;;   elenchon/reason     -- the reasoning system over a CEG: minimal high-coverage
-;;;;                          decision table (relational solver; miniKanren a
-;;;;                          candidate)                                  [Coalton]
+;;;;                          decision table, by independence-pairs then set
+;;;;                          cover behind a Solver protocol (ADR-0002)    [Coalton]
 ;;;;   elenchon/cases      -- decision table -> functional test cases + traceability
 ;;;;   elenchon/report     -- dangling/contradictory/non-propositional findings
 ;;;;   elenchon/build      -- the API for *constructing* a CEG from structured
