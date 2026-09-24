@@ -149,6 +149,12 @@ saas/
   files/               ; the tree, with substitution markers
 ```
 
+A file under `files/` whose name ends in `.tmpl` is written without that suffix. Use it for
+any file a tool would otherwise find inside the template directory. The built-ins ship their
+system definition as `{{name}}.asd.tmpl`, because a file named `{{name}}.asd` is one ASDF
+finds with the repository on the source registry (#108). The suffix is removed once, so a
+file that really ends in `.tmpl` is named `X.tmpl.tmpl` in the template.
+
 Three properties, each chosen against a failure we have already had elsewhere:
 
 **Declarative, not a program.** A template that can run arbitrary code is a supply-chain
@@ -185,6 +191,9 @@ turning it into a starter is the actual request, and it has a shape worth gettin
 - **Identify substitutions explicitly.** Project name, package prefix, and *branding* —
   logo path, palette — are parameters. That is precisely the "different logo, different
   palette" case, and §5a below is now the concrete mechanism for the palette half.
+- **Write the project's `.asd` as `{{name}}.asd.tmpl`**, not `{{name}}.asd`, so the
+  extracted template does not define a system ASDF finds inside the template directory
+  (§4, #108).
 - **Confidentiality is a first-class check.** Extracting from a private application into a
   shareable template is exactly where a client name escapes. `cons template from` should
   refuse on the [`AGENTS.md`](../../AGENTS.md) name list unless overridden, and say why.

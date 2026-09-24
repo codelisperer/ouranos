@@ -141,9 +141,12 @@ success; the target is empty (pre-publication issue 185)."
 It exists for files that a tool would otherwise pick up from inside the template directory.
 The built-in templates ship their system definition as `{{name}}.asd.tmpl' because a file
 named `{{name}}.asd' is one ASDF finds: with the repository on the source registry, the four
-built-ins defined four systems named `{{name}}', and every Lisp session that loaded a system
-printed a warning for each (#108). Any template file can use the suffix; a file without it is
-written under its own name, so an existing template that ships `{{name}}.asd' still works.")
+built-ins defined four systems named `{{name}}', and ASDF warned about the duplicates in any
+session whose first source-registry scan happened inside a REQUIRE, such as the second run of
+bootstrap.lisp (#108). Any template file can use the suffix; a file without it is written
+under its own name, so an existing template that ships `{{name}}.asd' still works. The suffix
+is removed once, so a file that really ends in `.tmpl' is named `X.tmpl.tmpl' in the
+template.")
 
 (defun %substitute-path (relpath subs)
   "Fill markers in a RELATIVE PATH, and drop +INERT-SUFFIX+ from its end. Templates carry

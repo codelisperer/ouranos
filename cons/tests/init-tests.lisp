@@ -109,8 +109,9 @@ BODY, and remove the directory however BODY exits."
 
 (test asdf-finds-no-template-system-in-this-repository
   ;; #108. With the repository on the source registry as a (:tree ...), ASDF found the four
-  ;; built-in templates' `{{name}}.asd' and printed a warning for each duplicate in every Lisp
-  ;; session that loaded a system. This walks the repository with the function ASDF's own
+  ;; built-in templates' `{{name}}.asd' and warned about the duplicates in any session whose
+  ;; first source-registry scan happened inside a REQUIRE, such as the second run of
+  ;; bootstrap.lisp. This walks the repository with the function ASDF's own
   ;; :tree scan uses, so what it checks is what ASDF would find.
   (let* ((root (uiop:pathname-parent-directory-pathname (asdf:system-source-directory :cons)))
          (found '()))
