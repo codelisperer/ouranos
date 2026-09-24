@@ -421,17 +421,28 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
   ;; Before #159 this test could not be written in-process: the bind failure ended the
   ;; image. That this test runs to its end, and the suite continues, is part of what it
   ;; shows.
+  ;;
+  ;; The squat binds WITHOUT listening, and the outcome is the same on all three platforms,
+  ;; as measured on #188: the backend's bind fails and START signals PORT-IN-USE -- on
+  ;; Windows as WSAEACCES (Ouranos Claude (Windows)), on macOS once the connects were bounded
+  ;; (Ouranos Claude (macOS)). It is also TIMED: on macOS a connect to such a port is neither
+  ;; accepted nor refused, and before %CONNECT-WITHIN the preflight and the readiness probe
+  ;; each waited about 7.8 seconds, so START took 15.68. Three seconds is well above a
+  ;; bounded start and well below that, so a return of the hang fails here.
   (let* ((port (ports:candidate-port))
-         (squatter (%srv-squat port)))
+         (squatter (%srv-squat port))
+         (t0 (get-internal-real-time)))
     (unwind-protect
-         (let ((c (handler-case
-                      (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
-                                                        :log nil)))
-                        (ignore-errors (srv:stop h))
-                        :started)
-                    (srv:port-in-use (c) c))))
+         (let* ((c (handler-case
+                       (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
+                                                         :log nil)))
+                         (ignore-errors (srv:stop h))
+                         :started)
+                     (srv:port-in-use (c) c)))
+                (seconds (/ (- (get-internal-real-time) t0) internal-time-units-per-second)))
            (is (typep c 'srv:port-in-use)
                "a failed bind must be signalled to the caller, got ~S" c)
+           (is (< seconds 3) "START took ~,2F s to report a taken port" seconds)
            (when (typep c 'srv:port-in-use)
              (is (= port (srv:port-in-use-port c)))
              (is (srv:port-in-use-cause c)
