@@ -14,23 +14,6 @@
 (def-suite server :description "The blocking foreground server entry." :in hyperion)
 (in-suite server)
 
-(defun %srv-free-port ()
-  "An unused TCP port, obtained by binding one and letting go."
-  (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
-    (unwind-protect
-         (progn (setf (sb-bsd-sockets:sockopt-reuse-address s) t)
-                (sb-bsd-sockets:socket-bind s #(127 0 0 1) 0)
-                (nth-value 1 (sb-bsd-sockets:socket-name s)))
-      (ignore-errors (sb-bsd-sockets:socket-close s)))))
-
-(defun %srv-listening-p (port &key (host #(127 0 0 1)))
-  "True if something accepts a TCP connection on PORT right now."
-  (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
-    (unwind-protect
-         (handler-case (progn (sb-bsd-sockets:socket-connect s host port) t)
-           (error () nil))
-      (ignore-errors (sb-bsd-sockets:socket-close s)))))
-
 (defun %srv-await (predicate &key (timeout 5) (interval 0.02))
   "Poll PREDICATE until true or TIMEOUT seconds elapse. Returns what it last saw."
   (let ((deadline (+ (get-internal-real-time)
@@ -40,25 +23,40 @@
           when (> (get-internal-real-time) deadline) return nil
           do (sleep interval))))
 
-(defun %srv-await-released (port &key (timeout 10))
-  "Block until nothing accepts on PORT. True if it was released, NIL on timeout.
+(defun %srv-spawn-serve-forever (out &rest options)
+  "Run SERVE-FOREVER on a new thread, printing to OUT, on a candidate port. Returns
+(values THREAD PORT SESSION) once ON-READY has fired, or with SESSION NIL if it did not
+within 10 seconds.
 
-WHY EVERY TEARDOWN WAITS ON THIS (#159). `request-shutdown' returns when the thread that was
-BLOCKED in SERVE-FOREVER has returned; the backend's acceptor giving the socket back is a
-separate event a moment later. A teardown that returns in between leaves a listener winding
-down on a port the OS now considers free -- and `%srv-free-port' hands out a number it has
-already let go of, so the NEXT test in this image can be handed that same number and its bind
-meets the old listener. That is USOCKET:ADDRESS-IN-USE-ERROR raised inside a
-`clack-handler-hunchentoot' thread, which is exactly how it surfaced: one image, sequential
-tests, timing the only variable, and a diff that had nothing to do with hyperion.
-
-THE SUITE ALREADY KNEW HOW TO CHECK THIS AND NEVER DID IT WHERE IT MATTERED. Release is
-asserted in three tests that are ABOUT release -- and in NO teardown. So every test not
-specifically about shutdown could return with an acceptor still closing. `%with-dev-serve'
-states the assumption outright, that \"the join that follows is what makes the NEXT test's free
-port genuinely free\"; the join is on the thread that called SERVE, which is not the thing
-holding the socket. A claim, in a docstring, that nothing checked."
-  (%srv-await (lambda () (not (%srv-listening-p port))) :timeout timeout))
+The port may have been taken since it was chosen (#159). START then signals PORT-IN-USE on
+the server's thread, so the handler below catches it THERE -- unhandled on that thread it
+would end the whole test image -- and another candidate is tried, up to PORTS:+ATTEMPTS+.
+OPTIONS go to SERVE-FOREVER; this helper supplies :PORT, :LOG and :ON-READY."
+  (loop for attempt from 1
+        do (let* ((port (ports:candidate-port))
+                  (ready (sb-thread:make-semaphore :name "test-ready"))
+                  (session nil)
+                  (failure nil)
+                  (thread (sb-thread:make-thread
+                           (lambda ()
+                             (let ((*standard-output* out))
+                               (handler-case
+                                   (apply #'srv:serve-forever (%srv-ok-app)
+                                          :port port :log nil
+                                          :on-ready (lambda (s)
+                                                      (setf session s)
+                                                      (sb-thread:signal-semaphore ready))
+                                          options)
+                                 (srv:port-in-use (c)
+                                   (setf failure c)
+                                   (sb-thread:signal-semaphore ready)))))
+                           :name "hyperion-test-server")))
+             (sb-thread:wait-on-semaphore ready :timeout 10)
+             (cond (session (return (values thread port session)))
+                   (failure
+                    (sb-thread:join-thread thread :timeout 10 :default nil)
+                    (when (>= attempt ports:+attempts+) (error failure)))
+                   (t (return (values thread port nil)))))))
 
 (defmacro %srv-with-globals (bindings &body body)
   "Like LET over special variables, but by SETF-and-restore rather than dynamic binding.
@@ -81,36 +79,20 @@ that configures a special variable and then exercises it on another thread."
 (defmacro %srv-with-serving ((session-var port-var &rest options) &body body)
   "Run SERVE-FOREVER on a background thread; bind PORT-VAR and the SERVER-SESSION captured
 via :on-ready. Shuts down and joins on exit, whatever BODY does."
-  (let ((ready (gensym)) (thread (gensym)) (done (gensym)) (banner (gensym)))
-    `(let* ((,port-var (%srv-free-port))
-            (,ready (sb-thread:make-semaphore :name "test-ready"))
-            (,session-var nil)
-            (,done nil)
-            (,banner (make-string-output-stream))
-            (,thread (sb-thread:make-thread
-                      (lambda ()
-                        (let ((*standard-output* ,banner))
-                          (srv:serve-forever
-                           (%srv-ok-app)
-                           :port ,port-var :log nil
-                           :on-ready (lambda (s)
-                                       (setf ,session-var s)
-                                       (sb-thread:signal-semaphore ,ready))
-                           ,@options)
-                          (setf ,done t)))
-                      :name "hyperion-test-server")))
-       (declare (ignorable ,banner ,done))
-       (unwind-protect
-            (progn
-              (is (sb-thread:wait-on-semaphore ,ready :timeout 10) "server never became ready")
-              ,@body)
-         (when ,session-var (ignore-errors (srv:request-shutdown ,session-var)))
-         (ignore-errors (sb-thread:join-thread ,thread :timeout 10))
-         ;; AND WAIT FOR THE SOCKET, not just for the thread (#159). Asserted rather than
-         ;; merely awaited: a port still accepting ten seconds after shutdown is a leak, and
-         ;; an invariant nothing checks is not an invariant.
-         (is (%srv-await-released ,port-var)
-             "the port was still accepting after teardown -- the next test's free port is not free")))))
+  (let ((thread (gensym)) (banner (gensym)))
+    `(let ((,banner (make-string-output-stream)))
+       (multiple-value-bind (,thread ,port-var ,session-var)
+           (%srv-spawn-serve-forever ,banner ,@options)
+         (unwind-protect
+              (progn
+                (is-true ,session-var "server never became ready")
+                ,@body)
+           (when ,session-var (ignore-errors (srv:request-shutdown ,session-var)))
+           (ignore-errors (sb-thread:join-thread ,thread :timeout 10))
+           ;; AND WAIT FOR THE SOCKET, not just for the thread. Asserted rather than merely
+           ;; awaited: a port still accepting ten seconds after shutdown is a leak.
+           (is (ports:await-released ,port-var)
+               "the port was still accepting after teardown -- the next test's free port is not free"))))))
 
 ;;; --- the thing that was missing -------------------------------------------
 
@@ -119,14 +101,12 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
   ;; both returns control AND releases the socket.
   (%srv-with-serving (session port)
     (is (srv:server-session-p session))
-    ;; Poll rather than assert instantly: ON-READY fires when START returns, which is when
-    ;; the handler EXISTS -- Clack runs the backend on its own thread, so the socket may be
-    ;; a moment behind. (An app that must not proceed until the port answers has
-    ;; hyperion/desktop:wait-until-listening for exactly that.)
-    (is (%srv-await (lambda () (%srv-listening-p port)))
+    ;; START returns once the port is listening (#159), so this could assert at once. The
+    ;; poll is kept because a poll that succeeds immediately costs nothing.
+    (is (%srv-await (lambda () (ports:listening-p port)))
         "the server should be accepting connections")
     (srv:request-shutdown session)
-    (is (%srv-await-released port)
+    (is (ports:await-released port)
         "the port must be released after shutdown")))
 
 (test the-socket-is-released-even-when-the-body-errors
@@ -134,7 +114,7 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
   ;; an unexpected exit makes the NEXT start fail with "address already in use", which is a
   ;; confusing way to find out about the first failure. ON-READY runs inside the protected
   ;; form, so signalling there exercises exactly that path.
-  (let* ((port (%srv-free-port))
+  (let* ((port (ports:candidate-port))
          (thread (sb-thread:make-thread
                   (lambda ()
                     (let ((*standard-output* (make-string-output-stream)))
@@ -144,25 +124,17 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
                                                       (error "boom"))))))
                   :name "hyperion-test-server-err")))
     (ignore-errors (sb-thread:join-thread thread :timeout 10))
-    (is (%srv-await-released port)
+    (is (ports:await-released port)
         "the port must be released even on an unhandled condition")))
 
 (test the-banner-is-printed-and-flushed
-  (let ((out (make-string-output-stream))
-        (port (%srv-free-port))
-        (session nil))
-    (let ((thread (sb-thread:make-thread
-                   (lambda ()
-                     (let ((*standard-output* out))
-                       (srv:serve-forever (%srv-ok-app) :port port :log nil
-                                          :name "Test App"
-                                          :on-ready (lambda (s) (setf session s)))))
-                   :name "hyperion-test-banner")))
-      (%srv-await (lambda () session))
+  (let ((out (make-string-output-stream)))
+    (multiple-value-bind (thread port session)
+        (%srv-spawn-serve-forever out :name "Test App")
       (when session (srv:request-shutdown session))
       (ignore-errors (sb-thread:join-thread thread :timeout 10))
       ;; The socket, not just the thread (#159) -- these two teardowns never waited.
-      (is (%srv-await-released port)
+      (is (ports:await-released port)
           "the port was still accepting after teardown -- the next test's free port is not free")
       (let ((text (get-output-stream-string out)))
         (is (search "Test App" text) "the NAME should title the banner")
@@ -170,21 +142,13 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
         (is (search "Stopped." text) "shutdown should be announced")))))
 
 (test a-nil-banner-prints-nothing-of-its-own
-  (let ((out (make-string-output-stream))
-        (port (%srv-free-port))
-        (session nil))
-    (let ((thread (sb-thread:make-thread
-                   (lambda ()
-                     (let ((*standard-output* out))
-                       (srv:serve-forever (%srv-ok-app) :port port :log nil
-                                          :banner nil
-                                          :on-ready (lambda (s) (setf session s)))))
-                   :name "hyperion-test-quiet")))
-      (%srv-await (lambda () session))
+  (let ((out (make-string-output-stream)))
+    (multiple-value-bind (thread port session)
+        (%srv-spawn-serve-forever out :banner nil)
       (when session (srv:request-shutdown session))
       (ignore-errors (sb-thread:join-thread thread :timeout 10))
       ;; The socket, not just the thread (#159) -- these two teardowns never waited.
-      (is (%srv-await-released port)
+      (is (ports:await-released port)
           "the port was still accepting after teardown -- the next test's free port is not free")
       (is (not (search "serving at" (get-output-stream-string out)))))))
 
@@ -192,7 +156,7 @@ via :on-ready. Shuts down and joins on exit, whatever BODY does."
 ;;; --- the control for the teardown guard (#159) ------------------------------
 
 (test the-release-check-reports-a-port-that-is-still-accepting
-  "THE CONTROL FOR EVERY TEARDOWN ABOVE. Each one now asserts `%srv-await-released', and a
+  "THE CONTROL FOR EVERY TEARDOWN ABOVE. Each one now asserts `ports:await-released', and a
 guard that has only ever been seen to pass is indistinguishable from one that cannot fail --
 especially this one, whose subject is a race nobody can provoke on demand.
 
@@ -201,11 +165,11 @@ than time out into a true. That is deterministic -- no race, no sleep tuned to a
 it is the only direction of this guard that can be made to happen on purpose."
   (%srv-with-serving (session port)
     (is (srv:server-session-p session))
-    (is (%srv-await (lambda () (%srv-listening-p port)))
+    (is (%srv-await (lambda () (ports:listening-p port)))
         "the server should be accepting before this asks about release")
     ;; A short timeout on purpose: the question is what it answers while a listener is there,
     ;; and ten seconds of it answering the same thing would only be slower.
-    (is (null (%srv-await-released port :timeout 0.5))
+    (is (null (ports:await-released port :timeout 0.5))
         "the release check returned true while the port was still accepting")))
 
 ;;; --- shutdown hooks --------------------------------------------------------
@@ -311,8 +275,12 @@ it is the only direction of this guard that can be made to happen on purpose."
                      (lambda (env) (declare (ignore env)) nil)
                      :port port :check-port nil)
                     (is-true t "started without consulting the probe"))
-           (hyperion/server:port-in-use ()
-             (is-true nil ":check-port nil still ran the preflight"))
+           ;; PORT-IN-USE can now come from the backend's own bind (#159), which is correct
+           ;; here: the port IS taken. The preflight's refusal carries no CAUSE; a failed
+           ;; bind carries the backend's error. Only the first means the preflight ran.
+           (hyperion/server:port-in-use (c)
+             (is-true (hyperion/server:port-in-use-cause c)
+                      ":check-port nil still ran the preflight"))
            (error () (is-true t "failed for some other reason, which is fine here")))
       (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
@@ -359,18 +327,21 @@ present or absent -- which is the only way a test can tell the two apart."
   "The whole reason the shim exists: one convention, every backend. HTTP/1.0 is used
 deliberately -- it makes the backend close at the end of the body, so reading to end of
 stream is exact framing whether the backend chunked the response or not."
-  (let* ((port (%srv-free-port))
-         (app (lambda (env)
+  (let* ((app (lambda (env)
                 (declare (ignore env))
                 (list 200 (list :content-type "text/plain; charset=utf-8")
                       (lambda (writer)
                         (funcall writer "one-")
                         (funcall writer "")     ; the ordinary accident: not the end
                         (funcall writer "two")))))
-         (handler (srv:start app :port port :server :hunchentoot)))
+         (port nil)
+         (handler (ports:call-with-port
+                   (lambda (p)
+                     (prog1 (srv:start app :port p :server :hunchentoot)
+                       (setf port p))))))
     (unwind-protect
          (progn
-           (is-true (%srv-await (lambda () (%srv-listening-p port))) "backend came up")
+           (is-true (%srv-await (lambda () (ports:listening-p port))) "backend came up")
            (let ((r (%srv-http-get port "/")))
              (is-true (search "200" r) "~S" r)
              (is-true (search "one-two" r)
@@ -394,17 +365,20 @@ it a fact that stays true -- and this test failing later is the good outcome, be
 would mean the divergence had closed.
 
 It is also the sharpest argument yet for the native path, and it is not a performance one."
-  (let* ((port (%srv-free-port))
-         (app (lambda (env)
+  (let* ((app (lambda (env)
                 (declare (ignore env))
                 (list 200 (list :content-type "text/plain; charset=utf-8")
                       (lambda (writer)
                         (funcall writer "before")
                         (error "boom")))))
-         (handler (srv:start app :port port :server :hunchentoot)))
+         (port nil)
+         (handler (ports:call-with-port
+                   (lambda (p)
+                     (prog1 (srv:start app :port p :server :hunchentoot)
+                       (setf port p))))))
     (unwind-protect
          (progn
-           (is-true (%srv-await (lambda () (%srv-listening-p port))))
+           (is-true (%srv-await (lambda () (ports:listening-p port))))
            (let ((r (%srv-http-get port "/" :version "1.1")))
              (is-true (search "before" r) "what was written before the failure was sent")
              (is-true (search "chunked" (string-downcase r))
@@ -429,3 +403,152 @@ that does not stream -- a far larger blast radius than the feature it enables."
   (let ((odd (srv:wrap-streaming-body (lambda (env) (declare (ignore env)) :not-a-response))))
     (is (eq :not-a-response (funcall odd nil))
         "and a response this wrapper does not understand is passed on, not swallowed")))
+
+;;; --- START knows whether it started (#159) ----------------------------------
+;;;
+;;; START with a Clack backend used to return before the backend had bound its port. When
+;;; the bind then failed, the error was unhandled on the backend's own thread, and under
+;;; --disable-debugger that ends the process: the gate lost every suite still to run.
+
+(defun %srv-squat (port)
+  "Bind PORT on loopback WITHOUT listening, and return the socket. A port held this way is
+invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can fail."
+  (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (sb-bsd-sockets:socket-bind s #(127 0 0 1) port)
+    s))
+
+(test start-signals-port-in-use-in-the-caller-when-the-bind-fails
+  ;; Before #159 this test could not be written in-process: the bind failure ended the
+  ;; image. That this test runs to its end, and the suite continues, is part of what it
+  ;; shows.
+  ;;
+  ;; The squat binds WITHOUT listening, and the outcome is the same on all three platforms,
+  ;; as measured on #188: the backend's bind fails and START signals PORT-IN-USE -- on
+  ;; Windows as WSAEACCES (Ouranos Claude (Windows)), on macOS once the connects were bounded
+  ;; (Ouranos Claude (macOS)). It is also TIMED: on macOS a connect to such a port is neither
+  ;; accepted nor refused, and before %CONNECT-WITHIN the preflight and the readiness probe
+  ;; each waited about 7.8 seconds, so START took 15.68. A bounded start took 1.55 s on an
+  ;; idle Mac, most of it fixed waits (the 0.5 s preflight and a 1 s probe) that stretch on a
+  ;; loaded CI runner, so the bound is 5 seconds: room for a slow runner, and still below
+  ;; the 7.86 s the hang took even with the preflight off.
+  (let* ((port (ports:candidate-port))
+         (squatter (%srv-squat port))
+         (t0 (get-internal-real-time)))
+    (unwind-protect
+         (let* ((c (handler-case
+                       (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
+                                                         :log nil)))
+                         (ignore-errors (srv:stop h))
+                         :started)
+                     (srv:port-in-use (c) c)))
+                (seconds (/ (- (get-internal-real-time) t0) internal-time-units-per-second)))
+           (is (typep c 'srv:port-in-use)
+               "a failed bind must be signalled to the caller, got ~S" c)
+           (is (< seconds 5) "START took ~,2F s to report a taken port" seconds)
+           (when (typep c 'srv:port-in-use)
+             (is (= port (srv:port-in-use-port c)))
+             (is (srv:port-in-use-cause c)
+                 "the backend's own error must be kept, not replaced")))
+      (sb-bsd-sockets:socket-close squatter))))
+
+(test a-listener-already-on-the-port-is-never-taken-for-our-server
+  ;; Another program LISTENING on the port, with SO_REUSEADDR, before START binds it, and the
+  ;; preflight off so that only the bind and the readiness check decide. Each platform's
+  ;; outcome is asserted as measured on #188, not a weaker "either" (Linux here; macOS by
+  ;; Ouranos Claude (macOS); Windows by Ouranos Claude (Windows)):
+  ;;   Linux, macOS  the backend's bind fails: PORT-IN-USE.
+  ;;   Windows       both sockets bind and listen, sharing the port with no error; the
+  ;;                 readiness nonce never comes back from the other listener, so START
+  ;;                 gives up with SERVER-START-TIMEOUT. Before #188 it reported success.
+  (let ((squatter (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address squatter) t)
+    (sb-bsd-sockets:socket-bind squatter #(127 0 0 1) 0)
+    (sb-bsd-sockets:socket-listen squatter 5)
+    (unwind-protect
+         (let* ((port (nth-value 1 (sb-bsd-sockets:socket-name squatter)))
+                (c (let ((srv:*start-timeout* 3))
+                     (handler-case
+                         (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
+                                                           :log nil :check-port nil)))
+                           (ignore-errors (srv:stop h))
+                           :started)
+                       (srv:port-in-use (c) c)
+                       (srv:server-start-timeout (c) c)))))
+           #-win32 (is (typep c 'srv:port-in-use) "expected PORT-IN-USE, got ~S" c)
+           #+win32 (is (typep c 'srv:server-start-timeout)
+                       "expected SERVER-START-TIMEOUT on a shared port, got ~S" c))
+      (sb-bsd-sockets:socket-close squatter))))
+
+(test start-returns-once-the-port-is-listening-and-stop-once-it-is-released
+  ;; No poll on either side: START's return means listening, and STOP's return means the
+  ;; socket is closed, because STOP now waits for the backend's thread.
+  (let* ((port nil)
+         (h (ports:call-with-port
+             (lambda (p)
+               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                 (setf port p))))))
+    (is (ports:listening-p port) "START returned before the port was listening")
+    (srv:stop h)
+    (is (not (ports:listening-p port)) "STOP returned while the port was still accepting")))
+
+(test start-gives-up-after-its-deadline-and-stops-the-server
+  ;; The only way to make readiness never arrive on demand is to replace the probe. The
+  ;; server itself does start; START must stop it rather than leave it running.
+  (let* ((port (ports:candidate-port))
+         (c (let ((srv::*listening-probe* (constantly nil))
+                  (srv:*start-timeout* 1))
+              (handler-case
+                  (progn (srv:start (%srv-ok-app) :port port :server :hunchentoot :log nil)
+                         :returned)
+                (srv:server-start-timeout (c) c)))))
+    (is (typep c 'srv:server-start-timeout) "expected a timeout, got ~S" c)
+    (is (ports:await-released port)
+        "the server START gave up on must not be left holding the port")))
+
+(test an-error-on-the-backend-thread-after-start-is-logged
+  ;; Once START has returned nothing is waiting for the backend thread's errors, so one that
+  ;; ends the thread must be logged, or the server stops serving without a word. The error
+  ;; is forced by interrupting that thread, which is the only way to make one happen after
+  ;; readiness on demand. Logging is captured the way logging-tests does it, and the quiet
+  ;; test default is restored afterwards.
+  (let* ((port nil)
+         (h (ports:call-with-port
+             (lambda (p)
+               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                 (setf port p)))))
+         (thread (srv::clack-server-thread h))
+         (s (make-string-output-stream)))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :error :stream s)
+           (sb-thread:interrupt-thread thread (lambda () (error "forced after start")))
+           (is (%srv-await (lambda () (not (sb-thread:thread-alive-p thread))))
+               "the backend thread should have ended on the forced error")
+           (let ((out (get-output-stream-string s)))
+             (is (search "failed after it started" out)
+                 "an error after START must be logged, got: ~S" out)
+             (is (and (search "hunchentoot" out) (search (princ-to-string port) out)
+                      (not (search "forced after start" out)))
+                 "the line names the backend and port, and not the condition's message: ~S"
+                 out)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*)
+      (ignore-errors (srv:stop h)))))
+
+(test a-normal-stop-logs-no-backend-failure
+  ;; The control for the test above. STOP ends the backend thread by unwinding it, and the
+  ;; backend's own cleanup runs inside the handler that logs errors after START. If that
+  ;; cleanup signalled on every clean shutdown, the error line would appear on every stop and
+  ;; people would learn to ignore it. Three cycles, because one clean stop could be luck.
+  (let ((s (make-string-output-stream)))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :error :stream s)
+           (dotimes (i 3)
+             (let ((h (ports:call-with-port
+                       (lambda (p) (srv:start (%srv-ok-app) :port p :server :hunchentoot
+                                                              :log nil)))))
+               (srv:stop h)))
+           (let ((out (get-output-stream-string s)))
+             (is (not (search "failed after it started" out))
+                 "a normal STOP must not log a backend failure, got: ~S" out)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))))

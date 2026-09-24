@@ -190,6 +190,15 @@
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
 
+(defsystem "hyperion/test-ports"
+  :description "Test support: a candidate port for a test server, and a retry when it is taken."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; Shared by hyperion/tests and hyperion/assets/tests, which each had an identical copy
+  ;; of the helper (#159). Depends on hyperion for the PORT-IN-USE condition it handles.
+  :depends-on ("hyperion" (:require "sb-bsd-sockets"))
+  :components ((:file "tests/ports")))
+
 (defsystem "hyperion/assets/tests"
   :description "Tests for the vendored-asset embedding and Bulma theming."
   :author "Bob <eternal.recursion@proton.me>"
@@ -201,7 +210,7 @@
   ;; rather than Woo so the suite needs no libev (ADR-0011, and pre-publication issue 139 left the backend to
   ;; the consumer -- here the consumer is the test).
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
-               "fiveam" "ironclad" "clack-handler-hunchentoot"
+               "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests"))
@@ -421,7 +430,7 @@
 (defsystem "hyperion/tests"
   :description "Test suite for Hyperion."
   :depends-on ("hyperion" "hyperion/import" "aion/log"   ; suite, csrf and logging tests call log:
-               "fiveam" "aion/test-threads"
+               "fiveam" "aion/test-threads" "hyperion/test-ports"
                "sb-bsd-sockets"    ; server-tests: a free port, and "is it listening?"
                ;; TEST-ONLY: an in-memory octet input stream, to hand BODY-STRING a body
                ;; without a socket (pre-publication issue 211). Already present transitively via clack --
@@ -446,9 +455,9 @@
                              (:file "router-tests")
                              (:file "server-tests")
                              ;; AFTER server-tests, which is not alphabetical and not an
-                             ;; accident: it reuses that file's %SRV-FREE-PORT /
-                             ;; %SRV-LISTENING-P / %SRV-AWAIT rather than keeping a second
-                             ;; copy of them (pre-publication issue 336).
+                             ;; accident: it reuses that file's %SRV-OK-APP and %SRV-AWAIT
+                             ;; rather than keeping a second copy of them (pre-publication issue 336). The port
+                             ;; helpers are in hyperion/test-ports (#159).
                              (:file "dev-serve-tests")
                              (:file "backend-tests")
                              (:file "session-tests")

@@ -17,7 +17,8 @@
 (cl:defpackage #:hyperion/assets/tests
   (:use #:cl #:fiveam)
   (:local-nicknames (#:assets #:hyperion/assets)
-                    (#:router #:hyperion/router)))
+                    (#:router #:hyperion/router)
+                    (#:ports #:hyperion/test-ports)))
 
 (in-package #:hyperion/assets/tests)
 
@@ -199,15 +200,6 @@ rather than quietly serve the current bytes."
 ;;; keep-alive, so EOF ends the body and a SHORT body (the bug) reads as short rather
 ;;; than hanging.
 
-(defun %free-port ()
-  "An OS-assigned free TCP port, released before it is returned."
-  (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
-    (unwind-protect
-         (progn (setf (sb-bsd-sockets:sockopt-reuse-address s) t)
-                (sb-bsd-sockets:socket-bind s #(127 0 0 1) 0)
-                (nth-value 1 (sb-bsd-sockets:socket-name s)))
-      (ignore-errors (sb-bsd-sockets:socket-close s)))))
-
 (defun %raw-get (port path)
   "GET PATH from 127.0.0.1:PORT over a raw socket. Returns the whole response as
 octets -- headers and body -- with no decoding anywhere."
@@ -243,27 +235,23 @@ octets -- headers and body -- with no decoding anywhere."
           finally (return (values (sb-ext:octets-to-string octets :external-format :latin-1)
                                   #())))))
 
-(defun %await-listening (port &key (tries 100) (pause 0.05))
-  "Block until PORT accepts a connection. hyperion/server:START clacks up with
-:use-thread t, so it returns BEFORE the socket is listening -- connecting immediately
-races it and loses (CONNECTION-REFUSED)."
-  (loop repeat tries
-        do (let ((s (make-instance 'sb-bsd-sockets:inet-socket
-                                   :type :stream :protocol :tcp)))
-             (unwind-protect
-                  (handler-case (progn (sb-bsd-sockets:socket-connect s #(127 0 0 1) port)
-                                       (return t))
-                    (error () (sleep pause)))
-               (ignore-errors (sb-bsd-sockets:socket-close s))))
-        finally (error "server on port ~D never started listening" port)))
-
 (defmacro %with-asset-server ((port) &body body)
-  "Run BODY against a live server mounting the vendored assets, on a free PORT."
-  `(let* ((,port (%free-port))
-          (app (router:to-app (router:router (assets:mount))))
-          (handler (hyperion/server:start app :port ,port :host "127.0.0.1" :log nil)))
-     (unwind-protect (progn (%await-listening ,port) ,@body)
-       (ignore-errors (hyperion/server:stop handler)))))
+  "Run BODY against a live server mounting the vendored assets, with PORT bound to its port.
+
+HYPERION/SERVER:START returns once the port is listening, and signals PORT-IN-USE if the
+candidate port was taken, in which case PORTS:CALL-WITH-PORT tries another (#159). The
+teardown waits until the port stops accepting, as the server-tests teardowns do."
+  (let ((handler (gensym "HANDLER")))
+    `(let* ((app (router:to-app (router:router (assets:mount))))
+            (,port nil)
+            (,handler (ports:call-with-port
+                       (lambda (p)
+                         (prog1 (hyperion/server:start app :port p :host "127.0.0.1" :log nil)
+                           (setf ,port p))))))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (hyperion/server:stop ,handler))
+         (is (ports:await-released ,port)
+             "the port was still accepting after teardown")))))
 
 (test every-asset-arrives-byte-for-byte-over-http
   ;; The regression test for pre-publication issue 148, and the one that would have caught it. Not "the

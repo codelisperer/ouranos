@@ -236,12 +236,18 @@ where the answer is always yes cannot ask this question."
 
 (define-condition port-in-use (error)
   ((host :initarg :host :reader port-in-use-host)
-   (port :initarg :port :reader port-in-use-port))
+   (port :initarg :port :reader port-in-use-port)
+   (cause :initarg :cause :initform nil :reader port-in-use-cause
+          :documentation "The backend's own error when its bind failed, or NIL when START
+refused before binding because the port was already answering."))
   (:report
    (lambda (c stream)
      (let ((host (port-in-use-host c)) (port (port-in-use-port c)))
-       (format stream "hyperion/server: ~A:~D is already answering -- something is listening there.~%"
-               host port)
+       (if (port-in-use-cause c)
+           (format stream "hyperion/server: could not bind ~A:~D -- the port is taken (~A).~%"
+                   host port (port-in-use-cause c))
+           (format stream "hyperion/server: ~A:~D is already answering -- something is listening there.~%"
+                   host port))
        (format stream "~%This is almost always a sibling application's dev server. The symptom if~%")
        (format stream "it is not caught here is much worse than this error: a window opens onto~%")
        (format stream "the OTHER application -- its title, its routes, and a 404 for everything~%")
@@ -253,7 +259,67 @@ where the answer is always yes cannot ask this question."
        #+win32   (format stream "  netstat -ano | findstr :~D~%" port)
        (format stream "~%Then pick another port, or pass :check-port nil to start anyway.~%"))))
   (:documentation
-   "Signalled by START when the requested port is already answering (pre-publication issue 238)."))
+   "Signalled by START when the requested port is taken: either it was already answering
+before START tried to bind it, or the backend's bind failed (#159), in which case CAUSE
+holds the backend's error."))
+
+(define-condition server-start-timeout (error)
+  ((host :initarg :host :reader server-start-timeout-host)
+   (port :initarg :port :reader server-start-timeout-port)
+   (seconds :initarg :seconds :reader server-start-timeout-seconds))
+  (:report
+   (lambda (c stream)
+     (format stream "hyperion/server: the server on ~A:~D neither started listening nor reported an error within ~D seconds; it has been stopped."
+             (server-start-timeout-host c) (server-start-timeout-port c)
+             (server-start-timeout-seconds c))))
+  (:documentation
+   "Signalled by START when a Clack backend has not started listening within
+*START-TIMEOUT* seconds and has not reported an error either. START stops it first."))
+
+(defvar *start-timeout* 10
+  "Seconds START waits for a Clack backend to start listening before it gives up and
+signals SERVER-START-TIMEOUT.")
+
+(defun %connect-address (host)
+  "HOST as an address to connect to. 0.0.0.0 means every interface when binding, and is
+reached through loopback."
+  (sb-bsd-sockets:make-inet-address (if (string= host "0.0.0.0") "127.0.0.1" host)))
+
+(defun %connect-within (sock address port seconds)
+  "Connect SOCK to ADDRESS:PORT, giving up after SECONDS. True if connected, NIL otherwise;
+never signals. SOCK is left in blocking mode, ready for a stream.
+
+A timeout that actually stops the connect. SB-SYS:WITH-DEADLINE around a blocking connect
+does not: on macOS a connect to a port that is bound but not listening is neither accepted
+nor refused, and the blocking connect ran about 7.8 seconds whatever the deadline (measured
+by Ouranos Claude (macOS) on #188). So on Unix the connect is non-blocking, and the wait for
+it is SB-SYS:WAIT-UNTIL-FD-USABLE with a timeout. Windows keeps the blocking connect: there
+a non-blocking connect signals INTERRUPTED-ERROR rather than OPERATION-IN-PROGRESS, and a
+blocking connect to a bound-but-not-listening port is refused after about 2.05 s rather than
+hanging (both measured by Ouranos Claude (Windows) on #188). That is measured for loopback,
+which is START's host almost always; a Windows connect to an address that silently drops
+packets would instead wait out Windows' own TCP connect timeout, about 21 s, which the
+deadline does not shorten."
+  (handler-case
+      #-win32
+      (progn
+        (setf (sb-bsd-sockets:non-blocking-mode sock) t)
+        (prog1
+            (handler-case (progn (sb-bsd-sockets:socket-connect sock address port) t)
+              (sb-bsd-sockets:operation-in-progress ()
+                (and (sb-sys:wait-until-fd-usable (sb-bsd-sockets:socket-file-descriptor sock)
+                                                  :output seconds)
+                     ;; Writable means the attempt FINISHED, not that it succeeded: a refused
+                     ;; connect is writable too. Only a connected socket has a peer.
+                     (handler-case (progn (sb-bsd-sockets:socket-peername sock) t)
+                       (error () nil)))))
+          (setf (sb-bsd-sockets:non-blocking-mode sock) nil)))
+      #+win32
+      (sb-sys:with-deadline (:seconds seconds)
+        (sb-bsd-sockets:socket-connect sock address port)
+        t)
+    (sb-sys:deadline-timeout () nil)
+    (error () nil)))
 
 (defun port-answering-p (host port &key (timeout 0.5))
   "Is something already listening on HOST:PORT?
@@ -266,26 +332,28 @@ work, and then does not, with no error in either direction. A bind-probe would t
 answer a different question on the one platform where the answer matters most.
 
 Fail-open: anything unexpected reports NIL (not answering), because this guard must never
-be the reason a server refuses to start."
-  (handler-case
-      (sb-sys:with-deadline (:seconds timeout)
-        (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
-                                   :type :stream :protocol :tcp)))
-          (unwind-protect
-               (progn (sb-bsd-sockets:socket-connect
-                       sock (sb-bsd-sockets:make-inet-address
-                             (if (string= host "0.0.0.0") "127.0.0.1" host))
-                       port)
-                      t)
-            (ignore-errors (sb-bsd-sockets:socket-close sock)))))
-    (sb-sys:deadline-timeout () nil)
-    (error () nil)))
+be the reason a server refuses to start. The connect is bounded by %CONNECT-WITHIN, which on
+macOS matters: a connect to a port that is bound but not listening is neither accepted nor
+refused there, and a plain blocking connect waited about 7.8 seconds (measured by Ouranos
+Claude (macOS) on #188)."
+  (let ((sock (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect (%connect-within sock (%connect-address host) port timeout)
+      (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t))
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
-the returned handler differs between the two and STOP takes either. DEBUG nil (the
+the returned handler differs between the two and STOP takes either.
+
+START RETURNS ONCE THE PORT IS LISTENING, on every backend (#159). A port that is taken
+signals PORT-IN-USE here, in the caller, whether START saw it answering beforehand or the
+backend's bind failed; with a Clack backend the bind happens on the server's own thread,
+and START waits for it. If a Clack backend neither listens nor fails within
+*START-TIMEOUT* seconds, START stops it and signals SERVER-START-TIMEOUT. Readiness is the
+server answering a one-time nonce, so another program on the port is never taken for this
+server. The one case that remains is Windows letting two sockets that both set SO_REUSEADDR
+share a port; what START does on each platform is described above %CLACK-START. DEBUG nil (the
 default) returns a 500 on an unhandled error instead of dropping into the debugger
 -- right for a server, and the only behaviour the native backend has.
 
@@ -318,11 +386,266 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
        ;; caller-supplied one precisely so the framing cannot disagree with the bytes. So
        ;; wrapping here would spend a UTF-8 length pass on every response to compute a
        ;; header that is then thrown away.
-       (%uv-call "START" wrapped :port port :host host))
+       ;; The native backend binds in THIS thread, so a taken port already signals here.
+       ;; It is translated so that a caller handles one condition whatever the backend.
+       ;;
+       ;; NO NONCE HERE, and that is not an omission (#188). The Clack path needs one because
+       ;; its bind happens on another thread after START could otherwise return. Here the
+       ;; bind and the listen both happen before %UV-CALL returns, in this thread, so a
+       ;; failed bind is signalled here and a returned START already means this server's
+       ;; own socket is listening. What this does NOT cover is a port another socket
+       ;; SHARES, which Windows allows when both set SO_REUSEADDR: whether libuv's listen
+       ;; socket can share a port that way on Windows has not been measured.
+       (handler-bind ((error (lambda (e)
+                               (when (%address-in-use-p e)
+                                 (error 'port-in-use :host host :port port :cause e)))))
+         (%uv-call "START" wrapped :port port :host host)))
       (t
-       (clack:clackup (wrap-content-length (wrap-streaming-body wrapped))
-                      :server server :port port :address host
-                      :use-thread t :debug debug)))))
+       (%clack-start (wrap-content-length (wrap-streaming-body wrapped))
+                     server host port debug)))))
+
+;;; --- the Clack path: a start that knows whether it started (#159) ---------
+;;;
+;;; `clackup :use-thread t' returns as soon as it has created the thread that will bind
+;;; the port. The bind happens afterwards, on that thread, so a caller got a handler for a
+;;; server that might never exist -- and when the bind failed, the error was unhandled on a
+;;; thread nobody was watching, which under --disable-debugger ENDS THE PROCESS. That is
+;;; how HYPERION/TESTS aborted whole gate runs with USOCKET:ADDRESS-IN-USE-ERROR, and an
+;;; application whose port is taken dies the same way.
+;;;
+;;; So START runs clackup with :use-thread NIL on a thread of its own, inside a handler that
+;;; records the error, and waits until the port answers, the thread records an error, or
+;;; the thread ends. A bind failure becomes PORT-IN-USE in the caller.
+;;;
+;;; READINESS COMES FROM THE SERVER, NOT THE PORT (#188). Neither Clack backend exposes a
+;;; "now listening" signal to the caller (Clack keeps the Hunchentoot acceptor inside its own
+;;; thread, and Woo has no hook), and a bare connect to the port is answered by ANY listener:
+;;; measured on Linux, a program already listening there, or a second hyperion server, made
+;;; START report success while requests reached the other one. So START asks for a path
+;;; carrying a random nonce that only its own server knows (%START-PROBE-ANSWERED-P), and a
+;;; different listener cannot give the answer.
+;;;
+;;; WHAT THAT LEAVES, PER PLATFORM, when another socket holds the port before the bind:
+;;;   Linux    the backend's bind fails, and START signals PORT-IN-USE.
+;;;   Windows  if the holder did NOT set SO_REUSEADDR, the bind fails with WSAEACCES and
+;;;            START signals PORT-IN-USE. If it DID -- as a second Hunchentoot server does --
+;;;            Windows lets both sockets bind and listen, with no error anywhere (measured by
+;;;            Ouranos Claude (Windows) on #188). START then either gets its own nonce back,
+;;;            and returns with the port still shared, or never does and signals
+;;;            SERVER-START-TIMEOUT. A shared port cannot be prevented or detected from here.
+;;;   macOS    the backend's bind fails, and START signals PORT-IN-USE, in every case measured
+;;;            on both backends -- bound or listening, with or without SO_REUSEADDR, or another
+;;;            hyperion server. With the preflight on, START reported it in 1.55 s (measured by
+;;;            Ouranos Claude (macOS) on #188).
+
+(defstruct (clack-server (:constructor %make-clack-server) (:copier nil))
+  "What START returns for a Clack backend. STOP takes it."
+  (thread nil)
+  (server nil)
+  (host nil)
+  (port nil))
+
+(defparameter +address-taken-errnos+
+  #+linux '(98) #+darwin '(48)
+  #+win32 '(10048 10013)
+  #-(or linux darwin win32) '()
+  "Socket error numbers that mean the port is taken, on this OS.
+
+EADDRINUSE on Linux (98) and macOS (48). On Windows, WSAEADDRINUSE (10048) is what a plain
+second bind gets, but a bind WITH SO_REUSEADDR -- which is how usocket, and therefore
+Hunchentoot, binds -- gets WSAEACCES (10013) when another socket holds the port without it.
+Measured by Ouranos Claude (Windows) on #188. 10013 can also mean a port in a range Windows
+reserves, which to a caller is the same answer: this port cannot be had.")
+
+(defun %errno-slot (condition)
+  "The socket error number CONDITION carries, or NIL. Woo's OS-ERROR keeps it in a slot
+named CODE and SB-BSD-SOCKETS:SOCKET-ERROR in one named ERRNO; neither exports a reader."
+  (dolist (slot (sb-mop:class-slots (class-of condition)) nil)
+    (let ((name (sb-mop:slot-definition-name slot)))
+      (when (and (member (symbol-name name) '("CODE" "ERRNO") :test #'string=)
+                 (slot-boundp condition name)
+                 (integerp (slot-value condition name)))
+        (return (slot-value condition name))))))
+
+(defun %address-in-use-p (condition)
+  "Whether CONDITION is a backend saying the port is taken. Each backend signals its own
+condition: USOCKET:ADDRESS-IN-USE-ERROR under Hunchentoot on Unix, a SOCKET-ERROR whose errno
+is WSAEACCES under Hunchentoot on Windows, an OS-ERROR whose code is EADDRINUSE under Woo, and
+a UV-ERROR saying \"address already in use\" under :uv."
+  (or (search "ADDRESS-IN-USE" (symbol-name (type-of condition)))
+      (search "address already in use" (princ-to-string condition) :test #'char-equal)
+      (and (member (%errno-slot condition) +address-taken-errnos+) t)))
+
+(defun %receive-within (sock seconds limit)
+  "Read from SOCK until the peer closes, LIMIT octets have arrived, or SECONDS have passed,
+and return what arrived as a string. Never signals.
+
+Each read is preceded by SB-SYS:WAIT-UNTIL-FD-USABLE with what is left of one overall
+deadline, because that wait is the only bound that works on every platform: on Windows a
+stream's :TIMEOUT does not bound a socket read, and neither does SB-SYS:WITH-DEADLINE -- the
+readiness probe read from a listener that never answered for over fifteen minutes, while
+the wait timed out after 1.015 s (measured by Ouranos Claude (Windows) on #188)."
+  (let ((fd (sb-bsd-sockets:socket-file-descriptor sock))
+        (buffer (make-array 1024 :element-type '(unsigned-byte 8)))
+        (got (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+        (deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (handler-case
+        (loop
+          (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+            (when (or (<= left 0) (>= (length got) limit)
+                      (not (sb-sys:wait-until-fd-usable fd :input left)))
+              (return))
+            (multiple-value-bind (buf n) (sb-bsd-sockets:socket-receive sock buffer nil)
+              (declare (ignore buf))
+              (when (or (null n) (zerop n)) (return))
+              (loop for i below n do (vector-push-extend (aref buffer i) got)))))
+      (error () nil))
+    (sb-ext:octets-to-string (coerce got '(simple-array (unsigned-byte 8) (*)))
+                             :external-format :latin-1)))
+
+(defun %start-probe-answered-p (host port path nonce)
+  "Send one HTTP/1.0 GET for PATH to HOST:PORT and report whether the reply contains NONCE.
+
+This is START's readiness check, and it asks the SERVER rather than the port: only the
+server START just started knows NONCE, so a different program listening on the same port
+cannot answer it. A raw socket rather than an HTTP client library, because hyperion/server
+takes no HTTP-client dependency, and no stream, because a stream's read timeout does not hold
+on Windows (%RECEIVE-WITHIN). The connect and the read each have a limit of about a second,
+so a listener that accepts and never answers costs one poll, not the whole of
+*START-TIMEOUT*. Never signals: anything unexpected is simply not an answer."
+  (let ((sock (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (handler-case
+             (when (%connect-within sock (%connect-address host) port 1)
+               (sb-bsd-sockets:socket-send
+                sock (sb-ext:string-to-octets
+                      (format nil "GET ~A HTTP/1.0~C~CHost: ~A~C~C~C~C"
+                              path #\Return #\Newline host #\Return #\Newline #\Return #\Newline)
+                      :external-format :latin-1)
+                nil)
+               ;; A reply is a few hundred octets; stop well past that rather than read
+               ;; whatever an unknown listener chooses to send.
+               (and (search nonce (%receive-within sock 1 4096)) t))
+           (error () nil))
+      (ignore-errors (sb-bsd-sockets:socket-close sock)))))
+
+(defvar *listening-probe* '%start-probe-answered-p
+  "How %CLACK-START asks whether its own server is answering: a function of HOST, PORT,
+PATH and NONCE. Internal; a test binds it to a probe that never answers, which is the only
+way to make the timeout path happen on demand.")
+
+(defun %start-nonce ()
+  "128 random bits as hex, from aion/random rather than CL:RANDOM, which hyperion/src does
+not use (pre-publication issue 95). Secrecy is not the point here -- the nonce only has to
+be something no other program on the port would reply with."
+  (aion/random:random-hex 128))
+
+(defun %clack-start (app server host port debug)
+  "Start APP on a Clack backend and return a CLACK-SERVER once that server answers. Signals
+PORT-IN-USE if the bind fails, the backend's own error for any other failure, and
+SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*.
+
+APP is wrapped OUTERMOST so that, until START returns, one path answers with a random nonce
+and nothing else: the probe request never reaches APP or any of its middleware, so it
+creates no session, is not logged and meets no CSRF or auth check. After START returns,
+every request is forwarded to APP, that path included; what remains is one check of a flag
+per request."
+  (let* ((failure nil)
+         (started nil)
+         (lock (sb-thread:make-mutex :name "hyperion-server-start"))
+         (nonce (%start-nonce))
+         (probe-path (format nil "/.hyperion-start-probe/~A" nonce))
+         (probe-reply (list 200 (list :content-type "text/plain"
+                                      :content-length (length nonce))
+                            (list nonce)))
+         (served (lambda (env)
+                   (if (and (not started) (equal (getf env :path-info) probe-path))
+                       probe-reply
+                       (funcall app env))))
+         (out *standard-output*)
+         (err *error-output*)
+         ;; THREAD-LIFETIME: independent -- the server runs for as long as it serves, not
+         ;; for the START call that created it; the only bindings it needs, the caller's
+         ;; output streams, are passed to it explicitly below.
+         (thread
+           (sb-thread:make-thread
+            (lambda ()
+              ;; A dynamic binding does not cross into a new thread, so the caller's
+              ;; streams are passed explicitly, as `clackup :use-thread t' did.
+              ;; FAILURE is the FIRST error, recorded by HANDLER-BIND before anything
+              ;; unwinds. Recording the one HANDLER-CASE catches would be wrong under
+              ;; Hunchentoot: when its bind fails, Clack's cleanup calls HUNCHENTOOT:STOP on
+              ;; an acceptor that never started, which signals UNBOUND-SLOT on the way out
+              ;; and would replace the address-in-use error with one about a slot. The
+              ;; HANDLER-BIND is INSIDE the HANDLER-CASE because the innermost handler runs
+              ;; first: outside, the HANDLER-CASE would unwind before it was ever asked.
+              ;;
+              ;; AFTER START HAS RETURNED, the same error is LOGGED instead. Nothing is
+              ;; waiting for FAILURE any more, and under Woo the event loop itself runs on
+              ;; this thread, so a loop that fails ends the thread and the server stops
+              ;; serving. Unlogged, that would be a server that stops without a word, which
+              ;; is worse for an application than the crash it replaced. STARTED and FAILURE
+              ;; are read and written under LOCK, so an error cannot fall between START
+              ;; deciding it is ready and START returning.
+              (let ((*standard-output* out) (*error-output* err))
+                (handler-case
+                    (handler-bind
+                        ((error (lambda (e)
+                                  (let ((after-start nil))
+                                    (sb-thread:with-mutex (lock)
+                                      (if started
+                                          (setf after-start t)
+                                          (unless failure (setf failure e))))
+                                    (when after-start
+                                      (log:error "hyperion/server: the backend failed after it started, and has stopped serving"
+                                                 :backend (string-downcase (symbol-name server))
+                                                 :host host :port port
+                                                 :condition-type (prin1-to-string (type-of e))))))))
+                      (clack:clackup served :server server :port port :address host
+                                            :use-thread nil :debug debug))
+                  (error () nil))))
+            :name (format nil "hyperion-server-~(~A~)" server)))
+         (deadline (+ (get-internal-real-time)
+                      (* *start-timeout* internal-time-units-per-second))))
+    ;; A bind that fails does so within milliseconds of the thread starting. Give it up to
+    ;; 200 ms to say so before the first probe, because a probe can itself cost seconds: on
+    ;; Windows a connect to a port that is bound but not listening is refused only after
+    ;; about 2.05 s, and a first probe sent before the failure was recorded made START take
+    ;; 4.11 s to report a taken port (measured by Ouranos Claude (Windows) on #188).
+    (loop repeat 10
+          until (or failure (not (sb-thread:thread-alive-p thread)))
+          do (sleep 0.02))
+    (loop
+      (cond
+        (failure
+         (ignore-errors (sb-thread:join-thread thread :timeout 5 :default nil))
+         (if (%address-in-use-p failure)
+             (error 'port-in-use :host host :port port :cause failure)
+             (error failure)))
+        ((not (sb-thread:thread-alive-p thread))
+         ;; Ended without recording an error: the backend returned without serving.
+         (error "hyperion/server: the ~(~A~) backend on ~A:~D stopped before it started listening"
+                server host port))
+        ((and (funcall *listening-probe* host port probe-path nonce)
+              ;; Ready, unless an error was recorded in the moment before STARTED is set;
+              ;; if one was, the next iteration takes the FAILURE branch.
+              (sb-thread:with-mutex (lock)
+                (unless failure (setf started t))))
+         (return (%make-clack-server :thread thread :server server :host host :port port)))
+        ((> (get-internal-real-time) deadline)
+         (%stop-clack-server thread)
+         (error 'server-start-timeout :host host :port port :seconds *start-timeout*))
+        (t (sleep 0.02))))))
+
+(defun %stop-clack-server (thread)
+  "Stop the thread running a Clack backend and wait for it to end.
+
+Terminating the thread unwinds it, and the backend's own UNWIND-PROTECT closes its socket
+on the way out. Waiting for the thread is what makes the socket closed when STOP returns;
+`clack:stop' sleeps half a second instead."
+  (when (sb-thread:thread-alive-p thread)
+    (ignore-errors (sb-thread:terminate-thread thread))
+    (ignore-errors (sb-thread:join-thread thread :timeout 10 :default nil))))
 
 (defun stop (handler)
   "Stop a server started by START -- either kind.
@@ -331,9 +654,10 @@ Dispatches on the HANDLER, not on a remembered backend name, because the handler
 callers actually hold: SERVE-FOREVER keeps it in a session, apps keep it in a variable, and
 a STOP that also needed the name would be a second value to thread through every one of
 them."
-  (if (%uv-server-p handler)
-      (%uv-call "STOP" handler)
-      (clack:stop handler)))
+  (cond
+    ((%uv-server-p handler) (%uv-call "STOP" handler))
+    ((clack-server-p handler) (%stop-clack-server (clack-server-thread handler)) t)
+    (t (clack:stop handler))))
 
 ;;; --- running in the foreground --------------------------------------------
 ;;;
@@ -465,11 +789,10 @@ Every `main` in the tree should be a call to this.
 NAME titles the derived banner. BANNER replaces the whole line; pass NIL for no banner at
 all (the default, :DERIVE, builds one from NAME/host/port).
 ON-READY, if given, is called with the SERVER-SESSION once START has returned and the
-banner is printed -- the seam a supervisor or a desktop shell hangs off. Note that this
-means the handler EXISTS, not that the port is already accepting: Clack runs the backend on
-its own thread. Something that must not proceed until the socket answers should use
-HYPERION/DESKTOP:WAIT-UNTIL-LISTENING, which exists for that. SIGNALS NIL skips signal
-installation, for an app that owns its own.
+banner is printed -- the seam a supervisor or a desktop shell hangs off. START returns only
+once the port is listening, so by then the socket answers (#159; until then this said the
+opposite, because a Clack backend bound its port after START had returned). SIGNALS NIL
+skips signal installation, for an app that owns its own.
 
 Shutdown is guaranteed on every exit path: Ctrl-C, SIGTERM, REQUEST-SHUTDOWN, or an
 unhandled condition. The socket is released, *SHUTDOWN-HOOKS* run, and the previous signal
