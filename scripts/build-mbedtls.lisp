@@ -130,9 +130,14 @@ are written down rather than left to the next failed build.")
 what distinguishes a library from a file of the right size: on Windows a missing export
 table is the expected failure mode, not an exotic one.")
 
-(defparameter *export-prefixes* '("mbedtls_" "psa_" "ouranos_tls_")
+(defparameter *export-prefixes* '("mbedtls_" "psa_" "tf_psa_crypto_" "ouranos_tls_")
   "The prefixes of the names the library exports: mbedTLS's own, and ours. The Windows .def
-is written from these, so a name with any other prefix is not exported there.")
+is written from these, so a name with any other prefix is not exported there.
+
+tf_psa_crypto_ covers the three tf_psa_crypto_version_* functions. The Linux library exports
+them, and they are the only names it exports outside the other three prefixes (nm -D, #273).
+Without this prefix the first Windows build exported 1,245 names to Linux's 1,251, so one
+library would have offered a different API on one OS.")
 
 (defun %exported-name-p (name)
   (some (lambda (prefix) (eql 0 (search prefix name))) *export-prefixes*))
