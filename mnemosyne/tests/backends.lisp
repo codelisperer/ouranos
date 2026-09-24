@@ -221,6 +221,11 @@ tells you a thing is broken but not where, which is half of a bug report."
     (format stream "  Postgres was NOT exercised. This run says nothing about the backend~%")
     (format stream "  the docs tell you to deploy on. Set ~A to change that.~%"
             +pg-url-var+))
+  ;; Which SQLite file the SQLite checks above ran against, and its version (#129). Printed
+  ;; on every run, including when it is the expected one: on Windows another program's
+  ;; sqlite3.dll once carried these checks for months, and nothing in the output said so.
+  ;; scripts/verify-tree.lisp repeats this line under the suite's result.
+  (format stream "SQLITE-LIBRARY ~A~%" (mnemosyne/sqlite-library:describe-loaded-library))
   (finish-output stream))
 
 ;;; --- the runner ------------------------------------------------------------

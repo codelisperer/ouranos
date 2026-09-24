@@ -673,6 +673,15 @@ storage engine and have nothing to say here."
               (push (cons (subseq rest 0 sp) (string-trim " " (subseq rest (1+ sp))))
                     out))))))))
 
+(defun sqlite-library-line (output)
+  "The rest of the `SQLITE-LIBRARY ' line in OUTPUT (\"<version> <path>\" or \"UNKNOWN
+(<reason>)\"), or NIL if there is none. mnemosyne/tests prints it with its coverage banner."
+  (dolist (line (uiop:split-string output :separator '(#\Newline)) nil)
+    (let ((trimmed (string-trim '(#\Space #\Tab #\Return) line))
+          (marker "SQLITE-LIBRARY "))
+      (when (uiop:string-prefix-p marker trimmed)
+        (return (subseq trimmed (length marker)))))))
+
 (defun coverage-problems (coverage)
   "The reasons COVERAGE is not acceptable, as a list of strings. Empty means fine."
   (let ((problems '()))
@@ -1019,6 +1028,16 @@ let this run claim `view' while the five assertions skipped."
           (when coverage
             (dolist (cell coverage)
               (format t "          backend ~a: ~a~%" (car cell) (cdr cell)))
+            ;; Which SQLite library those checks ran on (#129). Reported, never judged: the
+            ;; pinned version is provisioned only on Windows, and elsewhere the OS copy is the
+            ;; expected one, so there is no single right answer for the gate to enforce. What
+            ;; it prevents is a leg whose SQLite nobody can name. Only for a suite that ran
+            ;; SQLite checks: praxeon/memory-db reports Postgres coverage alone and has no
+            ;; SQLite to name.
+            (when (assoc "sqlite" coverage :test #'string=)
+              (format t "          sqlite library: ~a~%"
+                      (or (sqlite-library-line text)
+                          "NOT REPORTED (the suite ran SQLite checks and printed no SQLITE-LIBRARY line)")))
             ;; An excused skip is not a problem for the verdict, but it is a gap in what the
             ;; run covered, so NOT COVERED names it (#171).
             (let ((pg (assoc "postgres" coverage :test #'string=)))

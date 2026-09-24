@@ -115,6 +115,22 @@ request threads, then failed with BUSY at once instead of waiting a few millisec
 other to commit. Read when CONNECT opens the connection; bind it around CONNECT to change it for
 one connection.")
 
+(defvar *sqlite-library-logged* nil
+  "True once CONNECT has logged which SQLite library this image uses (#129). Once per image,
+because the library cannot change while the image runs.")
+
+(defun %log-sqlite-library-once ()
+  "Log, at :info and once per image, the SQLite library file and version the first SQLite
+connection runs on. Logged when things work, not only when they fail: a working connection
+through the wrong library looks exactly like one through the right library, and this line is
+where the difference shows."
+  (unless *sqlite-library-logged*
+    (setf *sqlite-library-logged* t)
+    (destructuring-bind (&key path version error) (sqlite-library:loaded-library)
+      (if error
+          (log:info "db sqlite library unknown" :reason error)
+          (log:info "db sqlite library" :version version :path path)))))
+
 (defun connect (backend)
   "Open a CL-DBI connection for BACKEND (a mnemosyne/backend:Backend). Postgres speaks
 the wire protocol (cl-postgres, no libpq); SQLite is a local file or \":memory:\" -- and a
@@ -129,6 +145,7 @@ is why the argument is always supplied."
       (cond
         ((string= name "sqlite")
          (log:debug "db connect" :backend name :busy-timeout-ms *sqlite-busy-timeout-ms*)
+         (%log-sqlite-library-once)
          (dbi:connect :sqlite3
                       :database-name (%ensure-sqlite-directory (be:sqlite-path backend))
                       :busy-timeout *sqlite-busy-timeout-ms*))
