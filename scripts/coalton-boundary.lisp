@@ -22,8 +22,10 @@
 ;;;;      tracked .lisp file, that resolves to the candidate. `pkg:name' and `pkg::name' resolve
 ;;;;      through package names and every :local-nicknames entry in the tree; a bare `name'
 ;;;;      resolves in the file's current package (the last `in-package' before it) and in the
-;;;;      packages that package :uses. A call site under a `tests/' directory is counted
-;;;;      separately from one in source.
+;;;;      packages that package :uses. A quoted symbol (`'name') is data, such as the
+;;;;      :FUNCTION argument of a check, and is not counted; `#'name' is, because it can be
+;;;;      funcalled. A call site under a `tests/' directory is counted separately from one in
+;;;;      source.
 ;;;;
 ;;;;   It can be wrong in both directions. A bare name that happens to equal a candidate in a
 ;;;;   package that :uses the candidate's package is counted as a call. A call made through
@@ -254,7 +256,10 @@ PARAMS starts with the signature's own opening paren, which is skipped."
                      (or (zerop i) (not (constituentp (char text (1- i))))))
                 (let* ((tok (string-downcase (token-at text i)))
                        (colon (position #\: tok)))
-                  (unless (or (inside-p i regions) (zerop (length tok)) (eql colon 0))
+                  (unless (or (inside-p i regions) (zerop (length tok)) (eql colon 0)
+                              ;; 'name is data; #'name is a function reference and counts.
+                              (and (plusp i) (char= (char text (1- i)) #\')
+                                   (not (and (> i 1) (char= (char text (- i 2)) #\#)))))
                     (let* ((current (package-at marks i))
                            (name (if colon (string-left-trim ":" (subseq tok colon)) tok))
                            (pkgs (if colon
