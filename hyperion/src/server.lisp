@@ -280,6 +280,42 @@ holds the backend's error."))
   "Seconds START waits for a Clack backend to start listening before it gives up and
 signals SERVER-START-TIMEOUT.")
 
+(defun %connect-address (host)
+  "HOST as an address to connect to. 0.0.0.0 means every interface when binding, and is
+reached through loopback."
+  (sb-bsd-sockets:make-inet-address (if (string= host "0.0.0.0") "127.0.0.1" host)))
+
+(defun %connect-within (sock address port seconds)
+  "Connect SOCK to ADDRESS:PORT, giving up after SECONDS. True if connected, NIL otherwise;
+never signals. SOCK is left in blocking mode, ready for a stream.
+
+A timeout that actually stops the connect. SB-SYS:WITH-DEADLINE around a blocking connect
+does not: on macOS a connect to a port that is bound but not listening is neither accepted
+nor refused, and the blocking connect ran about 7.8 seconds whatever the deadline (measured
+by Ouranos Claude (macOS) on #188). So on Unix the connect is non-blocking, and the wait for
+it is SB-SYS:WAIT-UNTIL-FD-USABLE with a timeout. Windows keeps the blocking connect under a
+deadline, because this non-blocking path has not been measured there."
+  (handler-case
+      #-win32
+      (progn
+        (setf (sb-bsd-sockets:non-blocking-mode sock) t)
+        (prog1
+            (handler-case (progn (sb-bsd-sockets:socket-connect sock address port) t)
+              (sb-bsd-sockets:operation-in-progress ()
+                (and (sb-sys:wait-until-fd-usable (sb-bsd-sockets:socket-file-descriptor sock)
+                                                  :output seconds)
+                     ;; Writable means the attempt FINISHED, not that it succeeded: a refused
+                     ;; connect is writable too. Only a connected socket has a peer.
+                     (handler-case (progn (sb-bsd-sockets:socket-peername sock) t)
+                       (error () nil)))))
+          (setf (sb-bsd-sockets:non-blocking-mode sock) nil)))
+      #+win32
+      (sb-sys:with-deadline (:seconds seconds)
+        (sb-bsd-sockets:socket-connect sock address port)
+        t)
+    (sb-sys:deadline-timeout () nil)
+    (error () nil)))
+
 (defun port-answering-p (host port &key (timeout 0.5))
   "Is something already listening on HOST:PORT?
 
@@ -291,20 +327,13 @@ work, and then does not, with no error in either direction. A bind-probe would t
 answer a different question on the one platform where the answer matters most.
 
 Fail-open: anything unexpected reports NIL (not answering), because this guard must never
-be the reason a server refuses to start."
-  (handler-case
-      (sb-sys:with-deadline (:seconds timeout)
-        (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
-                                   :type :stream :protocol :tcp)))
-          (unwind-protect
-               (progn (sb-bsd-sockets:socket-connect
-                       sock (sb-bsd-sockets:make-inet-address
-                             (if (string= host "0.0.0.0") "127.0.0.1" host))
-                       port)
-                      t)
-            (ignore-errors (sb-bsd-sockets:socket-close sock)))))
-    (sb-sys:deadline-timeout () nil)
-    (error () nil)))
+be the reason a server refuses to start. The connect is bounded by %CONNECT-WITHIN, which on
+macOS matters: a connect to a port that is bound but not listening is neither accepted nor
+refused there, and a plain blocking connect waited about 7.8 seconds (measured by Ouranos
+Claude (macOS) on #188)."
+  (let ((sock (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect (%connect-within sock (%connect-address host) port timeout)
+      (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t))
@@ -450,12 +479,7 @@ Never signals: anything unexpected is simply not an answer."
   (let ((sock (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
          (handler-case
-             (progn
-               (sb-sys:with-deadline (:seconds 1)
-                 (sb-bsd-sockets:socket-connect
-                  sock (sb-bsd-sockets:make-inet-address
-                        (if (string= host "0.0.0.0") "127.0.0.1" host))
-                  port))
+             (when (%connect-within sock (%connect-address host) port 1)
                (let ((stream (sb-bsd-sockets:socket-make-stream
                               sock :input t :output t :timeout 1
                                    :element-type 'character :external-format :latin-1)))
