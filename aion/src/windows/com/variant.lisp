@@ -132,12 +132,76 @@ this machine's offset would move a date of birth across midnight for anyone west
 silently change the day. The value is returned as though it were already UTC, which
 round-trips exactly and never changes the calendar date.
 
-Sub-second precision is lost: universal time is whole seconds."
-  (round (* (- days +ole-date-epoch-offset+) 86400)))
+BEFORE 1899-12-30 THE ENCODING IS NOT A NUMBER LINE (#127). The integer part counts whole
+days, backwards when negative, but the fraction is always the time of day counted FORWARDS
+from that day's midnight: -1.25 is 1899-12-29 06:00, not 1899-12-28 18:00. So the value is
+split into its whole days and the absolute value of its fraction and rebuilt as one instant.
+Arithmetic is done on the exact rational of the double, and only the final seconds are
+rounded.
+
+DATES BEFORE 1900-01-01 GIVE NEGATIVE INTEGERS. They are correct offsets from the CL epoch,
+but CL defines universal time as non-negative, and DECODE-UNIVERSAL-TIME signals on them. For
+those dates, or for the parts of any date without an epoch in the way, use OLE-DATE-TO-PARTS.
+
+Returns two values: the universal time, rounded to the nearest second, and the part of a
+second that rounding left out, as an exact rational between -1/2 and 1/2. Their sum is the
+instant the double encodes, so nothing is lost."
+  (let* ((seconds (%ole-date-seconds days))
+         (universal-time (round seconds)))
+    (values universal-time (- seconds universal-time))))
+
+(defun %ole-date-instant (days)
+  "An OLE DATE as an exact rational count of days since 1899-12-30 on an ordinary number line.
+See OLE-DATE-TO-UNIVERSAL-TIME for why a negative date needs rebuilding."
+  (let* ((exact (rational days))
+         (whole (truncate exact)))
+    (+ whole (abs (- exact whole)))))
+
+(defun %ole-date-seconds (days)
+  "An OLE DATE as an exact rational count of seconds since the CL epoch, 1900-01-01."
+  (* (- (%ole-date-instant days) +ole-date-epoch-offset+) 86400))
+
+(defun %civil-from-days (z)
+  "Day Z counted from 1970-01-01 as (values year month day), proleptic Gregorian. The
+algorithm is Howard Hinnant's civil_from_days, with FLOOR division so negative days work."
+  (let* ((z (+ z 719468))
+         (era (floor z 146097))
+         (doe (- z (* era 146097)))
+         (yoe (floor (- doe (floor doe 1460) (- (floor doe 36524)) (floor doe 146096)) 365))
+         (doy (- doe (+ (* 365 yoe) (floor yoe 4) (- (floor yoe 100)))))
+         (mp (floor (+ (* 5 doy) 2) 153))
+         (day (1+ (- doy (floor (+ (* 153 mp) 2) 5))))
+         (month (if (< mp 10) (+ mp 3) (- mp 9)))
+         (year (+ yoe (* era 400) (if (<= month 2) 1 0))))
+    (values year month day)))
+
+(defun ole-date-to-parts (days)
+  "An OLE DATE as (values year month day hour minute second fraction), losing nothing.
+
+This is the date as the database stored it: a naive calendar date and time of day, with no
+timezone and no epoch. It works for every OLE date, including those before 1900 that
+universal time cannot represent (#127). SECOND is an integer, and FRACTION is the exact
+rational part of a second the double carries, from 0 up to but not including 1. Dates are
+proleptic Gregorian, as OLE Automation uses; unlike Excel's serial dates, OLE has no
+1900-02-29."
+  (let* ((instant (%ole-date-instant days))
+         (day-number (floor instant))
+         (seconds-of-day (* (- instant day-number) 86400)))
+    (multiple-value-bind (year month day) (%civil-from-days (- day-number 25569))
+      (multiple-value-bind (hour rest) (floor seconds-of-day 3600)
+        (multiple-value-bind (minute rest) (floor rest 60)
+          (multiple-value-bind (second fraction) (floor rest 1)
+            (values year month day hour minute second fraction)))))))
 
 (defun universal-time-to-ole-date (universal-time)
-  "The inverse. Same naive-time caveat."
-  (+ (/ universal-time 86400.0d0) +ole-date-epoch-offset+))
+  "The inverse, as a double. Same naive-time caveat.
+
+Before 1899-12-30 it builds the encoding OLE-DATE-TO-UNIVERSAL-TIME reads: the whole day,
+counted backwards, minus the time of day as a positive fraction. 1899-12-29 06:00 is -1.25."
+  (let* ((instant (+ (/ universal-time 86400) +ole-date-epoch-offset+))
+         (day (floor instant))
+         (time-of-day (- instant day)))
+    (coerce (if (minusp day) (- day time-of-day) (+ day time-of-day)) 'double-float)))
 
 (defun %currency-to-rational (scaled)
   "VT_CY is a 64-bit integer scaled by 10,000. Returned as an EXACT RATIONAL, never a float.
@@ -165,7 +229,14 @@ would discard digits the database went to the trouble of storing."
 
 VT_DISPATCH is returned as a COM-OBJECT with its own reference: the pointer inside the
 VARIANT dies with the VARIANT, so handing the raw pointer out would be a use-after-free the
-moment the caller's WITH-VARIANT exits."
+moment the caller's WITH-VARIANT exits.
+
+VT_DATE is returned as CL universal time, rounded to the nearest second, with the part of a
+second that rounding left out as an exact rational SECOND value (see
+OLE-DATE-TO-UNIVERSAL-TIME). A date before 1900-01-01 gives a NEGATIVE integer, which CL does
+not define as universal time and DECODE-UNIVERSAL-TIME rejects. For those dates, or for the
+calendar date and time with nothing lost, read the double with OLE-DATE-TO-PARTS. VT_CY and
+VT_DECIMAL are returned as exact rationals, never floats."
   (let ((vt (%vt variant))
         (p (%value-pointer variant)))
     (cond
@@ -197,7 +268,9 @@ moment the caller's WITH-VARIANT exits."
            (%make-com-object ptr))))
       ((= vt ffi:+vt-error+) (cffi:mem-ref p :int32))
       ;; A date is a double counting days; see OLE-DATE-TO-UNIVERSAL-TIME for why no zone
-      ;; conversion happens.
+      ;; conversion happens. Its second value, the part of a second rounding left out, passes
+      ;; through COND and LET, so a caller that wants it gets it (#127). For dates before 1900,
+      ;; or the date as calendar parts, a caller reads the double itself with OLE-DATE-TO-PARTS.
       ((= vt ffi:+vt-date+) (ole-date-to-universal-time (cffi:mem-ref p :double)))
       ;; Money, exactly. Both of these return RATIONALS on purpose.
       ((= vt ffi:+vt-cy+) (%currency-to-rational (cffi:mem-ref p :int64)))

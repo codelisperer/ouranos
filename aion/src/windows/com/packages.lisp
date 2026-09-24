@@ -79,7 +79,7 @@
    #:by-ref #:by-ref-p #:by-ref-value
    ;; variants
    #:lisp-to-variant #:variant-to-lisp #:with-variant
-   #:ole-date-to-universal-time #:universal-time-to-ole-date
+   #:ole-date-to-universal-time #:universal-time-to-ole-date #:ole-date-to-parts
    ;; type libraries -- the server's own description, read and emitted (pre-publication issue 181)
    #:typelib-constants #:typelib-information #:typelib-contents
    #:define-typelib-constants #:expand-typelib-constants
