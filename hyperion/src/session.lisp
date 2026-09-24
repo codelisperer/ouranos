@@ -179,7 +179,12 @@ SameSite=Lax by default; pass SECURE for HTTPS-only."
  (values SESSION SET-COOKIE): the session named by the request's cookie, or -- when
 absent/unknown and CREATE is true -- a freshly minted one; SET-COOKIE is a
 Set-Cookie header string to emit when a new session was created, else NIL. Touches
-the resolved session's ACCESSED time."
+the resolved session's ACCESSED time.
+
+NOT FOR SIGN-IN. This returns the session the request already has, so a sign-in built on
+it keeps the id the visitor held before authenticating, which is session fixation (#120).
+To sign a visitor in, call SIGN-IN!, which rotates the id and discards privilege-scoped
+keys as part of the same call."
   (let* ((id (http:cookie env cookie-name))
          (existing (and id (store-ref store id))))
     (cond

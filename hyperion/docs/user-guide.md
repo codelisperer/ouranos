@@ -255,26 +255,53 @@ attaches the `Set-Cookie` the response owes — including after a `rotate-sessio
 anywhere inside the handler. **The header is never the application's to emit, so it
 cannot be dropped.**
 
-### Rotate the id at sign-in
+### Sign in with `sign-in!`
 
 ```lisp
 (defun sign-in (env)
-  (let ((sess (session:request-session env)))
-    (session:rotate-session *store* sess)        ; NEW id, same data, same object
-    (session:session-set sess :user-id (authenticate env))
-    (list 200 () (list "welcome"))))
+  (session:sign-in! *store* env :user-id (authenticate env))   ; rotates the id, then stores
+  (list 200 () (list "welcome")))
 ```
 
-An id minted before a visitor authenticated is one an attacker may have chosen and
-may still hold. `rotate-session` gives the session a fresh id, keeps its data bag,
-re-keys it in the store (new key in before old key out, so a concurrent lookup never
-finds a hole) and mutates the session **in place** — so the env, and anything else
-already holding it, stays live.
+`sign-in!` is the whole privilege change in one call. It gives the request's session a new
+id, discards the keys registered in `session:*privilege-scoped-keys*`, and stores the pairs
+you pass. It always rotates, including when the request carried no session, so no path through
+a sign-in keeps the id the visitor arrived with.
 
-> **`reset-session` is not this.** It wipes the data bag and **keeps the id**, which
-> is a restart of app state for a browser that stays attached. At a sign-in it reads
-> exactly like session-fixation defence and provides none of it. Use
-> `rotate-session` at every privilege change.
+Why the rotation matters: an id that existed before the visitor authenticated may be one an
+attacker holds. This store only honours ids it minted, so an invented cookie is ignored, but an
+attacker can sign in as themselves to get a real id, give that cookie to the victim, and wait.
+If the victim's sign-in keeps the id, the attacker's cookie is now signed in as the victim.
+`hyperion/tests/session-tests.lisp` shows both directions: the test
+`the-shipped-pattern-leaves-a-donated-id-alive-and-authenticated` and the test
+`sign-in-kills-the-donated-id`.
+
+> **Do not sign in with `ensure-session`.** It returns the session the request already has,
+> so the id a visitor held before signing in is the id they hold after. That reads correctly,
+> works, passes ordinary tests, and is the session-fixation bug above. A consuming app shipped
+> exactly this.
+
+### Other privilege changes: `rotate-session`
+
+For a privilege change that is not a sign-in, such as granting a role or a step-up
+authentication, call `rotate-session`:
+
+```lisp
+(session:rotate-session *store* (session:request-session env))   ; NEW id, same data, same object
+```
+
+It gives the session a fresh id, keeps its data bag, re-keys it in the store (new key in
+before old key out, so a concurrent lookup never finds a hole) and mutates the session **in
+place**, so the env and anything else already holding it stay live.
+
+`rotate-session` followed by `session-set` is **not** the same as `sign-in!`: it keeps every
+key in the data bag, including the ones in `*privilege-scoped-keys*`. `hyperion/csrf` registers
+its token there, so after a sign-in done by hand the CSRF token minted before the visitor
+authenticated is still valid (ADR-0019, decision 6). Use `sign-in!` for sign-in.
+
+> **`reset-session` is not rotation either.** It wipes the data bag and **keeps the id**,
+> which is a restart of app state for a browser that stays attached. At a sign-in it reads
+> exactly like session-fixation defence and provides none of it.
 
 ### The lower-level seam
 
