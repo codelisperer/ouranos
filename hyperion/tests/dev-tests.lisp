@@ -292,8 +292,7 @@ and the editor droppings that appear beside a file on every save."
   ;; SBCL's own wording is the signal, so this test is what stops a rephrasing from
   ;; silently disabling the detection: it fails loudly rather than the feature vanishing.
   (let ((c (make-condition 'simple-warning
-                           :format-control "change in instance length of class VIEW:~%~
-                                            The most recently compiled length: 2"
+                           :format-control "change in instance length of class VIEW:~%The most recently compiled length: 2"
                            :format-arguments nil)))
     (is (string= "VIEW" (hyperion/dev::%redefined-type-name c)))))
 

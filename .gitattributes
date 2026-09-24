@@ -6,16 +6,12 @@
 # compile-time "macroexpansion" error. Forcing LF on checkout makes the build
 # identical on Linux/macOS/Windows and immunizes against core.autocrlf.
 #
-# PLANNED, not true today (#146): source was meant to ALSO avoid FORMAT ~<newline>
-# continuations entirely, so that a stray CRLF from a zip download or a misconfigured
-# editor -- a tree that did not arrive through `git checkout', where the rule above
-# cannot reach -- could not break the build either. There are 53, across 13 files.
-# CLAUDE.md and AGENTS.md state the rule for new code and it holds for new code; the
-# existing 53 are a sweep nobody has done. Severity is low precisely because the line
-# below does hold: every git checkout is LF on every OS, and nothing is broken today.
-# #146 carries the sweep and the checker that would keep it swept, in that order --
-# a checker landing first would need a baseline of known violations, and a stored
-# count of those is an allowlist wearing a number.
+# Source ALSO avoids FORMAT ~<newline> continuations entirely, so that a stray CRLF from
+# a zip download or a misconfigured editor -- a tree that did not arrive through
+# `git checkout', where the rule above cannot reach -- cannot break the build either.
+# That was not true until #146: 76 continuations in 18 files were folded onto one line
+# each, and scripts/check-format-continuations.lisp, which the gate runs, fails on any
+# string literal that has one.
 
 * text=auto eol=lf
 

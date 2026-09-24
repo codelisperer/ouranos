@@ -47,10 +47,7 @@
    (file :initarg :file :initform nil :reader unsupported-front-matter-file))
   (:report
    (lambda (c s)
-     (format s "klio: front-matter uses ~A, which this parser does not support~@[ (~A~@[, line ~D~])~].~%~%~
-This is a documented subset rather than YAML. Refusing is deliberate: a parser that guessed ~
-at a construct it does not understand would produce content that is WRONG rather than ~
-content that is absent, and nothing downstream could tell.~@[~%~%  ~A~]"
+     (format s "klio: front-matter uses ~A, which this parser does not support~@[ (~A~@[, line ~D~])~].~%~%This is a documented subset rather than YAML. Refusing is deliberate: a parser that guessed at a construct it does not understand would produce content that is WRONG rather than content that is absent, and nothing downstream could tell.~@[~%~%  ~A~]"
              (unsupported-front-matter-construct c)
              (unsupported-front-matter-file c)
              (unsupported-front-matter-line c)

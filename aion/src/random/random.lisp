@@ -9,9 +9,7 @@ Not a joke and not defensive programming: pre-publication issue 95 was a placeho
 replace, and the comment did not stop anyone for months. A name that ERRORS stops the next
 person at the moment they reach for it, and says what to use instead in the same breath."
   (declare (ignore args))
-  (error "aion/random: CL:RANDOM is not a secret generator -- SBCL's is MT19937, whose ~
-state is recoverable from observed output. Use RANDOM-OCTETS, RANDOM-HEX or RANDOM-INTEGER. ~
-If you genuinely want a non-cryptographic PRNG, write CL:RANDOM explicitly and say why."))
+  (error "aion/random: CL:RANDOM is not a secret generator -- SBCL's is MT19937, whose state is recoverable from observed output. Use RANDOM-OCTETS, RANDOM-HEX or RANDOM-INTEGER. If you genuinely want a non-cryptographic PRNG, write CL:RANDOM explicitly and say why."))
 
 (defvar *prng* nil
   "The OS PRNG, created on first use.

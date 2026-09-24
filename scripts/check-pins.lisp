@@ -113,9 +113,7 @@ integrity check. Requiring them would fail a pin that is already stronger.")
     (cond
       ((plusp bad)
        (format *error-output*
-               "check-pins: ~D pin~:P missing required fields.~%~
-                Every pin declares `advisories <url>' and `reviewed <YYYY-MM-DD>'.~%~
-                See docs/versioning-and-pinning.md.~%" bad)
+               "check-pins: ~D pin~:P missing required fields.~%Every pin declares `advisories <url>' and `reviewed <YYYY-MM-DD>'.~%See docs/versioning-and-pinning.md.~%" bad)
        (uiop:quit 1))
       (t
        (format t "All ~D pin~:P declare an advisory source and a review date.~%" (length pins))

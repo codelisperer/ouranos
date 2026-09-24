@@ -102,9 +102,7 @@ accumulates and nothing is dropped-on-the-floor -- there was never a second slot
   ()
   (:report (lambda (c stream)
              (declare (ignore c))
-             (format stream "hyperion/feed: SUBSCRIBE needs :HZ. A subscription that ~
-declares no rate is an unthrottled one, which is the shape ADR-0016 exists to refuse -- ~
-pass a large :HZ if you genuinely want every change as fast as you can take it.")))
+             (format stream "hyperion/feed: SUBSCRIBE needs :HZ. A subscription that declares no rate is an unthrottled one, which is the shape ADR-0016 exists to refuse -- pass a large :HZ if you genuinely want every change as fast as you can take it.")))
   (:documentation
    "Signalled when SUBSCRIBE is called without a rate. There is deliberately no default:
 an omitted rate would silently reproduce the unbounded case the ADR rejects, and a default

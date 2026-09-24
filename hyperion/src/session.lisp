@@ -312,8 +312,7 @@ the plain (env -> response) shape; REQUEST-SESSION reads it.")
   ((response :initarg :response :reader session-cookie-not-attachable-response))
   (:report
    (lambda (c stream)
-     (format stream "hyperion/session: a Set-Cookie is owed for this request but the ~
-handler returned ~S, which is not a (status headers body) response and cannot carry it."
+     (format stream "hyperion/session: a Set-Cookie is owed for this request but the handler returned ~S, which is not a (status headers body) response and cannot carry it."
              (session-cookie-not-attachable-response c))))
   (:documentation
    "Signalled when WRAP-SESSION owes the browser a session cookie and the handler's

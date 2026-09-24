@@ -59,14 +59,12 @@ The matrix, and the middle row is the point:
     ((and behind (plusp behind))
      (list (format nil "framework checkout is ~D commit~:P behind its remote~@[ (~{~A~^, ~})~]"
                    behind packages)
-           (format nil "  it may already have what you are about to hand-roll; ~
-                        `git -C <framework> pull` to catch up")))
+           (format nil "  it may already have what you are about to hand-roll; `git -C <framework> pull` to catch up")))
     ((null fetch-age)
      (list "framework checkout has never been fetched, so \"up to date\" cannot be checked"
            "  `git -C <framework> fetch` to find out where it actually stands"))
     ((> fetch-age *stale-fetch-seconds*)
-     (list (format nil "framework checkout last fetched ~D day~:P ago, so \"up to date\" ~
-                        reflects that moment, not now"
+     (list (format nil "framework checkout last fetched ~D day~:P ago, so \"up to date\" reflects that moment, not now"
                    (floor fetch-age 86400))
            "  `git -C <framework> fetch` before trusting it"))
     (t nil)))

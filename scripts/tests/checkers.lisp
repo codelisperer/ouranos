@@ -204,6 +204,73 @@ all, which is the strongest form of that -- `git ls-files' would report nothing 
       (is (= 1 code)
           "a collision inside vendor/ must still be found; exit was ~D~%~A" code output))))
 
+;;; --- check-format-continuations (#146) ----------------------------------------
+;;;
+;;; What it exists to detect: a FORMAT `~<newline>' continuation inside a string, which a
+;;; CRLF checkout turns into an illegal `~<Return>' directive. The fixtures are built from
+;;; one-line strings joined at run time, because this file is itself scanned by the checker:
+;;; a fixture written here with a real tilde-newline inside a string would fail the tree.
+
+(defun %lines (&rest lines)
+  "LINES joined with newlines, and a final newline."
+  (format nil "~{~A~%~}" lines))
+
+(defparameter +tildes-outside-strings+
+  (list ";;;; every place a tilde can end a line without being a FORMAT continuation"
+        "; a comment that ends in a tilde, as an editor backup name does: foo.lisp~"
+        "#| a block comment with a tilde at the end of a line ~"
+        "   and a nested #| block comment ~"
+        "   |# still inside the outer one ~"
+        "|#"
+        "(defparameter *tilde* #\~)"
+        "(defparameter *quote-then-string* (list #\\\" \"a string after a quote character\"))"
+        "(defparameter |a symbol with a tilde~"
+        "at a line end| 1)"
+        "(defparameter *escaped-tilde* \"a literal tilde at the end of a line: ~~"
+        "\")"
+        "(defparameter *one-line* (format nil \"all on one line ~A~%\" 1))")
+  "A file the checker must pass. Each line is a trap for a scan that works line by line.")
+
+(test format-continuations-passes-tildes-that-are-not-continuations
+  "The negative control. Every tilde here ends a line, and none is a FORMAT continuation."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "src/fixture.lisp" tree) (apply #'%lines +tildes-outside-strings+))
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-format-continuations.lisp"))
+      (is (= 0 code) "no continuation here, so it must pass; exit was ~D~%~A" code output))))
+
+(test format-continuations-reports-a-continuation-by-file-and-line
+  "The positive control: the same file with one continuation added fails, and the report
+names that line. Together with the test above, this shows the file was read, and that the
+traps in it were passed over rather than never reached."
+  (let* ((tree (%fresh-tree))
+         (bad-line (+ 2 (length +tildes-outside-strings+))))
+    (%write (merge-pathnames "src/fixture.lisp" tree)
+            (apply #'%lines (append +tildes-outside-strings+
+                                    (list "(defparameter *folded* (format nil \"one ~"
+                                          "   two\"))"))))
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-format-continuations.lisp"))
+      (is (= 1 code) "a continuation must fail; exit was ~D~%~A" code output)
+      (is (search (format nil "src/fixture.lisp:~D:" (1- bad-line)) output)
+          "the report must name the line: ~A" output)
+      (is (search "FAIL -- 1 FORMAT continuation in 1 file" output)
+          "and count exactly one: ~A" output))))
+
+(test format-continuations-reports-all-three-directive-forms-and-a-crlf
+  "~<newline>, ~:<newline> and ~@<newline> are all continuations, and a CRLF line ending is
+the case the rule exists for."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "src/forms.lisp" tree)
+            (concatenate 'string
+                         (%lines "(defparameter *colon* \"a ~:" "b\")"
+                                 "(defparameter *at* \"a ~@" "b\")")
+                         (format nil "(defparameter *crlf* \"a ~~~C~Cb\")~%" #\Return #\Newline)))
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-format-continuations.lisp"))
+      (is (= 1 code) "exit was ~D~%~A" code output)
+      (is (search "FAIL -- 3 FORMAT continuations in 1 file" output) "three expected: ~A" output))))
+
 ;;; --- check-pins -------------------------------------------------------------
 ;;;
 ;;; What it exists to detect: a `.pin' that does not say where its security advisories come
@@ -544,10 +611,7 @@ nobody greps."
 The row shape is the real one, prose and all -- including an issue reference in the prose,
 because %REPLACE-LAST-INTEGER exists to not be fooled by it. A row without one would be a
 fixture easier than production."
-  (format nil "# Fixture~%~%| framework | where it is | checks |~%|---|---|---|~%~
-| **aion** | **mixed** -- `aion/log` and `aion/csv` are real; the collections core *(in progress)* (pre-publication issue 172) | ~D |~%~
-| **cons** | **alpha** -- the bootstrap seed and the task runner work | ~D |~%~%~
-Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own image.~%"
+  (format nil "# Fixture~%~%| framework | where it is | checks |~%|---|---|---|~%| **aion** | **mixed** -- `aion/log` and `aion/csv` are real; the collections core *(in progress)* (pre-publication issue 172) | ~D |~%| **cons** | **alpha** -- the bootstrap seed and the task runner work | ~D |~%~%Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own image.~%"
           aion cons-checks))
 
 (defun %fixture-log (aion cons-checks &key (host "linux") (sha "deadbee"))
@@ -556,16 +620,7 @@ Counts above are from the Linux CI leg at `c5b7b0b`; each suite runs in its own 
 Built rather than captured because a captured log is 5000 lines of another tree's numbers,
 and every line this checker reads is here. The formats are verify-tree's own -- `ok' suite
 rows, the PLATFORM banner, the SUMMARY block and the verdict."
-  (format nil "========== SUITES (each in its own image) ==========~%~
-  ok      AION/TESTS              ~D checks~%~
-  ok      CONS/TESTS              ~D checks~%~%~
-========== PLATFORM (host: ~A) ==========~%~%~
-========== SUMMARY ==========~%~
-commit: ~A~%~
-total checks executed: ~D (axes: base+uv+view)~%~
-axes: base+uv+view~%~
-axes-declined: none~%~%~
-VERDICT: PASS~%"
+  (format nil "========== SUITES (each in its own image) ==========~%ok      AION/TESTS              ~D checks~%ok      CONS/TESTS              ~D checks~%~%========== PLATFORM (host: ~A) ==========~%~%========== SUMMARY ==========~%commit: ~A~%total checks executed: ~D (axes: base+uv+view)~%axes: base+uv+view~%axes-declined: none~%~%VERDICT: PASS~%"
           aion cons-checks host sha (+ aion cons-checks)))
 
 (defun %readme-fixture-tree (aion cons-checks)

@@ -387,12 +387,9 @@ generator this script exists not to be."
 
     ;; Four ways a log cannot answer the question, each a different mistake to make.
     (unless grand
-      (die 2 "the log has no `total checks executed' line -- it is not a completed ~
-verify-tree run, and nothing can be derived from it."))
+      (die 2 "the log has no `total checks executed' line -- it is not a completed verify-tree run, and nothing can be derived from it."))
     (unless (equal verdict "VERDICT: PASS")
-      (die 2 "the log's verdict is ~a. A red tree's counts are not the tree's counts: a ~
-partially failing suite still contributes to the grand total, so publishing from this log ~
-would record numbers no green run will reproduce. Fix the tree, then re-check."
+      (die 2 "the log's verdict is ~a. A red tree's counts are not the tree's counts: a partially failing suite still contributes to the grand total, so publishing from this log would record numbers no green run will reproduce. Fix the tree, then re-check."
            (or verdict "missing")))
     ;; A PARTIAL log is the same mistake as a red one, one axis over (pre-publication issue 385). A run that
     ;; declined an axis is green and correct and its total is simply not the tree's total:
@@ -436,9 +433,7 @@ would record numbers no green run will reproduce. Fix the tree, then re-check."
       ;; the wrong numbers down. A producer verifying its own output cannot see that; the
       ;; gate's independently computed total can.
       (unless (= summed grand)
-        (die 2 "parsed ~:D check~:P across ~D framework~:P but the gate reports ~:D. ~
-This script is misreading the log, not finding drift -- verify-tree's suite-line format ~
-has probably changed. Nothing was compared."
+        (die 2 "parsed ~:D check~:P across ~D framework~:P but the gate reports ~:D. This script is misreading the log, not finding drift -- verify-tree's suite-line format has probably changed. Nothing was compared."
              summed (length gate) grand)))
 
     (let* ((readme-lines (uiop:split-string (uiop:read-file-string readme) :separator '(#\Newline)))
@@ -461,10 +456,7 @@ has probably changed. Nothing was compared."
       ;; Refuse before writing, not after: the wrong number in a README outlives the run.
       (let ((leg (and total-index (headline-leg (nth total-index readme-lines)))))
         (when (and leg (string/= leg host))
-          (die 2 "this gate ran on ~a and README's headline claims the ~a leg.~%~
-Writing it would put a ~a figure behind a ~a label -- wrong in a way that reads as more~%~
-trustworthy than the number it replaced, because it now carries a platform. Derive from the~%~
-~a leg's log, or change what the headline claims." host leg host leg leg)))
+          (die 2 "this gate ran on ~a and README's headline claims the ~a leg.~%Writing it would put a ~a figure behind a ~a label -- wrong in a way that reads as more~%trustworthy than the number it replaced, because it now carries a platform. Derive from the~%~a leg's log, or change what the headline claims." host leg host leg leg)))
       (format t "~&gate: host=~a  total=~D  commit=~a~a~%~%" host grand sha
               (if logged-sha "" "  (from local HEAD -- this log records no commit)"))
       ;; Counted here, PRINTED WITH THE TABLE below. The first version pushed this drift
@@ -537,8 +529,7 @@ trustworthy than the number it replaced, because it now carries a platform. Deri
            (push (list "(measured-at)" "no line" sha) drift)
            (format t "~14a ~8@a ~8@a   <-- DRIFT: no line carries the measured-at clause~%"
                    "(measured-at)" "no line" sha)
-           (format t "~%Restore a line beginning `Counts above are from the Linux CI leg`, ~
-then re-run with --update to stamp it. A count without its commit is a rumour.~%"))
+           (format t "~%Restore a line beginning `Counts above are from the Linux CI leg`, then re-run with --update to stamp it. A count without its commit is a rumour.~%"))
           ((null prov-index))
           ((null logged-sha)
            (format t "~14a ~8@a ~8@a   this log records no commit; none will be written~%"

@@ -54,8 +54,7 @@ Signals DB-REPL-ERROR naming the variables it looked for when none is set."
     (or (loop for n in names
               for v = (uiop:getenv n)
               when (and v (plusp (length v))) return v)
-        (%fail "no database URL for environment ~S.~%  Looked for: ~{~A~^, ~}~%~
-                Set it in .env (gitignored) or the platform's secrets."
+        (%fail "no database URL for environment ~S.~%  Looked for: ~{~A~^, ~}~%Set it in .env (gitignored) or the platform's secrets."
                env names))))
 
 ;;; --- parsing (only as far as we need) -------------------------------------

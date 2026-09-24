@@ -38,15 +38,12 @@ uncommented, which is the failure mode this guards."
   (let ((files (%hyperion-source-files))
         (found '()))
     (is-true (> (length files) 10)
-             "the scan must actually find the sources -- got ~D files, which suggests the ~
-path is wrong and this test is vacuous" (length files))
+             "the scan must actually find the sources -- got ~D files, which suggests the path is wrong and this test is vacuous" (length files))
     (dolist (f files)
       (let ((hits (%offending-lines f '("(random " "make-random-state" "*random-state*"))))
         (when hits (push (cons (file-namestring f) hits) found))))
     (is-false found
-              "cl:random must not appear in hyperion/src -- SBCL's is MT19937, whose state ~
-is recoverable from observed output, and a session id is observable by design (pre-publication issue 95). ~
-Found: ~S" found)))
+              "cl:random must not appear in hyperion/src -- SBCL's is MT19937, whose state is recoverable from observed output, and a session id is observable by design (pre-publication issue 95). Found: ~S" found)))
 
 ;;; --- and the ids themselves ------------------------------------------------
 

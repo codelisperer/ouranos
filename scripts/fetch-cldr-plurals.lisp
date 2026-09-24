@@ -45,8 +45,7 @@
 (defparameter *expected-sha256*
   "6c0a48e9bcfc25856f90202f703c2c7f89c105d6868f7712a943a6ed2dcbe8f4")
 (defparameter *url*
-  (format nil "https://raw.githubusercontent.com/unicode-org/cldr-json/~A~
-              /cldr-json/cldr-core/supplemental/plurals.json" *cldr-version*))
+  (format nil "https://raw.githubusercontent.com/unicode-org/cldr-json/~A/cldr-json/cldr-core/supplemental/plurals.json" *cldr-version*))
 
 (defun sha256 (octets)
   (string-downcase (ironclad:byte-array-to-hex-string
@@ -172,9 +171,7 @@ meaning `always` -- the evaluator treats a missing rule and a matching one ident
   (format t "~&CLDR ~A~%  url:      ~A~%  sha256:   ~A~%" *cldr-version* *url* actual)
   (unless (string= actual *expected-sha256*)
     (format *error-output*
-            "~&sha256 MISMATCH~%  expected ~A~%  got      ~A~%~
-             Upstream changed under a pinned tag, or the pin is stale. Do not regenerate~%~
-             until you know which.~%" *expected-sha256* actual)
+            "~&sha256 MISMATCH~%  expected ~A~%  got      ~A~%Upstream changed under a pinned tag, or the pin is stale. Do not regenerate~%until you know which.~%" *expected-sha256* actual)
     (uiop:quit 1))
   (format t "  pin:      OK~%")
   (if (not write-p)
