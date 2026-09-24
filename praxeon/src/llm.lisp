@@ -731,7 +731,15 @@ expand into one role:\"tool\" message each)."
   "The agent ROLE currently being resolved from the environment (a string like
 \"translate\" or \"scribe\"), or NIL for the global default. Bound by
 MAKE-PROVIDER-FROM-ENV so per-agent env vars win -- see %ENV-FOR. This is how one
-process runs several agents, each on its own model.")
+process runs several agents, each on its own model.
+
+DELIBERATELY NOT CARRIED ACROSS A THREAD BOUNDARY (#158), and not registered with
+aion/dynamic. It is not an ambient \"current agent\": MAKE-PROVIDER-FROM-ENV and
+MAKE-EMBEDDING-PROVIDER-FROM-ENV each bind it from their own ROLE argument for the length of
+that one call, and bind it to NIL when no ROLE is given. So a value inherited by a child
+thread would be overwritten before anything read it. A child that needs a role's provider
+gets it the way embedding.lisp prescribes: resolve the provider on the thread that owns the
+role, and pass the provider in.")
 
 (defun %env-for (impl suffix)
   "The value of PRAXEON_<SUFFIX>, most specific first: PRAXEON_<ROLE>_<SUFFIX> (the

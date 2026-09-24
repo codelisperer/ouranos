@@ -267,3 +267,45 @@ used to add nothing for it, so the page showed no count at all."
     (is (null (search "javascript:" html)) "the script URL must not appear at all: ~S" html)
     (is (search "href=\"https://example.com\"" html)
         "the ordinary link beside it must still render, or the test proves nothing: ~S" html)))
+
+;;; --------------------------------------------------------------------------
+;;; A web turn logs with the request's context (#160)
+;;; --------------------------------------------------------------------------
+;;;
+;;; `%run-turn-async' runs the turn on its own thread, and a LET binding does not cross a
+;;; thread, so without `aion/dynamic:inheriting' every line the turn logs would lack the
+;;; request id -- with nothing reporting the absence. This drives a real turn whose provider
+;;; fails, so the line under test is the one an operator most needs to trace: "llm request
+;;; failed", logged by LLM:COMPLETE's :around on the TURN thread.
+
+(defclass %failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails, so the turn logs the failure."))
+
+(defmethod llm:complete ((p %failing-provider) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (error "the provider is unavailable"))
+
+(defun %logged-lines-containing (text output)
+  (remove-if-not (lambda (line) (search text line))
+                 (uiop:split-string output :separator '(#\Newline))))
+
+(test a-web-turn-logs-with-the-request-s-context
+  (let ((out (make-string-output-stream))
+        (conv (web::make-conversation
+               :agent (actor:make-agent :name "failing"
+                                        :provider (make-instance '%failing-provider)))))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :warn :stream out)
+           (aion/log:with-context (:request-id "req-160" :conversation "conv-160")
+             (aion/test-threads:join (web::%run-turn-async conv "hi" nil)))
+           (let ((lines (%logged-lines-containing "llm request failed"
+                                                  (get-output-stream-string out))))
+             (is (= 1 (length lines))
+                 "the turn thread should log the provider failure once, got ~S" lines)
+             (is (every (lambda (l) (search "request-id=req-160" l)) lines)
+                 "the turn thread's line must carry the request id: ~S" lines)
+             (is (every (lambda (l) (search "conversation=conv-160" l)) lines)
+                 "and the rest of the request's context: ~S" lines)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
