@@ -241,8 +241,9 @@ jobs:
       # NOT BLOCKING YET, and this is the only reason: it fails on today's coalton-repl
       # bundle, which opens OpenSSL at startup without carrying it (#249). A blocking step
       # would stop every Windows release until #249 is decided. Make it blocking by deleting
-      # the continue-on-error line in the pull request that fixes #249; the step's red mark
-      # on this run is the reminder until then.
+      # the continue-on-error line in the pull request that fixes #249. Until then the
+      # failure shows only as an ##[error] annotation on the run: with continue-on-error,
+      # the step and the job both report success, in the UI and in the jobs API.
       - name: Verify the bundle loads only what it carries (Windows)
         if: runner.os == 'Windows'
         continue-on-error: true

@@ -117,14 +117,19 @@ namespace OuranosVerify {
     public bool Exited;
     public int ExitCode;
     public int Pid;
+    public string[] OutputTail = new string[0];
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO { public int cb; public string r, d, t; public int x, y, xs, ys, xc, yc, fill, flags; public short show, cbr2; public IntPtr r2, i, o, e; }
     [StructLayout(LayoutKind.Sequential)]
     struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int pid, tid; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public bool bInheritHandle; }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, ref SECURITY_ATTRIBUTES sa, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool WaitForDebugEvent(byte[] ev, uint ms);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -154,14 +159,29 @@ namespace OuranosVerify {
       return s;
     }
 
-    public static LoadTrace Run(string exe, string args, string cwd, int seconds) {
+    // OUTPUT is a file that receives the app's stdout and stderr, so that a failure to start
+    // can be reported with the app's own words (SBCL names the shared object it could not
+    // open). The handle is created inheritable and handed over through STARTF_USESTDHANDLES;
+    // this process closes its copy once the child has one.
+    public static LoadTrace Run(string exe, string args, string cwd, int seconds, string output) {
       var t = new LoadTrace();
       var si = new STARTUPINFO();
       si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+      var sa = new SECURITY_ATTRIBUTES();
+      sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+      sa.bInheritHandle = true;
+      // GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL
+      IntPtr log = CreateFileW(output, 0x40000000, 3, ref sa, 2, 0x80, IntPtr.Zero);
+      if (log == new IntPtr(-1))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CreateFile " + output);
+      si.flags = 0x100;                                    // STARTF_USESTDHANDLES
+      si.o = log; si.e = log; si.i = IntPtr.Zero;
       var cmd = new StringBuilder("\"" + exe + "\"" + (string.IsNullOrEmpty(args) ? "" : " " + args));
       PROCESS_INFORMATION pi;
-      if (!CreateProcessW(exe, cmd, IntPtr.Zero, IntPtr.Zero, false, DEBUG_ONLY_THIS_PROCESS | CREATE_NEW_CONSOLE, IntPtr.Zero, cwd, ref si, out pi))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CreateProcess " + exe);
+      bool ok = CreateProcessW(exe, cmd, IntPtr.Zero, IntPtr.Zero, true, DEBUG_ONLY_THIS_PROCESS | CREATE_NEW_CONSOLE, IntPtr.Zero, cwd, ref si, out pi);
+      int err = Marshal.GetLastWin32Error();
+      CloseHandle(log);
+      if (!ok) throw new System.ComponentModel.Win32Exception(err, "CreateProcess " + exe);
       t.Pid = pi.pid;
       var ev = new byte[256];
       var deadline = DateTime.UtcNow.AddSeconds(seconds);
@@ -216,10 +236,18 @@ function Get-DllClass([string]$Path, [string]$Carrier) {
 }
 
 # --- PE import table (for check 1) ---------------------------------------------------
+function Test-PeFile([string]$Path) {
+  # A truncated or empty DLL in a bundle is a finding. It gets its own test because an empty
+  # list returned from Get-PeImports reads as "imports nothing", which would pass it.
+  $b = [IO.File]::ReadAllBytes($Path)
+  if ($b.Length -lt 0x40) { return $false }
+  $pe = [BitConverter]::ToInt32($b, 0x3C)
+  return ($pe -ge 0 -and $pe + 24 -le $b.Length -and [BitConverter]::ToUInt32($b, $pe) -eq 0x00004550)
+}
+
 function Get-PeImports([string]$Path) {
   $b = [IO.File]::ReadAllBytes($Path)
   $pe = [BitConverter]::ToInt32($b, 0x3C)
-  if ([BitConverter]::ToUInt32($b, $pe) -ne 0x00004550) { return @() }
   $nsec = [BitConverter]::ToUInt16($b, $pe + 6)
   $optSize = [BitConverter]::ToUInt16($b, $pe + 20)
   $opt = $pe + 24
@@ -268,9 +296,16 @@ function Invoke-Traced([string]$Dir, [string]$Exe) {
   $oldPath = $env:PATH
   $env:PATH = "$Dir;$Sys32;$WinDir"
   $t = $null
-  try { $t = [OuranosVerify.LoadTrace]::Run($Exe, $AppArgs, $work, $Seconds) }
+  $out = Join-Path $work 'app-output.txt'
+  try { $t = [OuranosVerify.LoadTrace]::Run($Exe, $AppArgs, $work, $Seconds, $out) }
   finally {
     $env:PATH = $oldPath
+    if ($t -and (Test-Path -LiteralPath $out)) {
+      # The first lines and the last few. SBCL states the error first and then prints a
+      # backtrace, so the lines that say why are at the top, not the bottom.
+      $lines = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+      $t.OutputTail = if ($lines.Count -le 12) { $lines } else { @($lines[0..7]) + @("... ($($lines.Count - 11) lines omitted)") + @($lines[-3..-1]) }
+    }
     # The app's children are not debugged, so they outlive it; stop them.
     if ($t) {
       Get-CimInstance Win32_Process -Filter "ParentProcessId=$($t.Pid)" -ErrorAction SilentlyContinue |
@@ -284,7 +319,10 @@ function Invoke-Traced([string]$Dir, [string]$Exe) {
 function Get-RunVerdict($t) {
   if (-not $t.Exited) { return [pscustomobject]@{ Ok = $true; Text = "still running after $Seconds s, so it started; stopped" } }
   if ($t.ExitCode -eq 0) { return [pscustomobject]@{ Ok = $true; Text = 'exited 0' } }
-  return [pscustomobject]@{ Ok = $false; Text = "exited with code $($t.ExitCode) within $Seconds s" }
+  # The app's own words, so the report says WHY it did not start (#78: on the runner,
+  # "exited with code 1" alone left the reader to guess that OpenSSL was missing).
+  $said = if ($t.OutputTail.Count) { ". Its output:`n" + (($t.OutputTail | ForEach-Object { "            | $_" }) -join "`n") } else { '. It wrote nothing to stdout or stderr.' }
+  return [pscustomobject]@{ Ok = $false; Text = "exited with code $($t.ExitCode) within $Seconds s"; Said = $said }
 }
 
 Info "verify-bundle-windows (#78): $BundleDir"
@@ -298,6 +336,7 @@ Write-Host ''
 Info 'check 1: the static imports of every executable and DLL in the bundle'
 foreach ($f in @(Get-ChildItem -LiteralPath $BundleDir -File -Recurse | Where-Object { $_.Extension -in '.exe', '.dll' })) {
   $rel = $f.FullName.Substring($BundleDir.Length + 1)
+  if (-not (Test-PeFile $f.FullName)) { Fail "$rel is not a valid executable file ($($f.Length) bytes), so Windows cannot load it"; continue }
   foreach ($name in (Get-PeImports $f.FullName)) {
     if ($name -match '^(api|ext)-ms-win-') { continue }
     $p = Resolve-Import $name $f.DirectoryName
@@ -313,7 +352,7 @@ Write-Host ''
 Info "check 2: what $(Split-Path -Leaf $AppExe) loads when it runs"
 $trace = Invoke-Traced $BundleDir $AppExe
 $run = Get-RunVerdict $trace
-if ($run.Ok) { Good "the app $($run.Text)" } else { Fail "the app $($run.Text), so it does not start with only the bundle and Windows" }
+if ($run.Ok) { Good "the app $($run.Text)" } else { Fail "the app $($run.Text), so it does not start with only the bundle and Windows$($run.Said)" }
 
 # The instrument has to show it saw something before its silence about the rest is trusted.
 # Every Windows process maps ntdll.dll and kernel32.dll; a trace without them recorded nothing.
