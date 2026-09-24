@@ -47,6 +47,9 @@ secrets.lisp
 
 # Claude Code local (personal) settings
 .claude/settings.local.json
+# Worktrees that Claude Code's agent tool creates inside the checkout when it isolates a
+# task. They are working copies of other branches, never content of this one.
+.claude/worktrees/
 
 # LaTeX paper build artifacts (papers build to PDF via build.sh/ps1)
 *.pdf
