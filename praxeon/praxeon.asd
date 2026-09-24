@@ -134,7 +134,7 @@
 
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
-  :depends-on ("praxeon" "praxeon/web-search" "aion/boundary" "fiveam")
+  :depends-on ("praxeon" "praxeon/web-search" "aion/boundary" "aion/log" "fiveam")
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -156,7 +156,7 @@
 (defsystem "praxeon/web/tests"
   :description "Test suite for praxeon/web: the blocking entry, and the surface."
   :depends-on ("praxeon/web" "praxeon" "hyperion"   ; web-tests.lisp calls actor: and server:
-               "clack-handler-hunchentoot" "fiveam" "aion/test-threads")
+               "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log")
   :serial t
   :components ((:module "tests"
                 :serial t
