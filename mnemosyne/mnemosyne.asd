@@ -23,6 +23,7 @@
                "dbi"            ; CL-DBI: the DB-independent API (the neutral substrate)
                "dbd-postgres"   ; PostgreSQL over the WIRE (cl-postgres, no libpq); XTDB 2 rides it
                "dbd-sqlite3"    ; SQLite for zero-ops local dev
+               "cffi"           ; sqlite-library.lisp asks which file holds sqlite3_open (#129); already here via cl-sqlite
                "quri")          ; percent-decoding for DATABASE_URL (already in the tree, via hyperion)
   ;; NOT cl+ssl, deliberately. cl-postgres resolves it at connect time rather than at
   ;; load time, so TLS is available to any image whose APPLICATION depends on it, and
@@ -40,6 +41,7 @@
                              (:file "id")        ; time-ordered UUID/vid + touch! (CL)
                              (:file "url")       ; DATABASE_URL -> a typed Backend (CL)
                              (:file "param")     ; what a bound value MEANS, per backend
+                             (:file "sqlite-library") ; which SQLite file is loaded, and its version (CL) -- #129
                              (:file "conn")      ; connect/exec/query/txn over CL-DBI (CL)
                              (:file "migrate")   ; the migration runner (CL)
                              (:file "query")     ; HoneySQL-style data->SQL builder (CL)
@@ -100,5 +102,6 @@
                              (:file "url")
                              (:file "param")
                              (:file "sqlite-busy")
+                             (:file "sqlite-library")
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))

@@ -148,12 +148,22 @@
    #:row-value #:row-keys #:unknown-column #:unknown-column-key #:unknown-column-available
            #:null-value-p #:true-value-p #:false-value-p))
 
+(cl:defpackage #:mnemosyne/sqlite-library
+  (:use #:cl)
+  (:documentation
+   "Which SQLite library this image is using: the file that contains the sqlite3_open it
+    calls, and that library's sqlite3_libversion() (#129). cl-sqlite loads SQLite by a bare
+    name and nothing in the image keeps the file the loader chose, so without this a run
+    cannot say which SQLite its checks ran against.")
+  (:export #:loaded-library #:describe-loaded-library))
+
 (cl:defpackage #:mnemosyne/conn
   (:use #:cl)
   (:local-nicknames (#:be #:mnemosyne/backend)
                     (#:param #:mnemosyne/param)
                     (#:sec #:aion/secret)
-                    (#:log #:aion/log))
+                    (#:log #:aion/log)
+                    (#:sqlite-library #:mnemosyne/sqlite-library))
   (:documentation
    "The effectful CL shell: open a CL-DBI connection for a typed BACKEND (Postgres
     over the wire via cl-postgres; SQLite for local dev), run statements and queries,
