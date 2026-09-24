@@ -111,6 +111,11 @@
 (load (merge-pathnames "fiveam-report.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; The gate's judgement of compile warnings (#117): WARNINGS-IN and +KNOWN-WARNINGS+. Split out
+;;; so scripts/check-compile.lisp applies the same judgement to one system at a time.
+(load (merge-pathnames "compile-warnings.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; Each `caught ERROR' in a child's output (#263). Split out for the same reason, so the
 ;;; control in cons/tests/caught-errors-tests.lisp exercises the function the gate calls.
 (load (merge-pathnames "caught-errors.lisp"
@@ -233,34 +238,6 @@ the headline total without reaching any row and the table stopped summing to its
 this name it answers `mnemosyne'. The APP system is still plain `contacts' in its own
 contacts.asd, deliberately, because standalone-with-its-own-asd is what that example
 demonstrates.")
-
-(defparameter +known-warnings+
-  '(("undefined variable: PARENSCRIPT:*JS-TARGET-VERSION*"
-     . "Parenscript's own symbol, reached through a MACROEXPANSION -- it appears in no
-source file of ours. Deferred to the end of the compilation unit, so SBCL attributes it to
-whichever file finished last rather than to the form that caused it, and it surfaces only
-on a FULLY cold build. Harmless at run time: the symbol is external and bound once
-Parenscript is loaded. Listed rather than tolerated silently, because a gate that ignores
-warnings by category would have hidden the docstring bug this one exists to catch.")
-    ("undefined variable: CL-POSTGRES::*UNIX-SOCKET-DIR*"
-     . "An upstream cl-postgres read-conditional asymmetry, and WINDOWS-ONLY. In
-cl-postgres/public.lisp the DEFPARAMETER is guarded `#+(and (or ...sbcl-available ccl
-allegro) unix)`, so on Windows the variable is never defined -- but the reference to it
-(the `:unix` branch of INITIATE-CONNECTION) is guarded only by the implementation half,
-`#+(or allegro ...sbcl-available ccl)`, with no `unix`. So the reference compiles on
-Windows SBCL while the definition does not exist. Unreachable at run time: that branch
-calls `(assert-unix)` FIRST, which is `#-unix (error \"Unix sockets only available on Unix
-(really)\")`, so the unbound variable is never evaluated -- and Windows has no Unix domain
-sockets to connect to in the first place. Not fixable from here; it is in the dependency's
-own source. Surfaced by the COLD build, not by the SBCL roll that found it -- the warm fasl
-had hidden it on this platform indefinitely."))
-  "Warnings the gate accepts, each with the reason it is not ours to fix.
-
-The same doctrine as +KNOWN-EMPTY+: an exception someone MADE, not one that accumulated.
-A third-party library's cold-compile warning must not red the whole tree -- but the
-allowance is a recorded line with a justification, so it can be re-examined when the
-dependency moves, rather than a blanket `ignore warnings from dependencies` that would
-also swallow ours.")
 
 (defparameter +known-empty+
   '()
@@ -803,49 +780,15 @@ fallback for a child that died without printing a condition at all."
                 (subseq lines at (min (length lines) (+ at n))))
         (tail-lines text n))))
 
-(defun warnings-in (output)
-  "The `caught WARNING:` lines SBCL printed in OUTPUT, if any.
-
-Scanned from the child's output rather than trapped with HANDLER-BIND, because the
-warning that motivated this is DEFERRED: SBCL reports an undefined variable at the end of
-the compilation unit, past the point ASDF inspects compile-file's failure flag -- so
-`asdf:load-system` returns cleanly and the child exits 0. That is not a corner case, it is
-how an unescaped quote in a docstring emitted a warning on every cold build of hyperion
-for a week while this script reported PASS.
-
-STYLE-WARNINGs are deliberately not matched: they are advisory, they are noisy in Coalton
-code we do not own, and a gate that cries wolf gets switched off."
-  (let ((lines (uiop:split-string output :separator '(#\Newline)))
-        (out '()))
-    ;; Report the marker line AND the lines around it. SBCL prints the offending form
-    ;; and the file above `caught WARNING:`, and the message itself BELOW it -- so the
-    ;; marker alone says only "something warned", which is nearly useless in a gate
-    ;; whose whole job is to tell you what to fix. Learned by hitting it: an SBCL bump
-    ;; produced a cold-build-only warning that this function reported as
-    ;; "compiled with 1 warning" and nothing more, and it did not reproduce warm.
-    (loop for tail on lines
-          for l = (car tail)
-          when (search "caught WARNING" l)
-            do (let ((context (subseq tail 0 (min 5 (length tail)))))
-                 ;; Excused only if a KNOWN pattern appears in this warning's own context,
-                 ;; not merely somewhere in the output -- otherwise one excused warning
-                 ;; would excuse every other warning in the same build.
-                 (unless (some (lambda (known)
-                                 (some (lambda (cl) (search (car known) cl)) context))
-                               +known-warnings+)
-                   (setf out (append out context)))))
-    out))
-
-
 ;;; --- caught ERROR fails the gate (#263) -----------------------------------------------
 ;;;
-;;; WARNINGS-IN above matches `caught WARNING' only. A FiveAM test body is compiled when its
+;;; WARNINGS-IN (scripts/compile-warnings.lisp) matches `caught WARNING' only. A FiveAM test body is compiled when its
 ;;; fasl loads, so a body SBCL cannot compile prints `caught ERROR' where neither compile-file
 ;;; nor ASDF sees it, and this scan is its only compile check. scripts/caught-errors.lisp
 ;;; explains the mechanism and records the measurement taken before this became a failure:
 ;;; one occurrence, on Windows, since fixed.
 ;;;
-;;; No allowance list, unlike +KNOWN-WARNINGS+. A form that cannot compile is never correct,
+;;; No allowance list, unlike +KNOWN-WARNINGS+ in compile-warnings.lisp. A form that cannot compile is never correct,
 ;;; and no dependency has produced one. If one ever does, whether to excuse it is a decision
 ;;; for an issue of its own, not an entry added here in passing.
 
@@ -1000,7 +943,7 @@ let this run claim `view' while the five assertions skipped."
     ;; app's plain ASDF build rejected. See docs/coalton-patterns.md 8a/8b.
     (multiple-value-bind (code out)
         (run-checked (format nil "(asdf:load-system :~(~a~))" s) s)
-      (let ((warned (warnings-in out)))
+      (let ((warned (ouranos-compile-warnings:warnings-in out)))
         (cond
           ((not (zerop code))
            (format t "  FAIL    ~a~%~a~%" s (failure-excerpt out 6))
@@ -1032,10 +975,10 @@ let this run claim `view' while the five assertions skipped."
                  (format t "  empty   ~a  -- known: ~a~%" s empty-reason)
                  (progn (format t "  NO-RUN  ~a  -- 0 checks~%" s)
                         (fail "~a ran ZERO checks" s))))
-            ((and (search "Fail: 0 ( 0%)" text) (warnings-in text))
+            ((and (search "Fail: 0 ( 0%)" text) (ouranos-compile-warnings:warnings-in text))
              (incf grand n)
-             (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n (warnings-in text))
-             (fail "~a compiled with ~D warning~:P" s (length (warnings-in text))))
+             (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n (ouranos-compile-warnings:warnings-in text))
+             (fail "~a compiled with ~D warning~:P" s (length (ouranos-compile-warnings:warnings-in text))))
             ((search "Fail: 0 ( 0%)" text)
              (incf grand n)
              (let ((skipped (count-skips text)))

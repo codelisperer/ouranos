@@ -230,6 +230,14 @@ not about an expression inside it; an `ok` line is about failures, not about cov
 - Run `sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp`, cold (fresh
   detached worktree: `git worktree add --detach /tmp/v<issue> <sha>`), unmuffled, with
   Postgres up. It fails on a zero check count. A single suite between edits is a smoke test.
+- **A suite can pass while its compile prints warnings the gate fails on.** A warning that
+  SBCL reports at the end of a compilation unit does not fail `asdf:test-system`, and once
+  the fasl is warm it is not printed again at all (#117 measured a suite at `Fail: 0` with
+  four such warnings, and silent on the second run). Between edits, run
+  `sbcl --script scripts/check-compile.lisp`. It loads each system your change touches in a
+  fresh image, with this tree's fasls rebuilt, and judges the output the way the gate does,
+  in seconds per system. With no arguments it compares against the merge base with
+  `origin/main` and prints what it compared.
 - Confirm the run compiled the file you changed. A green suite that could not have seen
   your change is no evidence.
 - A check count is quoted with its **platform and its commit**, or it is a rumour. Suites
