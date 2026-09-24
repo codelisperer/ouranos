@@ -586,7 +586,9 @@ surfaces -- it just is not confused with a failing test."
     ("check-deps.lisp" () t
      "docs/dependencies.md matches the .asd files")
     ("check-asd-collisions.lisp" () nil
-     "no system name is defined by two .asd files"))
+     "no system name is defined by two .asd files")
+    ("check-format-continuations.lisp" () nil
+     "no string literal holds a FORMAT ~<newline> continuation (#146)"))
   "(script args big-heap-p what-it-answers). BIG-HEAP-P is for the two that load systems;
 the others read files and need no room to do it.
 
