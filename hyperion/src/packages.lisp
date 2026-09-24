@@ -108,6 +108,8 @@
            #:port-answering-p #:port-in-use #:port-in-use-host #:port-in-use-port
            #:port-in-use-cause #:server-start-timeout #:server-start-timeout-host
            #:server-start-timeout-port #:server-start-timeout-seconds #:*start-timeout*
+           #:woo-server-running #:woo-server-running-host #:woo-server-running-port
+           #:woo-server-running-running-host #:woo-server-running-running-port
            #:server-session #:server-session-p #:server-session-handler
            #:*shutdown-poll-interval*
            #:*install-signal-handlers* #:*shutdown-hooks*
