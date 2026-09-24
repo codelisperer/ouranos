@@ -319,3 +319,63 @@ and the editor droppings that appear beside a file on every save."
            (is (notany #'hyperion/dev::%lisp-file-p
                        (hyperion/dev::%watched-files (list root)))))
       (ignore-errors (uiop:delete-directory-tree root :validate t)))))
+
+;;; --- the no-Lisp warning is about the watch set, not each root (#134) ---------------
+
+(defun %dev-root-with (file)
+  "A fresh directory holding one file named FILE."
+  (let ((root (uiop:ensure-directory-pathname
+               (merge-pathnames (format nil "hyp-dev-134-~36R/" (random (expt 2 40) (make-random-state t)))
+                                (uiop:temporary-directory)))))
+    (ensure-directories-exist root)
+    (with-open-file (s (merge-pathnames file root) :direction :output :if-exists :supersede)
+      (write-string "x" s))
+    root))
+
+(defun %dev-warnings-and-no-lisp (roots)
+  "Call %NOTE-ROOTS-WITHOUT-LISP on ROOTS; return (values warning-messages no-lisp-roots)."
+  (let ((warnings '()))
+    (let ((no-lisp (handler-bind ((warning (lambda (w)
+                                             (push (princ-to-string w) warnings)
+                                             (muffle-warning w))))
+                     (hyperion/dev::%note-roots-without-lisp
+                      roots hyperion/dev:*watch-excluded-directories*
+                      hyperion/dev:*watch-excluded-types*))))
+      (values (nreverse warnings) no-lisp))))
+
+(test an-asset-only-root-beside-a-lisp-root-does-not-warn
+  ;; The reported case: :SYSTEM with Lisp, plus an asset directory passed through :PATHS.
+  ;; It used to warn on every boot, for a configuration that works.
+  (let ((src (%dev-root-with "app.lisp"))
+        (assets (%dev-root-with "site.css")))
+    (unwind-protect
+         (multiple-value-bind (warnings no-lisp) (%dev-warnings-and-no-lisp (list src assets))
+           (is (null warnings) "no warning when some watched root has Lisp, got ~S" warnings)
+           (is (equal (list assets) no-lisp) "the asset-only root is still identified")
+           (is (search "(no .lisp)" (second (hyperion/dev::%root-listing (list src assets) no-lisp)))
+               "and the banner marks it, instead of a warning")
+           (is (not (search "(no .lisp)" (first (hyperion/dev::%root-listing (list src assets) no-lisp))))))
+      (ignore-errors (uiop:delete-directory-tree src :validate t))
+      (ignore-errors (uiop:delete-directory-tree assets :validate t)))))
+
+(test a-single-root-with-no-lisp-still-warns-once
+  ;; pre-publication issue 237's case, which the narrowing must keep: :SYSTEM resolved somewhere with no
+  ;; Lisp, so the watcher would never fire.
+  (let ((root (%dev-root-with "README.md")))
+    (unwind-protect
+         (let ((warnings (%dev-warnings-and-no-lisp (list root))))
+           (is (= 1 (length warnings)) "exactly one warning, got ~S" warnings)
+           (is (search (namestring root) (or (first warnings) "")) "naming the root"))
+      (ignore-errors (uiop:delete-directory-tree root :validate t)))))
+
+(test several-roots-with-no-lisp-warn-once-not-once-each
+  (let ((a (%dev-root-with "a.css"))
+        (b (%dev-root-with "b.json")))
+    (unwind-protect
+         (let ((warnings (%dev-warnings-and-no-lisp (list a b))))
+           (is (= 1 (length warnings)) "one warning for the watch set, got ~S" warnings)
+           (is (and (search (namestring a) (or (first warnings) ""))
+                    (search (namestring b) (or (first warnings) "")))
+               "naming every root"))
+      (ignore-errors (uiop:delete-directory-tree a :validate t))
+      (ignore-errors (uiop:delete-directory-tree b :validate t)))))

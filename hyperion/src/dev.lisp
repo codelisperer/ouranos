@@ -400,23 +400,44 @@ Returns the dev handle; stop with UNWATCH."
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
             ;; server, not for the call that started it (#158).
             (sb-thread:make-thread (lambda () (%watch-loop d)) :name "hyperion-dev-watch"))
-      (format t "~&[dev] watching ~{~A~^ ~} — save any watched file to hot-reload~%"
-              (mapcar #'namestring roots))
-      ;; pre-publication issue 237: a root with no Lisp under it is almost always a mistake -- :SYSTEM resolved
-      ;; somewhere the developer does not work. Cheap to notice, and the watcher would
-      ;; otherwise run, print this banner, poll happily, and never fire.
-      ;;
-      ;; NOTE, because it matters for what this does NOT catch: the reported case was a
-      ;; repo whose .asd sits at the root with a POPULATED src/ holding a shared core,
-      ;; while the surface being edited lived in desktop/src/. That root has Lisp in it, so
-      ;; this warning is silent there. It catches the empty-root case only; the docstring
-      ;; below is what addresses the reported one.
-      (dolist (r roots)
-        (unless (some #'%lisp-file-p
-                      (%watched-files (list r) :excluded-dirs exclude-directories
-                                               :excluded-types exclude-types))
-          (warn "hyperion/dev: watching ~A, which contains no .lisp files.~%If your sources are elsewhere, pass :PATHS -- the watcher will otherwise run and never fire." (namestring r))))
+      (let ((no-lisp (%note-roots-without-lisp roots exclude-directories exclude-types)))
+        (format t "~&[dev] watching ~{~A~^ ~} — save any watched file to hot-reload~%"
+                (%root-listing roots no-lisp)))
       d)))
+
+;;; pre-publication issue 237, narrowed by #134: a watch with no Lisp anywhere is almost always a
+;;; mistake -- :SYSTEM resolved somewhere the developer does not work -- and the watcher would
+;;; otherwise run, print its banner, poll, and never fire. A single root with no Lisp is still
+;;; the whole watch set, so that case still warns. What no longer warns is an asset-only root
+;;; passed through :PATHS beside a root that has Lisp, which is what :PATHS is for; warning on
+;;; it every boot taught people to ignore the warning. Such a root is marked in the banner
+;;; instead.
+;;;
+;;; NOTE, because it matters for what this does NOT catch: the originally reported case was a
+;;; repo whose .asd sits at the root with a POPULATED src/ holding a shared core, while the
+;;; surface being edited lived in desktop/src/. That root has Lisp in it, so this is silent
+;;; there. It catches the no-Lisp-at-all case only; WATCH's docstring addresses the other.
+
+(defun %note-roots-without-lisp (roots excluded-dirs excluded-types)
+  "Return the ROOTS that contain no .lisp file, and WARN once if that is every root."
+  (let ((no-lisp (remove-if (lambda (r)
+                              (some #'%lisp-file-p
+                                    (%watched-files (list r) :excluded-dirs excluded-dirs
+                                                             :excluded-types excluded-types)))
+                            roots)))
+    (when (and roots (= (length no-lisp) (length roots)))
+      (warn "hyperion/dev: watching ~{~A~^, ~}, which contain~:[s~;~] no .lisp files.~%If your sources are elsewhere, pass :PATHS -- the watcher will otherwise run and never fire."
+            (mapcar #'namestring roots) (cdr roots)))
+    no-lisp))
+
+(defun %root-listing (roots no-lisp)
+  "ROOTS as the banner prints them, with a root in NO-LISP marked, when there is more than
+one root. A single root with no Lisp has already been warned about."
+  (mapcar (lambda (r)
+            (if (and (cdr roots) (member r no-lisp))
+                (format nil "~A (no .lisp)" (namestring r))
+                (namestring r)))
+          roots))
 
 (defun unwatch (&optional (d *dev*))
   "Stop the watcher thread and the server it manages."
