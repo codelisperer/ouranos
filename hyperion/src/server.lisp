@@ -372,8 +372,16 @@ Claude (macOS) on #188)."
     (unwind-protect (%connect-within sock (%connect-address host) port timeout)
       (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
+(defun %apply-security-headers (app option)
+  "APP wrapped per START's SECURITY-HEADERS OPTION: T for the defaults, a plist of keyword
+arguments, or NIL for none."
+  (cond ((null option) app)
+        ((eq option t) (hyperion/security-headers:wrap-security-headers app))
+        (t (apply #'hyperion/security-headers:wrap-security-headers app option))))
+
 (defun start (app &key (server (default-server)) (port *default-port*)
-                       (host "127.0.0.1") debug (log t) (check-port t))
+                       (host "127.0.0.1") debug (log t) (check-port t)
+                       (security-headers t))
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
 the returned handler differs between the two and STOP takes either.
@@ -394,6 +402,12 @@ id and one line at :info -- on by default because a server nobody can see into i
 problem this exists to solve, and the default log level leaves it quiet enough to live
 with. Pass :log nil to opt out (or if the app already wraps itself).
 
+SECURITY-HEADERS (default T) wraps APP in HYPERION/SECURITY-HEADERS:WRAP-SECURITY-HEADERS, so
+every response carries X-Content-Type-Options, X-Frame-Options, Referrer-Policy and a
+Content-Security-Policy with no script-src (#119). T uses that module's defaults; a plist is
+passed to it as keyword arguments, e.g. (:content-security-policy \"default-src 'self'\"
+:hsts \"max-age=31536000\"); NIL sends none of them.
+
 CHECK-PORT (default T) refuses to start when PORT is already answering, signalling
 PORT-IN-USE. On by default because the failure it prevents does not look like a port
 problem: a dev window opens onto a SIBLING application and reads as a catastrophically
@@ -401,7 +415,8 @@ broken build (pre-publication issue 238). The probe CONNECTS rather than binding
 why that distinction is not pedantry on Windows. Pass :check-port nil to start anyway."
   (when (and check-port (port-answering-p host port))
     (error 'port-in-use :host host :port port))
-  (let ((wrapped (if log (hyperion/logging:wrap app) app)))
+  (let* ((secured (%apply-security-headers app security-headers))
+         (wrapped (if log (hyperion/logging:wrap secured) secured)))
     (cond
       ((native-backend-p server)
        ;; DEBUG has no meaning here and is not silently dropped. There is no debugger to
@@ -854,7 +869,7 @@ Safe from any thread, and safe from a signal handler."
   t)
 
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
-                               (host "127.0.0.1") debug (log t)
+                               (host "127.0.0.1") debug (log t) (security-headers t)
                                name (banner :derive) (signals t) on-ready)
   "Start APP and BLOCK until interrupted or until REQUEST-SHUTDOWN is called. Returns NIL.
 
@@ -899,7 +914,8 @@ a dead server breaks the next thing you run."
       (setf restore-signals
             (funcall *install-signal-handlers*
                      (lambda () (request-shutdown-from-signal session)))))
-    (setf handler (start app :server server :port port :host host :debug debug :log log)
+    (setf handler (start app :server server :port port :host host :debug debug :log log
+                             :security-headers security-headers)
           (server-session-handler session) handler)
     ;; BANNER has THREE states, not two, so it cannot be a plain string-or-NIL: derive one
     ;; (the default), print this exact line, or print nothing. With NIL as the default there

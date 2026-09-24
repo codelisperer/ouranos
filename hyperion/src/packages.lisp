@@ -246,6 +246,18 @@
 ;;; --- Request logging + correlation --------------------------------------
 ;;; Clack middleware binding a request id into aion/log's ambient context, so a single
 ;;; request's events -- here, in mnemosyne, in praxeon, in the app -- share one field.
+(cl:defpackage #:hyperion/security-headers
+  (:use #:cl)
+  (:documentation
+   "Default HTTP security headers (#119): WRAP-SECURITY-HEADERS adds X-Content-Type-Options,
+    X-Frame-Options, Referrer-Policy and a Content-Security-Policy to every response, and
+    Strict-Transport-Security when asked. Each is overridable or can be turned off, and a header
+    the application sets on its own response is never replaced. HYPERION/SERVER:START applies
+    it by default.")
+  (:export #:wrap-security-headers #:hsts-value
+           #:*content-type-options* #:*frame-options* #:*referrer-policy*
+           #:*content-security-policy* #:*hsts*))
+
 (cl:defpackage #:hyperion/logging
   (:use #:cl)
   (:local-nicknames (#:log #:aion/log)
