@@ -14,7 +14,16 @@
 - **No native library** — Hyperion itself declares no HTTP server, so nothing to install.
   An app that chooses `clack-handler-woo` needs **`libev`** (macOS `brew install libev`,
   Debian/Ubuntu `sudo apt-get install libev-dev`) and cannot be shipped as a desktop bundle
-  without carrying it; `clack-handler-hunchentoot` is pure CL and needs nothing (pre-publication issue 139).
+  without carrying it; `clack-handler-hunchentoot` is pure CL (pre-publication issue 139), but its
+  SSL support loads the system's OpenSSL on Linux and macOS (on macOS that means Homebrew's,
+  #191).
+- **No HTTPS from Hunchentoot on Windows.** On Windows the tree builds Hunchentoot without
+  its SSL support (`:hunchentoot-no-ssl`, set at the top of `hyperion.asd` and
+  `praxeon.asd`), because Windows ships no OpenSSL and a desktop bundle that loaded it quit
+  at startup on machines without it (#249). Hunchentoot therefore cannot serve HTTPS on
+  Windows. Outbound HTTPS is unaffected, because dexador uses WinHTTP there. This is a
+  stopgap: `hyperion/server-uv` terminating TLS with the mbedTLS this tree builds and carries
+  is #125, and Postgres over TLS on Windows and macOS is #258.
 
 ## Getting started
 
