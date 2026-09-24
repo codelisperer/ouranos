@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # test-postgres.sh --- the Postgres the verification gate needs (pre-publication issue 176).
 #
-#   scripts/test-postgres.sh up      start it and wait until it actually answers
+#   scripts/test-postgres.sh up      pull the image, start it, and wait until it actually answers
 #   scripts/test-postgres.sh down    stop and remove it
 #   scripts/test-postgres.sh url     print the URL to export, and nothing else
 #   scripts/test-postgres.sh env     print the full `export ...` line, for eval
@@ -82,10 +82,54 @@ compose() {
   fi
 }
 
+# PULL THE IMAGE BEFORE STARTING THE CONTAINER, AND TRY MORE THAN ONCE (#245). `compose up`
+# pulls a missing image itself, and when the registry refuses that pull, `compose up` fails at
+# once. On one pull request's CI run, Docker Hub refused the pull of this public image with
+# "unauthorized: authentication required". The Linux leg failed before the gate ran, and
+# re-running the job at the same commit passed. This function therefore pulls first, up to four
+# times, with pauses of 10, 20 and 30 seconds between the tries. `compose up` then finds the
+# image present and does not pull it again.
+#
+# When every try fails, the last line names the image and the number of tries, and says that this
+# is a registry failure and not a test result. On GitHub Actions the same line is appended to
+# $GITHUB_STEP_SUMMARY, because the rest of the job summary, which scripts/ci-job-summary.sh
+# writes, shows only that this step failed.
+#
+# When a copy of the image is already on this machine, the pull is tried once and a failure is
+# not fatal. The pull would only have brought that copy up to date, and the copy is enough to
+# start the container, so a developer without network access can still run `up`.
+pull_image() {
+  image="$(declared_image)"
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    compose pull ||
+      echo "test-postgres: could not pull $image; starting the copy already on this machine." >&2
+    return 0
+  fi
+  try=1
+  for pause in 10 20 30; do
+    compose pull && return 0
+    echo "test-postgres: pulling $image failed on try $try; trying again in ${pause}s." >&2
+    sleep "$pause"
+    try=$((try + 1))
+  done
+  compose pull && return 0
+  msg="test-postgres: could not pull $image after $try tries. This is a registry failure, not a test result."
+  echo "$msg" >&2
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    echo "$msg" >> "$GITHUB_STEP_SUMMARY" ||
+      echo "test-postgres: could not write that line to $GITHUB_STEP_SUMMARY." >&2
+  fi
+  exit 1
+}
+
 case "${1:-}" in
   up)
     command -v docker >/dev/null 2>&1 || {
       echo "test-postgres: docker is not installed or not on PATH." >&2; exit 2; }
+    # The daemon has to answer too. When it does not, every pull in pull_image fails, and the line
+    # printed after the last try would blame the registry for a daemon that is not running.
+    docker version >/dev/null 2>&1 || {
+      echo "test-postgres: docker is installed, but its daemon is not answering." >&2; exit 2; }
     # ALREADY RUNNING IS SUCCESS, and this is not merely politeness. The container name is
     # fixed while compose derives its PROJECT name from the containing DIRECTORY -- so the
     # very setup AGENTS.md mandates, one worktree per agent, makes `up` in the second
@@ -104,6 +148,7 @@ case "${1:-}" in
       printf 'test-postgres: eval "$(scripts/test-postgres.sh env)"\n'
       exit 0
     fi
+    pull_image
     compose up -d
     # Wait for the HEALTHCHECK, not for the container to exist. `up -d` returns as soon as
     # the process starts, and Postgres refuses connections for a second or two after that
