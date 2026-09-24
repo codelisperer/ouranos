@@ -353,6 +353,14 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
        ;; header that is then thrown away.
        ;; The native backend binds in THIS thread, so a taken port already signals here.
        ;; It is translated so that a caller handles one condition whatever the backend.
+       ;;
+       ;; NO NONCE HERE, and that is not an omission (#188). The Clack path needs one because
+       ;; its bind happens on another thread after START could otherwise return. Here the
+       ;; bind and the listen both happen before %UV-CALL returns, in this thread, so a
+       ;; failed bind is signalled here and a returned START already means this server's
+       ;; own socket is listening. What this does NOT cover is a port another socket
+       ;; SHARES, which Windows allows when both set SO_REUSEADDR: whether libuv's listen
+       ;; socket can share a port that way on Windows has not been measured.
        (handler-bind ((error (lambda (e)
                                (when (%address-in-use-p e)
                                  (error 'port-in-use :host host :port port :cause e)))))
