@@ -366,6 +366,14 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   the case where there is no run to read: pre-publication PR 443 sat open for thirteen hours showing a green
   `copilot-pull-request-reviewer` and no `verify` run of any kind, which reads as a checked pull
   request in every interface that displays it.
+- **Quote a SHA, run id or comment id only from output you have already read.** An identifier
+  written into a message in the same step as the command that produces it is a guess, and a
+  guessed identifier looks exactly like a real one. On 2026-09-24 four went out in one night:
+  three commit SHAs that did not exist, each sent as a head to merge, and a link to a comment
+  id that no comment had. Run the command, read what it printed, then write the message. The
+  rule above is why none of the three reached `main`: every merge was pinned to a head read back
+  from GitHub, not to the one a message named. When someone sends you a head, read it back the
+  same way (`gh pr view <N> --json headRefOid`) before you pin to it.
 - **A job's conclusion is one bit, and it is about the job.** It cannot distinguish two failing
   suites from three, so a leg that is already red absorbs a new failure silently and
   indefinitely. The sentence you are most likely to write about it — *"that leg is red, it is
