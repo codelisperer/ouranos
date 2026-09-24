@@ -80,6 +80,14 @@ sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp
 scripts/test-postgres.sh down
 ```
 
+`up` prints which image the container is running and whether it is the one
+`docker-compose.test.yml` declares. An existing container is started as it is, so after the
+compose file's `image:` changes, a container created before the change keeps the old image.
+The line then says MISMATCH, and `scripts/test-postgres.sh down && scripts/test-postgres.sh up`
+recreates it (this pulls the new image, and stops the container for any other worktree using
+it). `scripts/test-postgres.sh check` prints the same line and exits 1 on a mismatch, 2 when
+no container is running (#147).
+
 **It uses its own variable, not `DATABASE_URL`.** The suite `CREATE`s and `DROP`s tables; a
 developer who exported `DATABASE_URL` for their application must never discover that running
 the tests reshaped it.

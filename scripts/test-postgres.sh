@@ -5,6 +5,8 @@
 #   scripts/test-postgres.sh down    stop and remove it
 #   scripts/test-postgres.sh url     print the URL to export, and nothing else
 #   scripts/test-postgres.sh env     print the full `export ...` line, for eval
+#   scripts/test-postgres.sh check   say whether the running container is the declared image;
+#                                    exit 0 if it is, 1 if not, 2 if none is running
 #
 # Typical use:
 #
@@ -23,11 +25,47 @@
 
 set -eu
 
-CONTAINER=ouranos-test-pg
 URL='postgres://ouranos:ouranos@127.0.0.1:55432/ouranos_test?sslmode=disable'
 
 root() { CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd; }
-COMPOSE_FILE="$(root)/docker-compose.test.yml"
+# The two OURANOS_TEST_PG_* overrides exist so the image check below can be measured against a
+# scratch container without touching the one other worktrees may be using. Unset, they are the
+# container and compose file this repository declares.
+CONTAINER="${OURANOS_TEST_PG_CONTAINER:-ouranos-test-pg}"
+COMPOSE_FILE="${OURANOS_TEST_PG_COMPOSE:-$(root)/docker-compose.test.yml}"
+
+# IS THE RUNNING CONTAINER THE ONE THE COMPOSE FILE DECLARES? (#147) `docker compose up` starts
+# an existing container as it is, so after `image:` changes in the compose file, anyone whose
+# container predates the change keeps the old image with no warning. That happened when the image
+# became pgvector: the vector suites then skipped, correctly and by name, and coverage dropped
+# with nothing going red. This compares the two and says which, every time.
+declared_image() {
+  awk '/^[[:space:]]*image:[[:space:]]*/ { print $2; exit }' "$COMPOSE_FILE"
+}
+running_image() {
+  docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || true
+}
+# Prints one line when they match. Prints a block on stderr and returns 1 when they do not.
+image_report() {
+  want="$(declared_image)"
+  have="$(running_image)"
+  if [ "$have" = "$want" ]; then
+    echo "test-postgres: $CONTAINER runs $have, as $(basename "$COMPOSE_FILE") declares."
+    return 0
+  fi
+  {
+    echo ""
+    echo "test-postgres: MISMATCH. $CONTAINER runs '$have',"
+    echo "test-postgres: but $(basename "$COMPOSE_FILE") declares '$want'."
+    echo "test-postgres: The container predates a change to the compose file, and \`up\` does not"
+    echo "test-postgres: recreate it, so tests run against a server the repository no longer describes"
+    echo "test-postgres: (after the pgvector change, the vector suites skipped on every run)."
+    echo "test-postgres: To recreate it -- which stops it for any other worktree using it:"
+    echo "test-postgres:   scripts/test-postgres.sh down && scripts/test-postgres.sh up"
+    echo ""
+  } >&2
+  return 1
+}
 
 compose() {
   # `docker compose` (v2 plugin) with a fallback to the standalone v1 binary, because both
@@ -60,6 +98,9 @@ case "${1:-}" in
     # broken -- sends you to remove a container another agent's run is using.
     if [ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo none)" = healthy ]; then
       echo "test-postgres: $CONTAINER is already running and healthy."
+      # Reported, not refused: the container may be serving another worktree's run, and
+      # recreating it from here would pull the database out from under that run.
+      image_report || true
       printf 'test-postgres: eval "$(scripts/test-postgres.sh env)"\n'
       exit 0
     fi
@@ -74,6 +115,7 @@ case "${1:-}" in
       state="$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo none)"
       if [ "$state" = healthy ]; then
         printf '\ntest-postgres: ready.\n'
+        image_report || true
         printf 'test-postgres: eval "$(scripts/test-postgres.sh env)"\n'
         exit 0
       fi
@@ -96,8 +138,15 @@ case "${1:-}" in
   env)
     echo "export MNEMOSYNE_TEST_PG_URL='$URL'"
     ;;
+  check)
+    if [ -z "$(running_image)" ]; then
+      echo "test-postgres: $CONTAINER is not running." >&2
+      exit 2
+    fi
+    image_report
+    ;;
   *)
-    echo "usage: scripts/test-postgres.sh up|down|url|env" >&2
+    echo "usage: scripts/test-postgres.sh up|down|url|env|check" >&2
     exit 2
     ;;
 esac
