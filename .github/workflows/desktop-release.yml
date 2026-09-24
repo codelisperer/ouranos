@@ -453,8 +453,8 @@ jobs:
       #
       # So the absence is DECLARED instead of inferred. APP_PLATFORMS is what this release is
       # supposed to carry; a mismatch either way is a failure. A platform that silently stops
-      # building can no longer slip out, and the day macOS packaging lands (#135) this line
-      # changes in the same commit as the step that produces it.
+      # building can no longer slip out. macOS joined in #135, in the same commit as the step
+      # that produces its payload, which is how any platform should join.
       - name: The manifest carries exactly the platforms this release declares
         shell: bash
         run: |
@@ -496,7 +496,9 @@ jobs:
             "" \
             "Platforms in this release: ${APP_PLATFORMS}." \
             "" \
-            "A platform not listed has no download here, and installed copies on it are not offered this version. macOS is absent because nothing builds its payload yet (#135).")
+            "A platform not listed has no download here, and installed copies on it are not offered this version." \
+            "" \
+            "macOS (macos-arm64): this release carries the update payload that installed copies download (.app.tar.gz). The drag-to-install .dmg is built but not attached here. The macOS build needs Homebrew's OpenSSL to start, and a Mac without it cannot run the app (#191).")
           # --latest=false: this repository's "Latest release" is the framework's, and an app's
           # release must not take it over. Installed copies never read it; they poll the
           # channel pointer below.
