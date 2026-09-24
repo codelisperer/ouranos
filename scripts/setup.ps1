@@ -262,6 +262,23 @@ function Install-Quicklisp {
   # Was Invoke-WebRequest with NO retry of any kind -- a second hole, and a worse one:
   # the MSI download at least tried. One transient here fails the whole setup.
   Get-Url -Url 'https://beta.quicklisp.org/quicklisp.lisp' -OutFile $tmp
+  # Verified before SBCL loads it (#211), against the pin setup.sh uses too. The URL is not
+  # versioned, so a new Quicklisp installer stops setup here until the pin is updated after
+  # checking its signature, as versions.env describes.
+  $want = $Pins['QUICKLISP_LISP_SHA256']
+  if (-not $want) {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Die 'versions.env has no QUICKLISP_LISP_SHA256, so quicklisp.lisp cannot be verified; refusing to load it'
+  }
+  $got = Get-Sha256Hex $tmp
+  if ($got -ne $want.ToLower()) {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Die ("quicklisp.lisp checksum mismatch`n" +
+      "       expected $($want.ToLower())`n" +
+      "       got      $got`n" +
+      "       scripts/versions.env is the pin; a mismatch means the downloaded file is not the pinned one. Nothing was loaded.")
+  }
+  Note "sha256 $got matches QUICKLISP_LISP_SHA256"
   # Forward slashes: backslash is the Lisp reader's escape character inside a string.
   $path = ($QlHome -replace '\\', '/') + '/'
   $rc = Invoke-SbclForm -PreLoad $tmp -Form "(quicklisp-quickstart:install :path `"$path`")"
