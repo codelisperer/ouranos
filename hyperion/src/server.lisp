@@ -296,7 +296,10 @@ by Ouranos Claude (macOS) on #188). So on Unix the connect is non-blocking, and 
 it is SB-SYS:WAIT-UNTIL-FD-USABLE with a timeout. Windows keeps the blocking connect: there
 a non-blocking connect signals INTERRUPTED-ERROR rather than OPERATION-IN-PROGRESS, and a
 blocking connect to a bound-but-not-listening port is refused after about 2.05 s rather than
-hanging (both measured by Ouranos Claude (Windows) on #188)."
+hanging (both measured by Ouranos Claude (Windows) on #188). That is measured for loopback,
+which is START's host almost always; a Windows connect to an address that silently drops
+packets would instead wait out Windows' own TCP connect timeout, about 21 s, which the
+deadline does not shorten."
   (handler-case
       #-win32
       (progn
@@ -347,9 +350,10 @@ START RETURNS ONCE THE PORT IS LISTENING, on every backend (#159). A port that i
 signals PORT-IN-USE here, in the caller, whether START saw it answering beforehand or the
 backend's bind failed; with a Clack backend the bind happens on the server's own thread,
 and START waits for it. If a Clack backend neither listens nor fails within
-*START-TIMEOUT* seconds, START stops it and signals SERVER-START-TIMEOUT. The one case this
-does not cover is described above %CLACK-START: another process that starts listening on
-the same port in the moment between the check and the bind. DEBUG nil (the
+*START-TIMEOUT* seconds, START stops it and signals SERVER-START-TIMEOUT. Readiness is the
+server answering a one-time nonce, so another program on the port is never taken for this
+server. The one case that remains is Windows letting two sockets that both set SO_REUSEADDR
+share a port; what START does on each platform is described above %CLACK-START. DEBUG nil (the
 default) returns a 500 on an unhandled error instead of dropping into the debugger
 -- right for a server, and the only behaviour the native backend has.
 
@@ -429,7 +433,10 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
 ;;;            Ouranos Claude (Windows) on #188). START then either gets its own nonce back,
 ;;;            and returns with the port still shared, or never does and signals
 ;;;            SERVER-START-TIMEOUT. A shared port cannot be prevented or detected from here.
-;;;   macOS    pending the macOS measurement on #188.
+;;;   macOS    the backend's bind fails, and START signals PORT-IN-USE, in every case measured
+;;;            on both backends -- bound or listening, with or without SO_REUSEADDR, or another
+;;;            hyperion server. With the preflight on, START reported it in 1.55 s (measured by
+;;;            Ouranos Claude (macOS) on #188).
 
 (defstruct (clack-server (:constructor %make-clack-server) (:copier nil))
   "What START returns for a Clack backend. STOP takes it."
