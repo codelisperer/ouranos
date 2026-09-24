@@ -87,6 +87,7 @@
 ;;;; compiled, none is in mbedtls.sources, and the bundler copies from lib/, not src/.)
 
 (require :uiop)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defparameter *root* (uiop:pathname-parent-directory-pathname
                       (uiop:pathname-directory-pathname *load-truename*)))
@@ -662,7 +663,7 @@ The tools disagree, so this is per-platform rather than one command with a flag:
 
 A file existing proves the compiler exited 0. These checks prove the loader will find it
 under the name it asks for, and that the entry points we are about to bind are in it."
-  (format t "~&~%Verifying ~A~%" (namestring library))
+  (format t "~&~%Verifying ~A~%" (human-path:human-path library))
   (let ((size (with-open-file (s library :element-type '(unsigned-byte 8)) (file-length s))))
     (format t "  size ~:D bytes~%" size)
     (when (< size 100000)
@@ -704,10 +705,10 @@ under the name it asks for, and that the entry points we are about to bind are i
 (defun main ()
   (let ((args (uiop:command-line-arguments)))
     (when (member "--where" args :test #'string=)
-      (format t "~A~%" (namestring (library-path)))
+      (format t "~A~%" (human-path:human-path (library-path)))
       (uiop:quit 0))
     (when (member "--clean" args :test #'string=)
-      (format t "~&removing ~A~%" (namestring *vendor*))
+      (format t "~&removing ~A~%" (human-path:human-path *vendor*))
       (uiop:delete-directory-tree *vendor* :validate t :if-does-not-exist :ignore)
       (uiop:quit 0))
     (let ((version (pin-field "version"))
@@ -717,7 +718,7 @@ under the name it asks for, and that the entry points we are about to bind are i
       (unless (and version url sha)
         (format *error-output* "build-mbedtls: mbedtls.pin is missing version, url or sha256.~%")
         (uiop:quit 1))
-      (format t "~&mbedTLS ~A (~A) -> ~A~%" version (platform) (namestring *vendor*))
+      (format t "~&mbedTLS ~A (~A) -> ~A~%" version (platform) (human-path:human-path *vendor*))
       ;; AN EXISTING LIBRARY IS VERIFIED, NOT TRUSTED. One built before ouranos_tls.c existed
       ;; is a file of the right name that lacks every symbol aion/tls needs, and "already
       ;; built" would have accepted it. It passes VERIFY-BUILT or it is rebuilt.
@@ -725,7 +726,7 @@ under the name it asks for, and that the entry points we are about to bind are i
         (handler-case
             (progn (verify-built (library-path))
                    (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                           (namestring (library-path)))
+                           (human-path:human-path (library-path)))
                    (uiop:quit 0))
           (error (e)
             (format t "~&  the library already there fails verification, so it is rebuilt:~%  ~A~%" e))))

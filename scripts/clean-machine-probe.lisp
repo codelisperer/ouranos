@@ -17,6 +17,7 @@
 ;;;; complaint `setup.sh' already carries.
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 
 (defun argv-value (name &optional default)
@@ -71,7 +72,7 @@
                    (setf found (eval (third form)))))))
     (when (eq found :none)
       (format *error-output*
-              "~&clean-machine-probe: +SYSTEMS+ not found in ~A -- it has been renamed.~%Refusing to probe a list I cannot derive: a short list here reports a~%CLEANER machine than the tree actually needs, which is the failure this~%file exists to catch.~%" file)
+              "~&clean-machine-probe: +SYSTEMS+ not found in ~A -- it has been renamed.~%Refusing to probe a list I cannot derive: a short list here reports a~%CLEANER machine than the tree actually needs, which is the failure this~%file exists to catch.~%" (human-path:human-path file))
       (finish-output *error-output*)
       (sb-ext:quit :unix-status 2))
     found))

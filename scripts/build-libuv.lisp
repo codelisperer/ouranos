@@ -71,6 +71,7 @@
 ;;;; uv_interface_addresses), that invariant breaks and this pairing stops being safe.
 
 (require :asdf)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defparameter *root*
   (uiop:pathname-parent-directory-pathname
@@ -558,11 +559,11 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
 (let ((args (uiop:command-line-arguments)))
   (cond
     ((member "--where" args :test #'string=)
-     (format t "~A~%" (namestring (library-path)))
+     (format t "~A~%" (human-path:human-path (library-path)))
      (uiop:quit 0))
 
     ((member "--clean" args :test #'string=)
-     (format t "~&removing ~A~%" (namestring *vendor*))
+     (format t "~&removing ~A~%" (human-path:human-path *vendor*))
      (uiop:delete-directory-tree *vendor* :validate t :if-does-not-exist :ignore)
      (uiop:quit 0))
 
@@ -578,7 +579,7 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
        (let ((existing (probe-file (library-path))))
          (when (and existing (not force))
            (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                   (namestring (library-path)))
+                   (human-path:human-path (library-path)))
            (uiop:quit 0)))
        (handler-case
            ;; BEFORE the fetch rather than inside the compile -- see `require-toolchain'.

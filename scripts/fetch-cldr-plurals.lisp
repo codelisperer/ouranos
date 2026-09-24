@@ -35,6 +35,7 @@
 ;;; pre-publication issue 450 in check-readme-counts, same resolver.
 (defparameter *script* (or *load-truename* *load-pathname*))
 (load (merge-pathnames "tree-root.lisp" (uiop:pathname-directory-pathname *script*)))
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname *script*)))
 
 (defparameter *root* (tree-root:resolve-or-die *script* "fetch-cldr-plurals"))
 
@@ -194,4 +195,4 @@ meaning `always` -- the evaluator treats a missing rule and a matching one ident
           (format s "locales   ~D~%" (length table))
           (format s "generated hyperion/src/vendor/cldr-plurals.lisp~%")
           (format s "licence   Unicode-3.0 (https://www.unicode.org/license.txt)~%"))
-        (format t "~&Wrote ~A (~D locales)~%and ~A~%" *out-file* (length table) *pin-file*))))
+        (format t "~&Wrote ~A (~D locales)~%and ~A~%" (human-path:human-path *out-file*) (length table) (human-path:human-path *pin-file*)))))

@@ -34,6 +34,7 @@
 
 (require :asdf)
 (require :uiop)
+(load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
 (defparameter *root*
   (uiop:pathname-parent-directory-pathname
@@ -68,7 +69,7 @@ build output, it is large, and two of them exist."
            (script-path (merge-pathnames script *root*)))
       (ensure-directories-exist cache)
       (unless (probe-file script-path)
-        (format *error-output* "~&with-mode: no such script: ~a~%" script-path)
+        (format *error-output* "~&with-mode: no such script: ~a~%" (human-path:human-path script-path))
         (uiop:quit 2))
 
       ;; The entry separator is `:` on Unix and `;` on Windows -- a colon there would be
