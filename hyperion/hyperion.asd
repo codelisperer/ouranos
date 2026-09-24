@@ -468,5 +468,6 @@
                              (:file "sse-tests")
                              (:file "static-tests")
                              (:file "logging-tests")
-                             (:file "import-tests"))))
+                             (:file "import-tests")
+                             (:file "markdown-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))
