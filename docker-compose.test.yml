@@ -2,6 +2,11 @@
 #
 #   scripts/test-postgres.sh up      start it, wait until it answers
 #   scripts/test-postgres.sh down    stop and remove it
+#   scripts/test-postgres.sh check   say whether the running container is the image below
+#
+# Changing `image:` does not change a container that is already running: `up` starts the
+# existing one as it is. `up` and `check` both print which image is running and whether it is
+# the one declared here (#147); to move to a new image, run `down` and then `up`.
 #
 # Why this exists: mnemosyne's claim is a NEUTRAL protocol over interchangeable backends,
 # and every check it has ever reported green ran against SQLite alone -- the one backend
