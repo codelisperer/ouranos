@@ -299,25 +299,64 @@ escape the closing quote, which is how a path with a space in it silently become
         (error "mbedTLS tarball checksum mismatch.~%  expected ~A~%  actual   ~A~%The tarball has been deleted. Either upstream was substituted, or mbedtls.pin is stale."
                expected-sha actual)))
     (format t "~&  sha256 ok~%")
-    ;; WHICH tar, and what it can decompress, printed before it runs. On Windows it is the
-    ;; bsdtar in System32, by absolute path, so a GNU tar earlier on PATH (Git's, which reads
-    ;; "D:/..." as a remote host) cannot be picked up instead.
-    (let ((tar (tar-program)))
+    ;; DECOMPRESSED IN LISP, then extracted as a plain tar (#273). Windows' bsdtar varies by
+    ;; build: the windows-2022 runner's 3.8.4 has no bz2lib, so it pipes the archive through an
+    ;; external bzip2, which failed on the pipe and left tar waiting until it was stopped. A
+    ;; 3.8.8 elsewhere has bz2lib and works. What a machine's tar can decompress is not
+    ;; something this script can rely on, and a clean Windows has no bzip2 of its own, so the
+    ;; bzip2 stream is decoded by chipz, on every OS, and tar only ever reads a plain archive,
+    ;; which every bsdtar and GNU tar handles itself. The sha256 above is on the .bz2, which
+    ;; is what mbedtls.pin records.
+    (let ((plain (make-pathname :type nil :defaults tarball))   ; mbedtls-4.1.1.tar
+          (tar (tar-program)))
+      (decompress-bzip2 tarball plain)
       (format t "~&  ~A~%"
               (or (ignore-errors (%run-bounded (list tar "--version") :capture t :timeout 30))
                   "(tar --version printed nothing)"))
-      ;; THE mldsa-native EXAMPLES ARE NOT EXTRACTED. They hold the archive's 147 symlinks,
-      ;; some to directories, and on Windows without symlink privilege both bsdtar and GNU
-      ;; tar fail on them and exit non-zero, having extracted everything else (measured by
-      ;; the Windows lane for #273: bsdtar 3.8.8 exit 1, Git's GNU tar exit 2). Nothing
-      ;; under drivers/pqcp/ is compiled or on an include path (see *INCLUDE-DIRS* and
-      ;; scripts/mbedtls-sources.lisp's *SOURCE-DIRS*), so leaving them out changes
-      ;; nothing that is built.
-      (run tar (list "--exclude=*/mldsa-native/examples"
-                     "-xjf" (namestring tarball) "-C"
-                     (namestring (merge-pathnames "src/" *vendor*)))
-           :timeout 600))
+      (unwind-protect
+           ;; THE mldsa-native EXAMPLES ARE NOT EXTRACTED. They hold the archive's 147
+           ;; symlinks, some to directories, and on Windows without symlink privilege both
+           ;; bsdtar and GNU tar fail on them and exit non-zero, having extracted everything
+           ;; else (measured by the Windows lane for #273: bsdtar 3.8.8 exit 1, Git's GNU tar
+           ;; exit 2). Nothing under drivers/pqcp/ is compiled or on an include path (see
+           ;; *INCLUDE-DIRS* and scripts/mbedtls-sources.lisp's *SOURCE-DIRS*), so leaving
+           ;; them out changes nothing that is built.
+           (run tar (list "--exclude=*/mldsa-native/examples"
+                          ;; NATIVE-NAMESTRING, not NAMESTRING: SBCL escapes the dots of a
+                          ;; name that has no type, and tar was handed mbedtls-4\.1\.1\.tar.
+                          "-xf" (uiop:native-namestring plain) "-C"
+                          (uiop:native-namestring (merge-pathnames "src/" *vendor*)))
+                :timeout 600)
+        ;; 67 MB that is only ever an intermediate.
+        (when (probe-file plain) (delete-file plain))))
     srcdir))
+
+(defun decompress-bzip2 (from to)
+  "Decode the bzip2 file FROM into TO with chipz, a pure-Lisp decompressor.
+
+chipz comes through Quicklisp, which setup.sh and setup.ps1 install before any build script
+runs. It is already in the tree as a dependency of dexador, so this adds no external
+dependency (docs/dependencies.md). Measured on Linux/WSL: mbedtls-4.1.1.tar.bz2 decodes in
+about a second to the same bytes as `bzip2 -dc'."
+  (let ((setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+    (unless (probe-file setup)
+      (error "Quicklisp is not installed (no ~A), and this script needs its chipz to decompress the mbedTLS tarball. Run scripts/setup.sh, or scripts/setup.ps1 on Windows, first."
+             (uiop:native-namestring setup)))
+    (handler-case
+        (progn (load setup)
+               (uiop:symbol-call :ql :quickload :chipz :silent t))
+      (error (e)
+        (error "Could not load chipz through Quicklisp, which this script needs to decompress the mbedTLS tarball: ~A~%Run scripts/setup.sh, or scripts/setup.ps1 on Windows, to provision Quicklisp."
+               e))))
+  (format t "~&  decompressing ~A with chipz~%" (file-namestring from))
+  (finish-output)
+  (with-open-file (in from :element-type '(unsigned-byte 8))
+    (with-open-file (out to :direction :output :element-type '(unsigned-byte 8)
+                            :if-exists :supersede)
+      (uiop:symbol-call :chipz :decompress out (uiop:find-symbol* :bzip2 :chipz) in)))
+  (format t "~&  ~:D bytes of tar~%"
+          (with-open-file (s to :element-type '(unsigned-byte 8)) (file-length s)))
+  to)
 
 (defun tar-program ()
   (if (uiop:os-windows-p)
