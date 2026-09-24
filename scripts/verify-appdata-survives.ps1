@@ -45,6 +45,18 @@
 .PARAMETER Control
   Run the inverted test: an installer that DOES delete the data directory must be caught.
 
+.PARAMETER DatabaseHandle
+  held (default) or released: whether the harness holds app.db open across the update (#122).
+
+  held models a running application, which is what an in-app updater faces. But Windows
+  refuses to delete a file that is open this way, so with the handle held app.db survives
+  whatever the installer does: its survival shows nothing about the installer, and the
+  control cannot delete it (measured: -Control reports 8 of the 9 entries, never app.db).
+
+  released opens no handle, so app.db is protected only by the installer's behaviour. With
+  -Control the run must then report app.db as lost, and fails if it does not. Without
+  -Control, app.db surviving is evidence about the installer, as the other eight entries are.
+
 .PARAMETER KeepWork
   Leave the working directory behind for inspection.
 
@@ -52,11 +64,14 @@
   .\scripts\verify-appdata-survives.ps1
 .EXAMPLE
   .\scripts\verify-appdata-survives.ps1 -Format nsis -Control
+.EXAMPLE
+  .\scripts\verify-appdata-survives.ps1 -Format nsis -Control -DatabaseHandle released
 #>
 [CmdletBinding()]
 param(
   [ValidateSet('nsis', 'inno', 'both')][string]$Format = 'both',
   [switch]$Control,
+  [ValidateSet('held', 'released')][string]$DatabaseHandle = 'held',
   [switch]$KeepWork
 )
 
@@ -146,6 +161,11 @@ function Get-FileSha256 {
 
 function Get-TreeSnapshot {
   param([string]$Root)
+  # A directory that no longer exists has no entries, so every entry of the earlier snapshot
+  # compares as VANISHED. Before this, Resolve-Path threw on it and the run ended in an error
+  # instead of a report (#122) -- which was unreachable only while the harness held app.db
+  # open, because a directory with an open file in it cannot be deleted.
+  if (-not (Test-Path -LiteralPath $Root)) { return @() }
   $prefix = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\') + '\'
   Get-ChildItem -LiteralPath $Root -Recurse -Force | ForEach-Object {
     $rel = $_.FullName.Substring($prefix.Length)
@@ -210,6 +230,7 @@ Note "data          : $DataDir"
 Note "work          : $Work"
 Note "formats       : $($formats -join ', ')"
 Note ("mode          : " + $(if ($Control) { 'CONTROL -- an installer that DELETES the data must be caught' } else { 'the real installers, which must not touch it' }))
+Note ("app.db handle : " + $(if ($DatabaseHandle -eq 'held') { 'held open across the update (a running app; app.db survival shows nothing about the installer)' } else { 'released (app.db is protected only by what the installer does)' }))
 
 # ---------------------------------------------------------------------------
 # a real executable, built once and shared by both versions
@@ -373,8 +394,13 @@ function Invoke-Run {
   Good "9 entries, including a database, two build-output-shaped names and an uninstall.exe"
 
   # A REAL APP HOLDS ITS DATABASE OPEN. Held across the whole update, because "the user
-  # must close the app first" is not what an in-app updater promises.
-  $db = [IO.File]::Open((Join-Path $DataDir 'app.db'), 'Open', 'ReadWrite', 'Read')
+  # must close the app first" is not what an in-app updater promises. With
+  # -DatabaseHandle released no handle is opened, so the installer alone decides whether
+  # app.db survives (#122).
+  $db = $null
+  if ($DatabaseHandle -eq 'held') {
+    $db = [IO.File]::Open((Join-Path $DataDir 'app.db'), 'Open', 'ReadWrite', 'Read')
+  }
   try {
     # --- publish 1.1.0 -----------------------------------------------------
     Info "publishing $V2 -- a real key, a real signed manifest, a real signed payload"
@@ -468,6 +494,8 @@ function Invoke-Run {
 
     $after = Get-TreeSnapshot $DataDir
     $diffs = Compare-TreeSnapshot -Before $before -After $after
+    # Name the worst case outright: the directory itself is gone, not only its contents.
+    if (-not (Test-Path -LiteralPath $DataDir)) { $diffs = @("VANISHED  $DataDir itself (the whole directory)") + $diffs }
     if ($Control) {
       if ($diffs.Count -eq 0) {
         $script:runFailures += "CONTROL: an installer that deletes ~/.<appname> was reported as having touched nothing -- this harness cannot fail, so its green runs mean nothing"
@@ -476,9 +504,28 @@ function Invoke-Run {
         Good "the control was detected -- $($diffs.Count) difference(s):"
         $diffs | ForEach-Object { Note $_ }
       }
+      # THE DATABASE IS THE FILE A USER WOULD LOSE (#122). With no handle on it, a control
+      # that deletes the data directory must delete app.db too, and the run must say so.
+      # With the handle held Windows protects it, and that is reported rather than passed.
+      $dbLost = [bool]($diffs | Where-Object { $_ -match '^VANISHED\s+app\.db$' })
+      if ($DatabaseHandle -eq 'released') {
+        if ($dbLost) {
+          Good "the control reached the database: app.db was deleted and reported"
+        } else {
+          $script:runFailures += "CONTROL (handle released): the installer deleted the data directory but app.db was not reported lost -- the harness cannot see the loss that matters most"
+          Bad "the control did NOT reach app.db"
+        }
+      } elseif (-not $dbLost) {
+        Note "app.db survived because this harness holds it open; run with -DatabaseHandle released to show the control reaching it"
+      }
     } else {
       if ($diffs.Count -eq 0) {
         Good "$DataDir is byte-identical after a real $Fmt update ($($before.Count) entries)"
+        if ($DatabaseHandle -eq 'held') {
+          Note "app.db was held open, so its survival is Windows refusing the delete; -DatabaseHandle released shows it survives on the installer's behaviour"
+        } else {
+          Good "including app.db, which had no handle on it, so the installer left it alone"
+        }
       } else {
         $script:runFailures += "the update touched ~/.<appname>: $($diffs -join '; ')"
         Bad "the update touched the data directory:"
@@ -486,7 +533,7 @@ function Invoke-Run {
       }
     }
   } finally {
-    $db.Close(); $db.Dispose()
+    if ($db) { $db.Close(); $db.Dispose() }
 
     # --- and the uninstall -------------------------------------------------
     # windows.nsi's Uninstall section and windows.iss's empty [UninstallDelete] both
