@@ -115,11 +115,23 @@ function Get-SbclVersion {
 # curl.exe rather than Invoke-WebRequest, everywhere: SourceForge answers with an HTML
 # interstitial that Invoke-WebRequest happily saves AS the .msi, and msiexec then fails
 # with the opaque 1620. curl ships with Windows 10+ and follows mirror redirects.
+#
+# FOR FILES VERIFIED AGAINST A PIN ONLY. Every caller checks what this fetched against a
+# SHA-256 in versions.env before using it: the SBCL MSI, quicklisp.lisp and the SQLite zip.
+# That is what makes --ssl-revoke-best-effort below safe, so a download with no pin must not
+# go through this function.
 function Get-Url {
   param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$OutFile)
   # --retry-all-errors is the flag that makes --retry cover a mid-transfer close
   # (curl exit 18). Available since curl 7.71; Windows 10+ ships 8.x.
-  & curl.exe -fsSL --retry 4 --retry-delay 2 --retry-all-errors -o $OutFile $Url
+  #
+  # --ssl-revoke-best-effort (#275). Windows curl uses Schannel, which by default refuses the
+  # connection when it cannot reach the certificate's revocation server, even for a good
+  # certificate: a CI runner failed that way with CRYPT_E_REVOCATION_OFFLINE (curl exit 35),
+  # and --retry does not retry exit 35. With the flag, curl still refuses a certificate it
+  # finds revoked, and goes on only when the revocation check cannot be made. The file is
+  # then checked against its pinned SHA-256 whatever the TLS layer did.
+  & curl.exe -fsSL --retry 4 --retry-delay 2 --retry-all-errors --ssl-revoke-best-effort -o $OutFile $Url
   if ($LASTEXITCODE -ne 0) {
     # A partial file is worse than none: it fails later, somewhere else, as a corrupt
     # archive rather than as a download that did not finish.
@@ -505,8 +517,9 @@ function Install-Sqlite {
   $zip = Join-Path $env:TEMP "sqlite-dll-$SqliteVersion-$Arch.zip"
   Info "downloading SQLite $SqliteVersion ($Arch) ..."
   try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-  & curl.exe -fsSL --retry 4 --retry-delay 2 -o $zip $url
-  if ($LASTEXITCODE -ne 0) { Die "downloading $url failed (curl exit $LASTEXITCODE)" }
+  # Through Get-Url (#275). This was a separate curl.exe call without --retry-all-errors
+  # or --ssl-revoke-best-effort, and it is the download that failed on the runner.
+  Get-Url -Url $url -OutFile $zip
 
   $got = Get-Sha256Hex $zip
   if ($got -ne $want.ToLower()) {
