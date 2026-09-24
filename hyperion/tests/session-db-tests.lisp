@@ -377,3 +377,91 @@ the mistake RESTORE-SESSION's docstring warns about."))
            (kept (funcall h (%req "/" fresh))))
       (is (null (%cookie-of kept)) "with both limits off, it is kept")
       (is (equal fresh (%body kept))))))
+
+;;; --- ENSURE-SESSION writes ACCESSED itself (#243) ---------------------------------------
+;;;
+;;; Until #243 only WRAP-SESSION wrote ACCESSED back. An application calling ENSURE-SESSION
+;;; directly with a store that hands out fresh objects kept the ACCESSED of its last explicit
+;;; save, so its idle limit counted from then. These tests call ENSURE-SESSION with no
+;;; WRAP-SESSION. The memory store shares one object, so it passed before the fix too, and is
+;;; the control.
+
+(defun %ensure (store &optional id)
+  "ENSURE-SESSION for a request carrying ID as its cookie (or none), outside WRAP-SESSION."
+  (sess:ensure-session (%req "/" id) store))
+
+(defun %stored-accessed (store id)
+  (let ((s (sess:store-ref store id))) (and s (sess:session-accessed s))))
+
+(defun %advance (store id seconds)
+  "Move session ID in STORE SECONDS into the past, as if the clock had advanced that much.
+Does nothing when STORE no longer holds ID, which is what an expiry leaves behind."
+  (let ((s (sess:store-ref store id)))
+    (when s
+      (setf (sess:session-created s) (- (sess:session-created s) seconds)
+            (sess:session-accessed s) (- (sess:session-accessed s) seconds))
+      (sess:store-add store s))))
+
+(test ensure-session-alone-writes-accessed-once-the-interval-has-passed
+  (%call-with-each-store
+   (lambda (kind store)
+     (let ((sess:*accessed-save-interval* 60)
+           (id (sess:session-id (%ensure store))))
+       (%age store id :accessed-ago 120)
+       (%ensure store id)
+       (let ((stored (%stored-accessed store id)))
+         (is (and stored (>= stored (- (get-universal-time) 5)))
+             "~a: the stored ACCESSED moved to now, got ~a s ago" kind
+             (and stored (- (get-universal-time) stored))))))))
+
+(test ensure-session-alone-does-not-write-accessed-inside-the-interval
+  ;; The throttle. Not on the memory store, whose stored session is the object being touched.
+  (%call-with-each-store
+   (lambda (kind store)
+     (unless (eq kind :memory)
+       (let ((sess:*accessed-save-interval* 3600)
+             (id (sess:session-id (%ensure store))))
+         (%age store id :accessed-ago 120)
+         (let ((before (%stored-accessed store id)))
+           (%ensure store id)
+           (is (eql before (%stored-accessed store id))
+               "~a: 120 s into a 3600 s interval, ACCESSED is not written" kind)))))))
+
+(test a-session-used-throughout-stays-signed-in-until-the-absolute-limit
+  ;; The defect as a consuming app met it: SIGN-IN! and ENSURE-SESSION, no WRAP-SESSION, and a
+  ;; STORE-SAVE by hand after sign-in. The clock advances 20 h between requests, under the 24 h
+  ;; idle limit each time. Eight requests span 160 h, past the idle limit and inside the 168 h
+  ;; absolute one, so the session must last through all of them; a ninth, at 180 h, is past
+  ;; the absolute limit and must be refused.
+  (%call-with-each-store
+   (lambda (kind store)
+     (let* ((sess:*session-idle-timeout* 86400)
+            (sess:*session-absolute-timeout* 604800)
+            (step (* 20 3600))
+            (s (sess:sign-in! store (%req "/" nil) :user-id 42))
+            (id (sess:session-id s)))
+       (sess:store-save store s)
+       (let ((kept (loop repeat 8
+                         do (%advance store id step)
+                         count (let ((got (%ensure store id)))
+                                 (and (equal id (sess:session-id got))
+                                      (eql 42 (sess:session-get got :user-id)))))))
+         (is (= 8 kept) "~a: signed in for all 8 requests over 160 h, kept for ~a" kind kept))
+       (%advance store id step)
+       (is (not (equal id (sess:session-id (%ensure store id))))
+           "~a: at 180 h the absolute limit refuses it" kind)))))
+
+(test store-touch-writes-only-accessed-and-never-inserts
+  (%call-with-each-store
+   (lambda (kind store)
+     (sess:store-add store (%sess "t" :accessed 200 :data '((:n . 1))))
+     ;; Another request saves a change after this one loaded its copy.
+     (let ((other (sess:store-ref store "t")))
+       (sess:session-set other :n 2)
+       (sess:store-save store other))
+     (is (eq t (sess:store-touch store "t" 12345)) "~a: touching a stored session returns T" kind)
+     (let ((got (sess:store-ref store "t")))
+       (is (eql 12345 (sess:session-accessed got)) "~a: ACCESSED is written" kind)
+       (is (eql 2 (sess:session-get got :n)) "~a: the other request's change is kept" kind))
+     (is (null (sess:store-touch store "missing" 12345)) "~a: an unknown id returns NIL" kind)
+     (is (null (sess:store-ref store "missing")) "~a: and is not inserted" kind))))
