@@ -21,6 +21,9 @@
 ;   OUTFILE  the installer path to write
 ;   EXENAME  the launched binary, e.g. "coalton-repl.exe"
 ;   VIVERSION  optional 4-part numeric version for the file's own metadata
+;   ICON       optional .ico path. It becomes the installer's and the uninstaller's own icon,
+;              and is installed as $INSTDIR\<APPNAME>.ico for the Start menu shortcut and
+;              the Add/Remove Programs entry. Without it all three show NSIS's default icon.
 
 Unicode true
 SetCompressor /SOLID lzma
@@ -61,6 +64,12 @@ VIAddVersionKey "LegalCopyright" ""        ; present-but-empty silences makensis
 !endif
 
 ; --- pages: a normal wizard interactively, nothing at all under /S -------------
+; MUI_ICON and MUI_UNICON have to be defined before the page macros below, because those
+; macros are where MUI reads them.
+!ifdef ICON
+  !define MUI_ICON "${ICON}"
+  !define MUI_UNICON "${ICON}"
+!endif
 !include "MUI2.nsh"
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_DIRECTORY
@@ -149,6 +158,14 @@ Section "Install"
   !insertmacro WaitForAppToExit
   SetOutPath "$INSTDIR"
   File /r "${SRCDIR}\*.*"
+!ifdef ICON
+  ; A separate file rather than the exe's own icon resource, so the shortcut and the
+  ; Add/Remove Programs entry show the icon whether or not one is embedded in the exe.
+  File "/oname=$INSTDIR\${APPNAME}.ico" "${ICON}"
+  !define SHORTCUT_ICON "$INSTDIR\${APPNAME}.ico"
+!else
+  !define SHORTCUT_ICON "$INSTDIR\${EXENAME}"
+!endif
 
   WriteRegStr HKCU "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\${APPNAME}" "Version" "${VERSION}"
@@ -159,11 +176,11 @@ Section "Install"
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${EXENAME}"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "${SHORTCUT_ICON}"
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
 
-  CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXENAME}"
+  CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXENAME}" "" "${SHORTCUT_ICON}" 0
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; Silent == the update path: hand the user back a running app, not a closed one.

@@ -5,7 +5,9 @@
 ;;;;          --entry  hyperion/examples/coalton-repl:main \
 ;;;;          --name   coalton-repl \
 ;;;;          --version 0.1.0 \
-;;;;          [--out dist]
+;;;;          [--out dist] [--icon path/to/app.ico]
+;;;;
+;;;; --icon is used on Windows only: see "Windows: the executable's icon" below.
 ;;;;
 ;;;; The command is IDENTICAL on Linux / macOS / Windows -- which is the whole point:
 ;;;; SBCL cannot cross-compile (save-lisp-and-die dumps an image for the HOST platform
@@ -191,6 +193,68 @@ and macOS refuses to execute an arm64 binary whose signature does not verify. Ad
                                                         (sb-ext:posix-environ)))))))
           (sb-ext:exit :code code))
         (format t "~&build-desktop-app: continuing UNPATCHED -- this bundle will not run on a Mac without those libraries.~%"))))
+
+;;; --- Windows: the executable's icon (#72) ----------------------------------------
+;;;
+;;; The icon Explorer, the taskbar and shortcuts show for an .exe is a resource inside the
+;;; file. It cannot be added to the dumped image: the Win32 resource-update API rewrites the
+;;; file without the Lisp core that save-lisp-and-die appends after the PE, and the image
+;;; then dies at start with "Can't find sbcl.core" (measured; windows-set-icon.ps1 has the
+;;; numbers). So this does what the macOS block above does: put the change into a copy of
+;;; the runtime and re-run the build under that copy, because the dump copies the running
+;;; runtime into the image byte for byte.
+;;;
+;;; On Linux and macOS the icon belongs to the package rather than the binary, so
+;;; build-appimage.sh and build-dmg.sh take it, and --icon here is ignored with a note.
+(defparameter *icon* (argv-value "--icon"))
+
+(when (and *icon* (not *patched-runtime-p*))
+  (let ((icon (probe-file *icon*)))
+    (unless icon
+      (error "build-desktop-app: no such icon file: ~A" *icon*))
+    (if (not (uiop:os-windows-p))
+        (format t "~&build-desktop-app: --icon applies on Windows only; on this OS build-appimage.sh or build-dmg.sh sets it.~%")
+        (let* ((patched (merge-pathnames (format nil "~A/.runtime/sbcl.exe" *out*) *root*))
+               (helper (merge-pathnames "scripts/windows-set-icon.ps1" *root*))
+               (core (namestring sb-ext:*core-pathname*))
+               (home (uiop:pathname-directory-pathname sb-ext:*core-pathname*))
+               (ready (handler-case
+                          (progn
+                            (ensure-directories-exist patched)
+                            (when (probe-file patched) (delete-file patched))
+                            (uiop:copy-file sb-ext:*runtime-pathname* patched)
+                            (uiop:run-program (list "powershell" "-NoProfile" "-ExecutionPolicy" "Bypass"
+                                                    "-File" (namestring helper)
+                                                    (namestring patched) (namestring icon))
+                                              :output t :error-output t)
+                            t)
+                        (error (e)
+                          (format t "~&build-desktop-app: could not set the icon on a copy of the runtime (~A).~%" e)
+                          nil))))
+          (cond
+            (ready
+             (format t "~&build-desktop-app: re-running the build under a runtime that carries ~A,~%" (file-namestring icon))
+             (format t "~&                   so the dumped image has it as its icon (#72).~%")
+             (finish-output)
+             (sb-ext:exit
+              :code (nth-value
+                     2 (uiop:run-program
+                        (list (namestring patched) "--core" core
+                              "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
+                              "--script" (namestring (or *load-truename* *load-pathname*))
+                              "--system" *system* "--entry" *entry*
+                              "--name" *name* "--version" *version* "--out" *out*)
+                        :output t :error-output t :ignore-error-status t
+                        ;; The copy sits in <out>/.runtime, away from SBCL's own directory,
+                        ;; so it is told where its contribs are.
+                        :environment (append (list (format nil "OURANOS_PATCHED_RUNTIME=~A" (namestring patched))
+                                                   (format nil "SBCL_HOME=~A" (namestring home)))
+                                             (remove-if (lambda (e)
+                                                          (some (lambda (p) (uiop:string-prefix-p p e))
+                                                                '("OURANOS_PATCHED_RUNTIME=" "SBCL_HOME=")))
+                                                        (sb-ext:posix-environ)))))))
+            (t
+             (format t "~&build-desktop-app: continuing WITHOUT an icon -- the executable will show the default one.~%")))))))
 
 
 ;;; --- the platform key, from the library that also serves the client (pre-publication issue 206) -------
