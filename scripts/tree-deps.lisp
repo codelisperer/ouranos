@@ -246,7 +246,10 @@ DEP-NAME-AND-GUARD."
   "The .asd files whose systems are all placeholders -- scaffolding, not systems (pre-publication issue 361).
 
 Reported by `check-deps.lisp' rather than silently dropped, so that `we do not check these'
-is a visible statement each run rather than an absence a reader has to infer."
+is a visible statement each run rather than an absence a reader has to infer.
+
+Empty on this tree since #108, when the built-in templates' `{{name}}.asd' became
+`{{name}}.asd.tmpl'. Kept for a template that ships an `.asd' again."
   (remove-if-not (lambda (asd)
                    (let ((names (system-names-in asd)))
                      (and names (every #'template-name-p names))))

@@ -89,6 +89,43 @@ BODY, and remove the directory however BODY exits."
            (is-true asd "the {{name}}.asd file name was not substituted")
            (is-true (search "\"alexandria\"" asd))))))
 
+(test a-tmpl-suffix-is-dropped-from-the-written-name
+  ;; #108. A template names its system definition `{{name}}.asd.tmpl' so that ASDF does not
+  ;; find it inside the template; the project it generates must still get `mine.asd'.
+  (tempdir:with-temporary-directory (tmp "tmpl")
+       (ensure-directories-exist (merge-pathnames "files/" tmp))
+       (with-open-file (out (merge-pathnames "template.lisp" tmp) :direction :output)
+         (write-string "(:name \"tiny\" :target-kind :lib :dependencies ())" out))
+       (with-open-file (out (merge-pathnames "files/{{name}}.asd.tmpl" tmp) :direction :output)
+         (write-string "(defsystem \"{{name}}\")" out))
+       (let ((out-dir (merge-pathnames "out/" tmp)))
+         (let ((*standard-output* (make-broadcast-stream)))
+           (cons/init:scaffold "mine" :template tmp :target out-dir))
+         (let ((root (merge-pathnames "mine/" out-dir)))
+           (is (equal "(defsystem \"mine\")" (%file root "mine.asd"))
+               "mine.asd was not written from {{name}}.asd.tmpl")
+           (is (null (probe-file (merge-pathnames "mine.asd.tmpl" root)))
+               "the .tmpl file was written under its own name as well")))))
+
+(test asdf-finds-no-template-system-in-this-repository
+  ;; #108. With the repository on the source registry as a (:tree ...), ASDF found the four
+  ;; built-in templates' `{{name}}.asd' and warned about the duplicates in any session whose
+  ;; first source-registry scan happened inside a REQUIRE, such as the second run of
+  ;; bootstrap.lisp. This walks the repository with the function ASDF's own
+  ;; :tree scan uses, so what it checks is what ASDF would find.
+  (let* ((root (uiop:pathname-parent-directory-pathname (asdf:system-source-directory :cons)))
+         (found '()))
+    (asdf/source-registry:collect-sub*directories-asd-files
+     root :collect (lambda (asd) (push asd found)))
+    ;; The scan has to be shown to reach the tree, or an empty result would pass. One file at
+    ;; the top of a framework and one nested three directories down.
+    (dolist (rel '("cons/cons.asd" "mnemosyne/examples/contacts/contacts.asd"))
+      (is (find (namestring (merge-pathnames rel root)) found :key #'namestring :test #'string=)
+          "the scan did not find ~A under ~A" rel root))
+    (is (null (remove-if-not (lambda (asd) (search "{{" (namestring asd))) found))
+        "ASDF would find template systems: ~{~A~^, ~}"
+        (mapcar #'namestring (remove-if-not (lambda (asd) (search "{{" (namestring asd))) found)))))
+
 (test a-manifest-cannot-execute-code
   ;; Declarative by construction, not by convention: the moment templates resolve by URL,
   ;; a manifest that can run code is a supply-chain problem (design §4).
