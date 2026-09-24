@@ -427,8 +427,10 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
   ;; Windows as WSAEACCES (Ouranos Claude (Windows)), on macOS once the connects were bounded
   ;; (Ouranos Claude (macOS)). It is also TIMED: on macOS a connect to such a port is neither
   ;; accepted nor refused, and before %CONNECT-WITHIN the preflight and the readiness probe
-  ;; each waited about 7.8 seconds, so START took 15.68. Three seconds is well above a
-  ;; bounded start and well below that, so a return of the hang fails here.
+  ;; each waited about 7.8 seconds, so START took 15.68. A bounded start took 1.55 s on an
+  ;; idle Mac, most of it fixed waits (the 0.5 s preflight and a 1 s probe) that stretch on a
+  ;; loaded CI runner, so the bound is 5 seconds: room for a slow runner, and still below
+  ;; the 7.86 s the hang took even with the preflight off.
   (let* ((port (ports:candidate-port))
          (squatter (%srv-squat port))
          (t0 (get-internal-real-time)))
@@ -442,7 +444,7 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
                 (seconds (/ (- (get-internal-real-time) t0) internal-time-units-per-second)))
            (is (typep c 'srv:port-in-use)
                "a failed bind must be signalled to the caller, got ~S" c)
-           (is (< seconds 3) "START took ~,2F s to report a taken port" seconds)
+           (is (< seconds 5) "START took ~,2F s to report a taken port" seconds)
            (when (typep c 'srv:port-in-use)
              (is (= port (srv:port-in-use-port c)))
              (is (srv:port-in-use-cause c)
