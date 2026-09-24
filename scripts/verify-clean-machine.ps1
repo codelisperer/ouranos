@@ -25,12 +25,20 @@
 
     PROVISIONED  -- beside sbcl.exe or under the tree's vendor/, i.e. something setup.ps1
                     or build-libuv.lisp put there deliberately, or
-    WINDOWS      -- in System32 AND carrying a valid Microsoft Authenticode signature.
+    WINDOWS      -- in System32 (or the Windows directory) AND carrying a valid signature
+                    that marks it as an operating-system binary (IsOSBinary).
 
   The signature is load-bearing, not decoration. System32 is a dumping ground on a
   developer's machine: anyone can drop a DLL in it, and being there is not evidence that
   Windows ships it. A genuine component (WinHttp.dll, kernel32.dll, even winsqlite3.dll) is
-  signed by Microsoft Windows; a third-party build sitting in the same directory is not.
+  signed as part of the operating system; a third-party build sitting in the same directory
+  is not.
+
+  A Microsoft signature is not enough either (#253). Microsoft also signs redistributables
+  that a fresh Windows does not necessarily have: vcruntime140.dll, the Visual C++ runtime,
+  is signed by "Microsoft Windows Software Compatibility Publisher" and has IsOSBinary
+  false. The rule used to accept any signer whose name matched 'Microsoft', which let it
+  through. Every run now checks the rule against this machine's own files first.
 
   Anything else is a FINDING -- a library the tree needs and nobody provisions, which will
   be absent on a user's machine and present on yours.
@@ -125,22 +133,44 @@ function Get-LibraryOrigin {
     # IN System32 IS NOT THE SAME AS SHIPPED BY WINDOWS. Anyone can drop a DLL there.
     $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction SilentlyContinue
     $signer = if ($sig -and $sig.SignerCertificate) { $sig.SignerCertificate.Subject -replace '^CN=([^,]+).*', '$1' } else { '' }
-    if ($sig -and $sig.Status -eq 'Valid' -and $signer -match 'Microsoft') {
-      return [pscustomobject]@{ Kind = 'WINDOWS'; Detail = "signed: $signer" }
+    if ($sig -and $sig.Status -eq 'Valid' -and $sig.IsOSBinary) {
+      return [pscustomobject]@{ Kind = 'WINDOWS'; Detail = "operating-system binary, signed: $signer" }
     }
-    $company = (Get-Item -LiteralPath $Path).VersionInfo.CompanyName
+    $vi = (Get-Item -LiteralPath $Path).VersionInfo
     $status = if ($sig) { $sig.Status } else { 'no signature data' }
     return [pscustomobject]@{
       Kind   = 'UNPROVISIONED'
-      Detail = "in System32 but NOT a Windows component -- signature $status, CompanyName '$company'"
+      Detail = "in System32 but NOT a Windows component -- signature $status, signer '$signer', CompanyName '$($vi.CompanyName)', ProductName '$($vi.ProductName)'"
     }
   }
   return [pscustomobject]@{ Kind = 'UNPROVISIONED'; Detail = "from $dir" }
 }
 
+# THE RULE ABOVE IS CHECKED AGAINST THIS MACHINE BEFORE IT IS USED (#253). A classifier that
+# accepts too much looks exactly like a machine that needs nothing, so both directions are
+# asserted: a file Windows certainly ships must be WINDOWS, and a Microsoft-signed
+# redistributable, if this machine has one, must not be.
+function Test-Classifier {
+  $k = Get-LibraryOrigin (Join-Path $Sys32 'kernel32.dll')
+  if ($k.Kind -eq 'WINDOWS') { Good "classifier: kernel32.dll is WINDOWS" }
+  else { Fail "classifier: kernel32.dll came out $($k.Kind) ($($k.Detail)), so the rule rejects Windows itself" }
+  $redist = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') | ForEach-Object { Join-Path $Sys32 $_ } |
+              Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $redist) {
+    Note 'classifier: no Visual C++ redistributable in System32 here, so the rejecting direction is not checked on this machine'
+    return
+  }
+  $r = Get-LibraryOrigin $redist
+  if ($r.Kind -ne 'WINDOWS') { Good "classifier: $(Split-Path -Leaf $redist) is $($r.Kind), not WINDOWS" }
+  else { Fail "classifier: $(Split-Path -Leaf $redist) came out WINDOWS ($($r.Detail)), but it is the Visual C++ redistributable, not part of Windows" }
+}
+
 # ---------------------------------------------------------------------------
 # the run
 # ---------------------------------------------------------------------------
+
+Info 'the classifier, against files whose answer is known'
+Test-Classifier
 
 # BOTH names are hidden. setup.ps1 installs the pinned DLL as libsqlite3.dll and as
 # sqlite3.dll (#239), and cl-sqlite loads either, so hiding one leaves the other to load and
