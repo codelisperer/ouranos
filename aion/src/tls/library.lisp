@@ -108,7 +108,11 @@ GetProcAddress on Windows, SBCL's DLSYM (dlsym) elsewhere."
                                   (equal file truename)
                                   (equal (funcall namestring-of o) path))))
                           (symbol-value (%sb-alien "*SHARED-OBJECTS*"))))
-         (handle (and object (funcall (%sb-alien "SHARED-OBJECT-HANDLE") object)))
+         ;; An integer on Windows (the HMODULE), a SAP elsewhere. Passed as an integer to a
+         ;; :POINTER argument it is a TYPE-ERROR, which is what #282's Windows runs hit;
+         ;; measured by Ouranos Claude (Windows).
+         (raw (and object (funcall (%sb-alien "SHARED-OBJECT-HANDLE") object)))
+         (handle (if (integerp raw) (sb-sys:int-sap raw) raw))
          (address (and handle
                        #+windows (cffi:foreign-funcall "GetProcAddress" :pointer handle
                                                        :string name :pointer)
@@ -142,12 +146,18 @@ call, then psa_crypto_init."
 path loaded. Signals MBEDTLS-NOT-FOUND if nothing loads, and MBEDTLS-MISMATCH if what loads
 first is not our build.
 
+A LIBRARY IS RECORDED AS LOADED ONLY ONCE IT HAS BEEN CHECKED AND INITIALISED. An earlier
+version recorded it first, so when the check itself failed (a TYPE-ERROR on Windows, #282)
+the library stayed recorded but uninitialised, every later caller used PSA without setup, and
+key generation failed with PSA_ERROR_SERVICE_FAILURE. Now any error while a candidate is
+being checked or initialised closes it and leaves nothing recorded.
+
 ONCE LOADED, IT IS NEVER RELOADED. Every key, certificate, config and engine points into the
-library's memory and its C runtime's heap. Reloading it, which SBCL's LOAD-SHARED-OBJECT does
-for a library already loaded, can move or reinitialise that memory under them; on Windows it
-reinitialised the global mutexes PSA locks, and key generation then failed with
-PSA_ERROR_SERVICE_FAILURE (#282). To use another library, call UNLOAD-MBEDTLS first, with
-nothing made from the old one still in use."
+library's memory, and SBCL's LOAD-SHARED-OBJECT reloads a library that is already loaded. That
+was not the cause of #282's failure (the Windows lane measured the same failure with the one
+test that reloaded removed), but reloading under live contexts is unsafe in principle, so
+there is no way to ask for it. To use another library, call UNLOAD-MBEDTLS first, with nothing
+made from the old one still in use."
   (sb-thread:with-recursive-lock (*load-lock*)
     (when *library*
       (return-from load-mbedtls *path*))
@@ -159,11 +169,13 @@ nothing made from the old one still in use."
           (let ((library (handler-case (cffi:load-foreign-library candidate)
                            (error (e) (setf last-error e) nil))))
             (when library
-              (let ((reason (%build-mismatch candidate)))
-                (when reason
-                  (ignore-errors (cffi:close-foreign-library library))
-                  (error 'mbedtls-mismatch :path candidate :reason reason)))
-              (%initialise candidate)
+              (handler-bind ((error (lambda (e)
+                                      (declare (ignore e))
+                                      (ignore-errors (cffi:close-foreign-library library)))))
+                (let ((reason (%build-mismatch candidate)))
+                  (when reason
+                    (error 'mbedtls-mismatch :path candidate :reason reason)))
+                (%initialise candidate))
               (setf *library* library *path* candidate)
               (return-from load-mbedtls candidate)))))
       (error 'mbedtls-not-found :searched (nreverse tried) :reason last-error))))
