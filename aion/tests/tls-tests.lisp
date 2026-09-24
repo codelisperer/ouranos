@@ -110,6 +110,38 @@ or signals whichever side's failure comes first."
           (is (null (aion/tls::%build-mismatch (tls:mbedtls-path)))
               "and our own library is not")))))
 
+(test a-candidate-whose-check-signals-leaves-nothing-loaded
+  ;; The half of #282's Windows failure that moved it far from its cause. The library check
+  ;; signalled (a TYPE-ERROR on Windows), but the loader had already recorded the library, so
+  ;; every later caller got a library nobody had initialised and failed on another thread
+  ;; with PSA_ERROR_SERVICE_FAILURE. Here the check is made to signal for a candidate, libuv,
+  ;; so our own library, already loaded for the other tests, is never touched.
+  (let ((libuv (libuv-path)))
+    (if (null libuv)
+        (skip "no built libuv to stand in for a candidate")
+        (let ((saved-env (uiop:getenv "AION_TLS_LIBRARY"))
+              (real-check (fdefinition 'aion/tls::%build-mismatch)))
+          (unwind-protect
+               (let ((aion/tls::*library* nil)
+                     (aion/tls::*path* nil))
+                 (setf (uiop:getenv "AION_TLS_LIBRARY") (uiop:native-namestring libuv))
+                 (setf (fdefinition 'aion/tls::%build-mismatch)
+                       (lambda (path) (declare (ignore path)) (error "the check itself failed")))
+                 (is (typep (handler-case (progn (tls:load-mbedtls) nil) (error (e) e)) 'error)
+                     "a check that signals makes the load signal")
+                 (is (and (null (tls:mbedtls-loaded-p)) (null (tls:mbedtls-path)))
+                     "and leaves no library recorded as loaded")
+                 (setf (fdefinition 'aion/tls::%build-mismatch) real-check)
+                 (is (typep (handler-case (progn (tls:load-mbedtls) nil) (error (e) e))
+                            'tls:mbedtls-mismatch)
+                     "the next load refuses the same candidate with a clear error")
+                 (is (null (tls:mbedtls-loaded-p))
+                     "and still records nothing, rather than handing out an uninitialised library"))
+            (setf (fdefinition 'aion/tls::%build-mismatch) real-check)
+            (setf (uiop:getenv "AION_TLS_LIBRARY") (or saved-env "")))
+          (is (search "vendor/mbedtls/lib/" (substitute #\/ #\\ (tls:mbedtls-path)))
+              "and the library the other tests use is still the one loaded")))))
+
 (test loading-again-keeps-the-library-in-use
   (let ((before (tls:mbedtls-path)))
     (is (equal before (tls:load-mbedtls)))
