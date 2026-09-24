@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # test-postgres.sh --- the Postgres the verification gate needs (pre-publication issue 176).
 #
-#   scripts/test-postgres.sh up      pull the image, start it, and wait until it actually answers
+#   scripts/test-postgres.sh up      pull a missing image, start it, and wait until it answers
 #   scripts/test-postgres.sh down    stop and remove it
 #   scripts/test-postgres.sh url     print the URL to export, and nothing else
 #   scripts/test-postgres.sh env     print the full `export ...` line, for eval
@@ -82,27 +82,35 @@ compose() {
   fi
 }
 
-# PULL THE IMAGE BEFORE STARTING THE CONTAINER, AND TRY MORE THAN ONCE (#245). `compose up`
+# PULL A MISSING IMAGE BEFORE STARTING THE CONTAINER, AND TRY MORE THAN ONCE (#245). `compose up`
 # pulls a missing image itself, and when the registry refuses that pull, `compose up` fails at
 # once. On one pull request's CI run, Docker Hub refused the pull of this public image with
 # "unauthorized: authentication required". The Linux leg failed before the gate ran, and
-# re-running the job at the same commit passed. This function therefore pulls first, up to four
-# times, with pauses of 10, 20 and 30 seconds between the tries. `compose up` then finds the
-# image present and does not pull it again.
+# re-running the job at the same commit passed. This function therefore pulls a missing image
+# first, up to four times, with pauses of 10, 20 and 30 seconds between the tries. `compose up`
+# then finds the image present and does not pull it again.
 #
 # When every try fails, the last line names the image and the number of tries, and says that this
 # is a registry failure and not a test result. On GitHub Actions the same line is appended to
 # $GITHUB_STEP_SUMMARY, because the rest of the job summary, which scripts/ci-job-summary.sh
 # writes, shows only that this step failed.
 #
-# When a copy of the image is already on this machine, the pull is tried once and a failure is
-# not fatal. The pull would only have brought that copy up to date, and the copy is enough to
-# start the container, so a developer without network access can still run `up`.
+# The compose file is checked first, with `compose config -q`. An invalid file makes every pull
+# fail as well, and without this check it would be retried four times and then reported as a
+# registry failure. Instead, compose's own error is printed and the script exits 2.
+#
+# When a copy of the image is already on this machine, nothing is pulled, which is also what
+# `compose up` does by default. Pulling would move the local tag to whatever build the registry
+# has now, and so change a developer's database without their asking. CI's runners start without
+# a copy, so on CI the image is always pulled, with the retries above.
 pull_image() {
+  compose config -q || {
+    echo "test-postgres: compose rejected $COMPOSE_FILE (its error is above), so nothing was pulled." >&2
+    exit 2
+  }
   image="$(declared_image)"
   if docker image inspect "$image" >/dev/null 2>&1; then
-    compose pull ||
-      echo "test-postgres: could not pull $image; starting the copy already on this machine." >&2
+    echo "test-postgres: $image is already on this machine, so it is not pulled."
     return 0
   fi
   try=1
