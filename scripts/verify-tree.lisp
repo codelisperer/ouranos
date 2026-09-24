@@ -111,6 +111,11 @@
 (load (merge-pathnames "fiveam-report.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; Each `caught ERROR' in a child's output (#263). Split out for the same reason, so the
+;;; control in cons/tests/caught-errors-tests.lisp exercises the function the gate calls.
+(load (merge-pathnames "caught-errors.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; The NOT COVERED section (#182). Split out for the same reason as the two above, so a test
 ;;; can hand the printer known inputs; REPORT-NOT-COVERED below passes it this run's state.
 (load (merge-pathnames "not-covered.lisp"
@@ -832,43 +837,30 @@ code we do not own, and a gate that cries wolf gets switched off."
     out))
 
 
-;;; --- caught ERROR, reported and not yet judged (#263) -------------------------------
+;;; --- caught ERROR fails the gate (#263) -----------------------------------------------
 ;;;
-;;; WARNINGS-IN above matches `caught WARNING' only. SBCL prints `caught ERROR' for a form it
-;;; cannot compile and turns into a run-time error instead, such as a DECLARE where no
-;;; declaration is allowed. For a source file that makes compile-file report failure, and
-;;; ASDF stops the load. For a FiveAM test body it does not: FiveAM passes the body to
-;;; REGISTER-TEST as quoted data and EVALs it when the fasl LOADS, so compile-file never
-;;; sees it and the `caught ERROR' appears only in the output. This scan is therefore the
-;;; only compile check a test body gets.
+;;; WARNINGS-IN above matches `caught WARNING' only. A FiveAM test body is compiled when its
+;;; fasl loads, so a body SBCL cannot compile prints `caught ERROR' where neither compile-file
+;;; nor ASDF sees it, and this scan is its only compile check. scripts/caught-errors.lisp
+;;; explains the mechanism and records the measurement taken before this became a failure:
+;;; one occurrence, on Windows, since fixed.
 ;;;
-;;; For now it only COUNTS and prints, per child and in one summary line, and fails nothing.
-;;; #263's plan is to measure every leg first, fix what it finds, and then make it fail the
-;;; gate, because the legs compile different code and no one leg can speak for the others.
+;;; No allowance list, unlike +KNOWN-WARNINGS+. A form that cannot compile is never correct,
+;;; and there has been no case of one in a dependency. If one appears, list it here the same
+;;; way, with the reason it is not ours to fix.
 
 (defvar *caught-errors* '()
   "(LABEL . COUNT) for every child whose output had a `caught ERROR', newest first.")
 
-(defun errors-in (output)
-  "Each `caught ERROR' SBCL printed in OUTPUT, as a list of lines: the four above the marker
-(the file and the form) and the three below it (the message)."
-  (let ((lines (coerce (uiop:split-string output :separator '(#\Newline)) 'vector))
-        (out '()))
-    (loop for i from 0 below (length lines)
-          when (search "caught ERROR" (aref lines i))
-            do (push (loop for j from (max 0 (- i 4)) to (min (1- (length lines)) (+ i 3))
-                           collect (string-right-trim '(#\Return) (aref lines j)))
-                     out))
-    (nreverse out)))
-
 (defun report-caught-errors (label output)
-  "Print and record OUTPUT's `caught ERROR's under LABEL. Report only (#263)."
-  (let ((errors (errors-in output)))
+  "Print OUTPUT's `caught ERROR's under LABEL, record them, and fail the run for them."
+  (let ((errors (ouranos-caught-errors:errors-in output)))
     (when errors
       (push (cons label (length errors)) *caught-errors*)
-      (format t "          caught ERROR x~D (report only, #263):~%" (length errors))
+      (format t "  ERROR   ~a: ~D caught ERROR~:P while compiling (#263)~%" label (length errors))
       (dolist (e errors)
-        (format t "~{            | ~a~%~}" e)))))
+        (format t "~{            | ~a~%~}" e))
+      (fail "~a: ~D caught ERROR~:P while compiling" label (length errors)))))
 
 ;;; --- the native launcher axis (pre-publication issue 410) ---------------------------------------
 ;;;
@@ -1203,9 +1195,9 @@ let this run claim `view' while the five assertions skipped."
     ;; so check-readme-counts.lisp's `%labelled-integer' still parses it.
     (format t "total checks executed: ~a (axes: ~a)~%" grand (axes-tag))
     ;; Printed on every run, including a run with none, so that a zero is a measurement
-    ;; and not an absence (#263). Report only: it does not change the verdict yet.
+    ;; and not an absence (#263). Each one has already failed the run above.
     (let ((caught (reverse *caught-errors*)))
-      (format t "caught ERROR (report only, #263): ~D in ~D child image~:P~@[: ~{~a~^, ~}~]~%"
+      (format t "caught ERROR (#263): ~D in ~D child image~:P~@[: ~{~a~^, ~}~]~%"
               (reduce #'+ caught :key #'cdr) (length caught)
               (mapcar (lambda (c) (format nil "~a x~D" (car c) (cdr c))) caught)))
     ;; The same fact on lines of their own, from the same functions, for a consumer that
