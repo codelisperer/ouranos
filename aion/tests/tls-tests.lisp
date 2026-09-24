@@ -88,30 +88,39 @@ or signals whichever side's failure comes first."
   (is (= tls:+shim-version+ (aion/tls::%shim-version)))
   (is (plusp (aion/tls::%threading-kind)) "a library with threading off must not be accepted"))
 
+(defun libuv-path ()
+  (probe-file (merge-pathnames
+               #+darwin "vendor/libuv/lib/libuv.1.dylib"
+               #+windows "vendor/libuv/lib/libuv.dll"
+               #-(or darwin windows) "vendor/libuv/lib/libuv.so.1"
+               (uiop:pathname-parent-directory-pathname (asdf:system-source-directory :aion)))))
+
 (test a-library-without-our-c-is-refused
   ;; libuv loads as a shared library and has none of our C, so it stands in for a system
-  ;; mbedTLS found before ours. The real library is loaded again afterwards.
-  (let ((libuv (probe-file (merge-pathnames
-                            #+darwin "vendor/libuv/lib/libuv.1.dylib"
-                            #+windows "vendor/libuv/lib/libuv.dll"
-                            #-(or darwin windows) "vendor/libuv/lib/libuv.so.1"
-                            (uiop:pathname-parent-directory-pathname
-                             (asdf:system-source-directory :aion))))))
+  ;; mbedTLS. It is loaded beside ours and asked about directly: the loader never reloads the
+  ;; library in use, because every key and config points into it (see LOAD-MBEDTLS).
+  (let ((libuv (libuv-path)))
     (if (null libuv)
         (skip "no built libuv to stand in for a foreign library")
-        (let ((saved (uiop:getenv "AION_TLS_LIBRARY")))
-          (unwind-protect
-               (progn
-                 (setf (uiop:getenv "AION_TLS_LIBRARY") (uiop:native-namestring libuv))
-                 (let ((e (handler-case (progn (tls:load-mbedtls :force t) nil)
-                            (tls:mbedtls-mismatch (e) e))))
-                   (is (typep e 'tls:mbedtls-mismatch))
-                   (is (and e (search "ouranos_tls_shim_version" (tls:mbedtls-mismatch-reason e)))
-                       "the refusal says what is missing: ~A" e)))
-            (setf (uiop:getenv "AION_TLS_LIBRARY") (or saved ""))
-            (tls:load-mbedtls :force t)
-            (is (search "vendor/mbedtls/lib/" (substitute #\/ #\\ (tls:mbedtls-path)))
-                "and the real library is back afterwards"))))))
+        (let ((path (uiop:native-namestring libuv)))
+          (cffi:load-foreign-library path)
+          (let ((reason (aion/tls::%build-mismatch path)))
+            (is (and reason (search "ouranos_tls_shim_version" reason))
+                "a library without our C is refused, and the refusal says why: ~S" reason))
+          (is (null (aion/tls::%build-mismatch (tls:mbedtls-path)))
+              "and our own library is not")))))
+
+(test loading-again-keeps-the-library-in-use
+  (let ((before (tls:mbedtls-path)))
+    (is (equal before (tls:load-mbedtls)))
+    (let ((key (tls:generate-private-key)))
+      (is-true key "keys can still be made after a second load")
+      (tls:free-private-key key))))
+
+(test a-psa-status-is-reported-by-name
+  ;; mbedtls_strerror does not know PSA's statuses and printed -144 as two unknown codes.
+  (is (string= "PSA_ERROR_SERVICE_FAILURE" (aion/tls::%strerror -144)))
+  (is (search "SSL" (aion/tls::%strerror (- #x7880))) "an mbedTLS code still gets mbedTLS's text"))
 
 ;;; --- keys and certificates -------------------------------------------------------------
 

@@ -115,33 +115,41 @@ GetProcAddress on Windows, SBCL's DLSYM (dlsym) elsewhere."
                        #-windows (funcall (%sb-alien "DLSYM") handle name))))
     (and address (not (zerop (sb-sys:sap-int address))))))
 
-(defun %check-build (path)
-  "Refuse the library just loaded from PATH unless it is our build, then initialise it.
-The order is mbedTLS's own: ouranos_tls_setup, which registers the Windows threading
-functions, before any other mbedTLS call, and psa_crypto_init before any TLS or crypto."
-  (flet ((refuse (reason)
-           (ignore-errors (cffi:close-foreign-library *library*))
-           (setf *library* nil *path* nil)
-           (error 'mbedtls-mismatch :path path :reason reason)))
-    (unless (%library-defines-p path "ouranos_tls_shim_version")
-      (refuse "it has no ouranos_tls_shim_version, so it was not built by scripts/build-mbedtls.lisp"))
-    (let ((version (%shim-version)))
-      (unless (= version +shim-version+)
-        (refuse (format nil "its C shim is version ~D and this code needs version ~D"
-                        version +shim-version+))))
-    (when (zerop (%threading-kind))
-      (refuse "it was built with threading off, so its crypto is not safe to use from two threads"))
-    (%setup)
-    (let ((status (%psa-crypto-init)))
-      (unless (zerop status)
-        (refuse (format nil "psa_crypto_init returned ~D" status))))))
+(defun %build-mismatch (path)
+  "NIL if the library just loaded from PATH is our build, else a sentence saying why not.
+Reads the library and changes nothing, so it can be asked of any candidate."
+  (cond ((not (%library-defines-p path "ouranos_tls_shim_version"))
+         "it has no ouranos_tls_shim_version, so it was not built by scripts/build-mbedtls.lisp")
+        ((/= (%shim-version) +shim-version+)
+         (format nil "its C shim is version ~D and this code needs version ~D"
+                 (%shim-version) +shim-version+))
+        ((zerop (%threading-kind))
+         "it was built with threading off, so its crypto is not safe to use from two threads")))
 
-(defun load-mbedtls (&key force)
-  "Load our mbedTLS, trying each candidate in turn, check it, and initialise it. Returns
-the path loaded. Signals MBEDTLS-NOT-FOUND if nothing loads, and MBEDTLS-MISMATCH if what
-loads is not our build. Idempotent unless FORCE."
+(defun %initialise (path)
+  "Initialise the library just accepted from PATH, in mbedTLS's order: ouranos_tls_setup,
+which registers the Windows threading functions and so must come before any other mbedTLS
+call, then psa_crypto_init."
+  (%setup)
+  (let ((status (%psa-crypto-init)))
+    (unless (zerop status)
+      (error 'mbedtls-mismatch :path path
+                               :reason (format nil "psa_crypto_init returned ~A"
+                                               (%psa-status-name status))))))
+
+(defun load-mbedtls ()
+  "Load our mbedTLS, trying each candidate in turn, check it, and initialise it. Returns the
+path loaded. Signals MBEDTLS-NOT-FOUND if nothing loads, and MBEDTLS-MISMATCH if what loads
+first is not our build.
+
+ONCE LOADED, IT IS NEVER RELOADED. Every key, certificate, config and engine points into the
+library's memory and its C runtime's heap. Reloading it, which SBCL's LOAD-SHARED-OBJECT does
+for a library already loaded, can move or reinitialise that memory under them; on Windows it
+reinitialised the global mutexes PSA locks, and key generation then failed with
+PSA_ERROR_SERVICE_FAILURE (#282). To use another library, call UNLOAD-MBEDTLS first, with
+nothing made from the old one still in use."
   (sb-thread:with-recursive-lock (*load-lock*)
-    (when (and *library* (not force))
+    (when *library*
       (return-from load-mbedtls *path*))
     (let ((tried '()) (last-error nil))
       (dolist (candidate (%candidates))
@@ -151,8 +159,12 @@ loads is not our build. Idempotent unless FORCE."
           (let ((library (handler-case (cffi:load-foreign-library candidate)
                            (error (e) (setf last-error e) nil))))
             (when library
+              (let ((reason (%build-mismatch candidate)))
+                (when reason
+                  (ignore-errors (cffi:close-foreign-library library))
+                  (error 'mbedtls-mismatch :path candidate :reason reason)))
+              (%initialise candidate)
               (setf *library* library *path* candidate)
-              (%check-build candidate)
               (return-from load-mbedtls candidate)))))
       (error 'mbedtls-not-found :searched (nreverse tried) :reason last-error))))
 
