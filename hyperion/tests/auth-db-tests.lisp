@@ -429,6 +429,11 @@ disagree on result-key case, so match the column name case-insensitively."
                      (auth:users-ddl :dialect :sqlite)
                      "DROP TABLE hyperion_users"))
 
+(defun %email-index-migration ()
+  (be:make-migration "20260729_003a_hyperion_users_email" "one account per email"
+                     (auth:users-email-index-ddl)
+                     "DROP INDEX idx_hyperion_users_email"))
+
 (defun %role-log-migrations ()
   (list (be:make-migration "20260729_004_hyperion_role_events" "role-change log"
                            (auth:role-events-ddl :dialect :sqlite)
@@ -436,6 +441,13 @@ disagree on result-key case, so match the column name case-insensitively."
         (be:make-migration "20260729_005_hyperion_role_events_index" "role-change log index"
                            (auth:role-events-index-ddl)
                            "DROP INDEX idx_hyperion_role_events_user_at")))
+
+(defun %with-file-migrated (path-and-migrations)
+  "Apply MIGRATIONS to the SQLite file PATH through MIGRATE, then close the connection."
+  (destructuring-bind (path migrations) path-and-migrations
+    (let ((c (conn:connect (be:make-sqlite (namestring path)))))
+      (unwind-protect (mnemosyne/migrate:migrate (be:make-sqlite (namestring path)) c migrations)
+        (conn:disconnect c)))))
 
 (defmacro %with-migrated ((conn migrations) &body body)
   `(let ((,conn (conn:connect (be:make-sqlite ":memory:"))))
@@ -445,7 +457,7 @@ disagree on result-key case, so match the column name case-insensitively."
        (conn:disconnect ,conn))))
 
 (test the-documented-migration-set-gives-a-store-whose-role-changes-work
-  (%with-migrated (c (cons (%users-migration) (%role-log-migrations)))
+  (%with-migrated (c (list* (%users-migration) (%email-index-migration) (%role-log-migrations)))
     (let* ((store (auth:make-db-auth c :dialect :sqlite))
            (id (auth:user-id (auth:create-user store :email "doc@x.com" :roles '(:member)))))
       (auth:grant-role store id :moderator :actor "test")
@@ -474,3 +486,78 @@ disagree on result-key case, so match the column name case-insensitively."
     (unwind-protect
          (is (typep (auth:make-db-auth c :dialect :sqlite :ensure t) 'auth:db-auth))
       (conn:disconnect c))))
+
+;;; --- one account per email (#221) ----------------------------------------------------
+;;;
+;;; USERS-DDL declares no UNIQUE constraint. Until #221 CREATE-USER relied only on the unique
+;;; index's error, and the documented migration set did not create the index, so a second
+;;; sign-up with the same address created a second account (measured on main: 2 rows).
+
+(defun %email-rows (c email)
+  (length (conn:query c "SELECT _id FROM hyperion_users WHERE email = ?" email)))
+
+(test a-duplicate-email-is-refused-even-without-the-index
+  ;; The users table only, as docs/migrations.md used to show, plus the role log so the
+  ;; store constructs. The refusal comes from CREATE-USER's own check.
+  (%with-migrated (c (cons (%users-migration) (%role-log-migrations)))
+    (let ((store (auth:make-db-auth c :dialect :sqlite)))
+      (auth:create-user store :email "same@x.com")
+      (signals auth:duplicate-email (auth:create-user store :email "Same@X.com"))
+      (is (= 1 (%email-rows c "same@x.com")) "one account for the address"))))
+
+(defun %concurrent-duplicate-signups (path pairs)
+  "Two stores on two connections to the SQLite file PATH. For each of PAIRS emails, both sign
+up at once. Returns (values pairs-with-exactly-one-row created refused other-errors)."
+  (let* ((ca (conn:connect (be:make-sqlite (namestring path))))
+         (cb (conn:connect (be:make-sqlite (namestring path))))
+         ;; Without a busy timeout, SQLite refuses a second writer at once with BUSY instead
+         ;; of waiting, and mnemosyne sets none, so here some sign-ups failed with "database is
+         ;; locked" before ever reaching the index (#223). Set here so
+         ;; this test measures the index, not the lock.
+         (_ (dolist (c (list ca cb)) (conn:exec c "PRAGMA busy_timeout = 5000")))
+         (a (auth:make-db-auth ca :dialect :sqlite))
+         (b (auth:make-db-auth cb :dialect :sqlite))
+         (one-row 0) (created 0) (refused 0) (other '()))
+    (declare (ignore _))
+    (unwind-protect
+         (dotimes (i pairs)
+           (let* ((email (format nil "race-~D@x.com" i))
+                  (go (sb-thread:make-semaphore))
+                  (outcomes (make-array 2 :initial-element nil))
+                  (threads
+                    (loop for store in (list a b) for k from 0
+                          collect (let ((store store) (k k))
+                                    ;; THREAD-LIFETIME: scoped -- joined below, before the next pair.
+                                    (sb-thread:make-thread
+                                     (lambda ()
+                                       (sb-thread:wait-on-semaphore go)
+                                       (setf (aref outcomes k)
+                                             (handler-case (progn (auth:create-user store :email email)
+                                                                  :created)
+                                               (auth:duplicate-email () :refused)
+                                               (error (e) (princ-to-string e)))))
+                                     :name "signup")))))
+             (sb-thread:signal-semaphore go 2)
+             (dolist (th threads) (aion/test-threads:join th))
+             (when (= 1 (%email-rows ca email)) (incf one-row))
+             (loop for o across outcomes
+                   do (case o (:created (incf created)) (:refused (incf refused))
+                        (t (push o other))))))
+      (conn:disconnect ca) (conn:disconnect cb))
+    (values one-row created refused other)))
+
+(test concurrent-duplicate-signups-leave-one-account-with-the-index
+  ;; Two stores do not share a lock, so both can pass CREATE-USER's check at once. The index
+  ;; is what refuses the second insert, and its error must still arrive as DUPLICATE-EMAIL.
+  (let ((path (%temp-db-path "email-race")))
+    (unwind-protect
+         (progn
+           (%with-file-migrated (list path (list* (%users-migration) (%email-index-migration)
+                                                   (%role-log-migrations))))
+           (multiple-value-bind (one-row created refused other)
+               (%concurrent-duplicate-signups path 50)
+             (is (= 50 one-row) "every contested address holds exactly one account")
+             (is (= 50 created) "one sign-up per address succeeds")
+             (is (= 50 refused) "and the other is refused as DUPLICATE-EMAIL")
+             (is (null other) "no other error: ~S" (remove-duplicates other :test #'string=))))
+      (ignore-errors (delete-file path)))))

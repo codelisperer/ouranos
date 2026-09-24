@@ -40,6 +40,7 @@
            #:role-update-conflict-attempts
            ;; pre-publication issue 166: the append-only role-change log.
            #:role-history #:role-events-ddl #:role-events-index-ddl #:events-table #:*events-table*
+           #:users-email-index-ddl
            #:missing-role-log #:missing-role-log-table #:missing-role-log-cause
            #:missing-actor #:missing-actor-operation))
 (in-package #:hyperion/auth-db)
@@ -56,7 +57,7 @@
 (schema:defschema hyperion-user (:table "hyperion_users")
   (:_id           :string  :primary t)
   (:vid           :integer)
-  (:email         :string  :required t)   ; unique -- enforced by an index in ENSURE-SCHEMA
+  (:email         :string  :required t)   ; unique -- enforced by USERS-EMAIL-INDEX-DDL (#221)
   (:phone         :string)                ; optional (E.164); NIL -> no SMS
   (:pw_hash       :text)
   (:temp_password :integer)               ; 0/1 (sqlite has no boolean)
@@ -159,14 +160,23 @@ rows, so it costs one round trip and reads nothing."
 (defun users-ddl (&key (dialect :sqlite))
   "The CREATE TABLE SQL for the users table under DIALECT, **store-less** -- so a consuming
 app can fold the identity schema into its OWN migration timeline (mnemosyne make-migration)
-rather than call ENSURE-SCHEMA. The unique email index is a separate statement (see
-ENSURE-SCHEMA); an app owning its migrations adds that as its own step."
+rather than call ENSURE-SCHEMA. The unique email index is a separate statement,
+USERS-EMAIL-INDEX-DDL, which an app owning its migrations adds as its own step (#221)."
   ;; The designator goes straight through (pre-publication issue 432, ADR-0003). This used to be
   ;; `(string-downcase (symbol-name dialect))' -- a fourth hand-rolled conversion, written
   ;; here because hyperion holds the dialect as a KEYWORD and schema-ddl used to take only a
   ;; STRING. It also made this helper keyword-only: a caller with the string spelling hit a
   ;; type error from SYMBOL-NAME. mnemosyne now normalises designators itself.
   (schema:schema-ddl (schema:find-schema 'hyperion-user) :dialect dialect))
+
+(defun users-email-index-ddl (&key (table *table*))
+  "CREATE UNIQUE INDEX DDL for the users table's email column, store-less like USERS-DDL, so an
+app that owns its migrations adds it as its own step (docs/migrations.md, section 5).
+
+THIS INDEX IS WHAT MAKES AN EMAIL UNIQUE (#221). USERS-DDL declares no UNIQUE constraint, and a
+database without this index accepts two rows for one address. CREATE-USER also refuses a known
+duplicate before inserting, but only the index holds when two processes insert at once."
+  (format nil "CREATE UNIQUE INDEX IF NOT EXISTS idx_~A_email ON ~A (email)" table table))
 
 (defun db-auth-ddl (store)
   (users-ddl :dialect (dialect store)))
@@ -185,9 +195,7 @@ always \"this account's history\", ordered."
   "Create the users table, its unique email index, and the role-event log if absent.
 Returns STORE."
   (conn:exec (conn store) (db-auth-ddl store))
-  (conn:exec (conn store)
-             (format nil "CREATE UNIQUE INDEX IF NOT EXISTS idx_~A_email ON ~A (email)"
-                     (table store) (table store)))
+  (conn:exec (conn store) (users-email-index-ddl :table (table store)))
   (conn:exec (conn store) (role-events-ddl :dialect (dialect store)))
   ;; Never an index on `at' alone: the question is never "every role event ever".
   (conn:exec (conn store) (role-events-index-ddl :table (events-table store)))
@@ -283,6 +291,15 @@ only chance to decide them."
                     :status (or status "active")
                     :created_at now :updated_at now)))
     (bt:with-lock-held ((lock store))
+      ;; A KNOWN duplicate is refused here, before the insert (#221). Until #221 this relied
+      ;; only on the unique index's error, and a database built from USERS-DDL alone, which is
+      ;; what docs/migrations.md used to show, has no index: a second sign-up with the same
+      ;; address then created a second account, silently. The check covers any caller of THIS
+      ;; store, which serialises on the lock. Two processes, or two stores on one database,
+      ;; can still both pass it at the same moment; only USERS-EMAIL-INDEX-DDL's index refuses
+      ;; that, and the handler below turns its error into DUPLICATE-EMAIL.
+      (when (find-user-by-email store em)
+        (error 'duplicate-email :email em))
       (handler-case
           (q:run (conn store) (list :insert-into (table store) :values (list row))
                  :dialect (dialect store))
