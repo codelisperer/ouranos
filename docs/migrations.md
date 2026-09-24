@@ -92,6 +92,9 @@ that migrates behind the app's back:
 (be:make-migration "20260729_003_hyperion_users" "identity store"
                    (auth:users-ddl :dialect :sqlite)      ; store-less accessor
                    "DROP TABLE hyperion_users")
+(be:make-migration "20260729_003a_hyperion_users_email" "one account per email"
+                   (auth:users-email-index-ddl)
+                   "DROP INDEX idx_hyperion_users_email")
 (be:make-migration "20260729_004_hyperion_role_events" "role-change log"
                    (auth:role-events-ddl :dialect :sqlite)
                    "DROP TABLE hyperion_role_events")
@@ -100,7 +103,11 @@ that migrates behind the app's back:
                    "DROP INDEX idx_hyperion_role_events_user_at")
 ```
 
-`hyperion/auth-db` owns two tables. `hyperion_users` holds the accounts. `hyperion_role_events`
+`hyperion/auth-db` owns two tables. `hyperion_users` holds the accounts, and **its unique
+email index is what makes an address belong to one account**: `users-ddl` declares no UNIQUE
+constraint, and a database without the index can hold two accounts for one email (#221).
+`create-user` also refuses a duplicate it can see before inserting, but only the index holds
+when two processes sign up the same address at once. `hyperion_role_events`
 is the append-only log that `grant-role` and `revoke-role` write on every call, and its
 `(user_id, at)` index serves "this account's history". `make-db-auth` checks at construction
 that the log can be read, and signals `missing-role-log`, naming the migration above, if it
