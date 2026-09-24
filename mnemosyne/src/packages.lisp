@@ -160,7 +160,7 @@
     and scope transactions. Recoverable failure is a DB-ERROR condition wrapping the
     driver's, not a return code. Start/stop-symmetric CONNECT/DISCONNECT + a
     WITH-CONNECTION macro (no globals -- a future Atropos component wraps them).")
-  (:export #:connect #:disconnect #:with-connection
+  (:export #:connect #:disconnect #:with-connection #:*sqlite-busy-timeout-ms*
            #:exec #:query #:with-transaction
            #:db-error #:db-error-message #:db-error-cause))
 

@@ -105,6 +105,16 @@ otherwise take depends on whether something else happened to load cl+ssl."
                  :requested (be:backend-pg-ssl-mode backend))
        :no))))
 
+(defvar *sqlite-busy-timeout-ms* 5000
+  "Milliseconds a SQLite connection waits for another connection's write lock before failing
+with BUSY (\"database is locked\"), or NIL to not wait at all.
+
+SQLite's own default is to wait zero time, and mnemosyne used to leave it there (#223). Two
+connections writing to one file at the same moment, such as a web server and a worker, or two
+request threads, then failed with BUSY at once instead of waiting a few milliseconds for the
+other to commit. Read when CONNECT opens the connection; bind it around CONNECT to change it for
+one connection.")
+
 (defun connect (backend)
   "Open a CL-DBI connection for BACKEND (a mnemosyne/backend:Backend). Postgres speaks
 the wire protocol (cl-postgres, no libpq); SQLite is a local file or \":memory:\" -- and a
@@ -118,9 +128,10 @@ is why the argument is always supplied."
     (let ((name (be:backend-name backend)))
       (cond
         ((string= name "sqlite")
-         (log:debug "db connect" :backend name)
+         (log:debug "db connect" :backend name :busy-timeout-ms *sqlite-busy-timeout-ms*)
          (dbi:connect :sqlite3
-                      :database-name (%ensure-sqlite-directory (be:sqlite-path backend))))
+                      :database-name (%ensure-sqlite-directory (be:sqlite-path backend))
+                      :busy-timeout *sqlite-busy-timeout-ms*))
         ((string= name "postgres")
          ;; Resolved BEFORE the log line, so the line reports the mode actually used
          ;; rather than the one requested -- a log that says `require' about a plaintext

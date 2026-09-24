@@ -511,9 +511,9 @@ up at once. Returns (values pairs-with-exactly-one-row created refused other-err
   (let* ((ca (conn:connect (be:make-sqlite (namestring path))))
          (cb (conn:connect (be:make-sqlite (namestring path))))
          ;; Without a busy timeout, SQLite refuses a second writer at once with BUSY instead
-         ;; of waiting, and mnemosyne sets none, so here some sign-ups failed with "database is
-         ;; locked" before ever reaching the index (#223). Set here so
-         ;; this test measures the index, not the lock.
+         ;; of waiting, and some sign-ups here failed with "database is locked" before ever
+         ;; reaching the index. mnemosyne sets one on connect since #223; it is set again here
+         ;; so this test measures the index whatever that default is.
          (_ (dolist (c (list ca cb)) (conn:exec c "PRAGMA busy_timeout = 5000")))
          (a (auth:make-db-auth ca :dialect :sqlite))
          (b (auth:make-db-auth cb :dialect :sqlite))
