@@ -5,6 +5,27 @@
 ;;;; core in Coalton with an effectful CLOS/Spinneret shell. Generic components
 ;;;; and industrial HTMX wiring only; never domain-specific components.
 
+;;; --- Hunchentoot without SSL on Windows (#249, #115) --------------------------------
+;;;
+;;; On Windows, Hunchentoot is built without its SSL support, so nothing loads OpenSSL there.
+;;; Windows ships no OpenSSL, and a desktop bundle that loaded it at build time reopens it at
+;;; startup and quits before `main' on any machine without a copy (#249). HTTPS requests the
+;;; application makes are unaffected: dexador uses WinHTTP on Windows and never loads cl+ssl.
+;;; What is lost is Hunchentoot serving HTTPS on Windows. That is a stopgap until
+;;; hyperion/server-uv terminates TLS with the mbedTLS this tree builds and carries (#125);
+;;; Postgres over TLS on Windows is #258.
+;;;
+;;; WHY HERE. `:hunchentoot-no-ssl' has to be on *FEATURES* before hunchentoot.asd is read,
+;;; because that file decides at read time whether Hunchentoot depends on cl+ssl, and its
+;;; sources test the feature with reader conditionals. ASDF reads this file before it resolves
+;;; the :DEPENDS-ON of any system defined below, and resolving `clack-handler-hunchentoot' is
+;;; what reads hunchentoot.asd. So the tree, the gate (every child image loads systems through
+;;; ASDF) and the desktop build (which loads the app's system) all see the feature. The same
+;;; form is at the top of praxeon/praxeon.asd, the other file whose systems depend on
+;;; clack-handler-hunchentoot. An application outside the tree that depends on
+;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
+#+win32 (pushnew :hunchentoot-no-ssl *features*)
+
 (defsystem "hyperion"
   :description "A full-stack, HTMX-first web framework for Common Lisp (Coalton core)."
   :author "Bob <eternal.recursion@proton.me>"
