@@ -82,6 +82,16 @@ build is one file carrying mbedTLS, its crypto and our C together.")
                       *library-names*))
             *library-names*)))
 
+(defun %sb-alien (name)
+  "The SB-ALIEN internal NAME, looked up when called, never read into the source.
+
+SBCL's foreign-library internals differ by platform. Windows builds have no SB-ALIEN::DLSYM,
+and a source file that merely MENTIONS SB-ALIEN::DLSYM fails to be read there, because the
+reader tries to intern it into a locked package (#282's first Windows run: \"Lock on package
+SB-ALIEN violated when interning DLSYM\"). So no internal is written as a symbol here."
+  (or (find-symbol name "SB-ALIEN")
+      (error "aion/tls: this SBCL has no SB-ALIEN::~A, which the library check needs" name)))
+
 (defun %library-defines-p (path name)
   "Whether the shared library loaded from PATH itself defines the symbol NAME.
 
@@ -89,16 +99,20 @@ Not CFFI:FOREIGN-SYMBOL-POINTER, which on SBCL ignores its library argument and 
 every loaded library (cffi-sbcl.lisp's %FOREIGN-SYMBOL-POINTER). With our mbedTLS already
 in the process, it would find our symbol and pass a system mbedTLS that has none, which is
 the case this check exists for. So this asks the one library, through SBCL's handle for it:
-dlsym on Linux and macOS, GetProcAddress on Windows, which is what SB-ALIEN::DLSYM calls."
+GetProcAddress on Windows, SBCL's DLSYM (dlsym) elsewhere."
   (let* ((truename (ignore-errors (truename path)))
+         (namestring-of (%sb-alien "SHARED-OBJECT-NAMESTRING"))
          (object (find-if (lambda (o)
-                            (let ((file (ignore-errors (truename (sb-alien::shared-object-namestring o)))))
+                            (let ((file (ignore-errors (truename (funcall namestring-of o)))))
                               (if truename
                                   (equal file truename)
-                                  (equal (sb-alien::shared-object-namestring o) path))))
-                          sb-alien::*shared-objects*))
-         (handle (and object (sb-alien::shared-object-handle object)))
-         (address (and handle (sb-alien::dlsym handle name))))
+                                  (equal (funcall namestring-of o) path))))
+                          (symbol-value (%sb-alien "*SHARED-OBJECTS*"))))
+         (handle (and object (funcall (%sb-alien "SHARED-OBJECT-HANDLE") object)))
+         (address (and handle
+                       #+windows (cffi:foreign-funcall "GetProcAddress" :pointer handle
+                                                       :string name :pointer)
+                       #-windows (funcall (%sb-alien "DLSYM") handle name))))
     (and address (not (zerop (sb-sys:sap-int address))))))
 
 (defun %check-build (path)
