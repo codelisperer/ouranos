@@ -604,9 +604,13 @@ when another Woo server is running, and register the new thread, in one critical
   (if (eq server :woo)
       (sb-thread:with-mutex (*woo-servers-lock*)
         (%refuse-second-woo host port)
+        ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
+        ;; call in %CLACK-START.
         (let ((thread (sb-thread:make-thread function :name name)))
           (push (list thread host port) *woo-servers*)
           thread))
+      ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
+      ;; call in %CLACK-START.
       (sb-thread:make-thread function :name name)))
 
 (defun %clack-start (app server host port debug)
@@ -635,9 +639,10 @@ per request."
                        (funcall app env))))
          (out *standard-output*)
          (err *error-output*)
-         ;; THREAD-LIFETIME: independent -- the server runs for as long as it serves, not
-         ;; for the START call that created it; the only bindings it needs, the caller's
-         ;; output streams, are passed to it explicitly below.
+         ;; The thread's lifetime is independent: the server runs for as long as it serves,
+         ;; not for the START call that created it; the only bindings it needs, the caller's
+         ;; output streams, are passed to it explicitly below. %SPAWN-BACKEND-THREAD, which
+         ;; creates it, points back here.
          (thread
            (%spawn-backend-thread
             server host port
