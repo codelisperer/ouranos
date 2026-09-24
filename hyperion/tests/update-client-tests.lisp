@@ -442,8 +442,9 @@ the artifact lookup is the real one rather than a hard-coded guess."
 ;;; `*exit-after-handoff*' are substituted, so everything up to the irreversible step is
 ;;; genuinely exercised: the re-check, the writability gate, the payload download, the
 ;;; PAYLOAD signature check, the shutdown hook, and the exact arguments handed to NSIS.
-;;; What is NOT exercised is NSIS actually running, which needs a built installer from #72
-;;; and a machine willing to have software installed on it.
+;;; What is NOT exercised is NSIS actually running. The installer is built now (by
+;;; desktop-release.yml); what is missing is a test that runs it, which needs a machine
+;;; willing to have software installed on it.
 ;;;
 ;;; THE THREE TESTS THAT MATTER ARE THE ONES ASSERTING THE INSTALLER WAS *NOT* LAUNCHED.
 ;;; A bad payload, a per-machine install, and an application that is not ready to stop are
@@ -529,9 +530,9 @@ shared literal that could collide with a real directory in somebody's home."
            (ignore-errors (uiop:delete-directory-tree d :validate t)))))))
 
 #-win32
-(test on-a-platform-with-no-artifact-apply-refuses-and-says-which-platform
+(test on-a-platform-with-no-apply-strategy-apply-refuses-and-says-which-platform
   ;; The other side of the guard, and not a placeholder: "macOS and Linux refuse" is a
-  ;; DECISION (#72 has produced no artifact for either), and a decision nothing asserts is
+  ;; DECISION (neither apply strategy is written, #251), and a decision nothing asserts is
   ;; how a half-built apply path ships. The detail names the platform key, so the refusal
   ;; a user or a log sees says WHICH platform is unbuilt rather than merely that one is.
   (with-apply ()

@@ -238,9 +238,9 @@ trace rendered at them."
 
 ;;; --- apply ------------------------------------------------------------------
 
-(test apply-on-a-platform-with-no-artifact-explains-itself
-  "APPLY-UPDATE signals `update-not-implemented' wherever #72 has produced no artifact --
-today macOS and Linux. That is an ordinary answer with a sentence attached, and the route
+(test apply-on-a-platform-with-no-apply-strategy-explains-itself
+  "APPLY-UPDATE signals `update-not-implemented' wherever the apply strategy is not written
+(#251) -- today macOS and Linux. That is an ordinary answer with a sentence attached, and the route
 renders the sentence rather than letting the condition escape as a 500.
 
 The status is deliberately NOT `available' here, so the refusal this exercises is the one

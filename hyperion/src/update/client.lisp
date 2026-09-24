@@ -1188,7 +1188,7 @@ IT NARROWS THE WINDOW; IT DOES NOT CLOSE IT. What remains is the interval betwee
 and the OS's own open-for-execute, which on Windows is a separate process whose loader does
 its own open. Closing it needs either a handle held across the hand-off or #113's
 stage-and-rename, where the verified artefact never sits at the path that gets executed.
-That decision belongs with #72's macOS and Linux strategies rather than before them.
+That decision belongs with the macOS and Linux strategies (#251) rather than before them.
 
 MEASURE THE PRECONDITION BEFORE COSTING THE REST: on Windows the staged file lives under
 `uiop:temporary-directory', which is the PER-USER temp (`%LOCALAPPDATA%\\Temp'), not
@@ -1411,7 +1411,7 @@ The order, and every step of it is load-bearing:
              :detail (format nil "no update to apply (~A)" (getf status :status))))
     #-win32
     (error 'update-not-implemented
-           :detail (format nil "the ~A apply strategy is not built yet -- #72 has produced no artifact for it"
+           :detail (format nil "the ~A apply strategy is not written yet (#251)"
                            (platform:platform-key)))
     #+win32
     (let ((dir (install-directory)))
