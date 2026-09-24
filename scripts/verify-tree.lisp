@@ -588,7 +588,11 @@ surfaces -- it just is not confused with a failing test."
     ("check-asd-collisions.lisp" () nil
      "no system name is defined by two .asd files")
     ("check-format-continuations.lisp" () nil
-     "no string literal holds a FORMAT ~<newline> continuation (#146)"))
+     "no string literal holds a FORMAT ~<newline> continuation (#146)")
+    ("check-source-deps.lisp" () t
+     "every system declares the packages its source names (#166)")
+    ("check-source-deps.lisp" ("--self-test") t
+     "check-source-deps' scanner still reads its known inputs correctly (#163)"))
   "(script args big-heap-p what-it-answers). BIG-HEAP-P is for the two that load systems;
 the others read files and need no room to do it.
 
