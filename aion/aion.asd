@@ -511,6 +511,12 @@
   ;; and praxeon (#178); aion is the one framework all of them may depend on.
   :components ((:file "tests/test-threads")))
 
+(defsystem "aion/test-threads/tests"
+  :description "Tests for aion/test-threads: values, the timeout and abort paths, and JOIN-ALL's single group deadline."
+  :depends-on ("aion/test-threads" "fiveam")
+  :components ((:file "tests/test-threads-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/test-threads/tests :run-tests)))
+
 (defsystem "aion/clock/tests"
   :description "Tests for aion/clock: id shape, strict monotonicity under concurrency, and v6 lexical sort order."
   :depends-on ("aion/clock" "fiveam" "aion/test-threads")
