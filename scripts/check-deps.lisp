@@ -105,12 +105,10 @@ can only produce a missed failure, which is the status quo, rather than a false 
                     (string-equal allowed heading :end2 (length allowed))))
              +source-of-truth-sections+)))
 
-(defun documented-externals ()
-  "Names in the leading name column of the tables that DOCUMENT dependencies.
-
-Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest are not."
+(defun %table-names-under (section-p)
+  "Names in the leading name column of every table under a heading SECTION-P accepts."
   (let ((names '())
-        (documenting nil)
+        (inside nil)
         (lines (uiop:split-string
                 (uiop:read-file-string (merge-pathnames "docs/dependencies.md" *root*))
                 :separator '(#\Newline))))
@@ -118,8 +116,8 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
       ;; A heading at ANY level replaces the current section: `### Native (non-Lisp)
       ;; dependencies' sits under `## External deps by role' and must not inherit it.
       (when (and (plusp (length line)) (char= (char line 0) #\#))
-        (setf documenting (%section-documents-p (string-left-trim "# " line))))
-      (when documenting
+        (setf inside (funcall section-p (string-left-trim "# " line))))
+      (when inside
         (let ((tick1 (and (> (length line) 2)
                           (char= (char line 0) #\|)
                           (position #\` line))))
@@ -129,12 +127,53 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
                 (let ((n (string-downcase (subseq line (1+ tick1) tick2))))
                   (pushnew n names :test #'string=))))))))))
 
+(defun documented-externals ()
+  "Names in the leading name column of the tables that DOCUMENT dependencies.
+
+Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest are not."
+  (%table-names-under #'%section-documents-p))
+
+(defparameter +deliberately-undeclared-section+ "deliberately undeclared"
+  "The heading, case-folded prefix, of the table of dependencies that nothing in the tree
+declares ON PURPOSE (#165): a server an APPLICATION declares rather than a framework, a system
+that arrives through an adapter. A row there is not stale.
+
+It is NOT a source of truth for the undocumented check. It records what nothing declares, so a
+dependency the code does declare, listed only here, is still undocumented -- otherwise this
+table would be a second place a dependency could hide from the externals table.
+
+It is a list you must ADD TO DELIBERATELY. A fifth such dependency, added later by someone who
+does not know this history, is reported as stale and gets a decision; that failure is the
+point, and the difference between a rule with recorded exceptions and one with unrecorded
+ones.")
+
+(defun deliberately-undeclared ()
+  "Names in the table of dependencies nothing in the tree declares on purpose."
+  (%table-names-under
+   (lambda (heading)
+     (and heading
+          (>= (length heading) (length +deliberately-undeclared-section+))
+          (string-equal +deliberately-undeclared-section+ heading
+                        :end2 (length +deliberately-undeclared-section+))))))
 
 (let* ((list-only (member "--list" (uiop:command-line-arguments) :test #'string=))
        (actual (actual-externals))
        (documented (documented-externals))
        (actual-names (sort (loop for k being the hash-keys of actual collect k) #'string<))
-       (undocumented (remove-if (lambda (n) (member n documented :test #'string=)) actual-names)))
+       (undocumented (remove-if (lambda (n) (member n documented :test #'string=)) actual-names))
+       ;; THE OTHER DIRECTION (#165): documented, declared by nothing, and not recorded as
+       ;; deliberately undeclared.
+       (deliberate (deliberately-undeclared))
+       ;; IN-TREE NAMES ARE SKIPPED, on the rule +SOURCE-OF-TRUTH-SECTIONS+ applies to native
+       ;; libraries: a checker that cannot observe a category must not judge it. ACTUAL-NAMES is
+       ;; external systems only, so an in-tree system named in a table -- `aion/log' in the
+       ;; hermes table, recording what hermes pulls through it -- can never appear there, and
+       ;; reporting it as stale would compare two different things.
+       (stale (sort (remove-if (lambda (n) (or (member n actual-names :test #'string=)
+                                               (member n deliberate :test #'string=)
+                                               (tree-deps:in-tree-p n)))
+                               (copy-list documented))
+                    #'string<)))
 
   (format t "~&~%=== external dependencies declared in the .asd files (~D) ===~%"
           (length actual-names))
@@ -176,7 +215,18 @@ Scoped by section -- see +SOURCE-OF-TRUTH-SECTIONS+ for which, and why the rest 
      (format t "  instructions are now wrong. Update docs/dependencies.md.~%")
      (format t "~%VERDICT: DRIFT~%")
      (uiop:quit 1))
+    (stale
+     (format t "  STALE -- in docs/dependencies.md, and nothing in the tree declares it:~%")
+     (dolist (n stale)
+       (format t "    ~A~%" n))
+     (format t "~%  A row for a dependency the code no longer uses inflates the count this~%")
+     (format t "  manifest is quoted for. Remove the row -- or, if nothing declares it ON~%")
+     (format t "  PURPOSE (an application declares it, or it arrives through an adapter),~%")
+     (format t "  move it to the `Deliberately undeclared' table and say why.~%")
+     (format t "~%VERDICT: STALE~%")
+     (uiop:quit 1))
     (t
-     (format t "  none -- every external dependency in the code is documented.~%")
+     (format t "  none -- every external dependency in the code is documented, and every~%")
+     (format t "  documented one is declared somewhere or recorded as deliberately undeclared.~%")
      (format t "~%VERDICT: IN SYNC~%")
      (uiop:quit 0))))

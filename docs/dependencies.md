@@ -45,9 +45,6 @@ separate repos with their own — not counted here.
 | `dexador` | HTTP client | **aion/http-client** (the shared client), hermes/blob | Wrapped once by `aion/http-client` (pre-publication issue 202) and reached through it by hermes and praxeon; `hermes/blob` still calls it directly for streaming. **Shared** — and now shared through one client rather than three call styles. |
 | `ironclad` | crypto (SHA-256, HMAC, Ed25519, **OS CSPRNG**) | hermes, hermes/blob, praxeon, **aion/random** | Twilio's inbound `X-Twilio-Signature`; blob checksums + S3 SigV4; **Ed25519 verification of signed spend grants** in `praxeon/ceiling` (pre-publication issue 172); and since pre-publication issue 95 the **OS random source** behind `aion/random` (`/dev/urandom`, `CryptGenRandom`) that mints session ids. **Shared** — arrived with hermes and reused each time rather than duplicated; pre-publication issue 95 added a fourth consumer and **no new dependency**. |
 | `clack` | HTTP server abstraction | hyperion | Web. |
-| `woo` | HTTP server (Unix/macOS) | praxeon/web | Pulled by `clack-handler-woo`. **No framework declares it** — see the two rows below. |
-| `hunchentoot` | HTTP server (Windows) | praxeon/web, hyperion examples | Pulled by `clack-handler-hunchentoot`. Likewise app-declared. |
-| `clack-handler-woo` | Clack↔Woo adapter | praxeon/web (Unix) | The system an app actually declares; it pulls `woo`. Binds **libev at load time**, so an image that loads it cannot be shipped as a desktop bundle without carrying libev. |
 | `clack-handler-hunchentoot` | Clack↔Hunchentoot adapter | praxeon/web (Windows), all three hyperion examples, **`praxeon/web/tests`** | Pure CL, every platform, nothing to install — which is why the desktop example uses it. `praxeon/web/tests` declares it because a suite that drives a real server is an *application* for the pre-publication issue 139 rule: `praxeon/web` must keep declaring none, so its suite cannot live in `praxeon/tests` (pre-publication issue 151). |
 | `log4cl` | logging engine | `aion/log` (and via it: every framework) | The engine behind the `aion/log` facade. Confined to the opt-in `aion/log` system; core aion never pulls it. *Previously documented only in prose here — added as a row 2026-08-04 by `scripts/check-deps.lisp`.* |
 | `lass` | CSS as s-expressions | `hyperion/examples/coalton-repl` | **Example-only** — no framework depends on it. Kept because the house CSS-DSL story (ADR-0003 §4) is dogfooded in the desktop demo. |
@@ -62,6 +59,20 @@ separate repos with their own — not counted here.
 | `dbd-postgres` | PostgreSQL **wire** driver | mnemosyne | Via `cl-postgres` (pure Lisp, no libpq); XTDB 2 rides it later. |
 | `dbd-sqlite3` | SQLite driver | mnemosyne | Local-dev backend; via `cl-sqlite` (FFI to the system `libsqlite3`). |
 | `cffi` | C FFI | `aion/uv` (aux only) | **New (2026-08-03).** The binding layer for libuv. Already present transitively (woo and cl-sqlite both pull it), so this makes an existing dependency explicit rather than adding a new one to the tree. Confined to the opt-in `aion/uv` and the Windows-only `aion/windows` (pre-publication issue 170) — core aion stays `coalton` + `alexandria`. **`aion/windows` adds no new dependency at all**: `cffi` was already here, and its threads come from `sb-thread` rather than `bordeaux-threads`, since a portability shim over threads buys nothing in a system that is Windows-only inside an SBCL-only tree. |
+
+### Deliberately undeclared
+
+Dependencies that **nothing in the tree declares, on purpose**: a server an *application* declares
+rather than a framework (pre-publication issue 139), or one that arrives through such an adapter.
+`scripts/check-deps.lisp` reads this table so these rows are not reported as stale, and does **not**
+count it as documentation: a dependency the code declares must still be in the table above (#165).
+Adding a row here is a decision; the check fails until one is made.
+
+| Dep | Role | Used by | Note |
+|---|---|---|---|
+| `woo` | HTTP server (Unix/macOS) | praxeon/web | Pulled by `clack-handler-woo`. **No framework declares it** — see `clack-handler-woo` below, and `clack-handler-hunchentoot` in the table above. |
+| `hunchentoot` | HTTP server (Windows) | praxeon/web, hyperion examples | Pulled by `clack-handler-hunchentoot`. Likewise app-declared. |
+| `clack-handler-woo` | Clack↔Woo adapter | praxeon/web (Unix) | The system an app actually declares; it pulls `woo`. Binds **libev at load time**, so an image that loads it cannot be shipped as a desktop bundle without carrying libev. |
 
 ### Shipped into generated projects
 

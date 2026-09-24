@@ -469,8 +469,8 @@ built to be agreeable."
 ;;; with only the checker in it would enumerate the real tree's .asd files while reading the
 ;;; fixture's manifest, and report drift that is an artefact of the fixture.
 ;;;
-;;; IT DETECTS ONE OF THE TWO DRIFTS ITS OWN HEADER NAMES. See
-;;; `deps-does-not-detect-a-documented-dependency-nothing-uses' below.
+;;; IT DETECTS BOTH DRIFTS ITS OWN HEADER NAMES since #165. Until then it detected only the
+;;; undocumented one; see `deps-detects-a-documented-dependency-nothing-uses' below.
 
 (defun %deps-tree (&key (depends "alexandria") (documented '("alexandria")))
   "A tree whose one .asd depends on DEPENDS and whose manifest lists DOCUMENTED."
@@ -560,26 +560,49 @@ every tree it is handed."
     (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
       (is (= 0 code) "agreement must pass; exit was ~D~%~A" code output))))
 
-(test deps-does-not-detect-a-documented-dependency-nothing-uses
-  "ASSERTS A DEFECT, DELIBERATELY, so the gap is visible in the gate rather than in a comment.
-
-check-deps' own header names two drifts and calls the second one a failure:
+(test deps-detects-a-documented-dependency-nothing-uses
+  "THE STALE DRIFT, which check-deps' own header has always called a failure (#165):
 
   STALE -- documented but no longer used. Harmless to a build, but it inflates the
   count we cite publicly, so it is still a failure.
 
-It is not computed. `documented' appears only inside the expression that filters
-`undocumented' (check-deps.lisp:93); the reverse direction is never taken. A manifest row for
-a system no .asd depends on reports IN SYNC and exits 0.
-
-This test passes on the CURRENT behaviour. When the stale check is implemented it will fail,
-which is the point -- a failing test naming its own issue is a better handover than a comment
-nobody greps."
+Until #165 it was not computed, and this test asserted the opposite: a manifest row for a
+system no .asd depends on reported IN SYNC and exited 0. It was written that way on purpose,
+to fail and name its issue the day the check landed."
   (let ((tree (%deps-tree :documented '("alexandria" "cl-ppcre"))))
     (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
-      (is (= 0 code)
-          "TODAY a stale manifest row passes. If this now fails, the stale check has been implemented and this test should become its detection test.~%~A"
-          output))))
+      (is (= 1 code) "a row nothing depends on must fail; exit was ~D~%~A" code output)
+      (is (search "cl-ppcre" output) "and the report names the stale row: ~A" output))))
+
+(defun %deps-tree-with-deliberate (deliberate &key (externals '("alexandria")))
+  "A tree whose .asd depends on alexandria, whose externals table lists EXTERNALS, and whose
+table of deliberately undeclared dependencies lists DELIBERATE."
+  (let ((tree (%fresh-tree)))
+    (%install-checker tree "tree-deps.lisp")
+    (%write (merge-pathnames "pkg/thing.asd" tree)
+            (format nil "(defsystem \"thing\"~%  :description \"fixture\"~%  :version \"0.0.0\"~%  :depends-on (\"alexandria\"))~%"))
+    (%write (merge-pathnames "docs/dependencies.md" tree)
+            (format nil "# Dependency manifest~%~%## External deps by role~%~%| Name | What |~%|---|---|~%~{| `~A` | fixture |~%~}~%### Deliberately undeclared~%~%| Name | Why nothing declares it |~%|---|---|~%~{| `~A` | fixture |~%~}"
+                    externals deliberate))
+    tree))
+
+(test deps-accepts-a-row-recorded-as-deliberately-undeclared
+  "The control for the test above, and the ruling on #165. The manifest documents, on purpose,
+dependencies nothing in the tree declares -- a server an APPLICATION declares, a system pulled
+in through an adapter. Those rows go in their own table, and a row there is not stale. Without
+this control the stale test passes identically on a checker that fails every documented row."
+  (let ((tree (%deps-tree-with-deliberate '("cl-ppcre"))))
+    (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
+      (is (= 0 code) "a deliberately undeclared row must pass; exit was ~D~%~A" code output))))
+
+(test deps-does-not-accept-the-deliberate-table-as-documentation
+  "The deliberate table records what nothing DECLARES. A dependency the code does declare, listed
+only there, is still undocumented -- or the table becomes a second place a dependency can hide
+from the externals table, which is the hole #165's scoping closed."
+  (let ((tree (%deps-tree-with-deliberate '("alexandria") :externals '())))
+    (multiple-value-bind (code output) (%run (%install-checker tree "check-deps.lisp"))
+      (is (= 1 code) "alexandria is declared and absent from the externals table; exit ~D~%~A"
+          code output))))
 
 ;;; --- check-readme-counts: WHICH tree does a writer write to? (pre-publication issue 450) --------
 ;;;
