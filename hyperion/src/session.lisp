@@ -87,7 +87,10 @@ At a privilege boundary -- sign-in above all -- you want ROTATE-SESSION."
 (defun restore-session (id &key (created 0) (accessed 0) (data nil))
   "Reconstruct a SESSION from persisted parts -- for a pluggable STORE backend loading a
 row (e.g. a mnemosyne-backed store). DATA is an alist of (key . value) copied into a fresh
-data bag. The in-memory store never needs this; a DB store does."
+data bag. The in-memory store never needs this; a DB store does.
+
+Pass the stored CREATED and ACCESSED. Left at their defaults of 0, the session reads as
+created and last used in 1900, and ENSURE-SESSION refuses it as expired (#121)."
   (let ((s (%make-session :%id id :created created :accessed accessed
                           :saved-accessed accessed)))
     (loop for (k . v) in data do (setf (gethash k (session-data s)) v))
@@ -101,6 +104,31 @@ data bag. The in-memory store never needs this; a DB store does."
           collect (cons k v))))
 
 ;;; ------------------------------------------------------------------------
+;;; Server-side expiry (#121).
+;;;
+;;; The cookie's Max-Age tells the browser when to stop sending an id; it does nothing to the
+;;; store. These are the server's own limits. ENSURE-SESSION refuses a session past either of
+;;; them, whether or not a sweep has run, and STORE-SWEEP reclaims the storage.
+
+(defparameter *session-idle-timeout* 86400
+  "Seconds a session may go unused before it expires, or NIL for no idle limit. Default 24 h,
+the same as *COOKIE-MAX-AGE*. Measured against the ACCESSED the store holds, which #231 writes
+at most once per *ACCESSED-SAVE-INTERVAL* (60 s): a limit much shorter than a few minutes
+should lower that interval too.")
+
+(defparameter *session-absolute-timeout* 604800
+  "Seconds a session may exist, however active, before it expires, or NIL for no absolute
+limit. Default 7 days. Counted from CREATED, which SIGN-IN! resets: a new authentication
+starts a new window. A sensitive application shortens both, for example an hour idle and
+twelve hours absolute.")
+
+(defun session-expired-p (session &optional (now (get-universal-time)))
+  "Whether SESSION is past *SESSION-IDLE-TIMEOUT* or *SESSION-ABSOLUTE-TIMEOUT* at NOW."
+  (or (and *session-idle-timeout*
+           (> (- now (session-accessed session)) *session-idle-timeout*))
+      (and *session-absolute-timeout*
+           (> (- now (session-created session)) *session-absolute-timeout*))))
+
 ;;; The store protocol: interchangeable backends (id -> session).
 ;;; ------------------------------------------------------------------------
 (defgeneric store-ref (store id)
@@ -131,6 +159,17 @@ keeps working without change."
     (store-add store session)
     t))
 
+(defgeneric store-sweep (store now)
+  (:documentation "Remove every session in STORE that SESSION-EXPIRED-P says is expired at NOW,
+and return how many were removed (#121)."))
+
+(defmethod store-sweep (store now)
+  "The default, for a store that defines only the other methods: load every session and
+delete the expired ones. Correct, but it reads the whole store; a store should do better."
+  (loop for s in (store-list store)
+        when (and (session-expired-p s now) (store-del store (session-id s)))
+          count t))
+
 ;;; --- the in-memory store ---
 (defclass memory-store ()
   ((table :initform (make-hash-table :test 'equal) :reader ms-table)
@@ -160,6 +199,12 @@ keeps working without change."
         (unless (eq current session)
           (setf (gethash (session-id session) (ms-table s)) session))
         t))))
+(defmethod store-sweep ((s memory-store) now)
+  (bt:with-lock-held ((ms-lock s))
+    (let ((expired (loop for id being the hash-keys of (ms-table s) using (hash-value v)
+                         when (session-expired-p v now) collect id)))
+      (dolist (id expired (length expired))
+        (remhash id (ms-table s))))))
 (defmethod store-list ((s memory-store))
   (bt:with-lock-held ((ms-lock s))
     (loop for v being the hash-values of (ms-table s) collect v)))
@@ -221,6 +266,12 @@ To sign a visitor in, call SIGN-IN!, which rotates the id and discards privilege
 keys as part of the same call."
   (let* ((id (http:cookie env cookie-name))
          (existing (and id (store-ref store id))))
+    ;; AN EXPIRED SESSION IS NOT A SESSION (#121). It is deleted and treated exactly as an
+    ;; unknown cookie, so no handler is ever given one, whether or not a sweep has run. The
+    ;; sweep only reclaims storage; this is what makes expiry true.
+    (when (and existing (session-expired-p existing))
+      (store-del store id)
+      (setf existing nil))
     (cond
       (existing
        (setf (session-accessed existing) (get-universal-time))
@@ -237,7 +288,7 @@ keys as part of the same call."
 (defun rotate-session (store session &key (cookie-name *cookie-name*)
                                           (max-age *cookie-max-age*)
                                           (path "/") (http-only t)
-                                          (same-site "Lax") secure)
+                                          (same-site "Lax") secure reset-created)
   "Give SESSION a NEW id, keep its data, and re-key it in STORE. Returns
  (values SESSION SET-COOKIE) -- the SAME session object, now under a fresh id, and the
 Set-Cookie header value that tells the browser about it.
@@ -257,10 +308,17 @@ those references pointing at something no longer in the store, and writes throug
 would be lost in silence.
 
 THE STORE IS NEVER WITHOUT THE SESSION. The new key goes in before the old one comes out,
-so a concurrent lookup finds one or the other and never a hole."
+so a concurrent lookup finds one or the other and never a hole.
+
+RESET-CREATED starts a new absolute-timeout window (#121) by setting CREATED to now. It is off
+by default: a rotation for a role change is not a new authentication, and must not extend a
+session past *SESSION-ABSOLUTE-TIMEOUT*. SIGN-IN! passes it, and so should a step-up
+re-authentication."
   (let ((old-id (session-id session))
         (fresh  (new-id)))
     (setf (session-%id session) fresh)
+    (when reset-created
+      (setf (session-created session) (get-universal-time)))
     (store-add store session)
     (unless (string= old-id fresh)
       (store-del store old-id))
@@ -312,7 +370,7 @@ is where cookie policy belongs; this value is for an app driving sessions withou
                      (ensure-session env store))))
     (dolist (k *privilege-scoped-keys*)
       (session-del session k))
-    (multiple-value-bind (s set-cookie) (rotate-session store session)
+    (multiple-value-bind (s set-cookie) (rotate-session store session :reset-created t)
       (loop for (k v) on data by #'cddr do (session-set s k v))
       (values s set-cookie))))
 
@@ -387,6 +445,16 @@ enough for an idle timeout measured in minutes.")
         (setf (session-dirty session) nil
               (session-saved-accessed session) (session-accessed session))))))
 
+(defparameter *session-sweep-interval* 300
+  "Seconds between the sweeps WRAP-SESSION runs, or NIL to never sweep from WRAP-SESSION (an
+app that sweeps on its own schedule calls SWEEP-SESSIONS). The sweep runs in the request that
+finds it due, after the handler; there is no background thread (#121).")
+
+(defun sweep-sessions (store &optional (now (get-universal-time)))
+  "Remove every expired session from STORE now; return how many were removed. For an app that
+sweeps on its own schedule, with *SESSION-SWEEP-INTERVAL* set to NIL."
+  (store-sweep store now))
+
 (defun wrap-session (app store &key (cookie-name *cookie-name*)
                                     (max-age *cookie-max-age*)
                                     (path "/") (http-only t)
@@ -406,7 +474,13 @@ owes -- on a mint, and on a ROTATE-SESSION performed anywhere inside the handler
         (list 200 () (list \"welcome\"))))
 
 The cookie options are this middleware's, applied to both cases, so `:secure t' holds for
-a rotation as much as for a mint."
+a rotation as much as for a mint.
+
+EXPIRED SESSIONS ARE SWEPT FROM HERE (#121), at most once per *SESSION-SWEEP-INTERVAL*, after
+the handler of the request that finds a sweep due. Correctness does not depend on it:
+ENSURE-SESSION refuses an expired session whether or not a sweep has run."
+  (let ((last-sweep nil)
+        (sweep-lock (bt:make-lock "hyperion-session-sweep")))
   (lambda (env)
     (multiple-value-bind (session minted) (ensure-session env store :cookie-name cookie-name)
       (let* ((entry-id (session-id session))
@@ -418,13 +492,20 @@ a rotation as much as for a mint."
         ;; the last rotation, and loses every SESSION-SET, SESSION-DEL and RESET-SESSION made
         ;; since. STORE-SAVE never inserts, so a session the handler killed stays killed.
         (%save-if-changed store session)
+        (let ((interval *session-sweep-interval*)
+              (now (get-universal-time)))
+          (when (and interval
+                     (bt:with-lock-held (sweep-lock)
+                       (when (or (null last-sweep) (>= (- now last-sweep) interval))
+                         (setf last-sweep now))))
+            (store-sweep store now)))
         (if owed
             (%attach-set-cookie
              response
              (set-cookie-header (session-id session)
                                 :name cookie-name :max-age max-age :path path
                                 :http-only http-only :same-site same-site :secure secure))
-            response)))))
+            response))))))
 
 ;;; ------------------------------------------------------------------------
 ;;; Dev / REPL session management (introspect, reset, kill). Data/render split:
