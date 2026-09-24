@@ -455,6 +455,7 @@ jobs:
         shell: bash
         env:
           OURANOS_WITH_UV: "1"
+          OURANOS_WITH_TLS: "1"
         run: |
           set -o pipefail
           sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
@@ -564,6 +565,12 @@ jobs:
         id: build-the-pinned-libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
+      # The release job loads aion/tls with OURANOS_WITH_TLS=1, the same as the matrix, so it
+      # needs the library too (#125).
+      - name: Build the pinned mbedTLS
+        id: build-the-pinned-mbedtls
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
+
       # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (pre-publication issue 276). Without it
       # this job would run verify-tree over a tree missing five checks that the matrix leg
       # has -- 4436 against 4446 at one commit, with nothing in either output saying why.
@@ -607,6 +614,7 @@ jobs:
         shell: bash
         env:
           OURANOS_WITH_UV: "1"
+          OURANOS_WITH_TLS: "1"
         run: |
           set -o pipefail
           sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \

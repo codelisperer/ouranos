@@ -108,6 +108,38 @@
                              (:file "introspect"))))
   :in-order-to ((test-op (test-op "aion/uv/tests"))))
 
+;;; aion/tls --- TLS over the mbedTLS this tree builds (#125). Opt-in, like aion/uv: nothing that
+;;; loads aion gets a native library from it. The library is found and checked on first use, not
+;;; at load time, so the system loads, and compiles, on a machine that has not built mbedTLS.
+(defsystem "aion/tls"
+  :description "TLS over the mbedTLS scripts/build-mbedtls.lisp builds: keys and certificates from octets, server and client configs, a memory-buffer engine, and a blocking stream."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; cffi for the binding; aion/random for certificate serials, from the OS generator.
+  :depends-on ("cffi" "aion/random")
+  :serial t
+  :components ((:module "src/tls"
+                :serial t
+                :components ((:file "packages")
+                             (:file "ffi")
+                             (:file "library")
+                             (:file "certs")
+                             (:file "config")
+                             (:file "engine")
+                             (:file "stream"))))
+  :in-order-to ((test-op (test-op "aion/tls/tests"))))
+
+(defsystem "aion/tls/tests"
+  :description "Tests for aion/tls. Requires a built mbedTLS (scripts/build-mbedtls.lisp)."
+  ;; cffi because two tests free a foreign suite list they made themselves.
+  :depends-on ("aion/tls" "fiveam" "cffi" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "tls-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/tls/tests :run-tests)))
+
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam")
