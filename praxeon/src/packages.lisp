@@ -57,6 +57,7 @@
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
    #:embedding-dimension-mismatch-source
    #:no-embedding-provider #:no-embedding-provider-role
+   #:vector-extension-missing #:vector-extension-missing-database
    #:missing-provider-key #:missing-provider-key-impl #:missing-provider-key-role
    #:missing-provider-key-variables
    #:parallel-child-failure #:parallel-child-failure-failures

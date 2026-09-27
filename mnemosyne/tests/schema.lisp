@@ -333,6 +333,21 @@ which digest a consumer brings (ADR-0002)."
         "the inputs in DECLARATION order, which two consumers must share or they compute
 different fingerprints for identical content")))
 
+(test a-runtime-schema-brings-the-same-companion-columns
+  "MAKE-SCHEMA is how a caller builds a schema whose vector width is known only at startup
+(#138). It must expand :derived-from as DEFSCHEMA does, or the runtime schema has nowhere to
+record staleness. Control: a schema with no derived field gains nothing."
+  (let ((schema (sch:make-schema 'runtime-block-row "runtime_block_rows"
+                                 '((:id :string :primary t)
+                                   (:body :text)
+                                   (:embedding :vector :dimensions 3 :derived-from :body)))))
+    (is-true (sch:schema-field schema :embedding_fingerprint))
+    (is-true (sch:schema-field schema :embedding_deriver))
+    (is (equal '(:body) (sch:derived-inputs schema :embedding))))
+  (is (= 2 (length (sch:schema-fields
+                    (sch:make-schema 'runtime-plain-row "runtime_plain_rows"
+                                     '((:id :string :primary t) (:body :text))))))))
+
 (test an-input-that-is-not-a-field-is-refused
   "A typo would fingerprint the empty string forever, so the value would look permanently
 fresh -- this convention's own failure mode, arriving through its front door."

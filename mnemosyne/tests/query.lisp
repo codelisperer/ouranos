@@ -193,6 +193,23 @@ not slow, it is meaningless."
                    :order-by (list (list (list :<=> :embedding "[1,2,3]"))))
              :dialect dialect))))
 
+(test ilike-renders-as-postgres-ilike-with-its-pattern-bound
+  "#138: case-insensitive matching for exact retrieval. The pattern is a parameter, never
+interpolated, and the SQL parses back to the same query."
+  (is (equal (list "SELECT id FROM chunks WHERE text ILIKE ?" '("%clause%"))
+             (gen '(:select (:id) :from (:chunks) :where (:ilike :text "%clause%"))
+                  :dialect :postgres)))
+  (is (rt '(:select (:id) :from (:chunks) :where (:ilike :text "%clause%")))))
+
+(test ilike-is-refused-off-postgres
+  "SQLite's LIKE folds ASCII case only, so rendering :ilike as LIKE there would apply a
+different rule without saying so. Control: :like still renders on SQLite."
+  (dolist (dialect '(:sqlite :xtdb))
+    (signals error
+      (q:sql '(:select (:id) :from (:chunks) :where (:ilike :text "%a%")) :dialect dialect)))
+  (is (equal (list "SELECT id FROM chunks WHERE text LIKE ?" '("%a%"))
+             (gen '(:select (:id) :from (:chunks) :where (:like :text "%a%")) :dialect :sqlite))))
+
 (test compiling-a-distance-operator-warns-and-names-the-operator-class-that-serves-it
   "Warn, do not refuse: the query is correct and the cost is invisible. The compiler is
 handed a table name rather than a schema, so it cannot know which indexes exist -- what it

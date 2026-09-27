@@ -692,7 +692,87 @@ The reasoning, the rejected alternatives (including a read-only replica with row
 and the ordering against #138's semantic-search seam are in
 [`docs/adr/0002-data-access-through-means.md`](adr/0002-data-access-through-means.md).
 
-## 12. Run the tests
+## 12. Search an app's documents (`praxeon/retrieval`, #138)
+
+`praxeon/retrieval` searches an app's documents, exactly or by similarity, and returns each
+passage with where it came from. It needs Postgres with pgvector. Load `praxeon/retrieval`
+and use the package of the same name.
+
+**Once per database**, a role with CREATE privilege on the database (on a managed cluster, the
+administrator) installs the extension: `CREATE EXTENSION vector;`. praxeon never runs that
+itself. `ensure-schema` checks for it and signals `praxeon/conditions:vector-extension-missing`,
+naming the database, when it is absent.
+
+**At startup**, make a store and a corpus for each set of documents searched together:
+
+```lisp
+(defparameter *embedder*        ; NIL when none is configured: exact search still works
+  (handler-case (praxeon/llm:make-embedding-provider-from-env)
+    (praxeon/conditions:no-embedding-provider () nil)))
+
+(defparameter *store*
+  (praxeon/retrieval:make-chunk-store connection :dimensions 1024 :ensure t))
+
+(defparameter *terms* (praxeon/retrieval:make-corpus *store* "terms"))
+```
+
+- One store is one table, `praxeon_chunks` by default, holding every corpus. A corpus is only a
+  name, so making one runs no SQL, and an app can create corpora at runtime (one per community,
+  one per persona) without a deploy.
+- `:dimensions` is the embedding width of the model the app uses. `ensure-schema` compares it
+  with the table, and signals `embedding-width-changed` when a new model has another width. The
+  `recreate-embedding-column` restart empties the column at the new width, for every corpus in
+  the table, and the next `embed-pending` fills it again.
+- Statements on one connection run one at a time. An app that ingests while it serves searches
+  gives each its own store, on its own connection, naming the same table.
+
+**Hand in the app's sections**, built with `make-section`:
+
+| key | meaning |
+|---|---|
+| `:id` | the section's stable id in the app |
+| `:document-id`, `:document-version` | its document, and the app's version of it (or NIL) |
+| `:locator` | where it sits, as a reader cites it: a clause number or a heading |
+| `:locale`, `:locale-role` | its language, and `:source` for an original or `:derived` for a translation |
+| `:derived-from` | for a translation, the id of the section it translates |
+| `:source-fingerprint` | for a translation, `(section-fingerprint original-text)` of the original it was made from |
+| `:text` | the section's text |
+
+```lisp
+(praxeon/retrieval:sync-corpus *terms* all-sections)           ; at boot
+(praxeon/retrieval:sync-document *terms* "doc-7" doc-sections) ; when an operator saves doc-7
+(praxeon/retrieval:embed-pending *terms* *embedder*)           ; when there is an embedder
+```
+
+A sync makes the corpus hold exactly the sections it was given, and removes the rest in its
+scope. Unchanged sections are not touched, so running it at every boot is cheap. It needs no
+embedder. `embed-pending` embeds whatever has no embedding from the current model, which
+includes everything after a model change. Syncs and `embed-pending` on one corpus run one at a
+time, across processes as well (a Postgres advisory lock).
+
+**Search:**
+
+```lisp
+(praxeon/retrieval:retrieve-exact *terms* "refund")                 ; no embedder involved
+(praxeon/retrieval:retrieve-similar *terms* *embedder* "when is my refund" :limit 5)
+```
+
+Both return a `retrieval-result`: the passages, and whether the result is `complete` or
+`truncated`. Exact search is truncated when more than `:limit` chunks matched. Similarity
+search compares the query with every chunk of the corpus embedded by the same model, and it is
+truncated only when some chunks have no such embedding yet (`truncated-pending` says how many).
+Each passage carries its `provenance`: corpus, document and version, section, locator, locale,
+and for a translation whether it was made from the current original (`:current`,
+`:older-original` or `:unknown`). A search never returns another corpus's chunks.
+
+`passage->ctx-item` turns a passage into a context item, and takes a function that writes the
+text the model reads, so the app decides how a citation looks.
+
+Similarity is an exact scan of one corpus in this first build, with no vector index. Measured on
+Postgres 18.6 with pgvector 0.8.6 at 1024 dimensions: about 8 ms for a corpus of 2,400 sections
+and 32 ms for 10,000 (`praxeon/bench/retrieval-scan.lisp` repeats the measurement).
+
+## 13. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

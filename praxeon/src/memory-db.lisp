@@ -43,6 +43,8 @@
                     (#:param #:mnemosyne/param)
                     (#:schema #:mnemosyne/schema)
                     (#:ddl #:mnemosyne/ddl)
+                    (#:mig #:mnemosyne/migrate)
+                    (#:conn #:mnemosyne/conn)
                     (#:bt #:bordeaux-threads))
   (:documentation
    "Observational memory persisted through mnemosyne, with similarity recall over pgvector.
@@ -50,7 +52,7 @@
     Implements praxeon/memory's store protocol, so a caller swaps it for the in-memory store
     without changing. Adds RECALL-SIMILAR, which the in-memory store does not answer.")
   (:export #:db-memory-store #:make-db-memory-store
-           #:ensure-schema #:store-schema #:store-table #:store-dimensions
+           #:ensure-schema #:check-vector-extension #:store-schema #:store-table #:store-dimensions
            #:*table*))
 
 (in-package #:praxeon/memory-db)
@@ -121,11 +123,9 @@ bound and hand it in; then no path through this store can resolve one."
   "Every statement this store's table needs, in order. Returns a list of SQL strings."
   (let ((table (store-table store)))
     (append
-     ;; The extension is a deployment fact and a migration has to state it (pre-publication issue 258). Postgres
-     ;; only: SQLite has no extension registry, and mnemosyne/ddl refuses it there rather
-     ;; than emitting nothing.
-     (when (eq (store-dialect store) :postgres)
-       (list (ddl:ddl '(:create-extension :name :vector) :dialect (store-dialect store))))
+     ;; No CREATE EXTENSION here (#138). The extension is a deployment fact, and on a managed
+     ;; Postgres the application's role usually cannot create it. ENSURE-SCHEMA checks that it
+     ;; is present instead; see CHECK-VECTOR-EXTENSION.
      (list (schema:schema-ddl (store-schema store) :dialect (store-dialect store)))
      ;; THE INDEX IS BUILT FOR THE OPERATOR THIS STORE QUERIES WITH. `<=>' is cosine, so
      ;; vector_cosine_ops. An index built for a different operator is not an error and not
@@ -140,10 +140,22 @@ bound and hand it in; then no path through this store can resolve one."
                             :opclass :vector_cosine_ops)
                       :dialect (store-dialect store)))))))
 
+(defun check-vector-extension (connection)
+  "Signal PRAXEON/CONDITIONS:VECTOR-EXTENSION-MISSING unless the `vector' extension is
+installed in CONNECTION's database. Reads pg_extension and never creates it (#138)."
+  (unless (mig:extension-present-p connection "vector")
+    (error 'praxeon/conditions:vector-extension-missing
+           :database (param:row-value (first (conn:query connection
+                                                         "SELECT current_database() AS db"))
+                                      :db))))
+
 (defun ensure-schema (store)
-  "Create the extension, the table and the index if they are not there. Returns STORE."
+  "Create the table and its index if they are not there. Returns STORE.
+On Postgres the `vector' extension must already be installed; see CHECK-VECTOR-EXTENSION."
+  (when (eq (store-dialect store) :postgres)
+    (check-vector-extension (store-connection store)))
   (dolist (statement (store-ddl store) store)
-    (mnemosyne/conn:exec (store-connection store) statement)))
+    (conn:exec (store-connection store) statement)))
 
 ;;; --- rows <-> observations ---------------------------------------------------
 

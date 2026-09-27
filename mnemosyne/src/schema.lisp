@@ -46,10 +46,16 @@ model into the schema. A caller that learns the width at startup needs to build 
 then, and until now the only constructor was internal.
 
 FIELDS are specs, not FIELD objects, so this validates the same way DEFSCHEMA does rather
-than accepting whatever a caller assembled -- one parser, not two."
+than accepting whatever a caller assembled -- one parser, not two.
+
+A `:derived-from' field brings its two companion columns here exactly as it does in
+DEFSCHEMA (ADR-0002). This constructor used to skip that step, so a runtime schema declaring
+a derived embedding had no `embedding_fingerprint' or `embedding_deriver' column and could not
+record staleness at all (#138)."
   (check-type name symbol)
   (check-type table string)
-  (%make-schema :name name :table table :fields (mapcar #'make-field fields)))
+  (%make-schema :name name :table table
+                :fields (expand-derived (mapcar #'make-field fields))))
 
 (defun register-schema (schema)
   "Register SCHEMA under its name; return it."
