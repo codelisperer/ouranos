@@ -252,6 +252,34 @@
    #:*token-thunk* #:current-token #:token-field
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
 
+(cl:defpackage #:hyperion/ratelimit
+  (:use #:cl)
+  (:local-nicknames (#:http #:hyperion/http)
+                    (#:csrf #:hyperion/csrf)        ; WITH-CACHED-BODY, so a form-field key leaves the body readable
+                    (#:log #:aion/log)
+                    (#:bt #:bordeaux-threads))
+  (:documentation
+   "A rate limiter for authentication routes (#297). WRAP-RATE-LIMIT refuses a request
+    with 429 and Retry-After once a limit's token bucket for that request's key is empty.
+    A limit is MAKE-LIMIT: a capacity, a refill period, the paths and methods it applies to,
+    and a KEY function of the env -- BY-ADDRESS for the client address, BY-FORM-FIELD for a
+    submitted identifier such as an email address. An account-keyed limit never consults
+    the account store, so it does not reveal whether an account exists.
+
+    Buckets live behind a two-function protocol, TAKE-TOKEN and FORGET-BUCKET.
+    MEMORY-STORE is the one-process default and bounds how many buckets it keeps. The clock
+    is *CLOCK-MS*, rebindable so a test can drive the limiter without sleeping.")
+  (:export
+   #:*clock-ms*
+   ;; limits and keys
+   #:limit #:make-limit #:limit-name #:limit-capacity #:limit-per
+   #:by-address #:by-form-field #:normalise-identifier
+   ;; storage
+   #:take-token #:forget-bucket #:memory-store #:make-memory-store #:memory-store-max-keys
+   #:memory-store-count #:reset-limit
+   ;; the refusal
+   #:wrap-rate-limit #:too-many-requests))
+
 ;;; --- Request logging + correlation --------------------------------------
 ;;; Clack middleware binding a request id into aion/log's ambient context, so a single
 ;;; request's events -- here, in mnemosyne, in praxeon, in the app -- share one field.

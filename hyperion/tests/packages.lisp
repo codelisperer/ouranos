@@ -20,6 +20,7 @@
                     (#:http    #:hyperion/http)
                     (#:session #:hyperion/session)
                     (#:csrf    #:hyperion/csrf)
+                    (#:rl      #:hyperion/ratelimit)
                     (#:spin    #:spinneret)
                     (#:srv     #:hyperion/server)
                     (#:static  #:hyperion/static)
