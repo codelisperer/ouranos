@@ -66,6 +66,15 @@
   (:documentation "Signalled by MAKE-EMBEDDING-PROVIDER-FROM-ENV when no variable names an
 embedding backend. It is signalled before any request is made."))
 
+(define-condition vector-extension-missing (praxeon-error)
+  ((database :initarg :database :initform nil :reader vector-extension-missing-database))
+  (:report
+   (lambda (c s)
+     (format s "The pgvector extension is not installed in database ~A.~%~%praxeon does not create it. On a managed Postgres the application's role usually has no CREATE privilege on its database, so the cluster administrator installs the extension once per database, as a role that has that privilege:~%  CREATE EXTENSION vector;~%Then start the application again (#138)."
+             (or (vector-extension-missing-database c) "(unknown)"))))
+  (:documentation "Signalled by a store's ENSURE-SCHEMA when the `vector' extension is absent
+from the connected database. The store checks pg_extension and never runs CREATE EXTENSION."))
+
 (define-condition missing-provider-key (praxeon-error)
   ((impl :initarg :impl :reader missing-provider-key-impl)
    (role :initarg :role :initform nil :reader missing-provider-key-role)

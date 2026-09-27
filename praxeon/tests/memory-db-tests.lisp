@@ -20,6 +20,8 @@
                     (#:cnd #:praxeon/conditions)
                     (#:conn #:mnemosyne/conn)
                     (#:url #:mnemosyne/url)
+                    (#:mig #:mnemosyne/migrate)
+                    (#:param #:mnemosyne/param)
                     (#:q #:mnemosyne/query))
   (:export #:run-tests))
 
@@ -112,16 +114,66 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
                                (random (expt 2 32) (make-random-state t))))
                 (connection (conn:connect (url:backend-from-url url))))
            (unwind-protect
-                (let ((,store-var (mdb:make-db-memory-store
+                (let ((,store-var
+                        (progn
+                          ;; The store no longer creates the extension (#138). The test role
+                          ;; is privileged, so it plays the cluster administrator here.
+                          (mig:require-extension connection "vector") (mdb:make-db-memory-store
                                    connection
                                    :embedder ,embedder
-                                   :table table :dialect :postgres :ensure t)))
+                                   :table table :dialect :postgres :ensure t))))
                   ,@body)
              (ignore-errors
               (conn:exec connection (format nil "DROP TABLE IF EXISTS ~A" table)))
              (conn:disconnect connection))))))
 
 ;;; --- the tests --------------------------------------------------------------
+
+;;; A database that has never had the extension installed. The test database has it by now,
+;;; so the absence is made in a scratch database, which is dropped afterwards.
+
+(defun %url-with-database (url database)
+  "URL with its database name replaced by DATABASE."
+  (let* ((query (position #\? url))
+         (slash (position #\/ url :end query :from-end t)))
+    (concatenate 'string (subseq url 0 (1+ slash)) database (if query (subseq url query) ""))))
+
+(defmacro with-scratch-database ((conn-var) &body body)
+  "Bind CONN-VAR to a connection to a new, empty database, dropped afterwards. Skips when
+there is no Postgres, or when the test role cannot create a database."
+  (let ((admin (gensym "ADMIN")) (name (gensym "NAME")) (made (gensym "MADE")))
+    `(let ((url (%pg-url)))
+       (if (not url)
+           (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
+           (let* ((,name (string-downcase (format nil "praxeon_scratch_~36R" (random (expt 2 40) (make-random-state t)))))
+                  (,admin (conn:connect (url:backend-from-url url)))
+                  (,made nil))
+             (unwind-protect
+                  (if (not (ignore-errors (conn:exec ,admin (format nil "CREATE DATABASE ~A" ,name))
+                                          (setf ,made t)))
+                      (skip "the test role cannot create a database, so a database without the extension cannot be made here")
+                      (let ((,conn-var (conn:connect (url:backend-from-url
+                                                      (%url-with-database url ,name)))))
+                        (unwind-protect (progn ,@body)
+                          (conn:disconnect ,conn-var))))
+               (when ,made
+                 (ignore-errors (conn:exec ,admin (format nil "DROP DATABASE ~A" ,name))))
+               (conn:disconnect ,admin)))))))
+
+(test ensure-schema-reports-a-missing-extension-instead-of-creating-it
+  "#138: on a managed Postgres the application's role cannot run CREATE EXTENSION, so the
+store checks pg_extension and signals a condition naming the database. Afterwards the
+extension is still absent, which shows the store did not try to create it. Control: once it
+is installed, ENSURE-SCHEMA succeeds."
+  (with-scratch-database (c)
+    (let ((store (mdb:make-db-memory-store c :embedder (make-instance 'basis-embedder)
+                                             :table "praxeon_noext_obs")))
+      (handler-case (progn (mdb:ensure-schema store) (fail "expected VECTOR-EXTENSION-MISSING"))
+        (cnd:vector-extension-missing (e)
+          (is (search "praxeon_scratch_" (cnd:vector-extension-missing-database e)))))
+      (is-false (mig:extension-present-p c "vector") "the store did not create it")
+      (mig:require-extension c "vector")
+      (is (eq store (mdb:ensure-schema store))))))
 
 (test the-schema-is-built-from-the-embedder-not-from-a-literal
   "#150: a schema hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small.
