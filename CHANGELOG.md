@@ -128,17 +128,17 @@ Changes since `v0.1.1`. The tag is on `7cf8d72`.
   documents may use the same section id, and `sync-document` never touches another document's
   rows. A translation's `:derived-from` names a section in its own document. Before this, two
   documents using the same id were refused by `sync-corpus`, and `sync-document` could delete
-  the other document's rows. (#FOLLOWUP, review of #306)
+  the other document's rows. (#310, review of #306)
 - **praxeon/retrieval: `retrieve-similar` reads its candidates and its count of chunks not yet
   embedded in one snapshot**, so an `embed-pending` committing in between can no longer make a
-  result that left a chunk out read as `complete`. (#FOLLOWUP, review of #306)
+  result that left a chunk out read as `complete`. (#310, review of #306)
 - **praxeon/retrieval: `embed-pending` refuses a `:batch-size` that is not a positive integer**
-  instead of embedding nothing and returning 0. (#FOLLOWUP, review of #306)
+  instead of embedding nothing and returning 0. (#310, review of #306)
 - **praxeon: a directly made `openai-compatible` reads the settings of the backend it is for.**
   It has an `:impl`, which defaults to the backend `PRAXEON_LLM_IMPL` names when that is
   `openai`, `ollama` or `openrouter`, so with `PRAXEON_LLM_IMPL=openrouter` it reads
   `PRAXEON_LLM_*` and OpenRouter's URL again. After #291 it always read the `openai` settings.
-  (#FOLLOWUP, review of #291)
+  (#310, review of #291)
 - **mnemosyne/schema: `make-schema` adds the companion columns of a `:derived-from` field**
   (`<name>_fingerprint`, `<name>_deriver`), as `defschema` always did. A runtime schema with a
   derived field had no columns to record staleness in. (#138)
