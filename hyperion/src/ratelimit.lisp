@@ -120,17 +120,25 @@ current time. Must be atomic per bucket."))
 (defclass memory-store ()
   ((buckets :initform (make-hash-table :test #'equal) :reader %buckets)
    (lock :initform (bt:make-lock "hyperion-ratelimit") :reader %lock)
-   (max-keys :initarg :max-keys :reader memory-store-max-keys))
+   (max-keys :initarg :max-keys :reader memory-store-max-keys)
+   (sweeps :initform 0 :accessor %sweeps
+           :documentation "How many times the store has swept, for the test of how often."))
   (:documentation "Buckets in a hash table in this process. See MAKE-MEMORY-STORE."))
 
 (defun make-memory-store (&key (max-keys 100000))
   "A MEMORY-STORE keeping at most about MAX-KEYS buckets.
 
-When it holds more, it first drops the buckets that have refilled completely, which loses
-nothing, because a full bucket and a missing one behave the same. If that is not enough, it
-drops the buckets touched longest ago. Dropping a bucket that is not full lets that key
-start again with a full bucket, so MAX-KEYS should be well above the number of keys a
-deployment sees within one refill period."
+When it holds more, it sweeps: it drops the buckets that have refilled completely, which
+loses nothing, because a full bucket and a missing one behave the same, and then, if it
+still holds more than nine tenths of MAX-KEYS, the buckets touched longest ago until it
+holds nine tenths. Dropping a bucket that is not full lets that key start again with a full
+bucket, so MAX-KEYS should be well above the number of keys a deployment sees within one
+refill period.
+
+A sweep reads every bucket and sorts them, so it must not run on every request. Sweeping
+down to nine tenths means the next sweep is at least a tenth of MAX-KEYS new keys away,
+which is what keeps a client that sends a new key with every request from making each of
+its requests pay for a sort of the whole table."
   (unless (and (integerp max-keys) (plusp max-keys))
     (error "make-memory-store: MAX-KEYS must be a positive integer, not ~S." max-keys))
   (make-instance 'memory-store :max-keys max-keys))
@@ -142,22 +150,29 @@ deployment sees within one refill period."
   (min (aref bucket 2)
        (+ (aref bucket 0) (/ (max 0 (- now-ms (aref bucket 1))) (aref bucket 3)))))
 
+(defun %sweep-target (max)
+  "How many buckets a sweep leaves: nine tenths of MAX, and always fewer than MAX."
+  (min (1- max) (floor (* 9 max) 10)))
+
 (defun %sweep (store now-ms)
-  "Bring STORE back under its MAX-KEYS. Called with the lock held."
+  "When STORE holds more than MAX-KEYS buckets, bring it down to %SWEEP-TARGET. Does nothing
+otherwise, so it is cheap to call on every request. Called with the lock held."
   (let ((table (%buckets store))
         (max (memory-store-max-keys store)))
     (when (> (hash-table-count table) max)
-      (loop for k being the hash-keys of table using (hash-value b)
-            when (>= (%refilled b now-ms) (aref b 2))
-              collect k into full
-            finally (dolist (k full) (remhash k table)))
-      (when (> (hash-table-count table) max)
-        (let ((by-age (sort (loop for k being the hash-keys of table using (hash-value b)
-                                  collect (cons (aref b 1) k))
-                            #'< :key #'car)))
-          (loop repeat (- (hash-table-count table) max)
-                for (nil . k) in by-age
-                do (remhash k table)))))))
+      (incf (%sweeps store))
+      (let ((target (max 0 (%sweep-target max))))
+        (loop for k being the hash-keys of table using (hash-value b)
+              when (>= (%refilled b now-ms) (aref b 2))
+                collect k into full
+              finally (dolist (k full) (remhash k table)))
+        (when (> (hash-table-count table) target)
+          (let ((by-age (sort (loop for k being the hash-keys of table using (hash-value b)
+                                    collect (cons (aref b 1) k))
+                              #'< :key #'car)))
+            (loop repeat (- (hash-table-count table) target)
+                  for (nil . k) in by-age
+                  do (remhash k table))))))))
 
 (defmethod take-token ((store memory-store) bucket-key capacity refill-ms now-ms)
   (bt:with-lock-held ((%lock store))

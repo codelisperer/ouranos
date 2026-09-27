@@ -185,6 +185,50 @@ body. Returns (values app calls-box)."
             do (funcall app (%rl-env :email (format nil "u~D@x.test" i))))
       (is (<= (rl:memory-store-count store) 10)))))
 
+(test sweeping-is-rare-when-every-request-brings-a-new-key
+  ;; The review finding on #308: once the store was over MAX-KEYS with no full bucket to
+  ;; drop, every new key swept and sorted the whole table, so a client sending a new email
+  ;; with each request made every request pay for a sort. A sweep now goes down to nine
+  ;; tenths, so 10,000 new keys into a store of 1,000 sweep about 90 times, not about 9,000.
+  (%with-rl-clock ()
+    (let* ((store (rl:make-memory-store :max-keys 1000))
+           (app (rl:wrap-rate-limit (%rl-app) :limits (list (%rl-by-account :capacity 1))
+                                    :store store)))
+      (loop for i from 1 to 10000
+            do (funcall app (%rl-env :email (format nil "u~D@x.test" i))))
+      (let ((sweeps (hyperion/ratelimit::%sweeps store)))
+        (is (<= sweeps 100) "10,000 new keys swept ~D times" sweeps)
+        (is (plusp sweeps) "the store must have swept at all, or this measured nothing"))
+      (is (<= (rl:memory-store-count store) 1000)))))
+
+(test a-refused-upload-does-not-orphan-the-file-it-spilled-here-either
+  ;; The review finding on #308: the refusal path deletes a multipart request's spilled
+  ;; parts, as WRAP-CSRF's does, and nothing tested it. The key is read from a part, so
+  ;; this also covers BY-FORM-FIELD on a multipart body.
+  (%with-rl-clock ()
+    (let ((http:*memory-threshold* 8)
+          (calls 0))
+      (flet ((upload ()
+               (%mp-body "BOUND" (list (list "email" "bob@x.test")
+                                       (list "f" "0123456789ABCDEF" :filename "big.bin")))))
+        (let* ((app (rl:wrap-rate-limit
+                     (lambda (e)
+                       (incf calls)
+                       ;; The app owns the spilled parts on the success path, and deletes them.
+                       (let ((parts (getf e http:+multipart-parts-key+)))
+                         (when (listp parts) (http:delete-parts parts)))
+                       (list 200 nil nil))
+                     :limits (list (%rl-by-account :capacity 1))))
+               (before (length (%upload-spills))))
+          (%with-mp (env tmp (upload) nil)
+            (is (= 200 (first (funcall app env)))))
+          (%with-mp (env tmp (upload) nil)
+            (is (= 429 (first (funcall app env))) "the same email, over the limit"))
+          (is (= 1 calls) "the refused request must not reach the app")
+          (is (= before (length (%upload-spills)))
+              "the refusal deleted what it spilled; ~D file(s) leaked"
+              (- (length (%upload-spills)) before)))))))
+
 (test the-store-drops-full-buckets-before-partly-drained-ones
   ;; A bucket that has refilled completely behaves exactly like a missing one, so dropping
   ;; it loses nothing. The drained bucket must survive the sweep and still refuse.
