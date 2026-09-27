@@ -20,7 +20,7 @@ per-user install locations, stage-and-swap per OS, and an HTMX-native update UI.
 ## What this is
 
 The capability that turns a Hyperion web app into a **native desktop app** without Tauri
-or Electron. A dumped SBCL image runs the Hyperion server **in-process** on localhost and
+or Electron. A dumped SBCL image runs the Hyperion server **in-process** on 127.0.0.1 and
 launches a tiny **out-of-process** native webview pointed at it. The webview is a pure
 renderer; all interaction is HTMX-over-HTTP to the local server — which already has full
 OS/filesystem access because *it is the native process*.
@@ -93,7 +93,7 @@ local server, so the keyword does not apply there.
 
 **Backends — the escape hatch (ADR-0009).** The webview needs a URL; where the server
 lives is a mode, not a hardcode:
-- **`:embedded`** (default) — start Hyperion in-process on a free localhost port (steps
+- **`:embedded`** (default) — start Hyperion in-process on a free port on 127.0.0.1 (steps
   1–3 below); the one-off, offline-capable app.
 - **`(:remote url)`** — no local server; point the webview straight at a **remote**
   Hyperion backend (`app` may be `nil`). This is GitHub-Desktop-over-github.com.
@@ -187,7 +187,7 @@ notarization** is an unavoidable tax, identical for Tauri/Electron.
   `run-app` + free-port + readiness poll; the native `hyperion-view` (built up front,
   proven on Windows/WebView2); the **visual Coalton REPL** as the example app
   (`hyperion/examples/coalton-repl` front-end + `cons/coalton-repl` engine). Runs in a
-  native window; validates window + webview + localhost + Hyperion + lifecycle end to end.
+  native window; validates window + webview + 127.0.0.1 + Hyperion + lifecycle end to end.
 - **M2** — `hyperion/desktop/dialog` (`tinyfiledialogs`) + single-instance + hardening.
 - **M3** — the `cons desktop` scaffold (config, launcher build, shell components).
 - **M4** — distribution: Ed25519 S3 updater + installers + release CI.

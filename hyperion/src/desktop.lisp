@@ -1,7 +1,7 @@
 ;;;; desktop.lisp --- turn a Hyperion app into a native desktop window.
 ;;;;
 ;;;; The CL half of the desktop capability (ADR-0008): boot Hyperion in-process on a
-;;;; free localhost port, then launch a small OUT-OF-PROCESS native webview pointed at
+;;;; free port on 127.0.0.1, then launch a small OUT-OF-PROCESS native webview pointed at
 ;;;; it (a `webview.h` launcher built per-OS -- see hyperion-view/). HTMX-over-HTTP
 ;;;; means no in-process JS<->native bridge, so the webview owns its own GUI main thread
 ;;;; in its own process and the SBCL main-thread/ldb hazard never arises.
@@ -17,7 +17,7 @@
                     (#:log #:aion/log))
   (:documentation
    "Run a Hyperion app as a native desktop window: boot the server in-process on a free
-    localhost port, then launch an out-of-process native webview at it (ADR-0008). The
+    port on 127.0.0.1, then launch an out-of-process native webview at it (ADR-0008). The
     embedded server is the default; :backend (:remote URL) points at a remote backend
     instead (ADR-0009). SBCL-only.")
   (:export #:run-app #:free-port #:wait-until-listening
@@ -197,7 +197,7 @@ includes the port, and the port is not known until this function picks it."
 See hyperion/docs/desktop.md.
 
 BACKEND -- where the UI is served:
-  :embedded        (default) start APP in-process on a free localhost port (one-off app);
+  :embedded        (default) start APP in-process on a free port on 127.0.0.1 (one-off app);
   (:remote URL)    no local server: point the shell straight at a remote Hyperion backend
                    (APP may be NIL) -- the GitHub-Desktop model;
   (:hybrid URL)    embedded local surface + *REMOTE-BACKEND* bound to URL for the app.
