@@ -94,7 +94,19 @@ cons test                  # run the test suite
 cons repl                  # an SBCL REPL with the tree on the ASDF path
 cons dev HOST=0.0.0.0      # (web templates) hot-reload serve, reachable on the LAN
 cons --fresh build         # run a target in a subprocess sbcl instead of cons's image
+cons --strict test         # recompile the project's own systems first; use this in CI
 ```
+
+A full compile `WARNING` in the project's own code fails `cons build` and `cons test`, and
+is printed; a `STYLE-WARNING` is printed and does not fail. The project's own systems are
+the ones whose `.asd` is under the directory holding `cons.lisp`. Libraries, and the
+framework when you are building an app, are loaded with their warnings muffled, because a
+warning inside a library is not yours to fix (#303).
+
+A fasl that is already current is loaded without compiling, so a warning in it is not seen
+again. That happens when the fasl was compiled while warnings were muffled, for example by
+a `cons` from before #303 or by `ql:quickload` at the REPL. `--strict` recompiles the
+project's own systems every time, so CI should use it.
 
 **Still ahead:** dependency management — `cons add`, Quicklisp/ocicl backends, a native
 resolver + lockfiles (see

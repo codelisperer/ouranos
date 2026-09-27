@@ -227,7 +227,9 @@ Then dispatch: a built-in first arg (init/setup/conform/version/help) runs the c
 surface; otherwise, if the current directory sits under a project with a `cons.lisp`,
 the first arg is a build-spec target (`cons dev HOST=0.0.0.0`) and trailing KEY=VALUE
 args set its params -- with no target, the targets are listed. A leading `--fresh`
-forces the target to run in a subprocess sbcl instead of cons's warm image. With no
+forces the target to run in a subprocess sbcl instead of cons's warm image. A leading
+`--strict` recompiles the project's own systems, so a compile WARNING hidden in a current
+fasl still fails the target (#303); use it in CI. With no
 `cons.lisp` and no built-in, clingon prints usage."
   ;; Early and once, before anything can meet a bare "Don't know how to REQUIRE SB-POSIX"
   ;; (pre-publication issue 161). Reported, not fatal: `cons version` and `cons help` must still answer on a
@@ -236,6 +238,7 @@ forces the target to run in a subprocess sbcl instead of cons's warm image. With
   (project:ensure-source-registry)
   (let ((argv (uiop:command-line-arguments)))
     (multiple-value-bind (fresh rest) (%pop-flag "--fresh" argv)
+     (multiple-value-bind (strict rest) (%pop-flag "--strict" rest)
       (let ((first (first rest)))
         (cond
           ((and first (member first *builtin-commands* :test #'string-equal))
@@ -247,5 +250,5 @@ forces the target to run in a subprocess sbcl instead of cons's warm image. With
                        (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
                        (uiop:quit 1)))))
              (if build-spec
-                 (run:cli-run build-spec rest :fresh fresh)
-                 (clingon:run (cons-command) argv)))))))))
+                 (run:cli-run build-spec rest :fresh fresh :strict strict)
+                 (clingon:run (cons-command) argv))))))))))

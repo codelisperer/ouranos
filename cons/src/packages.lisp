@@ -201,7 +201,7 @@
     sbcl (the Makefile model) -- required implicitly by save-lisp-and-die targets,
     which use :sh. Quicklisp is reached via (uiop:symbol-call :ql ...) so cons keeps no
     compile-time dep on it.")
-  (:export #:run #:cli-run #:list-targets))
+  (:export #:run #:cli-run #:list-targets #:load-system-strictly))
 
 ;;; --- cons-user: the package a cons.lisp manifest is read in ---------------
 (cl:defpackage #:cons-user

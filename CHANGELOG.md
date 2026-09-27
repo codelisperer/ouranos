@@ -12,6 +12,15 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **cons: `cons build`, `cons test` and every `:load` or `:test` target fail on a full compile
+  `WARNING` in the project's own code, and print it.** They loaded through `ql:quickload`, whose
+  quiet mode muffles every warning, so such code built and tested with exit 0. An app whose own
+  code has a full `WARNING` will now fail; fix the warning. `STYLE-WARNING`s still do not fail.
+  Libraries, and the framework, are still loaded with warnings muffled. The same applies under
+  `cons --fresh` and to `:isolate` targets. (#303)
+
 ### Added
 
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
@@ -23,6 +32,11 @@ its tag.
   carriage return counts as blank. `chunker-id` includes both settings, so changing either one
   re-chunks the corpus on its next `sync-corpus`. An app that wrote its own chunker for long
   sections can use this one instead. (#322)
+- **cons: `--strict` recompiles the project's own systems before a target runs**, so a warning
+  in a fasl that is already current is seen. Use `cons --strict test` in CI. The loader is
+  exported as `cons/run:load-system-strictly` for a script that needs the same rule. An app whose
+  CI added its own strict-build step as a workaround, such as `scripts/build-strict.lisp`, can
+  replace it with `cons --strict test`. (#303)
 
 ## v0.1.4 — 2026-09-29
 

@@ -79,9 +79,134 @@ both upcased for the standard readtable."
 
 ;;; --- in-process primitives ------------------------------------------------
 
-(defun %ql (system)
-  "Quickload SYSTEM (a name string) into the running image."
-  (uiop:symbol-call :ql :quickload system))
+;;; --- loading a project's systems so a compile WARNING fails the target (#303) ---
+;;;
+;;; These used to be `ql:quickload'. Quicklisp's quiet mode wraps the whole load in
+;;; (handler-bind ((warning #'muffle-warning)) ...) -- quicklisp/impl-util.lisp,
+;;; CALL-WITH-QUIET-COMPILATION -- so a full WARNING from COMPILE-FILE in the app's own code
+;;; was neither printed nor counted, and `cons build' and `cons test' exited 0 over code
+;;; that `asdf:load-system' refuses with COMPILE-FILE-ERROR.
+;;;
+;;; The loader below splits the load in two:
+;;;
+;;;   - The project's OWN systems, those whose .asd is under the project directory ROOT,
+;;;     are loaded by ASDF directly. Nothing muffles them, so a WARNING is printed and fails
+;;;     the load; a STYLE-WARNING is printed and does not.
+;;;   - Everything else the own systems depend on (libraries, and on a consuming app the
+;;;     framework) is loaded first with warnings muffled, as Quicklisp's quiet mode did. A
+;;;     warning inside a library is not the app's to fix, and must not fail the app's build.
+;;;
+;;; A system Quicklisp has not downloaded yet cannot be found by ASDF; FIND-SYSTEM then
+;;; signals MISSING-COMPONENT, and the loader quickloads the missing name and tries again.
+;;;
+;;; FORCE-OWN recompiles the own systems even when their fasls are current (`cons
+;;; --strict'). It exists because a fasl compiled while a warning was being muffled -- by an
+;;; older cons, or by a quickload at the REPL -- is current, so ASDF would load it without
+;;; compiling and the warning would stay hidden.
+;;;
+;;; ONE FORM, TWO USES. It is a quoted lambda so the in-process path compiles it and the
+;;; subprocess path (`--fresh', :isolate) prints it into an --eval, and the two cannot drift.
+;;; That is also why it reaches ASDF and Quicklisp only through UIOP:SYMBOL-CALL: printed,
+;;; it contains nothing but CL, UIOP and keyword symbols, which read back the same in a bare
+;;; sbcl that has only loaded Quicklisp.
+
+(defparameter +load-form+
+  '(lambda (system root force-own with-tests)
+     (let ((root (namestring (uiop:ensure-directory-pathname root)))
+           (own '())
+           (others '())
+           (seen (make-hash-table :test (function equal))))
+       (labels ((asdf (fn &rest args) (apply (function uiop:symbol-call) :asdf fn args))
+                (fetch (name) (uiop:symbol-call :ql :quickload name :silent t))
+                (quiet (name)
+                  ;; A system ASDF can already find: load it with warnings muffled, which is
+                  ;; what Quicklisp's quiet mode does, without asking Quicklisp to look it up.
+                  (handler-bind ((warning (function muffle-warning)))
+                    (asdf :load-system name)))
+                (missing-p (c)
+                  (typep c (uiop:find-symbol* :missing-component :asdf)))
+                (find-sys (name)
+                  ;; Retry after fetching whatever was missing. Bounded, and a name that
+                  ;; is still missing after it was fetched is re-signalled rather than
+                  ;; fetched again.
+                  (let ((fetched '()))
+                    (loop
+                      (handler-case (return (asdf :find-system name))
+                        (error (c)
+                          (let ((req (and (missing-p c) (asdf :missing-requires c))))
+                            (if (or (null req) (member req fetched :test (function equal))
+                                    (> (length fetched) 50))
+                                (error c)
+                                (progn (push req fetched) (fetch req)))))))))
+                (own-p (sys)
+                  (let ((dir (asdf :system-source-directory sys)))
+                    ;; Case-insensitive on Windows, where d:/ and D:/ are one directory.
+                    (and dir
+                         (let ((d (namestring dir)))
+                           (and (>= (length d) (length root))
+                                (if (uiop:os-windows-p)
+                                    (string-equal root d :end2 (length root))
+                                    (string= root d :end2 (length root))))))))
+                (dep-name (spec)
+                  ;; A DEPENDS-ON entry: a name, (:version NAME ...), (:feature F SPEC),
+                  ;; or (:require NAME), which ASDF resolves itself and is skipped here.
+                  (cond ((or (stringp spec) (symbolp spec)) (asdf :coerce-name spec))
+                        ((and (consp spec) (eq (first spec) :version)) (dep-name (second spec)))
+                        ((and (consp spec) (eq (first spec) :feature))
+                         (and (uiop:featurep (second spec)) (dep-name (third spec))))
+                        (t nil)))
+                (test-systems (sys)
+                  ;; The systems TEST-OP loads first: ((test-op (test-op "x/tests")) ...).
+                  (loop for (op . deps) in (asdf :component-in-order-to sys)
+                        when (string-equal (symbol-name op) "TEST-OP")
+                          append (loop for (nil . names) in deps append names)))
+                (visit (name)
+                  (let ((name (asdf :coerce-name name)))
+                    (unless (gethash name seen)
+                      (setf (gethash name seen) t)
+                      (let ((sys (find-sys name)))
+                        (cond ((own-p sys)
+                               (push name own)
+                               (dolist (d (append (asdf :system-depends-on sys)
+                                                  (and with-tests (test-systems sys))))
+                                 (let ((n (dep-name d))) (when n (visit n)))))
+                              (t (push name others))))))))
+         (visit system)
+         (dolist (name (reverse others)) (quiet name))
+         (asdf :load-system system :force (if force-own own nil))
+         (when with-tests
+           (dolist (name (reverse own))
+             (asdf :load-system name :force (if force-own own nil))))
+         (values (reverse own) (reverse others)))))
+  "The loader, as a form. See the comment above.")
+
+(defvar %loader nil)
+
+(defun load-system-strictly (system root &key force-own with-tests)
+  "Load SYSTEM so that a compile WARNING in the project under ROOT fails the load, as
+described above. FORCE-OWN recompiles the project's own systems; WITH-TESTS also loads the
+systems SYSTEM's test-op names. Returns (values OWN-SYSTEMS OTHER-SYSTEMS)."
+  (funcall (or %loader (setf %loader (compile nil +load-form+)))
+           system (namestring root) force-own with-tests))
+
+(defun %load-form-text (system root force-own with-tests)
+  "The loader as source text for a subprocess --eval, called on these arguments."
+  (with-standard-io-syntax
+    (let ((*package* (find-package :cons/run))
+          (*print-readably* nil))
+      (prin1-to-string
+       (list 'funcall +load-form+ system (namestring root) force-own with-tests)))))
+
+(defvar *strict* nil
+  "True under `cons --strict': recompile the project's own systems on every load.")
+
+(defvar *root* nil
+  "The project directory whose systems are the project's own, bound by RUN.")
+
+(defun %ql (system &key with-tests)
+  "Load SYSTEM (a name string) into the running image through LOAD-SYSTEM-STRICTLY."
+  (load-system-strictly system (or *root* *default-pathname-defaults*)
+                        :force-own *strict* :with-tests with-tests))
 
 (defun %invoke (call params)
   "Perform a :call clause (FN-STRING . ARGS) in-process, resolving param args."
@@ -94,7 +219,7 @@ both upcased for the standard readtable."
 code (0 ok, 1 on error). NOTE: a suite (e.g. fiveam's default) that reports failures
 without signalling still exits 0 here -- for exact exit codes use an :eval clause that
 calls uiop:quit on the run status (see praxeon/cons.lisp)."
-  (%ql system)
+  (%ql system :with-tests t)
   (handler-case (progn (asdf:test-system system) 0)
     (error (e) (format *error-output* "~&cons test: ~A~%" e) 1)))
 
@@ -132,7 +257,10 @@ the real SBCL toplevel REPL first; falls back to a minimal loop."
 
 (defun %exec (args dir)
   "Run ARGS (a program + argv) in DIR, wired to the terminal; return the exit code."
-  (format *error-output* "~&cons: ~{~A~^ ~}~%" args)
+  ;; Long arguments -- the loader form is one -- are shortened in this echo only.
+  (format *error-output* "~&cons: ~{~A~^ ~}~%"
+          (mapcar (lambda (a) (if (> (length a) 160) (format nil "~A ...)" (subseq a 0 60)) a))
+                  args))
   (nth-value 2
     (uiop:run-program args :directory dir
                            :output :interactive :error-output :interactive
@@ -174,10 +302,13 @@ the real SBCL toplevel REPL first; falls back to a minimal loop."
                 (list "sbcl" "--dynamic-space-size" (princ-to-string dss))
                 (unless interactive (list "--non-interactive"))
                 (list "--eval" (format nil "(load ~S)" (%quicklisp-setup)))
+                ;; The same loader the in-process path uses, printed (see +LOAD-FORM+).
                 (loop for s in (spec:target-load tgt)
-                      append (list "--eval" (format nil "(ql:quickload \"~A\")" s)))
+                      append (list "--eval" (%load-form-text s (spec:spec-dir spec)
+                                                             *strict* nil)))
                 (when (spec:target-test tgt)
-                  (list "--eval" (format nil "(ql:quickload \"~A\")" (spec:target-test tgt))))
+                  (list "--eval" (%load-form-text (spec:target-test tgt) (spec:spec-dir spec)
+                                                  *strict* t)))
                 (list "--eval" (%subprocess-form spec tgt params))
                 (unless interactive (list "--eval" "(uiop:quit 0)")))))
     (%exec args (spec:spec-dir spec))))
@@ -228,14 +359,19 @@ return -- it enters the REPL, which exits the process itself."
   (dolist (f (spec:spec-env spec))
     (cons/env:load-dotenv :path (merge-pathnames f (spec:spec-dir spec)))))
 
-(defun run (spec name params &key fresh)
+(defun run (spec name params &key fresh strict)
   "Run target NAME (string) of SPEC with PARAMS (a CLI alist NAME . VALUE). Loads the
 spec's .env first, then performs the target in-process -- or, with FRESH (or the
 target's :isolate) and a Lisp target, in a subprocess sbcl. Quits the process with the
-target's exit code; an interactive target instead stays in its REPL."
+target's exit code; an interactive target instead stays in its REPL.
+
+STRICT recompiles the project's own systems on every load, so a warning hidden in a current
+fasl is seen; see LOAD-SYSTEM-STRICTLY."
   (handler-case
       (let ((tgt  (%require-target spec name))
-            (pmap (%param-map spec params)))
+            (pmap (%param-map spec params))
+            (*strict* strict)
+            (*root* (spec:spec-dir spec)))
         ;; pre-publication issue 240: before doing the work, say whether the framework this app is built
         ;; against has moved. Advisory, fail-open, no network -- see cons/upstream.
         (cons/upstream:report)
@@ -282,11 +418,11 @@ target's exit code; an interactive target instead stays in its REPL."
           (t (incf i)))))
     (nreverse out)))
 
-(defun cli-run (spec args &key fresh)
+(defun cli-run (spec args &key fresh strict)
   "Top of the build-spec surface: ARGS is (TARGET . KEY=VALUE...). With no target,
 list the targets; otherwise run it. Always quits the process."
   (let ((name (first args))
         (kvs  (%parse-kvs (rest args))))
     (if (null name)
         (list-targets spec)
-        (run spec name kvs :fresh fresh))))
+        (run spec name kvs :fresh fresh :strict strict))))
