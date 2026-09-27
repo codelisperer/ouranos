@@ -173,3 +173,118 @@ it and broke that suite."
   (is (null (static:parse-http-date "")))
   (is (null (static:parse-http-date "not a date")))
   (is (null (static:parse-http-date "Sun, 06 Zzz 1994 08:49:37 GMT"))))
+
+;;; --- what is not served (#296) ---------------------------------------------------
+
+(defmacro with-deny-root ((root) &body body)
+  `(with-static-root (,root ("app.css" "body{}")
+                            ("img/logo.png" "png")
+                            (".env" "SECRET=1")
+                            (".git/config" "[core]")
+                            ("seed/users.json" "[]")
+                            ("db/schema.sql" "create table t ();")
+                            ("notes.txt~" "draft")
+                            ("data/public.json" "{}")
+                            ("data/private.json" "{}"))
+     ,@body))
+
+(defun %served-p (root path &rest keys)
+  (let ((r (apply #'static:file-response root path keys)))
+    (and r (= 200 (first r)))))
+
+(test dotfiles-and-well-known-private-names-are-not-served
+  "#296: a file under the static root is not public by accident. The defaults refuse
+dotfiles, dot-directories, SQL and backup copies. Control: an ordinary asset is served, in the
+root and in a subdirectory."
+  (with-deny-root (root)
+    (dolist (path '("/.env" "/.git/config" "/db/schema.sql" "/notes.txt~"))
+      (is-false (%served-p root path) "~A was served" path))
+    (is-true (%served-p root "/app.css"))
+    (is-true (%served-p root "/img/logo.png"))
+    (is-true (%served-p root "/seed/users.json") "not denied by default")))
+
+(test well-known-is-public-but-a-dotfile-inside-it-is-not
+  "/.well-known/ is public by definition (RFC 8615): ACME challenges and security.txt are
+served from it, so the dotfile rule does not refuse it. A dotfile inside it is still refused,
+and so is a .well-known directory anywhere but the root."
+  (with-static-root (root (".well-known/security.txt" "Contact: x")
+                          (".well-known/.secret" "x")
+                          (".well-known/debug.log" "x")
+                          ("a/.well-known/x.txt" "x"))
+    (is-true (%served-p root "/.well-known/security.txt"))
+    ;; review of #313: only the dotfile rule spares the directory; other patterns still apply
+    (is-false (%served-p root "/.well-known/debug.log"))
+    (is-false (%served-p root "/.well-known/security.txt" :deny '("*.txt")))
+    (is-false (%served-p root "/.well-known/.secret"))
+    (is-false (%served-p root "/a/.well-known/x.txt"))))
+
+(test an-app-denied-prefix-is-not-served-and-the-defaults-still-apply
+  "The app's :DENY adds to the defaults rather than replacing them."
+  (with-deny-root (root)
+    (let ((deny '("seed/" "data/private.json")))
+      (is-false (%served-p root "/seed/users.json" :deny deny))
+      (is-false (%served-p root "/data/private.json" :deny deny))
+      (is-false (%served-p root "/.env" :deny deny) "the defaults still apply")
+      (is-true (%served-p root "/data/public.json" :deny deny))
+      (is-true (%served-p root "/app.css" :deny deny)))))
+
+(test a-denied-path-cannot-be-reached-by-case-or-a-trailing-dot
+  "macOS and Windows file systems ignore case, and Windows opens `schema.sql.' as `schema.sql',
+so neither may be a way past a pattern. Checked by the matcher, since whether the file opens
+under those names depends on the host's file system."
+  (dolist (path '("DB/SCHEMA.SQL" "db/schema.sql." "db/schema.sql " "SEED/users.json"
+                  ".ENV" "a/.GIT/config" "db/schema.sql::$DATA"))
+    (is (static:denied-by path (append static:*default-deny* '("seed/")))
+        "~S was not denied" path))
+  (is (null (static:denied-by "img/logo.png" (append static:*default-deny* '("seed/")))))
+  (is (null (static:denied-by "seedling/a.png" '("seed/")))
+      "a prefix matches a whole directory name, not the start of one"))
+
+(test allow-serves-only-the-listed-prefixes
+  "With :ALLOW, only paths under those prefixes are served, and the deny patterns still apply
+inside them."
+  (with-deny-root (root)
+    (is-true (%served-p root "/img/logo.png" :allow '("img/")))
+    (is-false (%served-p root "/app.css" :allow '("img/")))
+    (is-false (%served-p root "/data/public.json" :allow '("img/")))
+    (is (eq :outside-allow (static:denied-by "imgs/x.png" '() :allow '("img/"))))))
+
+(test a-symbolic-link-out-of-the-root-is-not-served
+  "A link under the root may point anywhere; what is served must resolve under the root.
+Control: a link to a file inside the root is served."
+  #+os-windows (skip "symbolic links need a privilege on Windows")
+  #-os-windows
+  (with-static-root (root ("app.css" "body{}"))
+    (with-static-root (outside ("secret.txt" "outside the root"))
+      (uiop:run-program (list "ln" "-s" (namestring (merge-pathnames "secret.txt" outside))
+                              (namestring (merge-pathnames "leak.txt" root))))
+      (uiop:run-program (list "ln" "-s" (namestring (merge-pathnames "app.css" root))
+                              (namestring (merge-pathnames "alias.css" root))))
+      (is-false (%served-p root "/leak.txt"))
+      (is-true (%served-p root "/alias.css")))))
+
+(test the-static-handler-logs-its-rules-once-and-serves-through-them
+  "The effective rules are logged once, when the handler is made, and not per request."
+  (with-deny-root (root)
+    (let (handler)
+      (let ((out (%log-capture :info
+                               (lambda ()
+                                 (setf handler (static:make-static-handler root :deny '("seed/")))
+                                 (funcall handler (list :path-info "/app.css"))
+                                 (funcall handler (list :path-info "/.env"))))))
+        (is (= 1 (count-matches "static: serving files" out)) "~A" out)
+        (is (search "seed/" out))
+        (is (search ".*" out)))
+      (is (= 200 (first (funcall handler (list :path-info "/app.css")))))
+      ;; review of #313: defaults bound only around construction are the ones enforced later
+      (let ((narrow (let ((static:*default-deny* '("*.css"))) (static:make-static-handler root))))
+        (is (null (funcall narrow (list :path-info "/app.css"))))
+        (is (= 200 (first (funcall narrow (list :path-info "/.env"))))
+            "the narrowed defaults replaced the usual ones for this handler"))
+      (is (null (funcall handler (list :path-info "/seed/users.json"))))
+      (is (null (funcall handler (list :path-info "/.env")))))))
+
+(defun count-matches (needle haystack)
+  (loop with start = 0
+        for at = (search needle haystack :start2 start)
+        while at count t do (setf start (1+ at))))
