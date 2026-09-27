@@ -12,7 +12,9 @@
 
 (cl:defpackage #:hyperion/desktop
   (:use #:cl)
-  (:local-nicknames (#:platform #:aion/platform))
+  (:local-nicknames (#:platform #:aion/platform)
+                    (#:csrf #:hyperion/csrf)
+                    (#:log #:aion/log))
   (:documentation
    "Run a Hyperion app as a native desktop window: boot the server in-process on a free
     localhost port, then launch an out-of-process native webview at it (ADR-0008). The
@@ -152,21 +154,42 @@ immediately."
 (ADR-0009). The local surface still runs embedded; the app reads this to reach the
 remote contract.")
 
-(defun %start-embedded (app port server)
-  "Start APP on a free (or given) loopback port; wait until it listens. Returns
-(values URL HANDLER). Signals if the server never comes up."
+(defun %guard (app origin request-guard)
+  "APP wrapped in the CSRF defence REQUEST-GUARD names, for an app served from ORIGIN.
+
+:SAME-ORIGIN (the default) is HYPERION/CSRF:WRAP-SAME-ORIGIN (#293). A desktop app usually
+has no session, so the session-token check cannot protect it, and without this any web page
+the user visits could post to the app's local routes, or read them after a DNS rebinding.
+:NONE installs nothing, for an app that does its own checking, and says so in the log once,
+because an unprotected local server is otherwise invisible."
+  (ecase request-guard
+    (:same-origin (csrf:wrap-same-origin app :origins (list origin)))
+    (:none
+     (log:warn "desktop: request-guard is :none -- the local server has no CSRF defence"
+               :origin origin)
+     app)))
+
+(defun %start-embedded (app port server &optional (request-guard :same-origin))
+  "Start APP on a free (or given) loopback port, behind REQUEST-GUARD (see %GUARD); wait
+until it listens. Returns (values URL HANDLER). Signals if the server never comes up.
+
+The guard is applied here rather than by the caller because the origin it checks against
+includes the port, and the port is not known until this function picks it."
   (let* ((p (if (eq port :auto) (free-port) port))
-         (handler (hyperion/server:start app :port p :host "127.0.0.1" :server server)))
+         (origin (format nil "http://127.0.0.1:~D" p))
+         (handler (hyperion/server:start (%guard app origin request-guard)
+                                         :port p :host "127.0.0.1" :server server)))
     (unless (wait-until-listening p)
       (ignore-errors (hyperion/server:stop handler))
       (error "hyperion/desktop: server did not start listening on 127.0.0.1:~D" p))
-    (values (format nil "http://127.0.0.1:~D/" p) handler)))
+    (values (format nil "~A/" origin) handler)))
 
 (defun run-app (app &key (title "App") (width 1200) (height 800)
                          (backend :embedded)
                          (port :auto)
                          (server (hyperion/server:default-server))
                          (shell :webview)
+                         (request-guard :same-origin)
                          (launcher (default-launcher))
                          icon
                          on-ready on-close)
@@ -179,6 +202,11 @@ BACKEND -- where the UI is served:
                    (APP may be NIL) -- the GitHub-Desktop model;
   (:hybrid URL)    embedded local surface + *REMOTE-BACKEND* bound to URL for the app.
 SHELL -- :webview (the native launcher) or :browser (default browser; dev/hot-reload).
+REQUEST-GUARD -- the CSRF defence put in front of an embedded or hybrid APP (#293):
+  :same-origin (default) refuses a request whose Host is not 127.0.0.1:PORT, and an unsafe
+  request that did not come from the app's own page (hyperion/csrf:wrap-same-origin);
+  :none installs nothing and logs a warning. Ignored under (:remote URL), where no local
+  server runs.
 ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon (#74):
   `.ico` on Windows, `.png` on Linux, anything NSImage reads on macOS. A caller supplying
   one format for every OS gets an icon on one of them, so pick per platform. Ignored by
@@ -189,12 +217,12 @@ ON-READY is called with the URL before the shell launches; ON-CLOSE after it exi
   (when (eq shell :webview) (%check-launcher launcher))
   (multiple-value-bind (url handler)
       (cond
-        ((eq backend :embedded) (%start-embedded app port server))
+        ((eq backend :embedded) (%start-embedded app port server request-guard))
         ((and (consp backend) (eq (first backend) :remote))
          (values (second backend) nil))
         ((and (consp backend) (eq (first backend) :hybrid))
          (setf *remote-backend* (second backend))
-         (%start-embedded app port server))
+         (%start-embedded app port server request-guard))
         (t (error "hyperion/desktop: unrecognized :backend ~S" backend)))
     (unwind-protect
          (progn

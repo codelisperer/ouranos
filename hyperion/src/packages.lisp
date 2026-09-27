@@ -229,7 +229,12 @@
     served unprotected in silence.
 
     CHECK is exported separately from WRAP-CSRF so the refusal can be exercised by a
-    request built by hand, with no injector in the image.")
+    request built by hand, with no injector in the image.
+
+    WRAP-SAME-ORIGIN is the defence for an app with no session, such as a desktop app on
+    127.0.0.1 (#293). It refuses a request whose Host is not the app's own address, and an
+    unsafe request whose Sec-Fetch-Site or Origin header says it came from another site.
+    hyperion/desktop installs it by default.")
   (:export
    ;; vocabulary
    #:*field-name* #:*header-name* #:*token-bits* #:*safe-methods* #:+token-key+
@@ -241,6 +246,8 @@
    #:request-token #:safe-method-p #:with-cached-body
    ;; the refusal
    #:check #:wrap-csrf #:forbidden
+   ;; the refusal for an app with no session (#293): Host, Sec-Fetch-Site, Origin
+   #:check-host #:check-same-origin #:wrap-same-origin
    ;; the injector (ADR-0019): a deftag on :form, plus the seam it reads
    #:*token-thunk* #:current-token #:token-field
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
