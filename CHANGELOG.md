@@ -12,6 +12,67 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **praxeon: the shared `PRAXEON_LLM_*` settings apply only to the backend `PRAXEON_LLM_IMPL`
+  names.** A role that selects a different backend (`PRAXEON_<ROLE>_IMPL`) takes its settings from
+  `PRAXEON_<ROLE>_*` or `PRAXEON_<IMPL>_*` only.
+  - If that backend is `anthropic` or `openrouter` and neither `PRAXEON_<ROLE>_API_KEY` nor
+    `PRAXEON_<IMPL>_API_KEY` is set, `make-provider-from-env` signals
+    `praxeon/conditions:missing-provider-key`, which names both variables.
+  - An app whose roles relied on `PRAXEON_LLM_API_KEY` for another backend sets one of those
+    variables.
+  - The `anthropic` and `openai-compatible` initforms follow the same rule.
+  - An empty variable now counts as unset. (#291)
+- **praxeon: embedding providers read only embedding variables, and there is no default embedding
+  provider.**
+  - Each setting comes from `PRAXEON_<ROLE>_EMBED_<SETTING>`, then `PRAXEON_EMBED_<SETTING>`, then
+    the backend's own variable, then the backend's default.
+  - The backend's own variables are `PRAXEON_<X>_API_KEY` and `PRAXEON_<X>_BASE_URL` for the key
+    and the endpoint, and `PRAXEON_<X>_EMBED_MODEL` and `PRAXEON_<X>_EMBED_DIMENSIONS` for the
+    model and the width.
+  - `PRAXEON_<ROLE>_*` and `PRAXEON_LLM_*` are never read, including by the
+    `openai-compatible-embeddings` initforms.
+  - `make-embedding-provider-from-env` signals `praxeon/conditions:no-embedding-provider` before
+    any request unless `PRAXEON_<ROLE>_EMBED_IMPL` or `PRAXEON_EMBED_IMPL` is set. It used to fall
+    back to `openai` at `http://localhost:11434/v1`.
+  - An app that embeds sets `PRAXEON_EMBED_IMPL`. An app that can work without embeddings
+    handles the condition and uses exact search. (#291)
+
+### Added
+
+- **praxeon: `voyage-embeddings`, a Voyage AI embedding provider**, registered as `voyage`.
+  - Configuration: `PRAXEON_EMBED_IMPL=voyage` and `PRAXEON_VOYAGE_API_KEY`. The key is required;
+    without one, `missing-provider-key` is signalled.
+  - Defaults: base URL `https://api.voyageai.com/v1`, model `voyage-4`, width 1024. Override with
+    `PRAXEON_VOYAGE_BASE_URL`, `PRAXEON_VOYAGE_EMBED_MODEL` and
+    `PRAXEON_VOYAGE_EMBED_DIMENSIONS`, or the `PRAXEON_EMBED_*` variables.
+  - Every request sends `truncation: false`, so an over-long text is an error rather than a vector
+    for its beginning. (#292, #286)
+- **praxeon: `embed-documents` and `embed-query`.** Every embedding provider answers both. Use
+  `embed-documents` for text that is stored and searched, and `embed-query` for a search. Voyage
+  sends `input_type` `document` or `query` accordingly; the OpenAI-compatible provider sends the
+  same request for both. `db-memory-store`'s `remember` now embeds through `embed-documents`.
+  (#292, #286)
+- **praxeon: embedding calls are split into requests within each service's limits.**
+  `embedding-max-texts` and `embedding-max-tokens` state them:
+  - Voyage: 1,000 texts, and 320K tokens for `voyage-4`, 120K for `voyage-4-large`, 1M for
+    `voyage-4-lite`.
+  - OpenAI-compatible: 2,048 texts and 300K tokens.
+
+  Results keep input order. A reply that carries a different number of vectors than texts sent
+  signals `deliberation-failure`. (#292, #286)
+- **praxeon: `remote-embedding-provider`**, the base class for an embedding service reached over
+  HTTP. A new kind supplies `embedding-request-body` and its limits. `praxeon/llm:env-setting`
+  resolves a chat setting by the same rules as `make-provider-from-env`. (#292, #291)
+
+### Fixed
+
+- **praxeon: `make-translator` with `:model` builds its provider.** It passed an `:auth` initarg
+  that `anthropic` does not accept, so it always signalled an error. Its key now resolves as
+  `PRAXEON_<ROLE>_API_KEY`, then `PRAXEON_ANTHROPIC_API_KEY`, then `PRAXEON_LLM_API_KEY` only when
+  `PRAXEON_LLM_IMPL` is anthropic. (#291)
+
 ## v0.1.1 — 2026-09-27
 
 Changes since `v0.1.0`.
