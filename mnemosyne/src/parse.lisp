@@ -13,7 +13,7 @@
 
 ;;; --- tokenizer ------------------------------------------------------------
 (defparameter +sql-keywords+
-  '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "LIKE" "IN" "BETWEEN" "IS" "NULL"
+  '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "LIKE" "ILIKE" "IN" "BETWEEN" "IS" "NULL"
     "ORDER" "GROUP" "BY" "HAVING" "LIMIT" "OFFSET" "INSERT" "INTO" "VALUES"
     "UPDATE" "SET" "DELETE" "ASC" "DESC"
     "JOIN" "INNER" "LEFT" "RIGHT" "FULL" "CROSS" "OUTER" "ON" "AS" "EXISTS"
@@ -148,6 +148,7 @@ position."
        (cond
          ((eq (%peek-type) :op) (list (%op->kw (second (%advance))) lhs (%p-operand)))
          ((%kw-p "LIKE") (%advance) (list :like lhs (%p-operand)))
+         ((%kw-p "ILIKE") (%advance) (list :ilike lhs (%p-operand)))
          ((%kw-p "IN") (%advance) (%eat :lp)
           (if (%kw-p "SELECT")
               (prog1 (list :in lhs (%p-select)) (%eat :rp))          ; IN (SELECT ...)

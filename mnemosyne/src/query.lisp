@@ -181,6 +181,19 @@ problem would be the worse trade.")
       (warn 'unindexed-vector-distance :operator sql :opclass opclass :measures measures))
     (format nil "~A ~A ~A" (%expr ctx (first args)) sql (%expr ctx (second args)))))
 
+(defun %ilike (ctx args)
+  "Compile a case-insensitive match. Postgres only (#138).
+
+REFUSED OFF POSTGRES RATHER THAN RENDERED AS LIKE. SQLite's LIKE ignores case for ASCII
+letters only, so rendering :ilike as LIKE there would match `Café' against `CAFÉ' on one
+backend and not on the other, and a caller could not tell which rule it had. The same refusal
+applies to XTDB. A caller that needs a case-insensitive match off Postgres asks for it
+explicitly, for example with LOWER on both sides."
+  (unless (%postgres-p ctx)
+    (error "mnemosyne/query: :ilike renders as Postgres ILIKE, and the ~A backend has no operator with the same case rules. Use (:like (:lower col) (:lower pattern)) there, knowing which characters its LOWER folds."
+           (%dialect-name ctx)))
+  (format nil "~A ILIKE ~A" (%expr ctx (first args)) (%expr ctx (second args))))
+
 (defun %op (ctx op args)
   "Compile an operator expression (OP . ARGS)."
   (flet ((e (x) (%expr ctx x)))
@@ -195,6 +208,7 @@ problem would be the worse trade.")
       ((:or)  (format nil "(~{~A~^ OR ~})"  (mapcar #'e args)))
       ((:not) (format nil "NOT (~A)" (e (first args))))
       ((:like) (format nil "~A LIKE ~A" (e (first args)) (e (second args))))
+      ((:ilike) (%ilike ctx args))
       ((:is-null)     (format nil "~A IS NULL"     (e (first args))))
       ((:is-not-null) (format nil "~A IS NOT NULL" (e (first args))))
       ((:in)
