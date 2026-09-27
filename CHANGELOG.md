@@ -14,6 +14,20 @@ its tag.
 
 ### Added
 
+- **aion/http-client: fetching a URL a user supplied.**
+  - `fetch-public` resolves the host itself and refuses the URL, with `fetch-refused` naming the
+    reason, when any address it resolves to is loopback, private, link-local (which includes the
+    metadata service at 169.254.169.254), or otherwise not public. It connects to the address it
+    checked, follows redirects itself (checking every hop the same way, and dropping
+    `Authorization` and `Cookie` on a redirect to another origin), and caps the body at
+    `*fetch-public-max-body-bytes*` (10 MiB) unless told otherwise.
+  - Requests gain `:follow-redirects` (NIL follows none; the default stays 5), `:max-body-bytes`
+    (`response-too-large` past it), `:connect-address` (connect to this IP, keeping the URL's
+    host name for the Host header, SNI and certificate verification) and `:ca-path`.
+  - `address-category` classifies an address. `too-many-redirects` is signalled after
+    `:max-redirects` hops.
+  - Not on Windows: there dexador uses WinHTTP, and `:connect-address` and `fetch-public` signal
+    `pinned-connect-unsupported` rather than connect without the pin. (#295)
 - **hyperion/ratelimit: `wrap-rate-limit`, a rate limiter for sign-in, password reset and
   sign-up.** A request is refused with 429 and `Retry-After` once a limit's token bucket for it is
   empty. `make-limit` takes `:capacity`, `:per` (seconds), `:paths`, `:methods` (default POST

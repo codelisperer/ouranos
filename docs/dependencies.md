@@ -27,13 +27,14 @@ sentences, such as which frameworks carry which dependencies, is written by hand
 checked. The number of ASDF systems is not given here, because it changes with every new
 test suite; `scripts/check-deps.lisp` prints it.
 
-- **24** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
+- **26** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
   are counted on the next line). The tables below also document `hunchentoot`, `woo` and
   `clack-handler-woo`, which no `.asd` in this tree names in a `:depends-on`, so they are not
-  in this count. Of the 24 — 3 are foundation/test
+  in this count. Of the 26 — 3 are foundation/test
   (`coalton`, `alexandria`, `fiveam`), **~13 are hyperion's web stack**, **3 are the
   mnemosyne data layer** (CL-DBI + two drivers), and **2 arrived with hermes** (`cl-base64`,
-  `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (pre-publication issue 164)). One (`lass`) is example-only.
+  `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (pre-publication issue 164)). One (`lass`) is example-only. Two (`usocket`, `cl+ssl`) were already loaded as dexador's
+  own dependencies and are named directly by `aion/http-client` since #295.
 - **3** SBCL contribs named in a `:depends-on` (`sb-concurrency`, `sb-bsd-sockets`, `sb-posix` — ship with SBCL, zero install cost).
 - Every framework **except hyperion and mnemosyne** (the two that inherently carry a
   surface — web, DB) runs on just **2–4** external libs (hermes, the integrations leaf, is
@@ -49,6 +50,8 @@ test suite; `scripts/check-deps.lisp` prints it.
 | `flexi-streams` | in-memory octet streams | `hyperion/tests` | **Test-only.** Hands `body-string` a body without a socket (pre-publication issue 211). Already present transitively via clack; declared rather than assumed. |
 | `clingon` | CLI arg parsing | cons/cli, hyperion/cli | hyperion/cli is being retired (ADR-0007) → collapses to **cons only**. |
 | `com.inuoe.jzon` | JSON | hyperion, praxeon(+web,+web-search) | **One** JSON lib across the tree — no duplication. |
+| `usocket` | sockets | aion/http-client (and its tests) | **Not a new load.** It is dexador's own transport, and clack's. `aion/http-client` names it to open a connection to an address it has already checked, for a URL a user supplied, and its tests run a small HTTP server with it (#295). |
+| `cl+ssl` | TLS over OpenSSL | aion/http-client (and its tests), **not on Windows** | **Not a new load** on Linux and macOS, where dexador already uses it for https. `aion/http-client` names it, under `(:feature (:not :windows) ...)`, to run TLS on the connection it opened to a checked address, with the URL's host name for SNI and verification (#295). On Windows dexador uses WinHTTP and nothing loads it, as the OpenSSL row below says; the pinned connection is refused there. |
 | `dexador` | HTTP client | **aion/http-client** (the shared client), hermes/blob | Wrapped once by `aion/http-client` (pre-publication issue 202) and reached through it by hermes and praxeon; `hermes/blob` still calls it directly for streaming. **Shared** — and now shared through one client rather than three call styles. |
 | `ironclad` | crypto (SHA-256, HMAC, Ed25519, **OS CSPRNG**) | hermes, hermes/blob, praxeon, **aion/random** | Twilio's inbound `X-Twilio-Signature`; blob checksums + S3 SigV4; **Ed25519 verification of signed spend grants** in `praxeon/ceiling` (pre-publication issue 172); and since pre-publication issue 95 the **OS random source** behind `aion/random` (`/dev/urandom`, `CryptGenRandom`) that mints session ids. **Shared** — arrived with hermes and reused each time rather than duplicated; pre-publication issue 95 added a fourth consumer and **no new dependency**. |
 | `clack` | HTTP server abstraction | hyperion | Web. |
