@@ -273,3 +273,84 @@ tell the two apart: two requests, two different tokens."
           (second (%body (%dispatch r :get "/status"))))
       (is (%contains first "tok-1"))
       (is (%contains second "tok-2")))))
+
+;;; --- the channel and product reach both routes (#301) -----------------------
+;;;
+;;; These use the client suite's fixtures, which sign a real manifest with a real key, so the
+;;; product and channel checks run exactly as they do for an app. The source records every
+;;; channel it is asked for, which is what shows that Apply fetched beta and not stable.
+
+(defclass recording-source (hyperion/update/client-tests::fixed-source)
+  ((asked :initform nil :accessor source-asked))
+  (:documentation "A signed fixed source that records each channel it is asked for, in order."))
+
+(defmethod up:fetch-manifest :before ((source recording-source) channel)
+  (setf (source-asked source) (append (source-asked source) (list channel))))
+
+(defun %recording-source (&rest manifest-args)
+  "A RECORDING-SOURCE serving a signed manifest built from MANIFEST-ARGS."
+  (change-class (hyperion/update/client-tests::signed-source
+                 (apply #'hyperion/update/client-tests::manifest-json manifest-args))
+                'recording-source))
+
+(defmacro %with-update-client ((source app-name) &body body)
+  "BODY with a build that carries the test key, is installed at 1.0.0, uses SOURCE as its
+update source and APP-NAME as its *APP-NAME*."
+  `(hyperion/update/client-tests::with-client ()
+     (let ((up:*update-source* ,source)
+           (up:*app-name* ,app-name)
+           (up::*update-state* nil))
+       ,@body)))
+
+(test the-status-route-checks-the-channel-it-was-given
+  (let ((source (%recording-source :channel "beta" :version "2.0.0")))
+    (%with-update-client (source "testapp")
+      (%dispatch (ui:update-router :channel "beta") :get "/status")
+      (is (equal '("beta") (source-asked source)))
+      (is (string= "available" (getf (up:update-status) :status))))))
+
+(test apply-fetches-the-channel-the-router-was-given-even-with-check-nil
+  ;; SoloFlow's case: the app checks on beta itself and mounts the router with :CHECK NIL.
+  ;; Apply re-checks, and before #301 that re-check asked for stable. The channel is given
+  ;; as a function of the env, the per-user form. The offered version equals the installed
+  ;; one, so Apply stops at its re-check with "no update to apply" instead of installing.
+  (let ((source (%recording-source :channel "beta" :version "1.0.0")))
+    (%with-update-client (source "testapp")
+      (let ((response (%dispatch (ui:update-router :check nil
+                                                   :channel (lambda (env)
+                                                              (declare (ignore env))
+                                                              "beta"))
+                                 :post "/apply")))
+        (is (= 200 (first response)))
+        (is (equal '("beta") (source-asked source))
+            "Apply asked for ~S; it must ask for beta and nothing else" (source-asked source))))))
+
+(test without-a-channel-the-routes-use-stable
+  ;; The control for the two tests above: the recording shows what an unconfigured router
+  ;; asks for, so "beta" there came from the argument.
+  (let ((source (%recording-source :channel "stable" :version "2.0.0")))
+    (%with-update-client (source "testapp")
+      (%dispatch (ui:update-router) :get "/status")
+      (is (equal '("stable") (source-asked source))))))
+
+(test a-manifest-for-another-product-is-refused-by-the-status-route
+  (let ((source (%recording-source :product "otherapp" :version "2.0.0")))
+    (%with-update-client (source "testapp")
+      (let ((response (%dispatch (ui:update-router) :get "/status")))
+        (is (string= "manifest-mismatch" (getf (up:update-status) :block)))
+        (is (%contains (%body response) "hy-update-banner--blocked"))))))
+
+(test a-manifest-for-another-product-is-refused-by-the-apply-route
+  (let ((source (%recording-source :product "otherapp" :version "2.0.0")))
+    (%with-update-client (source "testapp")
+      (let ((response (%dispatch (ui:update-router :check nil) :post "/apply")))
+        (is (= 200 (first response)))
+        (is (string= "manifest-mismatch" (getf (up:update-status) :block))
+            "Apply's re-check must refuse the manifest, not install it")
+        (is (%contains (%body response) "hy-update-banner--blocked"))))))
+
+(test the-routers-product-overrides-app-name
+  (let ((source (%recording-source :product "testapp" :version "2.0.0")))
+    (%with-update-client (source "somethingelse")
+      (%dispatch (ui:update-router :product "testapp") :get "/status")
+      (is (string= "available" (getf (up:update-status) :status))))))

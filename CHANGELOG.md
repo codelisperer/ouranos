@@ -68,6 +68,12 @@ its tag.
   `head-chunked?` and the step functions `parse-chunk-size-line`, `parse-chunk-data-end` and
   `parse-trailers`.
 
+- **hyperion/update: `check-for-update` and `apply-update` check the manifest's product against
+  `*app-name*` by default.** Before, `:product` defaulted to NIL and the product was not checked
+  unless a caller passed it. An app whose `*app-name*` is not the `product` its manifests carry
+  now gets the `manifest-mismatch` block. Set `*app-name*` to the manifest's product, which is
+  also the name the Windows installer registers under `HKCU\Software\<name>`. (#301)
+
 ### Added
 
 - **praxeon/retrieval: keyword search by BM25, hybrid search, and a way to measure them.**
@@ -229,6 +235,11 @@ its tag.
   with one of these statuses is now dropped, with the warning `server-uv: dropped the body of a
   response whose status carries none`, instead of being written after the head, where a client
   would read it as the next response. Found by Clack's handler suite (#373).
+- **hyperion/update-ui: `update-router` takes `:channel` and `:product` and passes them to both the
+  status and the apply route.** Each is a string or a function of the request env. Before, both
+  routes used the stable channel and no product, so an app that checked on beta and mounted the
+  router with `:check nil` had Apply re-check against stable. The apply path's second manifest
+  fetch now also refuses a manifest for another channel. (#301)
 
 ## v0.1.4 — 2026-09-29
 

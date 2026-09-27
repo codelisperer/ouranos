@@ -1727,3 +1727,28 @@ installation: Windows' installer keeps sbcl.exe and sbcl.core in one directory."
                        "/Applications/Bar.app/Contents/MacOS/sbcl.core" :macos t)
               "sbcl.core in another bundle")
     (is-false (shipped nil nil :macos t))))
+
+;;; --- the product defaults to *app-name*, and the apply fetch checks the channel (#301) ---
+
+(test the-product-defaults-to-app-name
+  ;; Before #301 the default was NIL, which skips the product check, and the update UI
+  ;; passed no product, so no app that used it had the check at all.
+  (let ((source (signed-source (manifest-json :product "otherapp"))))
+    (with-client ()
+      (let ((up:*app-name* "testapp"))
+        (let ((status (up:check-for-update :source source)))
+          (is (string= "blocked" (getf status :status)))
+          (is (string= "manifest-mismatch" (getf status :block)))))
+      ;; The control: with no *APP-NAME* and no PRODUCT there is nothing to compare, and
+      ;; the same manifest is offered. So the refusal above came from the default.
+      (let ((up:*app-name* nil))
+        (is (string= "available" (getf (up:check-for-update :source source) :status)))))))
+
+(test the-apply-fetch-refuses-a-manifest-for-another-channel
+  ;; The check refuses this; the second fetch in the apply path used to accept it.
+  (let ((source (signed-source (manifest-json :channel "stable"))))
+    (with-client ()
+      (signals up:update-source-error
+        (up::%apply-inputs source "beta" nil))
+      ;; The control: the same fetch on the channel the manifest names is accepted.
+      (is (eq source (up::%apply-inputs source "stable" nil))))))
