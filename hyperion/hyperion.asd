@@ -86,6 +86,7 @@
                              (:file "router")   ; URL dispatch over the typed paths (CL)
                              (:file "session")  ; cookie-based HTTP sessions + store
                              (:file "csrf")     ; the CSRF refusal (ADR-0019, pre-publication issue 280)
+                             (:file "ratelimit") ; 429 for auth routes (#297); after csrf, whose body cache it uses
                              (:file "channel")  ; broadcast log + per-reader cursors (fan-out)
                              (:file "feed")     ; latest-per-key at a subscriber's rate (ADR-0016)
                              (:file "sse")      ; feed -> EventSource, the ADR-0016 consumer
@@ -505,6 +506,7 @@
                              ;; AFTER csrf-tests (its suite and %QUIETLY) and server-tests
                              ;; (%SRV-OK-APP).
                              (:file "same-origin-tests")
+                             (:file "ratelimit-tests")
                              (:file "entropy-tests")
                              (:file "channel-tests")
                              (:file "feed-tests")

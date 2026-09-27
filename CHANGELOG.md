@@ -12,6 +12,19 @@ its tag.
 
 ## Unreleased
 
+### Added
+
+- **hyperion/ratelimit: `wrap-rate-limit`, a rate limiter for sign-in, password reset and
+  sign-up.** A request is refused with 429 and `Retry-After` once a limit's token bucket for it is
+  empty. `make-limit` takes `:capacity`, `:per` (seconds), `:paths`, `:methods` (default POST
+  only) and `:key`: `by-address` for the client address, or `by-form-field` for a submitted
+  identifier such as the email address, trimmed and lowercased. An account-keyed limit never
+  reads the account store, so it does not reveal whether an account exists. `reset-limit` gives
+  a key a full bucket, for after a successful sign-in. Buckets are kept by `make-memory-store`,
+  one process, at most `:max-keys` of them; a shared store implements `take-token` and
+  `forget-bucket`. `*clock-ms*` can be rebound in tests. The recipe for guarding `auth-db`'s
+  routes is `hyperion/docs/rate-limit.md`. (#297)
+
 ## v0.1.2 — 2026-09-27
 
 Changes since `v0.1.1`. The tag is on `7cf8d72`.
