@@ -106,7 +106,9 @@ PRAXEON_ANTHROPIC_API_KEY=sk-ant-...
 
 **Per-agent models.** Configuration is *not* global — each agent resolves its own
 model by **role**: `PRAXEON_<ROLE>_MODEL` (also `_IMPL`/`_API_KEY`/`_AUTH`) wins over
-the shared `PRAXEON_LLM_*`. So one process runs several agents, each on its own
+the shared `PRAXEON_LLM_*`, which applies only to the provider `PRAXEON_LLM_IMPL` names.
+Embedding providers have their own variables (`PRAXEON_EMBED_*`) and no default; see the
+user guide, §8. So one process runs several agents, each on its own
 model — e.g. Elise deliberating on a strong model while a fast one translates:
 
 ```sh

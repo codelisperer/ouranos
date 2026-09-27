@@ -82,6 +82,10 @@ Notes:
   **per-provider** (`PRAXEON_<IMPL>_MODEL`, `PRAXEON_<IMPL>_API_KEY`, …). The
   per-provider form wins, so you can keep several providers configured and switch
   by changing **only** `PRAXEON_LLM_IMPL`.
+- The shared `PRAXEON_LLM_*` settings apply only to the provider `PRAXEON_LLM_IMPL`
+  names. Any other provider (for example one a role selects, §8) takes its settings
+  from its role's or its own variables.
+- Embeddings are configured separately, with their own variables (§8, "Embeddings").
 - Inline `# comments` after a value are fine.
 - `.env` is git-ignored — **never commit real keys.**
 
@@ -356,6 +360,11 @@ PRAXEON_LLM_IMPL=anthropic        # <-> openrouter, ollama, openai
 Model config is **not global** — each agent resolves its own provider by **role**.
 Resolution is most-specific-first: `PRAXEON_<ROLE>_<VAR>` > `PRAXEON_<IMPL>_<VAR>` >
 the shared `PRAXEON_LLM_<VAR>` (for `MODEL`, `IMPL`, `API_KEY`, `AUTH`, `BASE_URL`).
+The shared level applies only when the role's provider is the one `PRAXEON_LLM_IMPL`
+names. A role that selects a different provider (`PRAXEON_<ROLE>_IMPL`) gets its
+settings from `PRAXEON_<ROLE>_<VAR>` or `PRAXEON_<IMPL>_<VAR>`. When that provider is
+a hosted one (`anthropic`, `openrouter`) and neither key variable is set, building it
+signals `praxeon/conditions:missing-provider-key`, which names both variables.
 So one process runs several agents, each on its own model/vendor:
 
 ```sh
@@ -368,7 +377,7 @@ PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 In code, an agent asks for its role's provider — NIL role = the old global default:
 
 ```lisp
-(praxeon/llm:make-provider-from-env :role :elise)      ; PRAXEON_ELISE_* -> PRAXEON_LLM_*
+(praxeon/llm:make-provider-from-env :role :elise)      ; PRAXEON_ELISE_* -> PRAXEON_<IMPL>_* -> PRAXEON_LLM_*
 (praxeon/translate:make-translator)                    ; role :translate, by default
 (praxeon/llm:model-of (praxeon/llm:make-provider-from-env :role :scribe))  ; check it
 ```
@@ -380,6 +389,44 @@ default), then rebuild the agent:
 ```lisp
 (praxeon/config:load-dotenv :override t)
 (defparameter *e* (praxeon/elise:make-elise))
+```
+
+### Embeddings
+
+An embedding provider turns text into a vector (`praxeon/llm:embed`,
+`praxeon/llm:embed-batch`). It is configured with its own variables and never reads the
+chat ones: not `PRAXEON_<ROLE>_<VAR>`, and not `PRAXEON_LLM_<VAR>`.
+
+**There is no default embedding provider.** `make-embedding-provider-from-env` returns a
+provider only when `PRAXEON_<ROLE>_EMBED_IMPL` or `PRAXEON_EMBED_IMPL` names one.
+Otherwise it signals `praxeon/conditions:no-embedding-provider` before any request is made,
+and an app that can work without embeddings handles that condition and uses exact search.
+Impls: `openai`, `ollama`, `openrouter`.
+
+For embedding backend `X`, each setting resolves most-specific-first:
+
+1. `PRAXEON_<ROLE>_EMBED_<SETTING>`, when a role is being resolved;
+2. `PRAXEON_EMBED_<SETTING>`;
+3. `X`'s own variable: `PRAXEON_<X>_API_KEY` and `PRAXEON_<X>_BASE_URL` for the key and
+   the endpoint; `PRAXEON_<X>_EMBED_MODEL` and `PRAXEON_<X>_EMBED_DIMENSIONS` for the model
+   and the width, because `PRAXEON_<X>_MODEL` is the chat model of a backend that serves both;
+4. `X`'s built-in default. There are defaults for the endpoint, the model and the width,
+   never for a key.
+
+| Setting | Role level | Process level | Backend's own | Default (`openai`) |
+|---|---|---|---|---|
+| backend | `PRAXEON_<ROLE>_EMBED_IMPL` | `PRAXEON_EMBED_IMPL` | — | none |
+| key | `PRAXEON_<ROLE>_EMBED_API_KEY` | `PRAXEON_EMBED_API_KEY` | `PRAXEON_<X>_API_KEY` | none |
+| endpoint | `PRAXEON_<ROLE>_EMBED_BASE_URL` | `PRAXEON_EMBED_BASE_URL` | `PRAXEON_<X>_BASE_URL` | `http://localhost:11434/v1` |
+| model | `PRAXEON_<ROLE>_EMBED_MODEL` | `PRAXEON_EMBED_MODEL` | `PRAXEON_<X>_EMBED_MODEL` | `text-embedding-3-small` |
+| width | `PRAXEON_<ROLE>_EMBED_DIMENSIONS` | `PRAXEON_EMBED_DIMENSIONS` | `PRAXEON_<X>_EMBED_DIMENSIONS` | `1536` |
+
+`openrouter` defaults its endpoint to `https://openrouter.ai/api/v1` and, being hosted,
+signals `missing-provider-key` when no key variable is set.
+
+```lisp
+(handler-case (praxeon/llm:make-embedding-provider-from-env)
+  (praxeon/conditions:no-embedding-provider () nil))   ; NIL -> use exact search
 ```
 
 ## 9. Coordinate multiple agents (delegation + workflow)

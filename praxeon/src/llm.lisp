@@ -285,17 +285,18 @@ turn into a DELIBERATION-FAILURE. Timeouts are the module's own, as before."
 ;;; --------------------------------------------------------------------------
 (defclass anthropic (provider)
   ((model :initarg :model
-          :initform (or (uiop:getenv "PRAXEON_LLM_MODEL") *default-model*)
+          :initform (or (%env-for "anthropic" "MODEL") *default-model*)
           :reader anthropic-model)
    (api-key :initarg :api-key
-            :initform (uiop:getenv "PRAXEON_LLM_API_KEY")
+            :initform (%env-for "anthropic" "API_KEY")
             :reader anthropic-api-key)
    (endpoint :initarg :endpoint
              :initform "https://api.anthropic.com/v1/messages"
              :reader anthropic-endpoint)
    (version :initarg :version :initform "2023-06-01" :reader anthropic-version))
   (:documentation "The Anthropic Messages API as a Praxeon provider. Authenticates
-with an x-api-key from PRAXEON_LLM_API_KEY, billed to that key's API credits. (A
+with an x-api-key from PRAXEON_ANTHROPIC_API_KEY (or PRAXEON_LLM_API_KEY when
+PRAXEON_LLM_IMPL is anthropic), billed to that key's API credits. (A
 Pro/Max subscription funds Claude.ai and Claude Code, not the raw Messages API, so
 there is no subscription-billed path here.)"))
 
@@ -505,14 +506,14 @@ PARSED is the jzon hash-table form of the JSON body."
 ;;; --------------------------------------------------------------------------
 (defclass openai-compatible (provider)
   ((model :initarg :model
-          :initform (or (uiop:getenv "PRAXEON_LLM_MODEL") "qwen2.5")
+          :initform (or (%env-for "openai" "MODEL") "qwen2.5")
           :reader oai-model)
    (base-url :initarg :base-url
-             :initform (or (uiop:getenv "PRAXEON_LLM_BASE_URL")
+             :initform (or (%env-for "openai" "BASE_URL")
                            "http://localhost:11434/v1")
              :reader oai-base-url)
    (api-key :initarg :api-key
-            :initform (uiop:getenv "PRAXEON_LLM_API_KEY")
+            :initform (%env-for "openai" "API_KEY")
             :reader oai-api-key))
   (:documentation "Any OpenAI-compatible chat endpoint as a Praxeon provider.
 BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
@@ -741,26 +742,63 @@ thread would be overwritten before anything read it. A child that needs a role's
 gets it the way embedding.lisp prescribes: resolve the provider on the thread that owns the
 role, and pass the provider in.")
 
-(defun %env-for (impl suffix)
-  "The value of PRAXEON_<SUFFIX>, most specific first: PRAXEON_<ROLE>_<SUFFIX> (the
-per-agent role, when resolving one) > PRAXEON_<IMPL>_<SUFFIX> > the shared
-PRAXEON_LLM_<SUFFIX>. So each agent-role carries its own model/key/auth, each impl
-its own, and the shared vars still cover the simple single-provider case."
-  (or (and *provider-role*
-           (uiop:getenv (format nil "PRAXEON_~:@(~A~)_~A" *provider-role* suffix)))
-      (uiop:getenv (format nil "PRAXEON_~:@(~A~)_~A" impl suffix))
-      (uiop:getenv (format nil "PRAXEON_LLM_~A" suffix))))
+(defun %getenv (name)
+  "The value of the environment variable NAME, or NIL when it is unset or empty.
+An empty value is treated as unset, so that clearing a variable by setting it to the empty
+string does not make an empty model name or key."
+  (let ((v (uiop:getenv name)))
+    (and v (plusp (length v)) v)))
 
-(defun make-openai-from-env (impl &optional default-base-url)
+(defun %shared-impl ()
+  "The lowercased name of the backend PRAXEON_LLM_IMPL selects, \"anthropic\" when unset."
+  (string-downcase (or (%getenv "PRAXEON_LLM_IMPL") "anthropic")))
+
+(defun %env-for (impl suffix)
+  "The chat setting SUFFIX for backend IMPL, most specific first (#290):
+PRAXEON_<ROLE>_<SUFFIX> when a role is being resolved, then PRAXEON_<IMPL>_<SUFFIX>, then
+the shared PRAXEON_LLM_<SUFFIX>. The shared level applies only when IMPL is the backend
+PRAXEON_LLM_IMPL names, because the shared settings were configured for that backend."
+  (or (and *provider-role*
+           (%getenv (format nil "PRAXEON_~:@(~A~)_~A" *provider-role* suffix)))
+      (%getenv (format nil "PRAXEON_~:@(~A~)_~A" impl suffix))
+      (and (string-equal impl (%shared-impl))
+           (%getenv (format nil "PRAXEON_LLM_~A" suffix)))))
+
+(defun env-setting (impl suffix &key role)
+  "The chat setting SUFFIX (\"API_KEY\", \"MODEL\", ...) for backend IMPL and ROLE, resolved
+the way MAKE-PROVIDER-FROM-ENV resolves it (see %ENV-FOR). For code that builds a provider
+itself and has to follow the same rules."
+  (let ((*provider-role* (and role (string role))))
+    (%env-for impl suffix)))
+
+(defun %required-key (impl)
+  "The API key for backend IMPL through %ENV-FOR. Signals MISSING-PROVIDER-KEY when IMPL is
+not the shared backend and no key applies to it; the error lists the variables that would.
+For the shared backend a missing key is left to the request, as before."
+  (or (%env-for impl "API_KEY")
+      (if (string-equal impl (%shared-impl))
+          nil
+          (error 'praxeon/conditions:missing-provider-key
+                 :impl impl :role *provider-role*
+                 :variables (append
+                             (and *provider-role*
+                                  (list (format nil "PRAXEON_~:@(~A~)_API_KEY" *provider-role*)))
+                             (list (format nil "PRAXEON_~:@(~A~)_API_KEY" impl)))))))
+
+(defun make-openai-from-env (impl &optional default-base-url key-required)
   "An OPENAI-COMPATIBLE provider configured for IMPL (a name like \"openrouter\").
-Reads PRAXEON_<IMPL>_{MODEL,API_KEY,BASE_URL}, falling back to the shared
-PRAXEON_LLM_* vars, then DEFAULT-BASE-URL / Ollama's local URL."
+Reads PRAXEON_<IMPL>_{MODEL,API_KEY,BASE_URL} and the shared PRAXEON_LLM_* as %ENV-FOR
+describes, then DEFAULT-BASE-URL / Ollama's local URL. KEY-REQUIRED is true for a hosted
+service, where a missing key is reported at construction (see %REQUIRED-KEY); a local server
+usually needs none."
   (make-instance 'openai-compatible
                  :model (or (%env-for impl "MODEL") "qwen2.5")
                  :base-url (or (%env-for impl "BASE_URL")
                                default-base-url
                                "http://localhost:11434/v1")
-                 :api-key (%env-for impl "API_KEY")))
+                 :api-key (if key-required
+                              (%required-key impl)
+                              (%env-for impl "API_KEY"))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Provider selection from the environment
@@ -768,6 +806,7 @@ PRAXEON_LLM_* vars, then DEFAULT-BASE-URL / Ollama's local URL."
 ;;; PRAXEON_LLM_IMPL   picks the implementation (default "anthropic").
 ;;; PRAXEON_LLM_MODEL  the vendor model id (per-impl; falls back to *default-model*).
 ;;; PRAXEON_LLM_API_KEY the key (Anthropic x-api-key / OpenAI Bearer).
+;;; The PRAXEON_LLM_* settings apply only to the backend PRAXEON_LLM_IMPL names (#290).
 ;;;
 ;;; A new vendor is a new PROVIDER class plus a constructor registered here --
 ;;; the whole selection layer stays provider-neutral.
@@ -788,14 +827,14 @@ NAME, for PRAXEON_LLM_IMPL selection. Returns NAME."
   "Construct the provider for an agent ROLE (a string/keyword/symbol naming the agent,
 e.g. :translate or \"scribe\"), or the global default when ROLE is NIL. Resolution is
 per-role first: the impl comes from PRAXEON_<ROLE>_IMPL else PRAXEON_LLM_IMPL, and the
-chosen constructor then reads PRAXEON_<ROLE>_{MODEL,API_KEY,AUTH,BASE_URL} before the
-shared PRAXEON_LLM_* (see %ENV-FOR). So one process can run several agents, each on its
+chosen constructor then reads PRAXEON_<ROLE>_{MODEL,API_KEY,AUTH,BASE_URL}, then
+PRAXEON_<IMPL>_*, then the shared PRAXEON_LLM_* when the role's backend is the shared one
+(see %ENV-FOR). So one process can run several agents, each on its
 own model/vendor; NIL role reproduces the old single-provider behavior."
   (let* ((*provider-role* (and role (string role)))
          (impl (or (and *provider-role*
-                        (uiop:getenv (format nil "PRAXEON_~:@(~A~)_IMPL" *provider-role*)))
-                   (uiop:getenv "PRAXEON_LLM_IMPL")
-                   "anthropic"))
+                        (%getenv (format nil "PRAXEON_~:@(~A~)_IMPL" *provider-role*)))
+                   (%shared-impl)))
          (ctor (cdr (assoc (string-downcase impl) *provider-impls*
                            :test #'string=))))
     (unless ctor
@@ -806,10 +845,10 @@ own model/vendor; NIL role reproduces the old single-provider behavior."
 
 (defun make-anthropic-from-env ()
   "An ANTHROPIC provider from the environment. Reads PRAXEON_ANTHROPIC_{MODEL,
-API_KEY} (falling back to the shared PRAXEON_LLM_* vars)."
+API_KEY}, and the shared PRAXEON_LLM_* when anthropic is the shared backend."
   (make-instance 'anthropic
                  :model (or (%env-for "anthropic" "MODEL") *default-model*)
-                 :api-key (%env-for "anthropic" "API_KEY")))
+                 :api-key (%required-key "anthropic")))
 
 (register-provider-impl "anthropic" #'make-anthropic-from-env)
 (register-provider-impl "openai"
@@ -817,7 +856,7 @@ API_KEY} (falling back to the shared PRAXEON_LLM_* vars)."
 (register-provider-impl "ollama"
                         (lambda () (make-openai-from-env "ollama" "http://localhost:11434/v1")))
 (register-provider-impl "openrouter"
-                        (lambda () (make-openai-from-env "openrouter" "https://openrouter.ai/api/v1")))
+                        (lambda () (make-openai-from-env "openrouter" "https://openrouter.ai/api/v1" t)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Introspection (provider-neutral)

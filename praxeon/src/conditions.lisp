@@ -56,6 +56,29 @@
      (format s "Signalled here so the message names the misconfiguration. mnemosyne refuses the wrong width again at cast time, but that error names a column, which is a long way from the variable that caused it.")))
   (:documentation "Signalled when an embedding's width is not the width that was declared."))
 
+(define-condition no-embedding-provider (praxeon-error)
+  ((role :initarg :role :initform nil :reader no-embedding-provider-role))
+  (:report
+   (lambda (c s)
+     (let ((role (no-embedding-provider-role c)))
+       (format s "No embedding provider is configured~@[ for role ~A~].~%~%" role)
+       (format s "Set ~@[PRAXEON_~:@(~A~)_EMBED_IMPL or ~]PRAXEON_EMBED_IMPL to the name of an embedding backend. There is no default embedding provider (#290). An app that can work without embeddings handles this condition and uses exact search instead." role))))
+  (:documentation "Signalled by MAKE-EMBEDDING-PROVIDER-FROM-ENV when no variable names an
+embedding backend. It is signalled before any request is made."))
+
+(define-condition missing-provider-key (praxeon-error)
+  ((impl :initarg :impl :reader missing-provider-key-impl)
+   (role :initarg :role :initform nil :reader missing-provider-key-role)
+   (variables :initarg :variables :reader missing-provider-key-variables))
+  (:report
+   (lambda (c s)
+     (format s "The ~A backend~@[ selected for role ~A~] has no API key. Set one of: ~{~A~^, ~}. A backend reads only the settings configured for it (#290): PRAXEON_LLM_API_KEY applies only to the backend PRAXEON_LLM_IMPL names, and an embedding backend never reads a chat key."
+             (missing-provider-key-impl c) (missing-provider-key-role c)
+             (missing-provider-key-variables c))))
+  (:documentation "Signalled when a provider is built from the environment for a backend that
+needs a key and none of the variables that apply to it is set. VARIABLES lists them, most
+specific first."))
+
 (define-condition tool-choice-unsupported (praxeon-error)
   ((provider :initarg :provider :initform nil :reader tool-choice-unsupported-provider)
    (requested :initarg :requested :initform nil :reader tool-choice-unsupported-requested))

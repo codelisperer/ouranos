@@ -155,7 +155,8 @@
 
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
-  :depends-on ("praxeon" "praxeon/web-search" "aion/boundary" "aion/log" "fiveam")
+  :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
+               "fiveam")
   :serial t
   :components ((:module "tests"
                 :serial t

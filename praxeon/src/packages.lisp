@@ -56,6 +56,9 @@
    #:embedding-dimension-mismatch #:embedding-dimension-mismatch-provider
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
    #:embedding-dimension-mismatch-source
+   #:no-embedding-provider #:no-embedding-provider-role
+   #:missing-provider-key #:missing-provider-key-impl #:missing-provider-key-role
+   #:missing-provider-key-variables
    #:parallel-child-failure #:parallel-child-failure-failures
    #:parallel-child-failure-completed
    #:budget-exceeded #:budget-exceeded-requested #:budget-exceeded-available
@@ -139,7 +142,7 @@
    #:*default-model* #:*default-max-tokens*
    #:*connect-timeout* #:*read-timeout*
    ;; environment-driven provider selection
-   #:make-provider-from-env #:register-provider-impl))
+   #:make-provider-from-env #:register-provider-impl #:env-setting))
 
 (defpackage #:praxeon/distil
   (:use #:cl)
