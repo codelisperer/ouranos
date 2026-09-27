@@ -12,6 +12,10 @@ its tag.
 
 ## Unreleased
 
+## v0.1.3 — 2026-09-27
+
+Changes since `v0.1.2`. The tag is on `5c8fd25`.
+
 ### An app may have to act
 
 - **hyperion/static: `file-response` no longer serves every file under the root.** It refuses
@@ -65,7 +69,9 @@ its tag.
   documents may use the same section id, and `sync-document` never touches another document's
   rows. A translation's `:derived-from` names a section in its own document. Before this, two
   documents using the same id were refused by `sync-corpus`, and `sync-document` could delete
-  the other document's rows. (#310, review of #306)
+  the other document's rows. A chunk's `id` is now computed from its document as well. A chunk
+  table made under v0.1.2 needs no change: a chunk keeps its old `id` until its section changes
+  and is written again. (#310, review of #306)
 - **praxeon/retrieval: `retrieve-similar` reads its candidates and its count of chunks not yet
   embedded in one snapshot**, so an `embed-pending` committing in between can no longer make a
   result that left a chunk out read as `complete`. (#310, review of #306)
