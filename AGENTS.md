@@ -388,6 +388,17 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   the case where there is no run to read: pre-publication PR 443 sat open for thirteen hours showing a green
   `copilot-pull-request-reviewer` and no `verify` run of any kind, which reads as a checked pull
   request in every interface that displays it.
+- **Green includes the review threads.** A pull request is not ready to merge while any review
+  comment, Copilot's included, is unanswered. Fix each one that is correct and reasonable. Answer
+  the others on their thread with the reason they do not apply. The maintainer does not require
+  agreement, only that every comment is considered. On 2026-09-27, seven pull requests merged on
+  CI alone with 18 Copilot comments unread. Several were real:
+  - retrieval chunks keyed so that two documents' sections could collide;
+  - a chat provider that stopped reading shared settings when constructed directly;
+  - three inaccurate changelog lines.
+
+  Before merging, read the pull request's review threads with
+  `gh api graphql` (`pullRequest.reviewThreads`), and check that none is unanswered.
 - **Quote a SHA, run id or comment id only from output you have already read.** An identifier
   written into a message in the same step as the command that produces it is a guess, and a
   guessed identifier looks exactly like a real one. On 2026-09-24 four went out in one night:
