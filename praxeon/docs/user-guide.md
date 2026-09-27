@@ -401,7 +401,12 @@ chat ones: not `PRAXEON_<ROLE>_<VAR>`, and not `PRAXEON_LLM_<VAR>`.
 provider only when `PRAXEON_<ROLE>_EMBED_IMPL` or `PRAXEON_EMBED_IMPL` names one.
 Otherwise it signals `praxeon/conditions:no-embedding-provider` before any request is made,
 and an app that can work without embeddings handles that condition and uses exact search.
-Impls: `openai`, `ollama`, `openrouter`.
+Impls: `openai`, `ollama`, `openrouter`, `voyage`.
+
+Retrieval code embeds stored text with `embed-documents` and a search with `embed-query`.
+A service that treats the two differently (Voyage) is told which one it is getting; for the
+others the two calls send the same request. Both split their texts into as many requests as
+the service's limits require, and keep the results in input order.
 
 For embedding backend `X`, each setting resolves most-specific-first:
 
@@ -423,6 +428,19 @@ For embedding backend `X`, each setting resolves most-specific-first:
 
 `openrouter` defaults its endpoint to `https://openrouter.ai/api/v1` and, being hosted,
 signals `missing-provider-key` when no key variable is set.
+
+`voyage` (Voyage AI, #286) defaults to `https://api.voyageai.com/v1`, model `voyage-4` and
+width `1024`, and requires a key, so an app sets only the impl and the key:
+
+```sh
+PRAXEON_EMBED_IMPL=voyage
+PRAXEON_VOYAGE_API_KEY=pa-...
+# PRAXEON_VOYAGE_EMBED_MODEL=voyage-4-large     # or voyage-4-lite
+# PRAXEON_VOYAGE_EMBED_DIMENSIONS=512           # 256, 512 or 1024; 2048 cannot be indexed by pgvector
+```
+
+Every Voyage request sends `truncation: false`, so a text longer than the model accepts is an
+error rather than a vector for its beginning.
 
 ```lisp
 (handler-case (praxeon/llm:make-embedding-provider-from-env)

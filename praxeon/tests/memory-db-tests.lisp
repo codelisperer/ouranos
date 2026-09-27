@@ -101,8 +101,9 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
 
 (defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
 
-(defmacro with-store ((store-var) &body body)
-  "A fresh table, a fresh store, and a connection that is closed afterwards."
+(defmacro with-store ((store-var &optional (embedder '(make-instance 'basis-embedder)))
+                      &body body)
+  "A fresh table, a fresh store over EMBEDDER, and a connection that is closed afterwards."
   `(let ((url (%pg-url)))
      (if (not url)
          (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
@@ -113,7 +114,7 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
            (unwind-protect
                 (let ((,store-var (mdb:make-db-memory-store
                                    connection
-                                   :embedder (make-instance 'basis-embedder)
+                                   :embedder ,embedder
                                    :table table :dialect :postgres :ensure t)))
                   ,@body)
              (ignore-errors
@@ -268,6 +269,22 @@ agreeing would pass either way."
           "the columns are the record; the prose is not, got ~S"
           (mem:provenance-conversation p))
       (is (= 1 (mem:provenance-turn p))))))
+
+(defclass call-recording-embedder (basis-embedder)
+  ((calls :initform '() :accessor recorded-calls)))
+(defmethod llm:embed-documents :before ((p call-recording-embedder) texts)
+  (push (cons :documents texts) (recorded-calls p)))
+(defmethod llm:embed-query :before ((p call-recording-embedder) text)
+  (push (cons :query text) (recorded-calls p)))
+
+(test remember-embeds-its-content-as-a-document
+  "#286: a service like Voyage embeds documents and queries differently, so the store says
+which one it is embedding. REMEMBER stores text to be searched later, which is a document."
+  (let ((embedder (make-instance 'call-recording-embedder)))
+    (with-store (store embedder)
+      (remember* store "member-1" "the member prefers mornings")
+      (is (equal '((:documents "the member prefers mornings")) (recorded-calls embedder))
+          "one EMBED-DOCUMENTS call with the content, and no EMBED-QUERY"))))
 
 (test a-database-write-with-no-provenance-is-refused-before-it-embeds
   "The refusal is the same for both stores, and it happens BEFORE the embedding call -- so a
