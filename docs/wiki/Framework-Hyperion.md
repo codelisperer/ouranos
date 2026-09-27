@@ -279,9 +279,17 @@ session id *is* observable by design.
 **A curated `secure-app` middleware stack (security headers/CSP, CSRF, secure cookies) is
 PLANNED, not shipped** — see "Planned / in progress" above, and
 [`hyperion/docs/middleware-security.md`](../../hyperion/docs/middleware-security.md), which
-still calls it a *proposed* shape. There is no `secure-app`, no CSRF token machinery and no
-security-header middleware in `hyperion/src` today. This paragraph claimed it was bundled
-while the same page listed it as planned nine sections earlier (pre-publication issue 227).
+still calls it a *proposed* shape. There is no `secure-app` wrapper in `hyperion/src` today.
+This paragraph claimed it was bundled while the same page listed it as planned nine sections
+earlier (pre-publication issue 227).
+
+The parts have since landed separately, and an earlier version of this paragraph still said
+they did not exist; it was written before they landed and not updated when they did.
+`hyperion/security-headers` sends the security headers by default (#119). `hyperion/csrf`
+has `wrap-csrf`, which checks a token held in the session, and `wrap-same-origin`, which
+checks Host, Sec-Fetch-Site and Origin for an app with no session and which
+`hyperion/desktop:run-app` installs by default (#293). What is missing is the one call that
+composes them.
 
 XSS *is* already defended **at output** — Spinneret auto-escapes and
 `hyperion/markdown:render` is safe by default — which is real, and is the reason the

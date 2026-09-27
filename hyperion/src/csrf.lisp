@@ -56,10 +56,18 @@ default rather than exempt by omission.")
    (method :initarg :method :initform nil :reader csrf-failure-method)
    (path   :initarg :path   :initform nil :reader csrf-failure-path))
   (:documentation
-   "A request that had to carry a valid token and did not. REASON is one of :NO-SESSION,
-:NO-TOKEN-IN-SESSION, :MISSING or :MISMATCH -- distinguished because they mean different
-things to whoever is reading the log. :MISMATCH is an attack or a stale tab; :NO-SESSION is
-almost always WRAP-CSRF installed outside WRAP-SESSION.")
+   "A request that failed a CSRF check. REASON says which check and why, because the
+reasons mean different things to whoever is reading the log.
+
+From CHECK (WRAP-CSRF, the session token): :NO-SESSION, :NO-TOKEN-IN-SESSION, :MISSING or
+:MISMATCH. :MISMATCH is an attack or a stale tab; :NO-SESSION is almost always WRAP-CSRF
+installed outside WRAP-SESSION.
+
+From CHECK-HOST and CHECK-SAME-ORIGIN (WRAP-SAME-ORIGIN, the check for an app with no
+session): :NO-HOST or :HOST-MISMATCH when the Host header does not name the address the app
+is bound to, which is what a DNS-rebinding page sends; :CROSS-SITE when Sec-Fetch-Site says
+the request came from another site; :NO-ORIGIN or :ORIGIN-MISMATCH when Sec-Fetch-Site is
+absent and Origin is absent or names another origin.")
   (:report
    (lambda (c s)
      (format s "CSRF check failed (~A) for ~A ~A"
@@ -389,3 +397,114 @@ apart."
                   (%release-parts env)
                   (funcall on-failure env failure))
                 (funcall app env))))))))
+
+;;; --- the check for an app with no session (#293) ---------------------------
+;;;
+;;; WRAP-CSRF needs a session to hold the token. A desktop app that serves its UI on
+;;; 127.0.0.1 usually has none: one user, one process, no sign-in. WRAP-CSRF would refuse
+;;; every unsafe request there, so such an app had no framework CSRF defence, and any page
+;;; the user visited in a browser could POST to its local routes.
+;;;
+;;; WRAP-SAME-ORIGIN checks where the request came from instead of what it carries. It
+;;; makes two checks:
+;;;
+;;;   1. HOST, ON EVERY METHOD. The Host header must name the address the app is bound to.
+;;;      This is the defence against DNS rebinding: a page on attacker.example whose name is
+;;;      re-pointed at 127.0.0.1 is same-origin as far as the browser is concerned, so its
+;;;      requests carry Sec-Fetch-Site: same-origin and pass check 2. They still carry
+;;;      Host: attacker.example:PORT, and that is refused here. GET is checked as well,
+;;;      because a rebound page can READ the app's pages, not only post to them.
+;;;
+;;;   2. ORIGIN, ON UNSAFE METHODS. If Sec-Fetch-Site is present it must be same-origin or
+;;;      none (none is a navigation the user started, such as a bookmark). same-site is
+;;;      refused: another server on 127.0.0.1 at a different port is same-site. If
+;;;      Sec-Fetch-Site is absent (an older webview), Origin must be present and equal one
+;;;      of the app's own origins. A missing Origin is refused, not waved through, because
+;;;      every browser that omits Sec-Fetch-Site still sends Origin on a POST.
+;;;
+;;; Both headers are set by the browser and cannot be set by a page's script, which is
+;;; what makes them usable for this. A client that is not a browser can send anything; it
+;;; is not what CSRF is about, and this check does not claim to stop it.
+;;;
+;;; EXEMPTIONS skip check 2 only. Exempting a path from the Host check would let a
+;;; rebinding page read it, and no route needs that.
+
+(defun %strip-trailing-slash (s)
+  (string-right-trim "/" s))
+
+(defun %origin-authority (origin)
+  "\"http://127.0.0.1:5000\" => \"127.0.0.1:5000\": the part of ORIGIN a Host header carries."
+  (let* ((o (%strip-trailing-slash origin))
+         (sep (search "://" o)))
+    (if sep (subseq o (+ sep 3)) o)))
+
+(defun check-host (env hosts)
+  "Signal CSRF-FAILURE unless ENV's Host header is one of HOSTS (host:port strings,
+compared without regard to case). Returns T. Applies to every method."
+  (let ((host (http:request-header env "host"))
+        (method (getf env :request-method))
+        (path (getf env :path-info)))
+    (cond ((null host)
+           (error 'csrf-failure :reason :no-host :method method :path path))
+          ((not (member host hosts :test #'string-equal))
+           (error 'csrf-failure :reason :host-mismatch :method method :path path))
+          (t t))))
+
+(defun check-same-origin (env origins)
+  "Signal CSRF-FAILURE unless ENV came from one of ORIGINS (\"http://127.0.0.1:5000\"
+strings). Returns T. Reads Sec-Fetch-Site first and falls back to Origin when it is absent.
+Does not look at the method: WRAP-SAME-ORIGIN calls this only for unsafe ones."
+  (let ((site (http:request-header env "sec-fetch-site"))
+        (origin (http:request-header env "origin"))
+        (method (getf env :request-method))
+        (path (getf env :path-info)))
+    (cond (site
+           (if (member site '("same-origin" "none") :test #'string-equal)
+               t
+               (error 'csrf-failure :reason :cross-site :method method :path path)))
+          ((null origin)
+           (error 'csrf-failure :reason :no-origin :method method :path path))
+          ((not (member (%strip-trailing-slash origin) origins :test #'string-equal))
+           (error 'csrf-failure :reason :origin-mismatch :method method :path path))
+          (t t))))
+
+(defun wrap-same-origin (app &key origins hosts exempt (on-failure #'forbidden))
+  "Ring middleware for an app with no session, typically a desktop app on 127.0.0.1.
+Refuses any request whose Host is not the app's own, and any unsafe request that did not
+come from one of the app's own ORIGINS. See the comment above CHECK-HOST for what each check
+defends against.
+
+ORIGINS is a non-empty list of origins the app is served from, such as
+\"http://127.0.0.1:5000\". HOSTS defaults to their host:port parts. EXEMPT has the same shape
+as WRAP-CSRF's and skips the origin check only; exemptions are logged once, here. ON-FAILURE
+is called with (env condition) and defaults to FORBIDDEN.
+
+Needs no session and reads no body, so it can go anywhere in the middleware stack. It does
+not replace WRAP-CSRF for an app that has sessions."
+  (when (null origins)
+    (error "wrap-same-origin: ORIGINS is empty, so every request would be refused. Pass the origin the app is served from, e.g. \"http://127.0.0.1:5000\"."))
+  (let* ((origins (mapcar #'%strip-trailing-slash origins))
+         (hosts (or hosts (mapcar #'%origin-authority origins)))
+         (exemptions (copy-list exempt)))
+    (when exemptions
+      (log:warn "csrf: same-origin exemptions configured -- each one fails OPEN"
+                :count (length exemptions)
+                :exemptions (mapcar #'%describe-exemption exemptions)))
+    (lambda (env)
+      ;; The app is called OUTSIDE the handler, for the reason WRAP-CSRF gives: an app that
+      ;; signals CSRF-FAILURE itself must not be able to pass for a refusal.
+      (let ((failure (handler-case
+                         (progn (check-host env hosts)
+                                (unless (or (safe-method-p (getf env :request-method))
+                                            (%exempt-p env exemptions))
+                                  (check-same-origin env origins))
+                                nil)
+                       (csrf-failure (c) c))))
+        (if failure
+            (progn
+              (log:warn "csrf: refused"
+                        :reason (csrf-failure-reason failure)
+                        :method (getf env :request-method)
+                        :path (getf env :path-info))
+              (funcall on-failure env failure))
+            (funcall app env))))))

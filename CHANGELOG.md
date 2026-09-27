@@ -38,6 +38,15 @@ its tag.
     back to `openai` at `http://localhost:11434/v1`.
   - An app that embeds sets `PRAXEON_EMBED_IMPL`. An app that can work without embeddings
     handles the condition and uses exact search. (#291)
+- **hyperion/desktop: `run-app` refuses cross-site and DNS-rebinding requests by default.** It
+  puts `hyperion/csrf:wrap-same-origin` in front of an `:embedded` or `:hybrid` app. A request
+  whose `Host` header is not `127.0.0.1:<port>` gets a 403, whatever its method, and so does an
+  unsafe request (anything but GET, HEAD, OPTIONS, TRACE) unless `Sec-Fetch-Site` is
+  `same-origin` or `none`, or, when that header is absent, `Origin` is
+  `http://127.0.0.1:<port>`. The app's own pages, forms and HTMX requests pass unchanged. An app
+  that reaches its local server under another name (such as `localhost`) or posts to it from
+  another origin will now be refused; pass `:request-guard :none` to turn the check off, which
+  logs a warning. (#293)
 
 ### Added
 
@@ -65,6 +74,13 @@ its tag.
 - **praxeon: `remote-embedding-provider`**, the base class for an embedding service reached over
   HTTP. A new kind supplies `embedding-request-body` and its limits. `praxeon/llm:env-setting`
   resolves a chat setting by the same rules as `make-provider-from-env`. (#292, #291)
+- **hyperion/csrf: `wrap-same-origin`, a CSRF defence for an app with no session.**
+  `wrap-csrf` needs a session to hold its token; `wrap-same-origin` checks `Host`,
+  `Sec-Fetch-Site` and `Origin` instead. Takes `:origins` (such as `"http://127.0.0.1:5000"`),
+  `:hosts`, `:exempt` (skips the origin check only, never the Host check) and `:on-failure`.
+  `check-host` and `check-same-origin` are exported for requests built by hand. A refusal is a
+  `csrf-failure` with reason `:no-host`, `:host-mismatch`, `:cross-site`, `:no-origin` or
+  `:origin-mismatch`. (#293)
 
 ### Fixed
 

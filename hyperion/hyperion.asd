@@ -266,7 +266,7 @@
   :description "Run a Hyperion app as a native desktop window (out-of-process OS webview)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "aion/platform" (:require "sb-bsd-sockets"))
+  :depends-on ("hyperion" "aion/platform" "aion/log" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "src/desktop")))
 
@@ -477,7 +477,10 @@
                ;; that actually starts a server picks its own, and server-tests starts real
                ;; ones. Without this the suite dies on NO-SERVER-BACKEND -- correctly, since
                ;; refusing to start beats answering on a server nobody chose.
-               "clack-handler-hunchentoot")
+               "clack-handler-hunchentoot"
+               ;; same-origin-tests starts a real embedded desktop server to show RUN-APP
+               ;; installs the CSRF defence by default (#293). Pure CL, no webview.
+               "hyperion/desktop")
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -499,6 +502,9 @@
                              (:file "backend-tests")
                              (:file "session-tests")
                              (:file "csrf-tests")
+                             ;; AFTER csrf-tests (its suite and %QUIETLY) and server-tests
+                             ;; (%SRV-OK-APP).
+                             (:file "same-origin-tests")
                              (:file "entropy-tests")
                              (:file "channel-tests")
                              (:file "feed-tests")
