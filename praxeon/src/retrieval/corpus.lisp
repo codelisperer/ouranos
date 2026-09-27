@@ -79,8 +79,11 @@ DOCUMENT-VERSION  the app's version of that document, or NIL. Never filled in by
 LOCATOR       where the section sits, as a reader would cite it (a clause number, a heading)
 LOCALE        the language of TEXT
 LOCALE-ROLE   :SOURCE for the original, :DERIVED for a translation
-DERIVED-FROM  for a translation, the id of the section it translates (for an app that stores a
-              translation as another locale of the same section, its own ID)
+DERIVED-FROM  for a translation, the id of the section it translates, in the same document (for
+              an app that stores a translation as another locale of the same section, its own ID)
+
+A section is identified by DOCUMENT-ID, ID and LOCALE together, so two documents may use the
+same section id.
 SOURCE-FINGERPRINT  for a translation, SECTION-FINGERPRINT of the original text it was made
               from, or NIL when the app did not record it
 TEXT          the section's text"
@@ -348,9 +351,18 @@ process does that."
             thereis (not (equal (param:row-value row col) (getf want col))))))
 
 (defun %chunk-id (corpus section position)
-  (der:content-fingerprint (list (corpus-name corpus) (section-id section)
-                                 (section-locale section) position)
+  "The chunk's primary key. A section is identified by its document, its id and its locale,
+because a section id is stable within its document and need not be unique across documents."
+  (der:content-fingerprint (list (corpus-name corpus) (section-document-id section)
+                                 (section-id section) (section-locale section) position)
                            :hash #'%sha256-hex))
+
+(defun %section-key (section)
+  (list (section-document-id section) (section-id section) (section-locale section)))
+
+(defun %row-key (row)
+  (list (param:row-value row :document_id) (param:row-value row :section_id)
+        (param:row-value row :locale)))
 
 (defun %insert-section (corpus section fingerprint)
   (let* ((chunker (corpus-chunker corpus))
@@ -376,22 +388,27 @@ process does that."
                                               :section_fingerprint fingerprint)
                                         (%section-provenance section))))))))
 
-(defun %delete-section (corpus section-id locale)
+(defun %section-where (corpus key)
+  "The WHERE clause for one section of CORPUS, KEY being (document-id section-id locale)."
+  (destructuring-bind (document-id section-id locale) key
+    (corpus-where corpus (list := :document_id document-id) (list := :section_id section-id)
+                  (list := :locale locale))))
+
+(defun %delete-section (corpus key)
   (%run (corpus-store corpus)
         (list :delete-from (store-table (corpus-store corpus))
-              :where (corpus-where corpus (list := :section_id section-id)
-                                   (list := :locale locale)))))
+              :where (%section-where corpus key))))
 
 (defun %sync (corpus sections scope-clause)
   "Make CORPUS's chunks within SCOPE-CLAUSE match SECTIONS exactly. See SYNC-DOCUMENT."
   (mapc #'%check-section sections)
   (let ((seen (make-hash-table :test #'equal)))
     (dolist (s sections)
-      (let ((key (cons (section-id s) (section-locale s))))
+      (let ((key (%section-key s)))
         (when (gethash key seen)
           (error 'invalid-section :section s
-                                  :problem (format nil "it appears twice for locale ~A"
-                                                   (section-locale s))))
+                                  :problem (format nil "it appears twice in document ~A for locale ~A"
+                                                   (section-document-id s) (section-locale s))))
         (setf (gethash key seen) t))))
   (let* ((store (corpus-store corpus))
          (report (%make-sync-report))
@@ -407,12 +424,9 @@ process does that."
                                              :where (if scope-clause
                                                         (corpus-where corpus scope-clause)
                                                         (corpus-where corpus)))))
-              (setf (gethash (cons (param:row-value row :section_id)
-                                   (param:row-value row :locale))
-                             existing)
-                    row))
+              (setf (gethash (%row-key row) existing) row))
             (dolist (s sections)
-              (let* ((key (cons (section-id s) (section-locale s)))
+              (let* ((key (%section-key s))
                      (row (gethash key existing))
                      (fp (section-fingerprint (section-text s))))
                 (remhash key existing)
@@ -427,16 +441,11 @@ process does that."
                          ;; kept.
                          (%run store (list :update (store-table store)
                                            :set (%section-provenance s)
-                                           :where (corpus-where corpus
-                                                                (list := :section_id (section-id s))
-                                                                (list := :locale (section-locale s)))))
+                                           :where (%section-where corpus key)))
                          (incf (sync-report-updated report)))
                        (incf (sync-report-unchanged report))))
                   (t
-                   ;; Deleted by section and locale in the whole corpus, not only in the
-                   ;; scope, so a section that moved to another document is replaced rather
-                   ;; than colliding with its old rows.
-                   (%delete-section corpus (section-id s) (section-locale s))
+                   (%delete-section corpus key)
                    (%insert-section corpus s fp)
                    (if row
                        (incf (sync-report-replaced report))
@@ -444,7 +453,7 @@ process does that."
             ;; Whatever is left in scope was not handed in, so it no longer exists.
             (maphash (lambda (key row)
                        (declare (ignore row))
-                       (%delete-section corpus (car key) (cdr key))
+                       (%delete-section corpus key)
                        (incf (sync-report-removed report)))
                      existing)))))
     report))
@@ -505,30 +514,42 @@ could not consider them)."
 
 (defun %keyword (s) (and s (intern (string-upcase s) :keyword)))
 
+(defun %source-key (row)
+  "For a translation's ROW, the (document-id section-id) of the original it translates, which is
+in the same document."
+  (list (param:row-value row :document_id) (param:row-value row :derived_from)))
+
 (defun %source-fingerprints (corpus rows)
-  "section-id -> the stored fingerprint of its source-locale text, for the originals that
-ROWS' translations name."
-  (let ((ids (remove-duplicates
-              (loop for r in rows
-                    when (equal (param:row-value r :locale_role) "derived")
-                      collect (param:row-value r :derived_from))
-              :test #'equal))
-        (table (make-hash-table :test #'equal)))
-    (when ids
+  "(document-id section-id) -> the stored fingerprint of that section's source-locale text, for
+the originals that ROWS' translations name."
+  (let* ((wanted (remove-duplicates
+                  (loop for r in rows
+                        when (equal (param:row-value r :locale_role) "derived")
+                          collect (%source-key r))
+                  :test #'equal))
+         (table (make-hash-table :test #'equal)))
+    (when wanted
       (dolist (row (%fetch (corpus-store corpus)
-                           (list :select '(:section_id :section_fingerprint)
+                           (list :select '(:document_id :section_id :section_fingerprint)
                                  :from (list (store-table (corpus-store corpus)))
-                                 :where (corpus-where corpus
-                                                      (list := :locale_role "source")
-                                                      (list :in :section_id ids)))))
-        (setf (gethash (param:row-value row :section_id) table)
+                                 :where (corpus-where
+                                         corpus
+                                         (list := :locale_role "source")
+                                         (list :in :document_id
+                                               (remove-duplicates (mapcar #'first wanted)
+                                                                  :test #'equal))
+                                         (list :in :section_id
+                                               (remove-duplicates (mapcar #'second wanted)
+                                                                  :test #'equal))))))
+        (setf (gethash (list (param:row-value row :document_id) (param:row-value row :section_id))
+                       table)
               (param:row-value row :section_fingerprint))))
     table))
 
 (defun %translation-status (row sources)
   (when (equal (param:row-value row :locale_role) "derived")
     (let ((recorded (param:row-value row :source_fingerprint))
-          (current (gethash (param:row-value row :derived_from) sources)))
+          (current (gethash (%source-key row) sources)))
       (cond ((or (null recorded) (null current)) :unknown)
             ((equal recorded current) :current)
             (t :older-original)))))

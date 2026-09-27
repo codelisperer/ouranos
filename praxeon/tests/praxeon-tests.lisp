@@ -2831,6 +2831,59 @@ the backend and PRAXEON_LLM_* configures it, keeps working, with and without a r
         (is (string= "shared-model" (llm:model-of p)))
         (is (string= "https://openrouter.ai/api/v1" (llm::oai-base-url p)))))))
 
+(test a-directly-made-openai-compatible-reads-the-backend-it-is-for
+  "Review follow-up on #291. OPENAI-COMPATIBLE serves openai, ollama and openrouter. Made
+directly, with PRAXEON_LLM_IMPL=openrouter, it is the shared backend's provider: it reads
+PRAXEON_LLM_* and uses OpenRouter's URL, as before #291. With the shared backend anthropic it
+is for openai, and PRAXEON_LLM_API_KEY, which belongs to anthropic, is not read. An explicit
+:IMPL and explicit settings still win."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "openrouter")
+                 ("PRAXEON_LLM_MODEL" "shared-model")
+                 ("PRAXEON_LLM_API_KEY" "shared-key")
+                 ("PRAXEON_LLM_BASE_URL" nil)
+                 ("PRAXEON_OPENROUTER_MODEL" nil) ("PRAXEON_OPENROUTER_API_KEY" nil)
+                 ("PRAXEON_OPENROUTER_BASE_URL" nil)
+                 ("PRAXEON_OPENAI_MODEL" nil) ("PRAXEON_OPENAI_API_KEY" nil)
+                 ("PRAXEON_OPENAI_BASE_URL" nil))
+    (let ((p (make-instance 'llm:openai-compatible)))
+      (is (string= "openrouter" (llm::oai-impl p)))
+      (is (string= "shared-model" (llm:model-of p)))
+      (is (string= "shared-key" (llm::oai-api-key p)))
+      (is (string= "https://openrouter.ai/api/v1" (llm::oai-base-url p))))
+    (setf (uiop:getenv "PRAXEON_LLM_IMPL") "anthropic")
+    (let ((p (make-instance 'llm:openai-compatible)))
+      (is (string= "openai" (llm::oai-impl p)))
+      (is (null (llm::oai-api-key p)) "the shared key belongs to anthropic")
+      (is (string= "http://localhost:11434/v1" (llm::oai-base-url p))))
+    (let ((p (make-instance 'llm:openai-compatible :impl "openrouter" :model "m" :api-key "k")))
+      (is (string= "m" (llm:model-of p)))
+      (is (string= "k" (llm::oai-api-key p)))
+      (is (string= "https://openrouter.ai/api/v1" (llm::oai-base-url p))))))
+
+(test openrouter-embeddings-without-a-key-name-the-three-variables
+  "Review follow-up on #291. OpenRouter is hosted, so building its embedding provider with no
+key signals MISSING-PROVIDER-KEY naming the role's, the process's and the backend's variable,
+and the chat keys set here do not stand in. Control: with PRAXEON_OPENROUTER_API_KEY set, the
+provider is built with that key."
+  (with-emb-env (("PRAXEON_SCRIBE_EMBED_IMPL" "openrouter")
+                 ("PRAXEON_EMBED_IMPL" nil)
+                 ("PRAXEON_SCRIBE_EMBED_API_KEY" nil)
+                 ("PRAXEON_EMBED_API_KEY" nil)
+                 ("PRAXEON_OPENROUTER_API_KEY" nil)
+                 ("PRAXEON_LLM_API_KEY" "chat-key")
+                 ("PRAXEON_SCRIBE_API_KEY" "chat-role-key"))
+    (handler-case (progn (llm:make-embedding-provider-from-env :role :scribe)
+                         (fail "expected MISSING-PROVIDER-KEY"))
+      (cnd:missing-provider-key (c)
+        (is (string= "openrouter" (cnd:missing-provider-key-impl c)))
+        (is (equal '("PRAXEON_SCRIBE_EMBED_API_KEY" "PRAXEON_EMBED_API_KEY"
+                     "PRAXEON_OPENROUTER_API_KEY")
+                   (cnd:missing-provider-key-variables c)))))
+    (setf (uiop:getenv "PRAXEON_OPENROUTER_API_KEY") "openrouter-key")
+    (let ((p (llm:make-embedding-provider-from-env :role :scribe)))
+      (is (string= "openrouter-key" (llm:oai-embed-api-key p)))
+      (is (string= "https://openrouter.ai/api/v1" (llm:oai-embed-base-url p))))))
+
 (test an-explicit-translator-model-takes-the-anthropic-key-by-the-same-rules
   "make-translator with :model builds an Anthropic provider itself. Its key follows #290:
 the role's key, then PRAXEON_ANTHROPIC_API_KEY, then PRAXEON_LLM_API_KEY only when
