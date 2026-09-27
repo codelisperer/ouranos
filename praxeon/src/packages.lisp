@@ -105,10 +105,14 @@
    ;; protocol
    #:provider #:complete
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
-   #:embedding-provider #:embed #:embed-batch
+   #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of
+   #:embedding-max-texts #:embedding-max-tokens
+   #:remote-embedding-provider #:embedding-base-url #:embedding-api-key
+   #:embedding-request-body #:embedding-post
    #:openai-compatible-embeddings #:oai-embed-model #:oai-embed-base-url
    #:oai-embed-api-key
+   #:voyage-embeddings
    #:register-embedding-impl #:make-embedding-provider-from-env
    #:check-embedding-dimensions
    ;; neutral messages + content parts

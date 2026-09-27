@@ -53,6 +53,20 @@
 (in-package #:praxeon/llm)
 
 ;;; --- the protocol ----------------------------------------------------------
+;;;
+;;; The class layout (#286):
+;;;   EMBEDDING-PROVIDER          the protocol. EMBED, EMBED-BATCH, EMBED-DOCUMENTS,
+;;;                               EMBED-QUERY, the width check, and the per-request limits
+;;;                               that SPLIT-INTO-BATCHES works within.
+;;;   REMOTE-EMBEDDING-PROVIDER   a service reached over HTTP: model, base URL, key and width,
+;;;                               the POST with a bearer key, HTTP failures as praxeon
+;;;                               conditions, and the `data[].embedding' + `index' reply. A
+;;;                               kind that runs a model inside the process subclasses
+;;;                               EMBEDDING-PROVIDER directly and does not inherit any of this.
+;;;   OPENAI-COMPATIBLE-EMBEDDINGS, VOYAGE-EMBEDDINGS
+;;;                               each states its endpoint default, its request body (field
+;;;                               names, document/query, truncation), its limits, and its
+;;;                               default model and width.
 
 (defclass embedding-provider () ()
   (:documentation "Something that turns text into a vector of numbers.
@@ -63,6 +77,8 @@ vendor rather than about the protocol."))
 
 (defgeneric embed (provider text)
   (:documentation "TEXT as a vector of DOUBLE-FLOATs of length (EMBEDDING-DIMENSIONS PROVIDER).
+It does not say whether TEXT is a document or a query; use EMBED-DOCUMENTS or EMBED-QUERY
+for retrieval.
 
 PROVIDER is passed, never resolved here -- see the note on #158 at the top of this file."))
 
@@ -73,17 +89,47 @@ One round trip where the endpoint allows it. Order is part of the contract: call
 results back up with their inputs positionally, and a provider that returned them in
 completion order would corrupt every caller silently."))
 
+(defgeneric embed-documents (provider texts)
+  (:documentation "A list of vectors, one per text in TEXTS, in order, for texts that will be
+stored and searched later (ingest).
+
+A service that embeds documents and queries differently (Voyage's `input_type') is told these
+are documents. The texts are sent in as few requests as the provider's limits allow
+(EMBEDDING-MAX-TEXTS, EMBEDDING-MAX-TOKENS). Two calls rather than one call with a flag,
+following #138's ruling on exact and similarity retrieval (#286)."))
+
+(defgeneric embed-query (provider text)
+  (:documentation "The vector for TEXT, a search query, to compare against vectors made by
+EMBED-DOCUMENTS. The counterpart of EMBED-DOCUMENTS (#286)."))
+
 (defgeneric embedding-dimensions (provider)
   (:documentation "The width of the vectors PROVIDER produces. A deployment fact (#150)."))
 
 (defgeneric embedding-model-of (provider)
   (:documentation "The model id PROVIDER embeds with, or NIL. The counterpart of MODEL-OF."))
 
+(defgeneric embedding-max-texts (provider)
+  (:documentation "The most texts one request to PROVIDER may carry, or NIL for no stated limit."))
+
+(defgeneric embedding-max-tokens (provider)
+  (:documentation "The most tokens one request to PROVIDER may carry in total, or NIL for no
+stated limit. May depend on the model."))
+
 (defmethod embedding-model-of ((p embedding-provider)) nil)
+(defmethod embedding-max-texts ((p embedding-provider)) nil)
+(defmethod embedding-max-tokens ((p embedding-provider)) nil)
 
 (defmethod embed-batch ((p embedding-provider) texts)
   "Fallback: one call per text. Correct for any provider, slower than a batching endpoint."
   (mapcar (lambda (text) (embed p text)) texts))
+
+(defmethod embed-documents ((p embedding-provider) texts)
+  "Fallback for a kind that does not distinguish documents from queries."
+  (embed-batch p texts))
+
+(defmethod embed-query ((p embedding-provider) text)
+  "Fallback for a kind that does not distinguish documents from queries."
+  (embed p text))
 
 ;;; --- the width guard -------------------------------------------------------
 
@@ -111,6 +157,15 @@ they disagree it is the configuration that is wrong rather than the row."
   (let ((vectors (call-next-method)))
     (dolist (v vectors vectors) (%check-width p v))))
 
+(defmethod embed-query :around ((p embedding-provider) text)
+  (declare (ignore text))
+  (%check-width p (call-next-method)))
+
+(defmethod embed-documents :around ((p embedding-provider) texts)
+  (declare (ignore texts))
+  (let ((vectors (call-next-method)))
+    (dolist (v vectors vectors) (%check-width p v))))
+
 (defun check-embedding-dimensions (provider declared &key source)
   "Signal unless PROVIDER produces vectors DECLARED wide. Returns DECLARED.
 
@@ -126,49 +181,72 @@ column, which is true and unhelpful."
              :source (or source "the declared schema"))))
   declared)
 
-;;; --- OpenAI-compatible embeddings -----------------------------------------
+;;; --- batching within a provider's limits -----------------------------------
 
-(defclass openai-compatible-embeddings (embedding-provider)
-  ((model :initarg :model
-          :initform (or (%getenv "PRAXEON_EMBED_MODEL") "text-embedding-3-small")
-          :reader oai-embed-model)
-   (base-url :initarg :base-url
-             :initform (or (%getenv "PRAXEON_EMBED_BASE_URL") "http://localhost:11434/v1")
-             :reader oai-embed-base-url)
-   (api-key :initarg :api-key
-            :initform (%getenv "PRAXEON_EMBED_API_KEY")
-            :reader oai-embed-api-key)
-   (dimensions :initarg :dimensions
-               :initform 1536
-               :reader oai-embed-dimensions))
-  (:documentation "Any OpenAI-compatible /embeddings endpoint as an embedding provider.
+(defun estimate-tokens (text)
+  "An upper bound on the number of tokens TEXT becomes: its length in UTF-8 bytes.
 
-DIMENSIONS IS REQUIRED IN PRACTICE AND DEFAULTED ONLY FOR THE COMMON CASE. The endpoint does
-not announce its width before you call it, so this is a declaration about the deployment,
-checked against the first reply rather than trusted."))
+A byte-level tokenizer produces at most one token per byte, so batches sized by this estimate
+are smaller than they could be, never larger. If a request still exceeds a service's limit, the
+service refuses it with an error, which reaches the caller as a DELIBERATION-FAILURE; no kind
+here asks a service to shorten a text."
+  (loop for ch across text
+        sum (let ((code (char-code ch)))
+              (cond ((< code #x80) 1)
+                    ((< code #x800) 2)
+                    ((< code #x10000) 3)
+                    (t 4)))))
 
-(defmethod embedding-dimensions ((p openai-compatible-embeddings)) (oai-embed-dimensions p))
-(defmethod embedding-model-of ((p openai-compatible-embeddings)) (oai-embed-model p))
+(defun split-into-batches (texts max-texts max-tokens)
+  "TEXTS as a list of batches, in order, each holding at most MAX-TEXTS texts and at most
+MAX-TOKENS tokens by ESTIMATE-TOKENS. NIL for either limit means none.
 
-(defun %embeddings-request-body (p input)
-  "The request body, as a hash-table. INPUT is a string or a sequence of strings."
-  (let ((body (make-hash-table :test #'equal)))
-    (setf (gethash "model" body) (oai-embed-model p)
-          (gethash "input" body) input)
-    ;; text-embedding-3-* accept a narrower width; older models and most local servers
-    ;; ignore it. Sent because when it IS honoured it makes the reply match the declaration
-    ;; rather than merely be checked against it.
-    (setf (gethash "dimensions" body) (oai-embed-dimensions p))
-    body))
+A text whose estimate alone exceeds MAX-TOKENS gets a batch to itself and is sent anyway, so
+that the service refuses that text with an error. It is never dropped or shortened here."
+  (let ((batches '()) (current '()) (count 0) (tokens 0))
+    (dolist (text texts)
+      (let ((n (estimate-tokens text)))
+        (when (and current
+                   (or (and max-texts (>= count max-texts))
+                       (and max-tokens (> (+ tokens n) max-tokens))))
+          (push (nreverse current) batches)
+          (setf current '() count 0 tokens 0))
+        (push text current)
+        (incf count)
+        (incf tokens n)))
+    (when current (push (nreverse current) batches))
+    (nreverse batches)))
 
-(defun %embeddings-post (p input)
-  "POST INPUT to PROVIDER's /embeddings and return the parsed reply."
-  (let* ((payload (jzon:stringify (%embeddings-request-body p input)))
-         (url (concatenate 'string (oai-embed-base-url p) "/embeddings"))
+;;; --- a service reached over HTTP ------------------------------------------
+
+(defclass remote-embedding-provider (embedding-provider)
+  ((model :initarg :model :reader %remote-model)
+   (base-url :initarg :base-url :reader embedding-base-url)
+   (api-key :initarg :api-key :initform nil :reader embedding-api-key)
+   (dimensions :initarg :dimensions :reader %remote-dimensions))
+  (:documentation "An embedding service reached over HTTP at BASE-URL/embeddings, with API-KEY
+sent as a bearer token when set, replying with OpenAI's `data[].embedding' and `index' shape.
+A subclass supplies EMBEDDING-REQUEST-BODY and its limits."))
+
+(defmethod embedding-model-of ((p remote-embedding-provider)) (%remote-model p))
+(defmethod embedding-dimensions ((p remote-embedding-provider)) (%remote-dimensions p))
+
+(defgeneric embedding-request-body (provider texts input-type)
+  (:documentation "The JSON body, as a hash-table, of one request embedding TEXTS (a vector of
+strings). INPUT-TYPE is :DOCUMENT, :QUERY or NIL (not said). Separate from the POST so a test
+can read the body that is actually built."))
+
+(defgeneric embedding-post (provider body)
+  (:documentation "Send BODY to PROVIDER's endpoint and return the parsed reply. The transport,
+as a generic function so that a test can answer in its place without a network."))
+
+(defmethod embedding-post ((p remote-embedding-provider) body)
+  (let* ((payload (jzon:stringify body))
+         (url (concatenate 'string (embedding-base-url p) "/embeddings"))
          (headers (append '(("content-type" . "application/json"))
-                          (when (oai-embed-api-key p)
+                          (when (embedding-api-key p)
                             (list (cons "authorization"
-                                        (format nil "Bearer ~A" (oai-embed-api-key p))))))))
+                                        (format nil "Bearer ~A" (embedding-api-key p))))))))
     (handler-case (jzon:parse (%post-json url headers payload))
       (praxeon/conditions:praxeon-error (e) (error e))
       (error (e)
@@ -196,12 +274,117 @@ similarity, which is the one place a wrong answer looks like a plausible one."
             (sort (nreverse rows) #'<
                   :key (lambda (row) (or (gethash "index" row) 0))))))
 
-(defmethod embed ((p openai-compatible-embeddings) text)
-  (first (%embedding-vectors (%embeddings-post p text))))
+(defun %remote-embed (p texts input-type)
+  "Vectors for TEXTS, in order, sent in as many requests as P's limits require.
+Each reply must carry exactly one vector per text sent; a reply with more or fewer would pair
+vectors with the wrong texts, so it is refused."
+  (loop for batch in (split-into-batches texts (embedding-max-texts p) (embedding-max-tokens p))
+        append (let ((vectors (%embedding-vectors
+                               (embedding-post p (embedding-request-body
+                                                  p (coerce batch 'vector) input-type)))))
+                 (unless (= (length vectors) (length batch))
+                   (error 'praxeon/conditions:deliberation-failure
+                          :detail (format nil "embeddings reply carried ~D vectors for ~D texts"
+                                          (length vectors) (length batch))))
+                 vectors)))
 
-(defmethod embed-batch ((p openai-compatible-embeddings) texts)
-  (when texts
-    (%embedding-vectors (%embeddings-post p (coerce texts 'vector)))))
+(defmethod embed ((p remote-embedding-provider) text)
+  (first (%remote-embed p (list text) nil)))
+
+(defmethod embed-batch ((p remote-embedding-provider) texts)
+  (%remote-embed p texts nil))
+
+(defmethod embed-documents ((p remote-embedding-provider) texts)
+  (%remote-embed p texts :document))
+
+(defmethod embed-query ((p remote-embedding-provider) text)
+  (first (%remote-embed p (list text) :query)))
+
+;;; --- OpenAI-compatible embeddings -----------------------------------------
+
+(defclass openai-compatible-embeddings (remote-embedding-provider)
+  ((model :initform (or (%getenv "PRAXEON_EMBED_MODEL") "text-embedding-3-small")
+          :reader oai-embed-model)
+   (base-url :initform (or (%getenv "PRAXEON_EMBED_BASE_URL") "http://localhost:11434/v1")
+             :reader oai-embed-base-url)
+   (api-key :initform (%getenv "PRAXEON_EMBED_API_KEY")
+            :reader oai-embed-api-key)
+   (dimensions :initform 1536
+               :reader oai-embed-dimensions))
+  (:documentation "Any OpenAI-compatible /embeddings endpoint as an embedding provider.
+It does not distinguish documents from queries, so EMBED-DOCUMENTS and EMBED-QUERY send the
+same request as EMBED-BATCH and EMBED.
+
+DIMENSIONS IS REQUIRED IN PRACTICE AND DEFAULTED ONLY FOR THE COMMON CASE. The endpoint does
+not announce its width before you call it, so this is a declaration about the deployment,
+checked against the first reply rather than trusted."))
+
+(defmethod embedding-max-texts ((p openai-compatible-embeddings))
+  "OpenAI's limit on inputs per request."
+  2048)
+
+(defmethod embedding-max-tokens ((p openai-compatible-embeddings))
+  "OpenAI's limit on tokens summed over one request's inputs."
+  300000)
+
+(defmethod embedding-request-body ((p openai-compatible-embeddings) texts input-type)
+  (declare (ignore input-type))
+  (let ((body (make-hash-table :test #'equal)))
+    (setf (gethash "model" body) (oai-embed-model p)
+          (gethash "input" body) texts)
+    ;; text-embedding-3-* accept a narrower width; older models and most local servers
+    ;; ignore it. Sent because when it IS honoured it makes the reply match the declaration
+    ;; rather than merely be checked against it.
+    (setf (gethash "dimensions" body) (oai-embed-dimensions p))
+    body))
+
+;;; --- Voyage AI embeddings (#286) -------------------------------------------
+
+(defparameter *voyage-base-url* "https://api.voyageai.com/v1"
+  "Voyage's API base URL. The class appends /embeddings to it.")
+
+(defparameter *voyage-default-dimensions* 1024
+  "The width the voyage-4 models return when no output_dimension is sent. pgvector indexes at
+most 2,000 dimensions of `vector', so Voyage's 2,048 option cannot be indexed.")
+
+(defparameter *voyage-max-tokens*
+  '(("voyage-4-large" . 120000) ("voyage-4" . 320000) ("voyage-4-lite" . 1000000))
+  "Voyage's limit on tokens per request, by model. A model not listed here is given the
+smallest of these, which can only make its batches smaller than necessary.")
+
+(defclass voyage-embeddings (remote-embedding-provider)
+  ((model :initform "voyage-4")
+   (base-url :initform *voyage-base-url*)
+   (dimensions :initform *voyage-default-dimensions*))
+  (:documentation "Voyage AI's /embeddings endpoint as an embedding provider.
+
+Every request sends `truncation: false'. Voyage's default is to embed only the start of a text
+that is too long; with false, such a text is an error instead of a vector for part of it.
+EMBED-DOCUMENTS sends `input_type: \"document\"' and EMBED-QUERY `\"query\"', as Voyage's
+documentation asks for retrieval. `output_dimension' is sent only when DIMENSIONS is not the
+model's default width."))
+
+(defmethod embedding-max-texts ((p voyage-embeddings))
+  "Voyage's limit on texts per request."
+  1000)
+
+(defmethod embedding-max-tokens ((p voyage-embeddings))
+  (or (cdr (assoc (embedding-model-of p) *voyage-max-tokens* :test #'string=))
+      (reduce #'min *voyage-max-tokens* :key #'cdr)))
+
+(defmethod embedding-request-body ((p voyage-embeddings) texts input-type)
+  (let ((body (make-hash-table :test #'equal)))
+    (setf (gethash "model" body) (embedding-model-of p)
+          (gethash "input" body) texts
+          ;; jzon writes NIL as false.
+          (gethash "truncation" body) nil)
+    (when input-type
+      (setf (gethash "input_type" body) (ecase input-type
+                                          (:document "document")
+                                          (:query "query"))))
+    (unless (eql (embedding-dimensions p) *voyage-default-dimensions*)
+      (setf (gethash "output_dimension" body) (embedding-dimensions p)))
+    body))
 
 ;;; --- selection, mirroring the completion side ------------------------------
 
@@ -288,6 +471,18 @@ by the first request."
                                 (%embed-env-for impl "API_KEY"))
                    :dimensions (if declared (parse-integer declared) 1536))))
 
+(defun make-voyage-embeddings-from-env ()
+  "A VOYAGE-EMBEDDINGS provider, each setting found by %EMBED-ENV-FOR. A key is required:
+PRAXEON_<ROLE>_EMBED_API_KEY, PRAXEON_EMBED_API_KEY or PRAXEON_VOYAGE_API_KEY."
+  (let ((declared (%embed-env-for "voyage" "DIMENSIONS")))
+    (make-instance 'voyage-embeddings
+                   :model (or (%embed-env-for "voyage" "MODEL") "voyage-4")
+                   :base-url (or (%embed-env-for "voyage" "BASE_URL") *voyage-base-url*)
+                   :api-key (%embed-required-key "voyage")
+                   :dimensions (if declared
+                                   (parse-integer declared)
+                                   *voyage-default-dimensions*))))
+
 (register-embedding-impl "openai" (lambda () (make-openai-embeddings-from-env "openai")))
 (register-embedding-impl "ollama"
                          (lambda () (make-openai-embeddings-from-env
@@ -295,3 +490,4 @@ by the first request."
 (register-embedding-impl "openrouter"
                          (lambda () (make-openai-embeddings-from-env
                                      "openrouter" "https://openrouter.ai/api/v1" t)))
+(register-embedding-impl "voyage" #'make-voyage-embeddings-from-env)

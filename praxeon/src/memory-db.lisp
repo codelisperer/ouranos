@@ -209,7 +209,7 @@ language of columns."
   (mem:check-provenance provenance "remember" subject)
   (let* ((id (format nil "obs-~36R-~36R" (get-universal-time) (random (expt 2 32))))
          (now (%now))
-         (embedding (llm:embed (store-embedder store) content))
+         (embedding (first (llm:embed-documents (store-embedder store) (list content))))
          (observation (mem::%make-observation
                        :id id :subject subject :content content :kind kind :value value
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))

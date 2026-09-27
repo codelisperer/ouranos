@@ -2852,6 +2852,178 @@ PRAXEON_LLM_IMPL is anthropic. This also covers the construction itself, which h
       (is (string= "openrouter-shared-key" (key))
           "control: with anthropic as the shared backend, the shared key applies"))))
 
+;;; A Voyage provider whose transport is replaced (#286). Everything above the transport --
+;;; the request body, the batching, the reply parsing and the width check -- is the real code.
+;;; Each reply gives the Nth text sent, counted across requests, a vector filled with N, and
+;;; lists its rows in REVERSE order, so only a reader that sorts by `index' pairs them right.
+(defclass recording-voyage (llm:voyage-embeddings)
+  ((bodies :initform '() :accessor recorded-bodies)
+   (sent :initform 0 :accessor texts-sent)
+   (emit :initarg :emit :initform nil :reader recording-emit)
+   (drop :initarg :drop :initform nil :reader recording-drop)))
+
+(defmethod llm:embedding-post ((p recording-voyage) body)
+  (push body (recorded-bodies p))
+  (let* ((texts (gethash "input" body))
+         (width (or (recording-emit p) (llm:embedding-dimensions p)))
+         (rows (loop for i from 0 below (length texts)
+                     collect (let ((row (make-hash-table :test #'equal)))
+                               (setf (gethash "index" row) i
+                                     (gethash "embedding" row)
+                                     (make-array width :initial-element (+ (texts-sent p) i)))
+                               row)))
+         (reply (make-hash-table :test #'equal)))
+    (incf (texts-sent p) (length texts))
+    (when (recording-drop p) (setf rows (rest rows)))
+    (setf (gethash "data" reply) (coerce (reverse rows) 'vector))
+    reply))
+
+(defun %request-sizes (p)
+  "The number of texts in each request P sent, in the order sent."
+  (reverse (mapcar (lambda (b) (length (gethash "input" b))) (recorded-bodies p))))
+
+(test a-voyage-request-says-document-or-query-and-never-truncates
+  "#286. Voyage embeds a document and a query differently and its documentation says not to
+omit `input_type' for retrieval, so the two calls send different bodies. `truncation' is
+false on every request, because Voyage's default embeds only the start of an over-long text.
+Voyage has no `dimensions' field; `output_dimension' is sent only for a non-default width."
+  (let* ((p (make-instance 'llm:voyage-embeddings :api-key "k"))
+         (doc (llm:embedding-request-body p (vector "a") :document))
+         (query (llm:embedding-request-body p (vector "a") :query))
+         (plain (llm:embedding-request-body p (vector "a") nil)))
+    (is (string= "document" (gethash "input_type" doc)))
+    (is (string= "query" (gethash "input_type" query)))
+    (is (null (nth-value 1 (gethash "input_type" plain))) "EMBED leaves the type unsaid")
+    (is (search "\"truncation\":false" (jzon:stringify doc))
+        "the JSON carries truncation: false, not an absent field")
+    (is (string= "voyage-4" (gethash "model" doc)))
+    (is (null (nth-value 1 (gethash "dimensions" doc))))
+    (is (null (nth-value 1 (gethash "output_dimension" doc)))
+        "the default width sends no output_dimension")
+    (is (= 512 (gethash "output_dimension"
+                        (llm:embedding-request-body
+                         (make-instance 'llm:voyage-embeddings :api-key "k" :dimensions 512)
+                         (vector "a") :document)))))
+  (let ((p (make-instance 'recording-voyage :api-key "k" :dimensions 4)))
+    (llm:embed-documents p '("a" "b"))
+    (llm:embed-query p "c")
+    (is (equal '("document" "query")
+               (reverse (mapcar (lambda (b) (gethash "input_type" b)) (recorded-bodies p))))
+        "EMBED-DOCUMENTS and EMBED-QUERY each send their own type through the real path")))
+
+(test a-voyage-reply-is-read-in-index-order
+  "The recording transport lists rows in reverse, so a reader that took array order would
+give the first text the last vector."
+  (let* ((p (make-instance 'recording-voyage :api-key "k" :dimensions 4))
+         (vectors (llm:embed-documents p '("t0" "t1" "t2"))))
+    (is (equal '(0 1 2) (mapcar (lambda (v) (round (aref v 0))) vectors)))
+    (is (every (lambda (v) (typep v '(simple-array double-float (4)))) vectors))))
+
+(test a-voyage-vector-of-the-wrong-width-is-refused
+  "Both calls check the width that came back against the declared one. Control: the right
+width passes."
+  (let ((bad (make-instance 'recording-voyage :api-key "k" :dimensions 4 :emit 3))
+        (ok (make-instance 'recording-voyage :api-key "k" :dimensions 4 :emit 4)))
+    (signals cnd:embedding-dimension-mismatch (llm:embed-query bad "q"))
+    (signals cnd:embedding-dimension-mismatch (llm:embed-documents bad '("d")))
+    (is (= 4 (length (llm:embed-query ok "q"))))))
+
+(test a-reply-with-the-wrong-number-of-vectors-is-refused
+  "A reply with one vector fewer than the texts sent would pair every later vector with the
+wrong text, so it is an error rather than a shorter list."
+  (signals cnd:deliberation-failure
+    (llm:embed-documents (make-instance 'recording-voyage :api-key "k" :dimensions 4 :drop t)
+                         '("a" "b"))))
+
+(test a-voyage-batch-over-either-limit-is-split
+  "#286: at most 1,000 texts per request, and at most 320K tokens for voyage-4 (120K for
+voyage-4-large). Each limit is crossed on its own, with a control just inside it, and the
+vectors of a split call still come back in input order."
+  (let* ((p (make-instance 'recording-voyage :api-key "k" :dimensions 4))
+         (texts (loop for i below 1001 collect (format nil "t~D" i)))
+         (vectors (llm:embed-documents p texts)))
+    (is (equal '(1000 1) (%request-sizes p)) "1,001 texts go as 1,000 and 1")
+    (is (= 1001 (length vectors)))
+    (is (equal (loop for i below 1001 collect i)
+               (mapcar (lambda (v) (round (aref v 0))) vectors))
+        "in input order across the two requests"))
+  (let ((p (make-instance 'recording-voyage :api-key "k" :dimensions 4)))
+    (llm:embed-documents p (loop for i below 1000 collect "t"))
+    (is (equal '(1000) (%request-sizes p)) "control: 1,000 texts go as one request"))
+  (let ((big (make-string 50000 :initial-element #\a)))
+    (let ((large (make-instance 'recording-voyage :api-key "k" :dimensions 4
+                                                  :model "voyage-4-large")))
+      (llm:embed-documents large (list big big big))
+      (is (equal '(2 1) (%request-sizes large))
+          "150K estimated tokens against voyage-4-large's 120K go as 100K and 50K"))
+    (let ((standard (make-instance 'recording-voyage :api-key "k" :dimensions 4)))
+      (llm:embed-documents standard (list big big big))
+      (is (equal '(3) (%request-sizes standard))
+          "control: the same texts fit voyage-4's 320K in one request")))
+  (is (= 120000 (llm:embedding-max-tokens
+                 (make-instance 'llm:voyage-embeddings :api-key "k" :model "voyage-unknown")))
+      "a model not in the table gets the smallest limit")
+  (is (= 1000000 (llm:embedding-max-tokens
+                  (make-instance 'llm:voyage-embeddings :api-key "k" :model "voyage-4-lite")))))
+
+(test the-batcher-keeps-order-and-never-drops-or-cuts-a-text
+  "SPLIT-INTO-BATCHES is pure, so its edges are checked directly. A text over the token limit
+on its own gets a batch of its own, so that the service refuses it by name."
+  (is (equal '(("aa") ("bbbbbb") ("c")) (llm::split-into-batches '("aa" "bbbbbb" "c") nil 4)))
+  (is (equal '(("aa" "bb") ("c")) (llm::split-into-batches '("aa" "bb" "c") 2 nil)))
+  (is (equal '(("aa" "bb" "c")) (llm::split-into-batches '("aa" "bb" "c") nil nil)))
+  (is (null (llm::split-into-batches '() 2 4)))
+  (is (= 2 (llm::estimate-tokens (string (code-char #xE9))))
+      "a two-byte character counts as two, since a byte-level tokenizer may split it")
+  (is (= 4 (llm::estimate-tokens (string (code-char #x1F600))))))
+
+(test the-openai-compatible-kind-answers-documents-and-queries-alike
+  "Every kind answers EMBED-DOCUMENTS and EMBED-QUERY (#286). An OpenAI-compatible service has
+no document/query distinction, so both send the same body, with no input_type."
+  (let* ((p (make-instance 'llm:openai-compatible-embeddings :api-key "k" :dimensions 8))
+         (doc (llm:embedding-request-body p (vector "a") :document))
+         (query (llm:embedding-request-body p (vector "a") :query)))
+    (is (string= (jzon:stringify doc) (jzon:stringify query)))
+    (is (null (nth-value 1 (gethash "input_type" doc))))
+    (is (= 8 (gethash "dimensions" doc))))
+  (let ((fake (make-instance 'fake-embeddings :width 4 :emit 4)))
+    (is (= 2 (length (llm:embed-documents fake '("a" "b"))))
+        "a kind with only EMBED answers EMBED-DOCUMENTS through the protocol's fallback")
+    (is (= 4 (length (llm:embed-query fake "q"))))))
+
+(test voyage-is-registered-under-the-embedding-rules
+  "#290 and #286: PRAXEON_EMBED_IMPL=voyage builds a Voyage provider whose key comes from the
+embedding variables or PRAXEON_VOYAGE_API_KEY, never a chat key, and whose endpoint, model and
+width default so that an app sets only its key."
+  (with-emb-env (("PRAXEON_EMBED_IMPL" "voyage")
+                 ("PRAXEON_LLM_API_KEY" "chat-key")
+                 ("PRAXEON_VOYAGE_API_KEY" "voyage-key")
+                 ("PRAXEON_EMBED_API_KEY" nil)
+                 ("PRAXEON_EMBED_BASE_URL" nil)
+                 ("PRAXEON_EMBED_MODEL" nil)
+                 ("PRAXEON_EMBED_DIMENSIONS" nil)
+                 ("PRAXEON_VOYAGE_BASE_URL" nil)
+                 ("PRAXEON_VOYAGE_EMBED_MODEL" nil)
+                 ("PRAXEON_VOYAGE_EMBED_DIMENSIONS" nil))
+    (let ((p (llm:make-embedding-provider-from-env)))
+      (is (typep p 'llm:voyage-embeddings))
+      (is (string= "voyage-key" (llm:embedding-api-key p)))
+      (is (string= "https://api.voyageai.com/v1" (llm:embedding-base-url p)))
+      (is (string= "voyage-4" (llm:embedding-model-of p)))
+      (is (= 1024 (llm:embedding-dimensions p))))
+    (setf (uiop:getenv "PRAXEON_VOYAGE_EMBED_MODEL") "voyage-4-lite"
+          (uiop:getenv "PRAXEON_VOYAGE_EMBED_DIMENSIONS") "512")
+    (let ((p (llm:make-embedding-provider-from-env)))
+      (is (string= "voyage-4-lite" (llm:embedding-model-of p)))
+      (is (= 512 (llm:embedding-dimensions p))))
+    (funcall (%emb-env-fn "UNSETENV") "PRAXEON_VOYAGE_API_KEY")
+    (handler-case (progn (llm:make-embedding-provider-from-env)
+                         (fail "expected MISSING-PROVIDER-KEY"))
+      (cnd:missing-provider-key (c)
+        (is (equal '("PRAXEON_EMBED_API_KEY" "PRAXEON_VOYAGE_API_KEY")
+                   (cnd:missing-provider-key-variables c))
+            "with no embedding key, PRAXEON_LLM_API_KEY does not stand in")))))
+
 (test an-unregistered-embedding-impl-is-refused-by-name
   "A missing impl and a misspelt one are the same mistake, and neither may fall back to a
 default that embeds with the wrong model."
