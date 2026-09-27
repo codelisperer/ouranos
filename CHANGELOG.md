@@ -125,12 +125,15 @@ Changes since `v0.1.0`.
 
 ### An app may have to act
 
-- **hyperion/auth-db: `make-db-auth` refuses to start unless the role-event log table exists.**
-  Create the table before upgrading. The migration is in `docs/migrations.md`. (#220)
-- **hyperion/auth-db: one account per email address.** This is checked in code whether or not the
-  database has a unique index on email. `docs/migrations.md` adds the index
-  (`20260729_002_index_users_email`). Creating that index fails if the table already holds two
-  accounts with the same email. (#224)
+- **hyperion/auth-db: by default, `make-db-auth` refuses to start unless the role-event log
+  table exists.** An app that owns its migrations creates the table before upgrading; the
+  migration is in `docs/migrations.md`. With `:ensure t`, `make-db-auth` creates it. With
+  `:require-role-log nil`, the check is skipped. (#220)
+- **hyperion/auth-db: one account per email address.** `create-user` refuses a duplicate it can see,
+  but only a unique index holds when two processes insert at once, so an app should add it.
+  `docs/migrations.md` adds the index (`20260729_002_index_users_email`, or
+  `users-email-index-ddl`). Creating that index fails if the table already holds two accounts with
+  the same email. (#224)
 - **hyperion sessions expire on the server.** A session ends after `*session-idle-timeout*` without
   a request (default 86400 seconds, one day), and after `*session-absolute-timeout*` in total
   (default 604800 seconds, seven days). The session cookie's Max-Age now defaults to the absolute
@@ -197,8 +200,9 @@ Changes since `v0.1.0`.
 
 ### Setup
 
-- **Pinned downloads are verified before use.** `setup.sh` and `setup.ps1` check SBCL,
-  `quicklisp.lisp` and the WebView2 SDK against pinned SHA-256 sums. (#212, #227, #176)
+- **Pinned downloads are verified before use.** `setup.sh` and `setup.ps1` check SBCL and
+  `quicklisp.lisp` against pinned SHA-256 sums. `hyperion/hyperion-view/build.ps1` checks the
+  WebView2 SDK against the sum pinned in `scripts/versions.env`. (#212, #227, #176)
 - **`setup.ps1` provisions SQLite differently.**
   - It installs the pinned SQLite as both `libsqlite3.dll` and `sqlite3.dll`, and its downloads
     survive an unreachable certificate-revocation server. (#247, #277)
