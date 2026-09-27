@@ -504,21 +504,45 @@ PARSED is the jzon hash-table form of the JSON body."
 ;;; translated to/from OpenAI's schema here (tool_calls with JSON-string
 ;;; arguments, role:"tool" result messages, finish_reason).
 ;;; --------------------------------------------------------------------------
+(defparameter +openai-compatible-impls+
+  '(("openai" . "http://localhost:11434/v1")
+    ("ollama" . "http://localhost:11434/v1")
+    ("openrouter" . "https://openrouter.ai/api/v1"))
+  "The backends OPENAI-COMPATIBLE serves, each with its default base URL.")
+
+(defun %default-oai-impl ()
+  "The backend a directly made OPENAI-COMPATIBLE is for: the shared backend when
+PRAXEON_LLM_IMPL names one this class serves, otherwise \"openai\"."
+  (let ((shared (%shared-impl)))
+    (if (assoc shared +openai-compatible-impls+ :test #'string=) shared "openai")))
+
 (defclass openai-compatible (provider)
-  ((model :initarg :model
-          :initform (or (%env-for "openai" "MODEL") "qwen2.5")
-          :reader oai-model)
-   (base-url :initarg :base-url
-             :initform (or (%env-for "openai" "BASE_URL")
-                           "http://localhost:11434/v1")
-             :reader oai-base-url)
-   (api-key :initarg :api-key
-            :initform (%env-for "openai" "API_KEY")
-            :reader oai-api-key))
+  ((impl :initarg :impl :initform (%default-oai-impl) :reader oai-impl)
+   (model :initarg :model :reader oai-model)
+   (base-url :initarg :base-url :reader oai-base-url)
+   (api-key :initarg :api-key :reader oai-api-key))
   (:documentation "Any OpenAI-compatible chat endpoint as a Praxeon provider.
 BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
-\(local servers usually ignore it, hosted ones require it)."))
+\(local servers usually ignore it, hosted ones require it).
+
+IMPL is the backend these settings belong to: \"openai\", \"ollama\" or \"openrouter\".
+A MODEL, BASE-URL or API-KEY not passed is read for that backend as MAKE-PROVIDER-FROM-ENV
+reads it (%ENV-FOR), then defaulted. Unless given, IMPL is the backend PRAXEON_LLM_IMPL names
+when that is one of the three, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
+the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291."))
+
+(defmethod initialize-instance :after ((p openai-compatible) &key)
+  (let ((impl (oai-impl p)))
+    (unless (slot-boundp p 'model)
+      (setf (slot-value p 'model) (or (%env-for impl "MODEL") "qwen2.5")))
+    (unless (slot-boundp p 'base-url)
+      (setf (slot-value p 'base-url)
+            (or (%env-for impl "BASE_URL")
+                (cdr (assoc impl +openai-compatible-impls+ :test #'string=))
+                "http://localhost:11434/v1")))
+    (unless (slot-boundp p 'api-key)
+      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))))
 
 (defun %oai-tool-choice-json (tool-choice)
   "OpenAI's tool_choice value for a neutral TOOL-CHOICE, or NIL to send nothing.
@@ -792,6 +816,7 @@ describes, then DEFAULT-BASE-URL / Ollama's local URL. KEY-REQUIRED is true for 
 service, where a missing key is reported at construction (see %REQUIRED-KEY); a local server
 usually needs none."
   (make-instance 'openai-compatible
+                 :impl impl
                  :model (or (%env-for impl "MODEL") "qwen2.5")
                  :base-url (or (%env-for impl "BASE_URL")
                                default-base-url
