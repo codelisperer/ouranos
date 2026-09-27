@@ -123,7 +123,9 @@ are written down rather than left to the next failed build.")
     ;; allocation, inline wrappers, threading. A .def that dropped the ouranos_tls_ prefix
     ;; would build a DLL missing all of them, which is the failure this list is for.
     "ouranos_tls_shim_version" "ouranos_tls_threading_kind" "ouranos_tls_setup"
-    "ouranos_tls_ssl_new" "ouranos_tls_conf_version_range"
+    "ouranos_tls_ssl_new" "ouranos_tls_conf_version_range" "ouranos_tls_crt_der"
+    "ouranos_tls_pk_generate_ec_p256" "ouranos_tls_x509write_set_san"
+    "ouranos_tls_crt_check_key"
     ;; Exported only when MBEDTLS_THREADING_C is on, so its presence shows that
     ;; ouranos_tls_config.h reached the compile.
     "mbedtls_mutex_init")
@@ -684,6 +686,14 @@ under the name it asks for, and that the entry points we are about to bind are i
       (error "Could not read any exported symbol from ~A. On Windows that is the expected shape of a missing export table; elsewhere it usually means nm is absent."
              (file-namestring library)))
     (format t "  exports ~:D symbols~%" (length exports))
+    ;; THE FULL LIST, IN CI, so the three OSes can be compared name by name (#125). The
+    ;; counts differ between them (1,251 Linux, 1,250 macOS, 1,248 Windows at #273's merge),
+    ;; and a count cannot say which names. In a collapsed group so it costs nothing to skip.
+    (when (uiop:getenv "GITHUB_ACTIONS")
+      (format t "::group::mbedTLS exported names (~A)~%" (platform))
+      (dolist (name (sort (copy-list exports) #'string<))
+        (format t "export ~A~%" name))
+      (format t "::endgroup::~%"))
     (dolist (sym *required-symbols*)
       (unless (member sym exports :test #'string=)
         (error "The built library does not export ~A." sym))

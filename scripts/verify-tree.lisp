@@ -263,6 +263,19 @@ not evidence of anything.")
     :hyperion/server-uv/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
+(defparameter +tls-systems+ '(:aion/tls)
+  "Opt-in systems that need scripts/build-mbedtls.lisp to have run (#125). Loaded only when
+OURANOS_WITH_TLS=1, for the reasons WITH-UV-P gives for libuv.")
+
+(defparameter +tls-test-systems+ '(:aion/tls/tests)
+  "Their suites: real handshakes over the mbedTLS this tree builds.")
+
+(defun with-tls-p ()
+  "Should this run include the mbedTLS systems? OURANOS_WITH_TLS=1 says yes. An opt-in, not
+a probe for vendor/mbedtls/, for the reason WITH-UV-P gives."
+  (let ((v (uiop:getenv "OURANOS_WITH_TLS")))
+    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
+
 (defun with-uv-p ()
   "Should this run include the libuv systems? OURANOS_WITH_UV=1 says yes.
 
@@ -306,6 +319,7 @@ that the pinned libuv builds at all."
 
 (defparameter +optional-axes+
   '(("uv" with-uv-p report-uv-declined)
+    ("tls" with-tls-p report-tls-declined)
     ("view" view-covered-p report-view-uncovered))
   "(name predicate-symbol disclosure-symbol) for each axis this run may not cover.
 
@@ -408,6 +422,14 @@ OURANOS-NOT-COVERED:PRINT-NOT-COVERED (scripts/not-covered.lisp), whose docstrin
 the section reports and why."
   (ouranos-not-covered:print-not-covered (axes-declined) (reverse *postgres-excused*) (axes-tag)))
 
+(defun report-tls-declined (name)
+  "The tls axis is off. One cause only: the caller did not ask for it."
+  (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
+  (dolist (s +tls-systems+)
+    (format t "          ~(~a~)~%" s))
+  (format t "          OURANOS_WITH_TLS is unset. Set it to 1 to include them (needs scripts/build-mbedtls.lisp to have run).~%")
+  (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
+
 (defun report-uv-declined (name)
   "The uv axis is off. One cause only: the caller did not ask for it."
   (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
@@ -446,11 +468,15 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
                      (list (intern (string-upcase name) :keyword))))))
 
 (defun all-systems ()
-  (append (if (with-uv-p) (append +systems+ +uv-systems+) +systems+)
+  (append +systems+
+          (when (with-uv-p) +uv-systems+)
+          (when (with-tls-p) +tls-systems+)
           (platform-required-systems)))
 
 (defun all-test-systems ()
-  (append (if (with-uv-p) (append +test-systems+ +uv-test-systems+) +test-systems+)
+  (append +test-systems+
+          (when (with-uv-p) +uv-test-systems+)
+          (when (with-tls-p) +tls-test-systems+)
           (platform-required-test-systems)))
 
 ;;; --- the child image --------------------------------------------------------
