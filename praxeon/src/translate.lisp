@@ -44,16 +44,17 @@ here -- an unknown code falls back to its capitalized name.")
   2. an explicit Anthropic MODEL;
   3. the ROLE-scoped provider from the environment -- per-agent model config: the
      translator reads PRAXEON_TRANSLATE_{IMPL,MODEL,API_KEY,AUTH} (role :translate),
-     falling back to the shared PRAXEON_LLM_* (see llm:make-provider-from-env).
+     then the backend's own and the shared variables (see llm:make-provider-from-env).
+With an explicit MODEL the backend is Anthropic, and the key resolves the same way:
+PRAXEON_<ROLE>_API_KEY, then PRAXEON_ANTHROPIC_API_KEY, then PRAXEON_LLM_API_KEY only when
+PRAXEON_LLM_IMPL is anthropic (#290).
 So translation runs on its own fast, multilingual model/vendor without touching the
 main agent; prefer a higher-quality model on sensitive paths."
   (cond
     (provider provider)
     (model (make-instance 'llm:anthropic
                           :model model
-                          :api-key (or (uiop:getenv "PRAXEON_TRANSLATE_API_KEY")
-                                       (uiop:getenv "PRAXEON_LLM_API_KEY"))
-                          :auth :api-key))
+                          :api-key (llm:env-setting "anthropic" "API_KEY" :role role)))
     (t (llm:make-provider-from-env :role role))))
 
 (defun %blank-p (s)

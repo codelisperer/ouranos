@@ -2713,32 +2713,144 @@ only arrangement that can tell a sort from a pass-through."
   (signals cnd:deliberation-failure (llm::%embedding-vectors (jzon:parse "{\"data\":[]}")))
   (signals cnd:deliberation-failure (llm::%embedding-vectors (jzon:parse "{}"))))
 
-(test the-embedding-provider-inherits-the-endpoint-it-does-not-restate
-  "THE MEASUREMENT BEHIND THE DESIGN (#138).
-
-The objection to a separate embedding hierarchy was that an app would configure the same
-endpoint twice. It does not: `%env-for' resolves PRAXEON_<ROLE>_* > PRAXEON_<IMPL>_* >
-PRAXEON_LLM_*, so BASE_URL and API_KEY fall through from whatever the completion side
-already has. The marginal configuration is the MODEL -- and that is not duplication,
-because an embedding model and a chat model are necessarily different values.
-
-Asserted rather than argued, because the whole ruling rested on it."
-  (with-emb-env (("PRAXEON_LLM_BASE_URL" "https://shared.example/v1")
-                 ("PRAXEON_LLM_API_KEY" "shared-key")
+(test an-embedding-provider-reads-embedding-variables-and-never-chat-ones
+  "#290, rule 1. PRAXEON_EMBED_IMPL, a role's chat key and PRAXEON_LLM_API_KEY are all set.
+The embedding key comes from the embedding variables or the backend's own, never from either
+chat key. Each level is removed in turn, so the test shows which variable supplied the key."
+  (with-emb-env (("PRAXEON_EMBED_IMPL" "openai")
+                 ("PRAXEON_LLM_IMPL" "openai")
+                 ("PRAXEON_LLM_API_KEY" "chat-shared-key")
+                 ("PRAXEON_LLM_BASE_URL" "https://chat.example/v1")
+                 ("PRAXEON_LLM_MODEL" "chat-model")
+                 ("PRAXEON_SCRIBE_API_KEY" "chat-role-key")
+                 ("PRAXEON_SCRIBE_MODEL" "chat-role-model")
+                 ("PRAXEON_OPENAI_MODEL" "openai-chat-model")
+                 ("PRAXEON_SCRIBE_EMBED_API_KEY" "embed-role-key")
+                 ("PRAXEON_EMBED_API_KEY" "embed-key")
+                 ("PRAXEON_OPENAI_API_KEY" "openai-own-key")
+                 ("PRAXEON_SCRIBE_EMBED_IMPL" nil)
+                 ("PRAXEON_EMBED_BASE_URL" nil)
                  ("PRAXEON_OPENAI_BASE_URL" nil)
-                 ("PRAXEON_OPENAI_API_KEY" nil)
+                 ("PRAXEON_EMBED_MODEL" nil)
                  ("PRAXEON_OPENAI_EMBED_MODEL" "text-embedding-3-large")
-                 ("PRAXEON_OPENAI_EMBED_DIMENSIONS" "3072")
-                 ("PRAXEON_EMBED_IMPL" "openai"))
-    (let ((p (llm:make-embedding-provider-from-env)))
-      (is (string= "https://shared.example/v1" (llm:oai-embed-base-url p))
-          "the endpoint is inherited, not restated")
-      (is (string= "shared-key" (llm:oai-embed-api-key p))
-          "and so is the key")
+                 ("PRAXEON_EMBED_DIMENSIONS" nil)
+                 ("PRAXEON_OPENAI_EMBED_DIMENSIONS" "3072"))
+    (flet ((key (&optional role)
+             (llm:oai-embed-api-key (llm:make-embedding-provider-from-env :role role))))
+      (is (string= "embed-role-key" (key :scribe)) "the role's embedding key comes first")
+      (is (string= "embed-key" (key)) "without a role, PRAXEON_EMBED_API_KEY")
+      (funcall (%emb-env-fn "UNSETENV") "PRAXEON_SCRIBE_EMBED_API_KEY")
+      (is (string= "embed-key" (key :scribe))
+          "a role with no embedding key of its own gets PRAXEON_EMBED_API_KEY, not its chat key")
+      (funcall (%emb-env-fn "UNSETENV") "PRAXEON_EMBED_API_KEY")
+      (is (string= "openai-own-key" (key :scribe)) "then the backend's own PRAXEON_OPENAI_API_KEY")
+      (funcall (%emb-env-fn "UNSETENV") "PRAXEON_OPENAI_API_KEY")
+      (is (null (key :scribe))
+          "with no embedding key set, neither PRAXEON_SCRIBE_API_KEY nor PRAXEON_LLM_API_KEY is used")
+      (is (null (key)) "and the same without a role"))
+    (let ((p (llm:make-embedding-provider-from-env :role :scribe)))
+      (is (string= "http://localhost:11434/v1" (llm:oai-embed-base-url p))
+          "the endpoint is the backend's default, not PRAXEON_LLM_BASE_URL")
       (is (string= "text-embedding-3-large" (llm:embedding-model-of p))
-          "the model is this provider's own -- the one thing that must differ")
-      (is (= 3072 (llm:embedding-dimensions p))
-          "and the width is a deployment fact, read from the environment"))))
+          "the model is PRAXEON_OPENAI_EMBED_MODEL, not a chat model")
+      (is (= 3072 (llm:embedding-dimensions p))))))
+
+(test with-only-chat-variables-there-is-no-embedding-provider
+  "#290, rule 2. There is no default embedding provider. With every chat variable set and no
+PRAXEON_*_EMBED_IMPL, asking for one signals NO-EMBEDDING-PROVIDER, which an app handles to
+fall back to exact search. The control sets PRAXEON_EMBED_IMPL and gets a provider, so the
+condition is shown to depend on that variable."
+  (with-emb-env (("PRAXEON_EMBED_IMPL" nil)
+                 ("PRAXEON_SCRIBE_EMBED_IMPL" nil)
+                 ("PRAXEON_LLM_IMPL" "openai")
+                 ("PRAXEON_LLM_API_KEY" "chat-shared-key")
+                 ("PRAXEON_LLM_BASE_URL" "https://chat.example/v1")
+                 ("PRAXEON_SCRIBE_IMPL" "openai")
+                 ("PRAXEON_SCRIBE_API_KEY" "chat-role-key"))
+    (signals cnd:no-embedding-provider (llm:make-embedding-provider-from-env))
+    (handler-case (progn (llm:make-embedding-provider-from-env :role :scribe)
+                         (fail "expected NO-EMBEDDING-PROVIDER"))
+      (cnd:no-embedding-provider (c)
+        (is (string= "SCRIBE" (cnd:no-embedding-provider-role c)))
+        (is (search "PRAXEON_SCRIBE_EMBED_IMPL" (princ-to-string c))
+            "the report names the variable that would configure the role")))
+    (setf (uiop:getenv "PRAXEON_EMBED_IMPL") "ollama")
+    (is (typep (llm:make-embedding-provider-from-env) 'llm:openai-compatible-embeddings)
+        "control: once PRAXEON_EMBED_IMPL names a backend, there is a provider")))
+
+(test a-role-on-another-backend-does-not-get-the-shared-key
+  "#290, rule 3. PRAXEON_LLM_API_KEY belongs to the backend PRAXEON_LLM_IMPL names. A role
+that selects another backend gets no key from it: a backend that works without one (ollama)
+gets none, and a hosted one (openrouter) signals MISSING-PROVIDER-KEY naming both variables
+that would supply it."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "anthropic")
+                 ("PRAXEON_LLM_API_KEY" "anthropic-shared-key")
+                 ("PRAXEON_LLM_BASE_URL" "https://shared.example/v1")
+                 ("PRAXEON_SCRIBE_IMPL" "ollama")
+                 ("PRAXEON_SCRIBE_API_KEY" nil)
+                 ("PRAXEON_SCRIBE_BASE_URL" nil)
+                 ("PRAXEON_OLLAMA_API_KEY" nil)
+                 ("PRAXEON_OLLAMA_BASE_URL" nil)
+                 ("PRAXEON_CRITIC_IMPL" "openrouter")
+                 ("PRAXEON_CRITIC_API_KEY" nil)
+                 ("PRAXEON_OPENROUTER_API_KEY" nil))
+    (let ((p (llm:make-provider-from-env :role :scribe)))
+      (is (typep p 'llm:openai-compatible))
+      (is (null (llm::oai-api-key p)) "the ollama role does not receive PRAXEON_LLM_API_KEY")
+      (is (string= "http://localhost:11434/v1" (llm::oai-base-url p))
+          "nor PRAXEON_LLM_BASE_URL"))
+    (handler-case (progn (llm:make-provider-from-env :role :critic)
+                         (fail "expected MISSING-PROVIDER-KEY"))
+      (cnd:missing-provider-key (c)
+        (is (string= "openrouter" (cnd:missing-provider-key-impl c)))
+        (is (equal '("PRAXEON_CRITIC_API_KEY" "PRAXEON_OPENROUTER_API_KEY")
+                   (cnd:missing-provider-key-variables c)))))
+    (setf (uiop:getenv "PRAXEON_OPENROUTER_API_KEY") "openrouter-key")
+    (is (string= "openrouter-key" (llm::oai-api-key (llm:make-provider-from-env :role :critic)))
+        "control: the backend's own key is used")
+    (setf (uiop:getenv "PRAXEON_CRITIC_API_KEY") "critic-key")
+    (is (string= "critic-key" (llm::oai-api-key (llm:make-provider-from-env :role :critic)))
+        "and the role's key before it")))
+
+(test the-shared-backend-still-reads-the-shared-variables
+  "#290, rule 3, the other direction. The single-provider setup, where PRAXEON_LLM_IMPL names
+the backend and PRAXEON_LLM_* configures it, keeps working, with and without a role."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "openrouter")
+                 ("PRAXEON_LLM_API_KEY" "shared-key")
+                 ("PRAXEON_LLM_MODEL" "shared-model")
+                 ("PRAXEON_LLM_BASE_URL" nil)
+                 ("PRAXEON_OPENROUTER_API_KEY" nil)
+                 ("PRAXEON_OPENROUTER_MODEL" nil)
+                 ("PRAXEON_OPENROUTER_BASE_URL" nil)
+                 ("PRAXEON_SCRIBE_IMPL" nil)
+                 ("PRAXEON_SCRIBE_API_KEY" nil)
+                 ("PRAXEON_SCRIBE_MODEL" nil))
+    (dolist (role '(nil :scribe))
+      (let ((p (llm:make-provider-from-env :role role)))
+        (is (string= "shared-key" (llm::oai-api-key p)))
+        (is (string= "shared-model" (llm:model-of p)))
+        (is (string= "https://openrouter.ai/api/v1" (llm::oai-base-url p)))))))
+
+(test an-explicit-translator-model-takes-the-anthropic-key-by-the-same-rules
+  "make-translator with :model builds an Anthropic provider itself. Its key follows #290:
+the role's key, then PRAXEON_ANTHROPIC_API_KEY, then PRAXEON_LLM_API_KEY only when
+PRAXEON_LLM_IMPL is anthropic. This also covers the construction itself, which had no test."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "openrouter")
+                 ("PRAXEON_LLM_API_KEY" "openrouter-shared-key")
+                 ("PRAXEON_TRANSLATE_API_KEY" nil)
+                 ("PRAXEON_ANTHROPIC_API_KEY" nil))
+    (flet ((key () (llm:anthropic-api-key
+                    (praxeon/translate:make-translator :model "claude-haiku-4-5"))))
+      (is (null (key)) "the shared key belongs to openrouter here")
+      (setf (uiop:getenv "PRAXEON_ANTHROPIC_API_KEY") "anthropic-key")
+      (is (string= "anthropic-key" (key)))
+      (setf (uiop:getenv "PRAXEON_TRANSLATE_API_KEY") "translate-key")
+      (is (string= "translate-key" (key)))
+      (funcall (%emb-env-fn "UNSETENV") "PRAXEON_TRANSLATE_API_KEY")
+      (funcall (%emb-env-fn "UNSETENV") "PRAXEON_ANTHROPIC_API_KEY")
+      (setf (uiop:getenv "PRAXEON_LLM_IMPL") "anthropic")
+      (is (string= "openrouter-shared-key" (key))
+          "control: with anthropic as the shared backend, the shared key applies"))))
 
 (test an-unregistered-embedding-impl-is-refused-by-name
   "A missing impl and a misspelt one are the same mistake, and neither may fall back to a

@@ -21,11 +21,18 @@
 ;;;; A predicate makes those look like one question, and a caller who forgets to ask gets a
 ;;;; runtime signal where they should have had a type nobody offered them.
 ;;;;
-;;;; THE COST THAT LOOKED LIKE AN ARGUMENT AGAINST THIS, MEASURED: none. `%env-for' already
-;;;; resolves PRAXEON_<ROLE>_<SUFFIX> > PRAXEON_<IMPL>_<SUFFIX> > PRAXEON_LLM_<SUFFIX>, so
-;;;; an embedding impl inherits BASE_URL and API_KEY from the shared level. The marginal
-;;;; configuration is one variable, the model -- and that is not duplication, because
-;;;; `text-embedding-3-small' and a chat model are necessarily different values.
+;;;; HOW AN EMBEDDING PROVIDER FINDS ITS SETTINGS (#290). An embedding provider reads
+;;;; embedding variables only, never the chat ones (PRAXEON_<ROLE>_<SETTING>,
+;;;; PRAXEON_LLM_<SETTING>). For backend X each setting resolves, most specific first:
+;;;;   1. PRAXEON_<ROLE>_EMBED_<SETTING>, when a role is being resolved;
+;;;;   2. PRAXEON_EMBED_<SETTING>;
+;;;;   3. X's own variable: PRAXEON_<X>_API_KEY and PRAXEON_<X>_BASE_URL for the key and the
+;;;;      endpoint, PRAXEON_<X>_EMBED_MODEL and PRAXEON_<X>_EMBED_DIMENSIONS for the model
+;;;;      and the width (PRAXEON_<X>_MODEL names X's chat model where X also serves chat);
+;;;;   4. X's built-in default, which exists for the endpoint, model and width, never for a
+;;;;      key.
+;;;; There is no default embedding provider: with no PRAXEON_<ROLE>_EMBED_IMPL or
+;;;; PRAXEON_EMBED_IMPL, `make-embedding-provider-from-env' signals NO-EMBEDDING-PROVIDER.
 ;;;;
 ;;;; THE DIMENSION IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE CODE (#150): "a schema
 ;;;; hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small". So a provider
@@ -38,10 +45,10 @@
 ;;;; ONE. `make-embedding-provider-from-env' reads `*provider-role*', a special, and #158
 ;;;; records that nothing currently resolves a provider across a thread boundary -- latent
 ;;;; rather than live. Memory writes during a fanned-out turn are precisely where that would
-;;;; stop being latent: inside a worker the role level falls through to impl and then to
-;;;; shared, which is not an error, it is the WRONG MODEL, quietly, for that call -- and it
-;;;; surfaces later as a width that does not match the column. Resolve once where the role
-;;;; is bound and pass the provider in, and #158 cannot reach this seam at all.
+;;;; stop being latent: inside a worker the role level falls through to the process-wide
+;;;; PRAXEON_EMBED_* level, which is not an error, it is the WRONG MODEL, quietly, for that
+;;;; call -- and it surfaces later as a width that does not match the column. Resolve once
+;;;; where the role is bound and pass the provider in, and #158 cannot reach this seam at all.
 
 (in-package #:praxeon/llm)
 
@@ -123,16 +130,13 @@ column, which is true and unhelpful."
 
 (defclass openai-compatible-embeddings (embedding-provider)
   ((model :initarg :model
-          :initform (or (uiop:getenv "PRAXEON_EMBED_MODEL") "text-embedding-3-small")
+          :initform (or (%getenv "PRAXEON_EMBED_MODEL") "text-embedding-3-small")
           :reader oai-embed-model)
    (base-url :initarg :base-url
-             :initform (or (uiop:getenv "PRAXEON_EMBED_BASE_URL")
-                           (uiop:getenv "PRAXEON_LLM_BASE_URL")
-                           "http://localhost:11434/v1")
+             :initform (or (%getenv "PRAXEON_EMBED_BASE_URL") "http://localhost:11434/v1")
              :reader oai-embed-base-url)
    (api-key :initarg :api-key
-            :initform (or (uiop:getenv "PRAXEON_EMBED_API_KEY")
-                          (uiop:getenv "PRAXEON_LLM_API_KEY"))
+            :initform (%getenv "PRAXEON_EMBED_API_KEY")
             :reader oai-embed-api-key)
    (dimensions :initarg :dimensions
                :initform 1536
@@ -216,37 +220,72 @@ complete, or PRAXEON_EMBED_IMPL something that cannot embed.")
                  (remove key *embedding-impls* :key #'car :test #'string=))))
   name)
 
+(defun %embed-env-for (impl setting)
+  "The embedding SETTING (\"API_KEY\", \"BASE_URL\", \"MODEL\" or \"DIMENSIONS\") for
+backend IMPL, most specific first: PRAXEON_<ROLE>_EMBED_<SETTING>, PRAXEON_EMBED_<SETTING>,
+then IMPL's own variable. NIL when none is set; the caller supplies IMPL's default.
+
+IMPL's own variable for the model and the width carries EMBED_ (PRAXEON_OPENAI_EMBED_MODEL),
+because PRAXEON_<IMPL>_MODEL is the chat model of a backend that serves both. The key and the
+endpoint are the backend's own (PRAXEON_VOYAGE_API_KEY). No chat variable is read (#290)."
+  (or (and *provider-role*
+           (%getenv (format nil "PRAXEON_~:@(~A~)_EMBED_~A" *provider-role* setting)))
+      (%getenv (format nil "PRAXEON_EMBED_~A" setting))
+      (%getenv (format nil "PRAXEON_~:@(~A~)_~:[~;EMBED_~]~A" impl
+                       (member setting '("MODEL" "DIMENSIONS") :test #'string=)
+                       setting))))
+
+(defun %embed-required-key (impl)
+  "The embedding API key for IMPL, or MISSING-PROVIDER-KEY listing the variables that would
+supply one. For a hosted backend, where a request without a key cannot succeed."
+  (or (%embed-env-for impl "API_KEY")
+      (error 'praxeon/conditions:missing-provider-key
+             :impl impl :role *provider-role*
+             :variables (append
+                         (and *provider-role*
+                              (list (format nil "PRAXEON_~:@(~A~)_EMBED_API_KEY"
+                                            *provider-role*)))
+                         (list "PRAXEON_EMBED_API_KEY"
+                               (format nil "PRAXEON_~:@(~A~)_API_KEY" impl))))))
+
 (defun make-embedding-provider-from-env (&key role)
-  "Construct the embedding provider for ROLE, or the default when ROLE is NIL.
+  "Construct the embedding provider for ROLE, or the process-wide one when ROLE is NIL.
+
+The backend is named by PRAXEON_<ROLE>_EMBED_IMPL, then PRAXEON_EMBED_IMPL. There is no
+default: when neither is set this signals NO-EMBEDDING-PROVIDER before any request, and an app
+that can do without embeddings handles it (#290). A name nothing is registered under signals
+DELIBERATION-FAILURE.
 
 CALL THIS ON THE THREAD THAT OWNS THE ROLE. It reads `*provider-role*', and #158 records
 that a resolution inside a worker thread falls through to the shared level without erroring
 -- the wrong model, quietly. Resolve here and pass the provider to EMBED."
   (let* ((*provider-role* (and role (string role)))
          (impl (or (and *provider-role*
-                        (uiop:getenv (format nil "PRAXEON_~:@(~A~)_EMBED_IMPL" *provider-role*)))
-                   (uiop:getenv "PRAXEON_EMBED_IMPL")
-                   "openai"))
-         (ctor (cdr (assoc (string-downcase impl) *embedding-impls* :test #'string=))))
+                        (%getenv (format nil "PRAXEON_~:@(~A~)_EMBED_IMPL" *provider-role*)))
+                   (%getenv "PRAXEON_EMBED_IMPL")))
+         (ctor (and impl
+                    (cdr (assoc (string-downcase impl) *embedding-impls* :test #'string=)))))
+    (unless impl
+      (error 'praxeon/conditions:no-embedding-provider :role *provider-role*))
     (unless ctor
       (error 'praxeon/conditions:deliberation-failure
              :detail (format nil "no embedding impl registered for impl=~A~@[ (role ~A)~]"
                              impl role)))
     (funcall ctor)))
 
-(defun make-openai-embeddings-from-env (impl &optional default-base-url)
-  "An OPENAI-COMPATIBLE-EMBEDDINGS provider for IMPL, through the shared resolution chain.
-
-`%env-for' is what makes the separate hierarchy free: BASE_URL and API_KEY fall through to
-PRAXEON_LLM_* and are inherited from whatever the completion side already has. Only MODEL
-and DIMENSIONS are genuinely this provider's own, and both have to be stated anyway."
-  (let ((declared (%env-for impl "EMBED_DIMENSIONS")))
+(defun make-openai-embeddings-from-env (impl &optional default-base-url key-required)
+  "An OPENAI-COMPATIBLE-EMBEDDINGS provider for IMPL, each setting found by %EMBED-ENV-FOR.
+KEY-REQUIRED is true for a hosted service, where a missing key is reported here rather than
+by the first request."
+  (let ((declared (%embed-env-for impl "DIMENSIONS")))
     (make-instance 'openai-compatible-embeddings
-                   :model (or (%env-for impl "EMBED_MODEL") "text-embedding-3-small")
-                   :base-url (or (%env-for impl "BASE_URL")
+                   :model (or (%embed-env-for impl "MODEL") "text-embedding-3-small")
+                   :base-url (or (%embed-env-for impl "BASE_URL")
                                  default-base-url
                                  "http://localhost:11434/v1")
-                   :api-key (%env-for impl "API_KEY")
+                   :api-key (if key-required
+                                (%embed-required-key impl)
+                                (%embed-env-for impl "API_KEY"))
                    :dimensions (if declared (parse-integer declared) 1536))))
 
 (register-embedding-impl "openai" (lambda () (make-openai-embeddings-from-env "openai")))
@@ -255,4 +294,4 @@ and DIMENSIONS are genuinely this provider's own, and both have to be stated any
                                      "ollama" "http://localhost:11434/v1")))
 (register-embedding-impl "openrouter"
                          (lambda () (make-openai-embeddings-from-env
-                                     "openrouter" "https://openrouter.ai/api/v1")))
+                                     "openrouter" "https://openrouter.ai/api/v1" t)))
