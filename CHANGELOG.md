@@ -12,8 +12,28 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **hyperion/static: `file-response` no longer serves every file under the root.** It refuses
+  what `*default-deny*` matches:
+  - dotfiles and dot-directories (`.env`, `.git/`), except `/.well-known/` at the root;
+  - editor and backup copies (`*~`, `*.bak`, `*.swp`, `*.orig`);
+  - SQL and database files (`*.sql`, `*.sqlite`, `*.sqlite3`, `*.db`);
+  - `*.pem`, `*.key` and `*.log`.
+
+  It also refuses a path whose file resolves outside the root through a symbolic link, and a
+  path part containing a colon. A refused path returns NIL, as a missing file does, so the
+  caller's 404 applies. An app that meant to publish one of these files moves it, or binds
+  `*default-deny*`. Matching ignores case and trailing dots and spaces, so `SCHEMA.SQL` and
+  `schema.sql.` are refused too. (#296)
+
 ### Added
 
+- **hyperion/static: `:deny` and `:allow` on `file-response`, and `make-static-handler`.**
+  `:deny` adds patterns to the defaults: `"seed/"` for a directory, `"*.csv"` for a name
+  anywhere, `"data/*.json"` for a path. `:allow` serves only paths under the listed prefixes.
+  `make-static-handler` returns a handler for a root and logs its effective rules once, when it
+  is made. `denied-by` says why a path is refused. (#296)
 - **aion/http-client: fetching a URL a user supplied.**
   - `fetch-public` resolves the host itself and refuses the URL, with `fetch-refused` naming the
     reason, when any address it resolves to is loopback, private, link-local (which includes the

@@ -16,6 +16,16 @@
 ;;;;
 ;;;; Dates are formatted/parsed here (RFC 9110 IMF-fixdate) rather than pulling in a
 ;;;; time library: one fixed-width format, both directions, no dependency.
+;;;;
+;;;; What is not served (#296). Everything under the root used to be public apart from `..'.
+;;;; An app that kept a seed file, a SQL dump or a `.env' beside its assets published it. Now
+;;;; a path is refused when any pattern in *DEFAULT-DENY*, or in the app's own :DENY, matches
+;;;; it, and when :ALLOW is given, a path outside those prefixes is refused too. Matching
+;;;; ignores case, because the file systems of macOS and Windows do, and it trims trailing
+;;;; dots and spaces from each part of the path, because Windows opens `schema.sql.' as
+;;;; `schema.sql'. A path whose file resolves outside the root, through a symbolic link, is
+;;;; refused as well. A refused path gives NIL, like a missing file, so the caller's 404 does
+;;;; not tell the client that the file exists.
 
 (in-package #:hyperion/static)
 
@@ -135,6 +145,80 @@ second, so a stale date must not override a fresh tag."
         (let ((since (parse-http-date (%header env "if-modified-since"))))
           (and since last-modified (<= last-modified since))))))
 
+;;; --- what is not served (#296) ----------------------------------------------
+
+(defparameter *default-deny*
+  '(".*"                                  ; dotfiles and dot-directories: .env, .git/, .htpasswd
+    "*~" "*.bak" "*.swp" "*.orig"         ; editor and backup copies
+    "*.sql" "*.sqlite" "*.sqlite3" "*.db" ; SQL and database files
+    "*.pem" "*.key"                       ; keys and certificates with keys
+    "*.log")
+  "Patterns FILE-RESPONSE refuses in addition to an app's own :DENY. A pattern without a slash
+is matched against every part of the path, so \".*\" refuses \".env\" and \"a/.git/config\".
+A pattern ending in a slash refuses that directory under the root and everything in it
+(\"seed/\"). Any other pattern is matched against the whole path relative to the root
+(\"data/*.json\"). `*' matches any run of characters other than a slash. Matching ignores
+case. The directory /.well-known/ at the root is the one exception to matching every part:
+it is public by definition (RFC 8615), so \".*\" does not refuse it, though it refuses a
+dotfile inside it.")
+
+(defun %glob-match-p (pattern string)
+  "Does STRING match PATTERN, where `*' matches any run of characters other than a slash?
+Case is ignored."
+  (labels ((m (p i)
+             (cond ((= p (length pattern)) (= i (length string)))
+                   ((char= (char pattern p) #\*)
+                    (loop for k from i to (length string)
+                          thereis (m (1+ p) k)
+                          until (and (< k (length string)) (char= (char string k) #\/))))
+                   ((= i (length string)) nil)
+                   ((char-equal (char pattern p) (char string i)) (m (1+ p) (1+ i)))
+                   (t nil))))
+    (m 0 0)))
+
+(defun %path-parts (relative)
+  "RELATIVE (a path with forward slashes) as its parts, each with trailing dots and spaces
+trimmed, since Windows opens `x.sql.' and `x.sql ' as `x.sql'."
+  (mapcar (lambda (part) (string-right-trim ". " part))
+          (remove "" (uiop:split-string relative :separator "/") :test #'string=)))
+
+(defun denied-by (relative patterns &key allow)
+  "The reason RELATIVE, a path under the static root such as \"seed/users.json\", is not
+served: the first of PATTERNS that matches it, :OUTSIDE-ALLOW when ALLOW (a list of directory
+prefixes such as \"assets/\") is given and it is under none of them, or :STREAM-NAME when a part
+contains a colon (on Windows, a name for an alternate data stream of a file). NIL when it may be
+served."
+  (let* ((parts (%path-parts relative))
+         (joined (format nil "~{~A~^/~}" parts)))
+    (cond
+      ((some (lambda (part) (find #\: part)) parts) :stream-name)
+      ((and allow
+            (notany (lambda (prefix)
+                      (let ((p (string-right-trim "/" prefix)))
+                        (and (> (length joined) (length p))
+                             (string-equal p joined :end2 (length p))
+                             (char= #\/ (char joined (length p))))))
+                    allow))
+       :outside-allow)
+      (t
+       (find-if (lambda (pattern)
+                  (cond ((and (plusp (length pattern))
+                              (char= #\/ (char pattern (1- (length pattern)))))
+                         (let ((p (subseq pattern 0 (1- (length pattern)))))
+                           (and (> (length joined) (length p))
+                                (string-equal p joined :end2 (length p))
+                                (char= #\/ (char joined (length p))))))
+                        ((find #\/ pattern) (%glob-match-p pattern joined))
+                        (t (some (lambda (part) (%glob-match-p pattern part))
+                                 ;; /.well-known/ at the root is public by definition (RFC
+                                 ;; 8615: ACME challenges, security.txt), so that one directory
+                                 ;; name is not matched against the part patterns. Its files
+                                 ;; still are, so a dotfile inside it is refused.
+                                 (if (and parts (string-equal (first parts) ".well-known"))
+                                     (rest parts)
+                                     parts)))))
+                patterns)))))
+
 ;;; --- serving ---------------------------------------------------------------
 
 (defun %safe-relative (path-info)
@@ -144,10 +228,14 @@ second, so a stale date must not override a fresh tag."
                (not (search ".." clean)))
       (ignore-errors (uiop:parse-unix-namestring clean)))))
 
-(defun file-response (root path-info &key env (cache-control *cache-control*))
+(defun file-response (root path-info &key env (cache-control *cache-control*) deny allow)
   "Serve the file under ROOT (a directory) named by URL PATH-INFO. Returns a Clack
 response list, or NIL if PATH-INFO does not resolve to a readable regular file within
 ROOT (so the caller can fall through to a 404).
+
+NIL too when the path is not to be served (#296): when a pattern in *DEFAULT-DENY* or in DENY
+matches it, when ALLOW is given and it is under none of those prefixes, or when its file
+resolves outside ROOT. See DENIED-BY for the patterns.
 
 The response carries `ETag`, `Last-Modified`, and `Cache-Control` (CACHE-CONTROL, default
 *CACHE-CONTROL*; NIL omits it -- pass *IMMUTABLE-CACHE-CONTROL* for fingerprinted URLs).
@@ -156,10 +244,16 @@ Pass ENV -- the Clack request plist -- to honor conditional requests: when the c
 validators still match, the result is `304` with no body. Called without ENV the behaviour
 is unchanged apart from the new headers, so existing two-argument callers keep working."
   (let ((rel (%safe-relative path-info)))
-    (when rel
-      (let ((file (merge-pathnames rel (truename root))))
+    (when (and rel
+               (not (denied-by (string-left-trim "/" path-info)
+                               (append *default-deny* deny) :allow allow)))
+      (let* ((base (truename root))
+             (file (merge-pathnames rel base)))
         (when (and (uiop:file-exists-p file)
-                   (not (uiop:directory-exists-p file)))
+                   (not (uiop:directory-exists-p file))
+                   ;; Resolved, the file must still be under the root: a symbolic link
+                   ;; under it may point anywhere.
+                   (uiop:subpathp (truename file) base))
           (let* ((file (truename file))
                  (mtime (ignore-errors (file-write-date file)))
                  (etag (file-etag file))
@@ -176,3 +270,18 @@ is unchanged apart from the new headers, so existing two-argument callers keep w
                 (list 200
                       (list* :content-type (content-type-for file) headers)
                       file))))))))
+
+(defun make-static-handler (root &key deny allow (cache-control *cache-control*))
+  "A function of a Clack env that serves ROOT's files by the env's PATH-INFO through
+FILE-RESPONSE with DENY, ALLOW and CACHE-CONTROL, and returns NIL for anything not served, so
+the caller falls through to its 404.
+
+It logs the effective rules once, here, the way CSRF exemptions are logged (#296): the root,
+every pattern refused (the defaults and DENY), and ALLOW when given."
+  (let ((patterns (append *default-deny* deny))
+        (allow (copy-list allow)))
+    (log:info "static: serving files" :root (namestring (truename root))
+                                      :deny patterns :allow allow)
+    (lambda (env)
+      (file-response root (or (getf env :path-info) "") :env env :cache-control cache-control
+                                                         :deny deny :allow allow))))

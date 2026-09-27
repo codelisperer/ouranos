@@ -461,13 +461,15 @@
 ;;; --- Static asset serving -----------------------------------------------
 (cl:defpackage #:hyperion/static
   (:use #:cl)
+  (:local-nicknames (#:log #:aion/log))
   (:documentation
    "Serve files from a root directory as Clack responses, with content-type by
     extension and .. traversal guarded. Pathname-based so it works on Windows and
     Unix alike. Responses carry cache validators (ETag / Last-Modified) and a
     Cache-Control policy; pass the request env and conditional requests
     (If-None-Match / If-Modified-Since) are answered with 304 and no body.")
-  (:export #:file-response #:content-type-for
+  (:export #:file-response #:content-type-for #:make-static-handler
+           #:*default-deny* #:denied-by
            #:*cache-control* #:*immutable-cache-control*
            #:file-etag #:not-modified-p #:http-date #:parse-http-date))
 
