@@ -114,7 +114,8 @@
 
 (defsystem "praxeon/retrieval/tests"
   :description "praxeon/retrieval against a real Postgres with pgvector (#138)."
-  :depends-on ("praxeon/retrieval" "praxeon" "mnemosyne" "bordeaux-threads" "fiveam")
+  :depends-on ("praxeon/retrieval" "praxeon" "mnemosyne" "bordeaux-threads" "aion/test-threads"
+               "fiveam")
   :components ((:module "tests"
                 :components ((:file "retrieval-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))

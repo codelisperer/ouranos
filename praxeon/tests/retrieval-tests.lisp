@@ -17,7 +17,8 @@
                     (#:mig #:mnemosyne/migrate)
                     (#:param #:mnemosyne/param)
                     (#:q #:mnemosyne/query)
-                    (#:bt #:bordeaux-threads))
+                    (#:bt #:bordeaux-threads)
+                    (#:tt #:aion/test-threads))
   (:export #:run-tests))
 
 (in-package #:praxeon/retrieval/tests)
@@ -489,14 +490,16 @@ processes as far as the lock can tell."
              (is-true other-done "a sync of another corpus is not blocked")
              (is-false done "and the waiting sync is still waiting")
              (setf release t)
-             (mapc #'bt:join-thread threads)
+             (tt:join-all threads)
              (setf threads '())
              (is (null errors) "~{~A~^; ~}" errors)
              (is-true done "it finishes once the lock is released")
              (is (= 3 (%column-count store-a "corpus = ?" "policy")))
              (is (= 3 (%column-count store-a "corpus = ?" "other"))))
         (setf release t)
-        (mapc #'bt:join-thread threads)
+        ;; A deadline here too, and its failure ignored: the test's own failure is the one
+        ;; worth reporting, and cleanup must still close the connection.
+        (ignore-errors (tt:join-all threads))
         (conn:disconnect conn-b)))))
 
 (test concurrent-syncs-of-one-corpus-do-not-collide
@@ -520,7 +523,7 @@ exactly one version at the end."
                                                              (format nil "~A ~D ~D" tag i n)))))))))
              (let ((threads (list (bt:make-thread (worker store-a "a"))
                                   (bt:make-thread (worker store-b "b")))))
-               (mapc #'bt:join-thread threads))
+               (tt:join-all threads))
              (is (null errors) "~{~A~^; ~}" errors)
              (is (= 20 (%column-count store-a "corpus = ?" "policy"))))
         (conn:disconnect conn-b)))))
@@ -542,3 +545,90 @@ item's source is the passage, whose provenance was read from its row."
                      (ctx:ctx-item-content item)))
         (is (eq p (ctx:ctx-item-source item)))
         (signals error (rt:passage->ctx-item p nil))))))
+
+;;; --- review follow-ups on #306 --------------------------------------------------------
+
+(test two-documents-may-use-the-same-section-id
+  "A section is identified by its document, its id and its locale. Two documents that both
+number their sections from 1 coexist, and a sync of one document never touches the other's
+rows: doc-2's section keeps its embedding while doc-1's is replaced."
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy"))
+          (embedder (make-instance 'word-embedder)))
+      (rt:sync-corpus corpus (list (sec "1" "Refunds take 30 days." :document-id "doc-1")
+                                   (sec "1" "Payouts are monthly." :document-id "doc-2")))
+      (is (= 2 (%column-count store "section_id = ?" "1")))
+      (rt:embed-pending corpus embedder)
+      (let ((report (rt:sync-document corpus "doc-1"
+                                      (list (sec "1" "Refunds take 14 days." :document-id "doc-1")))))
+        (is (= 1 (rt:sync-report-replaced report)))
+        (is (= 0 (rt:sync-report-removed report))))
+      (is (= 1 (%column-count store "document_id = ? AND embedding IS NOT NULL" "doc-2"))
+          "doc-2's section was not deleted or re-chunked")
+      (is (= 1 (%column-count store "document_id = ? AND embedding IS NULL" "doc-1")))
+      (rt:sync-document corpus "doc-1" '())
+      (is (= 1 (%column-count store "true")) "removing doc-1 leaves doc-2's section 1"))))
+
+(test a-translation-is-matched-to-the-original-in-its-own-document
+  "Two documents with a section 4.2 each, one of them edited since its translation was made.
+Each translation's status is computed against the original in its own document."
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "terms"))
+           (a "4.2 Refunds take 30 days.")
+           (b "4.2 Payouts are monthly."))
+      (rt:sync-corpus corpus
+                      (list (sec "4.2" a :document-id "doc-a")
+                            (sec "4.2" "4.2 Reembolsos en 30 días." :document-id "doc-a" :locale "es"
+                                 :locale-role :derived :derived-from "4.2"
+                                 :source-fingerprint (rt:section-fingerprint a))
+                            (sec "4.2" b :document-id "doc-b")
+                            (sec "4.2" "4.2 Pagos mensuales." :document-id "doc-b" :locale "es"
+                                 :locale-role :derived :derived-from "4.2"
+                                 :source-fingerprint (rt:section-fingerprint "an older original"))))
+      (let ((status (make-hash-table :test #'equal)))
+        (dolist (p (rt:retrieval-result-passages (rt:retrieve-exact corpus "4.2" :limit 10)))
+          (let ((pv (rt:passage-provenance p)))
+            (when (equal "es" (rt:provenance-locale pv))
+              (setf (gethash (rt:provenance-document-id pv) status)
+                    (rt:provenance-translation pv)))))
+        (is (eq :current (gethash "doc-a" status)))
+        (is (eq :older-original (gethash "doc-b" status)))))))
+
+(test embed-pending-refuses-a-batch-size-that-is-not-positive
+  "A batch size of zero would query LIMIT 0 and report nothing embedded, as if nothing were
+pending. It is refused before any query. Control: 1 works."
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy"))
+          (embedder (make-instance 'word-embedder)))
+      (rt:sync-corpus corpus +policy+)
+      (signals error (rt:embed-pending corpus embedder :batch-size 0))
+      (signals error (rt:embed-pending corpus embedder :batch-size -1))
+      (is (null (recorded-calls embedder)))
+      (is (= 3 (rt:embed-pending corpus embedder :batch-size 1))))))
+
+(test completeness-and-candidates-come-from-one-snapshot
+  "Between the candidate query and the count of chunks not yet embedded, another session
+embeds the pending chunk and commits. Both reads use one snapshot, so the result, which left
+that chunk out, still says TRUNCATED with one pending, not COMPLETE."
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (embedder (make-instance 'word-embedder))
+           (conn-b (%connect))
+           (other (rt:make-corpus (rt:make-chunk-store conn-b :table (rt:store-table store)
+                                                               :dimensions 4)
+                                  "policy")))
+      (unwind-protect
+           (progn
+             (rt:ingest corpus +policy+ embedder)
+             (rt:sync-document corpus "doc-1" (append +policy+ (list (sec "4" "Refund refund."))))
+             (let* ((rt::*between-similar-reads*
+                      (lambda () (rt:embed-pending other embedder)))
+                    (r (rt:retrieve-similar corpus embedder "refund" :limit 10)))
+               (is (= 3 (length (rt:retrieval-result-passages r))) "the new chunk was not a candidate")
+               (is (rt:truncated-p (rt:retrieval-result-completeness r)))
+               (is (eql 1 (rt:truncated-pending (rt:retrieval-result-completeness r)))))
+             (is (= 0 (%column-count store "embedding IS NULL")) "the other session's embedding committed")
+             (is (rt:complete-p (rt:retrieval-result-completeness
+                                 (rt:retrieve-similar corpus embedder "refund")))
+                 "and the next search sees it"))
+        (conn:disconnect conn-b)))))

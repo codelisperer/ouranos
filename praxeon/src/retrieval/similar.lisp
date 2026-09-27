@@ -51,6 +51,8 @@ pending. A vector is written only if its chunk still holds the text that was emb
 chunk replaced by a sync in the meantime keeps its NULL embedding and is embedded next time.
 Serialised per corpus with the syncs (WITH-CORPUS-LOCK). The provider is called outside the
 database lock, so searches on the same store can run during the call."
+  (unless (typep batch-size '(integer 1))
+    (error "praxeon/retrieval: :batch-size must be a positive integer, not ~S" batch-size))
   (%check-width corpus embedder)
   (let* ((store (corpus-store corpus))
          (table (store-table store))
@@ -97,6 +99,11 @@ database lock, so searches on the same store can run during the call."
   (let ((report (sync-corpus corpus sections)))
     (values report (embed-pending corpus embedder :batch-size batch-size))))
 
+(defvar *between-similar-reads* nil
+  "Test seam: a function called between RETRIEVE-SIMILAR's two reads, or NIL. The suite uses it
+to commit an embedding from another session at that moment and check that the result still
+describes one snapshot.")
+
 (defun %pending-count (corpus deriver)
   (let ((row (first (rc::%fetch (corpus-store corpus)
                                 (list :select (list (list :as (list :count :*) :n))
@@ -120,18 +127,27 @@ or a model change."))
   (let* ((store (corpus-store corpus))
          (deriver (deriver-of embedder))
          (vector-text (%vector-text store (llm:embed-query embedder query)))
-         (rows (let ((q:*warn-unindexed-vector-distance* nil)) ; the exact scan is the design
-                 (rc::%fetch store
-                             (list :select (append rc::+passage-columns+
-                                                   (list (list :as (list :<=> :embedding vector-text)
-                                                               :distance)))
-                                   :from (list (store-table store))
-                                   :where (corpus-where corpus
-                                                        (list := :embedding_deriver deriver)
-                                                        (list :is-not-null :embedding))
-                                   :order-by '(:distance)
-                                   :limit limit))))
-         (pending (%pending-count corpus deriver)))
+         rows pending)
+    ;; ONE SNAPSHOT FOR BOTH READS. The candidates and the count of chunks that could not be
+    ;; candidates are read in one REPEATABLE READ transaction. Read separately, an
+    ;; EMBED-PENDING committing in between would fill a chunk after the candidate query missed
+    ;; it and before the count, and the result would say COMPLETE while leaving that chunk out.
+    (rc::with-db (store)
+      (conn:with-transaction ((store-connection store))
+        (conn:exec (store-connection store) "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        (setf rows (let ((q:*warn-unindexed-vector-distance* nil)) ; the exact scan is the design
+                     (rc::%fetch store
+                                 (list :select (append rc::+passage-columns+
+                                                       (list (list :as (list :<=> :embedding vector-text)
+                                                                   :distance)))
+                                       :from (list (store-table store))
+                                       :where (corpus-where corpus
+                                                            (list := :embedding_deriver deriver)
+                                                            (list :is-not-null :embedding))
+                                       :order-by '(:distance)
+                                       :limit limit))))
+        (when *between-similar-reads* (funcall *between-similar-reads*))
+        (setf pending (%pending-count corpus deriver))))
     (rc::%make-retrieval-result
      (rc::%rows->passages corpus rows :with-distance t)
      (if (plusp pending)
