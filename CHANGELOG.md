@@ -14,6 +14,10 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/memory-db: `ensure-schema` no longer creates the `vector` extension.** It checks
+  `pg_extension` and signals `praxeon/conditions:vector-extension-missing`, naming the database,
+  when the extension is absent. On a managed Postgres the app's role usually cannot create it.
+  Install it once per database as a role that can: `CREATE EXTENSION vector;`. (#138)
 - **praxeon: the shared `PRAXEON_LLM_*` settings apply only to the backend `PRAXEON_LLM_IMPL`
   names.** A role that selects a different backend (`PRAXEON_<ROLE>_IMPL`) takes its settings from
   `PRAXEON_<ROLE>_*` or `PRAXEON_<IMPL>_*` only.
@@ -50,6 +54,25 @@ its tag.
 
 ### Added
 
+- **praxeon/retrieval: document retrieval over an app's corpora.** Load `praxeon/retrieval`.
+  Postgres with pgvector only.
+  - `make-chunk-store` (one table, `praxeon_chunks` by default, for every corpus) and
+    `make-corpus`. A corpus is a name, so an app creates corpora at runtime without DDL.
+  - `make-section` builds the record an app hands in. `sync-corpus` (at boot) and
+    `sync-document` (on write) make a corpus hold exactly those sections, without an embedding
+    provider. `embed-pending` embeds what has no embedding from the current model; `ingest` does
+    both.
+  - `retrieve-exact` (case-insensitive, never touches embeddings) and `retrieve-similar` (cosine,
+    an exact scan of one corpus) return a `retrieval-result` whose completeness is `complete` or
+    `truncated`, and passages carrying their `provenance`, including whether a translation was
+    made from the current original. `passage->ctx-item` takes a required render function.
+  - Syncs and `embed-pending` on one corpus are serialised across processes by a Postgres
+    advisory lock.
+  - `ensure-schema` signals `praxeon/conditions:vector-extension-missing` when the extension is
+    absent, and `embedding-width-changed`, with a `recreate-embedding-column` restart, when the
+    configured width differs from the table's. (#138)
+- **mnemosyne/query: `:ilike`**, rendered as `ILIKE` on Postgres and refused on SQLite and
+  XTDB, whose case rules differ. (#138)
 - **praxeon: `voyage-embeddings`, a Voyage AI embedding provider**, registered as `voyage`.
   - Configuration: `PRAXEON_EMBED_IMPL=voyage` and `PRAXEON_VOYAGE_API_KEY`. The key is required;
     without one, `missing-provider-key` is signalled.
@@ -84,6 +107,9 @@ its tag.
 
 ### Fixed
 
+- **mnemosyne/schema: `make-schema` adds the companion columns of a `:derived-from` field**
+  (`<name>_fingerprint`, `<name>_deriver`), as `defschema` always did. A runtime schema with a
+  derived field had no columns to record staleness in. (#138)
 - **praxeon: `make-translator` with `:model` builds its provider.** It passed an `:auth` initarg
   that `anthropic` does not accept, so it always signalled an error. Its key now resolves as
   `PRAXEON_<ROLE>_API_KEY`, then `PRAXEON_ANTHROPIC_API_KEY`, then `PRAXEON_LLM_API_KEY` only when

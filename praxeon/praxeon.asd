@@ -96,6 +96,29 @@
                 :components ((:file "memory-db-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/memory-db/tests '#:run-tests)))
 
+;;; Document retrieval over an app's corpora (#138). An aux system for the reason
+;;; praxeon/memory-db is one: it stores externally, so it reaches praxeon as an injected seam
+;;; rather than giving praxeon's core a datastore. Postgres with pgvector only.
+(defsystem "praxeon/retrieval"
+  :description "Document retrieval over corpora of an app's sections, exact and by similarity (#138)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("praxeon" "mnemosyne" "dbi" "ironclad" "bordeaux-threads")
+  :serial t
+  :components ((:module "src/retrieval"
+                :serial t
+                :components ((:file "packages")
+                             (:file "corpus")
+                             (:file "similar")))))
+
+(defsystem "praxeon/retrieval/tests"
+  :description "praxeon/retrieval against a real Postgres with pgvector (#138)."
+  :depends-on ("praxeon/retrieval" "praxeon" "mnemosyne" "bordeaux-threads" "fiveam")
+  :components ((:module "tests"
+                :components ((:file "retrieval-tests"))))
+  :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))
+
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
   :author "Bob <eternal.recursion@proton.me>"
