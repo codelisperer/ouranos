@@ -41,24 +41,75 @@ written down before depending on it.
 LABEL is free-form and is for the caller's benefit in a report -- a provider name, an
 endpoint. It carries no semantics here."))
 
+(define-condition response-too-large (http-error)
+  ((limit :initarg :limit :reader response-too-large-limit))
+  (:documentation "The response body was longer than the request's MAX-BODY-BYTES, or declared
+so in Content-Length. The read stops at the limit, so the rest is never received."))
+
+(define-condition pinned-connect-unsupported (http-error) ()
+  (:documentation "A request set CONNECT-ADDRESS on a platform where this client cannot pin the
+connection: on Windows dexador uses WinHTTP, which does not accept a connection opened by the
+caller. Signalled instead of connecting without the pin."))
+
+(define-condition fetch-refused (http-error)
+  ((url :initarg :url :reader fetch-refused-url)
+   (host :initarg :host :initform nil :reader fetch-refused-host)
+   (address :initarg :address :initform nil :reader fetch-refused-address)
+   (reason :initarg :reason :reader fetch-refused-reason))
+  (:report (lambda (c s)
+             (format s "fetch-public refused ~A~@[ (host ~A~@[, address ~A~])~]: ~(~A~)"
+                     (fetch-refused-url c) (fetch-refused-host c)
+                     (let ((a (fetch-refused-address c))) (and a (address-string a)))
+                     (fetch-refused-reason c))))
+  (:documentation "FETCH-PUBLIC refused a URL before connecting. REASON is a keyword: :SCHEME
+(not http or https), :NO-HOST, :UNRESOLVABLE, or the ADDRESS-CATEGORY of an address the host
+resolved to (:LOOPBACK, :PRIVATE, :LINK-LOCAL and so on). ADDRESS is that address."))
+
+(define-condition too-many-redirects (http-error)
+  ((url :initarg :url :reader too-many-redirects-url)
+   (limit :initarg :limit :reader too-many-redirects-limit))
+  (:report (lambda (c s)
+             (format s "fetch-public: more than ~D redirects, the last to ~A"
+                     (too-many-redirects-limit c) (too-many-redirects-url c))))
+  (:documentation "FETCH-PUBLIC was redirected more than its MAX-REDIRECTS times."))
+
 ;;; --- the values -----------------------------------------------------------
 
 (defstruct (request (:constructor make-request (&key (method :get) url
                                                      (headers '()) content
-                                                     connect-timeout read-timeout)))
+                                                     connect-timeout read-timeout
+                                                     (follow-redirects 5) max-body-bytes
+                                                     connect-address ca-path)))
   "An outbound HTTP request being built. HEADERS is an alist of (name . value); CONTENT is a
 JSON/string body or an alist (dexador form-encodes an alist).
 
 TIMEOUTS are here rather than absent because the client's second consumer needed them and
 its first did not: praxeon hand-rolled dexador partly because this client could not express
 a read timeout, and an LLM call without one can hang for as long as a provider is willing to
-hold the socket. NIL leaves dexador's own default in place."
+hold the socket. NIL leaves dexador's own default in place.
+
+For fetching a URL a user supplied (#295; FETCH-PUBLIC builds on all four):
+
+FOLLOW-REDIRECTS  the most redirects to follow. NIL follows none, and a 3xx is the response.
+                  The default, 5, is dexador's own, so a caller that sets nothing is unchanged.
+MAX-BODY-BYTES    when set, the body is read as a stream and reading stops at this many bytes;
+                  a longer body signals RESPONSE-TOO-LARGE. NIL reads the whole body.
+CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to instead of
+                  resolving the URL's host. The Host header, TLS SNI and certificate
+                  verification still use the URL's host name. Not available on Windows, where
+                  dexador uses WinHTTP: signals PINNED-CONNECT-UNSUPPORTED there.
+CA-PATH           trust roots for certificate verification (a PEM file or a directory). NIL
+                  uses the system's."
   (method :get :type keyword)
   (url "" :type string)
   (headers (quote ()) :type list)
   (content nil)
   (connect-timeout nil)
-  (read-timeout nil))
+  (read-timeout nil)
+  (follow-redirects 5)
+  (max-body-bytes nil)
+  (connect-address nil)
+  (ca-path nil))
 
 (defparameter +no-bytes+
   (make-array 0 :element-type '(unsigned-byte 8))
@@ -147,15 +198,13 @@ count is the useful part anyway."
   "An ENTER stage that appends the header NAME: VALUE."
   (make-interceptor (format nil "header:~A" name)
                     :enter (lambda (req)
-                             (make-request :method (request-method req)
-                                           :url (request-url req)
-                                           :headers (cons (cons name value)
-                                                          (request-headers req))
-                                           :content (request-content req)
-                                           ;; carry the timeouts, or a header stage
-                                           ;; would silently reset them
-                                           :connect-timeout (request-connect-timeout req)
-                                           :read-timeout (request-read-timeout req)))))
+                             ;; A copy with one slot changed, so every other slot is carried
+                             ;; as it is. Rebuilding the request slot by slot once reset the
+                             ;; timeouts, and would reset any slot added later.
+                             (let ((copy (copy-request req)))
+                               (setf (request-headers copy)
+                                     (cons (cons name value) (request-headers req)))
+                               copy))))
 
 (defun ensure-2xx (&optional label)
   "A LEAVE stage that turns a non-2xx response into an HTTP-ERROR carrying the status and the
@@ -175,42 +224,85 @@ was."
 
 ;;; --- the runner (enter -> the one effect -> leave) ------------------------
 
+(defun %content-length (headers)
+  (let ((v (header-value headers "content-length")))
+    (and (stringp v) (ignore-errors (parse-integer v)))))
+
+(defun %read-capped (body limit url)
+  "BODY as octets, reading at most LIMIT of them. BODY is a stream (closed here) or a vector.
+Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
+  (flet ((too-large ()
+           (error 'response-too-large :limit limit
+                                      :detail (format nil "the body of ~A is larger than ~D bytes"
+                                                      url limit))))
+    (if (streamp body)
+        (unwind-protect
+             (let* ((buffer (make-array (1+ limit) :element-type '(unsigned-byte 8)))
+                    (end (read-sequence buffer body)))
+               (when (> end limit) (too-large))
+               (subseq buffer 0 end))
+          (ignore-errors (close body)))
+        (let ((octets (%as-octets body)))
+          (when (> (length octets) limit) (too-large))
+          octets))))
+
+(defun %dex-args (req)
+  "The dexador keyword arguments REQ implies, apart from the URL and the stream."
+  (append (list :method (request-method req)
+                :headers (request-headers req)
+                :content (request-content req)
+                ;; ALWAYS binary (pre-publication issue 223). Left to itself dexador decides by
+                ;; content-type and hands back a string for anything it considers text -- at
+                ;; which point the octets are gone and no caller can get them back. Decoding is
+                ;; this client's job now, and it happens in RESPONSE-BODY, once, from bytes that
+                ;; are still there.
+                :force-binary t
+                :max-redirects (or (request-follow-redirects req) 0))
+          (when (request-max-body-bytes req) (list :want-stream t))
+          (when (request-ca-path req) (list :ca-path (request-ca-path req)))
+          ;; Passed only when set, so an unset timeout means dexador's default rather than an
+          ;; explicit NIL, which it treats differently.
+          (when (request-connect-timeout req)
+            (list :connect-timeout (request-connect-timeout req)))
+          (when (request-read-timeout req)
+            (list :read-timeout (request-read-timeout req)))))
+
 (defun %http (req)
   "Perform the single dexador round-trip for REQ, returning a RESPONSE.
 
 A non-2xx is captured as a RESPONSE rather than signalled -- dexador would signal, and that
 would decide the meaning of a status before any LEAVE stage got to. A transport-level failure
 has no response to hand back, so it signals HTTP-ERROR directly."
-  (handler-case
-      (multiple-value-bind (body status headers)
-          (apply #'dex:request (request-url req)
-                 :method (request-method req)
-                 :headers (request-headers req)
-                 :content (request-content req)
-                 ;; ALWAYS binary (pre-publication issue 223). Left to itself dexador decides by content-type
-                 ;; and hands back a string for anything it considers text -- at which
-                 ;; point the octets are gone and no caller can get them back. Decoding is
-                 ;; this client's job now, and it happens in RESPONSE-BODY, once, from
-                 ;; bytes that are still there.
-                 :force-binary t
-                 ;; Passed only when set, so an unset timeout means dexador's default
-                 ;; rather than an explicit NIL, which it treats differently.
-                 (append (when (request-connect-timeout req)
-                           (list :connect-timeout (request-connect-timeout req)))
-                         (when (request-read-timeout req)
-                           (list :read-timeout (request-read-timeout req)))))
-        (make-response :status status :headers headers :bytes (%as-octets body)))
-    (dexador.error:http-request-failed (e)
-      ;; No decode here, deliberately. This runs INSIDE a handler-case handler, so
-      ;; anything it signals escapes the handler-case entirely -- and the old code decoded
-      ;; here, strictly, meaning a non-2xx whose body was not valid UTF-8 raised a raw
-      ;; INVALID-UTF8-STARTER-BYTE instead of the HTTP-ERROR that describes the failure.
-      ;; Storing bytes cannot fail.
-      (make-response :status (dexador.error:response-status e)
-                     :headers (ignore-errors (dexador.error:response-headers e))
-                     :bytes (%as-octets (dexador.error:response-body e))))
-    (error (e)
-      (error 'http-error :detail (format nil "transport error: ~A" e)))))
+  (let ((limit (request-max-body-bytes req))
+        (url (request-url req)))
+    (flet ((response (status headers body)
+             (let ((declared (and limit (%content-length headers))))
+               (when (and declared (> declared limit))
+                 (when (streamp body) (ignore-errors (close body)))
+                 (error 'response-too-large
+                        :limit limit
+                        :detail (format nil "~A declares a body of ~D bytes, over the limit of ~D"
+                                        url declared limit))))
+             (make-response :status status :headers headers
+                            :bytes (if limit (%read-capped body limit url) (%as-octets body)))))
+      (handler-case
+          (multiple-value-bind (body status headers)
+              (if (request-connect-address req)
+                  (%request-pinned req)
+                  (apply #'dex:request url (%dex-args req)))
+            (response status headers body))
+        (http-error (e) (error e))
+        (dexador.error:http-request-failed (e)
+          ;; No decode here, deliberately. This runs INSIDE a handler-case handler, so
+          ;; anything it signals escapes the handler-case entirely -- and the old code decoded
+          ;; here, strictly, meaning a non-2xx whose body was not valid UTF-8 raised a raw
+          ;; INVALID-UTF8-STARTER-BYTE instead of the HTTP-ERROR that describes the failure.
+          ;; Storing bytes cannot fail.
+          (response (dexador.error:response-status e)
+                    (ignore-errors (dexador.error:response-headers e))
+                    (dexador.error:response-body e)))
+        (error (e)
+          (error 'http-error :detail (format nil "transport error: ~A" e)))))))
 
 (defun send-request (request interceptors &key (perform #'%http))
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed
