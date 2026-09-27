@@ -253,8 +253,9 @@
   :version "0.0.0"
   ;; quri and usocket are dexador's own dependencies, named here because fetch.lisp calls them
   ;; directly. cl+ssl is dexador's TLS on every platform but Windows, where dexador uses
-  ;; WinHTTP; fetch.lisp opens a pinned TLS connection with it (#295).
-  :depends-on ("dexador" "quri" "usocket" (:feature (:not :windows) "cl+ssl"))
+  ;; WinHTTP; fetch.lisp opens a pinned TLS connection with it (#295). Guarded on :os-windows,
+  ;; which UIOP maintains before any .asd is read (see scripts/install-deps.lisp).
+  :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl"))
   :serial t
   :components ((:module "src/http-client"
                 :serial t
@@ -268,7 +269,7 @@
   ;; The transport tests run a small HTTP server in the test image (usocket, bordeaux-threads)
   ;; and, off Windows, a TLS one (cl+ssl) (#295).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
-               (:feature (:not :windows) "cl+ssl"))
+               (:feature (:not :os-windows) "cl+ssl"))
   :serial t
   :components ((:module "tests"
                 :serial t

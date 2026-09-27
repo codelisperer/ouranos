@@ -294,7 +294,7 @@ the response. Records every request head. TLS presents the test certificate."
                  (unwind-protect
                       (ignore-errors
                        (let ((stream (usocket:socket-stream conn)))
-                         #-windows
+                         #-os-windows
                          (when tls
                            (setf stream (cl+ssl:make-ssl-server-stream
                                          stream :certificate (namestring (%fixture "pinned-test.crt"))
@@ -321,8 +321,8 @@ the response. Records every request head. TLS presents the test certificate."
 (defun %requests (server) (length (server-heads server)))
 
 (defmacro skip-on-windows (reason &body body)
-  #+windows `(skip ,reason)
-  #-windows `(progn ,@body))
+  #+os-windows `(skip ,reason)
+  #-os-windows `(progn ,@body))
 
 ;;; --- addresses ----------------------------------------------------------------------
 
@@ -352,8 +352,16 @@ IPv4 list."
         (http:address-category (first case)))))
 
 (test only-an-address-parses-as-one
-  (dolist (junk '("1.2.3" "256.1.1.1" "1.2.3.4.5" "example.com" "1::2::3" "12345::" "01.2.3.x"))
+  (dolist (junk '("1.2.3" "256.1.1.1" "1.2.3.4.5" "example.com" "1::2::3" "12345::" "01.2.3.x"
+                  ;; review of #312: a dotted part only as the last 32 bits
+                  "1.2.3.4::" "1.2.3.4::5" "::1.2.3.4:5"))
     (is (null (http:parse-address junk)) "~S parsed as an address" junk))
+  (is (equalp #(0 0 0 0 0 0 0 0 0 0 255 255 1 2 3 4) (http:parse-address "::ffff:1.2.3.4"))
+      "control: a dotted part as the last 32 bits parses")
+  ;; review of #312: anything that is not text or octets is not an address, and says so with
+  ;; NIL rather than a type error
+  (dolist (other (list nil 42 :localhost #(1 2 3 4 5)))
+    (is (null (http:parse-address other)) "~S" other))
   (is (equalp #(10 0 0 5) (http:parse-address "10.0.0.5")))
   (is (string= "0:0:0:0:0:0:0:1" (http:address-string (http:parse-address "::1")))))
 
@@ -573,3 +581,14 @@ POST is followed with a GET and no body. Control: a 307 on the same origin keeps
         (is (eq :post (http:request-method second)))
         (is (equal "x=1" (http:request-content second)))
         (is (assoc "Authorization" (http:request-headers second) :test #'string-equal))))))
+
+(test a-url-without-a-port-connects-to-its-scheme-default
+  "Review of #312: QURI-PORT is NIL when the URL gives no port, and the pinned connection must
+then use 80 for http and 443 for https, not NIL. Checked on the function that chooses the port,
+since binding 80 or 443 in a test needs privileges."
+  (is (= 80 (http::%port-of (quri:uri "http://example.com/path"))))
+  (is (= 443 (http::%port-of (quri:uri "https://example.com/"))))
+  (is (= 8443 (http::%port-of (quri:uri "https://example.com:8443/"))) "an explicit port wins")
+  (is (equal (http::%origin (quri:uri "https://example.com/"))
+             (http::%origin (quri:uri "https://example.com:443/x")))
+      "the default port and the same port written out are one origin"))

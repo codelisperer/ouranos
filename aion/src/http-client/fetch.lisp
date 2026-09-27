@@ -40,6 +40,14 @@ trailing dotted IPv4 part."
                    (list (split string) nil))))
            (words '()))
       (when (and double (search "::" string :start2 (1+ double))) (return-from %parse-ipv6 nil))
+      ;; A dotted IPv4 part may only be the last 32 bits of the address.
+      (let* ((all (append (first groups) (second groups)))
+             (dotted (position-if (lambda (p) (find #\. p)) all)))
+        (when (and dotted (/= dotted (1- (length all))))
+          (return-from %parse-ipv6 nil))
+        (when (and dotted double (null (second groups)))
+          ;; "1.2.3.4::" puts the dotted part before the zeros, so it is not the last 32 bits.
+          (return-from %parse-ipv6 nil)))
       (flet ((words-of (parts)
                (loop for p in parts
                      append (cond ((find #\. p)
@@ -61,16 +69,24 @@ trailing dotted IPv4 part."
               do (setf (aref v i) (ash w -8) (aref v (1+ i)) (logand w #xff)))
         v))))
 
+(defun %port-of (uri)
+  "URI's port, or its scheme's default when the URL gives none: QURI-PORT is NIL then."
+  (or (quri:uri-port uri)
+      (if (string-equal (quri:uri-scheme uri) "https") 443 80)))
+
 (defun parse-address (x)
   "X as an octet vector of 4 or 16 elements: X may already be one, or an IPv4 or IPv6 address
 in text, with or without the brackets a URL puts around IPv6. NIL if X is not an address."
   ;; STRING FIRST: a string is a vector, so a VECTOR clause before it would take every string.
-  (etypecase x
+  ;; Anything that is not a string or a vector is not an address either, so it gives NIL
+  ;; rather than a type error.
+  (typecase x
     (string (let ((s (string-trim "[]" x)))
               (or (%parse-ipv4 s) (%parse-ipv6 s))))
     ((vector (unsigned-byte 8)) (and (member (length x) '(4 16)) x))
     (vector (and (member (length x) '(4 16)) (every (lambda (n) (typep n '(unsigned-byte 8))) x)
-                 (coerce x '(vector (unsigned-byte 8)))))))
+                 (coerce x '(vector (unsigned-byte 8)))))
+    (t nil)))
 
 (defun address-string (address)
   "ADDRESS (an octet vector) as text."
@@ -158,7 +174,7 @@ an IP address in text resolves to itself."
 
 ;;; --- a connection to a chosen address ------------------------------------------------
 
-#-windows
+#-os-windows
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning what DEX:REQUEST returns.
 
@@ -172,7 +188,7 @@ Host header is the URL's too."
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (quri:uri-port uri)
+         (socket (usocket:socket-connect address (%port-of uri)
                                          :element-type '(unsigned-byte 8)
                                          :timeout (request-connect-timeout req)))
          (body-owns-connection nil))
@@ -201,7 +217,7 @@ Host header is the URL's too."
       (unless body-owns-connection
         (ignore-errors (usocket:socket-close socket))))))
 
-#+windows
+#+os-windows
 (defun %request-pinned (req)
   (error 'pinned-connect-unsupported
          :detail (format nil "cannot connect ~A to ~A: on Windows dexador uses WinHTTP, which does not accept a connection opened by the caller"
@@ -215,7 +231,7 @@ Host header is the URL's too."
 (defun %origin (uri)
   (list (string-downcase (or (quri:uri-scheme uri) ""))
         (string-downcase (or (quri:uri-host uri) ""))
-        (quri:uri-port uri)))
+        (%port-of uri)))
 
 (defun %without-credentials (headers)
   (remove-if (lambda (h) (member (string (car h)) '("authorization" "cookie")
