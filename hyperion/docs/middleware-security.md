@@ -2,7 +2,9 @@
 
 *Partly built. The safe-output posture (Spinneret escaping, `hyperion/markdown:render`) is in
 force, the security headers are sent by default (#119, section "Security headers" below), and
-CSRF refusal is `hyperion/csrf:wrap-csrf`. The rest is a design capture.*
+CSRF refusal is `hyperion/csrf:wrap-csrf` for an app with sessions and
+`hyperion/csrf:wrap-same-origin` for one without (#293; `hyperion/desktop` installs it by
+default). The rest is a design capture.*
 
 ## The question
 
@@ -121,7 +123,8 @@ app-neutral (a framework capability, not app logic).
 ## Status
 
 **Built:** the escape-by-default output posture, the security headers (#119, above), and the
-CSRF refusal (`hyperion/csrf`). **Not built:** a single `secure-app` wrapper composing headers,
+CSRF refusal (`hyperion/csrf`: the session-token check, and the Host / Sec-Fetch-Site /
+Origin check for an app with no session, #293). **Not built:** a single `secure-app` wrapper composing headers,
 CSRF and session in one call; a nonce-based strict CSP. Bundles with the **session
 management + secure cookies + user-pref** subsystem already on the roadmap (Phase 4-adjacent). A future ADR records the
 middleware/interceptor decision when we build it.

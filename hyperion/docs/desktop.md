@@ -69,9 +69,27 @@ Hyperion **core stays webview-free** — only apps that want desktop pull the FF
        (port :auto)                          ; :auto → pick a free port; or an integer
        (server (hyperion/server:default-server))
        (shell :webview)                      ; :webview (native) | :browser (dev convenience)
+       (request-guard :same-origin)          ; :same-origin | :none -- the CSRF defence (#293)
        (launcher (default-launcher))         ; path to the hyperion-view binary
        on-ready on-close)
 ```
+
+**CSRF defence (#293).** A desktop app usually has no session, so `hyperion/csrf:wrap-csrf`,
+which compares a token held in the session, cannot protect it. Without a defence, any web page
+the user visits in a browser could post to the app's local routes. `run-app` therefore puts
+`hyperion/csrf:wrap-same-origin` in front of an `:embedded` or `:hybrid` app by default,
+once it knows the port:
+
+- A request whose `Host` header is not `127.0.0.1:<port>` is refused, whatever its method.
+  This refuses a DNS-rebinding page, which the browser treats as same-origin.
+- An unsafe request (anything but GET, HEAD, OPTIONS, TRACE) must carry
+  `Sec-Fetch-Site: same-origin` or `none`. A webview that does not send `Sec-Fetch-Site` must
+  send `Origin: http://127.0.0.1:<port>` instead.
+
+The app's own pages, forms and HTMX requests pass without any change to the app. A refusal
+is a 403 that names the reason, and is logged. `:request-guard :none` installs nothing and
+logs a warning; use it only for an app that does its own checking. `(:remote url)` runs no
+local server, so the keyword does not apply there.
 
 **Backends — the escape hatch (ADR-0009).** The webview needs a URL; where the server
 lives is a mode, not a hardcode:
