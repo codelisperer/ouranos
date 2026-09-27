@@ -211,10 +211,12 @@ served."
                         ((find #\/ pattern) (%glob-match-p pattern joined))
                         (t (some (lambda (part) (%glob-match-p pattern part))
                                  ;; /.well-known/ at the root is public by definition (RFC
-                                 ;; 8615: ACME challenges, security.txt), so that one directory
-                                 ;; name is not matched against the part patterns. Its files
-                                 ;; still are, so a dotfile inside it is refused.
-                                 (if (and parts (string-equal (first parts) ".well-known"))
+                                 ;; 8615: ACME challenges, security.txt), so the dotfile rule
+                                 ;; does not refuse that one directory name. Every other
+                                 ;; pattern still applies to it, and the dotfile rule still
+                                 ;; applies to its files.
+                                 (if (and parts (string= pattern ".*")
+                                          (string-equal (first parts) ".well-known"))
                                      (rest parts)
                                      parts)))))
                 patterns)))))
@@ -278,10 +280,14 @@ the caller falls through to its 404.
 
 It logs the effective rules once, here, the way CSRF exemptions are logged (#296): the root,
 every pattern refused (the defaults and DENY), and ALLOW when given."
-  (let ((patterns (append *default-deny* deny))
-        (allow (copy-list allow)))
+  ;; The defaults are captured here, once, so the rules this logs are the rules it enforces
+  ;; even when the caller bound *DEFAULT-DENY* only around this call.
+  (let* ((defaults *default-deny*)
+         (patterns (append defaults deny))
+         (allow (copy-list allow)))
     (log:info "static: serving files" :root (namestring (truename root))
                                       :deny patterns :allow allow)
     (lambda (env)
-      (file-response root (or (getf env :path-info) "") :env env :cache-control cache-control
-                                                         :deny deny :allow allow))))
+      (let ((*default-deny* defaults))
+        (file-response root (or (getf env :path-info) "") :env env :cache-control cache-control
+                                                           :deny deny :allow allow)))))

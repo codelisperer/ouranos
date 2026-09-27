@@ -209,8 +209,12 @@ served from it, so the dotfile rule does not refuse it. A dotfile inside it is s
 and so is a .well-known directory anywhere but the root."
   (with-static-root (root (".well-known/security.txt" "Contact: x")
                           (".well-known/.secret" "x")
+                          (".well-known/debug.log" "x")
                           ("a/.well-known/x.txt" "x"))
     (is-true (%served-p root "/.well-known/security.txt"))
+    ;; review of #313: only the dotfile rule spares the directory; other patterns still apply
+    (is-false (%served-p root "/.well-known/debug.log"))
+    (is-false (%served-p root "/.well-known/security.txt" :deny '("*.txt")))
     (is-false (%served-p root "/.well-known/.secret"))
     (is-false (%served-p root "/a/.well-known/x.txt"))))
 
@@ -248,8 +252,8 @@ inside them."
 (test a-symbolic-link-out-of-the-root-is-not-served
   "A link under the root may point anywhere; what is served must resolve under the root.
 Control: a link to a file inside the root is served."
-  #+windows (skip "symbolic links need a privilege on Windows")
-  #-windows
+  #+os-windows (skip "symbolic links need a privilege on Windows")
+  #-os-windows
   (with-static-root (root ("app.css" "body{}"))
     (with-static-root (outside ("secret.txt" "outside the root"))
       (uiop:run-program (list "ln" "-s" (namestring (merge-pathnames "secret.txt" outside))
@@ -272,6 +276,11 @@ Control: a link to a file inside the root is served."
         (is (search "seed/" out))
         (is (search ".*" out)))
       (is (= 200 (first (funcall handler (list :path-info "/app.css")))))
+      ;; review of #313: defaults bound only around construction are the ones enforced later
+      (let ((narrow (let ((static:*default-deny* '("*.css"))) (static:make-static-handler root))))
+        (is (null (funcall narrow (list :path-info "/app.css"))))
+        (is (= 200 (first (funcall narrow (list :path-info "/.env"))))
+            "the narrowed defaults replaced the usual ones for this handler"))
       (is (null (funcall handler (list :path-info "/seed/users.json"))))
       (is (null (funcall handler (list :path-info "/.env")))))))
 
