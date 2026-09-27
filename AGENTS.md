@@ -126,6 +126,13 @@ define it.
   issues GitHub has linked for closing; compare it with what the pull request is meant to
   close. After the merge, read the state of every issue the pull request names, because a
   keyword in a commit message can close an issue that list did not show.
+- **A change an app can see gets an entry in [`CHANGELOG.md`](CHANGELOG.md), under
+  Unreleased.** The entry names the behaviour, plus the symbols, settings, tables and files an
+  app would search its own code and notes for. Write "`make-db-auth` refuses to start unless the
+  role-event log table exists", not "auth-db: check the log at construction". Without an entry
+  like this, an app that wrote down a workaround gets no signal when the workaround stops being
+  needed, and the note turns into a false statement (#145). When the hub tags a release, the
+  Unreleased entries become that release's section, and apps pin the tag.
 
 ## The board
 
