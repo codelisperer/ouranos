@@ -248,11 +248,14 @@
 ;;; `--version` would print SBCL's help and never reach the CLI. With it, every arg
 ;;; goes to `cons` (clingon), and the 4 GB heap in effect here is baked in -- handy
 ;;; once `cons build` loads Coalton systems.
+;;;
+;;; Through scripts/dump-image.lisp, not `save-lisp-and-die' directly, so bin/cons takes its
+;;; temporary directory, fasl cache and ASDF configuration from the environment it RUNS in
+;;; (#107). A bare dump froze them at their values here: XDG_CACHE_HOME set afterwards was
+;;; ignored, and a cold-cache test once passed while compiling nothing because of it.
+(load (merge-pathnames "scripts/dump-image.lisp" *root*))
 (let ((bin (merge-pathnames (if (uiop:os-windows-p) "bin/cons.exe" "bin/cons") *root*)))
   (ensure-directories-exist bin)
   (format t "~&bootstrap: saving cons -> ~A~%" (human-path:human-path bin))
-  (sb-ext:save-lisp-and-die
-   bin
-   :toplevel (fdefinition (read-from-string "cons/cli:main"))
-   :executable t
-   :save-runtime-options t))
+  (funcall (read-from-string "ouranos-dump:dump-executable")
+           bin (fdefinition (read-from-string "cons/cli:main"))))
