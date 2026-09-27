@@ -76,10 +76,16 @@ freeing the engine. CLOSE-UNDERLYING, true by default, makes CLOSE close UNDERLY
             ((plusp (length got))
              (loop for b across got do (vector-push-extend b (%plain s))))
             ((not (%pull (tls-stream-engine s) (%underlying s)))
-             ;; The transport ended without close_notify. Treated as end of file, as every
-             ;; TLS client in practice does; a caller that must tell a truncation from a clean
-             ;; close can check the engine.
-             (setf (%eof s) t))))))
+             ;; The transport ended without close_notify, so what was read may be cut short.
+             ;; That is signalled rather than reported as end of file, because a caller that
+             ;; took it for a clean close would accept truncated data as complete. The restart
+             ;; lets a caller whose protocol frames its own messages accept it anyway.
+             (restart-case
+                 (error 'tls-truncated :code +err-conn-eof+ :operation "read"
+                                       :description "the transport ended without close_notify")
+               (treat-as-end-of-file ()
+                 :report "Treat the end of the transport as the end of the stream."
+                 (setf (%eof s) t))))))))
 
 (defmethod sb-gray:stream-read-byte ((s tls-stream))
   (if (%fill s)

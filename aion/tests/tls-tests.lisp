@@ -356,9 +356,63 @@ section 7.4.1.2, because no client we have can offer TLS 1.1."
                  (is (string= "world" (text buf))))
                (is (eq :eof (read-byte s nil :eof)) "the server's close_notify ends the stream")
                (close s)))
-        (sb-thread:join-thread thread :timeout 10 :default nil)
+        ;; JOIN signals, naming the thread, if the server has not finished in time. A
+        ;; server thread still running when the listener closes could write after the
+        ;; assertion below and make it racy.
+        (aion/test-threads:join thread)
         (sock:socket-close listener))
       (is (equal "hello" server-result)))))
+
+(defun %truncating-server (listener)
+  "A thread that accepts one TLS connection on LISTENER, sends \"world\", and closes the
+socket WITHOUT close_notify (CLOSE :ABORT T frees the engine and closes the transport)."
+  (sb-thread:make-thread
+   (lambda ()
+     (let* ((conn (sock:socket-accept listener))
+            (raw (sock:socket-make-stream conn :input t :output t
+                                               :element-type '(unsigned-byte 8)))
+            (s (tls:make-tls-stream raw (server-config))))
+       (write-sequence (octets "world") s)
+       (force-output s)
+       (close s :abort t)))
+   :name "tls-stream truncating server"))
+
+(defmacro %with-truncating-server ((stream) &body body)
+  "BODY with STREAM a client TLS-STREAM to a %TRUNCATING-SERVER."
+  `(let ((listener (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+     (setf (sock:sockopt-reuse-address listener) t)
+     (sock:socket-bind listener #(127 0 0 1) 0)
+     (sock:socket-listen listener 1)
+     (let ((thread (%truncating-server listener)))
+       (unwind-protect
+            (let ((conn (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+              (sock:socket-connect conn #(127 0 0 1) (nth-value 1 (sock:socket-name listener)))
+              (let ((,stream (tls:make-tls-stream
+                              (sock:socket-make-stream conn :input t :output t
+                                                            :element-type '(unsigned-byte 8))
+                              (client-config) :hostname "localhost")))
+                (unwind-protect (progn ,@body)
+                  (close ,stream :abort t))))
+         (aion/test-threads:join thread)
+         (sock:socket-close listener)))))
+
+(test a-transport-that-ends-without-close-notify-is-not-a-clean-end-of-file
+  ;; The review finding on #282: this used to read as end of file, so a caller could take
+  ;; data cut short by a dropped connection or an attacker for a complete reply.
+  (%with-truncating-server (s)
+    (let ((buf (make-array 5 :element-type '(unsigned-byte 8))))
+      (read-sequence buf s)
+      (is (string= "world" (text buf)) "the data sent before the drop still arrives"))
+    (is (typep (handler-case (progn (read-byte s nil :eof) nil)
+                 (tls:tls-truncated (c) c))
+               'tls:tls-truncated))))
+
+(test treat-as-end-of-file-lets-a-caller-accept-a-truncated-stream
+  (%with-truncating-server (s)
+    (let ((buf (make-array 5 :element-type '(unsigned-byte 8))))
+      (read-sequence buf s))
+    (is (eq :eof (handler-bind ((tls:tls-truncated #'tls:treat-as-end-of-file))
+                   (read-byte s nil :eof))))))
 
 ;;; --- nothing is left behind --------------------------------------------------------------
 

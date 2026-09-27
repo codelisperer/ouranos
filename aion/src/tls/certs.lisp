@@ -24,6 +24,27 @@
   (:documentation "An mbedTLS function returned an error. CODE is its negative return value;
 DESCRIPTION is mbedtls_strerror's text for it."))
 
+(define-condition tls-truncated (tls-error)
+  ()
+  (:report (lambda (c stream)
+             (declare (ignore c))
+             (format stream "the TLS connection ended without close_notify, so the data read so far may be incomplete")))
+  (:documentation "The transport under a TLS-STREAM reached end of file before the peer sent
+close_notify. The data read so far may have been cut short by an attacker or a dropped
+connection, so it is not reported as an ordinary end of file.
+
+Signalled with a TREAT-AS-END-OF-FILE restart. A caller whose protocol frames its own
+messages, so that it can tell a complete message from a partial one, may invoke it:
+
+    (handler-bind ((aion/tls:tls-truncated #'aion/tls:treat-as-end-of-file))
+      (read-reply stream))"))
+
+(defun treat-as-end-of-file (&optional condition)
+  "Invoke the TREAT-AS-END-OF-FILE restart of CONDITION (a TLS-TRUNCATED), so the read that
+signalled it returns end of file. Usable directly as a HANDLER-BIND handler."
+  (let ((r (find-restart 'treat-as-end-of-file condition)))
+    (when r (invoke-restart r))))
+
 (define-condition tls-verify-error (tls-error)
   ((flags :initarg :flags :reader tls-verify-error-flags))
   (:report (lambda (c stream)

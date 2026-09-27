@@ -140,5 +140,17 @@ measure."
   (dolist (template '("agent" "cli" "web"))
     (let* ((file (format nil "cons/templates/~A/files/scripts/build-{{name}}.lisp" template))
            (text (uiop:read-file-string (merge-pathnames file td-root))))
-      (is (search "(uiop:call-image-dump-hook)" text) "~A must call uiop:call-image-dump-hook before it dumps" file)
-      (is (search "(uiop:call-image-restore-hook)" text) "~A's toplevel must call uiop:call-image-restore-hook first" file))))
+      ;; Positions, not only presence (review of #285): a restore hook called after main, or
+      ;; a dump hook after the dump, would still be found by a presence check, and the image
+      ;; would read the frozen TEMP and cache again. The call is matched with its opening
+      ;; parenthesis because the file's header comment also names {{name}}:main.
+      (let ((dump-hook (search "(uiop:call-image-dump-hook)" text))
+            (dump (search "(sb-ext:save-lisp-and-die" text))
+            (restore-hook (search "(uiop:call-image-restore-hook)" text))
+            (main (search "({{name}}:main)" text)))
+        (is (and dump-hook dump (< dump-hook dump))
+            "~A must call uiop:call-image-dump-hook before save-lisp-and-die (hook at ~A, dump at ~A)"
+            file dump-hook dump)
+        (is (and restore-hook main (< restore-hook main))
+            "~A's toplevel must call uiop:call-image-restore-hook before ({{name}}:main) (hook at ~A, main at ~A)"
+            file restore-hook main)))))
