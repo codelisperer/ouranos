@@ -12,6 +12,10 @@ its tag.
 
 ## Unreleased
 
+## v0.1.2 — 2026-09-27
+
+Changes since `v0.1.1`. The tag is on `7cf8d72`.
+
 ### An app may have to act
 
 - **praxeon/memory-db: `ensure-schema` no longer creates the `vector` extension.** It checks
