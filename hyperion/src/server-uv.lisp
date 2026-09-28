@@ -556,7 +556,7 @@ message."
       ;; sometimes-fine one is left alone. Narrow on purpose -- only text/event-stream, and
       ;; only under the inline dispatcher. The condition names the fix, because an operator
       ;; meeting this needs POOL-DISPATCH and not a diagnosis.
-      ((and (%sse-response-p headers) (eq *dispatch* *inline-dispatch*))
+      ((and (%sse-response-p headers) (eq (%dispatcher state) *inline-dispatch*))
        (log:error "server-uv: refused an SSE stream on the loop thread"
                   :fix "set *DISPATCH* to (POOL-DISPATCH (POOL:MAKE-POOL ...))")
        (net:write-bytes conn (%latin1 (h1:encode-error 500)))
@@ -577,7 +577,7 @@ message."
          ;; THREAD for the life of the stream, which is fine for a short finite body and
          ;; fatal for an SSE stream that never ends. That is the M1 trade the file header
          ;; already names, at its sharpest -- a streaming app wants POOL-DISPATCH.
-         (funcall *dispatch*
+         (funcall (%dispatcher state)
                   (lambda (ignored)
                     (declare (ignore ignored))
                     (funcall body writer))
@@ -858,7 +858,15 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   (shutdown nil)
   (peer-ended nil)
   (closed nil)
-  (live nil))
+  (live nil)
+  ;; The dispatcher of the server this connection belongs to, when START was given
+  ;; :WORKERS (#324), else NIL and *DISPATCH* applies. See %DISPATCHER.
+  (dispatch nil))
+
+(defun %dispatcher (state)
+  "The dispatcher for a request on the connection whose state is STATE: its server's own,
+when that server was started with :WORKERS, else *DISPATCH*."
+  (or (conn-state-dispatch state) *dispatch*))
 
 (defun %append-octets (state chunk)
   (let ((buf (conn-state-buffer state)))
@@ -1232,7 +1240,7 @@ one level up."
                           (lambda () (%complete conn app state result keep-alive))
                           "a response completion"))))
       (handler-case
-          (funcall *dispatch* app env k)
+          (funcall (%dispatcher state) app env k)
         (error (e)
           (log:error "server-uv: dispatch failed" :condition (princ-to-string e))
           (funcall k e))))))
@@ -1241,26 +1249,35 @@ one level up."
 
 (defstruct (server (:constructor %make-server) (:copier nil))
   loop thread listener host port
+  ;; The aion/pool the handlers run on when START was given :WORKERS, else NIL (#324).
+  workers
   ;; The open connections, CONN -> CONN-STATE. Touched only on the loop thread: added at
   ;; accept, removed by %FINISH, walked by STOP (#262).
   live)
 
-(defun start (app &key (host "127.0.0.1") (port 8080))
+(defun start (app &key (host "127.0.0.1") (port 8080) workers)
   "Serve APP -- a Ring handler, (lambda (env) -> (status headers body)) -- on HOST:PORT.
 
 Returns a SERVER; STOP it. PORT 0 asks the OS to choose, and SERVER-PORT reports what it
 chose, which is what makes a test able to run without a fixed port.
 
+WORKERS, when given, is how many threads run this server's handlers: the server makes an
+aion/pool of that size, dispatches through POOL-DISPATCH on it, and stops it in STOP (#324).
+It applies to this server only; NIL leaves *DISPATCH* in charge, as before.
+
 TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is the
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
 Clack -- owning the socket is what makes it available at all."
+  (check-type workers (or null (integer 1)))
   (let* ((loop (uv:make-loop))
          (live (make-hash-table :test 'eq))
+         (workers-pool (and workers (pool:make-pool :size workers :name "server-uv-worker")))
+         (dispatch (and workers-pool (pool-dispatch workers-pool)))
          (listener (net:listen-tcp
                     loop host port
                     :on-connection
                     (lambda (conn)
-                      (let ((state (%make-conn-state :live live)))
+                      (let ((state (%make-conn-state :live live :dispatch dispatch)))
                         (setf (gethash conn live) state)
                         (net:start-reading
                          conn
@@ -1279,7 +1296,8 @@ Clack -- owning the socket is what makes it available at all."
       (let ((thread (uv:start-loop-thread loop)))
         (log:info "server-uv: listening" :host bound-host :port bound-port)
         (%make-server :loop loop :thread thread :listener listener
-                      :host bound-host :port bound-port :live live)))))
+                      :host bound-host :port bound-port :live live
+                      :workers workers-pool)))))
 
 (defparameter *stop-wait-seconds* 5
   "How long STOP waits for the loop thread to close the listener and the open connections
@@ -1314,4 +1332,26 @@ runs a connection's own close and so never frees its read buffer."
         (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)))
     (uv:close-loop (server-loop server))
     (setf (server-loop server) nil))
+  (when (server-workers server)
+    (%stop-workers (server-workers server))
+    (setf (server-workers server) nil))
   server)
+
+(defun %stop-workers (workers)
+  "Stop the worker pool START made for :WORKERS, waiting up to *STOP-WAIT-SECONDS*.
+
+POOL:STOP-POOL joins every worker and has no timeout, and a handler that never returns, such
+as a server-sent-events body, would make STOP wait for it forever. So the pool is stopped on
+a thread of its own, and STOP stops waiting for it after *STOP-WAIT-SECONDS* and says so."
+  (let* ((done (sb-thread:make-semaphore))
+         ;; THREAD-LIFETIME: independent -- normally joined within *STOP-WAIT-SECONDS*; left
+         ;; running, and logged, only when a handler never returns.
+         (stopper (sb-thread:make-thread (lambda ()
+                                           (unwind-protect (pool:stop-pool workers)
+                                             (sb-thread:signal-semaphore done)))
+                                         :name "server-uv-stop-workers")))
+    (if (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)
+        (sb-thread:join-thread stopper :default nil)
+        (log:warn "server-uv: worker threads still busy after stop"
+                  :workers (pool:pool-workers workers) :busy (pool:pool-busy workers)
+                  :seconds *stop-wait-seconds*))))

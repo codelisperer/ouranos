@@ -168,11 +168,18 @@
    "The effectful CL shell: open a CL-DBI connection for a typed BACKEND (Postgres
     over the wire via cl-postgres; SQLite for local dev), run statements and queries,
     and scope transactions. Recoverable failure is a DB-ERROR condition wrapping the
-    driver's, not a return code. Start/stop-symmetric CONNECT/DISCONNECT + a
-    WITH-CONNECTION macro (no globals -- a future Atropos component wraps them).")
-  (:export #:connect #:disconnect #:with-connection #:*sqlite-busy-timeout-ms*
+    driver's, not a return code. Start/stop-symmetric CONNECT/DISCONNECT, a pool of
+    connections that several threads can share (MAKE-POOL), and a WITH-CONNECTION macro
+    that takes either.")
+  (:export #:connect #:disconnect #:with-connection #:call-with-connection
+           #:*sqlite-busy-timeout-ms*
            #:exec #:query #:with-transaction
-           #:db-error #:db-error-message #:db-error-cause))
+           #:db-error #:db-error-message #:db-error-cause
+           ;; the connection pool (#325)
+           #:pool #:poolp #:make-pool #:close-pool #:pool-size
+           #:pool-open-count #:pool-idle-count
+           #:*checkout-timeout-seconds* #:*idle-check-seconds*
+           #:pool-exhausted #:pool-exhausted-pool #:pool-closed #:pool-closed-pool))
 
 ;;; --- migrate: the migration runner (CL, over backend + conn) -------------
 (cl:defpackage #:mnemosyne/migrate

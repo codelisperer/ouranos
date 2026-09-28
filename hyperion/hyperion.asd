@@ -385,6 +385,28 @@
   :components ((:file "tests/session-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/session-db/tests :run-tests)))
 
+;;; Lends each request a connection from a mnemosyne pool, bound to the app's own connection
+;;; variable (#325), so an app written against one global connection can run under
+;;; `start :workers'. Aux system so hyperion core keeps no DB dependency (same pattern as
+;;; session-db).
+(defsystem "hyperion/db-connection"
+  :description "A Ring middleware that binds an app's connection variable to a pooled mnemosyne connection per request."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("mnemosyne" "aion/log")
+  :serial t
+  :components ((:file "src/db-connection"))
+  :in-order-to ((test-op (test-op "hyperion/db-connection/tests"))))
+
+(defsystem "hyperion/db-connection/tests"
+  :description "Tests for hyperion/db-connection (SQLite, and real worker threads)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/db-connection" "mnemosyne" "fiveam")  ; the tests call mnemosyne/conn: directly
+  :serial t
+  :components ((:file "tests/db-connection-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/db-connection/tests :run-tests)))
+
 ;;; Mnemosyne-backed identity store (users + password auth). Aux system so hyperion core
 ;;; keeps no DB dependency (same pattern as session-db); depends on mnemosyne + ironclad.
 (defsystem "hyperion/auth-db"

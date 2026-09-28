@@ -102,6 +102,7 @@
                              (:file "url")
                              (:file "param")
                              (:file "sqlite-busy")
+                             (:file "pool")         ; uses sqlite-busy's helpers (#325)
                              (:file "sqlite-library")
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))

@@ -173,12 +173,13 @@ is why the argument is always supplied."
   (log:debug "db disconnect")
   (dbi:disconnect connection))
 
-(defmacro with-connection ((var backend) &body body)
-  "Bind VAR to a fresh connection for BACKEND, run BODY, and DISCONNECT on exit
-(start/stop-symmetric; no globals). A future Atropos component wraps this in one line."
-  `(let ((,var (connect ,backend)))
-     (unwind-protect (progn ,@body)
-       (disconnect ,var))))
+(defmacro with-connection ((var source) &body body)
+  "Bind VAR to a connection from SOURCE, run BODY, and give the connection back on exit.
+
+SOURCE is a BACKEND or a POOL (see MAKE-POOL). A backend gives a fresh connection that is
+DISCONNECTed on exit, as it always has. A pool lends one of its connections for the extent of
+BODY and takes it back afterwards; see CALL-WITH-CONNECTION for what happens to it then."
+  `(call-with-connection ,source (lambda (,var) ,@body)))
 
 (defun exec (connection sql &rest params)
   "Execute a statement SQL (DDL/DML) with positional PARAMS (\"?\" placeholders); return
@@ -215,3 +216,268 @@ a single list.)"
   "Run BODY inside a transaction on CONNECTION: commit on normal exit, roll back on a
 non-local exit."
   `(dbi:with-transaction ,connection ,@body))
+
+;;; --- the pool (#325) ------------------------------------------------------------
+;;;
+;;; An app that serves requests on more than one thread cannot share one connection: two
+;;; threads would interleave statements on one wire, or one would run inside the other's
+;;; transaction. The pool holds up to SIZE connections to one backend and lends each to one
+;;; thread at a time, for the extent of a WITH-CONNECTION body.
+;;;
+;;; A CONNECTION GOES BACK ONLY IN A KNOWN STATE. Session state set by one borrower would
+;;; otherwise reach the next one, and the case that matters most is a Postgres session-level
+;;; advisory lock (praxeon/retrieval's per-corpus lock is one): the lock belongs to the
+;;; connection, so a connection returned while holding it would give the lock to whichever
+;;; request borrowed it next. So:
+;;;
+;;;   body exited normally -> %RESET-CONNECTION: roll back any open transaction and, on
+;;;                           Postgres, RESET ALL and pg_advisory_unlock_all(). If the reset
+;;;                           itself fails, the connection is closed instead.
+;;;   body exited by a non-local exit (an error, a THROW, a thread being terminated)
+;;;                        -> the connection is closed, not reset. The exit may have come in
+;;;                           the middle of a statement, and a wire in that state cannot be
+;;;                           reset reliably. The pool opens a new connection when one is
+;;;                           next needed.
+;;;
+;;; SB-THREAD DIRECTLY, as aion/pool does and for its reason: the tree is SBCL-only, and this
+;;; wants CONDITION-WAIT with a timeout.
+
+(defvar *checkout-timeout-seconds* 30
+  "Seconds a WITH-CONNECTION on a pool waits for a connection when every one is lent out,
+before it signals POOL-EXHAUSTED. The default for MAKE-POOL's :CHECKOUT-TIMEOUT.")
+
+(defvar *idle-check-seconds* 30
+  "A pooled connection idle for longer than this is pinged before it is lent, and replaced if
+the ping fails. The default for MAKE-POOL's :IDLE-CHECK.
+
+Postgres servers, and the proxies in front of managed ones, close connections that have been
+idle for a while. Without the check, the first request after a quiet period would fail on a
+connection the server had already closed.")
+
+(define-condition pool-exhausted (db-error)
+  ((pool :initarg :pool :reader pool-exhausted-pool))
+  (:documentation
+   "Signalled by WITH-CONNECTION on a pool when no connection became free within the pool's
+checkout timeout. A web app answers it with 503."))
+
+(define-condition pool-closed (db-error)
+  ((pool :initarg :pool :reader pool-closed-pool))
+  (:documentation "Signalled by WITH-CONNECTION on a pool that CLOSE-POOL has closed."))
+
+(defstruct (pool (:constructor %make-pool) (:copier nil) (:predicate poolp))
+  "Up to SIZE connections to BACKEND, lent one thread at a time. Make it with MAKE-POOL."
+  backend
+  (size 1 :type (integer 1))
+  (checkout-timeout 30 :type (real 0))
+  (idle-check 30 :type (or null (real 0)))
+  ;; Everything below is read and written with LOCK held.
+  (idle '())                                   ; (connection . internal-real-time-returned)
+  (open 0 :type unsigned-byte)                 ; lent + idle + being opened
+  (closed nil)
+  (lock (sb-thread:make-mutex :name "mnemosyne-pool"))
+  (freed (sb-thread:make-waitqueue :name "mnemosyne-pool-freed")))
+
+(defmethod print-object ((pool pool) stream)
+  ;; The backend holds the password as an opaque SECRET, but a pool printed in a backtrace
+  ;; has no reason to show the backend at all.
+  (print-unreadable-object (pool stream :type t :identity t)
+    (format stream "~A size ~D" (be:backend-name (pool-backend pool)) (pool-size pool))))
+
+(defun make-pool (backend &key (size 10) (checkout-timeout *checkout-timeout-seconds*)
+                               (idle-check *idle-check-seconds*))
+  "A pool of up to SIZE connections to BACKEND. Connections are opened when first needed,
+not here, so making a pool does no IO.
+
+CHECKOUT-TIMEOUT is how many seconds WITH-CONNECTION waits for a free connection before it
+signals POOL-EXHAUSTED. IDLE-CHECK is how many seconds a connection may sit idle before it is
+pinged on its way out, or NIL to never ping.
+
+A web server with N worker threads wants SIZE of at least N, or requests wait for each
+other's connections. Close the pool with CLOSE-POOL."
+  (check-type size (integer 1))
+  (check-type checkout-timeout (real 0))
+  (check-type idle-check (or null (real 0)))
+  (%make-pool :backend backend :size size :checkout-timeout checkout-timeout
+              :idle-check idle-check))
+
+(defun pool-open-count (pool)
+  "How many connections POOL has open: lent out, idle, or being opened."
+  (sb-thread:with-mutex ((pool-lock pool)) (pool-open pool)))
+
+(defun pool-idle-count (pool)
+  "How many of POOL's open connections are idle, waiting to be lent."
+  (sb-thread:with-mutex ((pool-lock pool)) (length (pool-idle pool))))
+
+(defun %close-quietly (connection)
+  "Disconnect CONNECTION, ignoring a failure: it is being thrown away, and a connection the
+server already closed fails to close."
+  (handler-case (disconnect connection)
+    (error (e) (log:debug "db pool close failed" :condition (type-of e)))))
+
+(defun %seconds-since (start)
+  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+
+(defun %usable-p (connection returned-at pool)
+  "Can CONNECTION, idle since RETURNED-AT, be lent? True unless it has been idle longer than
+the pool's IDLE-CHECK and a ping says it is dead."
+  (let ((check (pool-idle-check pool)))
+    (or (null check)
+        (<= (%seconds-since returned-at) check)
+        (handler-case (and (dbi:ping connection) t)
+          (error (e)
+            (log:debug "db pool ping failed" :condition (type-of e))
+            nil)))))
+
+(defun %release-slot (pool)
+  "Forget one open connection that has been closed or never opened, and wake a waiter, who
+may now open one."
+  (sb-thread:with-mutex ((pool-lock pool))
+    (decf (pool-open pool))
+    (sb-thread:condition-notify (pool-freed pool))))
+
+(defun %take-or-reserve (pool deadline)
+  "With POOL's lock held for its whole extent: return (:IDLE (connection . returned-at)) for an
+idle connection, :OPEN when a slot has been reserved for a new connection, :CLOSED when the
+pool is closed, or :TIMEOUT when DEADLINE passed with every connection lent out."
+  (sb-thread:with-mutex ((pool-lock pool))
+    (loop
+      (cond
+        ((pool-closed pool) (return :closed))
+        ((pool-idle pool) (return (list :idle (pop (pool-idle pool)))))
+        ((< (pool-open pool) (pool-size pool))
+         (incf (pool-open pool))
+         (return :open))
+        (t
+         (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+           ;; On a timeout CONDITION-WAIT returns NIL WITHOUT the lock held, so nothing after
+           ;; it may touch the pool; returning is all that is safe, and WITH-MUTEX allows it.
+           (when (or (<= left 0)
+                     (not (sb-thread:condition-wait (pool-freed pool) (pool-lock pool)
+                                                    :timeout left)))
+             (return :timeout))))))))
+
+(defun %open-reserved (pool)
+  "Open a connection for a slot %TAKE-OR-RESERVE reserved, releasing the slot if the connect
+fails. Outside the lock: a connect is a network round trip, and holding the lock through it
+would make every other checkout and return wait for it."
+  (let ((connection nil))
+    (unwind-protect (setf connection (connect (pool-backend pool)))
+      (unless connection (%release-slot pool)))))
+
+(defun %checkout (pool)
+  "Take a connection from POOL: an idle one if there is one, a new one if fewer than SIZE are
+open, otherwise wait up to the checkout timeout for one to come back. Signals POOL-CLOSED or
+POOL-EXHAUSTED."
+  (let ((deadline (+ (get-internal-real-time)
+                     (round (* (pool-checkout-timeout pool) internal-time-units-per-second)))))
+    (loop
+      (let ((got (%take-or-reserve pool deadline)))
+        (case (if (consp got) (first got) got)
+          (:closed
+           (error 'pool-closed :pool pool :message "the connection pool is closed"))
+          (:timeout
+           (error 'pool-exhausted
+                  :pool pool
+                  :message (format nil "no pooled connection became free within ~A seconds (pool size ~D)"
+                                   (pool-checkout-timeout pool) (pool-size pool))))
+          (:open (return (%open-reserved pool)))
+          (:idle
+           (destructuring-bind (connection . returned-at) (second got)
+             (when (%usable-p connection returned-at pool)
+               (return connection))
+             ;; Dead: close it, give its slot back, and go round again. The next pass
+             ;; takes another idle connection or opens a new one in the freed slot.
+             (%close-quietly connection)
+             (%release-slot pool))))))))
+
+(defun %reset-connection (connection)
+  "Put CONNECTION back into the state a new connection is in, as far as a later borrower can
+tell: no open transaction and, on Postgres, no session settings and no advisory locks.
+Signals if it cannot.
+
+The transaction is rolled back whether or not one is open. On Postgres a ROLLBACK outside a
+transaction is answered with a warning, which is muffled here; cl-dbi only knows about
+transactions opened by its own WITH-TRANSACTION in the current dynamic extent, so it cannot
+be asked. SQLite refuses a ROLLBACK outside a transaction, so there the library's own
+autocommit flag is asked first."
+  (case (dbi:connection-driver-type connection)
+    (:postgres
+     (handler-bind ((warning #'muffle-warning))
+       (dbi:do-sql connection "ROLLBACK"))
+     (dbi:do-sql connection "RESET ALL")
+     (dbi:fetch-all (dbi:execute (dbi:prepare connection "SELECT pg_advisory_unlock_all()"))))
+    (:sqlite3
+     (unless (%sqlite-autocommit-p connection)
+       (dbi:do-sql connection "ROLLBACK")))
+    (t
+     (error "no way to reset a ~S connection for reuse"
+            (dbi:connection-driver-type connection)))))
+
+(defun %sqlite-autocommit-p (connection)
+  "Is the SQLite CONNECTION outside a transaction? sqlite3_get_autocommit, asked of the
+database handle cl-sqlite keeps in a slot it does not export."
+  (not (zerop (cffi:foreign-funcall "sqlite3_get_autocommit"
+                                    :pointer (slot-value (dbi:connection-handle connection)
+                                                         'sqlite::handle)
+                                    :int))))
+
+(defun %checkin (pool connection clean-exit)
+  "Take CONNECTION back into POOL. See the section header for why a non-local exit closes it."
+  (let ((keep (and clean-exit
+                   (handler-case (progn (%reset-connection connection) t)
+                     (error (e)
+                       (log:warn "db pool could not reset a connection, closing it"
+                                 :condition (type-of e))
+                       nil)))))
+    (if (not keep)
+        (progn (%close-quietly connection)
+               (%release-slot pool))
+        (let ((closed nil))
+          (sb-thread:with-mutex ((pool-lock pool))
+            (if (pool-closed pool)
+                (progn (setf closed t) (decf (pool-open pool)))
+                (push (cons connection (get-internal-real-time)) (pool-idle pool)))
+            (sb-thread:condition-notify (pool-freed pool)))
+          (when closed (%close-quietly connection))))))
+
+(defvar *lent* '()
+  "The connections lent to this thread, as an alist of (POOL . CONNECTION).
+
+Bound by CALL-WITH-CONNECTION, never set, and a new thread starts with the global value,
+empty. So a WITH-CONNECTION nested inside another on the same pool and thread reuses the
+outer connection instead of taking a second one; taking a second would deadlock a pool of
+one, and would put the inner body outside the outer body's transaction.")
+
+(defgeneric call-with-connection (source function)
+  (:documentation
+   "Call FUNCTION with a connection from SOURCE, a BACKEND or a POOL, and give it back
+afterwards. WITH-CONNECTION is the usual way to call this.")
+  (:method ((pool pool) function)
+    (let ((outer (cdr (assoc pool *lent* :test #'eq))))
+      (if outer
+          (funcall function outer)
+          (let ((connection (%checkout pool))
+                (clean-exit nil))
+            (unwind-protect
+                 (multiple-value-prog1
+                     (let ((*lent* (acons pool connection *lent*)))
+                       (funcall function connection))
+                   (setf clean-exit t))
+              (%checkin pool connection clean-exit))))))
+  (:method (backend function)
+    (let ((connection (connect backend)))
+      (unwind-protect (funcall function connection)
+        (disconnect connection)))))
+
+(defun close-pool (pool)
+  "Close POOL's idle connections and refuse further checkouts. A connection lent out when
+this is called is closed when it comes back. Idempotent."
+  (let ((idle '()))
+    (sb-thread:with-mutex ((pool-lock pool))
+      (setf (pool-closed pool) t
+            idle (pool-idle pool)
+            (pool-idle pool) '())
+      (decf (pool-open pool) (length idle))
+      (sb-thread:condition-broadcast (pool-freed pool)))
+    (dolist (entry idle) (%close-quietly (car entry)))
+    pool))
