@@ -100,6 +100,25 @@ TEST-SOURCE, also NAME/tests holding it, named by NAME's test-op. Returns DIR."
       (let ((asdf:*central-registry* (cons sub asdf:*central-registry*)))
         (is (typep (%strict-load name dir) 'error))))))
 
+(test a-project-reached-through-a-symbolic-link-is-still-the-projects-own
+  ;; ASDF reports a system's directory with symbolic links resolved. The project's root is
+  ;; given here through a link, so the two spellings differ, as they do for every project in
+  ;; the temporary directory on macOS (/var is a link to /private/var). Compared unresolved,
+  ;; the system was not the project's own, it was loaded with warnings muffled, and this
+  ;; load succeeded. Symbolic links need privileges on Windows, so this runs elsewhere.
+  (if (uiop:os-windows-p)
+      (skip "creating a symbolic link needs privileges on Windows")
+      (%with-strict-project (dir name "link" *strict-warning-source*)
+        (let ((link (merge-pathnames (format nil "~A-link/" name) (uiop:temporary-directory))))
+          (unwind-protect
+               (progn
+                 (uiop:run-program (list "ln" "-s" (uiop:native-namestring (truename dir))
+                                         (string-right-trim "/" (uiop:native-namestring link))))
+                 (is (typep (%strict-load name link) 'error)
+                     "the project's own system, reached through a link, must fail on its warning"))
+            (uiop:run-program (list "rm" "-f" (string-right-trim "/" (uiop:native-namestring link)))
+                              :ignore-error-status t))))))
+
 (test a-current-fasl-hides-the-warning-until-force-own-recompiles-it
   ;; Compile once with the warning muffled, as an older cons did: the fasl is now current,
   ;; so an ordinary strict load does not compile and cannot see it. FORCE-OWN (`cons

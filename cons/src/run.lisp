@@ -112,7 +112,13 @@ both upcased for the standard readtable."
 
 (defparameter +load-form+
   '(lambda (system root force-own with-tests)
-     (let ((root (namestring (uiop:ensure-directory-pathname root)))
+     ;; ROOT is resolved with TRUENAME because ASDF reports a system's directory with
+     ;; symbolic links resolved. On macOS the temporary directory /var/folders/... is
+     ;; /private/var/folders/..., and a project reached through any symbolic link has the same
+     ;; problem: compared unresolved, no system was the project's own, and every warning was
+     ;; muffled again.
+     (let ((root (let ((r (uiop:ensure-directory-pathname root)))
+                   (namestring (or (ignore-errors (truename r)) r))))
            (own '())
            (others '())
            (seen (make-hash-table :test (function equal))))
@@ -142,7 +148,7 @@ both upcased for the standard readtable."
                   (let ((dir (asdf :system-source-directory sys)))
                     ;; Case-insensitive on Windows, where d:/ and D:/ are one directory.
                     (and dir
-                         (let ((d (namestring dir)))
+                         (let ((d (namestring (or (ignore-errors (truename dir)) dir))))
                            (and (>= (length d) (length root))
                                 (if (uiop:os-windows-p)
                                     (string-equal root d :end2 (length root))
