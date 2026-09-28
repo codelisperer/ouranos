@@ -88,6 +88,17 @@ its tag.
   error code when Windows cannot answer, and signals on other systems. `aion/windows` re-exports
   it. An app that parses `attrib.exe` for a read-only check can call this instead: `attrib.exe`'s
   output did not decode for a non-ASCII path, and the check answered "not read-only". (#349)
+- **scripts/build-desktop-app.lisp: `--carry <path>` carries a native library of the app's own
+  into the bundle.** Give it once per library, for example a PDF renderer in the app's
+  repository or a pinned `sqlite3.dll`, which stock Windows does not have. The file is copied
+  beside the executable with its license text under `LICENSES/`: the files and directories named
+  `LICENSE*`, `COPYING*` or `NOTICE*` beside it or in the directory above, or, for a library that
+  ships none, such as public-domain SQLite, the files named by `--carry-license <file>` after its
+  `--carry`. If the image has the library open, the app opens the
+  copy beside its executable when it starts, and stops with exit code 3 naming the file if the
+  copy is missing. An app that added its own post-build copy step for such a library can
+  remove it. The build refuses a path with no license text, a path under the tree's `vendor/`,
+  and two paths with one file name. (#78)
 
 ### Fixed
 

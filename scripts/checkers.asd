@@ -47,5 +47,5 @@ that hides which scripts it is about.")
   :serial t
   :components ((:module "tests"
                 :serial t
-                :components ((:file "checkers") (:file "dump-image"))))
+                :components ((:file "checkers") (:file "dump-image") (:file "carry-natives"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))

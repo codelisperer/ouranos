@@ -98,6 +98,32 @@ failure shipped. The clean-room run is the acceptance test, not a nicety.
 - Nothing about the *dev* path changes: with no library beside the running SBCL, resolution
   falls through to `vendor/` exactly as before.
 
+## Amendment, 2026-09-28: an app's own libraries (#78)
+
+Decision 3 covers the libraries this tree builds. An app can also depend on native libraries
+of its own, which the tree knows nothing about: a PDF renderer kept in the app's repository,
+or a pinned `sqlite3.dll`, which stock Windows does not have (it has `winsqlite3.dll`, a
+different name). The bundler reported those as system libraries and left them out, so the
+installed app started and then failed on its first call into the library.
+
+An app now names them: `scripts/build-desktop-app.lisp --carry <path>`, once per library.
+`scripts/carry-natives.lisp` does the work, and follows decisions 1, 2 and 4:
+
+- the file is copied beside the executable, and its `LICENSE*`, `COPYING*` or `NOTICE*` text,
+  found beside it or in the directory above, goes under `LICENSES/`. A library with no
+  license text is refused, as is a path under `vendor/` or two paths with one file name;
+- if the image has the library open, it is closed before the dump, for the reason the
+  consequences below give for libuv, and a function added to `sb-ext:*init-hooks*` opens the
+  copy by absolute path from the directory of `sb-ext:*runtime-pathname*` when the app
+  starts, before `main`. If the copy is missing, the app stops with exit code 3 and names it;
+- if the image does not have it open, it is still copied, and the build log says the app must
+  open it itself from beside `sb-ext:*runtime-pathname*`.
+
+The app, not the tree, is responsible for the license of what it carries (decision 4 applies:
+no LGPL library this way). The checkers suite tests it by dumping an image that loaded a
+library from a directory, deleting the directory, and running the image; the controls are the
+same bundle with the carried copy deleted, and a dump without carrying, and both must fail.
+
 ## Alternatives considered
 
 - **`$ORIGIN` in `DT_RUNPATH`** — the conventional Linux answer, and the initial lean here.

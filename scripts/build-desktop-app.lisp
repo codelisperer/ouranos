@@ -6,9 +6,15 @@
 ;;;;          --name   coalton-repl \
 ;;;;          --version 0.1.0 \
 ;;;;          [--out dist] [--icon path/to/app.ico] [--window-icon path/to/window.png]
+;;;;          [--carry path/to/lib ...]
 ;;;;
 ;;;; --icon is used on Windows only: see "Windows: the executable's icon" below.
 ;;;; --window-icon is the icon for the app's window on every OS, carried in the bundle (#74).
+;;;;
+;;;; --carry, which may be given more than once, names a native library of the app's own
+;;;; (outside this tree's vendor/) to copy into the bundle, with its license text. If the
+;;;; image has the library open, the shipped app opens the copy beside its executable when it
+;;;; starts. See scripts/carry-natives.lisp (#78).
 ;;;;
 ;;;; The command is IDENTICAL on Linux / macOS / Windows -- which is the whole point:
 ;;;; SBCL cannot cross-compile (save-lisp-and-die dumps an image for the HOST platform
@@ -27,6 +33,7 @@
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
+(load (merge-pathnames "carry-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; an app's own libraries (#78)
 
 ;;; --- argv -------------------------------------------------------------------
 (defun argv-value (name &optional default)
@@ -38,6 +45,18 @@
 (defparameter *name*    (or (argv-value "--name")    (error "build-desktop-app: --name is required")))
 (defparameter *version* (or (argv-value "--version") "0.0.0"))
 (defparameter *out*     (argv-value "--out" "dist"))
+(defparameter *carry*   (ouranos-carry:declared-carry-paths (rest sb-ext:*posix-argv*)))
+
+;;; Checked here, before the minutes-long load, so a mistyped path is reported at once.
+;;; CARRY-DECLARED-LIBRARIES checks it again, with the rest of its rules, before copying.
+(dolist (path *carry*)
+  (unless (probe-file path)
+    (format *error-output* "~&build-desktop-app: --carry ~A: no such file.~%" path)
+    (sb-ext:exit :code 3)))
+
+(defun carry-args ()
+  "The --carry arguments again, for a build that re-runs itself under a patched runtime."
+  (loop for path in *carry* append (list "--carry" path)))
 
 ;;; --window-icon: the icon for the app's WINDOW, carried into the bundle as
 ;;; `window-icon.<type>' so hyperion/desktop:run-app finds it beside the executable on any
@@ -223,7 +242,8 @@ itself already finished, and its exit code is what the caller returns."
                                       "--script" (namestring (or *load-truename* *load-pathname*)))
                                 (list "--system" *system* "--entry" *entry*
                                       "--name" *name* "--version" *version* "--out" *out*)
-                                (%window-icon-args))
+                                (%window-icon-args)
+                                (carry-args))
                         :output t :error-output t :ignore-error-status t
                         ;; The child's own runtime now says @executable_path, so it cannot
                         ;; rediscover which files to carry -- it is told.
@@ -288,7 +308,8 @@ itself already finished, and its exit code is what the caller returns."
                                "--script" (namestring (or *load-truename* *load-pathname*))
                                "--system" *system* "--entry" *entry*
                                "--name" *name* "--version" *version* "--out" *out*)
-                         (%window-icon-args))
+                         (%window-icon-args)
+                         (carry-args))
                         :output t :error-output t :ignore-error-status t
                         ;; The copy sits in <out>/.runtime, away from SBCL's own directory,
                         ;; so it is told where its contribs are.
@@ -666,7 +687,7 @@ be missing from a step named for waking."
   (let ((libraries (loaded-foreign-libraries))
         (carried 0))
     (if (null libraries)
-        (format t "~&build-desktop-app: no foreign libraries loaded -- nothing to carry.~%")
+        (format t "~&build-desktop-app: no other foreign libraries are open -- none of this tree's to carry.~%")
         (dolist (lib libraries)
           (destructuring-bind (name . path) lib
             (let ((truename (and path (probe-file path))))
@@ -704,11 +725,11 @@ be missing from a step named for waking."
                        (uiop:copy-file license dst)
                        (format t "~&            + LICENSES/~A~%" (file-namestring dst))))))
                 (truename
-                 (format t "~&  system    ~A (~A) -- not ours to carry~%" name (human-path:human-path truename)))
+                 (format t "~&  system    ~A (~A) -- not carried; if the app ships it, pass --carry with that path~%" name (human-path:human-path truename)))
                 (t
                  (format t "~&  system    ~A -- resolved by the OS loader, not carried~%"
                          name)))))))
-    (format t "~&build-desktop-app: ~D native librar~:@P carried into the bundle.~%" carried)
+    (format t "~&build-desktop-app: ~D of this tree's native librar~:@P carried into the bundle.~%" carried)
     (release-lazy-natives)))
 
 (defun carry-runtime-linked-libraries ()
@@ -754,6 +775,12 @@ nothing."
 ;; we wanted (pre-publication issue 325).
 (wake-lazy-natives)
 (verify-natives-will-be-carried)
+;; The app's own libraries go first. The step closes each one it carries, so the step after
+;; it does not also list them as system libraries that are left out.
+(handler-case (ouranos-carry:carry-declared-libraries *carry* *bundle* :vendor *vendor*)
+  (ouranos-carry:carry-refused (e)
+    (format *error-output* "~&build-desktop-app: ~A~%" e)
+    (sb-ext:exit :code 3)))
 (carry-native-libraries)
 (carry-runtime-linked-libraries)
 
