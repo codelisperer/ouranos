@@ -20,7 +20,7 @@ agentic tool-use loops prefer a more capable model such as \"claude-opus-4-8\"."
 (defparameter *default-max-tokens* 8192
   "The output-token limit for a completion when the caller passes no :max-tokens. An agent turn
 uses it when neither RUN-TURN's :max-tokens nor the agent's MAX-TOKENS slot is set, and reads it
-at the time of each model call, so a binding around RUN-TURN still applies.
+when the turn starts, so a binding around RUN-TURN still applies.
 
 The limit is a ceiling, not a charge: providers bill the output tokens a model generates, so a
 higher limit costs nothing for a reply that stays short.

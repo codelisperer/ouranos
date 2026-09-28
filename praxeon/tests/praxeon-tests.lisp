@@ -3640,7 +3640,7 @@ value says which restart ended the turn, and :max-tokens reaches RUN-TURN."
     (actor:run-turn ag "hi" :max-tokens 5000)
     (is (equal '(5000) (scripted-limits provider)) "sent ~S" (scripted-limits provider))))
 
-(test with-no-limit-set-the-default-is-read-when-the-call-is-made
+(test with-no-limit-set-the-default-is-read-when-the-turn-starts
   "The agent's slot defaults to NIL rather than to the variable's value when the agent is made.
 So the workaround #326 was filed with, binding *DEFAULT-MAX-TOKENS* around RUN-TURN, keeps
 working, and outside the binding the global value applies."

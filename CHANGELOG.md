@@ -41,7 +41,7 @@ its tag.
 - **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`
   (`agent-max-tokens`), and `run-turn`, `run-turn-through` and `deliberate` take `:max-tokens`.
   The argument overrides the slot. With neither, `praxeon/llm:*default-max-tokens*` applies,
-  read at the time of each model call. An app that binds `*default-max-tokens*` around
+  read when the turn starts. An app that binds `*default-max-tokens*` around
   `run-turn` can stop and set one of these instead; the binding keeps working until it does.
   (#326)
 - **praxeon: `praxeon/llm:*default-max-tokens*` is 8,192, up from 1,024.** 1,024 cut off

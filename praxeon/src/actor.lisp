@@ -60,8 +60,8 @@ client rendering `agent-history' still shows the whole conversation."
   ;; everything, for a caller that bounds its context some other way.
   (history-budget 120000)
   ;; MAX-TOKENS (#326): the output-token limit for each model call this agent makes. RUN-TURN's
-  ;; :max-tokens overrides it. NIL, the default, means `llm:*default-max-tokens*' as it is at
-  ;; the time of the call, rather than the value it had when the agent was made: an app that
+  ;; :max-tokens overrides it. NIL, the default, means `llm:*default-max-tokens*' as it is when
+  ;; a turn starts, rather than the value it had when the agent was made: an app that
   ;; binds that variable around RUN-TURN (the workaround #326 was filed with) keeps getting
   ;; its value until it moves the number here.
   (max-tokens nil)
