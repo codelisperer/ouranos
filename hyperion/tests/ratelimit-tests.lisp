@@ -252,3 +252,163 @@ body. Returns (values app calls-box)."
   (signals error (rl:make-limit :x :capacity 5 :per 0 :key (rl:by-address)))
   (signals error (rl:make-limit :x :capacity 5 :per 60 :key nil))
   (signals error (rl:wrap-rate-limit (lambda (env) env) :limits nil)))
+
+;;; --- a limit that counts only failures (#323) ---------------------------------------
+;;;
+;;; The sign-in handler below answers 303 for a successful sign-in and 200 (the form again)
+;;; for a failed one. OUTCOMES is the list of what each successive request will be.
+
+(defun %rl-sign-in-app (outcomes)
+  "An app that answers each request with the next of OUTCOMES: :OK is a 303, :FAIL a 200,
+:SIGNAL an error. Returns (values app calls-box)."
+  (let ((calls (list 0)))
+    (values (lambda (env)
+              (declare (ignore env))
+              (incf (first calls))
+              (ecase (pop outcomes)
+                (:ok (list 303 (list :location "/home") '()))
+                (:fail (list 200 (list :content-type "text/plain") (list "wrong password")))
+                (:signal (error "the sign-in handler failed"))))
+            calls)))
+
+(defun %rl-failures-only (&key (capacity 3) (per 60))
+  (rl:make-limit :sign-in-address :capacity capacity :per per :key (rl:by-address)
+                 :count-when (rl:unless-status 303)))
+
+(defun %rl-statuses (app n &key (addr "10.0.0.1"))
+  (loop repeat n collect (%rl-status app (%rl-env :addr addr))))
+
+(test successful-sign-ins-are-not-counted-by-a-count-when-limit
+  (%with-rl-clock ()
+    (let ((app (rl:wrap-rate-limit (%rl-sign-in-app (make-list 20 :initial-element :ok))
+                                   :limits (list (%rl-failures-only)))))
+      (is (every (lambda (s) (= 303 s)) (%rl-statuses app 20))
+          "twenty members sign in from one address, over a capacity of 3"))
+    (let ((app (rl:wrap-rate-limit (%rl-sign-in-app (make-list 20 :initial-element :ok))
+                                   :limits (list (%rl-by-address)))))
+      (is (equal '(303 303 303 429) (%rl-statuses app 4))
+          "control: without :count-when the fourth sign-in is refused"))))
+
+(test failures-empty-the-bucket-and-a-success-does-not-refill-it
+  (%with-rl-clock ()
+    (multiple-value-bind (inner calls) (%rl-sign-in-app '(:fail :fail :ok :fail :ok))
+      (let ((app (rl:wrap-rate-limit inner :limits (list (%rl-failures-only)))))
+        (is (equal '(200 200 303 200 429) (%rl-statuses app 5))
+            "three failures empty a bucket of 3; the success between them costs nothing and restores nothing")
+        (is (= 4 (first calls)) "the refused request never reached the handler")))))
+
+(test a-count-when-refusal-waits-for-one-token-to-refill
+  (%with-rl-clock ()
+    (let* ((app (rl:wrap-rate-limit (%rl-sign-in-app '(:fail :fail :fail :ok))
+                                    :limits (list (%rl-failures-only)))))
+      (%rl-statuses app 3)
+      (let ((refused (funcall app (%rl-env :addr "10.0.0.1"))))
+        (is (= 429 (first refused)))
+        (is (equal "20" (getf (second refused) :retry-after))
+            "3 per 60 s refills one token every 20 s"))
+      (%rl-advance 20)
+      (is (= 303 (%rl-status app (%rl-env :addr "10.0.0.1"))) "and after 20 s one request passes"))))
+
+(test a-handler-that-signals-is-counted
+  (%with-rl-clock ()
+    (let ((app (rl:wrap-rate-limit (%rl-sign-in-app '(:signal :ok))
+                                   :limits (list (%rl-failures-only :capacity 1)))))
+      (is (typep (nth-value 1 (ignore-errors (funcall app (%rl-env :addr "10.0.0.1")))) 'simple-error))
+      (is (= 429 (%rl-status app (%rl-env :addr "10.0.0.1")))
+          "the attempt that signalled took the only token"))))
+
+(test a-count-when-that-signals-counts-the-request
+  (%with-rl-clock ()
+    (let* ((limit (rl:make-limit :sign-in-address :capacity 1 :per 60 :key (rl:by-address)
+                                 :count-when (lambda (env response)
+                                               (declare (ignore env response))
+                                               (error "a broken count-when"))))
+           (app (rl:wrap-rate-limit (%rl-sign-in-app '(:ok :ok)) :limits (list limit))))
+      (is (= 303 (%rl-status app (%rl-env :addr "10.0.0.1")))
+          "the response still reaches the client")
+      (is (= 429 (%rl-status app (%rl-env :addr "10.0.0.1")))
+          "and the request was counted"))))
+
+(test a-request-that-passed-the-check-is-counted-even-if-the-bucket-emptied-meanwhile
+  ;; Two requests pass CHECK-TOKEN before either is counted, as concurrent requests can. Both
+  ;; are debited, the bucket goes below empty, and the wait is longer by what was overdrawn.
+  (let ((store (rl:make-memory-store)))
+    (is (rl:check-token store "k" 1 1000 0))
+    (is (rl:check-token store "k" 1 1000 0))
+    (is (= 0 (rl:memory-store-count store)) "checking creates no bucket")
+    (rl:debit-token store "k" 1 1000 0)
+    (rl:debit-token store "k" 1 1000 0)
+    (multiple-value-bind (ok wait) (rl:check-token store "k" 1 1000 0)
+      (is (null ok))
+      (is (= 2000 wait) "one token overdrawn: two refills before the next request"))
+    (dotimes (i 5) (rl:debit-token store "k" 1 1000 0))
+    (is (= 2000 (nth-value 1 (rl:check-token store "k" 1 1000 0)))
+        "the overdraft stops at minus CAPACITY")))
+
+(test a-limit-without-count-when-still-takes-its-token-before-the-handler
+  ;; A mixed pair on one route: the address limit counts failures only, the account limit
+  ;; counts every attempt, as the recipe for sign-in suggests.
+  (%with-rl-clock ()
+    (let* ((by-account (%rl-by-account :capacity 2))
+           (app (rl:wrap-rate-limit (%rl-sign-in-app '(:ok :ok :ok))
+                                    :limits (list (%rl-failures-only) by-account))))
+      (is (equal '(303 303 429)
+                 (loop repeat 3
+                       collect (%rl-status app (%rl-env :addr "10.0.0.1" :email "a@x.test"))))
+          "the account limit counted both successful sign-ins"))))
+
+(defvar *rl-request-context* :unbound-here
+  "Stands for a binding an app makes for every request, such as its locale or its session.")
+
+(defun %rl-refusal-with-context (env seconds limit)
+  (declare (ignore env seconds limit))
+  (list 429 '() (list (princ-to-string *rl-request-context*))))
+
+(test call-with-rate-limit-refuses-inside-the-callers-bindings
+  (%with-rl-clock ()
+    (let ((store (rl:make-memory-store))
+          (limits (list (%rl-by-address :capacity 1))))
+      (flet ((request ()
+               (let ((*rl-request-context* :the-apps-context))
+                 (rl:call-with-rate-limit (%rl-env :addr "10.0.0.1")
+                                          (lambda (env) (declare (ignore env)) (list 200 '() '("ok")))
+                                          :limits limits :store store
+                                          :on-limited #'%rl-refusal-with-context))))
+        (is (= 200 (first (request))))
+        (is (equal '("THE-APPS-CONTEXT") (third (request)))
+            "the refusal was built with the app's binding in effect")))
+    (let* ((inner (rl:wrap-rate-limit (lambda (env) (declare (ignore env)) (list 200 '() '("ok")))
+                                      :limits (list (%rl-by-address :capacity 1))
+                                      :on-limited #'%rl-refusal-with-context))
+           (app (lambda (env) (let ((*rl-request-context* :the-apps-context)) (funcall inner env)))))
+      (funcall app (%rl-env :addr "10.0.0.2"))
+      (is (equal '("THE-APPS-CONTEXT") (third (funcall app (%rl-env :addr "10.0.0.2"))))
+          "wrap-rate-limit placed inside the binding middleware does the same"))))
+
+(test with-rate-limit-passes-on-the-env-whose-body-was-cached
+  (%with-rl-clock ()
+    (let ((store (rl:make-memory-store))
+          (seen nil))
+      (let ((r (rl:with-rate-limit (env (%rl-env :addr "10.0.0.1" :email "bob@x.test")
+                                    :limits (list (%rl-by-account)) :store store)
+                 (setf seen (http:form-param (http:body-string env) "email"))
+                 (list 200 '() '("ok")))))
+        (is (= 200 (first r)))
+        (is (equal "bob@x.test" seen) "the handler read the body the limiter had read")))))
+
+(test call-with-rate-limit-needs-a-store-and-count-when-must-be-a-function
+  (is (typep (nth-value 1 (ignore-errors
+                           (rl:call-with-rate-limit (%rl-env :addr "10.0.0.1") #'identity
+                                                    :limits (list (%rl-by-address)))))
+             'error))
+  (is (typep (nth-value 1 (ignore-errors
+                           (rl:make-limit :x :capacity 1 :per 1 :key (rl:by-address)
+                                             :count-when 303)))
+             'error)))
+
+(test unless-status-counts-everything-but-the-listed-statuses
+  (let ((f (rl:unless-status 302 303)))
+    (is (not (funcall f '() '(303 () ()))))
+    (is (not (funcall f '() '(302 () ()))))
+    (is (funcall f '() '(200 () ())))
+    (is (funcall f '() '(401 () ())))))

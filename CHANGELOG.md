@@ -44,6 +44,22 @@ its tag.
 
 ### Added
 
+- **hyperion/ratelimit: a limit that counts only failed attempts, and a limiter an app can
+  call inside its own bindings.** (#323)
+  - `make-limit` takes `:count-when`, a function of the env and the response. Before the
+    handler, such a limit refuses only when its bucket is already empty. After the handler, it
+    takes a token only when `:count-when` returns true, and always when the handler signals.
+    `(unless-status 303)` counts every response that is not a 303.
+  - A successful sign-in then costs nothing and restores nothing, so members signing in
+    together from one address are not refused. An app that called `reset-limit` on the address
+    limit after a successful sign-in, as a workaround, should stop: the recipe advises against
+    it. `hyperion/docs/rate-limit.md` now counts sign-in failures per address this way.
+  - `call-with-rate-limit` and `with-rate-limit` run the limiter as a function, so its
+    `:on-limited` refusal is built inside whatever bindings the app has made. `wrap-rate-limit`
+    is now that function as middleware, with no change in behaviour.
+  - The store protocol gains `check-token` and `debit-token`, next to `take-token` and
+    `forget-bucket`. A store written for the old protocol still serves limits without
+    `:count-when`. `memory-store` implements all four.
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
   `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
   `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with
