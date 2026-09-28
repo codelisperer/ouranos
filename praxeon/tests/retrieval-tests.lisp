@@ -28,19 +28,23 @@
 
 (defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
 
+(def-suite chunkers :description "Chunkers, which need no database (#322).")
+
 (defun run-tests ()
-  "Run the suite and print its Postgres coverage in the form scripts/verify-tree.lisp reads.
-Every check here needs Postgres, so a run without it skips them all, and the BACKEND-CHECKS
-line is what keeps that from reading as a pass (#171)."
+  "Run both suites and print the Postgres coverage in the form scripts/verify-tree.lisp reads.
+Every check in RETRIEVAL needs Postgres, so a run without it skips them all, and the
+BACKEND-CHECKS line is what keeps that from reading as a pass (#171). CHUNKERS needs no
+database, so its checks are not counted in that line."
   (let* ((url (%pg-url))
+         (chunker-results (run 'chunkers))
          (results (run 'retrieval)))
-    (explain! results)
+    (explain! (append chunker-results results))
     (if url
         (format t "~&BACKEND-CHECKS postgres ~D~%"
                 (count-if-not (lambda (r) (typep r 'fiveam::test-skipped)) results))
         (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
     (finish-output)
-    (results-status results)))
+    (and (results-status chunker-results) (results-status results))))
 
 ;;; --- a deterministic embedder ------------------------------------------------------
 ;;;
@@ -632,3 +636,95 @@ that chunk out, still says TRUNCATED with one pending, not COMPLETE."
                                  (rt:retrieve-similar corpus embedder "refund")))
                  "and the next search sees it"))
         (conn:disconnect conn-b)))))
+
+;;; --- the paragraph chunker (#322) ----------------------------------------------------
+;;;
+;;; The first six need no database and are in the CHUNKERS suite; the last syncs a corpus.
+
+(defun %para (tag length)
+  "A paragraph of exactly LENGTH characters that starts with TAG, so it can be found."
+  (let ((s (make-string length :initial-element #\x)))
+    (replace s tag)
+    s))
+
+(defun %join-paras (paras &optional (separator (format nil "~%~%")))
+  (format nil (concatenate 'string "~{~A~^" separator "~}") paras))
+
+(defun %chunks (text &rest settings)
+  (rt:chunk-section (apply #'make-instance 'rt:paragraph-chunker settings) (sec "p" text)))
+
+(test (a-section-up-to-the-long-section-length-is-one-whole-section-chunk :suite chunkers)
+  (let* ((text (%join-paras (list (%para "a" 749) (%para "b" 749))))   ; 1500 characters
+         (chunks (%chunks text)))
+    (is (= 1500 (length text)))
+    (is (= 1 (length chunks)))
+    (is (eq :whole-section (rt:chunk-boundary (first chunks))))
+    (is (null (rt:chunk-sub-locator (first chunks))))
+    (is (string= text (rt:chunk-text (first chunks))))))
+
+(test (a-long-section-is-cut-at-blank-lines-into-runs-of-whole-paragraphs :suite chunkers)
+  ;; Six paragraphs of 400: two fit in 900 (400 + 2 + 400), a third does not.
+  (let* ((paras (loop for i from 1 to 6 collect (%para (format nil "p~D" i) 400)))
+         (chunks (%chunks (%join-paras paras))))
+    (is (equal '("part 1" "part 2" "part 3") (mapcar #'rt:chunk-sub-locator chunks)))
+    (is (every (lambda (c) (eq :whole-paragraph (rt:chunk-boundary c))) chunks))
+    (is (equal (list (%join-paras (subseq paras 0 2)) (%join-paras (subseq paras 2 4))
+                     (%join-paras (subseq paras 4 6)))
+               (mapcar #'rt:chunk-text chunks))
+        "each chunk is whole paragraphs, with the blank lines between them kept")))
+
+(test (a-paragraph-longer-than-the-target-is-a-chunk-of-its-own-and-never-split :suite chunkers)
+  (let* ((big (%para "big" 1200))
+         (paras (list (%para "a" 300) big (%para "c" 300)))
+         (chunks (%chunks (%join-paras paras))))
+    (is (= 3 (length chunks)))
+    (is (string= big (rt:chunk-text (second chunks))))
+    (is (every (lambda (c) (member (rt:chunk-text c) paras :test #'string=)) chunks)
+        "no chunk holds part of a paragraph")))
+
+(test (a-long-section-with-no-blank-line-stays-one-whole-section-chunk :suite chunkers)
+  (let* ((text (format nil "~A~%~A" (%para "a" 1000) (%para "b" 1000)))
+         (chunks (%chunks text)))
+    (is (= 1 (length chunks)))
+    (is (eq :whole-section (rt:chunk-boundary (first chunks))))
+    (is (string= text (rt:chunk-text (first chunks))))))
+
+(test (whitespace-only-and-crlf-lines-count-as-blank-and-edges-make-no-empty-chunk :suite chunkers)
+  (let* ((crlf-blank (format nil "~C~%  ~C~%" #\Return #\Return))
+         (paras (list (%para "a" 800) (%para "b" 800)))
+         (text (concatenate 'string (format nil "~%~%") (%join-paras paras crlf-blank)
+                            (format nil "~%  ~%")))
+         (chunks (%chunks text)))
+    (is (= 2 (length chunks)))
+    (is (equal paras (mapcar #'rt:chunk-text chunks)))))
+
+(test (a-paragraph-chunker-refuses-bad-settings-and-names-them-in-its-id :suite chunkers)
+  (signals error (make-instance 'rt:paragraph-chunker :target 0))
+  (signals error (make-instance 'rt:paragraph-chunker :long-section "1500"))
+  (is (string= "paragraph/1:1500:900" (rt:chunker-id (make-instance 'rt:paragraph-chunker))))
+  (is (string/= (rt:chunker-id (make-instance 'rt:paragraph-chunker))
+                (rt:chunker-id (make-instance 'rt:paragraph-chunker :target 600)))
+      "a change of setting is a change of id, so the corpus is re-chunked"))
+
+(test a-long-section-is-stored-and-found-as-whole-paragraph-chunks
+  "The chunks a corpus stores, and what a match on one of them reports: its sub-locator, its
+boundary, the chunker, and the chunk's own text. A short section in the same corpus stays one
+chunk."
+  (with-store (store)
+    (let* ((paras (loop for i from 1 to 6 collect (%para (format nil "para~D" i) 400)))
+           (corpus (rt:make-corpus store "contracts"
+                                   :chunker (make-instance 'rt:paragraph-chunker)))
+           (short (sec "short" "A refund is issued within 30 days.")))
+      (rt:sync-corpus corpus (list (sec "preamble" (%join-paras paras)) short))
+      (is (= 4 (%column-count store "corpus = ?" "contracts")) "three parts and one short")
+      (let* ((hit (first (rt:retrieval-result-passages (rt:retrieve-exact corpus "para5"))))
+             (prov (and hit (rt:passage-provenance hit))))
+        (is (equal "preamble" (and prov (rt:provenance-section-id prov))))
+        (is (equal "part 3" (and prov (rt:provenance-sub-locator prov))))
+        (is (eq :whole-paragraph (and prov (rt:provenance-boundary prov))))
+        (is (equal "paragraph/1:1500:900" (and prov (rt:provenance-chunker prov))))
+        (is (equal (%join-paras (subseq paras 4 6)) (and hit (rt:passage-text hit)))))
+      (let ((prov (rt:passage-provenance
+                   (first (rt:retrieval-result-passages (rt:retrieve-exact corpus "refund"))))))
+        (is (eq :whole-section (rt:provenance-boundary prov)))
+        (is (null (rt:provenance-sub-locator prov)))))))

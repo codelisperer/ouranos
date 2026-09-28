@@ -26,6 +26,7 @@
    ;; chunkers
    #:chunk #:make-chunk #:chunk-text #:chunk-sub-locator #:chunk-boundary
    #:chunk-section #:chunker-id #:section-chunker
+   #:paragraph-chunker #:chunker-long-section #:chunker-target
    ;; the store and its corpora
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
@@ -64,6 +65,7 @@
    #:section-fingerprint
    #:chunk #:make-chunk #:chunk-text #:chunk-sub-locator #:chunk-boundary
    #:chunk-section #:chunker-id #:section-chunker
+   #:paragraph-chunker #:chunker-long-section #:chunker-target
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
@@ -104,6 +106,7 @@ argument.")
    #:section-fingerprint
    #:chunk #:make-chunk #:chunk-text #:chunk-sub-locator #:chunk-boundary
    #:chunk-section #:chunker-id #:section-chunker
+   #:paragraph-chunker #:chunker-long-section #:chunker-target
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where

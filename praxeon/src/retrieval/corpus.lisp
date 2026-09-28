@@ -133,6 +133,84 @@ only chunker (#138): both of the first app's corpora store one unit per section.
 
 (defmethod chunker-id ((c section-chunker)) "section/1")
 
+(defclass paragraph-chunker ()
+  ((long-section :initarg :long-section :initform 1500 :reader chunker-long-section)
+   (target :initarg :target :initform 900 :reader chunker-target))
+  (:documentation "A section of LONG-SECTION characters or fewer is one chunk, claiming
+:WHOLE-SECTION, as with SECTION-CHUNKER. A longer one is cut at blank lines into runs of whole
+paragraphs of up to about TARGET characters each, claiming :WHOLE-PARAGRAPH, with sub-locators
+\"part 1\", \"part 2\" and so on (#322).
+
+A paragraph is never split: one longer than TARGET is a chunk on its own. A long section with
+no blank line in it stays one :WHOLE-SECTION chunk. Each chunk's text is the section's own text
+from the start of its first paragraph to the end of its last, so the blank lines between its
+paragraphs are kept as written.
+
+Why: one embedding for a long section represents it badly. A consuming app's contract corpus
+opens with a preamble of about 6,400 characters holding every defined term; kept whole, questions
+of the form \"what is X\" found it in the top 5 for 43% of a fixed question set. Cut this way,
+with these defaults, 93%."))
+
+(defmethod initialize-instance :after ((c paragraph-chunker) &key)
+  (flet ((check (name value)
+           (unless (and (integerp value) (plusp value))
+             (error "praxeon/retrieval: a paragraph-chunker's ~(~A~) must be a positive integer, not ~S"
+                    name value))))
+    (check :long-section (chunker-long-section c))
+    (check :target (chunker-target c))))
+
+(defun %blank-line-p (text start end)
+  (loop for i from start below end
+        always (member (char text i) '(#\Space #\Tab #\Return #\Page))))
+
+(defun %paragraph-spans (text)
+  "(start . end) of each paragraph in TEXT, in order: a run of lines that are not blank,
+separated from the next by one or more blank lines. A line holding only spaces, tabs or a
+carriage return is blank."
+  (let ((spans '()) (para-start nil) (para-end nil) (pos 0) (n (length text)))
+    (loop while (<= pos n) do
+      (let ((eol (or (position #\Newline text :start pos) n)))
+        (if (%blank-line-p text pos eol)
+            (when para-start
+              (push (cons para-start para-end) spans)
+              (setf para-start nil))
+            (progn (unless para-start (setf para-start pos))
+                   ;; On a CRLF line the last character is #\Return; the paragraph ends before it.
+                   (setf para-end (if (and (> eol pos) (char= (char text (1- eol)) #\Return))
+                                      (1- eol)
+                                      eol))))
+        (setf pos (1+ eol))))
+    (when para-start (push (cons para-start para-end) spans))
+    (nreverse spans)))
+
+(defun %pack-spans (spans target)
+  "SPANS grouped greedily into runs whose extent, from the first span's start to the last's end,
+stays within TARGET characters. A span longer than TARGET is a run on its own."
+  (let ((runs '()) (current '()))
+    (dolist (span spans)
+      (if (and current (<= (- (cdr span) (car (first current))) target))
+          (setf current (append current (list span)))
+          (progn (when current (push current runs))
+                 (setf current (list span)))))
+    (when current (push current runs))
+    (nreverse runs)))
+
+(defmethod chunk-section ((c paragraph-chunker) section)
+  (let* ((text (section-text section))
+         (runs (and (> (length text) (chunker-long-section c))
+                    (%pack-spans (%paragraph-spans text) (chunker-target c)))))
+    (if (<= (length runs) 1)
+        (list (make-chunk :text text :sub-locator nil :boundary :whole-section))
+        (loop for run in runs
+              for i from 1
+              collect (make-chunk :text (subseq text (car (first run)) (cdr (first (last run))))
+                                  :sub-locator (format nil "part ~D" i)
+                                  :boundary :whole-paragraph)))))
+
+(defmethod chunker-id ((c paragraph-chunker))
+  ;; The settings are part of the id, so changing either re-chunks the corpus on its next sync.
+  (format nil "paragraph/1:~D:~D" (chunker-long-section c) (chunker-target c)))
+
 ;;; --- the store and its corpora -------------------------------------------------
 
 (defvar *table* "praxeon_chunks" "Default chunk table name.")
