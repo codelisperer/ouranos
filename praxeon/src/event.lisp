@@ -15,7 +15,13 @@
 ;;;;   (:type :deliberating :step N)                       -- about to call the model
 ;;;;   (:type :tool-call    :id .. :name .. :arguments ..) -- the model chose a means
 ;;;;   (:type :tool-result  :id .. :name .. :content ..)   -- the means ran
+;;;;   (:type :truncated    :step N :max-tokens M :tool-calls (name ..))
+;;;;                        -- step N stopped at the output limit M before the model had
+;;;;                           finished; its text is not the answer and the named tool calls
+;;;;                           were not run. OUTPUT-TRUNCATED is signalled next (#326).
 ;;;;   (:type :answer       :text ..)                      -- the model's final reply
+;;;;   (:type :answer       :text .. :truncated t)         -- cut-off text a handler accepted
+;;;;                                                          as the answer (ACCEPT-TRUNCATED)
 ;;;; Additional event types may appear over time; a renderer should ignore any it
 ;;;; does not recognize.
 

@@ -29,6 +29,35 @@
                      (deliberation-failure-detail c))))
   (:documentation "Signalled when the actor cannot decide on an action."))
 
+(define-condition output-truncated (deliberation-failure)
+  ((step-number :initarg :step :reader output-truncated-step)
+   (max-tokens :initarg :max-tokens :reader output-truncated-max-tokens)
+   (text :initarg :text :initform "" :reader output-truncated-text)
+   (tool-calls :initarg :tool-calls :initform '() :reader output-truncated-tool-calls))
+  (:report
+   (lambda (c s)
+     (let ((calls (length (output-truncated-tool-calls c))))
+       (format s "The model's output reached the output limit of ~D tokens before the model had finished, at step ~D of the turn (steps count from 0, as on the :deliberating event). Nothing from that step was used: its text was not returned as an answer"
+               (output-truncated-max-tokens c) (output-truncated-step c))
+       (cond ((= calls 1) (format s ", and its tool call was not run"))
+             ((> calls 1) (format s ", and its ~D tool calls were not run" calls)))
+       (format s " (#326).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS), end the turn with the cut-off text (ACCEPT-TRUNCATED), or end it with no answer (ABANDON-TURN). To raise the limit for every turn, pass :max-tokens to RUN-TURN or set the agent's MAX-TOKENS."))))
+  (:documentation "Signalled by RUN-TURN when a step's completion stopped at the output limit
+\(stop reason :MAX-TOKENS) instead of finishing (#326).
+
+STEP is the step's number, the same number as its :DELIBERATING event. MAX-TOKENS is the limit
+the step ran with. TEXT is the text the model produced before it was cut off, and TOOL-CALLS the
+tool calls the provider parsed from the cut-off output; their arguments may be incomplete, which
+is why none of them was run.
+
+A subtype of DELIBERATION-FAILURE, so a handler an app already has for a turn that produced no
+answer also receives this. Before #326 a cut-off tool call was attempted again until MAX-STEPS
+ran out and the turn ended in a DELIBERATION-FAILURE, so that handler is the one such an app was
+using.
+
+RUN-TURN signals it with ERROR, inside three restarts: RETRY-WITH-MAX-TOKENS, ACCEPT-TRUNCATED
+and ABANDON-TURN. The functions of the same names below invoke them."))
+
 (define-condition missing-provenance (praxeon-error)
   ((operation :initarg :operation :initform nil :reader missing-provenance-operation)
    (subject :initarg :subject :initform nil :reader missing-provenance-subject))
@@ -144,4 +173,27 @@ merged, and this names what did not (pre-publication issue 418)."))
 (defun abandon-action (&optional condition)
   "Invoke ABANDON-ACTION, giving up on the current action."
   (let ((r (find-restart 'abandon-action condition)))
+    (when r (invoke-restart r))))
+
+;;; Restart invokers for a step cut off by the output limit (#326). RUN-TURN establishes these
+;;; around OUTPUT-TRUNCATED. They act on the whole turn rather than on one means, which is why
+;;; they are not the three above.
+
+(defun retry-with-max-tokens (max-tokens &optional condition)
+  "Invoke RETRY-WITH-MAX-TOKENS: ask the model again for the step that was cut off, with
+MAX-TOKENS (a positive integer) as the output limit for that step and for every later step of
+the turn. The retry is another step, so it counts against RUN-TURN's MAX-STEPS."
+  (let ((r (find-restart 'retry-with-max-tokens condition)))
+    (when r (invoke-restart r max-tokens))))
+
+(defun accept-truncated (&optional condition)
+  "Invoke ACCEPT-TRUNCATED: end the turn with the cut-off text as its answer. RUN-TURN returns
+the text with a second value, :TRUNCATED."
+  (let ((r (find-restart 'accept-truncated condition)))
+    (when r (invoke-restart r))))
+
+(defun abandon-turn (&optional condition)
+  "Invoke ABANDON-TURN: end the turn with no answer. RUN-TURN returns NIL with a second value,
+:ABANDONED."
+  (let ((r (find-restart 'abandon-turn condition)))
     (when r (invoke-restart r))))

@@ -112,7 +112,10 @@ inheriting the original's source."
 ;;; protocol admits any LLM, not just Anthropic -- without a network call.
 ;;; --------------------------------------------------------------------------
 (defclass scripted (llm:provider)
-  ((script :initarg :script :accessor scripted-script))
+  ((script :initarg :script :accessor scripted-script)
+   ;; The :max-tokens of every request, oldest first (#326), so a test can assert the output
+   ;; limit that reached the provider rather than the one that was passed to RUN-TURN.
+   (limits :initform '() :accessor scripted-limits))
   (:documentation "A provider that hands back queued completions in order."))
 
 (defmethod llm:complete ((p scripted) messages
@@ -120,7 +123,8 @@ inheriting the original's source."
   ;; TOOL-CHOICE is accepted and ignored here. Adding a &key to a generic function obliges
   ;; every method to accept it, which is a real compatibility cost of pre-publication issue 416 and the reason
   ;; the PR says so: any provider implemented outside this tree needs the same edit.
-  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (declare (ignore messages system tools temperature tool-choice))
+  (setf (scripted-limits p) (append (scripted-limits p) (list max-tokens)))
   (or (pop (scripted-script p))
       (llm:make-completion :text "" :stop-reason :end)))
 
@@ -3394,3 +3398,258 @@ though it were the cost."
              (is (every (lambda (l) (search "workflow=fan-160" l)) lines)
                  "and the rest of the caller's context: ~S" lines)))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
+
+;;; --------------------------------------------------------------------------
+;;; #326: a step cut off by the output limit is not used.
+;;;
+;;; The scripted provider returns a completion whose stop reason is :max-tokens, which is what
+;;; both real backends return when the vendor stops at the limit (`%stop-reason' maps
+;;; "max_tokens", `%openai-stop-reason' maps "length"). Before #326 RUN-TURN never read the stop
+;;; reason: a cut-off answer was returned as though it were complete, and the tool calls parsed
+;;; from a cut-off step were run and the model asked again, until MAX-STEPS ran out.
+;;; --------------------------------------------------------------------------
+
+(in-suite praxeon)
+
+(defun %cut-off-tool-call ()
+  "A completion stopped by the output limit inside a tool call: some text, then a call whose
+arguments did not all arrive."
+  (llm:make-completion :text "I'll put it on the whiteboard."
+                       :tool-calls (list (llm:make-tool-call
+                                          :id "w1" :name "whiteboard"
+                                          :arguments (%args "title" "Plan")))
+                       :stop-reason :max-tokens))
+
+(defun %cut-off-text ()
+  "A completion stopped by the output limit in the middle of a plain answer."
+  (llm:make-completion :text "The three steps are: first, gather the"
+                       :stop-reason :max-tokens))
+
+(defun %whiteboard-agent (script &rest make-agent-args)
+  "An agent on a scripted provider answering with SCRIPT, with a `whiteboard' means. Returns the
+agent, and a function of no arguments that returns the arguments of every call the means
+received, oldest first."
+  (let* ((runs '())
+         (agent (apply #'actor:make-agent
+                       :name "writer"
+                       :provider (make-instance 'scripted :script script)
+                       make-agent-args)))
+    (actor:register-means agent "whiteboard" "writes a block on the whiteboard"
+                          (lambda (args) (push args runs) "written"))
+    (values agent (lambda () (reverse runs)))))
+
+(defun %roles (agent)
+  (mapcar #'llm:role (actor:agent-history agent)))
+
+(test a-tool-call-cut-off-by-the-output-limit-is-not-run-and-the-turn-stops
+  "The case #326 was filed about. The step stopped inside a tool call; with no handler, nothing
+from it is used and the turn ends at that step with OUTPUT-TRUNCATED, which names the step, the
+limit and the tool call that was dropped."
+  (multiple-value-bind (ag runs)
+      (%whiteboard-agent (list (%cut-off-tool-call) (%cut-off-tool-call) (%cut-off-tool-call))
+                         :max-tokens 1000)
+    (let* ((events '())
+           (c (handler-case
+                  (evt:with-observer ((lambda (e) (push e events)))
+                    (actor:run-turn ag "write the plan on the whiteboard")
+                    nil)
+                (cnd:output-truncated (c) c))))
+      (setf events (reverse events))
+      (is-true c "run-turn returned instead of signalling OUTPUT-TRUNCATED")
+      (is (typep c 'cnd:deliberation-failure)
+          "an app's existing handler for DELIBERATION-FAILURE must receive it too")
+      (is (null (funcall runs)) "the cut-off tool call was run with ~S" (funcall runs))
+      (is (= 1 (length (scripted-limits (actor:agent-provider ag))))
+          "the model was asked ~D times; the turn must stop at the first cut-off step"
+          (length (scripted-limits (actor:agent-provider ag))))
+      (is (null (find :answer events :key #'evt:event-type)) "an :answer event was emitted")
+      (is (eql 0 (and c (cnd:output-truncated-step c))))
+      (is (eql 1000 (and c (cnd:output-truncated-max-tokens c))))
+      (is (equal '("whiteboard")
+                 (and c (mapcar #'llm:tool-call-name (cnd:output-truncated-tool-calls c)))))
+      (let ((e (find :truncated events :key #'evt:event-type)))
+        (is-true e "no :truncated event was emitted: ~S" (mapcar #'evt:event-type events))
+        (is (eql 0 (evt:event-get e :step)))
+        (is (eql 1000 (evt:event-get e :max-tokens)))
+        (is (equal '("whiteboard") (evt:event-get e :tool-calls))))
+      ;; A tool-use part with no tool result after it would make the next request invalid, so
+      ;; the history holds the user's message and nothing from the cut-off step.
+      (is (equal '("user") (%roles ag)) "history roles: ~S" (%roles ag)))))
+
+(test a-reply-cut-off-by-the-output-limit-is-not-returned-as-the-answer
+  "The step stopped in the middle of a plain answer. Before #326 that text was the turn's answer,
+with nothing to show it was incomplete. Now, with no handler, RUN-TURN returns nothing and
+signals, and the condition carries the text so a handler can still use it."
+  (let* ((provider (make-instance 'scripted :script (list (%cut-off-text))))
+         (ag (actor:make-agent :provider provider))
+         (events '())
+         (returned :nothing)
+         (c (handler-case
+                (evt:with-observer ((lambda (e) (push e events)))
+                  (setf returned (actor:run-turn ag "list the three steps"))
+                  nil)
+              (cnd:output-truncated (c) c))))
+    (is-true c "run-turn did not signal OUTPUT-TRUNCATED")
+    (is (eq :nothing returned) "run-turn returned the cut-off text: ~S" returned)
+    (is (null (find :answer events :key #'evt:event-type)) "an :answer event was emitted")
+    (is (equal "The three steps are: first, gather the"
+               (and c (cnd:output-truncated-text c))))
+    (is (null (and c (cnd:output-truncated-tool-calls c))))
+    (let ((e (find :truncated events :key #'evt:event-type)))
+      (is-true e "no :truncated event was emitted")
+      (is (eql llm:*default-max-tokens* (evt:event-get e :max-tokens))
+          "with no limit set, the event must name the default, ~D; it named ~S"
+          llm:*default-max-tokens* (evt:event-get e :max-tokens))
+      (is (null (evt:event-get e :tool-calls))))
+    (is (equal '("user") (%roles ag)) "history roles: ~S" (%roles ag))))
+
+(test the-retry-restart-asks-again-with-the-larger-limit
+  "RETRY-WITH-MAX-TOKENS asks again with the new limit, and the rest of the turn keeps it. Here
+the retried step completes the tool call, so the tool runs once, with the complete arguments,
+and the turn answers."
+  (let ((complete (llm:make-tool-call :id "w2" :name "whiteboard"
+                                      :arguments (%args "title" "Plan" "body" "all of it"))))
+    (multiple-value-bind (ag runs)
+        (%whiteboard-agent (list (%cut-off-tool-call)
+                                 (llm:make-completion :tool-calls (list complete)
+                                                      :stop-reason :tool-use)
+                                 (llm:make-completion :text "It is on the whiteboard."
+                                                      :stop-reason :end))
+                           :max-tokens 1000)
+      (let* ((steps '())
+             (answer
+               (handler-bind ((cnd:output-truncated
+                                (lambda (c)
+                                  (cnd:retry-with-max-tokens
+                                   (* 4 (cnd:output-truncated-max-tokens c)) c))))
+                 (evt:with-observer ((lambda (e)
+                                       (when (eq :deliberating (evt:event-type e))
+                                         (push (evt:event-get e :step) steps))))
+                   (actor:run-turn ag "write the plan on the whiteboard")))))
+        (is (equal "It is on the whiteboard." answer))
+        (is (equal '(1000 4000 4000) (scripted-limits (actor:agent-provider ag)))
+            "the limits that reached the provider: ~S"
+            (scripted-limits (actor:agent-provider ag)))
+        (is (= 1 (length (funcall runs))) "the whiteboard ran ~D times" (length (funcall runs)))
+        (is (equal "all of it" (gethash "body" (first (funcall runs))))
+            "the tool must run with the retried step's arguments")
+        (is (equal '(0 1 2) (reverse steps)) "the retry is a step of its own: ~S" (reverse steps))
+        ;; user, assistant (the retried call), user (its result), assistant (the answer)
+        (is (equal '("user" "assistant" "user" "assistant") (%roles ag))
+            "history roles: ~S" (%roles ag))))))
+
+(test a-handler-that-always-retries-still-stops-at-max-steps
+  "A retry is another model call, so it counts against MAX-STEPS. A handler that retries every
+time, with a limit that never helps, ends in the ordinary DELIBERATION-FAILURE rather than
+asking the model without end."
+  (let* ((provider (make-instance 'scripted
+                                  :script (loop repeat 5 collect (%cut-off-text))))
+         (ag (actor:make-agent :provider provider :max-tokens 50))
+         (c (handler-case
+                (handler-bind ((cnd:output-truncated
+                                 (lambda (c) (cnd:retry-with-max-tokens 60 c))))
+                  (actor:run-turn ag "go" :max-steps 3)
+                  nil)
+              (cnd:deliberation-failure (c) c))))
+    (is-true c "the turn did not end in a DELIBERATION-FAILURE")
+    (is (not (typep c 'cnd:output-truncated))
+        "the failure after the last retry should be the MAX-STEPS one, got ~A" c)
+    (is (equal '(50 60 60) (scripted-limits provider))
+        "the model was asked with ~S; three steps were allowed" (scripted-limits provider))))
+
+(test the-retry-restart-refuses-a-limit-that-is-not-a-positive-integer
+  "A NIL here would otherwise fall back to the agent's limit, the one that was just too small,
+and the retry would silently repeat the failure."
+  (let ((ag (actor:make-agent :provider (make-instance 'scripted
+                                                       :script (list (%cut-off-text))))))
+    (signals type-error
+      (handler-bind ((cnd:output-truncated (lambda (c) (cnd:retry-with-max-tokens nil c))))
+        (actor:run-turn ag "go")))))
+
+(test the-accept-restart-returns-the-cut-off-text-marked-as-truncated
+  "ACCEPT-TRUNCATED ends the turn with the cut-off text, and marks it: :TRUNCATED as the second
+value and on the :answer event. The text goes into the history; the tool call does not, because
+it never ran and so has no result."
+  (multiple-value-bind (ag runs) (%whiteboard-agent (list (%cut-off-tool-call)))
+    (let ((events '()))
+      (multiple-value-bind (text mark)
+          (handler-bind ((cnd:output-truncated (lambda (c) (cnd:accept-truncated c))))
+            (evt:with-observer ((lambda (e) (push e events)))
+              (actor:run-turn ag "write the plan on the whiteboard")))
+        (is (equal "I'll put it on the whiteboard." text))
+        (is (eq :truncated mark) "the second value was ~S" mark)
+        (is (null (funcall runs)) "the cut-off tool call ran")
+        (let ((answer (find :answer events :key #'evt:event-type)))
+          (is-true answer "no :answer event was emitted")
+          (is (eq t (evt:event-get answer :truncated))))
+        (is (equal '("user" "assistant") (%roles ag)) "history roles: ~S" (%roles ag))
+        (is (equal '(:text) (mapcar (lambda (part) (getf part :type))
+                                    (llm:content (car (last (actor:agent-history ag))))))
+            "the recorded reply must be its text alone")))))
+
+(test the-accept-restart-returns-a-cut-off-plain-answer
+  (let ((ag (actor:make-agent :provider (make-instance 'scripted
+                                                       :script (list (%cut-off-text))))))
+    (multiple-value-bind (text mark)
+        (handler-bind ((cnd:output-truncated (lambda (c) (cnd:accept-truncated c))))
+          (actor:run-turn ag "list the three steps"))
+      (is (equal "The three steps are: first, gather the" text))
+      (is (eq :truncated mark) "the second value was ~S" mark))))
+
+(test the-abandon-restart-ends-the-turn-with-no-answer
+  (multiple-value-bind (ag runs) (%whiteboard-agent (list (%cut-off-tool-call)))
+    (multiple-value-bind (text mark)
+        (handler-bind ((cnd:output-truncated (lambda (c) (cnd:abandon-turn c))))
+          (actor:run-turn ag "write the plan on the whiteboard"))
+      (is (null text) "an abandoned turn returned ~S" text)
+      (is (eq :abandoned mark) "the second value was ~S" mark)
+      (is (null (funcall runs)) "the cut-off tool call ran")
+      (is (equal '("user") (%roles ag)) "history roles: ~S" (%roles ag)))))
+
+(test run-turn-through-reports-how-a-cut-off-turn-ended
+  "The turn's reply is a String, so an abandoned turn cannot return NIL through it. The second
+value says which restart ended the turn, and :max-tokens reaches RUN-TURN."
+  (let* ((provider (make-instance 'scripted :script (list (%cut-off-text) (%cut-off-text))))
+         (ag (actor:make-agent :provider provider)))
+    (multiple-value-bind (tn mark)
+        (handler-bind ((cnd:output-truncated (lambda (c) (cnd:accept-truncated c))))
+          (actor:run-turn-through ag "list the three steps" :max-tokens 700))
+      (is (equal "The three steps are: first, gather the" (turn:turn-reply tn)))
+      (is (eq :truncated mark) "after ACCEPT-TRUNCATED the second value was ~S" mark))
+    (multiple-value-bind (tn mark)
+        (handler-bind ((cnd:output-truncated (lambda (c) (cnd:abandon-turn c))))
+          (actor:run-turn-through ag "again" :max-tokens 900))
+      (is (equal "" (turn:turn-reply tn)))
+      (is (eq :abandoned mark) "after ABANDON-TURN the second value was ~S" mark))
+    (is (equal '(700 900) (scripted-limits provider))
+        "the limits that reached the provider: ~S" (scripted-limits provider))))
+
+(test the-agent-s-max-tokens-reaches-the-provider
+  (let* ((provider (make-instance 'scripted
+                                  :script (list (llm:make-completion :text "ok"
+                                                                     :stop-reason :end))))
+         (ag (actor:make-agent :provider provider :max-tokens 3000)))
+    (is (equal "ok" (actor:run-turn ag "hi")))
+    (is (equal '(3000) (scripted-limits provider)) "sent ~S" (scripted-limits provider))))
+
+(test run-turn-s-max-tokens-overrides-the-agent-s
+  (let* ((provider (make-instance 'scripted
+                                  :script (list (llm:make-completion :text "ok"
+                                                                     :stop-reason :end))))
+         (ag (actor:make-agent :provider provider :max-tokens 3000)))
+    (actor:run-turn ag "hi" :max-tokens 5000)
+    (is (equal '(5000) (scripted-limits provider)) "sent ~S" (scripted-limits provider))))
+
+(test with-no-limit-set-the-default-is-read-when-the-call-is-made
+  "The agent's slot defaults to NIL rather than to the variable's value when the agent is made.
+So the workaround #326 was filed with, binding *DEFAULT-MAX-TOKENS* around RUN-TURN, keeps
+working, and outside the binding the global value applies."
+  (let* ((provider (make-instance 'scripted
+                                  :script (list (llm:make-completion :text "one" :stop-reason :end)
+                                                (llm:make-completion :text "two" :stop-reason :end))))
+         (ag (actor:make-agent :provider provider)))
+    (let ((llm:*default-max-tokens* 1234))
+      (actor:run-turn ag "hi"))
+    (actor:run-turn ag "again")
+    (is (equal (list 1234 llm:*default-max-tokens*) (scripted-limits provider))
+        "sent ~S" (scripted-limits provider))))

@@ -17,11 +17,27 @@
   "Default model id. Confirmed a valid Claude API model string; for heavy
 agentic tool-use loops prefer a more capable model such as \"claude-opus-4-8\".")
 
-(defparameter *default-max-tokens* 1024
-  "Default output-token budget for a completion when the caller passes no
-:max-tokens. A reasoning model may need a larger budget to finish thinking and
-still answer -- bind this higher for such models, or when a deliberate/act step
-truncates (stop-reason :max-tokens).")
+(defparameter *default-max-tokens* 8192
+  "The output-token limit for a completion when the caller passes no :max-tokens. An agent turn
+uses it when neither RUN-TURN's :max-tokens nor the agent's MAX-TOKENS slot is set, and reads it
+at the time of each model call, so a binding around RUN-TURN still applies.
+
+The limit is a ceiling, not a charge: providers bill the output tokens a model generates, so a
+higher limit costs nothing for a reply that stays short.
+
+WHY 8,192 (#326). It was 1,024, which cut off ordinary agent work. Everything the model
+generates counts against the limit: its text, the arguments of its tool calls (a long document
+written through a tool is output), and, on a model that thinks before answering, its thinking.
+The default model decides for itself whether to think when a request carries no thinking
+setting, and this client sends none. A consuming app raised the limit to 8,192 after its tool
+calls were cut off at 1,024. The models praxeon names as defaults accept 8,192:
+claude-sonnet-5 (*DEFAULT-MODEL*) and claude-opus-4-8 allow up to 128,000 output tokens, and
+the model card of qwen2.5 (the default model of OPENAI-COMPATIBLE) gives its generation length
+as 8,192 tokens. For a model whose maximum is lower, pass :max-tokens or bind this lower.
+
+A reply that uses most of the limit takes correspondingly long to generate, and this client
+reads a response only when it is complete, so a long reply can take longer than
+*READ-TIMEOUT*. Bind that higher too if it does.")
 
 (defparameter *connect-timeout* 10
   "Seconds to wait for the provider TCP/TLS connect before failing. A short bound:
