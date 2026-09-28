@@ -402,7 +402,8 @@
   :description "Tests for hyperion/db-connection (SQLite, and real worker threads)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/db-connection" "mnemosyne" "fiveam")  ; the tests call mnemosyne/conn: directly
+  :depends-on ("hyperion/db-connection" "mnemosyne" "fiveam"   ; the tests call mnemosyne/conn: directly
+               "aion/test-threads")                          ; and join their threads with a deadline
   :serial t
   :components ((:file "tests/db-connection-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/db-connection/tests :run-tests)))

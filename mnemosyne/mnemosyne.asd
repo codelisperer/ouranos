@@ -85,7 +85,8 @@
 
 (defsystem "mnemosyne/tests"
   :description "Test suite for Mnemosyne."
-  :depends-on ("mnemosyne" "aion/secret" "aion/clock" "aion/log" "fiveam")  ; entity.lisp and backends.lisp
+  :depends-on ("mnemosyne" "aion/secret" "aion/clock" "aion/log" "fiveam"   ; entity.lisp and backends.lisp
+               "aion/test-threads")   ; pool.lisp joins its threads with a deadline (#325)
   :serial t
   :components ((:module "tests"
                 :serial t

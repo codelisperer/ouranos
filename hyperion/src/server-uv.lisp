@@ -1271,8 +1271,10 @@ Clack -- owning the socket is what makes it available at all."
   (check-type workers (or null (integer 1)))
   (let* ((loop (uv:make-loop))
          (live (make-hash-table :test 'eq))
-         (workers-pool (and workers (pool:make-pool :size workers :name "server-uv-worker")))
-         (dispatch (and workers-pool (pool-dispatch workers-pool)))
+         ;; Set below, once the bind has succeeded. The connection callback reads it only
+         ;; after the loop thread starts, which is after that.
+         (workers-pool nil)
+         (dispatch nil)
          (listener (net:listen-tcp
                     loop host port
                     :on-connection
@@ -1292,12 +1294,23 @@ Clack -- owning the socket is what makes it available at all."
                                      (%finish connection state)
                                      (log:debug "server-uv: connection error"
                                                 :condition (princ-to-string e)))))))))
-    (multiple-value-bind (bound-host bound-port) (net:listener-address listener)
-      (let ((thread (uv:start-loop-thread loop)))
-        (log:info "server-uv: listening" :host bound-host :port bound-port)
-        (%make-server :loop loop :thread thread :listener listener
-                      :host bound-host :port bound-port :live live
-                      :workers workers-pool)))))
+    ;; THE WORKER POOL IS MADE AFTER THE BIND, so a port that is taken starts no worker
+    ;; threads. After this point a failure stops the pool before it propagates: START has
+    ;; not returned a SERVER, so the caller has nothing to STOP.
+    (when workers
+      (setf workers-pool (pool:make-pool :size workers :name "server-uv-worker")
+            dispatch (pool-dispatch workers-pool)))
+    (let ((started nil))
+      (unwind-protect
+           (multiple-value-bind (bound-host bound-port) (net:listener-address listener)
+             (let ((thread (uv:start-loop-thread loop)))
+               (log:info "server-uv: listening" :host bound-host :port bound-port)
+               (prog1 (%make-server :loop loop :thread thread :listener listener
+                                    :host bound-host :port bound-port :live live
+                                    :workers workers-pool)
+                 (setf started t))))
+        (when (and workers-pool (not started))
+          (%stop-workers workers-pool))))))
 
 (defparameter *stop-wait-seconds* 5
   "How long STOP waits for the loop thread to close the listener and the open connections

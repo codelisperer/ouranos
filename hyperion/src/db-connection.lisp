@@ -73,6 +73,9 @@ When no connection becomes free within the pool's checkout timeout, the request 
 with *BUSY-RESPONSE* and APP is not called. Give the pool at least as many connections as the
 server has worker threads, or requests will wait for each other's connections."
   (check-type variable (and symbol (not null)))
+  ;; A pool, not a backend. WITH-CONNECTION accepts either, and a backend here would open and
+  ;; close a connection for every request with no limit, no timeout and no 503.
+  (check-type pool conn:pool)
   (lambda (env)
     (let ((entered nil))
       (block request

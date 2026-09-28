@@ -68,10 +68,11 @@ its tag.
   it lends one connection for the extent of its body, and a `with-connection` on the same
   pool nested inside it, on the same thread, gets the same connection. `close-pool` closes
   the pool.
-  - Before a connection is lent again, a transaction the body left open is rolled back, and
-    on Postgres `RESET ALL` and `pg_advisory_unlock_all()` run. A session-level advisory
-    lock, such as praxeon/retrieval's per-corpus lock, therefore never passes to the next
-    borrower.
+  - Before a connection is lent again, a transaction the body left open is rolled back. On
+    Postgres the session is then reset as `DISCARD ALL` resets it, except that prepared
+    statements are kept: settings, role, advisory locks, temporary tables, `LISTEN`
+    registrations and open cursors. A session-level advisory lock, such as
+    praxeon/retrieval's per-corpus lock, therefore never passes to the next borrower.
   - A body that exits with an error has its connection closed instead of returned.
   - A checkout that finds every connection lent waits up to `:checkout-timeout` seconds
     (`*checkout-timeout-seconds*`, 30) and then signals `pool-exhausted`, a `db-error`.
@@ -80,7 +81,7 @@ its tag.
   - Also new: `call-with-connection`, `pool-open-count`, `pool-idle-count` and `pool-closed`.
     (#325)
 - **hyperion/db-connection: `wrap-connection`, for an app that keeps its connection in a
-  global.** `(wrap-connection app pool '*db*)` binds `*db*` to a connection from the pool for
+  global.** `(wrap-connection app pool '*db*)`, where `pool` must be a pool, not a backend, binds `*db*` to a connection from the pool for
   each request, so handlers that read `*db*` keep working when the server runs several
   requests at once.
   - When no connection becomes free in time, the answer is 503 with `Retry-After`

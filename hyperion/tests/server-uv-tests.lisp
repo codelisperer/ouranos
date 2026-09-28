@@ -940,6 +940,19 @@ exists to make possible, and the thing that was impossible before M2."
     (is (%wait-until (lambda () (null (%worker-threads))))
         "and STOP ended them")))
 
+(test a-start-that-fails-to-bind-leaves-no-worker-threads
+  (let ((h (srv:start (const-app 200 +ok+ '("x")) :port 0)))
+    (unwind-protect
+         (progn
+           (is (null (%worker-threads)) "control: no worker threads before")
+           (is (typep (nth-value 1 (ignore-errors
+                                    (srv:start (const-app 200 +ok+ '("y"))
+                                               :port (srv:server-port h) :workers 3)))
+                      'error)
+               "the port is taken, so the second start fails")
+           (is (null (%worker-threads)) "and it left no worker threads behind"))
+      (srv:stop h))))
+
 (test stop-does-not-wait-forever-for-a-handler-that-never-returns
   (let ((gate (sb-thread:make-semaphore))
         (entered (sb-thread:make-semaphore)))

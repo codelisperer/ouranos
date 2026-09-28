@@ -75,7 +75,7 @@
       ;; Both requests are inside the handler at the same moment before either may leave.
       (is (sb-thread:wait-on-semaphore both-in :n 2 :timeout 10))
       (sb-thread:signal-semaphore go-on 2)
-      (let ((conns (mapcar (lambda (th) (first (third (sb-thread:join-thread th :timeout 10 :default nil))))
+      (let ((conns (mapcar (lambda (th) (first (third (aion/test-threads:join th :timeout 10))))
                            threads)))
         (is (every #'identity conns))
         (is (not (eq (first conns) (second conns)))
@@ -103,7 +103,7 @@
         (is (equal "1" (getf (second response) :retry-after)))
         (is (= 0 called) "the handler never ran"))
       (sb-thread:signal-semaphore release)
-      (sb-thread:join-thread holder :timeout 10 :default nil)
+      (aion/test-threads:join holder :timeout 10)
       (is (= 200 (first (funcall app '()))) "control: with the connection back, the request runs")
       (is (= 1 called)))))
 
@@ -129,7 +129,7 @@
         (is (typep (nth-value 1 (ignore-errors (funcall app '()))) 'conn:pool-exhausted)
             "the handler's own pool ran out, and the handler sees it")
         (sb-thread:signal-semaphore release)
-        (sb-thread:join-thread holder :timeout 10 :default nil)))))
+        (aion/test-threads:join holder :timeout 10)))))
 
 (test a-handler-that-signals-has-its-connection-closed
   (with-pool (pool :size 1)
@@ -165,3 +165,10 @@
                'type-error))
     (is (typep (nth-value 1 (ignore-errors (dbc:wrap-connection (lambda (env) env) pool "*DB*")))
                'type-error))))
+
+(test the-pool-must-be-a-pool-not-a-backend
+  ;; WITH-CONNECTION accepts a backend too, so a backend here would silently open a
+  ;; connection per request with no limit and no 503.
+  (is (typep (nth-value 1 (ignore-errors (dbc:wrap-connection (lambda (env) env)
+                                                              (be:make-sqlite ":memory:") '*db*)))
+             'type-error)))

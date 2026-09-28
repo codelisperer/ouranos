@@ -390,10 +390,28 @@ POOL-EXHAUSTED."
              (%close-quietly connection)
              (%release-slot pool))))))))
 
+(defparameter +postgres-reset+
+  '("CLOSE ALL"
+    "SET SESSION AUTHORIZATION DEFAULT"
+    "RESET ALL"
+    "UNLISTEN *"
+    "SELECT pg_advisory_unlock_all()"
+    "DISCARD PLANS"
+    "DISCARD TEMP"
+    "DISCARD SEQUENCES")
+  "What %RESET-CONNECTION runs on a Postgres connection after the rollback: the statements
+Postgres documents DISCARD ALL as equivalent to, without DEALLOCATE ALL. The advisory-lock
+release is the one #325 was ranked for.")
+
 (defun %reset-connection (connection)
   "Put CONNECTION back into the state a new connection is in, as far as a later borrower can
-tell: no open transaction and, on Postgres, no session settings and no advisory locks.
-Signals if it cannot.
+tell: no open transaction and, on Postgres, no session settings, role, advisory locks,
+temporary tables, LISTEN registrations or open cursors. Signals if it cannot.
+
+On Postgres this is every step of DISCARD ALL except DEALLOCATE ALL. cl-dbi keeps the names of
+prepared statements it has yet to deallocate and deallocates them during a later PREPARE on the
+same connection; after a DEALLOCATE ALL those names no longer exist, and that later PREPARE,
+in the next borrower's unrelated query, would fail. See +POSTGRES-RESET+.
 
 The transaction is rolled back whether or not one is open. On Postgres a ROLLBACK outside a
 transaction is answered with a warning, which is muffled here; cl-dbi only knows about
@@ -404,8 +422,8 @@ autocommit flag is asked first."
     (:postgres
      (handler-bind ((warning #'muffle-warning))
        (dbi:do-sql connection "ROLLBACK"))
-     (dbi:do-sql connection "RESET ALL")
-     (dbi:fetch-all (dbi:execute (dbi:prepare connection "SELECT pg_advisory_unlock_all()"))))
+     (dolist (statement +postgres-reset+)
+       (dbi:do-sql connection statement)))
     (:sqlite3
      (unless (%sqlite-autocommit-p connection)
        (dbi:do-sql connection "ROLLBACK")))

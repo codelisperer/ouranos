@@ -31,8 +31,24 @@ Build a typed backend, then open a connection. Backends are constructed from CL 
   not return codes.
 - **`?` placeholders are portable** (SQLite and Postgres both — verified). Never interpolate
   values into SQL.
-- **No connection pool yet**: a connection isn't safe to share across concurrent requests —
-  use `with-connection` per request/operation for now.
+- **A connection is not safe to share between threads.** For an app that serves requests on
+  more than one thread, make a pool once and take a connection from it where one is needed
+  (#325):
+
+  ```lisp
+  (defvar *pool* (mnemosyne/conn:make-pool backend :size 8))   ; opens nothing yet
+  (mnemosyne/conn:with-connection (c *pool*)                    ; lends one for the body
+    (mnemosyne/conn:query c "SELECT id, name FROM t"))
+  (mnemosyne/conn:close-pool *pool*)                            ; at shutdown
+  ```
+
+  `with-connection` takes a pool or a backend. A nested `with-connection` on the same pool and
+  thread gets the same connection. When the body returns, an open transaction is rolled back
+  and, on Postgres, session state (settings, role, advisory locks, temporary tables, `LISTEN`)
+  is cleared before the connection is lent again; when the body signals, the connection is
+  closed instead. A checkout that finds every connection lent waits up to `:checkout-timeout`
+  seconds and then signals `pool-exhausted`. A hyperion app that keeps its connection in a
+  global uses `hyperion/db-connection:wrap-connection` to bind it per request.
 - **A file-backed SQLite path gets its parent directory created.** `"./data/app.db"` is an
   ordinary layout, but SQLite creates the *file* and never the *folder*, so a first run
   failed with a bare `unable to open database file` naming neither the path nor the cause.

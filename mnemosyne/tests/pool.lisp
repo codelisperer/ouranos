@@ -121,6 +121,24 @@ from a backend, not from a connection."
             (conn:with-connection (c pool)
               (is* (equal default (timeout c)) "the next borrower sees the default again"))))))))
 
+(test a-postgres-temporary-table-and-listen-do-not-reach-the-next-borrower
+  ;; Two more kinds of session state RESET ALL alone would leave behind (review of #330).
+  (with-each-pool-backend (backend)
+    (when (%postgres-p)
+      (with-test-pool (pool backend :size 1)
+        (flet ((temp-table-p (c)
+                 (second (first (conn:query c "SELECT to_regclass('pg_temp.pool_temp_t') IS NOT NULL AS present"))))
+               (channels (c)
+                 (mapcar #'second (conn:query c "SELECT pg_listening_channels() AS channel"))))
+          (conn:with-connection (c pool)
+            (conn:exec c "CREATE TEMPORARY TABLE pool_temp_t (x INTEGER)")
+            (conn:exec c "LISTEN pool_channel")
+            (is* (eql 1 (temp-table-p c)) "control: the temporary table exists in the body")
+            (is* (equal '("pool_channel") (channels c)) "control: and the session listens"))
+          (conn:with-connection (c pool)
+            (is* (eql 0 (temp-table-p c)) "the next borrower has no temporary table")
+            (is* (null (channels c)) "and listens on nothing")))))))
+
 (test a-failed-postgres-transaction-does-not-poison-the-next-borrower
   ;; A statement that fails inside BEGIN leaves the session in an aborted transaction, where
   ;; every later statement fails until a ROLLBACK. The body catches the error itself and
@@ -157,7 +175,7 @@ from a backend, not from a connection."
         (sb-thread:wait-on-semaphore held)
         (let* ((start (get-internal-real-time))
                (mine (conn:with-connection (c pool) c))
-               (theirs (sb-thread:join-thread holder :timeout 10 :default nil)))
+               (theirs (aion/test-threads:join holder :timeout 10)))
           (is* (>= (%seconds-since start) 0.2) "the checkout waited for the holder")
           (is* (eq mine theirs) "and got the connection the holder gave back"))))))
 
@@ -182,7 +200,7 @@ from a backend, not from a connection."
           (is* (typep outcome 'conn:db-error) "it is a DB-ERROR, so existing handlers see it")
           (is* (>= (%seconds-since start) 0.15) "after waiting for the timeout"))
         (sb-thread:signal-semaphore release)
-        (sb-thread:join-thread holder :timeout 10 :default nil)))))
+        (aion/test-threads:join holder :timeout 10)))))
 
 (test many-threads-share-a-small-pool-without-exceeding-its-size
   (with-each-pool-backend (backend)
@@ -205,7 +223,7 @@ from a backend, not from a connection."
                                                  (incf done)))
                                            (error () (sb-thread:with-mutex (lock) (incf failures))))))
                               :name (format nil "pool-borrower-~D" i)))))
-        (dolist (thread threads) (sb-thread:join-thread thread :timeout 60 :default nil))
+        (aion/test-threads:join-all threads :timeout 60)
         (is* (= 160 done) "every checkout ran its query")
         (is* (= 0 failures))
         (is* (<= most-open 3) "the pool never had more than SIZE open, saw ~D" most-open)
@@ -234,7 +252,7 @@ from a backend, not from a connection."
       (is* (and (= 1 (conn:pool-open-count pool)) (= 0 (conn:pool-idle-count pool)))
            "the idle connection closed; the lent one is still open")
       (sb-thread:signal-semaphore release)
-      (sb-thread:join-thread holder :timeout 10 :default nil)
+      (aion/test-threads:join holder :timeout 10)
       (is* (= 0 (conn:pool-open-count pool)) "the lent connection closed when it came back")
       (is* (typep (handler-case (conn:with-connection (c pool) (declare (ignore c)) :lent)
                     (conn:pool-closed (e) e))
