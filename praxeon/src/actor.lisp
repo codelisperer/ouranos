@@ -542,8 +542,13 @@ can take TURN:TURN-REPLY.
 
 MAX-STEPS, PERMIT and MAX-TOKENS are passed to RUN-TURN. When a handler ends the turn through
 a restart of OUTPUT-TRUNCATED (#326), the second value is RUN-TURN's: :TRUNCATED after
-ACCEPT-TRUNCATED, with the cut-off text as the reply, and :ABANDONED after ABANDON-TURN, with an
-empty reply. It is NIL otherwise."
+ACCEPT-TRUNCATED, when the effect's reply is the cut-off text, and :ABANDONED after
+ABANDON-TURN, when the effect's reply is empty. It is NIL otherwise.
+
+The leave stages run after the effect in every case, so the final reply is what they made of the
+effect's reply. A guardrail that adds a note to the reply adds it to an abandoned turn's empty
+reply too, and the turn is returned with that note and :ABANDONED. The second value says how the
+model's part of the turn ended, not what the final reply contains."
   (let ((outcome nil))
     (values
      (turn:run-chain

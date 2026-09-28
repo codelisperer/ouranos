@@ -3653,3 +3653,27 @@ working, and outside the binding the global value applies."
     (actor:run-turn ag "again")
     (is (equal (list 1234 llm:*default-max-tokens*) (scripted-limits provider))
         "sent ~S" (scripted-limits provider))))
+
+(test leave-stages-still-run-when-a-cut-off-turn-ends-early
+  "From the review of #329. The effect's reply is empty after ABANDON-TURN and is the cut-off text
+after ACCEPT-TRUNCATED, and the leave stages then run as they always do, so a guardrail can still
+add its note. The second value says how the model's part of the turn ended, not what the final
+reply contains."
+  (let ((note (turn:leave-stage "note"
+                                (lambda (tn)
+                                  (turn:with-reply tn (concatenate 'string (turn:turn-reply tn)
+                                                                   "[note]"))))))
+    (flet ((end-early (restart)
+             (let ((ag (actor:make-agent
+                        :provider (make-instance 'scripted :script (list (%cut-off-text))))))
+               (handler-bind ((cnd:output-truncated (lambda (c) (funcall restart c))))
+                 (actor:run-turn-through ag "go" :chain (list note))))))
+      (multiple-value-bind (tn mark) (end-early #'cnd:abandon-turn)
+        (is (eq :abandoned mark) "the second value was ~S" mark)
+        (is (equal "[note]" (turn:turn-reply tn))
+            "the leave stage did not run on the abandoned turn's empty reply: ~S"
+            (turn:turn-reply tn)))
+      (multiple-value-bind (tn mark) (end-early #'cnd:accept-truncated)
+        (is (eq :truncated mark) "the second value was ~S" mark)
+        (is (equal "The three steps are: first, gather the[note]" (turn:turn-reply tn))
+            "the leave stage did not run on the accepted text: ~S" (turn:turn-reply tn))))))
