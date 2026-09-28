@@ -14,20 +14,27 @@ its tag.
 
 ### An app may have to act
 
-- **praxeon: a turn step cut off by the output limit ends the turn with `output-truncated`
-  instead of passing as finished.** When a completion's stop reason is `:max-tokens`, `run-turn`
-  no longer returns its text as the answer and no longer runs the tool calls parsed from it, and
-  nothing from the step goes into `agent-history`. It emits a `:truncated` event and signals
-  `praxeon/conditions:output-truncated`. That condition is a subtype of `deliberation-failure`,
-  so an app's existing handler for `deliberation-failure` or `praxeon-error` receives it. With
-  no handler the turn ends at that step with the error; in `praxeon/web` the reply shows the
-  error's message. Before, a cut-off answer was returned as though it were complete, and a
-  cut-off tool call was run and the model asked again until `max-steps` ran out. An app that
-  still wants the cut-off text handles the condition with `accept-truncated`. (#326)
+- **praxeon: a step of a turn that the output limit cuts off ends the turn with
+  `output-truncated` instead of passing as finished.** When a completion's stop reason is
+  `:max-tokens`, `run-turn` no longer returns its text as the answer and no longer runs the tool
+  calls parsed from it, and nothing from the step goes into `agent-history`. It emits a
+  `:truncated` event and signals `praxeon/conditions:output-truncated`. That condition is a
+  subtype of `deliberation-failure`, so an app's existing handler for `deliberation-failure` or
+  `praxeon-error` receives it. With no handler the turn ends at that step with the error; in
+  `praxeon/web` the reply shows the error's message. Before, a cut-off answer was returned as
+  though it were complete, and a cut-off tool call was run and the model asked again until
+  `max-steps` ran out. An app that still wants the cut-off text handles the condition with
+  `accept-truncated`. (#326)
 - **praxeon: a model whose maximum output is below 8,192 tokens needs a limit set.** The default
   limit is now 8,192 (see Added), and a provider can refuse a request whose limit is above the
   model's maximum. An app on such a model passes `:max-tokens`, sets the agent's `max-tokens`,
   or binds `praxeon/llm:*default-max-tokens*`. (#326)
+- **praxeon/translate: a translation is still limited to 2,048 tokens, and a turn's reply can
+  now be longer.** `translate` has its own `:max-tokens`, which defaults to 2,048 and did not
+  change, and it returns a cut-off translation without signalling, as before. While replies were
+  capped at 1,024 tokens, 2,048 left room for the translation; with replies of up to 8,192 it may
+  not. An app that translates `run-turn`'s reply, as `praxeon/elise` does, passes `translate` a
+  `:max-tokens` large enough for its longest replies. (#326)
 
 ### Added
 
