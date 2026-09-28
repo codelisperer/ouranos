@@ -1,9 +1,9 @@
 # Praxeon against Mastra and DeepAgents
 
-*A working comparison, 2026-08-23. Written to do two jobs: find the gaps worth closing
-before publication, and find the claims worth making. Praxeon's column is taken from the
-code, not the README — where something exists but has no consumer, it says so, because an
-unused subsystem is an unvalidated one.*
+*A working comparison, 2026-08-23; the Memory row was updated on 2026-09-28. Written to do
+two jobs: find the gaps worth closing before publication, and find the claims worth making.
+Praxeon's column is taken from the code, not the README — where something exists but has no
+consumer, it says so, because an unused subsystem is an unvalidated one.*
 
 The two references: **[Mastra](https://github.com/mastra-ai/mastra)** (TypeScript, agents +
 graph workflows, production tooling) and **[DeepAgents](https://github.com/langchain-ai/deepagents)**
@@ -21,7 +21,7 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 | **Explicit workflows** | `praxeon/workflow` — workflow/step/parallel over a blackboard. Unit-tested; **no application uses it.** | the core abstraction | — |
 | **Failure / approval** | **condition-system restarts**: `retry-action`, `substitute-result`, `abandon-action` | suspend/resume with persisted state | HITL approval hooks |
 | **Context economy** | `praxeon/context`, budgeted, bitemporal | context management + Observational Memory | summarise threads, **offload tool outputs to disk** |
-| **Memory** | — (pre-publication issue 60 open, Kairos #60 unbuilt) | Observational Memory | persistent, pluggable backends |
+| **Memory** | `praxeon/memory` — `remember`, `supersede`, `recall` within a token budget, per person rather than per agent, bitemporal, a provenance on every write, and erasure; an in-memory store and a SQL store with pgvector similarity recall (`praxeon/memory-db`). `praxeon/distil` has a model propose observations from a window of a transcript. **Nothing runs `distil` automatically or condenses observations yet (#317), and no application uses these modules.** | Observational Memory: an observer and a reflector compress each thread | persistent, pluggable backends |
 | **Provider neutrality** | `complete` generic; anthropic + openai-compatible | model routing, 40+ providers | LangChain's model layer |
 | **Tools** | `Means`, provider-neutral `tool-spec` | `createTool()` with schemas | tools + a **Skills** system |
 | **MCP** | — (#64) | authors MCP servers | consumes MCP tools |
