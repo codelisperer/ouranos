@@ -732,3 +732,37 @@ at once. 9 of 60 failed before #371."
               (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" users)))
               (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" events))))
             (conn:close-pool pool))))))
+
+(test a-write-outside-a-request-and-one-inside-it-do-not-wait-for-each-other
+  "On a pool of one: thread A holds the only connection, as a request inside WRAP-CONNECTION
+does, and then writes. Thread B writes outside any request meanwhile. B must wait for the
+connection without holding the store's lock, or A waits for the lock that B holds while B waits
+for the connection that A holds, until B's checkout timeout fails it. Found in review of #380."
+  (let* ((file (%sqlite-file))
+         (pool (conn:make-pool (be:make-sqlite file) :size 1 :checkout-timeout 3)))
+    (unwind-protect
+         (let* ((a (auth:make-db-auth pool :dialect :sqlite :ensure t))
+                (holding (bt:make-semaphore))
+                (request (bt:make-thread
+                          (lambda ()
+                            (conn:with-connection (c pool)
+                              (declare (ignore c))
+                              (bt:signal-semaphore holding)
+                              ;; Give B time to start its write and block on the pool.
+                              (sleep 0.3)
+                              (handler-case (progn (auth:create-user a :email "in@x.com") :ok)
+                                (error (e) (princ-to-string e)))))
+                          :name "a request's write"))
+                (background (progn
+                              (bt:wait-on-semaphore holding :timeout 10)
+                              (bt:make-thread
+                               (lambda ()
+                                 (handler-case (progn (auth:create-user a :email "out@x.com") :ok)
+                                   (error (e) (princ-to-string e))))
+                               :name "a write outside a request"))))
+           (is (eq :ok (aion/test-threads:join request :timeout 20)))
+           (is (eq :ok (aion/test-threads:join background :timeout 20)))
+           (is (auth:find-user-by-email a "out@x.com"))
+           (is (auth:find-user-by-email a "in@x.com")))
+      (conn:close-pool pool)
+      (ignore-errors (delete-file file)))))

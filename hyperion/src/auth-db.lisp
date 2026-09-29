@@ -118,7 +118,9 @@ WITH-STORE-CONNECTION for how each operation gets its connection."))
 ;;; extent, so reads on different threads run at once; inside HYPERION/DB-CONNECTION's
 ;;; WRAP-CONNECTION on the same pool that is the request's own connection. Writes also hold
 ;;; the store's lock on a pool, because CREATE-USER's duplicate check and %UPDATE-ROLES's
-;;; retry loop rely on writes in this process taking turns.
+;;; retry loop rely on writes in this process taking turns. A write takes its connection
+;;; first and the lock second, whether or not it runs inside a request, so no writer holds
+;;; the lock while it waits for a connection.
 ;;;
 ;;; An operation that calls another (CREATE-USER calls FIND-USER-BY-EMAIL, %UPDATE-ROLES reads
 ;;; and writes inside one transaction) uses the connection it already holds, so it stays in the
@@ -140,13 +142,16 @@ WITH-STORE-CONNECTION."
     (cond ((and *held* (eq (car *held*) store))
            (funcall function))
           ((conn:poolp source)
-           (flet ((borrow ()
-                    (conn:with-connection (c source)
-                      (let ((*held* (cons store c)))
-                        (funcall function)))))
-             (if exclusive
-                 (bt:with-recursive-lock-held ((lock store)) (borrow))
-                 (borrow))))
+           ;; BORROW FIRST, THEN LOCK, for every writer. A write inside WRAP-CONNECTION already
+           ;; holds its request's connection when it asks for the lock, so a write outside a
+           ;; request must not hold the lock while it waits for a connection: with every
+           ;; connection held by requests waiting for that lock, it would wait until the
+           ;; checkout timeout failed it. One order, connection then lock, cannot deadlock.
+           (conn:with-connection (c source)
+             (let ((*held* (cons store c)))
+               (if exclusive
+                   (bt:with-recursive-lock-held ((lock store)) (funcall function))
+                   (funcall function)))))
           (t
            (bt:with-recursive-lock-held ((lock store))
              (let ((*held* (cons store source)))
@@ -155,7 +160,8 @@ WITH-STORE-CONNECTION."
 (defmacro with-store-connection ((store &key exclusive) &body body)
   "Run BODY with a connection held for STORE, which (CONN STORE) returns (#371). On a store made
 over one connection, the store's lock is held for BODY. On a store made over a pool, BODY runs
-on a connection borrowed for its extent, and EXCLUSIVE (for a write) also holds the lock.
+on a connection borrowed for its extent, and EXCLUSIVE (for a write) also holds the lock, taken
+after the connection.
 Inside another operation of the same store, the connection already held is used."
   `(call-with-store-connection ,store (lambda () ,@body) :exclusive ,exclusive))
 
