@@ -254,9 +254,21 @@
    #:*token-thunk* #:current-token #:token-field
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
 
+(cl:defpackage #:hyperion/proxy
+  (:use #:cl)
+  (:documentation
+   "The client's address and scheme behind a trusted proxy (#381). *TRUSTED-PROXY*, made with
+    MAKE-PROXY-TRUST, says which proxies the app trusts; CLIENT-ADDRESS and REQUEST-SCHEME read
+    forwarded headers only as far as that setting vouches for them. With no setting,
+    CLIENT-ADDRESS is :REMOTE-ADDR.")
+  (:export #:*trusted-proxy* #:make-proxy-trust #:proxy-trust #:proxy-trust-p
+           #:client-address #:request-scheme #:trusted-peer-p
+           #:parse-address #:parse-cidr #:cidr-contains-p))
+
 (cl:defpackage #:hyperion/ratelimit
   (:use #:cl)
   (:local-nicknames (#:http #:hyperion/http)
+                    (#:proxy #:hyperion/proxy)      ; BY-ADDRESS's client address (#381)
                     (#:csrf #:hyperion/csrf)        ; WITH-CACHED-BODY, so a form-field key leaves the body readable
                     (#:log #:aion/log)
                     (#:bt #:bordeaux-threads))
@@ -300,6 +312,7 @@
 (cl:defpackage #:hyperion/logging
   (:use #:cl)
   (:local-nicknames (#:log #:aion/log)
+                    (#:proxy #:hyperion/proxy)      ; the request log's :remote (#381)
                     (#:rnd #:aion/random)          ; not a credential; see NEW-REQUEST-ID (pre-publication issue 95)
                     (#:bt  #:bordeaux-threads))
   (:documentation

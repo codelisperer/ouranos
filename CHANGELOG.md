@@ -44,6 +44,15 @@ its tag.
 
 ### Added
 
+- **hyperion/proxy: the client's address behind a trusted proxy, and one setting for it.**
+  (#381) `hyperion/proxy:*trusted-proxy*`, made with `make-proxy-trust` (`:hops N`, or
+  `:cidrs` with an optional platform `:header` such as `CF-Connecting-IP`), says which proxies
+  the app trusts. `client-address` then reads `X-Forwarded-For`, or the platform's header, only
+  as far as those proxies vouch for it, so a forged leftmost entry changes nothing.
+  `hyperion/ratelimit:by-address` and the request log's `remote` field use it, so rate limits
+  count each real client behind a proxy. `request-scheme` reads `X-Forwarded-Proto` under the
+  same setting, for #300. With no setting, the default, nothing changes: the address is
+  `:remote-addr`.
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
   `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
   `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with
