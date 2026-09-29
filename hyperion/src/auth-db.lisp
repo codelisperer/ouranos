@@ -94,19 +94,89 @@
 
 ;;; --- the store ------------------------------------------------------------
 (defclass db-auth ()
-  ((connection :initarg :connection :reader conn)
+  ((source     :initarg :source     :reader store-source)
    (dialect    :initarg :dialect    :reader dialect :initform :sqlite)
    (table      :initarg :table      :reader table   :initform *table*)
    (events-table :initarg :events-table :reader events-table :initform *events-table*)
    (known-roles :initarg :known-roles :reader known-roles :initform nil)
-   (lock :initform (bt:make-lock "hyperion-auth-db") :reader lock))
-  (:documentation "An identity store over a mnemosyne connection (one connection, locked)."))
+   (lock :initform (bt:make-recursive-lock "hyperion-auth-db") :reader lock))
+  (:documentation "An identity store over a mnemosyne connection or a mnemosyne pool. See
+WITH-STORE-CONNECTION for how each operation gets its connection."))
 
-(defun make-db-auth (connection &key (dialect :sqlite) (table *table*)
-                                     (events-table *events-table*) ensure known-roles
-                                     (require-role-log t))
-  "An identity store over an open mnemosyne CONNECTION. DIALECT is :sqlite or :postgres.
-With :ENSURE, create the users table, its unique email index, and the role-event log.
+;;; --- one connection per operation (#371) -----------------------------------
+;;;
+;;; Every operation runs inside WITH-STORE-CONNECTION, and every statement it sends goes to
+;;; (CONN STORE), the connection that form holds for it. Before #371 only the writes took the
+;;; store's lock. The reads (FIND-USER-BY-ID, FIND-USER-BY-EMAIL, AUTHENTICATE, USERS-WITH-ROLE,
+;;; ROLE-HISTORY) used the store's one connection unlocked, so under hyperion/server's :workers
+;;; two request threads could send statements on it at once, and Postgres refused one: "This
+;;; connection is still processing another query" (9 of 60 concurrent page loads in a
+;;; consuming app).
+;;;
+;;; ON A CONNECTION, every operation holds the store's lock, reads included, so the store's
+;;; threads take turns on it. ON A POOL, each operation borrows a connection for its own
+;;; extent, so reads on different threads run at once; inside HYPERION/DB-CONNECTION's
+;;; WRAP-CONNECTION on the same pool that is the request's own connection. Writes also hold
+;;; the store's lock on a pool, because CREATE-USER's duplicate check and %UPDATE-ROLES's
+;;; retry loop rely on writes in this process taking turns. A write takes its connection
+;;; first and the lock second, whether or not it runs inside a request, so no writer holds
+;;; the lock while it waits for a connection.
+;;;
+;;; An operation that calls another (CREATE-USER calls FIND-USER-BY-EMAIL, %UPDATE-ROLES reads
+;;; and writes inside one transaction) uses the connection it already holds, so it stays in the
+;;; same transaction and does not wait for itself.
+
+(defvar *held* nil
+  "(store . connection) while an operation of STORE runs on this thread, or NIL.")
+
+(defun conn (store)
+  "The connection the running operation of STORE holds. Only valid inside
+WITH-STORE-CONNECTION."
+  (if (and *held* (eq (car *held*) store))
+      (cdr *held*)
+      (error "hyperion/auth-db: no connection is held for this store; the operation must run inside WITH-STORE-CONNECTION")))
+
+(defun call-with-store-connection (store function &key exclusive)
+  "Call FUNCTION with STORE's connection for this operation held; see WITH-STORE-CONNECTION."
+  (let ((source (store-source store)))
+    (cond ((and *held* (eq (car *held*) store))
+           (funcall function))
+          ((conn:poolp source)
+           ;; BORROW FIRST, THEN LOCK, for every writer. A write inside WRAP-CONNECTION already
+           ;; holds its request's connection when it asks for the lock, so a write outside a
+           ;; request must not hold the lock while it waits for a connection: with every
+           ;; connection held by requests waiting for that lock, it would wait until the
+           ;; checkout timeout failed it. One order, connection then lock, cannot deadlock.
+           (conn:with-connection (c source)
+             (let ((*held* (cons store c)))
+               (if exclusive
+                   (bt:with-recursive-lock-held ((lock store)) (funcall function))
+                   (funcall function)))))
+          (t
+           (bt:with-recursive-lock-held ((lock store))
+             (let ((*held* (cons store source)))
+               (funcall function)))))))
+
+(defmacro with-store-connection ((store &key exclusive) &body body)
+  "Run BODY with a connection held for STORE, which (CONN STORE) returns (#371). On a store made
+over one connection, the store's lock is held for BODY. On a store made over a pool, BODY runs
+on a connection borrowed for its extent, and EXCLUSIVE (for a write) also holds the lock, taken
+after the connection.
+Inside another operation of the same store, the connection already held is used."
+  `(call-with-store-connection ,store (lambda () ,@body) :exclusive ,exclusive))
+
+(defun make-db-auth (source &key (dialect :sqlite) (table *table*)
+                                 (events-table *events-table*) ensure known-roles
+                                 (require-role-log t))
+  "An identity store over SOURCE: an open mnemosyne connection, or a mnemosyne pool
+\(MNEMOSYNE/CONN:MAKE-POOL). DIALECT is :sqlite or :postgres. With :ENSURE, create the users
+table, its unique email index, and the role-event log.
+
+A POOL IS WHAT AN APP SERVING WITH :WORKERS PASSES (#371), usually the pool it gives
+HYPERION/DB-CONNECTION:WRAP-CONNECTION: each operation then borrows a connection, which inside
+a request is the request's own, and requests do not wait for each other's lookups. Over one
+connection every operation, reads included, takes turns on it under the store's lock; that is
+safe under :WORKERS and makes the store's operations run one at a time.
 
 THE ROLE-EVENT LOG IS CHECKED HERE, at construction (#139). GRANT-ROLE and REVOKE-ROLE write
 to it on every call, so a store without it fails the first time an operator changes a role,
@@ -120,7 +190,7 @@ is the historical behaviour and means a typo like :MODERATER is stored happily a
 grants nothing. Supply a list and CREATE-USER, GRANT-ROLE and REVOKE-ROLE signal UNKNOWN-ROLE
 instead, turning that typo into an error at the point of the mistake. Opt-in, because the
 framework does not know an application's vocabulary and existing callers must keep working."
-  (let ((store (make-instance 'db-auth :connection connection :dialect dialect :table table
+  (let ((store (make-instance 'db-auth :source source :dialect dialect :table table
                                        :events-table events-table
                                        :known-roles known-roles)))
     (when ensure (ensure-schema store))
@@ -153,7 +223,8 @@ database's own error. The report names the migration that creates the table."))
   "Signal MISSING-ROLE-LOG unless STORE's role-event table can be read. A query that returns no
 rows, so it costs one round trip and reads nothing."
   (handler-case
-      (conn:query (conn store) (format nil "SELECT 1 FROM ~A WHERE 1 = 0" (events-table store)))
+      (with-store-connection (store)
+        (conn:query (conn store) (format nil "SELECT 1 FROM ~A WHERE 1 = 0" (events-table store))))
     (error (e)
       (error 'missing-role-log :table (events-table store) :dialect (dialect store) :cause e))))
 
@@ -194,11 +265,12 @@ always \"this account's history\", ordered."
 (defun ensure-schema (store)
   "Create the users table, its unique email index, and the role-event log if absent.
 Returns STORE."
-  (conn:exec (conn store) (db-auth-ddl store))
-  (conn:exec (conn store) (users-email-index-ddl :table (table store)))
-  (conn:exec (conn store) (role-events-ddl :dialect (dialect store)))
-  ;; Never an index on `at' alone: the question is never "every role event ever".
-  (conn:exec (conn store) (role-events-index-ddl :table (events-table store)))
+  (with-store-connection (store :exclusive t)
+    (conn:exec (conn store) (db-auth-ddl store))
+    (conn:exec (conn store) (users-email-index-ddl :table (table store)))
+    (conn:exec (conn store) (role-events-ddl :dialect (dialect store)))
+    ;; Never an index on `at' alone: the question is never "every role event ever".
+    (conn:exec (conn store) (role-events-index-ddl :table (events-table store))))
   store)
 
 ;;; --- passwords (pure; PBKDF2 self-describing combined string) --------------
@@ -290,7 +362,7 @@ only chance to decide them."
                     :roles (%write-roles roles)
                     :status (or status "active")
                     :created_at now :updated_at now)))
-    (bt:with-lock-held ((lock store))
+    (with-store-connection (store :exclusive t)
       ;; A KNOWN duplicate is refused here, before the insert (#221). Until #221 this relied
       ;; only on the unique index's error, and a database built from USERS-DDL alone, which is
       ;; what docs/migrations.md used to show, has no index: a second sign-up with the same
@@ -311,22 +383,25 @@ only chance to decide them."
 
 (defun find-user-by-email (store email)
   "The USER with EMAIL (case-insensitive), or NIL."
-  (let ((rows (q:fetch (conn store)
-                       (list :select '(:*) :from (list (table store))
-                             :where (list := :email (%norm-email email)))
-                       :dialect (dialect store))))
+  (let ((rows (with-store-connection (store)
+                (q:fetch (conn store)
+                         (list :select '(:*) :from (list (table store))
+                               :where (list := :email (%norm-email email)))
+                         :dialect (dialect store)))))
     (when rows (%row->user (first rows)))))
 
 (defun find-user-by-id (store id)
   "The USER with primary key ID, or NIL."
-  (let ((rows (q:fetch (conn store)
-                       (list :select '(:*) :from (list (table store))
-                             :where (list := :_id id))
-                       :dialect (dialect store))))
+  (let ((rows (with-store-connection (store)
+                (q:fetch (conn store)
+                         (list :select '(:*) :from (list (table store))
+                               :where (list := :_id id))
+                         :dialect (dialect store)))))
     (when rows (%row->user (first rows)))))
 
 (defun authenticate (store email plaintext)
-  "The USER if EMAIL exists and PLAINTEXT matches its password; else NIL."
+  "The USER if EMAIL exists and PLAINTEXT matches its password; else NIL. The lookup holds a
+connection; the password check, which is deliberately slow, runs after it has been given back."
   (let ((u (find-user-by-email store email)))
     (when (and u (verify-password plaintext (user-hash u))) u)))
 
@@ -397,7 +472,7 @@ change, never beside it -- see %UPDATE-ROLES."
 
 Returns T on success (including the no-op case where TRANSFORM changed nothing), NIL if there
 is no such user. Signals ROLE-UPDATE-CONFLICT if it keeps losing the swap."
-  (bt:with-lock-held ((lock store))
+  (with-store-connection (store :exclusive t)
     (loop repeat *role-update-attempts*
           do (multiple-value-bind (vid roles) (%roles-row store id)
                (when (null vid) (return nil))
@@ -463,24 +538,25 @@ actor is exactly the thing it cannot supply and must be told."))
 
 Oldest-first because the reconstruction is chronological -- what happened to this account,
 in order -- and a reader scanning for \"when did this start\" reads forwards."
-  (let ((rows (q:fetch (conn store)
-                       (list :select '(:role :action :actor :at)
-                             :from (list (events-table store))
-                             :where (list := :user_id id)
-                             ;; _id BREAKS THE TIE, and it has to. `at' is whole seconds, so
-                             ;; two changes in the same second order arbitrarily under `at'
-                             ;; alone -- and "was this account escalated before or after the
-                             ;; incident" is exactly an ordering question, so an ambiguous
-                             ;; order is a wrong answer to the thing the log is for. Found
-                             ;; by a Postgres run where a grant and a revoke came back
-                             ;; sharing one timestamp.
-                             ;;
-                             ;; _id is a UUID v6, which is time-ordered and sorts
-                             ;; lexicographically in generation order (verified over 200
-                             ;; ids) -- so it is a sub-second tiebreaker already present in
-                             ;; the row, not a column added to paper over the resolution.
-                             :order-by '((:at :asc) (:_id :asc)))
-                       :dialect (dialect store))))
+  (let ((rows (with-store-connection (store)
+                (q:fetch (conn store)
+                         (list :select '(:role :action :actor :at)
+                               :from (list (events-table store))
+                               :where (list := :user_id id)
+                               ;; _id BREAKS THE TIE, and it has to. `at' is whole seconds, so
+                               ;; two changes in the same second order arbitrarily under `at'
+                               ;; alone -- and "was this account escalated before or after the
+                               ;; incident" is exactly an ordering question, so an ambiguous
+                               ;; order is a wrong answer to the thing the log is for. Found
+                               ;; by a Postgres run where a grant and a revoke came back
+                               ;; sharing one timestamp.
+                               ;;
+                               ;; _id is a UUID v6, which is time-ordered and sorts
+                               ;; lexicographically in generation order (verified over 200
+                               ;; ids) -- so it is a sub-second tiebreaker already present in
+                               ;; the row, not a column added to paper over the resolution.
+                               :order-by '((:at :asc) (:_id :asc)))
+                         :dialect (dialect store)))))
     (mapcar (lambda (row)
               (list :role (let ((r (%rget row :role)))
                             (and r (intern (string-upcase r) :keyword)))
@@ -537,9 +613,10 @@ Chiefly for the guard REVOKE-ROLE deliberately does not make: counting the admin
 before removing one. Roles are a serialized keyword list in a text column, so there is no
 portable SQL predicate for this and it scans the table -- fine for an admin-console guard,
 and the signal to move to a real grants table (see the header) if it ever is not."
-  (let ((rows (q:fetch (conn store)
-                       (list :select '(:_id :roles) :from (list (table store)))
-                       :dialect (dialect store))))
+  (let ((rows (with-store-connection (store)
+                (q:fetch (conn store)
+                         (list :select '(:_id :roles) :from (list (table store)))
+                         :dialect (dialect store)))))
     (loop for row in rows
           when (member role (%read-roles (%rget row :roles)))
             collect (%rget row :_id))))
@@ -547,11 +624,14 @@ and the signal to move to a real grants table (see the header) if it ever is not
 (defun set-password (store id new-plaintext &key (clear-temp t))
   "Set user ID's password to NEW-PLAINTEXT (hashed); by default clears the temp-password
 flag (the forced-change-at-first-login completion). Bumps updated_at. Returns T."
-  (let ((now (get-universal-time)))
-    (bt:with-lock-held ((lock store))
+  ;; Hashed before the connection is taken: PBKDF2 is deliberately slow, and holding the
+  ;; store's lock through it would make every other operation wait for it.
+  (let ((now (get-universal-time))
+        (hash (hash-password new-plaintext)))
+    (with-store-connection (store :exclusive t)
       (q:run (conn store)
              (list :update (table store)
-                   :set (list :pw_hash (hash-password new-plaintext)
+                   :set (list :pw_hash hash
                               :temp_password (if clear-temp 0 1)
                               :updated_at now)
                    :where (list := :_id id))

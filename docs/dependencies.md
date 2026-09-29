@@ -27,10 +27,10 @@ sentences, such as which frameworks carry which dependencies, is written by hand
 checked. The number of ASDF systems is not given here, because it changes with every new
 test suite; `scripts/check-deps.lisp` prints it.
 
-- **26** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
-  are counted on the next line). The tables below also document `hunchentoot`, `woo` and
-  `clack-handler-woo`, which no `.asd` in this tree names in a `:depends-on`, so they are not
-  in this count. Of the 26 — 3 are foundation/test
+- **27** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
+  are counted on the next line). The tables below also document `hunchentoot` and `woo`, which
+  no `.asd` in this tree names in a `:depends-on`, so they are not in this count;
+  `clack-handler-woo` is in it since `hyperion/woo` declares it (#372). Of the 27 — 3 are foundation/test
   (`coalton`, `alexandria`, `fiveam`), **~13 are hyperion's web stack**, **3 are the
   mnemosyne data layer** (CL-DBI + two drivers), and **2 arrived with hermes** (`cl-base64`,
   `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (pre-publication issue 164)). One (`lass`) is example-only. Two (`usocket`, `cl+ssl`) were already loaded as dexador's
@@ -57,7 +57,7 @@ test suite; `scripts/check-deps.lisp` prints it.
 | `clack` | HTTP server abstraction | hyperion | Web. |
 | `woo` | HTTP server (Unix/macOS) | praxeon/web | Pulled by `clack-handler-woo`. **No framework declares it** — see the two rows below. |
 | `hunchentoot` | HTTP server (Windows) | praxeon/web, hyperion examples | Pulled by `clack-handler-hunchentoot`. Likewise app-declared. **Built without SSL on every platform** (`:hunchentoot-no-ssl`, pushed at the top of `hyperion.asd` and `praxeon.asd` before `hunchentoot.asd` is read), so it cannot serve HTTPS and does not load OpenSSL: on Windows since #249, and on Linux and macOS since #337. The TLS answer is #125 (server-uv with the mbedTLS this tree carries) and #258 (Postgres over TLS). |
-| `clack-handler-woo` | Clack↔Woo adapter | praxeon/web (Unix) | The system an app actually declares; it pulls `woo`. Binds **libev at load time**, so an image that loads it cannot be shipped as a desktop bundle without carrying libev. |
+| `clack-handler-woo` | Clack↔Woo adapter | praxeon/web (Unix), **`hyperion/woo`** | The system an app actually declares; it pulls `woo`. Binds **libev at load time**, so an image that loads it cannot be shipped as a desktop bundle without carrying libev. `hyperion/woo` (#372) declares it so that one suite, `hyperion/woo/tests`, serves real requests through Woo; it is registered for Linux in `scripts/platform-packages.lisp`, and nothing in hyperion's core depends on them. |
 | `clack-handler-hunchentoot` | Clack↔Hunchentoot adapter | praxeon/web (Windows), all three hyperion examples, **`praxeon/web/tests`** | Pure CL, every platform, nothing to install — which is why the desktop example uses it. `praxeon/web/tests` declares it because a suite that drives a real server is an *application* for the pre-publication issue 139 rule: `praxeon/web` must keep declaring none, so its suite cannot live in `praxeon/tests` (pre-publication issue 151). |
 | `log4cl` | logging engine | `aion/log` (and via it: every framework) | The engine behind the `aion/log` facade. Confined to the opt-in `aion/log` system; core aion never pulls it. *Previously documented only in prose here — added as a row 2026-08-04 by `scripts/check-deps.lisp`.* |
 | `lass` | CSS as s-expressions | `hyperion/examples/coalton-repl` | **Example-only** — no framework depends on it. Kept because the house CSS-DSL story (ADR-0003 §4) is dogfooded in the desktop demo. |

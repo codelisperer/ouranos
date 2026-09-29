@@ -434,7 +434,7 @@ disagree on result-key case, so match the column name case-insensitively."
       (is (equal ids (sort (copy-list ids) #'string<)) "premise: the ids sort in the order made")
       (dolist (row (reverse rows))                               ; stored last-first
         (destructuring-bind (event-id action actor) row
-          (conn:exec (hyperion/auth-db::conn a)
+          (conn:exec (hyperion/auth-db::store-source a)
                      (format nil "INSERT INTO ~A (_id, user_id, role, action, actor, at) VALUES (?, ?, ?, ?, ?, ?)"
                              (auth:events-table a))
                      event-id id "MODERATOR" action actor at)))
@@ -588,3 +588,181 @@ up at once. Returns (values pairs-with-exactly-one-row created refused other-err
              (is (= 50 refused) "and the other is refused as DUPLICATE-EMAIL")
              (is (null other) "no other error: ~S" (remove-duplicates other :test #'string=))))
       (ignore-errors (delete-file path)))))
+
+;;; --- one store shared by request threads (#371) ------------------------------------------
+;;;
+;;; A consuming app on hyperion/server's :workers kept one store over one connection for every
+;;; request, and 9 of 60 concurrent page loads failed with Postgres's "This connection is still
+;;; processing another query": the reads did not take the store's lock. The first test is the
+;;; property itself, on SQLite and with no timing to win: a read waits while another thread
+;;; holds the lock. The Postgres tests repeat the app's case.
+
+(defun %finished-within (thread seconds)
+  "True if THREAD finished within SECONDS."
+  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
+        until (or (not (bt:thread-alive-p thread)) (> (get-internal-real-time) deadline))
+        do (sleep 0.01))
+  (not (bt:thread-alive-p thread)))
+
+(test a-read-on-a-store-over-one-connection-waits-for-the-store-s-lock
+  "FIND-USER-BY-ID takes the store's lock like the writes do. Before #371 it ran on the shared
+connection straight away, whoever else was using it."
+  (with-auth (a)
+    (let* ((id (auth:user-id (auth:create-user a :email "wait@x.com")))
+           (held (bt:make-semaphore))
+           (release (bt:make-semaphore))
+           (holder (bt:make-thread (lambda ()
+                                     (bt:with-recursive-lock-held ((hyperion/auth-db::lock a))
+                                       (bt:signal-semaphore held)
+                                       (bt:wait-on-semaphore release :timeout 10))
+                                     t)
+                                   :name "holds the store's lock")))
+      (bt:wait-on-semaphore held :timeout 10)
+      (let ((reader (bt:make-thread (lambda () (auth:user-id (auth:find-user-by-id a id)))
+                                    :name "reads")))
+        (is (not (%finished-within reader 0.3)) "the read ran while another thread held the lock")
+        (bt:signal-semaphore release)
+        (is (equal id (aion/test-threads:join reader)) "and it finished once the lock was free")
+        (aion/test-threads:join holder)))))
+
+(defun %sqlite-file ()
+  (namestring (uiop:tmpize-pathname
+               (merge-pathnames (format nil "auth-db-~36R.db" (random (expt 2 40) (make-random-state t)))
+                                (uiop:temporary-directory)))))
+
+(test a-store-over-a-pool-borrows-a-connection-for-each-operation
+  "Given a pool, the store holds no connection of its own: each operation borrows one, and inside
+a request that already holds one from the same pool (WRAP-CONNECTION), it uses that one."
+  (let* ((file (%sqlite-file))
+         (pool (conn:make-pool (be:make-sqlite file) :size 4)))
+    (unwind-protect
+         (let* ((a (auth:make-db-auth pool :dialect :sqlite :ensure t))
+                (id (auth:user-id (auth:create-user a :email "pool@x.com" :password "pw"))))
+           (is (typep (hyperion/auth-db::store-source a) 'conn:pool))
+           (let ((results (aion/test-threads:join-all
+                           (loop repeat 8
+                                 collect (bt:make-thread
+                                          (lambda ()
+                                            (loop repeat 10
+                                                  always (equal id (auth:user-id
+                                                                    (auth:find-user-by-id a id)))))
+                                          :name "pooled reads")))))
+             (is (every #'identity results) "every read found the user"))
+           (is (<= (conn:pool-open-count pool) 4))
+           (conn:with-connection (c pool)
+             (declare (ignore c))
+             (let ((open (conn:pool-open-count pool))
+                   (idle (conn:pool-idle-count pool)))
+               (is (auth:authenticate a "pool@x.com" "pw"))
+               (is (= open (conn:pool-open-count pool)) "no second connection was opened")
+               (is (= idle (conn:pool-idle-count pool))
+                   "none was borrowed either: the operation used the one this thread holds"))))
+      (conn:close-pool pool)
+      (ignore-errors (delete-file file)))))
+
+(defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
+
+(defun %pg-names ()
+  (let ((suffix (format nil "~36R" (random (expt 2 40) (make-random-state t)))))
+    (values (string-downcase (format nil "hyperion_users_~A" suffix))
+            (string-downcase (format nil "hyperion_role_events_~A" suffix)))))
+
+(defun %create-pg-tables (c users events)
+  "Create the users table USERS and the role log EVENTS on C from the store's own DDL.
+ENSURE-SCHEMA creates the default table names whatever the store's :TABLE says, so a test that
+wants tables of its own creates them here."
+  (flet ((renamed (ddl from to)
+           (let ((at (search from ddl)))
+             (concatenate 'string (subseq ddl 0 at) to (subseq ddl (+ at (length from)))))))
+    (conn:exec c (renamed (auth:users-ddl :dialect :postgres) "hyperion_users" users))
+    (conn:exec c (auth:users-email-index-ddl :table users))
+    (conn:exec c (renamed (auth:role-events-ddl :dialect :postgres) "hyperion_role_events" events))
+    (conn:exec c (auth:role-events-index-ddl :table events))))
+
+(defun %sixty-lookups (store id)
+  "Look up user ID from 60 threads at once. Returns the number of lookups that failed or found
+the wrong user, and the first error."
+  (let* ((start (bt:make-semaphore))
+         (threads (loop repeat 60
+                        collect (bt:make-thread
+                                 (lambda ()
+                                   (bt:wait-on-semaphore start :timeout 10)
+                                   (handler-case
+                                       (if (equal id (auth:user-id (auth:find-user-by-id store id)))
+                                           :ok
+                                           :wrong)
+                                     (error (e) (princ-to-string e))))
+                                 :name "lookup"))))
+    (bt:signal-semaphore start :count 60)
+    (let ((failed (remove :ok (aion/test-threads:join-all threads :timeout 60))))
+      (values (length failed) (first failed)))))
+
+(test sixty-concurrent-lookups-on-a-store-over-one-postgres-connection-all-succeed
+  "The consuming app's case: one store over one Postgres connection, looked up from 60 threads
+at once. 9 of 60 failed before #371."
+  (if (not (%pg-url))
+      (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about Postgres")
+      (multiple-value-bind (users events) (%pg-names)
+        (let ((c (conn:connect (mnemosyne/url:backend-from-url (%pg-url)))))
+          (unwind-protect
+               (let* ((a (progn (%create-pg-tables c users events)
+                                (auth:make-db-auth c :dialect :postgres :table users
+                                                     :events-table events)))
+                      (id (auth:user-id (auth:create-user a :email "sixty@x.com"))))
+                 (multiple-value-bind (failed first) (%sixty-lookups a id)
+                   (is (= 0 failed) "~D of 60 lookups failed, the first with: ~A" failed first)))
+            (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" users)))
+            (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" events)))
+            (conn:disconnect c))))))
+
+(test sixty-concurrent-lookups-on-a-store-over-a-postgres-pool-all-succeed
+  (if (not (%pg-url))
+      (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about Postgres")
+      (multiple-value-bind (users events) (%pg-names)
+        (let ((pool (conn:make-pool (mnemosyne/url:backend-from-url (%pg-url)) :size 8)))
+          (unwind-protect
+               (let* ((a (progn (conn:with-connection (c pool) (%create-pg-tables c users events))
+                                (auth:make-db-auth pool :dialect :postgres :table users
+                                                        :events-table events)))
+                      (id (auth:user-id (auth:create-user a :email "pool60@x.com"))))
+                 (multiple-value-bind (failed first) (%sixty-lookups a id)
+                   (is (= 0 failed) "~D of 60 lookups failed, the first with: ~A" failed first))
+                 (is (<= (conn:pool-open-count pool) 8)))
+            (conn:with-connection (c pool)
+              (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" users)))
+              (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" events))))
+            (conn:close-pool pool))))))
+
+(test a-write-outside-a-request-and-one-inside-it-do-not-wait-for-each-other
+  "On a pool of one: thread A holds the only connection, as a request inside WRAP-CONNECTION
+does, and then writes. Thread B writes outside any request meanwhile. B must wait for the
+connection without holding the store's lock, or A waits for the lock that B holds while B waits
+for the connection that A holds, until B's checkout timeout fails it. Found in review of #380."
+  (let* ((file (%sqlite-file))
+         (pool (conn:make-pool (be:make-sqlite file) :size 1 :checkout-timeout 3)))
+    (unwind-protect
+         (let* ((a (auth:make-db-auth pool :dialect :sqlite :ensure t))
+                (holding (bt:make-semaphore))
+                (request (bt:make-thread
+                          (lambda ()
+                            (conn:with-connection (c pool)
+                              (declare (ignore c))
+                              (bt:signal-semaphore holding)
+                              ;; Give B time to start its write and block on the pool.
+                              (sleep 0.3)
+                              (handler-case (progn (auth:create-user a :email "in@x.com") :ok)
+                                (error (e) (princ-to-string e)))))
+                          :name "a request's write"))
+                (background (progn
+                              (bt:wait-on-semaphore holding :timeout 10)
+                              (bt:make-thread
+                               (lambda ()
+                                 (handler-case (progn (auth:create-user a :email "out@x.com") :ok)
+                                   (error (e) (princ-to-string e))))
+                               :name "a write outside a request"))))
+           (is (eq :ok (aion/test-threads:join request :timeout 20)))
+           (is (eq :ok (aion/test-threads:join background :timeout 20)))
+           (is (auth:find-user-by-email a "out@x.com"))
+           (is (auth:find-user-by-email a "in@x.com")))
+      (conn:close-pool pool)
+      (ignore-errors (delete-file file)))))

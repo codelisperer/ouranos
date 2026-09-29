@@ -14,6 +14,27 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
+  request threads, and `make-db-auth` takes a pool.** (#371)
+  - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
+    `set-password`) took its lock. Its reads (`find-user-by-id`, `find-user-by-email`,
+    `authenticate`, `users-with-role`, `role-history`) used its one connection unlocked, so two
+    request threads could send statements on it at once. On Postgres one of them failed with
+    "This connection is still processing another query": 9 of 60 concurrent page loads in a
+    consuming app that had turned on `:workers`, and 56 of 60 concurrent lookups in this
+    change's test. The v0.1.4 note that an app sharing one connection uses `wrap-connection`
+    before turning on `:workers` did not cover this: the store holds a connection of its own,
+    which `wrap-connection` does not replace. An app on Hunchentoot, which runs each connection
+    on its own thread, had the same hazard before v0.1.4.
+  - **The workaround, until an app has this change.** Make a store for each pooled connection
+    and use the one for the request's connection, as the app that found this does (180 of 180
+    concurrent requests answered).
+  - **The fix.** Every operation now takes the store's lock over one connection, reads
+    included. And `make-db-auth` accepts a mnemosyne pool in place of a connection: each
+    operation then borrows a connection, which inside `wrap-connection` on the same pool is the
+    request's own, so reads on different threads run at once. An app serving with `:workers`
+    passes its pool: `(make-db-auth pool :dialect :postgres)`. An app that keeps passing one
+    connection needs no change and is now safe, with its lookups taking turns.
 - **cons: `cons build`, `cons test` and every `:load` or `:test` target fail on a full compile
   `WARNING` in the project's own code, and print it.** They loaded through `ql:quickload`, whose
   quiet mode muffles every warning, so such code built and tested with exit 0. An app whose own
@@ -37,6 +58,39 @@ its tag.
   exported as `cons/run:load-system-strictly` for a script that needs the same rule. An app whose
   CI added its own strict-build step as a workaround, such as `scripts/build-strict.lisp`, can
   replace it with `cons --strict test`. (#303)
+
+### Fixed
+
+- **hyperion/server: on Woo, a response with status 429 reaches the client as 429, with its
+  headers and body, instead of as an empty 500.** Woo writes a status line from its own table of
+  reason phrases, which has no entry for 429 or for the other registered codes 103, 104, 425,
+  428, 431 and 511, and it failed to write a response with any of them (#372). So
+  `hyperion/ratelimit:wrap-rate-limit`'s refusals, and any handler returning one of those codes,
+  reached a client on Woo as `HTTP/1.1 500` with an empty body and no `Retry-After`.
+  `hyperion/server:start` now adds a line to Woo's table, before it starts a Woo server, for
+  every code from 100 to 599 that has none (`complete-woo-status-lines`). Lines Woo already had
+  are unchanged. An app on Woo needs no change. An app that starts Woo without
+  `hyperion/server:start` calls `(hyperion/server:complete-woo-status-lines)` once after Woo
+  is loaded. Hunchentoot was not affected. A new system, `hyperion/woo`, exists only for its
+  suite, `hyperion/woo/tests`, which serves requests through a real Woo server; the gate runs it
+  on Linux. It is not for an app: an app that wants Woo declares `clack-handler-woo` itself.
+- **hyperion/http1: `reason-phrase` names every registered status code, and gives a code the
+  registry does not name an empty phrase instead of "Unknown".** It is now the one table in
+  hyperion: the native `:uv` server writes it, so a 429 there goes out as
+  `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
+  takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
+  the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
+
+- **praxeon/retrieval: an agent can search a corpus.** `(register-corpus-search agent corpus
+  embedder render)` registers a means, `"search-documents"` unless `:name` says otherwise. The
+  model passes a `query`, and a `match` of `"meaning"` or `"words"`; with a NIL `embedder` only
+  `"words"` is offered. It reads each passage as `render` writes it, through `passage->ctx-item`,
+  in the order the search returned them, and a sentence when the result is truncated.
+  `:on-result` receives the query and the `retrieval-result`, so an app can keep what it will
+  cite. `:description`, `:limit` and `:capability` are optional. (#138)
+- **praxeon/retrieval: `retrieve`**, the call an agent's search makes. For a corpus it is
+  `retrieve-similar` with a default `:limit` of 20; a later version will follow the corpus's
+  retrieval strategy (#316) with no change for callers. (#138)
 
 ## v0.1.4 — 2026-09-29
 

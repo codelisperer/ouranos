@@ -91,7 +91,8 @@
 ;;; --- The configurable Clack server backend ------------------------------
 (cl:defpackage #:hyperion/server
   (:use #:cl)
-  (:local-nicknames (#:log #:aion/log))
+  (:local-nicknames (#:log #:aion/log)
+                    (#:h1 #:hyperion/http1))   ; the reason phrases (#372)
   (:documentation
    "The web-server backend behind a neutral protocol. Hyperion declares NO backend
     (pre-publication issue 139): the application depends on the one it wants, and DEFAULT-SERVER picks from
@@ -108,6 +109,7 @@
            #:port-answering-p #:port-in-use #:port-in-use-host #:port-in-use-port
            #:port-in-use-cause #:server-start-timeout #:server-start-timeout-host
            #:server-start-timeout-port #:server-start-timeout-seconds #:*start-timeout*
+           #:complete-woo-status-lines #:status-line-octets
            #:woo-server-running #:woo-server-running-host #:woo-server-running-port
            #:woo-server-running-running-host #:woo-server-running-running-port
            #:server-session #:server-session-p #:server-session-handler
