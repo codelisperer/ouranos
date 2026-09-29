@@ -62,7 +62,7 @@
            #:*stream-write-timeout-seconds*
            #:*file-chunk-bytes* #:*file-write-observer*
            #:server #:server-p #:server-host #:server-port
-           #:*dispatch* #:*max-body-octets*
+           #:*dispatch* #:*max-body-octets* #:*max-head-octets*
            #:*max-requests-per-connection* #:*keep-alive-timeout-ms* #:*inline-dispatch*))
 
 (in-package #:hyperion/server-uv)
@@ -172,6 +172,13 @@ mechanism meant to remove it."
 (defvar *max-body-octets* (* 10 1024 1024)
   "Largest request body accepted, before 413. Policy, therefore here and not in the parser,
 which reports the declared length and takes no view on how big is too big.")
+
+(defvar *max-head-octets* (coalton:coalton h1:max-head-octets)
+  "Largest request head accepted, terminator included, before 431 (#375). It starts as the
+parser's own default, H1:MAX-HEAD-OCTETS (65,536), read in Coalton's environment because a
+Coalton value DEFINE is not a CL variable; writing the number here as well would let the two
+drift. A larger value lets a peer hold that much memory per connection before a request is
+complete, which is what the limit is for.")
 
 ;;; --- env synthesis ---------------------------------------------------------
 ;;;
@@ -899,24 +906,15 @@ so the overlap here is safe rather than merely untested."
     (setf (fill-pointer buf) remaining)
     (setf (conn-state-continued state) nil)))
 
-(defun %max-head-octets ()
-  "H1:MAX-HEAD-OCTETS, read across the Coalton boundary.
-
-A Coalton toplevel `define' of a NON-FUNCTION compiles to a global lexical, so the exported
-symbol is neither FBOUNDP nor BOUNDP from CL and `(h1:max-head-octets)' is an undefined
-function at run time -- an error the compiler cannot see, because the call is well-formed.
-The COALTON macro evaluates the reference in Coalton's own environment, which is the
-supported way to read one. Restating 65536 here instead would be the drift this avoids."
-  (coalton:coalton h1:max-head-octets))
-
-(defun %parse-view (buffer)
-  "BUFFER decoded as ISO-8859-1, bounded to the largest head the parser will accept.
+(defun %parse-view (buffer &optional (start 0) (limit *max-head-octets*))
+  "BUFFER from START decoded as ISO-8859-1, bounded to LIMIT + 4 octets: the largest head the
+parser will accept.
 
 Bounded on purpose: decoding the whole buffer on every chunk would be quadratic in the body
 size, and the parser cannot look past the head anyway. One octet is one character in
 ISO-8859-1, so the bound is exact rather than approximate."
-  (let ((n (min (length buffer) (+ (%max-head-octets) 4))))
-    (sb-ext:octets-to-string (subseq buffer 0 n) :external-format :latin-1)))
+  (let ((end (min (length buffer) (+ start limit 4))))
+    (sb-ext:octets-to-string (subseq buffer start end) :external-format :latin-1)))
 
 (defun %header (head name)
   "The value of header NAME in HEAD, or NIL. NAME must be lowercase -- the parser has already
@@ -1112,7 +1110,7 @@ Returns T when it consumed one and the caller should look for another, NIL when 
 nothing more to do with what we hold -- either the request is incomplete or the connection
 is finished."
   (let* ((buffer (conn-state-buffer state))
-         (head (h1:parse-head (%parse-view buffer))))
+         (head (h1:parse-head-limited (%parse-view buffer) *max-head-octets*)))
     (cond
       ((h1:head-incomplete? head) nil)          ; read more; NOT an error
       ((h1:head-rejected? head)

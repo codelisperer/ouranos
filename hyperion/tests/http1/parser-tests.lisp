@@ -235,3 +235,13 @@ evaluates each part to build a failure report, so a bare variable is a compile-t
   (let ((r (parse (apply #'req "GET / HTTP/1.1"
                          (loop for i below 100 collect (format nil "X-~D: v" i))))))
     (is (h1:head-complete? r))))
+
+;;; --- the head limit is a setting (#375) ------------------------------------
+
+(test the-head-limit-can-be-raised-and-its-default-still-holds
+  (let ((big (req "GET / HTTP/1.1" (format nil "X-Foo: ~A" (make-string 96000 :initial-element #\a)))))
+    (is-rejected 431 big "the default limit is 65,536")
+    (let ((r (h1:parse-head-limited big 200000)))
+      (is-true (h1:head-complete? r) "a raised limit accepts it: ~A" (h1:head-reason r)))
+    (is (= 431 (h1:head-status (h1:parse-head-limited (req "GET / HTTP/1.1" "X-A: b") 10)))
+        "and a lowered one refuses a small head")))

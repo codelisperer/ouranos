@@ -41,7 +41,7 @@
    #:Body-Spec #:Body-None #:Body-Exact
    #:Request #:Head-Result #:Incomplete #:Complete #:Rejected
    ;; the parser
-   #:parse-head
+   #:parse-head #:parse-head-limited
    ;; limits, exported so the shell can name them in an error
    #:max-head-octets #:max-header-fields
    ;; CL-facing, total accessors

@@ -1755,6 +1755,25 @@ the encoder now names."
       (is (equal "7" (header-of r "Retry-After")))
       (is (string= "slow down" (body-of r))))))
 
+;;; --- the head limit is a setting (#375) --------------------------------------
+
+(defmacro with-setting ((place value) &body body)
+  "Set PLACE, a server setting read on the loop thread, around BODY. A LET would bind it only
+in this thread, which the server never reads it from."
+  (let ((saved (gensym "SAVED")))
+    `(let ((,saved ,place))
+       (setf ,place ,value)
+       (unwind-protect (progn ,@body) (setf ,place ,saved)))))
+
+(test the-head-limit-is-a-setting-and-its-default-holds
+  (let ((big (format nil "X-Foo: ~A" (make-string 96000 :initial-element #\a))))
+    (with-server (port (const-app 200 +ok+ '("ok")))
+      (is (= 431 (status-of (get* port "GET / HTTP/1.1" "Host: x" big)))
+          "the default, 65,536, refuses a 96,000-octet header value")
+      (with-setting (srv:*max-head-octets* 200000)
+        (is (= 200 (status-of (get* port "GET / HTTP/1.1" "Host: x" big)))
+            "raised, it accepts it")))))
+
 ;;; --- a status that carries no body (#373) ------------------------------------
 
 (test a-body-on-a-bodiless-status-is-dropped-and-the-connection-survives

@@ -44,6 +44,13 @@ its tag.
 
 ### Added
 
+- **hyperion/server-uv: `*max-head-octets*`, the largest request head accepted before 431.**
+  The default is 65,536, the limit the parser has always applied. An app whose clients send
+  larger headers can raise it; each connection may then hold that much memory before its
+  request is complete. `hyperion/http1:parse-head-limited` takes the limit as an argument, and
+  `parse-head` still uses the default. Clack's handler suite sends a 96,000-octet header
+  value, which is refused at the default (#375).
+
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
   `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
   `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with

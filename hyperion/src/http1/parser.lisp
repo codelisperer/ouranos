@@ -290,7 +290,14 @@ carrying a second request line inside it."
 
   (declare parse-head (String -> Head-Result))
   (define (parse-head input)
-    "Parse as much of INPUT as is a complete HTTP/1.1 request head.
+    "Parse as much of INPUT as is a complete HTTP/1.1 request head, of at most
+MAX-HEAD-OCTETS. PARSE-HEAD-LIMITED takes the limit as an argument."
+    (parse-head-limited input max-head-octets))
+
+  (declare parse-head-limited (String * UFix -> Head-Result))
+  (define (parse-head-limited input limit)
+    "Parse as much of INPUT as is a complete HTTP/1.1 request head of at most LIMIT octets,
+terminator included (#375: the limit is the server's setting; MAX-HEAD-OCTETS is its default).
 
 Total: every input is Incomplete, Complete or Rejected. It never signals, never blocks and
 never consumes more than it reports."
@@ -298,11 +305,11 @@ never consumes more than it reports."
       ;; No terminator yet. Incomplete ONLY while still inside the cap -- past it, a peer
       ;; that never terminates the head must be refused rather than buffered forever.
       ((None)
-       (if (> (str:length input) max-head-octets)
+       (if (> (str:length input) limit)
            (Rejected 431 "request head exceeds the maximum size")
            Incomplete))
       ((Some end)
-       (if (> (+ end 4) max-head-octets)
+       (if (> (+ end 4) limit)
            (Rejected 431 "request head exceeds the maximum size")
            (parse-lines (split-crlf (str:substring input 0 end)) (+ end 4))))))
 
