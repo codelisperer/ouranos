@@ -44,7 +44,23 @@ $SENDGRID_API_KEY."))
                     "content" (%sendgrid-content m))))
     (when (email-reply-to m)
       (setf (gethash "reply_to" body) (%obj "email" (email-reply-to m))))
+    ;; Only when there are attachments, so an email without any is the same request as before
+    ;; #366.
+    (when (email-attachments m)
+      (setf (gethash "attachments" body)
+            (map 'vector #'%sendgrid-attachment (email-attachments m))))
     body))
+
+(defun %sendgrid-attachment (a)
+  "One entry of SendGrid's attachments array: the content in base64, and the type, filename and
+disposition given; an inline attachment also carries its content_id."
+  (let ((entry (%obj "content" (b64:usb8-array-to-base64-string (attachment-octets a))
+                     "type" (attachment-content-type a)
+                     "filename" (attachment-filename a)
+                     "disposition" (string-downcase (symbol-name (attachment-disposition a))))))
+    (when (attachment-content-id a)
+      (setf (gethash "content_id" entry) (attachment-content-id a)))
+    entry))
 
 (defmethod deliver ((p sendgrid) (m email))
   (let* ((key (%require (sendgrid-api-key p) "SENDGRID_API_KEY"))

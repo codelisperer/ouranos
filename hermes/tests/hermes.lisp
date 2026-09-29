@@ -176,3 +176,80 @@ Skips when the build cannot write the environment — see ENV-WRITABLE-P."
     (is (search "&amp;" x))
     (is (search "&lt;" x))
     (is (search "&quot;" x))))
+
+;;; --- attachments (#366) -----------------------------------------------------
+
+(defparameter +invite-ics+
+  (format nil "BEGIN:VCALENDAR~C~CVERSION:2.0~C~CMETHOD:REQUEST~C~CSUMMARY:Café review~C~CEND:VCALENDAR~C~C"
+          #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+          #\Return #\Linefeed #\Return #\Linefeed)
+  "A small calendar file, with a non-ASCII character so the UTF-8 encoding is exercised.")
+
+(test an-email-without-attachments-serialises-exactly-as-before
+  "The two JSON strings are what hermes produced for these emails before #366, captured from
+main at 3ab171b."
+  (is (string= "{\"personalizations\":[{\"to\":[{\"email\":\"a@x.com\"}]}],\"from\":{\"email\":\"b@x.com\"},\"subject\":\"Hi\",\"content\":[{\"type\":\"text/plain\",\"value\":\"Body\"}]}"
+               (com.inuoe.jzon:stringify
+                (hermes::%sendgrid-body (h:make-email :to "a@x.com" :from "b@x.com"
+                                                      :subject "Hi" :text "Body")))))
+  (is (string= "{\"personalizations\":[{\"to\":[{\"email\":\"a@x.com\"}]}],\"from\":{\"email\":\"b@x.com\"},\"subject\":\"Hi\",\"content\":[{\"type\":\"text/plain\",\"value\":\"Body\"},{\"type\":\"text/html\",\"value\":\"<p>Body</p>\"}],\"reply_to\":{\"email\":\"r@x.com\"}}"
+               (com.inuoe.jzon:stringify
+                (hermes::%sendgrid-body (h:make-email :to "a@x.com" :from "b@x.com"
+                                                      :subject "Hi" :text "Body"
+                                                      :html "<p>Body</p>" :reply-to "r@x.com"))))))
+
+(test a-text-and-an-octet-attachment-go-to-sendgrid-in-base64-with-their-type-name-and-disposition
+  (let* ((octets (coerce #(0 1 2 250 251 255) '(vector (unsigned-byte 8))))
+         (m (h:make-email :to "a@x.com" :from "b@x.com" :subject "Invite" :text "See the file."
+                          :attachments
+                          (list (h:make-attachment
+                                 :filename "invite.ics"
+                                 :content-type "text/calendar; charset=utf-8; method=REQUEST"
+                                 :content +invite-ics+)
+                                (h:make-attachment :filename "logo.png" :content-type "image/png"
+                                                   :content octets :disposition :inline
+                                                   :content-id "logo"))))
+         (entries (gethash "attachments" (hermes::%sendgrid-body m))))
+    (is (= 2 (length entries)))
+    (let ((ics (aref entries 0)) (png (aref entries 1)))
+      (is (string= "invite.ics" (gethash "filename" ics)))
+      (is (string= "text/calendar; charset=utf-8; method=REQUEST" (gethash "type" ics))
+          "the content type is sent with its parameters")
+      (is (string= "attachment" (gethash "disposition" ics)))
+      (is (null (nth-value 1 (gethash "content_id" ics))))
+      (is (string= +invite-ics+
+                   (sb-ext:octets-to-string (cl-base64:base64-string-to-usb8-array (gethash "content" ics))
+                                            :external-format :utf-8))
+          "a string is sent as its UTF-8 bytes, in base64")
+      (is (equalp octets (cl-base64:base64-string-to-usb8-array (gethash "content" png)))
+          "an octet vector is sent as those octets")
+      (is (string= "inline" (gethash "disposition" png)))
+      (is (string= "logo" (gethash "content_id" png))))))
+
+(test the-dev-transport-shows-and-keeps-the-attachments-of-the-last-email
+  (let* ((out (make-string-output-stream))
+         (p (h:make-dev-transport :stream out))
+         (invite (h:make-attachment :filename "invite.ics"
+                                    :content-type "text/calendar; method=CANCEL"
+                                    :content +invite-ics+)))
+    (h:deliver p (h:make-email :to "a@x.io" :from "b@y.io" :subject "Cancelled" :text "Off."
+                               :attachments (list invite)))
+    (is (equal (list invite) (h:email-attachments (h:dev-last-email p)))
+        "a test can read the attachments of the last email sent")
+    (let ((s (get-output-stream-string out)))
+      (is (search (format nil "invite.ics (text/calendar; method=CANCEL, ~D bytes)"
+                          (length (sb-ext:string-to-octets +invite-ics+ :external-format :utf-8)))
+                  s)
+          "the render names the file, its type and its size in bytes")
+      (is (not (search "BEGIN:VCALENDAR" s)) "and not its content"))))
+
+(test an-attachment-that-cannot-be-sent-is-refused-when-it-is-made
+  (signals h:invalid-message (h:make-attachment :content-type "text/plain" :content "x"))
+  (signals h:invalid-message (h:make-attachment :filename (format nil "a~Cb" #\Newline)
+                                                :content-type "text/plain" :content "x"))
+  (signals h:invalid-message (h:make-attachment :filename "a" :content-type "text/plain" :content 42))
+  (signals h:invalid-message (h:make-attachment :filename "a" :content-type "text/plain" :content "x"
+                                                :disposition :inline))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :attachments (list "not an attachment")))
+  (is (h:attachment-p (h:make-attachment :filename "a.txt" :content-type "text/plain" :content ""))
+      "an empty file is still a file"))
