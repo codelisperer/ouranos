@@ -122,8 +122,8 @@ Measured at `3d67a34`, with Clack 2.1.0 (`clack-20250622-git`, from the pinned Q
 - **Naming a server that is not loaded stops `start`** with `no-server-backend`, whose report
   lists the systems to add. A consuming app planning a trial of `:uv` found that setting
   `HYPERION_SERVER=uv` is not enough on its own. The app also has to add `hyperion/server-uv`
-  to its `:depends-on`, and its runtime image has to contain libuv (on Debian, the `libuv1`
-  package), in the same way a Woo deployment needs libev. The report says only "needs a built
+  to its `:depends-on`, and its runtime image has to contain libuv (on the app's Debian 13
+  image, the `libuv1t64` package), in the same way a Woo deployment needs libev. The report says only "needs a built
   libuv". When the default changes, the report also says what a deployment needs at run time,
   and so does the CHANGELOG entry for the change.
 - **Hyperion's code for Woo and Hunchentoot stays, and after point 5 nothing in the tree runs
@@ -185,4 +185,7 @@ cases are copied instead. And Clack's suite sends a chunked request body, which 
 request bodies out of the list of later limitations and into the Clack handler work.
 
 What an application needs to try `:uv` (the dependency, and libuv in its runtime image) was
-found by a consuming app's session while it planned a staging trial.
+found by a consuming app's session while it planned a staging trial. The trial ran the same
+day, and that session reported the results on #373: on `:uv`, the app's staging environment
+passed its smoke suite (33 of 33) and 40 concurrent requests (40 of 40), and delivered a 429
+that Woo sends as an empty 500 (#372). The app's staging environment was left on `:uv`.
