@@ -14,6 +14,27 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
+  request threads, and `make-db-auth` takes a pool.** (#371)
+  - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
+    `set-password`) took its lock. Its reads (`find-user-by-id`, `find-user-by-email`,
+    `authenticate`, `users-with-role`, `role-history`) used its one connection unlocked, so two
+    request threads could send statements on it at once. On Postgres one of them failed with
+    "This connection is still processing another query": 9 of 60 concurrent page loads in a
+    consuming app that had turned on `:workers`, and 56 of 60 concurrent lookups in this
+    change's test. The v0.1.4 note that an app sharing one connection uses `wrap-connection`
+    before turning on `:workers` did not cover this: the store holds a connection of its own,
+    which `wrap-connection` does not replace. An app on Hunchentoot, which runs each connection
+    on its own thread, had the same hazard before v0.1.4.
+  - **The workaround, until an app has this change.** Make a store for each pooled connection
+    and use the one for the request's connection, as the app that found this does (180 of 180
+    concurrent requests answered).
+  - **The fix.** Every operation now takes the store's lock over one connection, reads
+    included. And `make-db-auth` accepts a mnemosyne pool in place of a connection: each
+    operation then borrows a connection, which inside `wrap-connection` on the same pool is the
+    request's own, so reads on different threads run at once. An app serving with `:workers`
+    passes its pool: `(make-db-auth pool :dialect :postgres)`. An app that keeps passing one
+    connection needs no change and is now safe, with its lookups taking turns.
 - **cons: `cons build`, `cons test` and every `:load` or `:test` target fail on a full compile
   `WARNING` in the project's own code, and print it.** They loaded through `ql:quickload`, whose
   quiet mode muffles every warning, so such code built and tested with exit 0. An app whose own
