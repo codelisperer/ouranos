@@ -29,7 +29,7 @@
 
 (defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
 
-(def-suite chunkers :description "Chunkers, which need no database (#322).")
+(def-suite chunkers :description "Tests that need no database: the chunkers (#322) and the text the search means writes (#138).")
 
 (defun run-tests ()
   "Run both suites and print the Postgres coverage in the form scripts/verify-tree.lisp reads.
@@ -830,12 +830,26 @@ chunk."
       (rt:sync-corpus corpus (list (sec "1" "A refund is issued.") (sec "2" "Refund rules.")
                                    (sec "3" "Privacy.")))
       (rt:register-corpus-search agent corpus embedder #'%render :limit 1)
-      (is (string= (format nil "No passages matched.~%~%3 parts of this collection could not be searched by meaning yet, so this result may be missing passages. A search by words covers every part.")
+      (is (string= (format nil "No passages matched.~%~%3 parts of this collection could not be searched by meaning yet, so this result may be missing passages. A search with \"match\": \"words\" covers every part.")
                    (actor:act agent "search-documents" (%args "query" "refund"))))
       ;; Two passages contain "refund" and the limit is 1.
       (let ((text (actor:act agent "search-documents" (%args "query" "refund" "match" "words"))))
         (is (search "More passages matched than are shown here." text))
         (is (= 1 (count #\[ text)) "one passage, as :limit 1 asks")))))
+
+(test (every-truncation-reason-gets-a-sentence-for-the-model :suite chunkers)
+  ;; RETRIEVE cannot produce :NOT-INDEXED yet (#316 adds it), so the note is checked directly.
+  (flet ((note (reason &optional pending)
+           (rt::%completeness-note
+            (rc::%make-retrieval-result '() (rt:make-truncated :reason reason :pending pending)))))
+    (is (null (rt::%completeness-note (rc::%make-retrieval-result '() (rt:make-complete)))))
+    (is (string= "More passages matched than are shown here. A narrower query would show others."
+                 (note :limit)))
+    (let ((meaning "2 parts of this collection could not be searched by meaning yet, so this result may be missing passages. A search with \"match\": \"words\" covers every part."))
+      (is (string= meaning (note :not-embedded 2)))
+      (is (string= meaning (note :not-indexed 2)) ":not-indexed says the same as :not-embedded"))
+    (is (search "1 part of" (note :not-indexed 1)) "one part is singular")
+    (is (stringp (note :some-later-reason 3)) "an unknown reason is a sentence, not an error")))
 
 (test the-search-means-refuses-bad-registration-and-bad-arguments
   (with-store (store)

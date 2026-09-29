@@ -834,7 +834,7 @@ corpus:
   words is offered, and the schema has no `match`.
 - The model reads the passages in the order the search returned them, each as the function
   writes it, and one sentence when the result is truncated: more matches than `:limit`, or parts
-  of the corpus not yet embedded. It never sees a passage's distance.
+  of the corpus a search by meaning could not consider yet. It never sees a passage's distance.
 - `:on-result` is called with the query and the `retrieval-result` before the model sees
   anything, so the app can keep the provenance it cites from. `:limit` and `:capability` are
   optional; a failed search reaches the caller as `means-failure`, as any means does.

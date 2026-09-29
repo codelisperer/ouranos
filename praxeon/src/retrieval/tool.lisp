@@ -60,14 +60,21 @@ WITH-MEANING."
     schema))
 
 (defun %completeness-note (result)
-  "One sentence for the model when RESULT is TRUNCATED, or NIL when it is COMPLETE."
+  "One sentence for the model when RESULT is TRUNCATED, or NIL when it is COMPLETE.
+
+:NOT-EMBEDDED and :NOT-INDEXED get the same sentence. Both come only from a search by meaning
+(RETRIEVE), since without an embedder the means offers only \"words\"; and a hybrid result's
+PENDING counts every chunk missing either an embedding or its terms (#316), so a sentence
+naming one of the two would overstate. A search by words is RETRIEVE-EXACT, which needs
+neither. A reason added later gets a general sentence rather than failing the call."
   (let ((c (retrieval-result-completeness result)))
     (when (truncated-p c)
-      (ecase (truncated-reason c)
+      (case (truncated-reason c)
         (:limit "More passages matched than are shown here. A narrower query would show others.")
-        (:not-embedded
-         (format nil "~D part~:P of this collection could not be searched by meaning yet, so this result may be missing passages. A search by words covers every part."
-                 (truncated-pending c)))))))
+        ((:not-embedded :not-indexed)
+         (format nil "~D part~:P of this collection could not be searched by meaning yet, so this result may be missing passages. A search with \"match\": \"words\" covers every part."
+                 (truncated-pending c)))
+        (t "Not every part of this collection could be searched, so this result may be missing passages.")))))
 
 (defun %search-text (result render)
   "What the model reads for RESULT: each passage as RENDER writes it, in order, then the
