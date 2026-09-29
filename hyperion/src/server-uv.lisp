@@ -6,9 +6,9 @@
 ;;;;
 ;;;; PERSISTENT CONNECTIONS, pipelining and 100-continue all land here (commit 4); see the
 ;;;; commentary above %MAX-REQUESTS-PER-CONNECTION for the two limits persistence made
-;;;; necessary. Chunked transfer-encoding is still refused with 501 by the parser for a
-;;;; REQUEST; a chunked RESPONSE is how a streamed body is written -- see the streaming
-;;;; section below.
+;;;; necessary. A chunked REQUEST body is decoded a step at a time -- see the section on
+;;;; chunked request bodies (#374) -- and a chunked RESPONSE is how a streamed body is
+;;;; written -- see the streaming section below.
 ;;;;
 ;;;; WHERE THE HANDLER RUNS -- the decision, made once, in the open. It runs ON THE LOOP
 ;;;; THREAD, behind *DISPATCH*. That is right for the desktop-first target (ADR-0002 §4) and
@@ -62,7 +62,7 @@
            #:*stream-write-timeout-seconds*
            #:*file-chunk-bytes* #:*file-write-observer*
            #:server #:server-p #:server-host #:server-port
-           #:*dispatch* #:*max-body-octets* #:*max-head-octets*
+           #:*dispatch* #:*max-body-octets* #:*max-head-octets* #:*max-chunk-overhead-octets*
            #:*max-requests-per-connection* #:*keep-alive-timeout-ms* #:*inline-dispatch*))
 
 (in-package #:hyperion/server-uv)
@@ -171,14 +171,20 @@ mechanism meant to remove it."
 
 (defvar *max-body-octets* (* 10 1024 1024)
   "Largest request body accepted, before 413. Policy, therefore here and not in the parser,
-which reports the declared length and takes no view on how big is too big.")
+which reports the declared length and takes no view on how big is too big. A chunked body is
+held to it too, counted as the decoded octets (#374).")
 
 (defvar *max-head-octets* (coalton:coalton h1:max-head-octets)
   "Largest request head accepted, terminator included, before 431 (#375). It starts as the
 parser's own default, H1:MAX-HEAD-OCTETS (65,536), read in Coalton's environment because a
 Coalton value DEFINE is not a CL variable; writing the number here as well would let the two
 drift. A larger value lets a peer hold that much memory per connection before a request is
-complete, which is what the limit is for.")
+complete, which is what the limit is for. It also bounds a chunked body's trailer section.")
+
+(defvar *max-chunk-overhead-octets* (* 1024 1024)
+  "Most octets a chunked body may spend on framing -- chunk-size lines, the CRLF after each
+chunk, and trailers -- before 413 (#374). Without it, a peer sending one octet per chunk holds
+about six octets of buffer for each octet of body the cap counts.")
 
 ;;; --- env synthesis ---------------------------------------------------------
 ;;;
@@ -878,7 +884,16 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   (live nil)
   ;; The dispatcher of the server this connection belongs to, when START was given
   ;; :WORKERS (#324), else NIL and *DISPATCH* applies. See %DISPATCHER.
-  (dispatch nil))
+  (dispatch nil)
+  ;; A CHUNKED BODY BEING READ (#374), so each read continues where the last one stopped
+  ;; instead of decoding the body again. PHASE is NIL when none is, else :SIZE, :DATA,
+  ;; :DATA-END or :TRAILERS. POS is the buffer index the next step starts at; DATA holds the
+  ;; decoded octets; SIZE is the current chunk's; OVERHEAD counts the framing octets.
+  (chunk-phase nil)
+  (chunk-pos 0)
+  (chunk-data nil)
+  (chunk-size 0)
+  (chunk-overhead 0))
 
 (defun %dispatcher (state)
   "The dispatcher for a request on the connection whose state is STATE: its server's own,
@@ -907,13 +922,25 @@ so the overlap here is safe rather than merely untested."
     (setf (conn-state-continued state) nil)))
 
 (defun %parse-view (buffer &optional (start 0) (limit *max-head-octets*))
-  "BUFFER from START decoded as ISO-8859-1, bounded to LIMIT + 4 octets: the largest head the
-parser will accept.
+  "BUFFER from START decoded as ISO-8859-1, bounded to LIMIT + 4 octets: the largest head, or
+trailer section, the parser will accept.
 
 Bounded on purpose: decoding the whole buffer on every chunk would be quadratic in the body
 size, and the parser cannot look past the head anyway. One octet is one character in
 ISO-8859-1, so the bound is exact rather than approximate."
   (let ((end (min (length buffer) (+ start limit 4))))
+    (sb-ext:octets-to-string (subseq buffer start end) :external-format :latin-1)))
+
+(defun %line-view (buffer start limit)
+  "BUFFER from START to just past the first CRLF, or to START + LIMIT + 2 octets if that comes
+first, as ISO-8859-1. A chunk-size line is short, so its view is copied at its own length
+rather than at the length of the longest line allowed."
+  (let* ((fill (length buffer))
+         (cap (min fill (+ start limit 2)))
+         (cr (position 13 buffer :start start :end cap))
+         (end (if (and cr (< (1+ cr) fill) (= 10 (aref buffer (1+ cr))))
+                  (+ cr 2)
+                  cap)))
     (sb-ext:octets-to-string (subseq buffer start end) :external-format :latin-1)))
 
 (defun %header (head name)
@@ -1127,29 +1154,128 @@ is finished."
            ((> declared *max-body-octets*)
             (%fail conn state 413 "declared body exceeds the configured cap")
             nil)
+           ((h1:head-chunked? head)
+            (multiple-value-bind (outcome body end) (%read-chunked conn state consumed)
+              (case outcome
+                (:complete (%start-request conn app state head body end))
+                (:incomplete (%maybe-continue conn state head) nil)
+                (t nil))))                ; :REJECTED, already answered and closing
            ((< (fill-pointer buffer) (+ consumed declared))
-            ;; The body is still arriving. If the peer asked us to confirm before sending it,
-            ;; now is the moment -- otherwise both ends wait for each other until something
-            ;; times out. Once per request, hence the flag.
-            (when (and (eq :continue (%expectation head))
-                       (not (conn-state-continued state)))
-              (setf (conn-state-continued state) t)
-              (%write-interim conn 100))
+            (%maybe-continue conn state head)
             nil)
            (t
-            (let ((body (subseq buffer consumed (+ consumed declared))))
-              (%drop-consumed state (+ consumed declared))
-              (incf (conn-state-requests state))
-              (setf (conn-state-continued state) nil)
-              (let ((wanted (and (h1:head-keep-alive? head)
-                                 (< (conn-state-requests state)
-                                    *max-requests-per-connection*))))
-                ;; Hands off and returns T. Whether the connection survives is no longer
-                ;; knowable here -- the handler has not run yet -- so %COMPLETE decides it
-                ;; and %RESUME picks up any further pipelined requests. The caller's loop
-                ;; stops on IN-FLIGHT rather than on this value.
-                (%respond conn app state head body wanted)
-                t)))))))))
+            (%start-request conn app state head
+                            (subseq buffer consumed (+ consumed declared))
+                            (+ consumed declared)))))))))
+
+(defun %maybe-continue (conn state head)
+  "The body is still arriving. If the peer asked us to confirm before sending it, now is the
+moment -- otherwise both ends wait for each other until something times out. Once per
+request, hence the flag."
+  (when (and (eq :continue (%expectation head))
+             (not (conn-state-continued state)))
+    (setf (conn-state-continued state) t)
+    (%write-interim conn 100)))
+
+(defun %start-request (conn app state head body end)
+  "The request whose head is HEAD and whose body is BODY occupies the first END octets of the
+buffer: drop them and hand it to the handler. Returns T.
+
+Whether the connection survives is not knowable here -- the handler has not run yet -- so
+%COMPLETE decides it and %RESUME picks up any further pipelined requests. The caller's loop
+stops on IN-FLIGHT rather than on this value."
+  (%drop-consumed state end)
+  (incf (conn-state-requests state))
+  (setf (conn-state-continued state) nil)
+  (let ((wanted (and (h1:head-keep-alive? head)
+                     (< (conn-state-requests state) *max-requests-per-connection*))))
+    (%respond conn app state head body wanted)
+    t))
+
+;;; --- a chunked request body (#374) -------------------------------------------
+;;;
+;;; The parser decides every framing question, one step at a time (hyperion/http1's
+;;; PARSE-CHUNK-SIZE-LINE, PARSE-CHUNK-DATA-END and PARSE-TRAILERS). This keeps the position
+;;; between reads, copies each chunk's data out of the buffer, and applies the two size caps,
+;;; which are policy and so live here.
+
+(defun %chunk-reset (state)
+  (setf (conn-state-chunk-phase state) nil
+        (conn-state-chunk-pos state) 0
+        (conn-state-chunk-data state) nil
+        (conn-state-chunk-size state) 0
+        (conn-state-chunk-overhead state) 0))
+
+(defun %chunk-framing (state n)
+  "Count N framing octets. True while the total is within *MAX-CHUNK-OVERHEAD-OCTETS*."
+  (<= (incf (conn-state-chunk-overhead state) n) *max-chunk-overhead-octets*))
+
+(defun %read-chunked (conn state head-end)
+  "Decode as much of the chunked body that starts at HEAD-END as the buffer holds.
+
+Returns :INCOMPLETE; :REJECTED, having answered and begun closing; or :COMPLETE, the decoded
+body, and the buffer index just past the trailer section."
+  (let ((buffer (conn-state-buffer state)))
+    (unless (conn-state-chunk-phase state)
+      (setf (conn-state-chunk-phase state) :size
+            (conn-state-chunk-pos state) head-end
+            (conn-state-chunk-data state)
+            (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (flet ((reject (status reason)
+             (%chunk-reset state)
+             (%fail conn state status reason)
+             (return-from %read-chunked :rejected))
+           (step-or-return (step)
+             (cond ((h1:step-incomplete? step) (return-from %read-chunked :incomplete))
+                   ((h1:step-rejected? step)
+                    (%chunk-reset state)
+                    (%fail conn state (h1:step-status step) (h1:step-reason step))
+                    (return-from %read-chunked :rejected))
+                   (t step))))
+      (loop
+        (let ((pos (conn-state-chunk-pos state))
+              (data (conn-state-chunk-data state)))
+          (ecase (conn-state-chunk-phase state)
+            (:size
+             (let* ((step (step-or-return
+                           (h1:parse-chunk-size-line
+                            (%line-view buffer pos (coalton:coalton h1:max-chunk-line-octets)))))
+                    (size (h1:step-value step)))
+               (unless (%chunk-framing state (h1:step-consumed step))
+                 (reject 413 "chunked framing exceeds the configured cap"))
+               (when (> (+ (length data) size) *max-body-octets*)
+                 (reject 413 "chunked body exceeds the configured cap"))
+               (setf (conn-state-chunk-pos state) (+ pos (h1:step-consumed step))
+                     (conn-state-chunk-size state) size
+                     (conn-state-chunk-phase state) (if (zerop size) :trailers :data))))
+            (:data
+             (let ((size (conn-state-chunk-size state)))
+               (when (< (- (fill-pointer buffer) pos) size)
+                 (return-from %read-chunked :incomplete))
+               (loop for i from pos below (+ pos size)
+                     do (vector-push-extend (aref buffer i) data))
+               (setf (conn-state-chunk-pos state) (+ pos size)
+                     (conn-state-chunk-phase state) :data-end)))
+            (:data-end
+             (let ((step (step-or-return
+                          (h1:parse-chunk-data-end
+                           (sb-ext:octets-to-string
+                            (subseq buffer pos (min (fill-pointer buffer) (+ pos 2)))
+                            :external-format :latin-1)))))
+               (unless (%chunk-framing state (h1:step-consumed step))
+                 (reject 413 "chunked framing exceeds the configured cap"))
+               (setf (conn-state-chunk-pos state) (+ pos (h1:step-consumed step))
+                     (conn-state-chunk-phase state) :size)))
+            (:trailers
+             (let ((step (step-or-return
+                          (h1:parse-trailers (%parse-view buffer pos *max-head-octets*)
+                                             *max-head-octets*))))
+               (unless (%chunk-framing state (h1:step-consumed step))
+                 (reject 413 "chunked framing exceeds the configured cap"))
+               (let ((end (+ pos (h1:step-consumed step)))
+                     (body (coerce data '(simple-array (unsigned-byte 8) (*)))))
+                 (%chunk-reset state)
+                 (return-from %read-chunked (values :complete body end)))))))))))
 
 (defun %write-interim (conn status)
   "Write a 1xx interim response. Refusal is impossible for the status we pass, but it is

@@ -417,8 +417,8 @@ floor is decided in one place and reported from another."
     (is (= 505 (status-of (get* port "GET / HTTP/2.0" "Host: x")))
         "an unsupported version is 505, not 400")
     (is (= 501 (status-of (get* port "POST / HTTP/1.1" "Host: x"
-                                "Transfer-Encoding: chunked")))
-        "chunked is 501 in M1 -- and refusing beats reading the body as a second request")))
+                                "Transfer-Encoding: gzip")))
+        "a coding other than chunked is 501 -- refusing beats reading the body as a second request")))
 
 (test the-handler-never-runs-for-a-rejected-request
   "A rejection is decided before the application sees anything. If a malformed request could
@@ -1794,3 +1794,137 @@ the next response, so the second request on the connection is the real check."
             "the next octets on the connection are the next response's status line, not the dropped body: ~S"
             (subseq (second rs) 0 (min 40 (length (second rs)))))
         (is (string= "second" (body-of (second rs))))))))
+
+;;; --- chunked request bodies (#374) ------------------------------------------
+
+(defun body-report-app (&optional seen)
+  "Answers `content-length|octets|text' for the request body; records each env in SEEN."
+  (lambda (env)
+    (when seen (push env (car seen)))
+    (let* ((rb (getf env :raw-body))
+           (octets (if rb
+                       (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                                                :adjustable t :fill-pointer 0)))
+                         (loop for b = (read-byte rb nil nil) while b do (vector-push-extend b out))
+                         out)
+                       #())))
+      (list 200 +ok+ (list (format nil "~A|~D|~A" (getf env :content-length) (length octets)
+                                   (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8)))
+                                                            :external-format :latin-1)))))))
+
+(defun chunked-post (&rest body-parts)
+  "A chunked POST head, then BODY-PARTS as the body's octets."
+  (apply #'concatenate 'string
+         (req "POST /up HTTP/1.1" "Host: x" "Transfer-Encoding: chunked")
+         body-parts))
+
+(defparameter +hello-world+
+  (concatenate 'string "5" +crlf+ "hello" +crlf+ "6" +crlf+ " world" +crlf+ "0" +crlf+ +crlf+))
+
+(test a-chunked-body-reaches-the-handler-decoded
+  "The body is the chunks' data joined, and :CONTENT-LENGTH is NIL: a chunked request declares
+no length, and a handler reading one would believe a number nobody sent."
+  (with-server (port (body-report-app))
+    (let ((r (first (converse port (list (chunked-post +hello-world+))))))
+      (is (= 200 (status-of r)))
+      (is (string= "NIL|11|hello world" (body-of r))))))
+
+(test a-chunked-body-may-arrive-in-any-pieces
+  "A TCP segment boundary is not a framing boundary. Each split lands inside a different part:
+the size line, its CRLF, the data, the CRLF after it, the last chunk and the final CRLF."
+  (with-server (port (body-report-app))
+    (let* ((whole (chunked-post +hello-world+))
+           (b (+ 4 (search +crlfcrlf+ whole))))      ; where the body starts
+      ;; The body is "5" CRLF "hello" CRLF "6" CRLF " world" CRLF "0" CRLF CRLF.
+      (dolist (cut (list b                  ; between the head and the body
+                         (+ b 1)            ; between the size and its CRLF
+                         (+ b 2)            ; inside that CRLF
+                         (+ b 5)            ; inside the data
+                         (+ b 8)            ; between the data and its CRLF
+                         (+ b 9)            ; inside that CRLF
+                         (- (length whole) 4) ; between the last chunk's 0 and its CRLF
+                         (1- (length whole))))  ; inside the final CRLF
+        (let ((r (first (converse port (list (subseq whole 0 cut) (subseq whole cut))))))
+          (is (string= "NIL|11|hello world" (body-of r)) "split at ~D: ~S" cut (body-of r)))))))
+
+(test a-request-pipelined-after-a-chunked-body-is-served
+  "The body ends exactly where its final CRLF does. One octet either way and the next request
+is read from the wrong place, which is request smuggling."
+  (with-server (port (body-report-app))
+    (let ((rs (converse port (list (concatenate 'string (chunked-post +hello-world+)
+                                                (req "GET /next HTTP/1.1" "Host: x")))
+                        :responses 2)))
+      (is (string= "NIL|11|hello world" (body-of (first rs))))
+      (is (= 200 (status-of (second rs))))
+      (is (string= "NIL|0|" (body-of (second rs))) "the second request has no body"))))
+
+(test chunk-extensions-and-trailers-are-accepted-and-trailers-do-not-become-headers
+  (let ((seen (list nil)))
+    (with-server (port (body-report-app seen))
+      (let ((r (first (converse port (list (chunked-post "5;ext=1" +crlf+ "hello" +crlf+
+                                                         "0" +crlf+ "X-Trailer: t" +crlf+
+                                                         "Content-Length: 99" +crlf+ +crlf+))))))
+        (is (string= "NIL|5|hello" (body-of r)))))
+    (let ((headers (getf (first (car seen)) :headers)))
+      (is (null (gethash "x-trailer" headers)) "a trailer is not a header")
+      (is (null (gethash "content-length" headers))
+          "least of all one that would change the framing"))))
+
+(test a-malformed-chunked-body-is-400-and-the-handler-never-runs
+  (let ((ran (list nil)))
+    (with-server (port (lambda (env) (declare (ignore env)) (setf (car ran) t)
+                         (list 200 +ok+ '("ran"))))
+      (dolist (body (list (concatenate 'string "5" +crlf+ "helloX" +crlf+ "0" +crlf+ +crlf+)
+                          ;; Only the check for CRLF after the data refuses this one: without
+                          ;; it, "XY" is taken as the CRLF and "0" as the last chunk, and the
+                          ;; request is accepted with a body the size did not describe.
+                          (concatenate 'string "5" +crlf+ "helloXY0" +crlf+ +crlf+)
+                          (concatenate 'string "z" +crlf+ "hello" +crlf+ "0" +crlf+ +crlf+)
+                          (concatenate 'string "0x5" +crlf+ "hello" +crlf+ "0" +crlf+ +crlf+)
+                          (concatenate 'string "5" (string +lf+) "hello" +crlf+ "0" +crlf+ +crlf+)
+                          (concatenate 'string "0" +crlf+ "Bad Name: x" +crlf+ +crlf+)))
+        (is (= 400 (status-of (first (converse port (list (chunked-post body))))))
+            "~S" body)))
+    (is (null (car ran)))))
+
+(test chunked-framing-that-disagrees-with-other-framing-is-refused
+  (with-server (port (body-report-app))
+    (is (= 400 (status-of (get* port "POST / HTTP/1.1" "Host: x" "Content-Length: 5"
+                                "Transfer-Encoding: chunked")))
+        "Content-Length with Transfer-Encoding is 400")
+    (is (= 400 (status-of (get* port "POST / HTTP/1.0" "Transfer-Encoding: chunked")))
+        "Transfer-Encoding in HTTP/1.0 is 400")
+    (is (= 501 (status-of (get* port "POST / HTTP/1.1" "Host: x"
+                                "Transfer-Encoding: gzip, chunked")))
+        "a coding other than chunked alone is 501")))
+
+(test a-chunked-body-over-the-cap-is-413
+  (with-server (port (body-report-app))
+    (with-setting (srv:*max-body-octets* 8)
+      (is (= 413 (status-of (first (converse port (list (chunked-post +hello-world+))))))
+          "11 octets of body against a cap of 8, found before the data is read")
+      (is (= 200 (status-of (first (converse port (list (chunked-post "8" +crlf+ "12345678" +crlf+
+                                                                        "0" +crlf+ +crlf+))))))
+          "exactly the cap is accepted"))
+    (with-setting (srv:*max-chunk-overhead-octets* 20)
+      (is (= 413 (status-of (first (converse port (list (chunked-post
+                                                         (apply #'concatenate 'string
+                                                                (loop repeat 10 collect
+                                                                  (concatenate 'string "1" +crlf+ "a" +crlf+)))
+                                                         "0" +crlf+ +crlf+))))))
+          "one-octet chunks spend more on framing than the cap allows"))))
+
+(test a-chunked-body-can-ask-to-continue
+  "Expect: 100-continue applies to a chunked body as to any other: the peer waits for the 100."
+  (with-server (port (body-report-app))
+    (let ((r (converse port (list (req "POST / HTTP/1.1" "Host: x" "Transfer-Encoding: chunked"
+                                       "Expect: 100-continue"))
+                       :responses 1
+                       :then (lambda (stream)
+                               (write-sequence (sb-ext:string-to-octets +hello-world+
+                                                                        :external-format :latin-1)
+                                               stream)
+                               (force-output stream)
+                               (read-response stream)))))
+      (is (= 100 (status-of (first (first r)))))
+      (is (string= "NIL|11|hello world" (body-of (second r)))))))

@@ -38,17 +38,23 @@
   (:export
    ;; the types
    #:Version #:Http-1-0 #:Http-1-1
-   #:Body-Spec #:Body-None #:Body-Exact
+   #:Body-Spec #:Body-None #:Body-Exact #:Body-Chunked
    #:Request #:Head-Result #:Incomplete #:Complete #:Rejected
    ;; the parser
    #:parse-head #:parse-head-limited
+   ;; chunked request bodies, a step at a time (#374)
+   #:Chunk-Step #:Step-Incomplete #:Step-Ok #:Step-Rejected
+   #:parse-chunk-size-line #:parse-chunk-data-end #:parse-trailers
+   #:max-chunk-line-octets #:max-chunk-size-digits
+   #:step-incomplete? #:step-ok? #:step-rejected?
+   #:step-value #:step-consumed #:step-status #:step-reason
    ;; limits, exported so the shell can name them in an error
    #:max-head-octets #:max-header-fields
    ;; CL-facing, total accessors
    #:head-incomplete? #:head-complete? #:head-rejected?
    #:head-status #:head-reason #:head-consumed
    #:head-method #:head-target #:head-version #:head-keep-alive?
-   #:head-has-body? #:head-body-length #:head-headers-flat
+   #:head-has-body? #:head-chunked? #:head-body-length #:head-headers-flat
    ;; the response encoder (commit 2)
    #:Encode-Result #:Encoded #:Refused
    #:encode-head #:encode-head-flat #:encode-error #:encode-interim #:reason-phrase

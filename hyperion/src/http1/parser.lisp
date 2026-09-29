@@ -28,9 +28,15 @@
 ;;;;   duplicate Content-Length, differing       -> 400. Same disagreement, one header.
 ;;;;   non-digit / negative Content-Length       -> 400. "+5", " 5", "0x5" are read
 ;;;;                                                differently by different parsers.
-;;;;   any Transfer-Encoding                     -> 501. Refused LOUDLY, never ignored:
+;;;;   Transfer-Encoding other than `chunked'    -> 501. Refused LOUDLY, never ignored:
 ;;;;                                                silently dropping it is how a body gets
-;;;;                                                interpreted as a second request.
+;;;;                                                interpreted as a second request. Only the
+;;;;                                                single coding `chunked' is decoded (#374).
+;;;;   Transfer-Encoding in an HTTP/1.0 request  -> 400. RFC 9112 6.1: the framing is
+;;;;                                                faulty, whatever else the message says.
+;;;;   a chunk-size that is not hexadecimal,     -> 400. Each has been read differently by
+;;;;   has more than 15 digits, or a chunk         two parsers in a chain; see CHUNKED
+;;;;   not followed by CRLF                        BODIES below.
 ;;;;   bare LF as a line terminator              -> 400. Accepting bare LF where a peer
 ;;;;                                                requires CRLF is a smuggling desync.
 ;;;;   obs-fold (a header line starting SP/HTAB) -> 400. Obsolete since RFC 7230 and a
@@ -45,6 +51,15 @@
 ;;;;
 ;;;; A body-size cap (413) is deliberately NOT here: it is configurable and therefore the
 ;;;; server's decision. This layer reports the declared length; the shell compares it.
+;;;;
+;;;; CHUNKED BODIES (#374) are decoded a step at a time, because they arrive a piece at a time
+;;;; and may be large. PARSE-CHUNK-SIZE-LINE reads one chunk-size line, PARSE-CHUNK-DATA-END
+;;;; checks the CRLF after a chunk's data, and PARSE-TRAILERS reads the trailer section after
+;;;; the last chunk. Each takes a short ISO-8859-1 view starting where the shell has got to, so
+;;;; the shell never decodes the whole body to a string, and slices the data straight from its
+;;;; octets. The size cap stays the shell's, as for Content-Length. Trailer fields are checked
+;;;; like header fields and then discarded: nothing a peer sends after the body can change how
+;;;; the request was framed or what its headers said.
 
 (cl:in-package #:hyperion/http1)
 (named-readtables:in-readtable coalton:coalton)
@@ -83,11 +98,11 @@ so an unsupported version can never reach the rest of the server as a default."
   (define-type Body-Spec
     "How this request's body is framed, once framing has been AGREED.
 
-There is no Chunked variant on purpose. Transfer-Encoding is rejected at parse time with
-501, so `chunked' never becomes a state the server has to carry -- a variant here would
-spread one decision across two layers and invite a later branch that forgets it."
+BODY-CHUNKED is `Transfer-Encoding: chunked' and nothing else (#374). Any other coding is
+refused with 501 before a Body-Spec exists, so no other coding is a state the server carries."
     Body-None
-    (Body-Exact UFix))
+    (Body-Exact UFix)
+    Body-Chunked)
 
   (define-type Request
     "A checked request head: method, target, version, header fields (names lowercased, values
@@ -363,17 +378,33 @@ the status and reason, so the first bad field decides the response."
                         (Err (Tuple 400 "header field name is not a token"))
                         (parse-fields rest (Cons (Tuple name value) acc)))))))))))
 
-  (declare body-spec ((List (Tuple String String)) -> (Result (Tuple UFix String) Body-Spec)))
-  (define (body-spec headers)
+  (declare transfer-codings ((List String) -> (List String)))
+  (define (transfer-codings values)
+    "Every coding named across all Transfer-Encoding field lines, lowercased and trimmed, in
+order. Two lines are one list (RFC 9110 5.3), so `chunked' split over two lines is still two."
+    (list:concat (map comma-tokens values)))
+
+  (declare body-spec (Version * (List (Tuple String String)) -> (Result (Tuple UFix String) Body-Spec)))
+  (define (body-spec version headers)
     "Decide the body framing, or say why it cannot be decided. Order matters: the
 both-present case is checked first, because it is the one that is dangerous rather than
-merely unsupported."
+merely unsupported.
+
+Transfer-Encoding is accepted only as the single coding `chunked' (#374). `gzip, chunked',
+`chunked, chunked' and `identity' are all 501: each is a framing another parser might read
+differently, and none is needed. In HTTP/1.0 it is 400, whatever it says, because RFC 9112
+6.1 says such a message's framing is faulty."
     (let ((cls (header-values "content-length" headers))
           (tes (header-values "transfer-encoding" headers)))
       (if (and (list:cons? cls) (list:cons? tes))
           (Err (Tuple 400 "Content-Length and Transfer-Encoding are both present"))
           (if (list:cons? tes)
-              (Err (Tuple 501 "Transfer-Encoding is not supported"))
+              (match version
+                ((Http-1-0) (Err (Tuple 400 "Transfer-Encoding in an HTTP/1.0 request")))
+                ((Http-1-1)
+                 (if (== (transfer-codings tes) (Cons "chunked" Nil))
+                     (Ok Body-Chunked)
+                     (Err (Tuple 501 "only the chunked transfer coding is supported")))))
               (match cls
                 ((Nil) (Ok Body-None))
                 ((Cons first _)
@@ -392,7 +423,7 @@ merely unsupported."
        (match (parse-fields field-lines Nil)
          ((Err e) (match e ((Tuple s why) (Rejected s why))))
          ((Ok headers)
-          (match (body-spec headers)
+          (match (body-spec version headers)
             ((Err e) (match e ((Tuple s why) (Rejected s why))))
             ((Ok body)
              (Complete (Request method target version headers body
@@ -407,6 +438,169 @@ connections or silently break pipelining."
     (match v
       ((Http-1-1) (not (has-connection-token? "close" headers)))
       ((Http-1-0) (has-connection-token? "keep-alive" headers))))
+
+  ;;; --- chunked bodies (#374) ----------------------------------------------
+  ;;;
+  ;;; One step at a time, over a short view that starts where the shell has got to; see
+  ;;; CHUNKED BODIES in the file header. Each step answers with a CHUNK-STEP.
+
+  ;; The longest chunk-size line accepted, CRLF excluded: the size, and any extensions. Past
+  ;; it the line is refused rather than buffered, for the reason MAX-HEAD-OCTETS gives.
+  (declare max-chunk-line-octets UFix)
+  (define max-chunk-line-octets 4096)
+
+  ;; The most hex digits a chunk-size may have. Fifteen is 2^60 - 1, far past any body cap and
+  ;; still a UFix; a sixteenth digit could not be represented, and a parser that wrapped it
+  ;; would read a different size from one that did not.
+  (declare max-chunk-size-digits UFix)
+  (define max-chunk-size-digits 15)
+
+  (define-type Chunk-Step
+    "What one step of chunked decoding concluded from the view it was given.
+
+  Step-Incomplete     not enough of the view yet, and still within its limit. Read more.
+  Step-Ok value n     N octets of the view were this step's; VALUE is the chunk size for a
+                      size line and 0 otherwise.
+  Step-Rejected s why S is the HTTP status to send, as in HEAD-RESULT."
+    Step-Incomplete
+    (Step-Ok UFix UFix)
+    (Step-Rejected UFix String))
+
+  (declare hex-value (Char -> (Optional UFix)))
+  (define (hex-value c)
+    (let ((code (char:char-code c)))
+      (cond
+        ((and (>= code 48) (<= code 57)) (Some (- code 48)))
+        ((and (>= code 97) (<= code 102)) (Some (- code 87)))
+        ((and (>= code 65) (<= code 70)) (Some (- code 55)))
+        (True None))))
+
+  (declare hex-digits-from (String * UFix -> UFix))
+  (define (hex-digits-from s i)
+    "How many hex digits S has from I onward, stopping at the first that is not one."
+    (match (str:ref s i)
+      ((Some c) (match (hex-value c)
+                  ((Some _) (+ 1 (hex-digits-from s (+ i 1))))
+                  ((None) 0)))
+      ((None) 0)))
+
+  (declare hex-fold (String * UFix * UFix * UFix -> UFix))
+  (define (hex-fold s i end acc)
+    "The value of the hex digits of S from I to END, added to ACC. The caller has counted
+them, so every character here is one."
+    (if (>= i end)
+        acc
+        (hex-fold s (+ i 1) end
+                  (+ (* acc 16)
+                     (match (str:ref s i)
+                       ((Some c) (match (hex-value c) ((Some v) v) ((None) 0)))
+                       ((None) 0))))))
+
+  (declare ext-char-ok? (Char -> Boolean))
+  (define (ext-char-ok? c)
+    "A character a chunk extension may hold: HTAB, or anything visible or a space, but no
+control character and no DEL."
+    (let ((code (char:char-code c)))
+      (or (== code 9) (and (>= code 32) (not (== code 127))))))
+
+  (declare ext-clean-from? (String * UFix -> Boolean))
+  (define (ext-clean-from? s i)
+    (match (str:ref s i)
+      ((Some c) (and (ext-char-ok? c) (ext-clean-from? s (+ i 1))))
+      ((None) True)))
+
+  (declare chunk-ext-ok? (String -> Boolean))
+  (define (chunk-ext-ok? rest)
+    "What follows the chunk-size on its line: nothing, or optional whitespace then `;' and the
+extensions (RFC 9112 7.1.1). The extensions are not interpreted -- nothing here uses one --
+but they must be clean, so a line cannot carry a control character past this parser."
+    (let ((trimmed (trim-start rest 0)))
+      (or (== (str:length rest) 0)
+          (and (char-at? trimmed 0 #\;) (ext-clean-from? trimmed 0)))))
+
+  (declare parse-chunk-size-line (String -> Chunk-Step))
+  (define (parse-chunk-size-line view)
+    "Read the chunk-size line at the start of VIEW: 1*HEXDIG, then any extensions, then CRLF.
+Step-Ok carries the size and the octets the line took, CRLF included. A size of 0 is the
+last chunk; the trailer section follows it (PARSE-TRAILERS).
+
+The view need hold no more than MAX-CHUNK-LINE-OCTETS + 2; past that without a CRLF, the line
+is refused."
+    (match (str:substring-index crlf view)
+      ((None)
+       (if (> (str:length view) max-chunk-line-octets)
+           (Step-Rejected 400 "chunk-size line is too long")
+           Step-Incomplete))
+      ((Some end)
+       (if (> end max-chunk-line-octets)
+           (Step-Rejected 400 "chunk-size line is too long")
+           (let ((line (str:substring view 0 end)))
+             (if (not (line-clean? line))
+                 (Step-Rejected 400 "bare CR or LF in a chunk-size line")
+                 (let ((digits (hex-digits-from line 0)))
+                   (cond
+                     ((== digits 0) (Step-Rejected 400 "chunk-size is not hexadecimal"))
+                     ((> digits max-chunk-size-digits)
+                      (Step-Rejected 400 "chunk-size has too many digits"))
+                     ((not (chunk-ext-ok? (str:substring line digits (str:length line))))
+                      (Step-Rejected 400 "malformed chunk extension"))
+                     (True (Step-Ok (hex-fold line 0 digits 0) (+ end 2)))))))))))
+
+  (declare parse-chunk-data-end (String -> Chunk-Step))
+  (define (parse-chunk-data-end view)
+    "Check that VIEW, which starts right after a chunk's data, starts with CRLF. Anything else
+means the chunk-size did not describe the data, which is the disagreement this refuses."
+    (cond
+      ((< (str:length view) 2)
+       (if (or (== (str:length view) 0) (char-at? view 0 cr))
+           Step-Incomplete
+           (Step-Rejected 400 "chunk data is not followed by CRLF")))
+      ((and (char-at? view 0 cr) (char-at? view 1 lf)) (Step-Ok 0 2))
+      (True (Step-Rejected 400 "chunk data is not followed by CRLF"))))
+
+  (declare parse-trailers (String * UFix -> Chunk-Step))
+  (define (parse-trailers view limit)
+    "Read the trailer section at the start of VIEW, which starts after the last chunk's line:
+field lines, each ending in CRLF, then CRLF. Step-Ok carries the octets it took. The fields
+are checked as header fields are, and at most LIMIT octets and MAX-HEADER-FIELDS of them are
+accepted, as for the head; they are not returned (see CHUNKED BODIES)."
+    (if (and (char-at? view 0 cr) (char-at? view 1 lf))
+        (Step-Ok 0 2)
+        (match (str:substring-index crlfcrlf view)
+          ((None)
+           (if (> (str:length view) limit)
+               (Step-Rejected 431 "trailer section exceeds the maximum size")
+               Step-Incomplete))
+          ((Some end)
+           (if (> (+ end 4) limit)
+               (Step-Rejected 431 "trailer section exceeds the maximum size")
+               (let ((lines (split-crlf (str:substring view 0 end))))
+                 (if (> (list:length lines) max-header-fields)
+                     (Step-Rejected 431 "too many trailer fields")
+                     (match (parse-fields lines Nil)
+                       ((Err e) (match e ((Tuple st why) (Step-Rejected st why))))
+                       ((Ok _) (Step-Ok 0 (+ end 4)))))))))))
+
+  (declare step-incomplete? (Chunk-Step -> Boolean))
+  (define (step-incomplete? r) (match r ((Step-Incomplete) True) (_ False)))
+
+  (declare step-ok? (Chunk-Step -> Boolean))
+  (define (step-ok? r) (match r ((Step-Ok _ _) True) (_ False)))
+
+  (declare step-rejected? (Chunk-Step -> Boolean))
+  (define (step-rejected? r) (match r ((Step-Rejected _ _) True) (_ False)))
+
+  (declare step-value (Chunk-Step -> UFix))
+  (define (step-value r) (match r ((Step-Ok v _) v) (_ 0)))
+
+  (declare step-consumed (Chunk-Step -> UFix))
+  (define (step-consumed r) (match r ((Step-Ok _ n) n) (_ 0)))
+
+  (declare step-status (Chunk-Step -> UFix))
+  (define (step-status r) (match r ((Step-Rejected st _) st) (_ 0)))
+
+  (declare step-reason (Chunk-Step -> String))
+  (define (step-reason r) (match r ((Step-Rejected _ why) why) (_ "")))
 
   ;;; --- the CL-facing surface ------------------------------------------------
   ;;;
@@ -465,15 +659,23 @@ connections or silently break pipelining."
 
   (declare head-has-body? (Head-Result -> Boolean))
   (define (head-has-body? h)
+    "Whether the request declares a body by Content-Length. A chunked body is not one of
+these: see HEAD-CHUNKED?."
     (match (head-request h)
-      ((Request _ _ _ _ b _) (match b ((Body-Exact _) True) ((Body-None) False)))))
+      ((Request _ _ _ _ b _) (match b ((Body-Exact _) True) (_ False)))))
+
+  (declare head-chunked? (Head-Result -> Boolean))
+  (define (head-chunked? h)
+    "Whether the request's body is sent with Transfer-Encoding: chunked (#374)."
+    (match (head-request h)
+      ((Request _ _ _ _ b _) (match b ((Body-Chunked) True) (_ False)))))
 
   (declare head-body-length (Head-Result -> UFix))
   (define (head-body-length h)
     "The declared body length, 0 when there is none. The shell compares this against its own
 configurable cap and answers 413 -- that limit is policy, so it is not decided here."
     (match (head-request h)
-      ((Request _ _ _ _ b _) (match b ((Body-Exact n) n) ((Body-None) 0)))))
+      ((Request _ _ _ _ b _) (match b ((Body-Exact n) n) (_ 0)))))
 
   (declare head-headers-flat (Head-Result -> (List String)))
   (define (head-headers-flat h)

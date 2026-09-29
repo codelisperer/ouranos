@@ -42,6 +42,18 @@ its tag.
   Libraries, and the framework, are still loaded with warnings muffled. The same applies under
   `cons --fresh` and to `:isolate` targets. (#303)
 
+- **hyperion/server-uv: a request body sent with `Transfer-Encoding: chunked` reaches the
+  handler, where it used to be refused with 501** (#374). The handler gets the decoded body as
+  `:raw-body` and `:content-length` NIL, as under Hunchentoot and Woo. An app acts if a handler
+  sizes its read of `:raw-body` by `:content-length`: it now meets NIL for such a request, and
+  reads to the end of the stream instead. Only the single coding `chunked` is decoded; any
+  other `Transfer-Encoding` is still 501, one in an HTTP/1.0 request is 400, and one alongside
+  `Content-Length` is 400 as before. The decoded body counts against `*max-body-octets*`, and
+  the chunk framing against the new `*max-chunk-overhead-octets*` (1 MiB); either answers 413.
+  Trailer fields are checked and discarded. `hyperion/http1` gains `Body-Chunked`,
+  `head-chunked?` and the step functions `parse-chunk-size-line`, `parse-chunk-data-end` and
+  `parse-trailers`.
+
 ### Added
 
 - **hyperion/server-uv: `*max-head-octets*`, the largest request head accepted before 431.**
