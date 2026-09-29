@@ -34,18 +34,22 @@ set -eu
 
 msg_file=$1
 
-# Three patterns, because the trailer arrives under more than one name. The middle one
-# catches an assistant this list has not heard of yet; the last catches the harness's PR
-# boilerplate when it is pasted into a commit message.
-#
-# The last is ANCHORED to the start of a line and requires the bracketed link form. An
-# unanchored match refused the commit that introduced this hook, for describing what it
-# refuses -- a message that DESCRIBES a rule is not one that BREAKS it, and a guard that
-# cannot tell the difference bites whoever writes the documentation. (Found by the
-# Windows lane, which shipped the unanchored version and caught it on its own commit.)
-if grep -qiE '^Co-Authored-By:.*(claude|anthropic|gpt|openai|copilot|cursor|codex|gemini|llama|devin|aider)' "$msg_file" \
-   || grep -qiE '^Co-Authored-By:.*<[^>]*(anthropic|openai)\.com>' "$msg_file" \
-   || grep -qiE '^[^A-Za-z]*Generated with \[Claude Code\]' "$msg_file"; then
+# WHAT IS REFUSED: a trailer that identifies an AI assistant, not one whose name merely
+# contains a product's name. A human called Claude Smith is a co-author like any other (#311).
+# The pattern below, shared word for word with the other copy of this hook, refuses:
+#   - a name that is an assistant's name and nothing else, or that name followed only by
+#     model and version words: "Claude", "Claude Opus 5.5 (1M context)", "GPT-5", "Cursor Agent";
+#   - an address at anthropic.com or openai.com, where the assistants' noreply addresses are;
+#   - a [bot] account;
+#   - a GitHub noreply address for an assistant's account, such as 12345+Copilot@users.noreply.github.com;
+#   - the harness's generated-with footer, when it is pasted into a commit message.
+# The footer pattern is ANCHORED to the start of a line and requires the bracketed link form.
+# An unanchored match refused the commit that introduced this hook, for describing what it
+# refuses -- a message that DESCRIBES a rule is not one that BREAKS it. A pull request's body
+# never passes through this hook; the rule there is in the agent instructions.
+ai_trailer='^Co-Authored-By:[[:space:]]*(claude|copilot|chatgpt|gpt|codex|gemini|cursor|devin|aider|llama)([-. ]?[[:alnum:].]*[0-9][[:alnum:].]*)?([[:space:]]+(opus|sonnet|haiku|fable|code|agent|pro|flash|[^[:space:]<]*[0-9][^[:space:]<]*|\([^)]*\)))*[[:space:]]*<|^Co-Authored-By:.*<[^>]*@(anthropic|openai)[.]com>|^Co-Authored-By:.*\[bot\]|^Co-Authored-By:.*<[0-9]+[+][^>@]*(copilot|claude|codex|devin|cursor)[^>@]*@users[.]noreply[.]github[.]com>|^[^A-Za-z]*Generated with \[Claude Code\]'
+
+if grep -qiE "$ai_trailer" "$msg_file"; then
   cat >&2 <<'MSG'
 
   REFUSED: this commit message credits an AI assistant as a co-author.

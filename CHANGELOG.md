@@ -91,6 +91,14 @@ its tag.
 - **praxeon/retrieval: `retrieve`**, the call an agent's search makes. For a corpus it is
   `retrieve-similar` with a default `:limit` of 20; a later version will follow the corpus's
   retrieval strategy (#316) with no change for callers. (#138)
+- **cons conform: the commit-msg hook refuses an AI assistant's identity, not a human whose
+  name contains an assistant's name.** `Co-Authored-By: Claude Smith <claude.smith@example.com>`
+  was refused. The hook now refuses a name that is an assistant's name alone or followed only by
+  model and version words (`Claude`, `Claude Opus 5.5 (1M context)`, `GPT-5`, `Cursor Agent`),
+  an address at anthropic.com or openai.com, a `[bot]` account, an assistant's GitHub noreply
+  address, and the generated-with footer. The pattern is the `ai_trailer=` line in
+  `.githooks/commit-msg`. An app that copied the hook, from `cons conform` or from this tree,
+  copies it again. (#311)
 
 ## v0.1.4 — 2026-09-29
 
