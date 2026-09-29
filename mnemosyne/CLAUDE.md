@@ -25,8 +25,9 @@ knowledge graph *on* it (praxeon, unbuilt) · **Praxeon** is the agent on Kairos
 - A backend that cannot support a declared field type **refuses at migration time**;
   emulation is opt-in at the declaration site — ADR-0001 (accepted). `field-type-sql`
   returns `Native | Emulated | Unsupported`, never a bare string.
-- `cl+ssl` is deliberately not a dependency (pre-publication issue 146): `conn` degrades `sslmode=prefer` to
-  plaintext with a warning and refuses `require`/`verify-*` unless the app declares it.
+- `cl+ssl` is deliberately not a dependency (pre-publication issue 146). Unless the app declares it, `conn`
+  degrades `sslmode=prefer` to plaintext with a warning only for this machine (localhost, 127.0.0.1, ::1,
+  a Unix socket), and refuses `prefer` to any other host (#341) and `require`/`verify-*` everywhere.
   Note this is now undercut by `aion/http-client` pulling `cl+ssl` on non-Windows (#115).
 
 ## Gotchas

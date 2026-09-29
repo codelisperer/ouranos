@@ -234,11 +234,56 @@ A path or an sslmode that is correctly encoded still arrives decoded."
   (is (eq :yes     (%resolve "postgres://u:p@h/d?sslmode=verify-ca" t)))
   (is (eq :full    (%resolve "postgres://u:p@h/d?sslmode=verify-full" t))))
 
+(defun %refuses-p (url)
+  "Whether resolving URL with no TLS in the image signals DB-ERROR."
+  (handler-case (progn (%resolve url nil) nil)
+    (mnemosyne/conn:db-error () t)
+    (error () nil)))
+
 (test tls-absent-degrades-only-what-promised-nothing
-  ;; `disable' and `prefer' carry no guarantee, so they connect.
-  (is (eq :no (%resolve "postgres://u:p@h/d?sslmode=disable" nil)))
-  (is (eq :no (%resolve "postgres://u:p@h/d?sslmode=prefer" nil)))
-  (is (eq :no (%resolve "postgres://u:p@h/d" nil)) "the default is prefer, so it degrades"))
+  ;; `disable' carries no guarantee and asks for no TLS, so it connects to any host. `prefer'
+  ;; degrades only for this machine (#341; see the tests below).
+  (is (eq :no (%resolve "postgres://u:p@db.example.com/d?sslmode=disable" nil)))
+  (is (eq :no (%resolve "postgres://u:p@localhost/d?sslmode=prefer" nil)))
+  (is (eq :no (%resolve "postgres://u:p@localhost/d" nil))
+      "the default is prefer, so it degrades on this machine"))
+
+(test tls-absent-prefer-refuses-a-host-that-is-not-this-machine
+  ;; #341, the maintainer's option 2. A URL without sslmode means prefer, so without this a
+  ;; deployed app whose image lost cl+ssl would send its database traffic in plaintext across
+  ;; the network, with a warning as the only sign.
+  (is (%refuses-p "postgres://u:p@db.example.com/d?sslmode=prefer"))
+  (is (%refuses-p "postgres://u:p@db.example.com/d") "the default is prefer")
+  (is (%refuses-p "postgres://u:p@10.0.0.5:5432/d") "a private address is still another machine")
+  (is (%refuses-p "postgres://u:p@[2001:db8::1]:5432/d") "an IPv6 address that is not ::1"))
+
+(test tls-absent-prefer-still-connects-to-this-machine
+  ;; Local development keeps working without cl+ssl: localhost, 127.0.0.1, ::1 and a Unix
+  ;; socket (a host that is a directory) degrade to plaintext as before.
+  (dolist (url '("postgres://u:p@localhost/d"
+                 "postgres://u:p@LOCALHOST:5432/d"
+                 "postgres://u:p@127.0.0.1:55432/d?sslmode=prefer"
+                 "postgres://u:p@[::1]:5432/d"))
+    (is (eq :no (%resolve url nil)) "~A should connect in plaintext" url))
+  (is (eq :no (mnemosyne/conn::%resolve-ssl
+               (mnemosyne/backend:make-postgres-with-ssl "/var/run/postgresql" 5432 "d" "u" "p" "prefer")
+               nil))
+      "a Unix socket directory"))
+
+(test tls-present-prefer-uses-tls-to-any-host
+  ;; The refusal is only about an image that cannot do TLS. Once cl+ssl is loaded, prefer to a
+  ;; remote host asks the driver for TLS, as before.
+  (is (eq :try (%resolve "postgres://u:p@db.example.com/d?sslmode=prefer" t)))
+  (is (eq :try (%resolve "postgres://u:p@db.example.com/d" t))))
+
+(test tls-absent-prefer-refusal-names-the-host-and-the-fix-and-not-the-password
+  (handler-case (%resolve "postgres://u:hunter2@db.example.com/d" nil)
+    (mnemosyne/conn:db-error (e)
+      (let ((printed (princ-to-string e)))
+        (is (search "cl+ssl" printed) "names what to add: ~A" printed)
+        (is (search "db.example.com" printed) "names the host: ~A" printed)
+        (is (null (search "hunter2" printed)) "leaked the password: ~A" printed)))
+    (:no-error (r) (declare (ignore r)) (is nil "should have signalled"))))
 
 (test tls-absent-refuses-a-mode-that-promised-encryption
   ;; THE test in this change. Silently connecting in plaintext here would hand a

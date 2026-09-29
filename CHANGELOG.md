@@ -14,6 +14,23 @@ its tag.
 
 ### An app may have to act
 
+- **mnemosyne: `sslmode=prefer` to another machine refuses to connect when the app has not
+  loaded cl+ssl, instead of connecting in plaintext** (#341). mnemosyne uses TLS only if the app
+  has loaded cl+ssl. Without it, `prefer`, which is also what a `DATABASE_URL` with no `sslmode`
+  means, used to log `db tls unavailable, connecting in plaintext` and connect in plaintext to
+  any host. It now does that only for this machine: `localhost`, `127.0.0.1`, `::1` and a Unix
+  socket. To any other host it signals `mnemosyne/conn:db-error`: "sslmode=prefer to HOST, which
+  is not this machine, needs TLS, and CL+SSL is not loaded in this image. Add "cl+ssl" to your
+  application's :depends-on, or set sslmode=disable if a plaintext connection to that host is
+  really what you want." `require`, `verify-ca` and `verify-full` refused already.
+
+  An app acts if it connects to a Postgres on another machine, has no `cl+ssl` in its image, and
+  relied on `prefer` falling back: it adds `"cl+ssl"` to its `:depends-on`. This departs from
+  libpq, whose `prefer` connects in plaintext when the client has no SSL support; the
+  maintainer chose to refuse, because #337 removed the cl+ssl that Hunchentoot used to load into
+  every macOS and Linux app, and a deployed app would otherwise have lost TLS to its database
+  with only a warning.
+
 - **praxeon: a step of a turn that the output limit cuts off ends the turn with
   `output-truncated` instead of passing as finished.** When a completion's stop reason is
   `:max-tokens`, `run-turn` no longer returns its text as the answer and no longer runs the tool
