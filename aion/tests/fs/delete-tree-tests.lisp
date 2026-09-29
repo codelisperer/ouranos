@@ -119,6 +119,38 @@ the root deletes the target's files."
            (is (null (probe-file tree))))
       (%cleanup base))))
 
+(test a-link-whose-target-is-gone-is-removed-with-the-tree
+  ;; UIOP:DIRECTORY-FILES and CL:DIRECTORY leave out a POSIX symbolic link whose target does
+  ;; not exist, so a walk built on them never removed it, and the RMDIR of its directory failed
+  ;; with ENOTEMPTY. Found by hyperion/view/tests, whose window-icon fixture holds such a link.
+  ;; On Windows the dangling link is a junction; the file-symlink case needs a privilege that
+  ;; mklink /J does not, so it is only planted on Linux and macOS.
+  (let* ((base (%fresh))
+         (tree (merge-pathnames "tree/" base))
+         (gone (merge-pathnames "gone/" base))
+         (dir-link (merge-pathnames "sub/dangling-dir/" tree)))
+    (unwind-protect
+         (progn
+           (%write (merge-pathnames "b.txt" tree) "b")
+           (%write (merge-pathnames "keep.txt" gone) "x")
+           (ensure-directories-exist (merge-pathnames "sub/" tree))
+           (%link dir-link gone)
+           #-win32
+           (let ((file-target (%write (merge-pathnames "file-target.txt" base) "t")))
+             ;; A name with wildcard characters, since the POSIX walk parses each name itself.
+             (%write (merge-pathnames (uiop:parse-native-namestring "a*b[1].txt") tree) "w")
+             (uiop:run-program (list "ln" "-s" (uiop:native-namestring file-target)
+                                     (uiop:native-namestring (merge-pathnames "dangling-file" tree)))
+                               :output nil)
+             (delete-file file-target)
+             (is (null (uiop:directory-files tree "dangling-file"))
+                 "the precondition: UIOP does not list a symbolic link whose target is gone"))
+           (fs:delete-tree gone)
+           (is (fs:link-p dir-link) "the precondition: the directory link is still there, dangling")
+           (is (eq t (fs:delete-tree tree)))
+           (is (null (probe-file tree)) "the tree must be gone, dangling links included"))
+      (%cleanup base))))
+
 (test a-missing-root-is-an-error-unless-ignored
   (let ((missing (merge-pathnames "not-there/" (%fresh))))
     (signals fs:delete-tree-error (fs:delete-tree missing))

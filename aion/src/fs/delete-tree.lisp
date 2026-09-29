@@ -154,12 +154,32 @@ real directory or file by mistake."
 
 ;;; --- the walk --------------------------------------------------------------------------
 
+#+win32
 (defun %entries (directory)
   "Every entry in DIRECTORY, which is known not to be a link, as pathnames: files as file
 pathnames and subdirectories (including links to directories) as directory pathnames. Listed
-without resolving links, so a link appears under its own name."
+without resolving links, so a link appears under its own name. A junction whose target is gone
+is still listed, as a subdirectory."
   (append (uiop:directory-files directory)
           (uiop:subdirectories directory)))
+
+#-win32
+(defun %entries (directory)
+  "Every entry in DIRECTORY, which is known not to be a link, as file pathnames; %DELETE-ENTRY
+asks %KIND what each one is. Read with readdir, because UIOP:DIRECTORY-FILES and CL:DIRECTORY
+both leave out a symbolic link whose target does not exist, and the RMDIR that follows then fails
+because the directory is not empty (measured on SBCL 2.6.8, Linux)."
+  (let ((dir (sb-posix:opendir (%native directory)))
+        (entries '()))
+    (unwind-protect
+         (loop for entry = (sb-posix:readdir dir)
+               until (sb-alien:null-alien entry)
+               do (let ((name (sb-posix:dirent-name entry)))
+                    (unless (member name '("." "..") :test #'string=)
+                      (push (merge-pathnames (uiop:parse-native-namestring name) directory)
+                            entries))))
+      (sb-posix:closedir dir))
+    entries))
 
 (defun %delete-entry (path)
   (ecase (%kind path)
