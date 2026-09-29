@@ -81,7 +81,7 @@ cleanup still runs because it is the UNWIND-PROTECT outside the block."
                   (unwind-protect (progn ,@body)
                     (ignore-errors (com:invoke-method ,conn "Close"))
                     (com:release ,conn))))
-           (ignore-errors (uiop:delete-directory-tree ,dir :validate t)))))))
+           (ignore-errors (aion/fs:delete-tree ,dir)))))))
 
 (defun %csv-lines (dir)
   (with-open-file (in (merge-pathnames "t.csv" dir))

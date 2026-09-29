@@ -42,6 +42,13 @@ its tag.
   Libraries, and the framework, are still loaded with warnings muffled. The same applies under
   `cons --fresh` and to `:isolate` targets. (#303)
 
+- **hyperion/update: on Linux, update staging directories are made in
+  `<XDG_CACHE_HOME>/ouranos-update/`, normally `~/.cache/ouranos-update/` (mode 700), not in the
+  temp directory.** On Windows and macOS they stay in the per-user temp directory. The sweep that
+  removes old `ouranos-update-<time>-<hex>` directories looks in the same place, and removes only
+  real directories this user owns. An app that cleans up after the updater, or looks for a
+  staged installer, looks in the new place on Linux. (#347)
+
 ### Added
 
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
@@ -58,6 +65,19 @@ its tag.
   exported as `cons/run:load-system-strictly` for a script that needs the same rule. An app whose
   CI added its own strict-build step as a workaround, such as `scripts/build-strict.lisp`, can
   replace it with `cons --strict test`. (#303)
+- **aion/fs: `delete-tree`, a directory-tree delete that never follows a link out of the tree.**
+  A Windows junction or other reparse point, or a symbolic link, inside the tree is removed as a
+  link, and what it points to is left alone; a root that is a link signals `link-root-refused`.
+  `delete-link` removes a link and nothing else, and `link-p` sees Windows junctions, which
+  `truename` does not. It needs only UIOP, and `sb-posix` on Unix. An app that removes directory
+  trees with `uiop:delete-directory-tree` can use it instead. (#347)
+
+### Fixed
+
+- **Directory trees the framework removes are removed without following links.** `cons`'s
+  `with-temporary-directory`, `cons` templates, hyperion/update's staging, the build scripts and
+  the test fixtures used `uiop:delete-directory-tree`, which on Windows follows a junction inside
+  the tree and deletes files outside it. They use `aion/fs:delete-tree` now. (#347)
 
 ### Fixed
 

@@ -39,7 +39,7 @@ that hides which scripts it is about.")
   ;; declares it and docs/dependencies.md does not list it -- that manifest records the
   ;; external dependencies the tree consciously chose, and putting uiop there would claim a
   ;; choice nobody made. `check-source-deps' treats it the same way, in +ALWAYS-AVAILABLE+.
-  :depends-on ("fiveam"
+  :depends-on ("aion/fs" "fiveam"
                ;; To COMPUTE a fixture's sha256 rather than hand-write one. A hand-written
                ;; hash is a second copy of a fact, and the test would then be checking that
                ;; two hand-written things agree (pre-publication issue 466).

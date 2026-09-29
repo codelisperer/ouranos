@@ -155,7 +155,7 @@ resolution moves, this suite must move with it or say so."
            (is (null (desktop:bundled-window-icon dir)) "no icon carried, so none found")
            (let ((icon (%touch (merge-pathnames "window-icon.png" dir))))
              (is (equal icon (desktop:bundled-window-icon dir)))))
-      (uiop:delete-directory-tree dir :validate t))))
+      (aion/fs:delete-tree dir))))
 
 (test the-bundled-icon-is-passed-before-the-callers-path
   ;; In a shipped app the caller's path is the build machine's. It exists on that machine,
@@ -173,7 +173,7 @@ resolution moves, this suite must move with it or say so."
            (is (null (hyperion/desktop::%icon-arguments
                       (merge-pathnames "not-on-this-machine.png" dir) nil))
                "a caller's path that does not exist passes no --icon at all"))
-      (uiop:delete-directory-tree dir :validate t))))
+      (aion/fs:delete-tree dir))))
 
 #-win32
 (test a-bundled-icon-behind-a-broken-link-is-not-found
@@ -195,7 +195,7 @@ resolution moves, this suite must move with it or say so."
            (is (equal (list "--icon" (uiop:native-namestring callers))
                       (hyperion/desktop::%icon-arguments callers (desktop:bundled-window-icon dir)))
                "so the caller's icon is used instead"))
-      (uiop:delete-directory-tree dir :validate t))))
+      (aion/fs:delete-tree dir))))
 
 (defun run-tests ()
   (let ((results (run 'view)))

@@ -824,6 +824,27 @@ similar name. Recognise, or leave alone."
            (every #'digit-char-p digits)
            (parse-integer digits :junk-allowed t)))))
 
+(defun %staging-root ()
+  "The directory staging directories are made in and swept from, which only this user can
+write into (#347).
+
+On Linux and other Unix systems except macOS that is `<XDG_CACHE_HOME>/ouranos-update/',
+normally `~/.cache/ouranos-update/', created with mode 700. The temp directory there is
+normally /tmp, which every user of the machine shares, and the sweep deletes what it finds.
+On Windows and macOS the temp directory is already per-user (`%LOCALAPPDATA%\\Temp', and the
+`$TMPDIR' under /var/folders), so it is kept, together with the Windows permission checks
+written for it.
+
+What is staged here is read back into memory and written beside its target before it is
+used, so the filesystem this is on does not matter to the Linux strategy."
+  #+(and unix (not darwin))
+  (let ((dir (uiop:xdg-cache-home "ouranos-update/")))
+    (ensure-directories-exist dir :mode #o700)
+    (sb-posix:chmod (string-right-trim "/" (uiop:native-namestring dir)) #o700)
+    dir)
+  #-(and unix (not darwin))
+  (uiop:temporary-directory))
+
 (defun %sweep-staging (&optional (now (get-universal-time)))
   "Remove staging directories older than the retention window. Returns how many went.
 
@@ -843,13 +864,26 @@ permissions, a file somebody locked -- is a smaller problem than an update that 
 proceed because it could not tidy up."
   (let ((removed 0))
     (ignore-errors
-     (dolist (dir (uiop:subdirectories (uiop:temporary-directory)))
+     (dolist (dir (uiop:subdirectories (%staging-root)))
        (let* ((name (car (last (pathname-directory dir))))
               (stamp (and (stringp name) (%staging-name-time name))))
-         (when (and stamp (> (- now stamp) +staging-retention-seconds+))
-           (when (ignore-errors (uiop:delete-directory-tree dir :validate t) t)
+         (when (and stamp (> (- now stamp) +staging-retention-seconds+) (%sweepable-p dir))
+           (when (ignore-errors (aion/fs:delete-tree dir) t)
              (incf removed))))))
     removed))
+
+(defun %sweepable-p (dir)
+  "True when DIR is a directory this code could have created: a real directory, not a link, and
+on Unix one this user owns. The sweep only ever removes what `%staging-directory' made, so
+anything else with a matching name is left alone, whoever put it there (#347)."
+  #+unix
+  (handler-case
+      (let ((st (sb-posix:lstat (string-right-trim "/" (uiop:native-namestring dir)))))
+        (and (= (logand (sb-posix:stat-mode st) #o170000) #o040000)
+             (= (sb-posix:stat-uid st) (sb-posix:getuid))))
+    (sb-posix:syscall-error () nil))
+  #-unix
+  (not (aion/fs:link-p dir)))
 
 
 ;;; --- the staging directory's permissions (pre-publication issue 264) ----------------------------
@@ -1196,7 +1230,7 @@ unique is worse than no suffix, because it reads as a guarantee."
   (loop for candidate = (merge-pathnames
                          (format nil "~A~D-~A/" +staging-prefix+ (get-universal-time)
                                  (rand:random-hex 48))
-                         (uiop:temporary-directory))
+                         (%staging-root))
         unless (probe-file candidate)
           do (ensure-directories-exist candidate)
              ;; BEFORE ANYTHING IS WRITTEN INTO IT. The payload inherits this directory's
@@ -1315,7 +1349,7 @@ exit, which is what `%sweep-staging' exists for instead."
    (let* ((parent (uiop:pathname-directory-pathname (pathname installer)))
           (name (car (last (pathname-directory parent)))))
      (when (and (stringp name) (%staging-name-time name))
-       (uiop:delete-directory-tree parent :validate t)))))
+       (aion/fs:delete-tree parent)))))
 
 (defun %payload-filename (url)
   (let ((slash (position #\/ url :from-end t)))

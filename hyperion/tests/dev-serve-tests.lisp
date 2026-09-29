@@ -130,8 +130,7 @@ would meet the old listener. `ports:await-released' is the check the claim neede
          (ignore-errors (sb-thread:join-thread ,thread :timeout 10 :default nil))
          (is (ports:await-released ,port)
              "the port was still accepting after teardown -- the next test's free port is not free")
-         (ignore-errors (uiop:delete-directory-tree ,root :validate t
-                                                          :if-does-not-exist :ignore))))))
+         (ignore-errors (aion/fs:delete-tree ,root :if-does-not-exist :ignore))))))
 
 (defun %dev-serve-returned-p (thread &key (timeout 5))
   "Did THREAD's SERVE call return within TIMEOUT? T or NIL, never a hang."

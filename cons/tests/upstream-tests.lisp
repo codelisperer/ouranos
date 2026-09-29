@@ -170,7 +170,7 @@ runs once per image cannot detect that it poisons the next run."
       ;; a leftover cannot poison the next one. On Windows this raises on git's read-only
       ;; object store, which is how pre-publication issue 284 survived -- the error was swallowed and the corpse
       ;; persisted. Swallowing it is fine now; relying on it was not.
-      (ignore-errors (uiop:delete-directory-tree root :validate t)))))
+      (ignore-errors (aion/fs:delete-tree root)))))
 
 (test a-consumer-that-never-fetched-is-told-so-and-then-told-how-far-behind
   (%drift-scenario))

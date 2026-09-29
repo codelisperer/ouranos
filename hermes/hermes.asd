@@ -118,7 +118,7 @@
 
 (defsystem "hermes/blob/tests"
   :description "Test suite for the blob store."
-  :depends-on ("hermes/blob" "aion/clock" "aion/log" "fiveam")  ; blob.lisp calls both directly
+  :depends-on ("aion/fs" "hermes/blob" "aion/clock" "aion/log" "fiveam")  ; blob.lisp calls both directly
   :serial t
   :components ((:module "blob-tests"
                 :pathname "tests"

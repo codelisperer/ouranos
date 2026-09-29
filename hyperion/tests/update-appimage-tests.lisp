@@ -78,9 +78,9 @@ only the process exit is replaced."
                       (up:*exit-after-handoff* (lambda () (setf *exited* t))))
                   ,@body)))
          (ignore-errors (sb-posix:chmod (namestring ,dir) #o755))
-         (ignore-errors (uiop:delete-directory-tree ,dir :validate t))
+         (ignore-errors (aion/fs:delete-tree ,dir))
          (dolist (d (set-difference (staging-directories) before :test #'equal))
-           (ignore-errors (uiop:delete-directory-tree d :validate t)))))))
+           (ignore-errors (aion/fs:delete-tree d)))))))
 
 (test the-install-directory-is-the-appimage-files-directory
   "Inside an AppImage the running image is in a read-only mount; the AppImage file is the
@@ -124,7 +124,7 @@ installation, so its directory is what an update writes to."
                ;; this test's directory is removed; otherwise it starts on a missing file.
                (wait-for-line marker "launched version=2.0.0")))
            (is-untouched data before))
-      (ignore-errors (uiop:delete-directory-tree data :validate t)))))
+      (ignore-errors (aion/fs:delete-tree data)))))
 
 (test a-read-only-install-is-reported-not-writable-and-left-alone
   (if (zerop (sb-posix:getuid))
@@ -177,6 +177,6 @@ copied beside the AppImage. The staging directory is mode 700 and owned by this 
                "staging directory mode ~O" (logand (sb-posix:stat-mode st) #o7777))
            (is (= (sb-posix:getuid) (sb-posix:stat-uid st))))
       (dolist (d (set-difference (staging-directories) before :test #'equal))
-        (ignore-errors (uiop:delete-directory-tree d :validate t))))))
+        (ignore-errors (aion/fs:delete-tree d))))))
 
 ) ; #+linux

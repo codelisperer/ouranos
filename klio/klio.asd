@@ -28,7 +28,7 @@
 
 (defsystem "klio/tests"
   :description "Test suite for klio."
-  :depends-on ("klio" "fiveam")
+  :depends-on ("aion/fs" "klio" "fiveam")
   :serial t
   :components ((:module "tests"
                 :serial t
