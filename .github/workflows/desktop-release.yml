@@ -184,7 +184,8 @@ jobs:
           sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp \
             --system "$APP_SYSTEM" --entry "$APP_ENTRY" \
             --name "$APP_NAME" --version "$APP_VERSION" \
-            --icon hyperion/examples/coalton-repl/assets/lambda.ico
+            --icon hyperion/examples/coalton-repl/assets/lambda.ico \
+            --window-icon "hyperion/examples/coalton-repl/assets/lambda.$(if [ "$RUNNER_OS" = Windows ]; then echo ico; else echo png; fi)"
 
       # save-lisp-and-die writes a CONSOLE-subsystem PE, so a desktop app would drag a
       # console window behind it. editbin (MSVC, already on the runner) rewrites the one

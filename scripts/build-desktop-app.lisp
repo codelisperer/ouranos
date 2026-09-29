@@ -5,9 +5,10 @@
 ;;;;          --entry  hyperion/examples/coalton-repl:main \
 ;;;;          --name   coalton-repl \
 ;;;;          --version 0.1.0 \
-;;;;          [--out dist] [--icon path/to/app.ico]
+;;;;          [--out dist] [--icon path/to/app.ico] [--window-icon path/to/window.png]
 ;;;;
 ;;;; --icon is used on Windows only: see "Windows: the executable's icon" below.
+;;;; --window-icon is the icon for the app's window on every OS, carried in the bundle (#74).
 ;;;;
 ;;;; The command is IDENTICAL on Linux / macOS / Windows -- which is the whole point:
 ;;;; SBCL cannot cross-compile (save-lisp-and-die dumps an image for the HOST platform
@@ -36,6 +37,23 @@
 (defparameter *name*    (or (argv-value "--name")    (error "build-desktop-app: --name is required")))
 (defparameter *version* (or (argv-value "--version") "0.0.0"))
 (defparameter *out*     (argv-value "--out" "dist"))
+
+;;; --window-icon: the icon for the app's WINDOW, carried into the bundle as
+;;; `window-icon.<type>' so hyperion/desktop:run-app finds it beside the executable on any
+;;; machine (#74). An app names its icon by a path in its source tree, and in a dumped image
+;;; that is the build machine's path, so a friend's copy had no window icon and no message
+;;; said so. Give the format the platform reads: .ico on Windows, .png on Linux and macOS.
+;;; This is not --icon below, which sets only the .exe's own icon in Explorer.
+(defparameter *window-icon*
+  (let ((given (argv-value "--window-icon")))
+    (when given
+      (let ((found (probe-file given)))
+        (unless found (error "build-desktop-app: no such window icon file: ~A" given))
+        (namestring found)))))
+
+(defun %window-icon-args ()
+  "--window-icon for a re-run of this script, which has to carry the icon too."
+  (when *window-icon* (list "--window-icon" *window-icon*)))
 
 ;; The repo root -- the PARENT of scripts/. NB: pathname-directory-pathname is idempotent
 ;; on a directory, so applying it twice does NOT go up a level; parent-directory-pathname does.
@@ -203,7 +221,8 @@ itself already finished, and its exit code is what the caller returns."
                                       "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
                                       "--script" (namestring (or *load-truename* *load-pathname*)))
                                 (list "--system" *system* "--entry" *entry*
-                                      "--name" *name* "--version" *version* "--out" *out*))
+                                      "--name" *name* "--version" *version* "--out" *out*)
+                                (%window-icon-args))
                         :output t :error-output t :ignore-error-status t
                         ;; The child's own runtime now says @executable_path, so it cannot
                         ;; rediscover which files to carry -- it is told.
@@ -262,11 +281,13 @@ itself already finished, and its exit code is what the caller returns."
              (finish-output)
              (let ((code (nth-value
                      2 (uiop:run-program
-                        (list (namestring patched) "--core" core
-                              "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
-                              "--script" (namestring (or *load-truename* *load-pathname*))
-                              "--system" *system* "--entry" *entry*
-                              "--name" *name* "--version" *version* "--out" *out*)
+                        (append
+                         (list (namestring patched) "--core" core
+                               "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
+                               "--script" (namestring (or *load-truename* *load-pathname*))
+                               "--system" *system* "--entry" *entry*
+                               "--name" *name* "--version" *version* "--out" *out*)
+                         (%window-icon-args))
                         :output t :error-output t :ignore-error-status t
                         ;; The copy sits in <out>/.runtime, away from SBCL's own directory,
                         ;; so it is told where its contribs are.
@@ -741,6 +762,13 @@ nothing."
 (with-open-file (out (merge-pathnames "VERSION" *bundle*)
                      :direction :output :if-exists :supersede :if-does-not-exist :create)
   (format out "~A~%" *version*))
+
+;;; The window icon, beside the executable, under the name hyperion/desktop looks for (#74).
+(when *window-icon*
+  (let ((target (merge-pathnames (format nil "window-icon.~(~A~)" (pathname-type *window-icon*))
+                                 *bundle*)))
+    (uiop:copy-file *window-icon* target)
+    (format t "~&build-desktop-app: window icon -> ~A~%" (human-path:human-path target))))
 
 ;;; --- dump ---------------------------------------------------------------------
 ;;; Through scripts/dump-image.lisp, which keeps :save-runtime-options t on Linux and Windows
