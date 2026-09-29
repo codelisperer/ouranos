@@ -1,6 +1,30 @@
 # klio
 
-TODO: one-line description.
+A git-backed content engine: Markdown files with front matter, loaded into an immutable tree
+that is published all at once, and served by a hyperion site or exported to static files.
+
+## Using klio from a site
+
+```lisp
+(defparameter *site* (klio:make-site #p"content/" :known-extra '("start" "bullets")))
+(klio:boot *site*)                                   ; refuses to start if any file fails
+
+;; In a theme function: every readable role, newest first, with its nested front matter.
+(klio:collection *site* "roles" :sort-by "start" :order :descending)
+(klio:document-field role "bullets")                 ; lists of maps, as written
+(klio:document-by-slug *site* "skills")              ; another page, if a reader may see it
+
+;; Served by hyperion, or written out for a static host.
+(hyperion/server:start (klio:site-app *site* :page-theme #'my-page :index-theme #'my-index))
+(klio:export-site *site* #p"public/" :page-theme #'my-page :index-theme #'my-index :clean t)
+```
+
+A collection is a directory under the content directory. A theme reads collections and other
+pages from the same tree its request, or the export, is using, so a reload during a request
+cannot mix two versions on one page. `export-site` writes `index.html`, `404.html` and one file
+per readable page (`roles/a.html` for the page served at `/roles/a`, or `roles/a/index.html`
+with `:layout :directory`). It writes nothing if any page fails to render, and it refuses a
+non-empty directory unless given `:clean t`. The site copies its own static assets.
 
 ## Develop
 

@@ -23,6 +23,8 @@
                              (:file "render")        ; markdown, via hyperion/markdown
                              (:file "mode")          ; dev mode: preview is a flag
                              (:file "content")       ; the tree, and the all-or-nothing swap
+                             (:file "collection")    ; collections and lookups for themes (#353)
+                             (:file "export")        ; the site rendered to static files (#353)
                              (:file "serve"))))      ; the tree as a hyperion application
   :in-order-to ((test-op (test-op "klio/tests"))))
 

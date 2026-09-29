@@ -802,3 +802,203 @@ property of the tree rather than of a handler."
              (document (k:tree-document tree "p")))
         (is-true (search "code-operator" (k:document-html document))
                  "the spans are in the tree, put there at load")))))
+
+;;; --- collections, for a site's theme (#353) ------------------------------------
+;;;
+;;; The shape the personal site's CV needs, with invented content: a directory of roles, each
+;;; with a start date and bullets carrying metric maps in `extra', rendered newest first.
+
+(defun %role (title start &key draft (metric 10))
+  (format nil "---~%title: \"~A\"~@[~%start: \"~A\"~]~@[~%draft: ~A~]~%bullets:~%  - text: \"Did a thing.\"~%    metrics:~%      - value: ~D~%        unit: percent~%---~%~%# ~A~%"
+          title start (and draft "true") metric title))
+
+(defparameter +role-extra+ '("start" "bullets"))
+
+(defun %titles (documents)
+  (mapcar (lambda (d) (k:document-field d "title")) documents))
+
+(test a-collection-is-the-readable-documents-under-a-directory-sorted-by-a-field
+  (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01" :metric 42))
+                         ("roles/c.md" . (%role "Gamma" nil))
+                         ("roles/d.md" . (%role "Delta" "2021-01-01" :draft t))
+                         ("roles/older/e.md" . (%role "Epsilon" "2010-01-01"))
+                         ("rolesish.md" . (%role "Not a role" "2030-01-01"))
+                         ("about.md" . +good+))
+    (let ((tree (k:load-tree dir :known-extra +role-extra+)))
+      (is (equal '("Beta" "Alpha" "Epsilon" "Gamma")
+                 (%titles (k:tree-collection tree "roles" :sort-by "start" :order :descending)))
+          "newest first; the one without a start last; the draft absent; a subdirectory
+included; a file whose name only begins with the collection's name is not a member")
+      (is (equal '("Epsilon" "Alpha" "Beta" "Gamma")
+                 (%titles (k:tree-collection tree "roles/" :sort-by "start")))
+          "ascending, and a trailing slash on the name changes nothing")
+      (let ((beta (first (k:tree-collection tree "roles" :sort-by "start" :order :descending))))
+        (is (= 42 (cdr (assoc "value" (first (cdr (assoc "metrics" (first (k:document-field beta "bullets"))
+                                                           :test #'string=)))
+                              :test #'string=)))
+            "the nested front matter comes through as data a theme can read a metric from"))
+      (k:with-dev-mode ()
+        (is (member "Delta" (%titles (k:tree-collection tree "roles")) :test #'equal)
+            "the control: in dev mode the draft is a member")))))
+
+(test a-collection-sorts-by-a-core-field-and-keeps-key-order-for-ties
+  (with-content-dir (dir ("notes/b.md" . (format nil "---~%title: \"Same\"~%date: 2024-01-01~%---~%x~%"))
+                         ("notes/a.md" . (format nil "---~%title: \"Same\"~%date: 2024-01-01~%---~%y~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"Early\"~%date: 2020-01-01~%---~%z~%")))
+    (let ((tree (k:load-tree dir)))
+      (is (equal '("notes/c" "notes/a" "notes/b")
+                 (mapcar #'k:document-key (k:tree-collection tree "notes" :sort-by "date")))
+          "a and b tie on date and stay in key order")
+      (is (equal '("notes/a" "notes/b" "notes/c")
+                 (mapcar #'k:document-key (k:tree-collection tree "notes")))
+          "unsorted is key order")
+      (is (typep (nth-value 1 (ignore-errors (k:tree-collection tree "notes" :order :sideways)))
+                 'type-error)))))
+
+(test a-document-is-found-by-its-slug-only-when-a-reader-may-see-it
+  (with-content-dir (dir ("skills.md" . (format nil "---~%title: \"Skills\"~%slug: \"toolbox\"~%---~%x~%"))
+                         ("secret.md" . +draft+))
+    (let* ((site (k:make-site dir)))
+      (k:boot site)
+      (is (equal "Skills" (k:document-field (k:document-by-slug site "toolbox") "title"))
+          "the front matter's slug, not the file name")
+      (is (null (k:document-by-slug site "skills")))
+      (is (null (k:document-by-slug site "secret")) "a draft is not found, so a link cannot reveal it")
+      (k:with-dev-mode ()
+        (is (k:document-by-slug site "secret") "the control: in dev mode it is")))))
+
+(test document-field-reads-core-fields-and-extra-keys
+  (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01")))
+    (let ((d (k:tree-document (k:load-tree dir :known-extra +role-extra+) "roles/a")))
+      (is (equal "Alpha" (k:document-field d "title")))
+      (is (equal "a" (k:document-field d "slug")) "the resolved slug")
+      (is (equal "2019-03-01" (k:document-field d "start")) "an extra key")
+      (is (null (k:document-field d "nope"))))))
+
+(test a-theme-reads-its-collection-from-the-requests-tree-even-when-a-reload-lands
+  "The collection half of ADR-0001's atomicity. The index theme below publishes a tree with a
+third role before it asks for the collection, which is what a reload landing mid-request does.
+It must still list the two roles of the tree the request started with."
+  (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01")))
+    (let* ((site (k:make-site dir :known-extra +role-extra+))
+           (seen nil)
+           (app (k:site-app site
+                            :index-theme
+                            (lambda (site documents)
+                              (declare (ignore documents))
+                              (with-open-file (out (merge-pathnames "roles/c.md" dir)
+                                                   :direction :output :if-exists :supersede)
+                                (write-string (%role "Gamma" "2024-01-01") out))
+                              (k:reload site)
+                              (setf seen (%titles (k:collection site "roles" :sort-by "start")))
+                              "ok"))))
+      (k:boot site)
+      (%get app "/")
+      (is (equal '("Alpha" "Beta") seen) "the request's tree, not the one published mid-request")
+      (is (= 3 (length (k:collection site "roles")))
+          "the control: outside a request, CURRENT-TREE is the newly published tree"))))
+
+;;; --- the static export (#353) ------------------------------------------------------------
+
+(defmacro with-export-dir ((dir) &body body)
+  "A fresh directory name, not created, deleted afterwards."
+  `(let ((,dir (uiop:ensure-directory-pathname
+                (uiop:tmpize-pathname (merge-pathnames "klio-export" (uiop:temporary-directory))))))
+     (ignore-errors (delete-file (string-right-trim "/" (namestring ,dir))))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (uiop:delete-directory-tree ,dir :validate t)))))
+
+(defun %file-text (dir relative)
+  (uiop:read-file-string (merge-pathnames relative dir) :external-format :utf-8))
+
+(test the-export-writes-every-readable-page-through-the-sites-themes
+  (with-content-dir (src ("one.md" . +good+) ("roles/two.md" . +also-good+) ("secret.md" . +draft+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((written (k:export-site site out
+                                      :page-theme (lambda (site d) (declare (ignore site))
+                                                    (format nil "PAGE ~A" (k:document-key d))))))
+          (is (equal '("404.html" "index.html" "one.html" "roles/two.html")
+                     (sort (copy-list written) #'string<)))
+          (is (equal "PAGE roles/two" (%file-text out "roles/two.html")) "the site's page theme")
+          (is (search "A post" (%file-text out "index.html")) "the index theme lists what a reader may see")
+          (is (not (search "Unfinished" (%file-text out "index.html"))))
+          (is (not (probe-file (merge-pathnames "secret.html" out))) "a draft is not exported"))))))
+
+(test the-directory-layout-writes-an-index-file-per-page
+  (with-content-dir (src ("roles/two.md" . +also-good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (k:export-site site out :layout :directory)
+        (is (probe-file (merge-pathnames "roles/two/index.html" out)))))))
+
+(test a-theme-that-fails-writes-nothing
+  (with-content-dir (src ("one.md" . +good+) ("two.md" . +also-good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (is (typep (nth-value 1 (ignore-errors
+                                 (k:export-site site out
+                                                :page-theme (lambda (site d) (declare (ignore site))
+                                                              (if (string= "two" (k:document-key d))
+                                                                  (error "a theme bug")
+                                                                  "fine")))))
+                   'simple-error))
+        (is (not (uiop:directory-exists-p out)) "not even the pages that rendered")))))
+
+(test an-export-refuses-a-directory-that-holds-files-unless-told-to-clean-it
+  (with-content-dir (src ("one.md" . +good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src))
+            (stale (merge-pathnames "deleted-post.html" out)))
+        (k:boot site)
+        (ensure-directories-exist stale)
+        (with-open-file (s stale :direction :output) (write-string "old" s))
+        (is (typep (nth-value 1 (ignore-errors (k:export-site site out))) 'k:export-refused))
+        (is (probe-file stale) "nothing was touched")
+        (k:export-site site out :clean t)
+        (is (not (probe-file stale)) "with :clean, an earlier export's page is gone")
+        (is (probe-file (merge-pathnames "one.html" out)))))))
+
+(test an-export-refuses-to-clean-the-content-directory-or-its-parent
+  ;; THE PARENT IS A DIRECTORY THIS TEST MADE. If the guard regressed, :CLEAN would delete the
+  ;; directory it was pointed at, so the test must never point it at anything it does not own,
+  ;; such as the system's temporary directory.
+  (with-export-dir (outer)
+    (let* ((content (merge-pathnames "content/" outer))
+           (file (merge-pathnames "one.md" content)))
+      (ensure-directories-exist file)
+      (with-open-file (s file :direction :output) (write-string +good+ s))
+      (let ((site (k:make-site content)))
+        (k:boot site)
+        (is (typep (nth-value 1 (ignore-errors (k:export-site site content :clean t)))
+                   'k:export-refused)
+            "the content directory itself")
+        (is (typep (nth-value 1 (ignore-errors (k:export-site site outer :clean t)))
+                   'k:export-refused)
+            "a directory that contains it")
+        (is (probe-file file) "the content is still there")))))
+
+(test an-export-needs-published-content
+  (with-content-dir (src ("one.md" . +good+))
+    (with-export-dir (out)
+      (is (typep (nth-value 1 (ignore-errors (k:export-site (k:make-site src) out)))
+                 'k:export-refused)))))
+
+(test an-exported-theme-reads-collections-from-the-exported-tree
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+)))
+        (k:boot site)
+        (k:export-site site out
+                       :index-theme (lambda (site documents)
+                                      (declare (ignore documents))
+                                      (format nil "~{~A~^,~}"
+                                              (%titles (k:collection site "roles" :sort-by "start"
+                                                                                  :order :descending)))))
+        (is (equal "Beta,Alpha" (%file-text out "index.html")))))))

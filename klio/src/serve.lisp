@@ -104,7 +104,11 @@ main, which is also why this system declares no HTTP backend (pre-publication is
     ;; consuming half of ADR-0001's atomicity guarantee.
     (let* ((tree (site-tree site))
            (key (%request-key env))
-           (readable (tree-readable-documents tree :now now)))
+           (readable (tree-readable-documents tree :now now))
+           ;; The theme reads the same tree, through CURRENT-TREE and COLLECTION, rather
+           ;; than the site's slot, which a reload may have replaced by now (#353).
+           (*request-tree* tree)
+           (*request-now* now))
       (cond
         ((string= "" key)
          (%html-response 200 (funcall index-theme site readable)))

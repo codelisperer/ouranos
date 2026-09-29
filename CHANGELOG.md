@@ -230,6 +230,21 @@ Changes since `v0.1.3`. The tag is on `b68ccd4`.
 
 ### Added
 
+- **klio: collections for a site's theme, and a static export.** (#353)
+  - `collection` returns the readable documents under a content subdirectory, such as
+    `roles/`, sorted by a field with `:sort-by` (a core field such as `date`, or an `extra` key
+    such as `start`) and `:order`. A document without the field goes last.
+  - `document-field` reads a core field or an `extra` key, with nested values intact, and
+    `document-by-slug` finds a readable page by its slug. `tree-collection` and
+    `tree-document-by-slug` do the same on a tree.
+  - `site-app` binds the tree it serves a request from (`*request-tree*`, `*request-now*`), and
+    these functions read it through `current-tree`. A theme that lists a collection therefore
+    sees the same tree as the page it is rendering, even when a reload lands mid-request.
+  - `export-site` renders every readable page, `index.html` and `404.html` through the site's
+    theme functions into a directory for a static host. `:layout` is `:file` (`roles/a.html`)
+    or `:directory` (`roles/a/index.html`). It writes nothing unless every page renders. It
+    signals `export-refused` for a non-empty directory without `:clean t`, for the content
+    directory or one containing it, and for a site that has not booted.
 - **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`
   (`agent-max-tokens`), and `run-turn`, `run-turn-through` and `deliberate` take `:max-tokens`.
   The argument overrides the slot. With neither, `praxeon/llm:*default-max-tokens*` applies,

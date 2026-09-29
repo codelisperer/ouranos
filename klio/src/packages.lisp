@@ -40,5 +40,10 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:site #:make-site #:site-directory #:site-tree #:site-known-extra
            #:publish #:boot #:reload #:reload-or-fail
            #:*content-extension*
+           ;; collections -- a directory of documents, sorted by a field, for a theme (#353)
+           #:*request-tree* #:*request-now* #:current-tree #:document-field
+           #:tree-collection #:collection #:tree-document-by-slug #:document-by-slug
+           ;; static export -- the site as files for a static host (#353)
+           #:export-site #:export-refused #:export-refused-directory #:export-refused-reason
            ;; serving -- the tree as a hyperion application; the look is the site's
            #:site-app #:default-page-theme #:default-index-theme #:default-not-found))
