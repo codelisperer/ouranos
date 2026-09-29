@@ -71,6 +71,13 @@ its tag.
   `delete-link` removes a link and nothing else, and `link-p` sees Windows junctions, which
   `truename` does not. It needs only UIOP, and `sb-posix` on Unix. An app that removes directory
   trees with `uiop:delete-directory-tree` can use it instead. (#347)
+- **aion/fs: `file-attributes`, a file's Windows attributes asked of Windows.** It returns keywords
+  such as `:read-only`, `:hidden`, `:directory` and `:reparse-point` through `GetFileAttributesW`,
+  with the path passed as UTF-16, so non-ASCII names and names with `[ ]` work; a string is used
+  as the native path without being parsed. It signals `file-attributes-error` with the Windows
+  error code when Windows cannot answer, and signals on other systems. `aion/windows` re-exports
+  it. An app that parses `attrib.exe` for a read-only check can call this instead: `attrib.exe`'s
+  output did not decode for a non-ASCII path, and the check answered "not read-only". (#349)
 
 ### Fixed
 
