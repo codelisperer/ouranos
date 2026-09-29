@@ -358,9 +358,10 @@ section 7.4.1.2, because no client we have can offer TLS 1.1."
                (close s)))
         ;; JOIN signals, naming the thread, if the server has not finished in time. A
         ;; server thread still running when the listener closes could write after the
-        ;; assertion below and make it racy.
-        (aion/test-threads:join thread)
-        (sock:socket-close listener))
+        ;; assertion below and make it racy. The listener is closed whether JOIN returns or
+        ;; signals, so a timed-out server does not leave it open for the rest of the suite.
+        (unwind-protect (aion/test-threads:join thread)
+          (sock:socket-close listener)))
       (is (equal "hello" server-result)))))
 
 (defun %truncating-server (listener)
@@ -393,8 +394,8 @@ socket WITHOUT close_notify (CLOSE :ABORT T frees the engine and closes the tran
                               (client-config) :hostname "localhost")))
                 (unwind-protect (progn ,@body)
                   (close ,stream :abort t))))
-         (aion/test-threads:join thread)
-         (sock:socket-close listener)))))
+         (unwind-protect (aion/test-threads:join thread)
+           (sock:socket-close listener))))))
 
 (test a-transport-that-ends-without-close-notify-is-not-a-clean-end-of-file
   ;; The review finding on #282: this used to read as end of file, so a caller could take
