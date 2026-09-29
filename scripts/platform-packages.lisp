@@ -72,7 +72,13 @@
     (:darwin
      (:system "hades/darwin"  :status :planned :issue "pre-publication issue 180"))
     (:linux
-     (:system "hades/linux"   :status :planned :issue "pre-publication issue 180")))
+     (:system "hades/linux"   :status :planned :issue "pre-publication issue 180")
+     (:system "hyperion/woo"  :status :required :issue "#372"
+      :note "hyperion served by Woo; its suite is the only one that runs a real Woo server.
+             Woo binds libev at load and has no Windows build. It also runs on macOS, but a
+             package here has exactly one owning OS (each-package-is-owned-by-exactly-one-os
+             in cons's platform tests), so it is owned by Linux, whose CI leg runs it, and a
+             macOS gate reports it as not applicable")))
   "Platform packages by host OS, each with the status that says how to read its absence.
 
 Keyed by the OS that OWNS the package -- the one where it can be compiled at all. Every

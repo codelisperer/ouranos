@@ -1741,3 +1741,16 @@ platform this test has no way to count them on (Windows)."
                  "STOP closed ~D connection~:P through the connection's own close" (length closed))))
       (ignore-errors (sock:socket-close s))
       (srv:stop server))))
+
+;;; --- a 429 keeps its status, Retry-After and body (#372) ---------------------------------
+
+(test a-429-arrives-as-429-with-its-retry-after-and-its-body
+  "#372 found Woo sending a 429 as an empty 500. The native server writes any code in 100-599,
+so this pins that a rate-limit refusal reaches the client whole here too, with the reason phrase
+the encoder now names."
+  (with-server (port (const-app 429 '(:content-type "text/plain; charset=utf-8" :retry-after "7")
+                                '("slow down")))
+    (let ((r (get* port "GET / HTTP/1.1" "Host: x" "Connection: close")))
+      (is (string= "HTTP/1.1 429 Too Many Requests" (subseq r 0 (search +crlf+ r))))
+      (is (equal "7" (header-of r "Retry-After")))
+      (is (string= "slow down" (body-of r))))))

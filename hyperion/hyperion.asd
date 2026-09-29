@@ -175,6 +175,30 @@
 ;;; Native: needs a built vendor/libuv (scripts/build-libuv.lisp), so it is opt-in and sits
 ;;; in verify-tree's +UV-SYSTEMS+ rather than +SYSTEMS+ -- see the commentary there.
 
+;;; Hyperion served by Woo (#372). Hyperion declares no HTTP backend (pre-publication issue 139), so no
+;;; suite in the tree ran a real Woo server, and a 429 that Woo could not write reached every
+;;; client as an empty 500 without a test noticing. This system is that backend's seam: it
+;;; loads Woo's Clack handler beside hyperion and has nothing of its own. Its suite serves real
+;;; requests through Woo. Woo binds libev when it loads and does not run on Windows, so the
+;;; system is registered in scripts/platform-packages.lisp, owned by Linux, rather than in
+;;; verify-tree's host-neutral lists.
+(defsystem "hyperion/woo"
+  :description "Hyperion with Woo's Clack handler loaded (Unix only), for an app or a suite that serves on Woo."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion" "clack-handler-woo")
+  :in-order-to ((test-op (test-op "hyperion/woo/tests"))))
+
+(defsystem "hyperion/woo/tests"
+  :description "Responses served through a real Woo server, read back over a TCP socket (#372)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/woo" "hyperion" "hyperion/test-ports" "fiveam"
+               (:require "sb-bsd-sockets"))
+  :components ((:module "tests"
+                :components ((:file "woo-tests"))))
+  :perform (test-op (o c) (symbol-call :hyperion/woo/tests '#:run-tests)))
+
 (defsystem "hyperion/server-uv"
   :description "A native HTTP/1.1 server for Ring handlers, on aion/uv (no Clack)."
   :author "Bob <eternal.recursion@proton.me>"

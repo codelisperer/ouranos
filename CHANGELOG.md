@@ -38,6 +38,23 @@ its tag.
   CI added its own strict-build step as a workaround, such as `scripts/build-strict.lisp`, can
   replace it with `cons --strict test`. (#303)
 
+### Fixed
+
+- **hyperion/server: on Woo, a response with status 429 reaches the client as 429, with its
+  headers and body, instead of as an empty 500.** Woo writes a status line from its own table of
+  reason phrases, which has no entry for 429 or for the other registered codes 103, 104, 425,
+  428, 431 and 511, and it failed to write a response with any of them (#372). So
+  `hyperion/ratelimit:wrap-rate-limit`'s refusals, and any handler returning one of those codes,
+  reached a client on Woo as `HTTP/1.1 500` with an empty body and no `Retry-After`.
+  `hyperion/server:start` now adds a line to Woo's table, before it starts a Woo server, for
+  every code from 100 to 599 that has none: the registered phrase, or an empty one for an
+  unregistered code, as HTTP/1.1 allows. Lines Woo already had are unchanged
+  (`complete-woo-status-lines`). An app on Woo needs no change. An app that starts Woo without
+  `hyperion/server:start` calls `(hyperion/server:complete-woo-status-lines)` once after Woo
+  is loaded. Hunchentoot and hyperion's own server were not affected; the native server now
+  names 429's phrase too. A new system, `hyperion/woo`, loads Woo's handler beside hyperion,
+  and its suite serves requests through a real Woo server; the gate runs it on Linux.
+
 ## v0.1.4 — 2026-09-29
 
 Changes since `v0.1.3`. The tag is on `b68ccd4`.

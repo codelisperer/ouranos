@@ -666,6 +666,77 @@ when another Woo server is running, and register the new thread, in one critical
       ;; call in %CLACK-START.
       (sb-thread:make-thread function :name name)))
 
+;;; --- status lines Woo cannot write (#372) ------------------------------------
+;;;
+;;; Woo writes a response's status line from a table it builds once, when it is loaded, from
+;;; its own list of reason phrases for the codes 100 to 510 (`woo.response::*status-line*' in
+;;; woo-20241012). A code with no entry has no status line, so writing the response fails
+;;; inside Woo (`The value NIL is not of type VECTOR when binding WOO.EV.SOCKET::DATA') and the
+;;; client receives an empty 500 instead of the handler's response. Woo's list has no 429, so
+;;; every refusal from WRAP-RATE-LIMIT reached the client that way, without its Retry-After or
+;;; its body. The registered codes it lacks are 103, 104, 425, 428, 429, 431 and 511.
+;;;
+;;; So before START runs a Woo server, every code from 100 to 599 that has no entry gets one:
+;;; the registered reason phrase, or an empty one for a code nobody registered, which HTTP/1.1
+;;; allows (RFC 9112 section 4: the reason phrase is optional). Entries Woo already has are
+;;; left as they are. Hyperion declares no backend, so Woo's table is found by name at run
+;;; time, and nothing happens in an image without Woo.
+
+(defparameter +registered-reason-phrases+
+  '((100 . "Continue") (101 . "Switching Protocols") (102 . "Processing")
+    (103 . "Early Hints") (104 . "Upload Resumption Supported")
+    (200 . "OK") (201 . "Created") (202 . "Accepted") (203 . "Non-Authoritative Information")
+    (204 . "No Content") (205 . "Reset Content") (206 . "Partial Content")
+    (207 . "Multi-Status") (208 . "Already Reported") (226 . "IM Used")
+    (300 . "Multiple Choices") (301 . "Moved Permanently") (302 . "Found") (303 . "See Other")
+    (304 . "Not Modified") (305 . "Use Proxy") (307 . "Temporary Redirect")
+    (308 . "Permanent Redirect")
+    (400 . "Bad Request") (401 . "Unauthorized") (402 . "Payment Required") (403 . "Forbidden")
+    (404 . "Not Found") (405 . "Method Not Allowed") (406 . "Not Acceptable")
+    (407 . "Proxy Authentication Required") (408 . "Request Timeout") (409 . "Conflict")
+    (410 . "Gone") (411 . "Length Required") (412 . "Precondition Failed")
+    (413 . "Content Too Large") (414 . "URI Too Long") (415 . "Unsupported Media Type")
+    (416 . "Range Not Satisfiable") (417 . "Expectation Failed")
+    (421 . "Misdirected Request") (422 . "Unprocessable Content") (423 . "Locked")
+    (424 . "Failed Dependency") (425 . "Too Early") (426 . "Upgrade Required")
+    (428 . "Precondition Required") (429 . "Too Many Requests")
+    (431 . "Request Header Fields Too Large") (451 . "Unavailable For Legal Reasons")
+    (500 . "Internal Server Error") (501 . "Not Implemented") (502 . "Bad Gateway")
+    (503 . "Service Unavailable") (504 . "Gateway Timeout")
+    (505 . "HTTP Version Not Supported") (506 . "Variant Also Negotiates")
+    (507 . "Insufficient Storage") (508 . "Loop Detected") (510 . "Not Extended")
+    (511 . "Network Authentication Required"))
+  "The IANA HTTP Status Code Registry's codes and descriptions, as read on 2026-09-29, less the
+two it marks unused (306 and 418). Used only for a code Woo's own table lacks.")
+
+(defun %woo-status-table ()
+  "Woo's table of status lines, a hash table from code to octets, or NIL when Woo is not loaded
+or does not have one by that name."
+  (let* ((package (find-package "WOO.RESPONSE"))
+         (symbol (and package (find-symbol "*STATUS-LINE*" package))))
+    (and symbol (boundp symbol) (hash-table-p (symbol-value symbol)) (symbol-value symbol))))
+
+(defun status-line-octets (code)
+  "CODE's HTTP/1.1 status line with its CRLF, as UTF-8 octets: the registered reason phrase, or
+an empty one for a code not in +REGISTERED-REASON-PHRASES+."
+  (sb-ext:string-to-octets
+   (format nil "HTTP/1.1 ~D ~A~C~C" code
+           (or (cdr (assoc code +registered-reason-phrases+)) "") #\Return #\Linefeed)
+   :external-format :utf-8))
+
+(defun complete-woo-status-lines ()
+  "Add a status line to Woo's table for every code from 100 to 599 that has none, so that Woo can
+send any status a handler returns (#372). Returns the codes added, in order; NIL when Woo is not
+loaded or nothing was missing. START calls it before it runs a Woo server."
+  (let ((table (%woo-status-table))
+        (added '()))
+    (when table
+      (loop for code from 100 to 599
+            unless (gethash code table)
+              do (setf (gethash code table) (status-line-octets code))
+                 (push code added)))
+    (nreverse added)))
+
 (defun %clack-start (app server host port debug &optional backend-args)
   "Start APP on a Clack backend and return a CLACK-SERVER once that server answers.
 BACKEND-ARGS is a plist passed on to clackup, from %BACKEND-ARGS. Signals
@@ -678,7 +749,11 @@ APP is wrapped OUTERMOST so that, until START returns, one path answers with a r
 and nothing else: the probe request never reaches APP or any of its middleware, so it
 creates no session, is not logged and meets no CSRF or auth check. After START returns,
 every request is forwarded to APP, that path included; what remains is one check of a flag
-per request."
+per request.
+
+For :WOO it first completes Woo's table of status lines (COMPLETE-WOO-STATUS-LINES, #372)."
+  (when (eq server :woo)
+    (complete-woo-status-lines))
   (let* ((failure nil)
          (started nil)
          (lock (sb-thread:make-mutex :name "hyperion-server-start"))

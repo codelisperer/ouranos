@@ -662,3 +662,27 @@ thread, then end the thread and wait for it."
                                                       :check-port nil :workers bad)))
                'type-error)
         "~S is refused before anything starts" bad)))
+
+;;; --- a 429 keeps its status, Retry-After and body (#372) ---------------------------------
+
+(test a-429-arrives-as-429-on-hunchentoot
+  "#372 found Woo sending a 429 as an empty 500; hyperion/woo/tests covers Woo. Hunchentoot
+already knows the phrase, and this pins that a rate-limit refusal reaches the client whole on
+it: status line, Retry-After and body."
+  (let* ((app (lambda (env)
+                (declare (ignore env))
+                (list 429 (list :content-type "text/plain; charset=utf-8" :retry-after "7")
+                      (list "slow down"))))
+         (port nil)
+         (handler (ports:call-with-port
+                   (lambda (p)
+                     (prog1 (srv:start app :port p :server :hunchentoot :log nil)
+                       (setf port p))))))
+    (unwind-protect
+         (let* ((r (%srv-http-get port "/" :version "1.1"))
+                (eol (search (format nil "~C~C" #\Return #\Linefeed) r)))
+           (is (string= "HTTP/1.1 429 Too Many Requests" (subseq r 0 eol)) "~S" r)
+           (is (search (format nil "~C~CRetry-After: 7~C~C" #\Return #\Linefeed #\Return #\Linefeed) r)
+               "~S" r)
+           (is (search "slow down" r) "~S" r))
+      (ignore-errors (srv:stop handler)))))

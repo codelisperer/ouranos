@@ -82,6 +82,7 @@ served rather than refused, and the numeric status still means exactly what it m
       ((== status 414) "URI Too Long")
       ((== status 415) "Unsupported Media Type")
       ((== status 417) "Expectation Failed")
+      ((== status 429) "Too Many Requests")    ; WRAP-RATE-LIMIT's refusal (#372)
       ((== status 431) "Request Header Fields Too Large")
       ((== status 500) "Internal Server Error")
       ((== status 501) "Not Implemented")
