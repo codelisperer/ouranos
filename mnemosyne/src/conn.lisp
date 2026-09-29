@@ -65,15 +65,29 @@ database, including desktop bundles, where an unvendorable .so is precisely what
 ADR-0011 was about."
   (and (find-package '#:cl+ssl) t))
 
+(defun %local-host-p (host)
+  "Whether HOST is this machine: `localhost', `127.0.0.1' or `::1' (the URL parser has already
+removed an IPv6 literal's brackets), no host at all, or a Unix socket directory, which is a host
+that starts with `/'. The only hosts `prefer' may reach in plaintext (#341)."
+  (or (null host)
+      (zerop (length host))
+      (char= (char host 0) #\/)
+      (and (member host '("localhost" "127.0.0.1" "::1") :test #'string-equal) t)))
+
 (defun %resolve-ssl (backend &optional (tls-available (%tls-available-p)))
   "The :USE-SSL keyword to hand the Postgres driver, applying the one rule that matters:
 an OPPORTUNISTIC mode may quietly degrade; a GUARANTEED one may never.
 
-  prefer, with no TLS library    -> :no, and a warning. `prefer' promises nothing by
-                                   definition -- libpq itself falls back when the SERVER
-                                   does not offer TLS, and \"this image has no TLS\" is
-                                   the same kind of unavailability. Local development
-                                   keeps working.
+  prefer, no library, LOCAL host -> :no, and a warning, so local development keeps
+                                   working without cl+ssl. Local is %LOCAL-HOST-P:
+                                   localhost, 127.0.0.1, ::1, or a Unix socket.
+  prefer, no library, other host -> DB-ERROR, naming the fix (#341). libpq built without
+                                   SSL would connect in plaintext here, and this departs
+                                   from it on purpose: a URL without `sslmode' means
+                                   `prefer', so a deployed app whose image lost cl+ssl
+                                   (#337 took it out of Hunchentoot) would otherwise
+                                   start sending its database traffic in plaintext across
+                                   the network, with a warning as the only sign.
   require/verify-*, no library   -> DB-ERROR. Downgrading here would hand back a
                                    plaintext connection to a caller who asked for an
                                    encrypted one, and it would do so silently, on the
@@ -100,6 +114,14 @@ otherwise take depends on whether something else happened to load cl+ssl."
                 (format s "~%mnemosyne deliberately does not: that would put OpenSSL on")
                 (format s "~% the load path of every image that touches a database.")
                 (format s "~%Refusing to connect in plaintext instead."))))
+      ((not (%local-host-p (be:backend-pg-host backend)))
+       (error 'db-error
+              :message
+              (with-output-to-string (s)
+                (format s "sslmode=~A to ~A, which is not this machine, needs TLS, and CL+SSL is not loaded in this image."
+                        (be:backend-pg-ssl-mode backend) (be:backend-pg-host backend))
+                (format s "~%Add \"cl+ssl\" to your application's :depends-on, or set sslmode=disable if a plaintext connection to that host is really what you want.")
+                (format s "~%Refusing to connect in plaintext instead (#341)."))))
       (t
        (log:warn "db tls unavailable, connecting in plaintext"
                  :requested (be:backend-pg-ssl-mode backend))
