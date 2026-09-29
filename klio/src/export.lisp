@@ -32,23 +32,30 @@
                      (export-refused-directory c) (export-refused-reason c))))
   (:documentation "Signalled by EXPORT-SITE before it writes anything."))
 
-(defun %export-path (key layout)
-  "The file, relative to the export directory, that the document KEY is written to."
-  (ecase layout
-    (:file (concatenate 'string key ".html"))
-    (:directory (concatenate 'string key "/index.html"))))
+(defun %export-file (path layout document-keys)
+  "The file, relative to the export directory, that the engine's page at PATH is written to."
+  (cond ((string= path "") "index.html")
+        ((char= #\/ (char path (1- (length path)))) (concatenate 'string path "index.html"))
+        ((gethash path document-keys)
+         (ecase layout
+           (:file (concatenate 'string path ".html"))
+           (:directory (concatenate 'string path "/index.html"))))
+        (t path)))
 
-(defun %render-site (site tree now page-theme index-theme not-found layout)
-  "Every file of the export as (relative-path . html), rendered from TREE. Signals whatever a
-theme signals, before anything has been written."
+(defun %render-site (site tree now layout)
+  "Every file of the export as (relative-path . text), rendered from TREE through RESOLVE-PATH
+for every path SITE-PATHS lists. Signals whatever a theme signals, before anything has been
+written."
   (let* ((*request-tree* tree)
          (*request-now* now)
-         (readable (tree-readable-documents tree :now now)))
-    (append (list (cons "index.html" (funcall index-theme site readable))
-                  (cons "404.html" (funcall not-found site nil)))
-            (mapcar (lambda (d)
-                      (cons (%export-path (document-key d) layout) (funcall page-theme site d)))
-                    readable))))
+         (keys (let ((h (make-hash-table :test #'equal)))
+                 (dolist (d (tree-readable-documents tree :now now) h)
+                   (setf (gethash (document-key d) h) t)))))
+    (cons (cons "404.html" (funcall (site-options-not-found *site-options*) site nil))
+          (mapcar (lambda (path)
+                    (cons (%export-file path layout keys)
+                          (nth-value 1 (resolve-path site tree path :now now))))
+                  (site-paths tree :now now)))))
 
 (defun %holds-content-p (directory content)
   "Whether DIRECTORY is CONTENT or one of its ancestors, compared by resolved name where both
@@ -63,15 +70,15 @@ exist, so a relative or aliased spelling is not a way around the check."
   (and (null (uiop:directory-files directory))
        (null (uiop:subdirectories directory))))
 
-(defun export-site (site directory &key (page-theme #'default-page-theme)
-                                        (index-theme #'default-index-theme)
-                                        (not-found #'default-not-found)
-                                        (layout :file) clean now)
-  "Render SITE's published content into DIRECTORY for a static host, through the same theme
-functions SITE-APP takes. Returns the list of files written, relative to DIRECTORY.
+(defun export-site (site directory &rest options &key (layout :file) clean now
+                                                    &allow-other-keys)
+  "Render SITE's published content into DIRECTORY for a static host, with the same options
+SITE-APP takes (MAKE-SITE-OPTIONS). Returns the list of files written, relative to DIRECTORY.
 
-Writes index.html, 404.html and one file per readable document; see the file header for
-LAYOUT. NOW is the time visibility is judged at, so a scheduled document is exported only once
+Writes 404.html and every page RESOLVE-PATH answers: the index and its pages, each tag's
+listing and its pages, the feeds when BASE-URL is given, the search index and one file per
+readable document. A listing at /tags/x/ is written to tags/x/index.html; see the file header
+for LAYOUT, which applies to documents. NOW is the time visibility is judged at, so a scheduled document is exported only once
 its time has come; NIL means now.
 
 Nothing is written unless every page renders. DIRECTORY must be absent or empty, or CLEAN must
@@ -92,7 +99,12 @@ Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first)."
                (not clean))
       (error 'export-refused :directory directory
                              :reason "it already holds files, and an earlier export's pages would be left behind; pass :CLEAN T to empty it first"))
-    (let ((files (%render-site site tree now page-theme index-theme not-found layout)))
+    (let ((files (let ((*site-options*
+                         (apply #'make-site-options
+                                (loop for (k v) on options by #'cddr
+                                      unless (member k '(:layout :clean :now))
+                                        append (list k v)))))
+                   (%render-site site tree now layout))))
       (when (uiop:directory-exists-p directory)
         (uiop:delete-directory-tree directory :validate t))
       (dolist (file files)

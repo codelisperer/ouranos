@@ -18,6 +18,9 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:content-meta #:content-meta-title #:content-meta-date #:content-meta-slug
            #:content-meta-tags #:content-meta-draft #:content-meta-publish-at
            #:content-meta-extra #:content-meta-warnings #:extra #:+core-keys+
+           #:content-meta-timestamp
+           ;; dates -- ISO 8601 in front matter, RFC 822 and 3339 in feeds (#353, #359)
+           #:parse-iso-date #:date-universal-time #:invalid-date #:rfc-822-date #:rfc-3339-date
            ;; search -- tokenised, field-weighted, built at load
            #:tokenize #:make-search-index #:index-document #:search-index-query
            #:*field-weights*
@@ -52,4 +55,9 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            ;; static export -- the site as files for a static host (#353)
            #:export-site #:export-refused #:export-refused-directory #:export-refused-reason
            ;; serving -- the tree as a hyperion application; the look is the site's
-           #:site-app #:default-page-theme #:default-index-theme #:default-not-found))
+           #:site-app #:default-page-theme #:default-index-theme #:default-not-found
+           #:default-tag-theme #:make-site-options
+           ;; listings -- feeds, tags, pagination, the search index, and the resolver (#353)
+           #:tag-slug #:tree-tags #:page-url #:tag-url #:*page-number* #:*page-count*
+           #:feed-entries #:rss-feed #:atom-feed #:search-json #:resolve-path #:site-paths
+           #:*site-options*))

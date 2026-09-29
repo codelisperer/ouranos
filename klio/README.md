@@ -37,6 +37,14 @@ refers to a label that is not in the list fails to load, naming both files.
 (klio:vocabulary-entry-p *site* "skills" "C#")       ; in a theme
 ```
 
+`site-app` and `export-site` take the same options (`make-site-options`): the themes, `:per-page`
+to paginate the index and each tag's listing (`/page/2/`, `/tags/<tag>/page/2/`), `:base-url` to
+turn on the RSS and Atom feeds (`/feed.xml`, `/atom.xml`, with `:feed-collection` such as
+`"posts"`), and the paths of all of these and of the search index, `/search.json`, a JSON array
+of every readable page for a search box. A tag's URL is its slug (`C#` is `/tags/c-sharp/`). A
+listing theme gets `*page-number*` and `*page-count*`, and `page-url` and `tag-url` for links.
+`publish-at` takes an ISO 8601 date, and a scheduled page appears when its time comes.
+
 In development, `(klio:watch-site *site*)` reloads when a content file changes and keeps
 serving the last good content when an edit breaks a file; `stop-watching` stops it. How a
 production server is told to reload is recorded, not yet built, in

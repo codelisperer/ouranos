@@ -292,7 +292,9 @@ which is what it always meant."
 engine's knowledge of a document stops.")
 
 (defstruct (content-meta (:constructor %make-content-meta))
-  (title nil) (date nil) (slug nil) (tags '()) (draft nil) (publish-at nil)
+  ;; DATE is as written, for display and sorting; TIMESTAMP is it parsed, or NIL when it is
+  ;; absent or not an ISO date. PUBLISH-AT is always parsed: a universal time or NIL (#359).
+  (title nil) (date nil) (timestamp nil) (slug nil) (tags '()) (draft nil) (publish-at nil)
   (extra '() :type list)
   (warnings '() :type list))
 
@@ -315,11 +317,25 @@ instead of stopping at the first."
     (loop for (key . value) in data
           do (cond
                ((string= key "title") (setf (content-meta-title meta) value))
-               ((string= key "date") (setf (content-meta-date meta) value))
+               ((string= key "date")
+                (setf (content-meta-date meta) value)
+                ;; A date that is not ISO is a warning, not a failure: it still displays and
+                ;; sorts as written, and only a feed needs the instant.
+                (setf (content-meta-timestamp meta)
+                      (handler-case (date-universal-time value :field "date")
+                        (invalid-date ()
+                          (push (format nil "~@[~A: ~]`date' ~S is not an ISO 8601 date, so feeds cannot date this document"
+                                        file value)
+                                warnings)
+                          nil))))
                ((string= key "slug") (setf (content-meta-slug meta) value))
                ((string= key "tags") (setf (content-meta-tags meta) (%as-list value)))
                ((string= key "draft") (setf (content-meta-draft meta) (eq value t)))
-               ((string= key "publish-at") (setf (content-meta-publish-at meta) value))
+               ;; Parsed here, and a bad one SIGNALS, which makes it a load failure: a typo in a
+               ;; scheduled date must not publish the document early (#359).
+               ((string= key "publish-at")
+                (setf (content-meta-publish-at meta)
+                      (date-universal-time value :field "publish-at")))
                (t
                 (push (cons key value) (content-meta-extra meta))
                 (unless (member key known-extra :test #'string=)

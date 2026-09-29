@@ -86,37 +86,78 @@ author did not write is worse than one that says it has none."
 
 ;;; --- the application ---------------------------------------------------------
 
-(defun site-app (site &key (page-theme #'default-page-theme)
-                        (index-theme #'default-index-theme)
-                        (not-found #'default-not-found)
-                        now)
+(defun default-tag-theme (site tag documents)
+  "The default page for one tag: the documents that carry it, by title, in key order. TAG is
+the tag's slug."
+  (declare (ignore site))
+  (%page-html
+   tag
+   (spin:with-html-string
+     (:h1 tag)
+     (:ul
+      (dolist (d documents)
+        (:li (:a :href (format nil "/~A" (document-key d))
+                 (or (content-meta-title (document-meta d)) (document-key d)))))))))
+
+(defun make-site-options (&key (page-theme #'default-page-theme)
+                               (index-theme #'default-index-theme)
+                               (not-found #'default-not-found)
+                               (tag-theme #'default-tag-theme)
+                               per-page base-url feed-title feed-collection (feed-limit 20)
+                               (tags-prefix "tags") (page-segment "page")
+                               (rss-path "feed.xml") (atom-path "atom.xml")
+                               (search-path "search.json"))
+  "The options SITE-APP and EXPORT-SITE share; each takes these as keyword arguments.
+
+The themes are functions of the site and what they render: PAGE-THEME (site document),
+INDEX-THEME (site documents), TAG-THEME (site tag documents), NOT-FOUND (site key). A listing
+theme runs with *PAGE-NUMBER* and *PAGE-COUNT* bound, and PAGE-URL and TAG-URL give it links.
+
+PER-PAGE, when given, paginates the index and each tag's listing: page 1 is the listing's own
+URL, page N adds PAGE-SEGMENT/N/. Without it, a listing is one page.
+
+BASE-URL, such as \"https://example.org\", turns the feeds on. RSS and Atom need absolute
+links, so without it there are no feeds. FEED-COLLECTION limits them to one collection, such as
+\"posts\"; FEED-LIMIT caps the entries, newest first; FEED-TITLE names the feed.
+
+TAGS-PREFIX, RSS-PATH, ATOM-PATH and SEARCH-PATH are the defaults /tags/<tag>/, /feed.xml,
+/atom.xml and /search.json, without their leading slash."
+  (check-type per-page (or null (integer 1)))
+  (check-type feed-limit (integer 1))
+  (%make-site-options :page-theme page-theme :index-theme index-theme :not-found not-found
+                      :tag-theme tag-theme :per-page per-page :base-url base-url
+                      :feed-title feed-title :feed-collection feed-collection
+                      :feed-limit feed-limit :tags-prefix tags-prefix :page-segment page-segment
+                      :rss-path rss-path :atom-path atom-path :search-path search-path))
+
+(defun site-app (site &rest options &key now &allow-other-keys)
   "SITE as a Clack/Ring handler: (env -> response), ready for HYPERION/SERVER:START.
 
-PAGE-THEME, INDEX-THEME and NOT-FOUND are the site's, and the defaults are plain on purpose
-(see the commentary at the top of this file). NOW is a clock for tests, threaded into the
-same request-time visibility rule READABLE-P states, so a scheduled document is hidden by the
-request that asks for it rather than by the load that read it.
+OPTIONS are MAKE-SITE-OPTIONS's: the themes, pagination, feeds and the URLs of the engine's
+own pages. The defaults are plain on purpose (see the commentary at the top of this file).
+Which page answers which path is RESOLVE-PATH's, shared with EXPORT-SITE.
+
+NOW is a clock for tests. Without it each request is judged at the time it arrives, so a
+scheduled document appears when its time comes (#359).
 
 A HANDLER, not a server. klio starts nothing: the site owns its server, its port and its
 main, which is also why this system declares no HTTP backend (pre-publication issue 139, ADR-0011)."
-  (lambda (env)
-    ;; ONE READ, at the top, for the whole request. See the file header: this is the
-    ;; consuming half of ADR-0001's atomicity guarantee.
-    (let* ((tree (site-tree site))
-           (key (%request-key env))
-           (readable (tree-readable-documents tree :now now))
-           ;; The theme reads the same tree, through CURRENT-TREE and COLLECTION, rather
-           ;; than the site's slot, which a reload may have replaced by now (#353).
-           (*request-tree* tree)
-           (*request-now* now))
-      (cond
-        ((string= "" key)
-         (%html-response 200 (funcall index-theme site readable)))
-        (t
-         (let ((document (find key readable :key #'document-key :test #'string=)))
-           (if document
-               (%html-response 200 (funcall page-theme site document))
-               ;; A document that exists but is not readable yet is a 404 and not a 403:
-               ;; that a draft EXISTS is itself unpublished information, and the two answers
-               ;; are distinguishable from outside.
-               (%html-response 404 (funcall not-found site key)))))))))
+  (let ((options (apply #'make-site-options
+                        (loop for (k v) on options by #'cddr
+                              unless (eq k :now) append (list k v)))))
+    (lambda (env)
+      ;; ONE READ, at the top, for the whole request. See the file header: this is the
+      ;; consuming half of ADR-0001's atomicity guarantee. The theme reads the same tree,
+      ;; through CURRENT-TREE and COLLECTION, rather than the site's slot (#353).
+      (let* ((tree (site-tree site))
+             (key (%request-key env))
+             (*request-now* (or now (get-universal-time)))
+             (*request-tree* tree)
+             (*site-options* options))
+        (multiple-value-bind (kind body) (resolve-path site tree key :now *request-now*)
+          (if kind
+              (list 200 (list :content-type (cdr (assoc kind +content-types+))) (list body))
+              ;; A document that exists but is not readable yet is a 404 and not a 403:
+              ;; that a draft EXISTS is itself unpublished information, and the two answers
+              ;; are distinguishable from outside.
+              (%html-response 404 (funcall (site-options-not-found options) site key))))))))

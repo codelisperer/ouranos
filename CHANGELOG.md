@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **klio: a scheduled document is no longer published before its `publish-at`.** `site-app`
+  judged visibility with no clock unless given `:now`, which skipped the schedule, so a
+  document with a future `publish-at` was served at once (#359). Each request is now judged at
+  its own time, and so is any caller of `tree-readable-documents` that passes no `:now`.
+  `publish-at` is parsed at load as an ISO 8601 date (`2030-01-01`, midnight UTC) or date and
+  time (`2030-01-01T09:00:00Z`, or with an offset such as `+02:00`), and a value that is not
+  one fails the load, naming the file, instead of publishing. A site whose pages carry a future
+  `publish-at` will see them disappear until that time. `content-meta-publish-at` is now a
+  universal time. A `date` that is not ISO 8601 is a load warning, and the page is left out of
+  the feeds.
 - **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
   request threads, and `make-db-auth` takes a pool.** (#371)
   - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
@@ -257,6 +267,19 @@ Changes since `v0.1.3`. The tag is on `b68ccd4`.
     removed, checking every `:interval` seconds, and keeps serving the last good content when
     an edit breaks a file. `stop-watching` stops it. It is for development; how a production
     server is told to reload is recorded, not built, in klio's ADR-0002.
+- **klio: RSS and Atom feeds, tag pages, pagination and a search index.** (#353)
+  - `site-app` and `export-site` take the same options, from `make-site-options`.
+  - `:base-url` turns on `/feed.xml` (RSS 2.0) and `/atom.xml`, with absolute links, newest
+    first, for the readable documents that have a `date` (`:feed-collection` limits them to one
+    collection, and `:feed-limit` caps them at 20).
+  - Each tag has a page at `/tags/<slug>/` (`tag-slug`: `C#` is `c-sharp`, `C++` is
+    `c-plus-plus`), through the site's `:tag-theme`.
+  - `:per-page` paginates the index and each tag's listing at `/page/2/` and
+    `/tags/<slug>/page/2/`; a listing theme gets `*page-number*`, `*page-count*`, `page-url` and
+    `tag-url`.
+  - `/search.json` lists every readable page (url, title, tags, date, text) for a search box.
+  - Every path is an option. `resolve-path` answers them all, for the handler and for the
+    export, which now writes each listing, tag page, feed and the search index as well.
 - **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`
   (`agent-max-tokens`), and `run-turn`, `run-turn-through` and `deliberate` take `:max-tokens`.
   The argument overrides the slot. With neither, `praxeon/llm:*default-max-tokens*` applies,
