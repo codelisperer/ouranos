@@ -32,7 +32,7 @@ need a directory of that name.")
                                                           :if-exists :supersede)
                                    (write-string ,contents s))))
               ,@body)
-         (ignore-errors (uiop:delete-directory-tree ,dir :validate t))))))
+         (ignore-errors (aion/fs:delete-tree ,dir))))))
 
 (defun %static-env (&rest headers)
   "A minimal Clack env carrying HEADERS (name value name value ...).

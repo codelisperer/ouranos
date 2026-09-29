@@ -67,7 +67,7 @@ in the registry for the next test to trip over."
        (declare (ignorable ,dir-var))
        (ensure-directories-exist ,dir-var)
        (unwind-protect (progn ,@body)
-         (ignore-errors (uiop:delete-directory-tree ,dir-var :validate t))))))
+         (ignore-errors (aion/fs:delete-tree ,dir-var))))))
 
 (test load-project-env-resolves-against-the-system-not-the-current-directory
   ;; The property that makes it correct for a BUILT BINARY, which is normally run from a

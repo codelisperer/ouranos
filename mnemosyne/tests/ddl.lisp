@@ -164,7 +164,7 @@
                     (conn:exec c "CREATE TABLE t (a TEXT)")
                     (is (= 0 (length (conn:query c "SELECT * FROM t")))))
                (conn:disconnect c))))
-      (ignore-errors (uiop:delete-directory-tree root :validate t)))))
+      (ignore-errors (aion/fs:delete-tree root)))))
 
 (test in-memory-and-empty-paths-are-left-alone
   ;; ":memory:" and "" are not paths -- creating a directory for them would be nonsense.

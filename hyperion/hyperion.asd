@@ -301,7 +301,7 @@
   ;; who can predict the path can create it first. pre-publication issue 95's guard over hyperion/src forbids
   ;; cl:random for exactly this reason and caught the first version of it. No new external
   ;; dependency -- ironclad already arrives with aion/signature.
-  :depends-on ("coalton" "aion/signature" "aion/platform" "aion/http-client"
+  :depends-on ("aion/fs" "coalton" "aion/signature" "aion/platform" "aion/http-client"
                ;; dexador is GONE from this line (pre-publication issue 332). It was here for the local
                ;; transport this file used to carry; pre-publication issue 223 (0c65c72) moved that
                ;; contract into `aion/http-client', so the HTTP call is now made
@@ -333,7 +333,7 @@
   ;; answers. The contract under test there is between this client and DEXADOR -- a
   ;; 404 is a status Dexador SIGNALS rather than returns -- and no CLOS stub standing
   ;; in for a source can state it (pre-publication issue 332). An SBCL contrib, so nothing new is pulled in.
-  :depends-on ("hyperion/update" "aion/platform"   ; update-client-tests.lisp calls platform:
+  :depends-on ("aion/fs" "hyperion/update" "aion/platform"   ; update-client-tests.lisp calls platform:
                "aion/random"   ; ...and aion/random:random-hex, for a fresh ACL test directory (#166)
                "fiveam" "aion/signature" "cl-base64"
                (:require "sb-bsd-sockets")
@@ -494,7 +494,7 @@
 
 (defsystem "hyperion/tests"
   :description "Test suite for Hyperion."
-  :depends-on ("hyperion" "hyperion/import" "aion/log"   ; suite, csrf and logging tests call log:
+  :depends-on ("aion/fs" "hyperion" "hyperion/import" "aion/log"   ; suite, csrf and logging tests call log:
                "fiveam" "aion/test-threads" "hyperion/test-ports"
                "sb-bsd-sockets"    ; server-tests: a free port, and "is it listening?"
                ;; TEST-ONLY: an in-memory octet input stream, to hand BODY-STRING a body

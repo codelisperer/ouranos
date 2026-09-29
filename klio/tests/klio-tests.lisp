@@ -313,7 +313,7 @@ found there, and a fixture that hands it strings would test everything except th
            (with-open-file (out ,path :direction :output :if-exists :supersede)
              (write-string (cdr ,f) out))))
        (unwind-protect (progn ,@forms)
-         (ignore-errors (uiop:delete-directory-tree ,dir :validate t))))))
+         (ignore-errors (aion/fs:delete-tree ,dir))))))
 
 (defparameter +good+ (format nil "---~%title: \"A post\"~%---~%~%Some prose.~%"))
 (defparameter +also-good+ (format nil "---~%title: \"Another\"~%---~%~%More prose.~%"))

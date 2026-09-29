@@ -95,7 +95,7 @@ failed check is a result, and the caller decides whether that is fatal."
            (values ok root output))
       (if (and keep (not ok))
           (format stream "  left in place: ~A~%" (namestring work))
-          (uiop:delete-directory-tree work :validate t :if-does-not-exist :ignore)))))
+          (aion/fs:delete-tree work :if-does-not-exist :ignore)))))
 
 (defun check-all (&key (stream *standard-output*))
   "Check every built-in template. Returns T when all of them build."

@@ -38,6 +38,7 @@
 (defparameter *script* (or *load-truename* *load-pathname*))
 (defparameter *scripts* (uiop:pathname-directory-pathname *script*))
 (load (merge-pathnames "tree-root.lisp" *scripts*))
+(load (merge-pathnames "fs.lisp" *scripts*))   ; aion/fs:delete-tree (#347)
 (load (merge-pathnames "compile-warnings.lisp" *scripts*))
 (load (merge-pathnames "caught-errors.lisp" *scripts*))
 
@@ -123,9 +124,16 @@
                   ;; Two translations into the new directory: this tree, and the directory of the
          ;; system being checked, which may lie outside it (the control in cons/tests does).
          ;; The system's own entry comes first, because the first match wins.
+         ;;
+         ;; ONE DIRECTORY PER CHECKED SYSTEM for that entry. It maps the system's own directory,
+         ;; and two systems' directories hold files with the same relative names: a shared
+         ;; `system/' sent klio/src/packages.lisp and mnemosyne/src/packages.lisp to one fasl,
+         ;; so checking mnemosyne after klio loaded klio's package definition, and failed with
+         ;; "SPINNERET does not designate any package" (found on #347, whose change touched both).
          (form (format nil "(let ((d (asdf:system-source-directory ~S))) (asdf:initialize-output-translations `(:output-translations ((,d :**/ :*.*.*) (~S :**/ :*.*.*)) ((~S :**/ :*.*.*) (~S :**/ :*.*.*)) :inherit-configuration)) (asdf:load-system ~S))"
                        name
-                       (namestring (merge-pathnames "system/" fasls))
+                       (namestring (merge-pathnames (format nil "system-~A/" (substitute #\- #\/ name))
+                                                    fasls))
                        (namestring *root*) (namestring (merge-pathnames "tree/" fasls))
                        name))
          (out (make-string-output-stream))
@@ -196,7 +204,7 @@
                (dolist (l lines) (format t "          ~A~%" l))
                (unless ok (incf failed))
                (finish-output)))
-        (uiop:delete-directory-tree fasls :validate t :if-does-not-exist :ignore))
+        (aion/fs:delete-tree fasls :if-does-not-exist :ignore))
       (format t "~&check-compile: ~D system~:P checked, ~D failed.~%" (length systems) failed)
       (uiop:quit (if (zerop failed) 0 1)))))
 

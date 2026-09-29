@@ -106,7 +106,7 @@ than quietly fall through to a default."
     (unwind-protect
          (let ((*root* root))
            (funcall fn (b:make-filesystem-store :root root :base-url base-url)))
-      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+      (aion/fs:delete-tree root :if-does-not-exist :ignore))))
 
 (defmacro with-temp-store ((var &key base-url) &body body)
   `(call-with-temp-store (lambda (,var) ,@body) :base-url ,base-url))

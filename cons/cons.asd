@@ -34,7 +34,7 @@
   ;; hyperion/server fail to READ on Windows.
   ;; aion/secret is DEPENDENCY-FREE and Coalton-free by construction, which is what makes
   ;; it admissible here: cons's core stays trivial to install (pre-publication issue 209).
-  :depends-on ("alexandria" "cons/env" "aion/secret"
+  :depends-on ("aion/fs" "alexandria" "cons/env" "aion/secret"
                (:feature :unix (:require :sb-posix)))
   :serial t
   :components ((:module "src"
@@ -81,7 +81,7 @@
 
 (defsystem "cons/tests"
   :description "Test suite for cons."
-  :depends-on ("cons" "cons/env" "aion/secret" "fiveam")  ; env-tests.lisp calls cons/env: directly
+  :depends-on ("aion/fs" "cons" "cons/env" "aion/secret" "fiveam")  ; env-tests.lisp calls cons/env: directly
   :serial t
   :components ((:module "tests"
                 :serial t

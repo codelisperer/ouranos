@@ -14,8 +14,7 @@ markers as it needs them."
      (declare (ignorable ,root ,nested))
      (unwind-protect
           (progn (ensure-directories-exist ,nested) ,@body)
-       (uiop:delete-directory-tree ,root :validate (constantly t)
-                                         :if-does-not-exist :ignore))))
+       (aion/fs:delete-tree ,root :if-does-not-exist :ignore))))
 
 (test find-root-walks-up-to-marker
   "FIND-ROOT returns the nearest ancestor holding a root marker; PROJECT-ROOT returns

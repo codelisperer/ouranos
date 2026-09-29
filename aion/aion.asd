@@ -415,7 +415,7 @@
   ;; uses AION/WINDOWS and AION/WINDOWS/FFI directly (apartment-tests, layout-tests), and a
   ;; system that names a package it reads must say so rather than reach it through a
   ;; neighbour's dependency (pre-publication issue 461, #162).
-  :depends-on ("aion/windows" "aion/windows/com" "fiveam")
+  :depends-on ("aion/fs" "aion/windows" "aion/windows/com" "fiveam")
   :serial t
   :components ((:module "tests/windows/com"
                 :serial t
@@ -499,6 +499,31 @@
                 :components ((:file "packages")
                              (:file "signature-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :aion/signature/tests :run-tests)))
+
+(defsystem "aion/fs"
+  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; UIOP only, plus sb-posix on Unix (an SBCL contrib, as in cons). Windows is reached through
+  ;; SB-ALIEN rather than CFFI: the build scripts load this before Quicklisp, and cons, which
+  ;; depends on it, does not carry CFFI.
+  :depends-on ((:feature :unix (:require :sb-posix)))
+  :serial t
+  :components ((:module "src/fs"
+                :serial t
+                :components ((:file "packages")
+                             (:file "delete-tree"))))
+  :in-order-to ((test-op (test-op "aion/fs/tests"))))
+
+(defsystem "aion/fs/tests"
+  :description "Tests for aion/fs: links planted inside and at the root of a tree, pointing outside it."
+  :depends-on ("aion/fs" "fiveam")
+  :serial t
+  :components ((:module "tests/fs"
+                :serial t
+                :components ((:file "delete-tree-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"
   :description "The platform key that names a build artifact -- <os>-<arch> -- and the set of platforms this project actually builds (pre-publication issue 206, pre-publication issue 145)."

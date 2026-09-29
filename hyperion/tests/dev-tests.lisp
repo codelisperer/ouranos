@@ -59,7 +59,7 @@ and the editor droppings that appear beside a file on every save."
 (defmacro %with-dev-tree ((var) &body body)
   `(let ((,var (%dev-tree)))
      (unwind-protect (progn ,@body)
-       (ignore-errors (uiop:delete-directory-tree ,var :validate t)))))
+       (ignore-errors (aion/fs:delete-tree ,var)))))
 
 (defun %names (paths) (sort (mapcar #'file-namestring paths) #'string<))
 
@@ -318,7 +318,7 @@ and the editor droppings that appear beside a file on every save."
              (write-string "no lisp here" s))
            (is (notany #'hyperion/dev::%lisp-file-p
                        (hyperion/dev::%watched-files (list root)))))
-      (ignore-errors (uiop:delete-directory-tree root :validate t)))))
+      (ignore-errors (aion/fs:delete-tree root)))))
 
 ;;; --- the no-Lisp warning is about the watch set, not each root (#134) ---------------
 
@@ -355,8 +355,8 @@ and the editor droppings that appear beside a file on every save."
            (is (search "(no .lisp)" (second (hyperion/dev::%root-listing (list src assets) no-lisp)))
                "and the banner marks it, instead of a warning")
            (is (not (search "(no .lisp)" (first (hyperion/dev::%root-listing (list src assets) no-lisp))))))
-      (ignore-errors (uiop:delete-directory-tree src :validate t))
-      (ignore-errors (uiop:delete-directory-tree assets :validate t)))))
+      (ignore-errors (aion/fs:delete-tree src))
+      (ignore-errors (aion/fs:delete-tree assets)))))
 
 (test a-single-root-with-no-lisp-still-warns-once
   ;; pre-publication issue 237's case, which the narrowing must keep: :SYSTEM resolved somewhere with no
@@ -366,7 +366,7 @@ and the editor droppings that appear beside a file on every save."
          (let ((warnings (%dev-warnings-and-no-lisp (list root))))
            (is (= 1 (length warnings)) "exactly one warning, got ~S" warnings)
            (is (search (namestring root) (or (first warnings) "")) "naming the root"))
-      (ignore-errors (uiop:delete-directory-tree root :validate t)))))
+      (ignore-errors (aion/fs:delete-tree root)))))
 
 (test several-roots-with-no-lisp-warn-once-not-once-each
   (let ((a (%dev-root-with "a.css"))
@@ -377,5 +377,5 @@ and the editor droppings that appear beside a file on every save."
            (is (and (search (namestring a) (or (first warnings) ""))
                     (search (namestring b) (or (first warnings) "")))
                "naming every root"))
-      (ignore-errors (uiop:delete-directory-tree a :validate t))
-      (ignore-errors (uiop:delete-directory-tree b :validate t)))))
+      (ignore-errors (aion/fs:delete-tree a))
+      (ignore-errors (aion/fs:delete-tree b)))))
