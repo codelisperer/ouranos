@@ -249,6 +249,10 @@ both naming the same table."))
     (:boundary           :string :required t)
     (:text               :text :required t)
     (:section_fingerprint :string :required t)
+    ;; BM25 (#316): the number of terms the tokenizer found in TEXT, and which tokenizer. The
+    ;; terms themselves are in the store's terms table.
+    (:term_count         :integer)
+    (:terms_tokenizer    :string)
     (:embedding          :vector :dimensions ,dimensions :derived-from :text)))
 
 (defun make-chunk-store (connection &key (table *table*) dimensions ensure)
@@ -321,6 +325,19 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                  :if-not-exists t)
            :dialect "postgres"))
 
+(defun terms-table (store)
+  "The table holding STORE's chunk terms for BM25: the chunk table's name with \"_terms\"."
+  (format nil "~A_terms" (store-table store)))
+
+(defun %terms-ddl (store)
+  "The terms table: one row per term of a chunk, with how often it occurs (TF). CORPUS and
+TOKENIZER are copied from the chunk so that the document frequency of a term in a corpus is one
+indexed count over this table."
+  (list (format nil "CREATE TABLE IF NOT EXISTS ~A (chunk_id TEXT NOT NULL, corpus TEXT NOT NULL, tokenizer TEXT NOT NULL, term TEXT NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY (chunk_id, term))"
+                (terms-table store))
+        (format nil "CREATE INDEX IF NOT EXISTS ~A_corpus_term_idx ON ~A (corpus, tokenizer, term)"
+                (terms-table store) (terms-table store))))
+
 (defun %live-embedding-type (store)
   "The live embedding column's type, for example \"vector(1024)\", or NIL."
   (let ((row (first (conn:query (store-connection store)
@@ -358,6 +375,15 @@ every result is complete; an index would let the database drop rows after the co
                                       :dialect "postgres"))
       (conn:exec c (%index-ddl table "corpus_deriver" '(:corpus :embedding_deriver)))
       (conn:exec c (%index-ddl table "corpus_document" '(:corpus :document_id)))
+      ;; A table made before #316 has neither BM25 column. Its chunks then count as not
+      ;; indexed until INDEX-PENDING writes their terms. Postgres answers IF NOT EXISTS on an
+      ;; object that exists with a notice, which cl-postgres signals as a warning; that is the
+      ;; expected case on every start after the first, so it is muffled here and nowhere else.
+      (handler-bind ((warning #'muffle-warning))
+        (dolist (column '("term_count INTEGER" "terms_tokenizer TEXT"))
+          (conn:exec c (format nil "ALTER TABLE ~A ADD COLUMN IF NOT EXISTS ~A" table column)))
+        (dolist (statement (%terms-ddl store))
+          (conn:exec c statement)))
       (let ((live (%live-embedding-type store))
             (want (format nil "vector(~D)" (store-dimensions store))))
         (unless (equal live want)
@@ -442,18 +468,45 @@ because a section id is stable within its document and need not be unique across
   (list (param:row-value row :document_id) (param:row-value row :section_id)
         (param:row-value row :locale)))
 
+(defun %write-terms (corpus chunk-id text locale)
+  "Write CHUNK-ID's terms, tokenized from TEXT in LOCALE, and return how many terms there were.
+Called with the store's database lock held, inside the caller's transaction."
+  (multiple-value-bind (counts total) (term-counts text :locale locale)
+    (when counts
+      (%run (corpus-store corpus)
+            (list :insert-into (terms-table (corpus-store corpus))
+                  :values (mapcar (lambda (entry)
+                                    (list :chunk_id chunk-id
+                                          :corpus (corpus-name corpus)
+                                          :tokenizer +tokenizer-id+
+                                          :term (car entry)
+                                          :tf (cdr entry)))
+                                  counts))))
+    total))
+
+(defun %delete-terms (corpus chunk-where)
+  "Delete the terms of CORPUS's chunks that CHUNK-WHERE selects."
+  (%run (corpus-store corpus)
+        (list :delete-from (terms-table (corpus-store corpus))
+              :where (corpus-where corpus
+                                   (list :in :chunk_id
+                                         (list :select '(:id)
+                                               :from (list (store-table (corpus-store corpus)))
+                                               :where chunk-where))))))
+
 (defun %insert-section (corpus section fingerprint)
   (let* ((chunker (corpus-chunker corpus))
          (chunks (chunk-section chunker section)))
     (loop for ch in chunks
           for position from 0
+          for id = (%chunk-id corpus section position)
           do (unless (member (chunk-boundary ch) +boundaries+)
                (error "praxeon/retrieval: chunker ~A returned boundary ~S (one of ~{~S~^, ~})"
                       (chunker-id chunker) (chunk-boundary ch) +boundaries+))
              (%run (corpus-store corpus)
                    (list :insert-into (store-table (corpus-store corpus))
                          :values (list (append
-                                        (list :id (%chunk-id corpus section position)
+                                        (list :id id
                                               :corpus (corpus-name corpus)
                                               :section_id (section-id section)
                                               :locale (section-locale section)
@@ -464,7 +517,14 @@ because a section id is stable within its document and need not be unique across
                                                          (symbol-name (chunk-boundary ch)))
                                               :text (chunk-text ch)
                                               :section_fingerprint fingerprint)
-                                        (%section-provenance section))))))))
+                                        (%section-provenance section)))))
+             ;; The terms are written with the chunk, in the sync's transaction, so a synced
+             ;; chunk is indexed for BM25 as soon as the sync commits.
+             (let ((total (%write-terms corpus id (chunk-text ch) (section-locale section))))
+               (%run (corpus-store corpus)
+                     (list :update (store-table (corpus-store corpus))
+                           :set (list :term_count total :terms_tokenizer +tokenizer-id+)
+                           :where (corpus-where corpus (list := :id id))))))))
 
 (defun %section-where (corpus key)
   "The WHERE clause for one section of CORPUS, KEY being (document-id section-id locale)."
@@ -473,6 +533,7 @@ because a section id is stable within its document and need not be unique across
                   (list := :locale locale))))
 
 (defun %delete-section (corpus key)
+  (%delete-terms corpus (%section-where corpus key))
   (%run (corpus-store corpus)
         (list :delete-from (store-table (corpus-store corpus))
               :where (%section-where corpus key))))
@@ -569,16 +630,21 @@ made from is the original stored now, :OLDER-ORIGINAL when the original has chan
   derived-from translation chunker boundary)
 
 (defstruct (passage (:constructor %make-passage))
-  "A retrieved chunk. DISTANCE is the cosine distance for a similarity result, NIL otherwise."
-  text provenance distance)
+  "A retrieved chunk. DISTANCE is the cosine distance for a similarity result, NIL otherwise.
+SCORE is a keyword or hybrid result's score, higher meaning a better match, NIL otherwise: the
+BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE-HYBRID. The two
+are on different scales, so compare scores only within one result."
+  text provenance distance score)
 
 (defstruct (complete (:constructor make-complete))
   "Every chunk of the corpus was a candidate, and nothing was cut off.")
 
 (defstruct (truncated (:constructor make-truncated (&key reason pending)))
-  "Not every candidate is in the result. REASON is :LIMIT (more matches than the limit) or
-:NOT-EMBEDDED (PENDING chunks have no embedding by the current model yet, so similarity
-could not consider them)."
+  "Not every candidate is in the result. REASON is :LIMIT (more matches than the limit),
+:NOT-EMBEDDED (PENDING chunks have no embedding by the current model yet, so similarity could
+not consider them) or :NOT-INDEXED (PENDING chunks have no terms from the current tokenizer, so
+keyword search could not consider them; INDEX-PENDING writes them). A hybrid result that is
+missing both says :NOT-EMBEDDED, and PENDING counts every chunk missing either."
   reason pending)
 
 (defstruct (retrieval-result (:constructor %make-retrieval-result (passages completeness)))
@@ -589,6 +655,10 @@ could not consider them)."
   '(:text :section_id :document_id :document_version :locator :sub_locator :locale
     :locale_role :derived_from :source_fingerprint :chunker :boundary)
   "What a retrieval selects. Never the embedding.")
+
+(defun %qualified (alias columns)
+  "COLUMNS as ALIAS.column identifiers, for a query that joins the chunk table to others."
+  (mapcar (lambda (c) (intern (format nil "~:@(~A.~A~)" alias c) :keyword)) columns))
 
 (defun %keyword (s) (and s (intern (string-upcase s) :keyword)))
 
@@ -632,13 +702,16 @@ the originals that ROWS' translations name."
             ((equal recorded current) :current)
             (t :older-original)))))
 
-(defun %rows->passages (corpus rows &key with-distance)
+(defun %rows->passages (corpus rows &key with-distance scores)
+  "Passages for ROWS. WITH-DISTANCE reads each row's DISTANCE column. SCORES, when given, is a
+list of scores parallel to ROWS."
   (let ((sources (%source-fingerprints corpus rows)))
-    (mapcar (lambda (row)
+    (mapcar (lambda (row score)
               (%make-passage
                :text (param:row-value row :text)
+               :score (and score (coerce score 'double-float))
                :distance (and with-distance
-                              (let ((d (param:row-value row :distance)))
+                              (let ((d (param:row-value row :distance :if-missing nil)))
                                 (and d (coerce d 'double-float))))
                :provenance
                (%make-provenance
@@ -654,7 +727,8 @@ the originals that ROWS' translations name."
                 :translation (%translation-status row sources)
                 :chunker (param:row-value row :chunker)
                 :boundary (%keyword (param:row-value row :boundary)))))
-            rows)))
+            rows
+            (or scores (make-list (length rows) :initial-element nil)))))
 
 (defun passage->ctx-item (passage render)
   "PASSAGE as a context item. RENDER is required: a function from the passage to the string
@@ -709,4 +783,127 @@ when there were more than LIMIT."))
      (%rows->passages corpus (subseq rows 0 (min limit (length rows))))
      (if (> (length rows) limit)
          (make-truncated :reason :limit)
+         (make-complete)))))
+
+;;; --- keyword retrieval: BM25 (#316) --------------------------------------------------
+
+(defparameter *bm25-k1* 1.2d0 "BM25's term-frequency saturation, #316's starting value.")
+(defparameter *bm25-b* 0.75d0 "BM25's document-length normalisation, #316's starting value.")
+
+(defun %unindexed-clause ()
+  "Chunks with no terms from the current tokenizer: synced before #316, or indexed by an older
+TOKENIZE."
+  (list :or (list :is-null :terms_tokenizer) (list :<> :terms_tokenizer +tokenizer-id+)))
+
+(defun %unindexed-count (corpus)
+  (let ((row (first (%fetch (corpus-store corpus)
+                            (list :select (list (list :as (list :count :*) :n))
+                                  :from (list (store-table (corpus-store corpus)))
+                                  :where (corpus-where corpus (%unindexed-clause)))))))
+    (or (and row (param:row-value row :n)) 0)))
+
+(defun index-pending (corpus &key (batch-size 200))
+  "Write the BM25 terms of every chunk of CORPUS that has none from the current tokenizer, in
+batches of BATCH-SIZE chunks. Returns the number of chunks indexed.
+
+A sync writes the terms of the chunks it inserts, so this is needed only for chunks synced
+before #316 and after a change of tokenizer (+TOKENIZER-ID+). Needs no model and no provider.
+Serialised per corpus with the syncs (WITH-CORPUS-LOCK)."
+  (unless (typep batch-size '(integer 1))
+    (error "praxeon/retrieval: :batch-size must be a positive integer, not ~S" batch-size))
+  (let ((store (corpus-store corpus))
+        (count 0))
+    (with-corpus-lock (corpus)
+      (loop
+        (let ((rows (%fetch store (list :select '(:id :text :locale)
+                                        :from (list (store-table store))
+                                        :where (corpus-where corpus (%unindexed-clause))
+                                        :order-by '(:id)
+                                        :limit batch-size))))
+          (when (null rows) (return count))
+          (with-db (store)
+            (conn:with-transaction ((store-connection store))
+              (dolist (row rows)
+                (let ((id (param:row-value row :id)))
+                  (%delete-terms corpus (list := :id id))
+                  (%run store (list :update (store-table store)
+                                    :set (list :term_count
+                                               (%write-terms corpus id (param:row-value row :text)
+                                                             (param:row-value row :locale))
+                                               :terms_tokenizer +tokenizer-id+)
+                                    :where (corpus-where corpus (list := :id id))))
+                  (incf count))))))))))
+
+(defun %bm25-expression ()
+  "The BM25 score of one matched term in one chunk, as SQL over the aliases of %BM25-QUERY: M
+the matched term row, D its document frequency, C2 the chunk, ST the corpus statistics. IDF is
+the non-negative form, ln((N - df + 0.5) / (df + 0.5) + 1). Only numbers this file sets are
+formatted in; nothing an app or a user supplies reaches this string."
+  (format nil "LN((st.n - d.df + 0.5) / (d.df + 0.5) + 1) * (m.tf * ~F) / (m.tf + ~F * (1 - ~F + ~F * c2.term_count / NULLIF(st.avgdl, 0)))"
+          (+ *bm25-k1* 1) *bm25-k1* *bm25-b* *bm25-b*))
+
+(defun %bm25-query (corpus terms limit)
+  "One SELECT returning the LIMIT chunks of CORPUS with the highest BM25 score for TERMS, best
+first, each with its passage columns, its ID and its SCORE. Each piece reads one table through
+CORPUS-WHERE: the matched terms, their document frequencies, and the corpus's chunk count and
+average length."
+  (let* ((store (corpus-store corpus))
+         (chunks (store-table store))
+         (terms-table (terms-table store))
+         (term-rows (lambda (&rest more)
+                      (apply #'corpus-where corpus (list := :tokenizer +tokenizer-id+)
+                             (list :in :term terms) more)))
+         (matches (list :select '(:chunk_id :term :tf)
+                        :from (list terms-table)
+                        :where (funcall term-rows)))
+         (frequencies (list :select '(:term (:as (:count :*) :df))
+                            :from (list terms-table)
+                            :where (funcall term-rows)
+                            :group-by '(:term)))
+         (stats (list :select '((:as (:count :*) :n) (:as (:avg :term_count) :avgdl))
+                      :from (list chunks)
+                      :where (corpus-where corpus (list := :terms_tokenizer +tokenizer-id+))))
+         (scored (list :select (list :m.chunk_id
+                                     (list :as (list :sum (list :raw (%bm25-expression))) :score))
+                       :from (list (list :as matches :m))
+                       :join (list (list :inner (list :as frequencies :d) '(:= :d.term :m.term))
+                                   (list :inner (list :as chunks :c2) '(:= :c2.id :m.chunk_id))
+                                   (list :cross (list :as stats :st)))
+                       :group-by '(:m.chunk_id))))
+    (list :select (append (%qualified "c" +passage-columns+) '(:c.id :s.score))
+          :from (list (list :as chunks :c))
+          :join (list (list :inner (list :as scored :s) '(:= :s.chunk_id :c.id)))
+          :where (corpus-where corpus)
+          :order-by '((:s.score :desc) :c.id)
+          :limit limit)))
+
+(defun %keyword-rows (corpus query limit locale)
+  "The rows of the LIMIT best BM25 matches for QUERY, best first. NIL when QUERY has no terms."
+  (let ((terms (remove-duplicates (tokenize query :locale locale) :test #'string= :from-end t)))
+    (and terms
+         (%fetch (corpus-store corpus) (%bm25-query corpus terms limit)))))
+
+(defgeneric retrieve-keyword (corpus query &key limit locale)
+  (:documentation "The LIMIT chunks of CORPUS that best match QUERY by BM25, best first, each
+with its SCORE (#316). QUERY is tokenized as a chunk is (TOKENIZE); LOCALE chooses the stop words
+dropped from it, and NIL drops none. Needs no embedding provider.
+
+Returns a RETRIEVAL-RESULT. COMPLETE means every chunk of the corpus was a candidate. TRUNCATED
+with reason :NOT-INDEXED gives the number of chunks that have no terms from the current
+tokenizer; INDEX-PENDING writes them. A query whose words are all stop words matches nothing."))
+
+(defmethod retrieve-keyword ((corpus corpus) query &key (limit 20) locale)
+  (let ((store (corpus-store corpus))
+        rows pending)
+    ;; One snapshot for the candidates and the count of chunks that could not be candidates,
+    ;; for the reason RETRIEVE-SIMILAR gives.
+    (with-db (store)
+      (conn:with-transaction ((store-connection store))
+        (conn:exec (store-connection store) "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        (setf rows (%keyword-rows corpus query limit locale)
+              pending (%unindexed-count corpus))))
+    (%make-retrieval-result
+     (%rows->passages corpus rows :scores (mapcar (lambda (r) (param:row-value r :score)) rows))
+     (if (plusp pending)
+         (make-truncated :reason :not-indexed :pending pending)
          (make-complete)))))

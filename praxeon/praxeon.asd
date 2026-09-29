@@ -109,11 +109,15 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  :depends-on ("praxeon" "mnemosyne" "dbi" "ironclad" "bordeaux-threads")
+  :depends-on ("praxeon" "mnemosyne" "dbi" "ironclad" "bordeaux-threads"
+               "coalton" "named-readtables"   ; fusion.lisp is Coalton (#316)
+               "aion/boundary")               ; the rankings are checked before fusion.lisp (#110)
   :serial t
   :components ((:module "src/retrieval"
                 :serial t
                 :components ((:file "packages")
+                             (:file "fusion")    ; reciprocal rank fusion, Coalton (#316)
+                             (:file "terms")     ; the BM25 tokenizer (#316)
                              (:file "corpus")
                              (:file "similar")
                              (:file "tool")))))
