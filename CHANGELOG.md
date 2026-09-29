@@ -60,6 +60,16 @@ its tag.
   carriage return counts as blank. `chunker-id` includes both settings, so changing either one
   re-chunks the corpus on its next `sync-corpus`. An app that wrote its own chunker for long
   sections can use this one instead. (#322)
+- **praxeon/retrieval: an agent can search a corpus.** `(register-corpus-search agent corpus
+  embedder render)` registers a means, `"search-documents"` unless `:name` says otherwise. The
+  model passes a `query`, and a `match` of `"meaning"` or `"words"`; with a NIL `embedder` only
+  `"words"` is offered. It reads each passage as `render` writes it, through `passage->ctx-item`,
+  in the order the search returned them, and a sentence when the result is truncated.
+  `:on-result` receives the query and the `retrieval-result`, so an app can keep what it will
+  cite. `:description`, `:limit` and `:capability` are optional. (#138)
+- **praxeon/retrieval: `retrieve`**, the call an agent's search makes. For a corpus it is
+  `retrieve-similar` with a default `:limit` of 20; a later version will follow the corpus's
+  retrieval strategy (#316) with no change for callers. (#138)
 - **cons: `--strict` recompiles the project's own systems before a target runs**, so a warning
   in a fasl that is already current is seen. Use `cons --strict test` in CI. The loader is
   exported as `cons/run:load-system-strictly` for a script that needs the same rule. An app whose
@@ -85,9 +95,6 @@ its tag.
   `with-temporary-directory`, `cons` templates, hyperion/update's staging, the build scripts and
   the test fixtures used `uiop:delete-directory-tree`, which on Windows follows a junction inside
   the tree and deletes files outside it. They use `aion/fs:delete-tree` now. (#347)
-
-### Fixed
-
 - **hyperion/server: on Woo, a response with status 429 reaches the client as 429, with its
   headers and body, instead of as an empty 500.** Woo writes a status line from its own table of
   reason phrases, which has no entry for 429 or for the other registered codes 103, 104, 425,
@@ -107,17 +114,6 @@ its tag.
   `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
   takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
   the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
-
-- **praxeon/retrieval: an agent can search a corpus.** `(register-corpus-search agent corpus
-  embedder render)` registers a means, `"search-documents"` unless `:name` says otherwise. The
-  model passes a `query`, and a `match` of `"meaning"` or `"words"`; with a NIL `embedder` only
-  `"words"` is offered. It reads each passage as `render` writes it, through `passage->ctx-item`,
-  in the order the search returned them, and a sentence when the result is truncated.
-  `:on-result` receives the query and the `retrieval-result`, so an app can keep what it will
-  cite. `:description`, `:limit` and `:capability` are optional. (#138)
-- **praxeon/retrieval: `retrieve`**, the call an agent's search makes. For a corpus it is
-  `retrieve-similar` with a default `:limit` of 20; a later version will follow the corpus's
-  retrieval strategy (#316) with no change for callers. (#138)
 
 ## v0.1.4 — 2026-09-29
 
