@@ -391,6 +391,47 @@ default), then rebuild the agent:
 (defparameter *e* (praxeon/elise:make-elise))
 ```
 
+### The output limit (`:max-tokens`)
+
+Each model call of a turn may generate at most a set number of output tokens. The text, the
+arguments of a tool call and a thinking model's thinking all count. The limit is `:max-tokens`
+on `run-turn` (or `run-turn-through`), else the agent's `max-tokens` slot, else
+`praxeon/llm:*default-max-tokens*`, which is 8,192. It is a ceiling, not a charge: a provider
+bills the tokens the model generates.
+
+```lisp
+(praxeon/actor:make-agent :provider p :max-tokens 16000)   ; every turn of this agent
+(praxeon/actor:run-turn agent "Summarise the report." :max-tokens 32000)  ; this turn only
+```
+
+A step that reaches the limit before the model has finished is not used (#326). Its tool calls
+are not run and its text is not returned as the answer. `run-turn` emits a `:truncated` event and
+signals `praxeon/conditions:output-truncated`, which names the step and the limit. It is a
+`deliberation-failure`, so with no handler the turn ends there with an error. A handler picks one
+of three restarts:
+
+- `retry-with-max-tokens` asks the model again with a larger limit, for the rest of the turn. The
+  retry counts against `:max-steps`.
+- `accept-truncated` ends the turn with the cut-off text. `run-turn` returns it with a second
+  value, `:truncated`.
+- `abandon-turn` ends the turn with no answer. `run-turn` returns NIL and `:abandoned`.
+
+This handler retries once at 32,000 tokens and, if the step is cut off again, accepts the text
+and says it is incomplete:
+
+```lisp
+(multiple-value-bind (text mark)
+    (handler-bind ((praxeon/conditions:output-truncated
+                     (lambda (c)
+                       (if (< (praxeon/conditions:output-truncated-max-tokens c) 32000)
+                           (praxeon/conditions:retry-with-max-tokens 32000 c)
+                           (praxeon/conditions:accept-truncated c)))))
+      (praxeon/actor:run-turn agent "Write the full plan on the whiteboard."))
+  (if (eq mark :truncated)
+      (format nil "~A~%~%(The answer was too long and was cut off.)" text)
+      text))
+```
+
 ### Embeddings
 
 An embedding provider turns text into a vector (`praxeon/llm:embed`,

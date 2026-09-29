@@ -59,6 +59,12 @@ client rendering `agent-history' still shows the whole conversation."
   ;; LOW (see `prompt:*chars-per-token*'), so the headroom is deliberate. NIL means send
   ;; everything, for a caller that bounds its context some other way.
   (history-budget 120000)
+  ;; MAX-TOKENS (#326): the output-token limit for each model call this agent makes. RUN-TURN's
+  ;; :max-tokens overrides it. NIL, the default, means `llm:*default-max-tokens*' as it is when
+  ;; a turn starts, rather than the value it had when the agent was made: an app that
+  ;; binds that variable around RUN-TURN (the workaround #326 was filed with) keeps getting
+  ;; its value until it moves the number here.
+  (max-tokens nil)
   (history '() :type list))               ; list of praxeon/llm messages
 
 (defun register-means (agent name description fn &key schema capability)
@@ -178,10 +184,20 @@ rather than NIL, which is the distinction pre-publication issue 401 paid for and
         (list (llm:text-part prompt :cache t))
         prompt)))
 
-(defun deliberate (agent &key permit)
+(defun %output-limit (agent max-tokens)
+  "The output-token limit for a model call AGENT makes: MAX-TOKENS when it is given, else the
+agent's MAX-TOKENS slot, else `llm:*default-max-tokens*' as it is now (#326)."
+  (or max-tokens (agent-max-tokens agent) llm:*default-max-tokens*))
+
+(defun deliberate (agent &key permit max-tokens)
   "Ask the provider for the agent's next move given its current history,
 advertising the means PERMIT allows as tools. Returns (values COMPLETION
 ESTIMATED-INPUT-TOKENS). Signals DELIBERATION-FAILURE when no provider is configured.
+
+MAX-TOKENS is the output-token limit for this call. When it is NIL the agent's MAX-TOKENS slot
+applies, and when that is NIL too, `llm:*default-max-tokens*' (#326). Before #326 no limit was
+passed, so every call took the provider's default, which is that variable, and an app could
+change the limit only by rebinding it.
 
 What is sent is REQUEST-MESSAGES, not the raw history -- trimmed to the agent's
 history budget with its retrieved facts placed after the cacheable prefix (pre-publication issue 402).
@@ -198,7 +214,8 @@ to the model at all (#90)."
     (values (llm:complete (agent-provider agent)
                           messages
                           :system (agent-system-parts agent)
-                          :tools (agent-tool-specs agent :permit permit))
+                          :tools (agent-tool-specs agent :permit permit)
+                          :max-tokens (%output-limit agent max-tokens))
             estimate)))
 
 (defun act (agent means-name argument &key permit)
@@ -282,10 +299,32 @@ each so a client can report progress."
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
-(defun run-turn (agent user-input &key (max-steps 8) permit)
+(defun run-turn (agent user-input &key (max-steps 8) permit max-tokens)
   "Run one full turn: record USER-INPUT, then deliberate and act until the model
 replies with no further tool call. Returns the model's final text. MAX-STEPS
 bounds the deliberate/act cycle so a misbehaving loop stays finite.
+
+MAX-TOKENS is the output-token limit for each model call of the turn. It overrides the agent's
+MAX-TOKENS slot, and with neither, `llm:*default-max-tokens*' applies (#326).
+
+A STEP CUT OFF BY THE OUTPUT LIMIT IS NOT USED (#326). When a completion stops with the stop
+reason :MAX-TOKENS, the model had not finished: its text ends mid-sentence, and a tool call in
+it can be missing arguments. So RUN-TURN does not run the step's tool calls, does not return its
+text as the answer, and adds nothing from the step to the history. It emits a :TRUNCATED event
+and signals OUTPUT-TRUNCATED, an error, inside three restarts. The functions of the same names in
+praxeon/conditions invoke them:
+
+  RETRY-WITH-MAX-TOKENS n  ask the model again with the limit N, for that step and every later
+                           step of the turn. The retry is another step, so it counts against
+                           MAX-STEPS, and a handler that always retries still stops.
+  ACCEPT-TRUNCATED         end the turn with the cut-off text. RUN-TURN returns it with a second
+                           value, :TRUNCATED, and records the text in the history without the
+                           step's tool calls, which never ran.
+  ABANDON-TURN             end the turn with no answer. RUN-TURN returns NIL and :ABANDONED.
+
+With no handler, the error ends the turn at the first cut-off step. Before #326 a cut-off reply
+was returned as though it were complete, and the tool calls parsed from a cut-off step were run
+and the model asked again, until MAX-STEPS ran out.
 
 PERMIT IS THE CALLER'S AUTHORITY and it travels to both halves of the loop -- the tool table
 the model is shown (DELIBERATE) and the check at the moment of use (ACT). Without it, a means
@@ -299,68 +338,102 @@ the authority that would permit it short of driving DELIBERATE and ACT by hand. 
 ADR-0002's own example and watching the turn loop refuse the means the ADR recommends -- the
 pattern was unexecutable through the path every reader would use."
   (%append-history agent (llm:msg "user" user-input))
-  (dotimes (step max-steps
-                 (error 'cnd:deliberation-failure
-                        :detail (format nil "no final answer within ~A steps"
-                                        max-steps)))
-    (evt:emit :deliberating :step step)
-    (multiple-value-bind (completion estimate) (deliberate agent :permit permit)
-      ;; Economic calculation: report what this step cost so the scarce resource
-      ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
-      ;; enforced against and :INPUT is what the provider actually charged -- two numbers
-      ;; computed different ways, on one event, so they can be made to meet (pre-publication issue 402).
-      ;;
-      ;; Still only when the provider reported something, which is the pre-publication issue 401 rule applied
-      ;; to the event stream: emitting :usage with :input 0 for a provider that reports
-      ;; no usage would claim a measurement nobody made, and a renderer summing input+output
-      ;; would show a running total of zero as though it were the cost. When there is no
-      ;; measurement, the estimate travels on :context-trimmed / :context-overflow instead,
-      ;; which is where it matters -- beside the budget it was enforced against.
-      ;;
-      ;; ALL FOUR COUNTS, not two (#161). `ceiling:meter' has accepted four since
-      ;; pre-publication PR 419 -- input, output, cache-read, cache-write -- and this event is
-      ;; the ONLY programmatic route by which usage escapes a turn: `run-turn' returns text and
-      ;; the completion is appended to history as messages and then dropped. So a caller wiring
-      ;; the spend guard could supply `input-fn' and `output-fn' from here and had NO SOURCE AT
-      ;; ALL for the other two. The provider had them, `llm.lisp' logged all four, and the seam
-      ;; between producer and consumer carried half. `praxeon/web' reads (+ :input :output) off
-      ;; this event for its own counter, so the one real consumer in the tree was
-      ;; under-reporting a cached turn for the same reason.
-      ;;
-      ;; The cache fields are passed through as reported, like :input and :output below: NIL
-      ;; means the provider did not report the count, 0 means it reported a miss.
-      ;; Collapsing them would make a misplaced cache breakpoint indistinguishable from a
-      ;; provider with no cache, which is what pre-publication issue 401 built the distinction
-      ;; to prevent, and `ceiling:record-usage' already passes them through without an `or'.
-      ;;
-      ;; The gate widens with the payload: a provider reporting only cache counts would
-      ;; otherwise emit nothing, which is the same silence this clause exists to avoid.
-      (let ((in (llm:completion-input-tokens completion))
-            (out (llm:completion-output-tokens completion))
-            (cache-read (llm:completion-cache-read-tokens completion))
-            (cache-write (llm:completion-cache-write-tokens completion)))
-        (when (or in out cache-read cache-write)
-          ;; NO `(or in 0)'. NIL and 0 ARE DIFFERENT ANSWERS and the distinction is the
-          ;; whole point -- `completion's own docstring says so, and `ceiling:record-usage'
-          ;; already honours it for the cache fields, which it passes with no `or'. NIL
-          ;; means the provider did not report it; 0 means it reported a miss.
-          ;;
-          ;; The gate above is the pre-publication issue 401 rule at the level it was written for: no counts at
-          ;; all, no event. It does not cover a PARTIAL report, and that is what this line
-          ;; got wrong -- a provider reporting output and not input emitted `:input 0',
-          ;; which is the thing the comment fourteen lines up forbids, one field down. A
-          ;; renderer summing input+output then shows a total that is short by an unknown
-          ;; amount rather than absent, and short-by-unknown reads as a real number (pre-publication issue 444).
-          (evt:emit :usage :input in :output out
-                           :cache-read cache-read :cache-write cache-write
-                           :estimated-input estimate)))
-      (%append-history agent (%assistant-message completion))
-      (let ((calls (llm:completion-tool-calls completion)))
-        (if (null calls)
-            (progn
-              (evt:emit :answer :text (llm:completion-text completion))
-              (return (llm:completion-text completion)))
-            (%append-history agent (%tool-results-message agent calls :permit permit)))))))
+  (let ((limit (%output-limit agent max-tokens)))
+    (dotimes (step max-steps
+                   (error 'cnd:deliberation-failure
+                          :detail (format nil "no final answer within ~A steps"
+                                          max-steps)))
+      (evt:emit :deliberating :step step)
+      (multiple-value-bind (completion estimate)
+          (deliberate agent :permit permit :max-tokens limit)
+        ;; Economic calculation: report what this step cost so the scarce resource
+        ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
+        ;; enforced against and :INPUT is what the provider actually charged -- two numbers
+        ;; computed different ways, on one event, so they can be made to meet (pre-publication issue 402).
+        ;;
+        ;; Still only when the provider reported something, which is the pre-publication issue 401 rule applied
+        ;; to the event stream: emitting :usage with :input 0 for a provider that reports
+        ;; no usage would claim a measurement nobody made, and a renderer summing input+output
+        ;; would show a running total of zero as though it were the cost. When there is no
+        ;; measurement, the estimate travels on :context-trimmed / :context-overflow instead,
+        ;; which is where it matters -- beside the budget it was enforced against.
+        ;;
+        ;; ALL FOUR COUNTS, not two (#161). `ceiling:meter' has accepted four since
+        ;; pre-publication PR 419 -- input, output, cache-read, cache-write -- and this event is
+        ;; the ONLY programmatic route by which usage escapes a turn: `run-turn' returns text and
+        ;; the completion is appended to history as messages and then dropped. So a caller wiring
+        ;; the spend guard could supply `input-fn' and `output-fn' from here and had NO SOURCE AT
+        ;; ALL for the other two. The provider had them, `llm.lisp' logged all four, and the seam
+        ;; between producer and consumer carried half. `praxeon/web' reads (+ :input :output) off
+        ;; this event for its own counter, so the one real consumer in the tree was
+        ;; under-reporting a cached turn for the same reason.
+        ;;
+        ;; The cache fields are passed through as reported, like :input and :output below: NIL
+        ;; means the provider did not report the count, 0 means it reported a miss.
+        ;; Collapsing them would make a misplaced cache breakpoint indistinguishable from a
+        ;; provider with no cache, which is what pre-publication issue 401 built the distinction
+        ;; to prevent, and `ceiling:record-usage' already passes them through without an `or'.
+        ;;
+        ;; The gate widens with the payload: a provider reporting only cache counts would
+        ;; otherwise emit nothing, which is the same silence this clause exists to avoid.
+        (let ((in (llm:completion-input-tokens completion))
+              (out (llm:completion-output-tokens completion))
+              (cache-read (llm:completion-cache-read-tokens completion))
+              (cache-write (llm:completion-cache-write-tokens completion)))
+          (when (or in out cache-read cache-write)
+            ;; NO `(or in 0)'. NIL and 0 ARE DIFFERENT ANSWERS and the distinction is the
+            ;; whole point -- `completion's own docstring says so, and `ceiling:record-usage'
+            ;; already honours it for the cache fields, which it passes with no `or'. NIL
+            ;; means the provider did not report it; 0 means it reported a miss.
+            ;;
+            ;; The gate above is the pre-publication issue 401 rule at the level it was written for: no counts at
+            ;; all, no event. It does not cover a PARTIAL report, and that is what this line
+            ;; got wrong -- a provider reporting output and not input emitted `:input 0',
+            ;; which is the thing the comment fourteen lines up forbids, one field down. A
+            ;; renderer summing input+output then shows a total that is short by an unknown
+            ;; amount rather than absent, and short-by-unknown reads as a real number (pre-publication issue 444).
+            (evt:emit :usage :input in :output out
+                             :cache-read cache-read :cache-write cache-write
+                             :estimated-input estimate)))
+        (let ((text (llm:completion-text completion))
+              (calls (llm:completion-tool-calls completion)))
+          (cond
+            ((eq (llm:completion-stop-reason completion) :max-tokens)
+             ;; Nothing from the cut-off step goes into the history unless ACCEPT-TRUNCATED
+             ;; puts its text there. A tool-use part with no tool result after it makes the
+             ;; next request invalid, and a retry has to ask again from the history as it was
+             ;; before this step.
+             (evt:emit :truncated :step step :max-tokens limit
+                                  :tool-calls (mapcar #'llm:tool-call-name calls))
+             (restart-case (error 'cnd:output-truncated
+                                  :step step :max-tokens limit :text text :tool-calls calls)
+               (cnd:retry-with-max-tokens (new-limit)
+                 :report "Ask the model again with a larger output limit."
+                 :interactive (lambda ()
+                                (format *query-io* "~&New output limit, in tokens: ")
+                                (finish-output *query-io*)
+                                (list (parse-integer (read-line *query-io*))))
+                 (check-type new-limit (integer 1))
+                 ;; The loop goes on to the next step, which sends the same history with the
+                 ;; new limit.
+                 (setf limit new-limit))
+               (cnd:accept-truncated ()
+                 :report "End the turn with the cut-off text, marked as truncated."
+                 (when (plusp (length text))
+                   (%append-history agent (llm:msg "assistant" (list (llm:text-part text)))))
+                 (evt:emit :answer :text text :truncated t)
+                 (return (values text :truncated)))
+               (cnd:abandon-turn ()
+                 :report "End the turn with no answer."
+                 (return (values nil :abandoned)))))
+            (t
+             (%append-history agent (%assistant-message completion))
+             (if (null calls)
+                 (progn
+                   (evt:emit :answer :text text)
+                   (return text))
+                 (%append-history agent (%tool-results-message agent calls
+                                                               :permit permit))))))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Delegation: an agent as another agent's means (multi-agent coordination, A).
@@ -454,7 +527,8 @@ acyclic to stay finite."
 ;;;     is a fact about the chain rather than a comment.
 ;;; --------------------------------------------------------------------------
 
-(defun run-turn-through (agent input &key (locale "en") chain (max-steps 8) permit)
+(defun run-turn-through (agent input &key (locale "en") chain (max-steps 8) permit
+                                          max-tokens)
   "Run one turn for AGENT through CHAIN, returning the final TURN (not a string).
 
 CHAIN is a list of stages built with PRAXEON/TURN's ENTER-STAGE / LEAVE-STAGE /
@@ -464,15 +538,32 @@ means it never happens.
 
 Returns the turn so the caller can distinguish an answer from a refusal -- ask
 TURN:TURN-HALTED, and read TURN:TURN-NOTE for the reason. Callers wanting only the text
-can take TURN:TURN-REPLY."
-  (turn:run-chain
-   ;; Coalton checks that CHAIN is a list, not what is in it (#110).
-   (boundary:check-elements chain 'aion/interceptor:interceptor
-                            :function 'turn:run-chain :argument 'chain)
-   (lambda (tn)
-     ;; The one impure pivot. It reads the turn's INPUT rather than the argument, so an
-     ;; enter stage that rewrote the input (translation, redaction, a system preamble) is
-     ;; what the model actually sees.
-     (turn:with-reply tn (run-turn agent (turn:turn-input tn)
-                                   :max-steps max-steps :permit permit)))
-   (turn:make-turn input locale)))
+can take TURN:TURN-REPLY.
+
+MAX-STEPS, PERMIT and MAX-TOKENS are passed to RUN-TURN. When a handler ends the turn through
+a restart of OUTPUT-TRUNCATED (#326), the second value is RUN-TURN's: :TRUNCATED after
+ACCEPT-TRUNCATED, when the effect's reply is the cut-off text, and :ABANDONED after
+ABANDON-TURN, when the effect's reply is empty. It is NIL otherwise.
+
+The leave stages run after the effect in every case, so the final reply is what they made of the
+effect's reply. A guardrail that adds a note to the reply adds it to an abandoned turn's empty
+reply too, and the turn is returned with that note and :ABANDONED. The second value says how the
+model's part of the turn ended, not what the final reply contains."
+  (let ((outcome nil))
+    (values
+     (turn:run-chain
+      ;; Coalton checks that CHAIN is a list, not what is in it (#110).
+      (boundary:check-elements chain 'aion/interceptor:interceptor
+                               :function 'turn:run-chain :argument 'chain)
+      (lambda (tn)
+        ;; The one impure pivot. It reads the turn's INPUT rather than the argument, so an
+        ;; enter stage that rewrote the input (translation, redaction, a system preamble) is
+        ;; what the model actually sees.
+        (multiple-value-bind (reply ended)
+            (run-turn agent (turn:turn-input tn)
+                      :max-steps max-steps :permit permit :max-tokens max-tokens)
+          (setf outcome ended)
+          ;; TURN-REPLY is a String, and an abandoned turn has no text.
+          (turn:with-reply tn (or reply ""))))
+      (turn:make-turn input locale))
+     outcome)))

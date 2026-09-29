@@ -144,8 +144,11 @@ The abstraction is not aspirational; it has been falsified-tested and held.
 
 Two smaller decisions that fall out of neutrality: `temperature` is **omitted by default**
 because current models reject a non-default value (so new params stay opt-in for the same
-reason), and `*default-max-tokens*` is tunable because reasoning models need headroom or
-their deliberate step silently truncates.
+reason), and the output limit is tunable because reasoning models need headroom: per turn
+(`run-turn`'s `:max-tokens`), per agent (its `max-tokens` slot), or globally
+(`*default-max-tokens*`, 8,192). A step the limit cuts off is not treated as finished:
+`run-turn` reads the neutral stop reason `:max-tokens` and signals `output-truncated` (#326).
+Before that, a cut-off answer was returned as complete.
 
 ### 1. Tool use — "means" and the dispatch loop
 

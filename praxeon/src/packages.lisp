@@ -50,6 +50,8 @@
    #:praxeon-error
    #:means-failure #:means-failure-means #:means-failure-cause
    #:deliberation-failure
+   #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
+   #:output-truncated-text #:output-truncated-tool-calls
    #:tool-choice-unsupported #:tool-choice-unsupported-provider
    #:tool-choice-unsupported-requested
    #:missing-provenance #:missing-provenance-operation #:missing-provenance-subject
@@ -64,7 +66,8 @@
    #:parallel-child-failure-completed
    #:budget-exceeded #:budget-exceeded-requested #:budget-exceeded-available
    ;; restarts (as function-style invokers)
-   #:retry-action #:substitute-result #:abandon-action))
+   #:retry-action #:substitute-result #:abandon-action
+   #:retry-with-max-tokens #:accept-truncated #:abandon-turn))
 
 (defpackage #:praxeon/context
   (:use #:cl)
@@ -255,7 +258,7 @@
   (:export
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
-   #:agent-cache-system #:agent-system-parts
+   #:agent-cache-system #:agent-system-parts #:agent-max-tokens
    #:request-messages
    #:means-entry #:register-means #:means-permitted-p #:agent-means-for
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an

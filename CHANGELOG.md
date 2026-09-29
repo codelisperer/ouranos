@@ -12,6 +12,57 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **praxeon: a step of a turn that the output limit cuts off ends the turn with
+  `output-truncated` instead of passing as finished.** When a completion's stop reason is
+  `:max-tokens`, `run-turn` no longer returns its text as the answer and no longer runs the tool
+  calls parsed from it, and nothing from the step goes into `agent-history`. It emits a
+  `:truncated` event and signals `praxeon/conditions:output-truncated`. That condition is a
+  subtype of `deliberation-failure`, so an app's existing handler for `deliberation-failure` or
+  `praxeon-error` receives it. With no handler the turn ends at that step with the error; in
+  `praxeon/web` the reply shows the error's message. Before, a cut-off answer was returned as
+  though it were complete, and a cut-off tool call was run and the model asked again until
+  `max-steps` ran out. An app that still wants the cut-off text handles the condition with
+  `accept-truncated`. (#326)
+- **praxeon: a model whose maximum output is below 8,192 tokens needs a limit set.** The default
+  limit is now 8,192 (see Added), and a provider can refuse a request whose limit is above the
+  model's maximum. An app on such a model passes `:max-tokens`, sets the agent's `max-tokens`,
+  or binds `praxeon/llm:*default-max-tokens*`. (#326)
+- **praxeon/translate: a translation is still limited to 2,048 tokens, and a turn's reply can
+  now be longer.** `translate` has its own `:max-tokens`, which defaults to 2,048 and did not
+  change, and it returns a cut-off translation without signalling, as before. While replies were
+  capped at 1,024 tokens, 2,048 left room for the translation; with replies of up to 8,192 it may
+  not. An app that translates `run-turn`'s reply, as `praxeon/elise` does, passes `translate` a
+  `:max-tokens` large enough for its longest replies. (#326)
+
+### Added
+
+- **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`
+  (`agent-max-tokens`), and `run-turn`, `run-turn-through` and `deliberate` take `:max-tokens`.
+  The argument overrides the slot. With neither, `praxeon/llm:*default-max-tokens*` applies,
+  read when the turn starts. An app that binds `*default-max-tokens*` around
+  `run-turn` can stop and set one of these instead; the binding keeps working until it does.
+  (#326)
+- **praxeon: `praxeon/llm:*default-max-tokens*` is 8,192, up from 1,024.** 1,024 cut off
+  ordinary agent turns: the text, a tool call's arguments and a thinking model's thinking all
+  count against the limit. It applies to every call made without `:max-tokens`, including
+  `generate-structured` and `distil`. The limit is a ceiling, not a charge: providers bill the
+  tokens a model generates. `claude-sonnet-5` (`*default-model*`) and `claude-opus-4-8` accept up
+  to 128,000, and `qwen2.5` (the `openai-compatible` default model) generates up to 8,192. A long
+  reply can take longer than `*read-timeout*` (120 s) to arrive; bind that higher if it does.
+  (#326)
+- **praxeon/conditions: `output-truncated` and three restarts for it.** The readers are
+  `output-truncated-step`, `output-truncated-max-tokens`, `output-truncated-text` and
+  `output-truncated-tool-calls`. The restarts, each invoked by the function of the same name:
+  `retry-with-max-tokens` asks the model again with a larger limit for the rest of the turn, and
+  the retry counts against `max-steps`; `accept-truncated` makes `run-turn` return the cut-off
+  text with a second value, `:truncated`; `abandon-turn` makes it return NIL and `:abandoned`.
+  `run-turn-through` returns the same keyword as its second value. (#326)
+- **praxeon/event: the `:truncated` event**, with `:step`, `:max-tokens` and `:tool-calls`, the
+  names of the tool calls that were not run. The `:answer` event for text kept with
+  `accept-truncated` carries `:truncated t`. (#326)
+
 ## v0.1.3 — 2026-09-27
 
 Changes since `v0.1.2`. The tag is on `5c8fd25`.

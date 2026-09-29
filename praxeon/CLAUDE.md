@@ -42,8 +42,10 @@ examples/elise/       Elise, the PoC agent
 
 - Provider/model/key come from `PRAXEON_LLM_*` in a git-ignored `.env` (`.env.example`).
 - Current Claude models reject a non-default `temperature`; the provider omits it.
-- Reasoning models truncate the deliberate step at the default budget — bind
-  `praxeon/llm:*default-max-tokens*` higher.
+- A turn's output limit per model call is `run-turn`'s `:max-tokens`, else the agent's
+  `max-tokens` slot, else `praxeon/llm:*default-max-tokens*` (8,192). Thinking and tool-call
+  arguments count against it. A step it cuts off is not used: `run-turn` signals
+  `output-truncated` with retry / accept / abandon restarts (#326).
 - hermes is a satellite: anything an agent sends or stores externally reaches praxeon as
   an injected seam, never a dependency.
 
