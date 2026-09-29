@@ -2,7 +2,8 @@
 
 (cl:defpackage #:klio
   (:use #:cl)
-  (:local-nicknames (#:spin #:spinneret))
+  (:local-nicknames (#:spin #:spinneret)
+                    (#:log #:aion/log))
   (:documentation "klio -- a git-backed content engine for hyperion sites.
 
 A LIBRARY, not an application. A site instantiates it with a theme, a content directory and
@@ -43,6 +44,11 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            ;; collections -- a directory of documents, sorted by a field, for a theme (#353)
            #:*request-tree* #:*request-now* #:current-tree #:document-field
            #:tree-collection #:collection #:tree-document-by-slug #:document-by-slug
+           ;; controlled vocabularies -- a list in one file, checked at load (#353)
+           #:vocabulary #:make-vocabulary #:vocabulary-name #:vocabulary-labels
+           #:vocabulary-entries #:vocabulary-entry-p #:content-tree-vocabularies
+           ;; reload on change, for development (#353)
+           #:watch-site #:stop-watching #:watcher #:watcher-reloads #:content-snapshot
            ;; static export -- the site as files for a static host (#353)
            #:export-site #:export-refused #:export-refused-directory #:export-refused-reason
            ;; serving -- the tree as a hyperion application; the look is the site's

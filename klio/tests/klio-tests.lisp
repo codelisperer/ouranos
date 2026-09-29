@@ -866,7 +866,7 @@ included; a file whose name only begins with the collection's name is not a memb
       (is (null (k:document-by-slug site "skills")))
       (is (null (k:document-by-slug site "secret")) "a draft is not found, so a link cannot reveal it")
       (k:with-dev-mode ()
-        (is (k:document-by-slug site "secret") "the control: in dev mode it is")))))
+        (is (not (null (k:document-by-slug site "secret"))) "the control: in dev mode it is")))))
 
 (test document-field-reads-core-fields-and-extra-keys
   (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01")))
@@ -1002,3 +1002,164 @@ It must still list the two roles of the tree the request started with."
                                               (%titles (k:collection site "roles" :sort-by "start"
                                                                                   :order :descending)))))
         (is (equal "Beta,Alpha" (%file-text out "index.html")))))))
+
+;;; --- a controlled vocabulary (#353) ------------------------------------------------------
+;;;
+;;; The personal site's shape, with invented labels: `groups', each with a `name' and a list
+;;; of `skills', in one file; references in a page's `skills' and in a bullet's `skills'.
+
+(defparameter +skills+
+  (format nil "---~%title: \"Skills\"~%groups:~%  - name: \"Languages\"~%    skills: [\"C#\", \"C++\", \"Common Lisp\"]~%  - name: \"Platforms\"~%    skills: [\".NET\", \"Serverless functions\"]~%---~%~%Skills.~%"))
+
+(defun %skilled-role (title page-skills bullet-skills)
+  (format nil "---~%title: \"~A\"~%skills: [~{\"~A\"~^, ~}]~%bullets:~%  - text: \"Did a thing.\"~%    skills: [~{\"~A\"~^, ~}]~%---~%~%x~%"
+          title page-skills bullet-skills))
+
+(defparameter +skills-vocabulary+
+  (k:make-vocabulary "skills" :source "skills" :entries '("groups" "skills")
+                              :references '(("skills") ("bullets" "skills"))))
+
+(defparameter +skills-extra+ '("groups" "skills" "bullets"))
+
+(defun %load-with-skills (dir)
+  (k:load-tree dir :known-extra +skills-extra+ :vocabularies (list +skills-vocabulary+)))
+
+(test references-to-known-labels-load-and-labels-match-exactly
+  (with-content-dir (dir ("skills.md" . +skills+)
+                         ("roles/a.md" . (%skilled-role "A" '("C#" ".NET") '("C++"))))
+    (multiple-value-bind (tree failures) (%load-with-skills dir)
+      (is (null failures))
+      (is (not (null tree)))
+      (is (equal '("C#" "C++" "Common Lisp" ".NET" "Serverless functions")
+                 (gethash "skills" (k:content-tree-vocabularies tree)))
+          "every group's skills, in the order the file lists them"))))
+
+(test an-unknown-label-is-a-load-failure-naming-both-files
+  (with-content-dir (dir ("skills.md" . +skills+)
+                         ("roles/a.md" . (%skilled-role "A" '("c#") '("C++")))
+                         ("roles/b.md" . (%skilled-role "B" '("C#") '("Cobol"))))
+    (multiple-value-bind (tree failures) (%load-with-skills dir)
+      (is (null tree) "nothing is published")
+      (is (equal '("roles/a" "roles/b") (sort (mapcar #'k:load-failure-file failures) #'string<))
+          "the referring files, one failure each: lowercase c# is not C#, and a bullet's
+reference is checked like the page's")
+      (let ((reason (k:load-failure-reason (find "roles/b" failures :key #'k:load-failure-file
+                                                                   :test #'string=))))
+        (is (search "\"Cobol\"" reason) "the label")
+        (is (search "bullets > skills" reason) "where it was")
+        (is (search "in skills" reason) "and the file that holds the list")))
+    (is (typep (nth-value 1 (ignore-errors
+                             (k:boot (k:make-site dir :known-extra +skills-extra+
+                                                      :vocabularies (list +skills-vocabulary+)))))
+               'k:content-load-failed)
+        "at boot the site refuses to start")))
+
+(test a-bad-reference-at-reload-keeps-the-last-good-tree
+  (with-content-dir (dir ("skills.md" . +skills+)
+                         ("roles/a.md" . (%skilled-role "A" '("C#") '())))
+    (let ((site (k:make-site dir :known-extra +skills-extra+ :vocabularies (list +skills-vocabulary+))))
+      (k:boot site)
+      (with-open-file (out (merge-pathnames "roles/a.md" dir) :direction :output :if-exists :supersede)
+        (write-string (%skilled-role "A edited" '("Fortran") '()) out))
+      (is (eq :refused (k:reload site)))
+      (is (equal "A" (k:document-field (k:tree-document (k:site-tree site) "roles/a") "title"))
+          "the edit that broke the reference is not served"))))
+
+(test a-missing-or-empty-vocabulary-source-is-a-failure
+  (with-content-dir (dir ("roles/a.md" . (%skilled-role "A" '("C#") '())))
+    (let ((failures (nth-value 1 (%load-with-skills dir))))
+      (is (find "skills" failures :key #'k:load-failure-file :test #'string=)
+          "no skills document at all")))
+  (with-content-dir (dir ("skills.md" . +good+))
+    (let ((failures (nth-value 1 (%load-with-skills dir))))
+      (is (search "finds no entries" (k:load-failure-reason (first failures)))
+          "a skills document with nothing at the declared path"))))
+
+(test a-theme-looks-up-vocabulary-entries-from-the-requests-tree
+  (with-content-dir (dir ("skills.md" . +skills+))
+    (let* ((site (k:make-site dir :known-extra +skills-extra+ :vocabularies (list +skills-vocabulary+)))
+           (seen nil)
+           (app (k:site-app site :index-theme
+                            (lambda (site documents)
+                              (declare (ignore documents))
+                              (setf seen (list (k:vocabulary-entry-p site "skills" ".NET")
+                                               (k:vocabulary-entry-p site "skills" "Cobol")
+                                               (length (k:vocabulary-entries site "skills"))))
+                              "ok"))))
+      (k:boot site)
+      (%get app "/")
+      (is (equal '(t nil 5) seen))
+      (is (null (k:vocabulary-entries site "tools")) "a vocabulary the site did not declare"))))
+
+(test make-vocabulary-refuses-a-malformed-declaration
+  (is (typep (nth-value 1 (ignore-errors (k:make-vocabulary "x" :source "" :entries '("a")))) 'error))
+  (is (typep (nth-value 1 (ignore-errors (k:make-vocabulary "x" :source "s" :entries "a"))) 'error))
+  (is (typep (nth-value 1 (ignore-errors (k:make-vocabulary "x" :source "s" :entries '("a")
+                                                               :references '("skills"))))
+             'error)
+      "a reference is a path, a list of keys, not a key"))
+
+;;; --- reloading on change, for development (#353) ----------------------------------------
+
+(defun %await (predicate &key (seconds 10))
+  "Call PREDICATE every 20 ms until it is true or SECONDS pass; return its last value."
+  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
+        for value = (funcall predicate)
+        until (or value (> (get-internal-real-time) deadline))
+        do (sleep 0.02)
+        finally (return value)))
+
+(defun %write-content (dir name text)
+  (with-open-file (out (merge-pathnames name dir) :direction :output :if-exists :supersede
+                                                  :if-does-not-exist :create)
+    (write-string text out)))
+
+(defun %served-title (site key)
+  (let ((d (k:tree-document (k:site-tree site) key)))
+    (and d (k:document-field d "title"))))
+
+(test the-watcher-reloads-an-edit-and-keeps-the-last-good-tree-on-a-bad-one
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (outcomes '())
+           (lock (sb-thread:make-mutex))
+           (watcher nil))
+      (k:boot site)
+      (unwind-protect
+           (progn
+             (setf watcher (k:watch-site site :interval 0.05
+                                              :on-reload (lambda (outcome failures)
+                                                           (declare (ignore failures))
+                                                           (sb-thread:with-mutex (lock)
+                                                             (push outcome outcomes)))))
+             (%write-content dir "one.md" (format nil "---~%title: \"Edited\"~%---~%~%x~%"))
+             (is (%await (lambda () (equal "Edited" (%served-title site "one"))))
+                 "an edited file is served after the next poll")
+             (%write-content dir "one.md" +bad+)
+             (is (%await (lambda () (sb-thread:with-mutex (lock) (eq :refused (first outcomes)))))
+                 "a malformed edit is refused")
+             (is (equal "Edited" (%served-title site "one")) "and the last good version is still served")
+             (%write-content dir "two.md" +also-good+)
+             (%write-content dir "one.md" (format nil "---~%title: \"Fixed\"~%---~%~%x~%"))
+             (is (%await (lambda () (equal "Fixed" (%served-title site "one"))))
+                 "fixing it publishes again, the watcher having kept running")
+             (is (equal "Another" (%served-title site "two")) "a new file is picked up"))
+        (when watcher (k:stop-watching watcher))))))
+
+(test a-same-length-edit-in-the-same-second-is-still-seen
+  ;; A write date can have one-second resolution, so the snapshot includes a hash of the text.
+  (with-content-dir (dir ("one.md" . (format nil "---~%title: \"Aaaa\"~%---~%~%x~%")))
+    (let ((before (k:content-snapshot dir)))
+      (%write-content dir "one.md" (format nil "---~%title: \"Bbbb\"~%---~%~%x~%"))
+      (is (not (equal before (k:content-snapshot dir)))))))
+
+(test stop-watching-ends-the-watcher
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (watcher (progn (k:boot site) (k:watch-site site :interval 0.05)))
+           (thread (klio::watcher-thread watcher)))
+      (is (sb-thread:thread-alive-p thread) "control: it is running")
+      (k:stop-watching watcher)
+      (is (not (sb-thread:thread-alive-p thread)))
+      (k:stop-watching watcher)
+      (is (= 0 (k:watcher-reloads watcher)) "and nothing changed, so nothing was reloaded"))))

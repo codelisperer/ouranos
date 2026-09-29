@@ -10,7 +10,8 @@
   ;; pulled in clack-handler-hunchentoot would choose for every consumer, and choose the
   ;; backend ADR-0011 called a stop-gap.
   :depends-on ("hyperion"
-               "spinneret")
+               "spinneret"
+               "aion/log")       ; watch.lisp logs each reload and what refused it (#353)
   :serial t
   :components ((:module "src"
                 :serial t
@@ -18,6 +19,7 @@
                              (:file "klio")
                              (:file "visibility")    ; request-time scheduling
                              (:file "frontmatter")
+                             (:file "vocabulary")    ; a controlled list and its check (#353)
                              (:file "search")         ; in-memory index, built at load
                              (:file "highlight")     ; a small CL highlighter (pre-publication issue 359 Q3)
                              (:file "render")        ; markdown, via hyperion/markdown
@@ -25,6 +27,7 @@
                              (:file "content")       ; the tree, and the all-or-nothing swap
                              (:file "collection")    ; collections and lookups for themes (#353)
                              (:file "export")        ; the site rendered to static files (#353)
+                             (:file "watch")         ; reload on change, for development (#353)
                              (:file "serve"))))      ; the tree as a hyperion application
   :in-order-to ((test-op (test-op "klio/tests"))))
 

@@ -103,6 +103,16 @@ call a theme makes."
 is not found, so a theme that links to one cannot reveal that it exists."
   (find slug (tree-readable-documents tree :now now) :key #'document-slug :test #'string=))
 
+(defun vocabulary-entries (site name)
+  "The labels of the vocabulary NAME in CURRENT-TREE, in the order its source document lists
+them, or NIL for a vocabulary the site did not declare (#353)."
+  (let ((tree (current-tree site)))
+    (and tree (gethash name (content-tree-vocabularies tree)))))
+
+(defun vocabulary-entry-p (site name label)
+  "Whether LABEL is an entry of the vocabulary NAME, matched exactly (#353)."
+  (and (member label (vocabulary-entries site name) :test #'string=) t))
+
 (defun document-by-slug (site slug &key (now *request-now*))
   "TREE-DOCUMENT-BY-SLUG over CURRENT-TREE. The call a theme makes."
   (tree-document-by-slug (current-tree site) slug :now now))

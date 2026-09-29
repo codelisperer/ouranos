@@ -26,6 +26,22 @@ per readable page (`roles/a.html` for the page served at `/roles/a`, or `roles/a
 with `:layout :directory`). It writes nothing if any page fails to render, and it refuses a
 non-empty directory unless given `:clean t`. The site copies its own static assets.
 
+A controlled list, such as skills, is declared once and checked on every load: a page that
+refers to a label that is not in the list fails to load, naming both files.
+
+```lisp
+(klio:make-site #p"content/"
+  :known-extra '("groups" "skills" "bullets")
+  :vocabularies (list (klio:make-vocabulary "skills" :source "skills" :entries '("groups" "skills")
+                                            :references '(("skills") ("bullets" "skills")))))
+(klio:vocabulary-entry-p *site* "skills" "C#")       ; in a theme
+```
+
+In development, `(klio:watch-site *site*)` reloads when a content file changes and keeps
+serving the last good content when an edit breaks a file; `stop-watching` stops it. How a
+production server is told to reload is recorded, not yet built, in
+`docs/adr/0002-reload-in-production.md`.
+
 ## Develop
 
     cons build   # compile

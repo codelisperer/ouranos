@@ -245,6 +245,18 @@ Changes since `v0.1.3`. The tag is on `b68ccd4`.
     or `:directory` (`roles/a/index.html`). It writes nothing unless every page renders. It
     signals `export-refused` for a non-empty directory without `:clean t`, for the content
     directory or one containing it, and for a site that has not booted.
+- **klio: a controlled vocabulary checked at load, and a reload on change for development.**
+  (#353)
+  - `make-vocabulary` declares a list held in one document, such as the skills in `groups`,
+    and the paths in other documents that refer to it, such as `skills` on a page or on a
+    bullet. `make-site` and `load-tree` take `:vocabularies`. A reference to a label that is not
+    in the list, matched exactly, is a load failure naming the referring file and the list's
+    file, so boot refuses to start and reload keeps the last good tree. A missing list document
+    is a failure too. `vocabulary-entries` and `vocabulary-entry-p` are the lookups for a theme.
+  - `watch-site` reloads a site whenever a file in its content directory is edited, added or
+    removed, checking every `:interval` seconds, and keeps serving the last good content when
+    an edit breaks a file. `stop-watching` stops it. It is for development; how a production
+    server is told to reload is recorded, not built, in klio's ADR-0002.
 - **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`
   (`agent-max-tokens`), and `run-turn`, `run-turn-through` and `deliberate` take `:max-tokens`.
   The argument overrides the slot. With neither, `praxeon/llm:*default-max-tokens*` applies,
