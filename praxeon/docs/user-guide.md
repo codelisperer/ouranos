@@ -813,7 +813,61 @@ Similarity is an exact scan of one corpus in this first build, with no vector in
 Postgres 18.6 with pgvector 0.8.6 at 1024 dimensions: about 8 ms for a corpus of 2,400 sections
 and 32 ms for 10,000 (`praxeon/bench/retrieval-scan.lisp` repeats the measurement).
 
-## 13. Run the tests
+## 13. Keep large tool results out of the prompt (#319)
+
+A tool result stays in the conversation, and so in the prompt, for every later step. In an agent
+that fetches pages or runs queries, results soon make up most of what each step sends.
+`offload-tool-results` keeps every result in a result store and lets the agent read back the
+part it needs:
+
+```lisp
+(praxeon/actor:offload-tool-results
+ agent (praxeon/results:make-memory-result-store)
+ :conversation "conv-42"        ; results are kept and erased under this id
+ :threshold 2000                ; estimated tokens; a larger result goes in as a stand-in
+ :clear-budget 60000            ; optional: clear older results once the prompt passes this
+ :keep-recent 3                 ; the last three results are never cleared
+ :never-clear '("get-order"))   ; nor is any result of these means
+```
+
+- A result over `:threshold` goes into the conversation as a **stand-in**: the tool's name, its
+  arguments, the result's size, its first lines and a handle such as `res-0a1b2c3d4e5f6a7b`.
+- The agent gets a means, `read-result`, which takes the handle and returns a range of lines, a
+  range of characters, or the lines that contain a string. What it returns is the stored text
+  exactly, never a summary, so anything the agent quotes is what the tool said. A range larger
+  than `*read-result-max-characters*` (16,000) is refused with its size, not cut.
+- With `:clear-budget`, once the messages a step sends pass the budget, older results are
+  replaced by short stand-ins **in what is sent**, oldest first, until the messages are at most
+  `:clear-target` (half the budget by default). `agent-history`, the record, still holds them,
+  and a cleared result can still be read by its handle. The cleared results stay cleared, so the
+  start of the prompt stays the same from one step to the next and a provider's prefix cache
+  keeps working; it changes only when a new batch is cleared.
+- `(praxeon/actor:forget-agent-results agent)` erases the conversation's stored results. A
+  fetched page or a record can hold personal data (#150).
+- `praxeon/results-db` keeps results in a database through mnemosyne, for an app that keeps its
+  conversations: `(praxeon/results-db:make-db-result-store connection-or-pool :ensure t)`.
+
+**Nothing here is on by default**, and the numbers above are only an example. The maintainer's
+rule is that a setting becomes a default only when a measurement with a real model shows the
+task still succeeds with it. `praxeon/bench/tool-results.lisp` runs a tool-heavy task under each
+configuration and reports task success, input tokens and the share a prefix cache could reuse;
+pass `:provider` to run it with a real model. With its scripted model, which knows the task,
+the figures on WSL2 Linux were:
+
+```
+20 tasks of 6 pages, seed 316, scripted model; tokens are estimates and the cache is simulated
+configuration    succeeded  input tokens   cached share
+full              20 of  20         613060        71.5%
+offload           20 of  20          85479        77.4%
+clear             20 of  20         256960        30.0%
+```
+
+The scripted model's success says that the tools make the answer reachable, not that a model
+finds it. The clearing row shows a setting to avoid: when each result is about half the budget,
+a batch runs after almost every result, and each batch changes the start of the prompt, so the
+cached share falls.
+
+## 14. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 
