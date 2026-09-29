@@ -153,3 +153,18 @@ or a model change."))
      (if (plusp pending)
          (make-truncated :reason :not-embedded :pending pending)
          (make-complete)))))
+
+;;; --- the entry point a caller searches through ----------------------------------------
+
+(defgeneric retrieve (corpus embedder query &key limit)
+  (:documentation "The passages of CORPUS that answer QUERY, best first, as a RETRIEVAL-RESULT:
+the same type RETRIEVE-SIMILAR and RETRIEVE-EXACT return, with the same COMPLETE and TRUNCATED
+values. This is the call an agent's search tool makes (REGISTER-CORPUS-SEARCH), so that how a
+corpus is searched can change without changing the tool.
+
+For a CORPUS it is RETRIEVE-SIMILAR with a default LIMIT of 20. A later version will choose the
+method by the corpus's retrieval strategy (#316); a keyword added for that will default to NIL,
+so a call written against this one keeps working."))
+
+(defmethod retrieve ((corpus corpus) embedder query &key (limit 20))
+  (retrieve-similar corpus embedder query :limit limit))

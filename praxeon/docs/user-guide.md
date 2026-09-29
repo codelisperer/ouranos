@@ -809,6 +809,36 @@ and for a translation whether it was made from the current original (`:current`,
 `passage->ctx-item` turns a passage into a context item, and takes a function that writes the
 text the model reads, so the app decides how a citation looks.
 
+`retrieve` takes the same arguments as `retrieve-similar` and returns the same result, with a
+default `:limit` of 20. It is the call to make when the app does not care how a corpus is
+searched: today it is `retrieve-similar`, and a later version will follow the corpus's retrieval
+strategy (#316) without a change at the call.
+
+**Let an agent search.** `register-corpus-search` gives an agent a means that searches one
+corpus:
+
+```lisp
+(praxeon/retrieval:register-corpus-search
+ agent *terms* *embedder*
+ (lambda (passage)                    ; the text the model reads for one passage
+   (format nil "[~A] ~A"
+           (praxeon/retrieval:provenance-locator (praxeon/retrieval:passage-provenance passage))
+           (praxeon/retrieval:passage-text passage)))
+ :name "search-terms"
+ :description "Search the terms and conditions. Returns clauses with their numbers."
+ :on-result (lambda (query result) (remember-what-was-shown query result)))
+```
+
+- The model passes a `query`, and a `match` of `"meaning"` (the default, through `retrieve`) or
+  `"words"` (through `retrieve-exact`, every word required). With a NIL embedder only a search by
+  words is offered, and the schema has no `match`.
+- The model reads the passages in the order the search returned them, each as the function
+  writes it, and one sentence when the result is truncated: more matches than `:limit`, or parts
+  of the corpus not yet embedded. It never sees a passage's distance.
+- `:on-result` is called with the query and the `retrieval-result` before the model sees
+  anything, so the app can keep the provenance it cites from. `:limit` and `:capability` are
+  optional; a failed search reaches the caller as `means-failure`, as any means does.
+
 Similarity is an exact scan of one corpus in this first build, with no vector index. Measured on
 Postgres 18.6 with pgvector 0.8.6 at 1024 dimensions: about 8 ms for a corpus of 2,400 sections
 and 32 ms for 10,000 (`praxeon/bench/retrieval-scan.lisp` repeats the measurement).

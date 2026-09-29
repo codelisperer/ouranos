@@ -115,7 +115,8 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "corpus")
-                             (:file "similar")))))
+                             (:file "similar")
+                             (:file "tool")))))
 
 (defsystem "praxeon/retrieval/tests"
   :description "praxeon/retrieval against a real Postgres with pgvector (#138)."

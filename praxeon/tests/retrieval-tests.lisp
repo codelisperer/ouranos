@@ -12,6 +12,7 @@
                     (#:llm #:praxeon/llm)
                     (#:cnd #:praxeon/conditions)
                     (#:ctx #:praxeon/context)
+                    (#:actor #:praxeon/actor)
                     (#:conn #:mnemosyne/conn)
                     (#:url #:mnemosyne/url)
                     (#:mig #:mnemosyne/migrate)
@@ -728,3 +729,125 @@ chunk."
                    (first (rt:retrieval-result-passages (rt:retrieve-exact corpus "refund"))))))
         (is (eq :whole-section (rt:provenance-boundary prov)))
         (is (null (rt:provenance-sub-locator prov)))))))
+
+;;; --- the retrieve entry point and the agent's search means (#138) ---------------------
+
+(defun %render (passage)
+  "What a test app shows the model: the section's locator, then the passage text."
+  (format nil "[~A] ~A" (rt:provenance-locator (rt:passage-provenance passage))
+          (rt:passage-text passage)))
+
+(defun %args (&rest pairs)
+  "A tool-call argument table, as the loop hands one to a means."
+  (let ((h (make-hash-table :test 'equal)))
+    (loop for (k v) on pairs by #'cddr do (setf (gethash k h) v))
+    h))
+
+(defun %expected-text (result)
+  (format nil "~{~A~^~%~%~}" (mapcar #'%render (rt:retrieval-result-passages result))))
+
+(test retrieve-is-retrieve-similar-with-a-default-limit-of-20
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "many"))
+          (embedder (make-instance 'word-embedder)))
+      ;; Section I mentions "refund" I times, so every section is at a different distance from
+      ;; the query and the order has no ties.
+      (rt:ingest corpus (loop for i from 1 to 25
+                              collect (sec (format nil "~D" i)
+                                           (with-output-to-string (out)
+                                             (write-string "Rule:" out)
+                                             (dotimes (k i) (write-string " refund" out)))))
+                 embedder)
+      (let ((default (rt:retrieve corpus embedder "refund")))
+        (is (= 20 (length (rt:retrieval-result-passages default))))
+        (is (equal (ids (rt:retrieve-similar corpus embedder "refund" :limit 20)) (ids default))
+            "the same passages in the same order as RETRIEVE-SIMILAR at 20"))
+      (is (equal (ids (rt:retrieve-similar corpus embedder "refund" :limit 3))
+                 (ids (rt:retrieve corpus embedder "refund" :limit 3)))
+          ":limit is passed through"))))
+
+(test the-search-means-shows-the-rendered-passages-in-order-and-reports-the-result
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (embedder (make-instance 'word-embedder))
+           (agent (actor:make-agent :name "searcher"))
+           (seen '()))
+      (rt:ingest corpus +policy+ embedder)
+      (is (equal "search-documents"
+                 (rt:register-corpus-search agent corpus embedder #'%render
+                                            :on-result (lambda (q r) (push (cons q r) seen)))))
+      (let ((text (actor:act agent "search-documents" (%args "query" "refund")))
+            (expected (rt:retrieve corpus embedder "refund")))
+        (is (string= (%expected-text expected) text)
+            "every passage, rendered by the app, in the order RETRIEVE returned them")
+        (is (search "[§2] A refund is issued" text) "the best match is in it")
+        (is (= 1 (length seen)))
+        (is (equal "refund" (car (first seen))))
+        (is (equal (ids expected) (ids (cdr (first seen))))
+            "ON-RESULT receives the result the model was shown")))))
+
+(test a-search-by-words-uses-exact-retrieval-and-embeds-nothing
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (embedder (make-instance 'word-embedder))
+           (agent (actor:make-agent)))
+      (rt:ingest corpus +policy+ embedder)
+      (rt:register-corpus-search agent corpus embedder #'%render)
+      (setf (recorded-calls embedder) '())
+      (let ((text (actor:act agent "search-documents" (%args "query" "30  DAYS" "match" "words"))))
+        (is (string= (%expected-text (rt:retrieve-exact corpus '("30" "DAYS"))) text))
+        (is (search "[§2]" text))
+        (is (null (recorded-calls embedder)) "a search by words never calls the embedder")))))
+
+(test with-no-embedder-the-means-offers-and-runs-a-search-by-words-only
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (agent (actor:make-agent)))
+      (rt:sync-corpus corpus +policy+)
+      (rt:register-corpus-search agent corpus nil #'%render :name "policy")
+      (let* ((spec (find "policy" (actor:agent-tool-specs agent)
+                         :key #'llm:tool-spec-name :test #'string=))
+             (props (gethash "properties" (llm:tool-spec-schema spec))))
+        (is (gethash "query" props))
+        (is (null (gethash "match" props)) "no \"match\" is offered without an embedder"))
+      (is (string= (%expected-text (rt:retrieve-exact corpus '("refund")))
+                   (actor:act agent "policy" (%args "query" "refund"))))
+      (let* ((agent2 (actor:make-agent))
+             (corpus2 (rt:make-corpus store "policy")))
+        (rt:register-corpus-search agent2 corpus2 (make-instance 'word-embedder) #'%render)
+        (is (equalp #("meaning" "words")
+                    (gethash "enum" (gethash "match" (gethash "properties"
+                                                              (llm:tool-spec-schema
+                                                               (first (actor:agent-tool-specs agent2)))))))
+            "with an embedder, both kinds are offered")))))
+
+(test the-model-is-told-when-a-search-result-is-truncated
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (embedder (make-instance 'word-embedder))
+           (agent (actor:make-agent)))
+      ;; Synced and never embedded: a search by meaning has no candidates, and says why.
+      (rt:sync-corpus corpus (list (sec "1" "A refund is issued.") (sec "2" "Refund rules.")
+                                   (sec "3" "Privacy.")))
+      (rt:register-corpus-search agent corpus embedder #'%render :limit 1)
+      (is (string= (format nil "No passages matched.~%~%3 parts of this collection could not be searched by meaning yet, so this result may be missing passages. A search by words covers every part.")
+                   (actor:act agent "search-documents" (%args "query" "refund"))))
+      ;; Two passages contain "refund" and the limit is 1.
+      (let ((text (actor:act agent "search-documents" (%args "query" "refund" "match" "words"))))
+        (is (search "More passages matched than are shown here." text))
+        (is (= 1 (count #\[ text)) "one passage, as :limit 1 asks")))))
+
+(test the-search-means-refuses-bad-registration-and-bad-arguments
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (embedder (make-instance 'word-embedder))
+           (agent (actor:make-agent)))
+      (signals error (rt:register-corpus-search agent corpus embedder nil))
+      (signals error (rt:register-corpus-search agent "policy" embedder #'%render))
+      (signals error (rt:register-corpus-search agent corpus embedder #'%render :limit 0))
+      (signals error (rt:register-corpus-search agent corpus embedder #'%render :on-result t))
+      (rt:register-corpus-search agent corpus embedder #'%render)
+      (signals cnd:means-failure (actor:act agent "search-documents" (%args "query" "   ")))
+      (signals cnd:means-failure (actor:act agent "search-documents" (%args)))
+      (signals cnd:means-failure
+        (actor:act agent "search-documents" (%args "query" "refund" "match" "fuzzy"))))))
