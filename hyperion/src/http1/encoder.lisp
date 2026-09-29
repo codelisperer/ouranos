@@ -200,7 +200,13 @@ BODY-LENGTH octets.
 
 BODY-LENGTH is the number the caller MEASURED, not one it was told. Content-Length,
 Transfer-Encoding and Connection are dropped from HEADERS and written from the arguments,
-so the framing on the wire cannot disagree with the bytes that follow it."
+so the framing on the wire cannot disagree with the bytes that follow it.
+
+A STATUS THAT CANNOT CARRY A BODY (BODY-FORBIDDEN?: 1xx, 204, 304) gets no Content-Length,
+whatever BODY-LENGTH says. RFC 9110 forbids Content-Length on 1xx and 204, and allows it on a
+304 only as the length the full response would have had, which this encoder does not know;
+`Content-Length: 0' on a 304 says the resource is empty (#373, found by Clack's handler
+suite). The caller writes no body after such a head: server-uv drops one a handler supplied."
     (if (not (status-ok? status))
         (Refused (<> "status is not a three-digit HTTP status: " (the String (into status))))
         (match (check-headers headers)
@@ -209,7 +215,9 @@ so the framing on the wire cannot disagree with the bytes that follow it."
            (Encoded
             (<> (status-line status)
                 (<> (render-headers headers)
-                    (<> (<> "Content-Length: " (<> (the String (into body-length)) crlf))
+                    (<> (if (body-forbidden? status)
+                            ""
+                            (<> "Content-Length: " (<> (the String (into body-length)) crlf)))
                         (<> (<> "Connection: "
                                 (<> (if keep-alive "keep-alive" "close") crlf))
                             crlf)))))))))

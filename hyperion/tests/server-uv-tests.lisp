@@ -1754,3 +1754,24 @@ the encoder now names."
       (is (string= "HTTP/1.1 429 Too Many Requests" (subseq r 0 (search +crlf+ r))))
       (is (equal "7" (header-of r "Retry-After")))
       (is (string= "slow down" (body-of r))))))
+
+;;; --- a status that carries no body (#373) ------------------------------------
+
+(test a-body-on-a-bodiless-status-is-dropped-and-the-connection-survives
+  "A 304 or 204 has no Content-Length and no body. A body the handler supplied is dropped, not
+answered with 500, so an app that works on Hunchentoot works here. Writing it would be read as
+the next response, so the second request on the connection is the real check."
+  (dolist (status '(304 204))
+    (with-server (port (lambda (env)
+                         (if (string= "/first" (getf env :path-info))
+                             (list status '(:etag "\"v1\"") '("this body must not be sent"))
+                             (list 200 +ok+ '("second")))))
+      (let ((rs (exchange port (list (req "GET /first HTTP/1.1" "Host: x")
+                                     (req "GET /second HTTP/1.1" "Host: x")))))
+        (is (= status (status-of (first rs))))
+        (is (null (header-of (first rs) "Content-Length")) "no Content-Length on ~D" status)
+        (is (string= "" (body-of (first rs))))
+        (is (eql 0 (search "HTTP/1.1 200" (second rs)))
+            "the next octets on the connection are the next response's status line, not the dropped body: ~S"
+            (subseq (second rs) 0 (min 40 (length (second rs)))))
+        (is (string= "second" (body-of (second rs))))))))

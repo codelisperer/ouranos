@@ -271,6 +271,16 @@ been produced yet -- the streaming shape is a function AS the body, not among th
     (function
      (error "hyperion/server-uv: a function inside a list body is not a stream. A streamed body is the function ITSELF: (status headers (lambda (writer) ...)). See pre-publication issue 117."))))
 
+(defun %empty-body-p (body)
+  "Whether BODY would write no octets: NIL, an empty string or vector, or a list of those. A
+pathname or a function is never empty here, because it is not read to find out."
+  (typecase body
+    (null t)
+    (string (zerop (length body)))
+    ((vector (unsigned-byte 8)) (zerop (length body)))
+    (cons (every #'%empty-body-p body))
+    (t nil)))
+
 (defun %ring-headers-flat (headers)
   "A Ring header plist -- (:content-type \"text/html\") -- as the flat name/value list of
 STRINGS h1:ENCODE-HEAD-FLAT takes.
@@ -1177,6 +1187,16 @@ written into a closed socket."
                     nil)
                   (handler-case
                       (destructuring-bind (status headers body) result
+                        ;; A 1xx, 204 or 304 carries no body, and the encoder writes no
+                        ;; Content-Length for one. A body a handler supplied anyway is dropped
+                        ;; with a warning rather than refused, as Hunchentoot does, so a Clack
+                        ;; app that works there does not get a 500 here (#373). Writing it would
+                        ;; be read by the client as the start of the next response.
+                        (when (h1:body-forbidden? status)
+                          (unless (%empty-body-p body)
+                            (log:warn "server-uv: dropped the body of a response whose status carries none"
+                                      :status status))
+                          (setf body nil))
                         (cond
                           ((functionp body)
                            (%stream-response conn app state status headers body keep-alive))

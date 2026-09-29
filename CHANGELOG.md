@@ -92,6 +92,13 @@ its tag.
   `retrieve-similar` with a default `:limit` of 20; a later version will follow the corpus's
   retrieval strategy (#316) with no change for callers. (#138)
 
+- **hyperion/server-uv: a 1xx, 204 or 304 response has no Content-Length and no body.** It
+  used to be sent with `Content-Length: 0`, which on a 304 says the resource is empty (RFC 9110
+  allows Content-Length on a 304 only as the full response's length). A body a handler returns
+  with one of these statuses is now dropped, with the warning `server-uv: dropped the body of a
+  response whose status carries none`, instead of being written after the head, where a client
+  would read it as the next response. Found by Clack's handler suite (#373).
+
 ## v0.1.4 — 2026-09-29
 
 Changes since `v0.1.3`. The tag is on `b68ccd4`.
