@@ -12,6 +12,18 @@ its tag.
 
 ## Unreleased
 
+### Added
+
+- **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
+  `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
+  `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with
+  `section-chunker`. A longer one becomes runs of whole paragraphs of up to about `:target`
+  characters (default 900), with boundary `:whole-paragraph` and sub-locators `"part 1"`,
+  `"part 2"` and so on. A paragraph is never split. A line holding only spaces, tabs or a
+  carriage return counts as blank. `chunker-id` includes both settings, so changing either one
+  re-chunks the corpus on its next `sync-corpus`. An app that wrote its own chunker for long
+  sections can use this one instead. (#322)
+
 ## v0.1.4 — 2026-09-29
 
 Changes since `v0.1.3`. The tag is on `b68ccd4`.
@@ -126,16 +138,6 @@ Changes since `v0.1.3`. The tag is on `b68ccd4`.
   at startup on a Mac without Homebrew, whichever shape it has; that is #78 and #334.
 
 ### Added
-
-- **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
-  `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
-  `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with
-  `section-chunker`. A longer one becomes runs of whole paragraphs of up to about `:target`
-  characters (default 900), with boundary `:whole-paragraph` and sub-locators `"part 1"`,
-  `"part 2"` and so on. A paragraph is never split. A line holding only spaces, tabs or a
-  carriage return counts as blank. `chunker-id` includes both settings, so changing either one
-  re-chunks the corpus on its next `sync-corpus`. An app that wrote its own chunker for long
-  sections can use this one instead. (#322)
 
 - **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`
   (`agent-max-tokens`), and `run-turn`, `run-turn-through` and `deliberate` take `:max-tokens`.
