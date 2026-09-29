@@ -105,6 +105,7 @@
                              (:file "caught-errors-tests")
                              (:file "check-compile-tests")
                              (:file "not-covered-tests")
+                             (:file "strict-load-tests")
                              (:file "view-launcher-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :cons/tests :run-tests)))
 
