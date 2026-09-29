@@ -5,7 +5,9 @@
 ;;;;
 ;;;;   - Windows: Credential Manager, a generic credential per item, encrypted per user by DPAPI
 ;;;;     and kept on this machine across logons (CRED_PERSIST_LOCAL_MACHINE).
-;;;;   - macOS: the login Keychain. Not written yet; the macOS lane adds it (#357).
+;;;;   - macOS: the login Keychain, a generic-password item per credential, with the item's
+;;;;     service and account set to SERVICE and ACCOUNT. Not the data-protection keychain,
+;;;;     which needs a keychain-access-groups entitlement that an app signed ad hoc lacks.
 ;;;;   - Linux: the Secret Service API over D-Bus. Not written yet (#357).
 ;;;;
 ;;;; Where no backend exists, every call signals CREDENTIAL-STORE-UNAVAILABLE. Nothing is ever
@@ -19,8 +21,9 @@
 ;;;; THE VALUE NEVER APPEARS IN TEXT. It goes in as an AION/SECRET and comes out as one, which
 ;;;; prints as #<SECRET REDACTED>. No condition carries it, and no report names it. On Windows it
 ;;;; passes through a foreign buffer as UTF-8 bytes, and that buffer is zeroed before it is freed.
-;;;; The Lisp string REVEAL returns cannot be zeroed; that is aion/secret's limit, not this
-;;;; file's.
+;;;; On macOS it passes through the same kind of buffer into a CFData; the buffer is zeroed, and
+;;;; the CFData's own copy is not (aion ADR-0004). The Lisp string REVEAL returns cannot be
+;;;; zeroed; that is aion/secret's limit, not this file's.
 
 (in-package #:hades/credentials)
 
@@ -146,13 +149,91 @@ gives its length, not its content."))
                                          :code code)))
           t))))
 
-#-win32
+;;; --- macOS: the login Keychain ---------------------------------------------------------
+
+#+darwin
+(progn
+  (defconstant +keychain-max-bytes+ 2560
+    "The longest value stored, in UTF-8 bytes. The Keychain itself takes more; this is
+Credential Manager's limit, so a value an app can store on one system it can store on the
+other.")
+
+  (defun %keychain-fail (status service account operation)
+    (error (if (= status ffi:+err-sec-item-not-found+) 'credential-not-found 'credential-error)
+           :service service :account account :operation operation :code status))
+
+  (defun %call-with-query (service account extra fn)
+    "Call FN with an owned query dictionary naming the generic-password item SERVICE / ACCOUNT,
+plus EXTRA, a list of (CONSTANT-NAME . VALUE) pairs whose values the caller owns. Returns what
+FN returns."
+    (darwin:with-cf ((s (darwin:make-cf-string service))
+                     (a (darwin:make-cf-string account))
+                     (query (darwin:make-cf-dictionary
+                             (list* (cons (darwin:cf-constant "kSecClass")
+                                          (darwin:cf-constant "kSecClassGenericPassword"))
+                                    (cons (darwin:cf-constant "kSecAttrService") s)
+                                    (cons (darwin:cf-constant "kSecAttrAccount") a)
+                                    (mapcar (lambda (pair)
+                                              (cons (darwin:cf-constant (car pair)) (cdr pair)))
+                                            extra)))))
+      (funcall fn query)))
+
+  (defun %store (service account secret)
+    (let ((octets (sb-ext:string-to-octets (aion/secret:reveal secret) :external-format :utf-8)))
+      (unwind-protect
+           (progn
+             (when (> (length octets) +keychain-max-bytes+)
+               (error 'credential-too-large :service service :account account :operation :store
+                                            :size (length octets) :limit +keychain-max-bytes+))
+             (darwin:with-cf ((data (darwin:make-cf-data octets)))
+               ;; Add, and when an item already exists, replace its value instead.
+               (let ((status (%call-with-query service account (list (cons "kSecValueData" data))
+                                               (lambda (query)
+                                                 (ffi:sec-item-add query (cffi:null-pointer))))))
+                 (when (= status ffi:+err-sec-duplicate-item+)
+                   (setf status
+                         (%call-with-query service account '()
+                                           (lambda (query)
+                                             (darwin:with-cf ((change (darwin:make-cf-dictionary
+                                                                       (list (cons (darwin:cf-constant "kSecValueData")
+                                                                                   data)))))
+                                               (ffi:sec-item-update query change))))))
+                 (unless (= status ffi:+err-sec-success+)
+                   (%keychain-fail status service account :store)))))
+        (fill octets 0)))
+    t)
+
+  (defun %fetch (service account)
+    (cffi:with-foreign-object (out :pointer)
+      (setf (cffi:mem-ref out :pointer) (cffi:null-pointer))
+      (let ((status (%call-with-query service account
+                                      (list (cons "kSecReturnData" (darwin:cf-constant "kCFBooleanTrue"))
+                                            (cons "kSecMatchLimit" (darwin:cf-constant "kSecMatchLimitOne")))
+                                      (lambda (query) (ffi:sec-item-copy-matching query out)))))
+        (unless (= status ffi:+err-sec-success+)
+          (%keychain-fail status service account :fetch)))
+      ;; SecItemCopyMatching is a Copy: the CFData it returned is ours to release.
+      (darwin:with-cf ((data (cffi:mem-ref out :pointer)))
+        (let ((octets (darwin:cf-data-octets data)))
+          (unwind-protect
+               (aion/secret:make-secret (sb-ext:octets-to-string octets :external-format :utf-8))
+            (fill octets 0))))))
+
+  (defun %delete (service account)
+    (let ((status (%call-with-query service account '()
+                                    (lambda (query) (ffi:sec-item-delete query)))))
+      (cond ((= status ffi:+err-sec-success+) t)
+            ((= status ffi:+err-sec-item-not-found+) nil)
+            (t (%keychain-fail status service account :delete))))))
+
+;;; --- elsewhere: no store yet ------------------------------------------------------------
+
+#-(or win32 darwin)
 (progn
   (defun %unavailable (service account operation)
     (error 'credential-store-unavailable
            :service service :account account :operation operation
-           :reason #+darwin "the Keychain backend is not written yet (#357)"
-                   #-darwin "the Secret Service backend is not written yet (#357)"))
+           :reason "the Secret Service backend is not written yet (#357)"))
   (defun %store (service account secret)
     (declare (ignore secret))
     (%unavailable service account :store))

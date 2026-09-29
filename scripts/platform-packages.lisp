@@ -70,6 +70,9 @@
      (:system "hades/windows"    :status :planned  :issue "pre-publication issue 180"
       :note "the OS ergonomics layer over the binding; hades is not chartered yet"))
     (:darwin
+     (:system "aion/darwin"   :status :required :issue "#357"
+      :note "the binding: CoreFoundation strings, data and dictionaries, Security's keychain
+             item calls, OSStatus as a condition (ADR-0004). Its suite never touches a keychain.")
      (:system "hades/darwin"  :status :planned :issue "pre-publication issue 180"))
     (:linux
      (:system "hades/linux"   :status :planned :issue "pre-publication issue 180")

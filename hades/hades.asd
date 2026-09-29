@@ -42,15 +42,17 @@
   :perform (test-op (o c) (uiop:symbol-call :hades/single-instance/tests :run-tests)))
 
 (defsystem "hades/credentials"
-  :description "A credential store over the operating system's own -- Windows Credential Manager so far -- that returns aion/secret values and never falls back to a file (#357)."
+  :description "A credential store over the operating system's own -- Windows Credential Manager and the macOS Keychain so far -- that returns aion/secret values and never falls back to a file (#357)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   ;; aion/secret for the value in and out. On Windows, Credential Manager through
-  ;; aion/windows (the binding belongs to aion; hades ADR-0001).
+  ;; aion/windows; on macOS, the Keychain through aion/darwin (the bindings belong to aion;
+  ;; hades ADR-0001).
   :depends-on ("aion/secret"
                (:feature :win32 "aion/windows")
-               (:feature :win32 "cffi"))
+               (:feature :darwin "aion/darwin")
+               (:feature (:or :win32 :darwin) "cffi"))
   :serial t
   :components ((:module "src/credentials"
                 :serial t
