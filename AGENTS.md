@@ -296,6 +296,32 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   commits merge, the rows come from two runs and neither sha is true of the result. The second
   one rebases and re-derives, and its CI run is what makes the line honest again. Budget a
   rebase cycle per count-changing PR ahead of yours in the queue.
+- **Count-changing PRs merge in trains of up to four (the maintainer, 2026-09-29).** Merging
+  them one at a time cost two CI runs in a row per PR, one to measure the row and one on the
+  README commit, about 45 minutes with the lane's turnaround, while fourteen approved PRs
+  waited. A train pays for those two runs once for all its members. The rules above about
+  `--update` and dispatched runs now apply to the hub building a train, not to each lane, and
+  trains themselves merge one at a time, for the reason in the bullet above.
+  - **A lane** does not derive README rows or dispatch runs for counts. Its PR is ready for a
+    train when its own PR run passes the gate on all four legs (on the Linux leg, a failure of
+    the README count check alone is expected), every review thread is answered, and its
+    CHANGELOG entries sit under Unreleased. It rebases only when its code conflicts with
+    `main`. It reports ready with the head SHA, the run id, and its Linux delta: that run's gate
+    total minus `main`'s total at its base. A PR stacked on another rides in the same train,
+    after its base.
+  - **The hub** finds an order that merges without conflicts (`git merge-tree`), creates
+    `train/N` from `main`, and merges each member's reported head with `--no-ff`. It checks
+    that every new CHANGELOG entry is under Unreleased and that the released sections are
+    byte-identical to `main`'s, because a merge can move an entry into a release section
+    without a conflict. It pushes, dispatches `verify.yml` on the branch, and runs
+    `check-readme-counts.lisp --from <that run's Linux log> --update` inside the train's
+    worktree. The Linux total must equal `main`'s total plus the members' deltas; if it does
+    not, a delta or the merge is wrong, and the train stops until that is found. It commits
+    the README, opens one PR carrying one closing keyword per issue the members close, and
+    merges it pinned to the head whose run is green on all four legs.
+  - GitHub marks each member PR as merged when the train lands, and the train PR's keywords
+    close the issues. Read both back. Train 1 (#385) was the first: three PRs, and a Linux
+    total of 6784 = 6701 + 36 + 15 + 32.
 - **A bare `asdf:test-system` is a different measurement from the gate, and that catches people
   before the host difference does.** A README row is the sum of **every** suite the gate
   registers for that framework, and a framework may register more than one. `praxeon` registers
