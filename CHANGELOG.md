@@ -47,12 +47,16 @@ its tag.
   `hyperion/ratelimit:wrap-rate-limit`'s refusals, and any handler returning one of those codes,
   reached a client on Woo as `HTTP/1.1 500` with an empty body and no `Retry-After`.
   `hyperion/server:start` now adds a line to Woo's table, before it starts a Woo server, for
-  every code from 100 to 599 that has none: the registered phrase, or an empty one for an
-  unregistered code, as HTTP/1.1 allows. Lines Woo already had are unchanged
-  (`complete-woo-status-lines`). An app on Woo needs no change. An app that starts Woo without
+  every code from 100 to 599 that has none (`complete-woo-status-lines`). Lines Woo already had
+  are unchanged. An app on Woo needs no change. An app that starts Woo without
   `hyperion/server:start` calls `(hyperion/server:complete-woo-status-lines)` once after Woo
-  is loaded. Hunchentoot and hyperion's own server were not affected; the native server now
-  names 429's phrase too. A new system, `hyperion/woo`, loads Woo's handler beside hyperion,
+  is loaded. Hunchentoot was not affected.
+- **hyperion/http1: `reason-phrase` names every registered status code, and gives a code the
+  registry does not name an empty phrase instead of "Unknown".** It is now the one table in
+  hyperion: the native `:uv` server writes it, so a 429 there goes out as
+  `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
+  takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
+  the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372) A new system, `hyperion/woo`, loads Woo's handler beside hyperion,
   and its suite serves requests through a real Woo server; the gate runs it on Linux.
 
 ## v0.1.4 — 2026-09-29

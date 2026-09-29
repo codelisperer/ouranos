@@ -676,38 +676,12 @@ when another Woo server is running, and register the new thread, in one critical
 ;;; every refusal from WRAP-RATE-LIMIT reached the client that way, without its Retry-After or
 ;;; its body. The registered codes it lacks are 103, 104, 425, 428, 429, 431 and 511.
 ;;;
-;;; So before START runs a Woo server, every code from 100 to 599 that has no entry gets one:
-;;; the registered reason phrase, or an empty one for a code nobody registered, which HTTP/1.1
+;;; So before START runs a Woo server, every code from 100 to 599 that has no entry gets one,
+;;; with the reason phrase from HYPERION/HTTP1:REASON-PHRASE, the table the native server also
+;;; uses: the registered phrase, or an empty one for a code nobody registered, which HTTP/1.1
 ;;; allows (RFC 9112 section 4: the reason phrase is optional). Entries Woo already has are
 ;;; left as they are. Hyperion declares no backend, so Woo's table is found by name at run
 ;;; time, and nothing happens in an image without Woo.
-
-(defparameter +registered-reason-phrases+
-  '((100 . "Continue") (101 . "Switching Protocols") (102 . "Processing")
-    (103 . "Early Hints") (104 . "Upload Resumption Supported")
-    (200 . "OK") (201 . "Created") (202 . "Accepted") (203 . "Non-Authoritative Information")
-    (204 . "No Content") (205 . "Reset Content") (206 . "Partial Content")
-    (207 . "Multi-Status") (208 . "Already Reported") (226 . "IM Used")
-    (300 . "Multiple Choices") (301 . "Moved Permanently") (302 . "Found") (303 . "See Other")
-    (304 . "Not Modified") (305 . "Use Proxy") (307 . "Temporary Redirect")
-    (308 . "Permanent Redirect")
-    (400 . "Bad Request") (401 . "Unauthorized") (402 . "Payment Required") (403 . "Forbidden")
-    (404 . "Not Found") (405 . "Method Not Allowed") (406 . "Not Acceptable")
-    (407 . "Proxy Authentication Required") (408 . "Request Timeout") (409 . "Conflict")
-    (410 . "Gone") (411 . "Length Required") (412 . "Precondition Failed")
-    (413 . "Content Too Large") (414 . "URI Too Long") (415 . "Unsupported Media Type")
-    (416 . "Range Not Satisfiable") (417 . "Expectation Failed")
-    (421 . "Misdirected Request") (422 . "Unprocessable Content") (423 . "Locked")
-    (424 . "Failed Dependency") (425 . "Too Early") (426 . "Upgrade Required")
-    (428 . "Precondition Required") (429 . "Too Many Requests")
-    (431 . "Request Header Fields Too Large") (451 . "Unavailable For Legal Reasons")
-    (500 . "Internal Server Error") (501 . "Not Implemented") (502 . "Bad Gateway")
-    (503 . "Service Unavailable") (504 . "Gateway Timeout")
-    (505 . "HTTP Version Not Supported") (506 . "Variant Also Negotiates")
-    (507 . "Insufficient Storage") (508 . "Loop Detected") (510 . "Not Extended")
-    (511 . "Network Authentication Required"))
-  "The IANA HTTP Status Code Registry's codes and descriptions, as read on 2026-09-29, less the
-two it marks unused (306 and 418). Used only for a code Woo's own table lacks.")
 
 (defun %woo-status-table ()
   "Woo's table of status lines, a hash table from code to octets, or NIL when Woo is not loaded
@@ -717,11 +691,11 @@ or does not have one by that name."
     (and symbol (boundp symbol) (hash-table-p (symbol-value symbol)) (symbol-value symbol))))
 
 (defun status-line-octets (code)
-  "CODE's HTTP/1.1 status line with its CRLF, as UTF-8 octets: the registered reason phrase, or
-an empty one for a code not in +REGISTERED-REASON-PHRASES+."
+  "CODE's HTTP/1.1 status line with its CRLF, as UTF-8 octets, with the reason phrase
+HYPERION/HTTP1:REASON-PHRASE gives it: the registered one, or an empty one for a code the
+registry does not name. The native server's status line uses the same table."
   (sb-ext:string-to-octets
-   (format nil "HTTP/1.1 ~D ~A~C~C" code
-           (or (cdr (assoc code +registered-reason-phrases+)) "") #\Return #\Linefeed)
+   (format nil "HTTP/1.1 ~D ~A~C~C" code (h1:reason-phrase code) #\Return #\Linefeed)
    :external-format :utf-8))
 
 (defun complete-woo-status-lines ()

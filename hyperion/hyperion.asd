@@ -37,6 +37,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("coalton"
+               "hyperion/http1"                       ; the reason-phrase table (#372); Coalton only
                "aion/log"                             ; neutral logging facade (leftward dep
                "aion/dynamic"   ; carries the request context across a thread (#158))
                "aion/interceptor"                     ; the typed pipeline (pre-publication issue 177; was a file here)
@@ -195,7 +196,7 @@
   :description "Responses served through a real Woo server, read back over a TCP socket (#372)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/woo" "hyperion" "hyperion/test-ports" "fiveam"
+  :depends-on ("hyperion/woo" "hyperion" "hyperion/http1" "hyperion/test-ports" "fiveam"
                (:require "sb-bsd-sockets"))
   :components ((:module "tests"
                 :components ((:file "woo-tests"))))

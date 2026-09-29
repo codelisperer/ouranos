@@ -57,7 +57,8 @@ cons and building one from CL yields a runtime pattern-match failure, not a type
   ;; unrecognised code still gets a correct message rather than a 500.
   (let ((r (enc 418 nil 0 nil)))
     (is-true (h1:encode-ok? r))
-    (is-true (search "HTTP/1.1 418 Unknown" (text-of r)))))
+    (is-true (search (format nil "HTTP/1.1 418 ~C~C" (code-char 13) (code-char 10)) (text-of r))
+             "418 is registered as unused, so its reason phrase is empty (#372)")))
 
 ;;; --- framing: the number must be the bytes ---------------------------------
 
@@ -159,9 +160,9 @@ cons and building one from CL yields a runtime pattern-match failure, not a type
 
 (test every-status-the-parser-can-return-has-a-reason-phrase
   ;; The two halves must agree: a rejection the parser can produce and the encoder cannot
-  ;; name would go out as "Unknown", which is a worse bug report than the status alone.
-  (dolist (status '(400 431 501 505 413 500))
-    (is-false (string= "Unknown" (h1:reason-phrase status))
+  ;; name would go out with an empty reason phrase, which is a worse bug report than a named one.
+  (dolist (status '(400 431 501 505 413 500 429))
+    (is-false (string= "" (h1:reason-phrase status))
               "status ~D is produced by the parser or the server and needs a phrase" status)))
 
 ;;; --- interim (1xx) responses (commit 4) ------------------------------------
@@ -195,7 +196,7 @@ Content-Length would leave the client reading the body until the connection clos
 
 (test the-statuses-commit-4-added-have-reason-phrases
   "100 and 417 are emitted by the server now, and a status the encoder cannot name would go
-out as `Unknown' -- harmless to a client, and a sign the two files disagree about what this
+out with an empty reason phrase -- harmless to a client, and a sign the two files disagree about what this
 server answers."
   (is (string= "Continue" (h1:reason-phrase 100)))
   (is (string= "Expectation Failed" (h1:reason-phrase 417))))

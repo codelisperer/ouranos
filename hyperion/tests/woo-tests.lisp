@@ -8,6 +8,7 @@
 (cl:defpackage #:hyperion/woo/tests
   (:use #:cl #:fiveam)
   (:local-nicknames (#:srv #:hyperion/server)
+                    (#:h1 #:hyperion/http1)
                     (#:rl #:hyperion/ratelimit)
                     (#:ports #:hyperion/test-ports)
                     (#:sock #:sb-bsd-sockets))
@@ -172,5 +173,7 @@ Woo's list lacks are named, so that a Woo upgrade that adds them shows up here."
                            (equalp (gethash code table)
                                    (sb-ext:string-to-octets text :external-format :utf-8)))))
       (is (equal '(103 104 425 428 429 431 511)
-                 (loop for (code) in srv::+registered-reason-phrases+
-                       unless (funcall woo-text code) collect code))))))
+                 (loop for code from 100 to 599
+                       when (and (plusp (length (h1:reason-phrase code)))
+                                 (not (funcall woo-text code)))
+                         collect code))))))
