@@ -21,7 +21,7 @@
     embedded server is the default; :backend (:remote URL) points at a remote backend
     instead (ADR-0009). SBCL-only.")
   (:export #:run-app #:free-port #:wait-until-listening
-           #:*launcher* #:default-launcher #:image-directory
+           #:*launcher* #:default-launcher #:image-directory #:bundled-window-icon
            #:launcher-not-found #:*remote-backend*))
 
 (in-package #:hyperion/desktop)
@@ -96,6 +96,46 @@ source tree (dev -- run hyperion-view/build.sh once), else the bare name on PATH
                 (and (probe-file dev) dev)))
             ;; last resort: bare name on PATH
             exe))))
+
+(defparameter +window-icon-types+ '("ico" "png" "icns")
+  "The extensions BUNDLED-WINDOW-ICON looks for, as scripts/build-desktop-app.lisp names the
+copy it carries: `window-icon.<type>'.")
+
+(defun %readable-file (path)
+  "PATH's truename when a file can be opened there, or NIL. PROBE-FILE alone is not enough: for
+a symbolic link whose target is missing, SBCL returns the link's own path. A macOS bundle keeps
+the window icon in Contents/Resources behind such a link, so a bundle that lost the file would
+otherwise pass a path hyperion-view cannot read (#74)."
+  (let ((found (probe-file path)))
+    (and found
+         (ignore-errors
+          (with-open-file (in found :element-type '(unsigned-byte 8))
+            (declare (ignore in))
+            t))
+         found)))
+
+(defun bundled-window-icon (&optional (dir (image-directory)))
+  "The window icon a shipped bundle carries beside its executable, or NIL (#74).
+
+scripts/build-desktop-app.lisp --window-icon copies the icon into the bundle as
+`window-icon.<type>'. An app usually names its icon by its path in the source tree, which in
+a dumped image is the build machine's path; on anyone else's machine that file does not
+exist, and the window got hyperion-view's default icon without any message. The carried copy
+is found from the running image's own directory, so it is there wherever the bundle is."
+  (and dir
+       (some (lambda (type)
+               (%readable-file (merge-pathnames (format nil "window-icon.~A" type) dir)))
+             +window-icon-types+)))
+
+(defun %icon-arguments (icon &optional (bundled (bundled-window-icon)))
+  "The --icon arguments RUN-APP passes the launcher: BUNDLED if a bundle carries one, else ICON
+if it names a file that exists, else none.
+
+The bundled copy wins because in a shipped app ICON is usually the build machine's path: it
+exists only on the machine that built the app, so preferring it would make the icon depend
+on which machine the app runs on. In development there is no bundled copy, and ICON is used."
+  (let ((path (or bundled (and icon (%readable-file icon)))))
+    (when path (list "--icon" (uiop:native-namestring path)))))
 
 (define-condition launcher-not-found (error)
   ((path :initarg :path :reader launcher-not-found-path))
@@ -211,7 +251,9 @@ ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon 
   `.ico` on Windows, `.png` on Linux, anything NSImage reads on macOS. A caller supplying
   one format for every OS gets an icon on one of them, so pick per platform. Ignored by
   the :browser shell, which has no window of its own. It is NOT the executable's icon on
-  Windows, nor a bundled .app's icon on macOS -- both come from elsewhere.
+  Windows, nor a bundled .app's icon on macOS -- both come from elsewhere. A shipped bundle
+  built with --window-icon carries its own copy, and that copy is used instead
+  (BUNDLED-WINDOW-ICON), because ICON is usually a path on the machine that built the app.
 ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits."
   ;; Fail before booting anything if the native half was never built on this machine.
   (when (eq shell :webview) (%check-launcher launcher))
@@ -236,9 +278,9 @@ ON-READY is called with the URL before the shell launches; ON-CLOSE after it exi
                               (princ-to-string height))
                         ;; Only when it exists: an older launcher build treats an unknown
                         ;; trailing argument as noise, but a --icon pointing at nothing
-                        ;; would still cost a silent failed load on every start.
-                        (let ((path (and icon (probe-file icon))))
-                          (when path (list "--icon" (namestring path))))))))
+                        ;; would still cost a silent failed load on every start. A bundle's
+                        ;; own copy comes first (#74); see %ICON-ARGUMENTS.
+                        (%icon-arguments icon)))))
              (:browser
               (open-in-browser url)
               (%wait-for-interrupt))))

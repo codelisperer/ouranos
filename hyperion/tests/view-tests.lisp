@@ -131,6 +131,72 @@ resolution moves, this suite must move with it or say so."
       (is (eql 2 code) "a fifth positional must exit 2, got ~S" code)
       (is (search "too many arguments" err) "and name it; got ~S" err))))
 
+;;; --- the window icon a bundle carries (#74) ------------------------------------------
+;;;
+;;; These need no launcher binary: they check which file run-app would pass as --icon, using
+;;; directories and files made here.
+
+(defun %fresh-dir ()
+  (let ((dir (uiop:ensure-directory-pathname
+              (merge-pathnames (format nil "hyperion-icon-~36R/" (random (expt 2 40) (make-random-state t)))
+                               (uiop:temporary-directory)))))
+    (ensure-directories-exist dir)
+    dir))
+
+(defun %touch (path)
+  (with-open-file (out path :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (write-string "icon" out))
+  (probe-file path))
+
+(test a-bundled-window-icon-is-found-beside-the-executable
+  (let ((dir (%fresh-dir)))
+    (unwind-protect
+         (progn
+           (is (null (desktop:bundled-window-icon dir)) "no icon carried, so none found")
+           (let ((icon (%touch (merge-pathnames "window-icon.png" dir))))
+             (is (equal icon (desktop:bundled-window-icon dir)))))
+      (uiop:delete-directory-tree dir :validate t))))
+
+(test the-bundled-icon-is-passed-before-the-callers-path
+  ;; In a shipped app the caller's path is the build machine's. It exists on that machine,
+  ;; so the bundled copy has to win even when the caller's file is present, or the icon
+  ;; would depend on which machine the app runs on.
+  (let ((dir (%fresh-dir)))
+    (unwind-protect
+         (let ((bundled (%touch (merge-pathnames "window-icon.png" dir)))
+               (callers (%touch (merge-pathnames "source-icon.png" dir))))
+           (is (equal (list "--icon" (uiop:native-namestring bundled))
+                      (hyperion/desktop::%icon-arguments callers bundled)))
+           (is (equal (list "--icon" (uiop:native-namestring callers))
+                      (hyperion/desktop::%icon-arguments callers nil))
+               "without a bundled copy, the caller's existing file is used")
+           (is (null (hyperion/desktop::%icon-arguments
+                      (merge-pathnames "not-on-this-machine.png" dir) nil))
+               "a caller's path that does not exist passes no --icon at all"))
+      (uiop:delete-directory-tree dir :validate t))))
+
+#-win32
+(test a-bundled-icon-behind-a-broken-link-is-not-found
+  ;; A macOS .app keeps window-icon.png in Contents/Resources, with a symbolic link to it in
+  ;; Contents/MacOS. If the file is gone, PROBE-FILE still returns the link, and the app passed
+  ;; hyperion-view a path it cannot read instead of falling back to the caller's icon.
+  (let ((dir (%fresh-dir)))
+    (unwind-protect
+         (let ((target (%touch (merge-pathnames "Resources-window-icon.png" dir)))
+               (link (merge-pathnames "window-icon.png" dir))
+               (callers (%touch (merge-pathnames "source-icon.png" dir))))
+           (uiop:run-program (list "ln" "-s" (uiop:native-namestring target)
+                                   (uiop:native-namestring link)))
+           (is (equal target (desktop:bundled-window-icon dir))
+               "through a link whose target exists, the target is found")
+           (delete-file target)
+           (is (probe-file link) "the precondition: PROBE-FILE still answers for the broken link")
+           (is (null (desktop:bundled-window-icon dir)))
+           (is (equal (list "--icon" (uiop:native-namestring callers))
+                      (hyperion/desktop::%icon-arguments callers (desktop:bundled-window-icon dir)))
+               "so the caller's icon is used instead"))
+      (uiop:delete-directory-tree dir :validate t))))
+
 (defun run-tests ()
   (let ((results (run 'view)))
     (explain! results)

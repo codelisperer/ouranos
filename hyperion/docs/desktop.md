@@ -177,6 +177,16 @@ a permanent `download/<App>-Setup.exe`), tag-driven CI. The updater: fetch `late
 swap (with the Windows locked-exe rename/`MoveFileEx` dance) → relaunch. Installers via
 WiX/NSIS/`create-dmg`/`linuxdeploy` from CI — none require Tauri/Electron.
 
+**The window icon travels with the bundle (#74).** An app names its window icon by a path in
+its source tree (`run-app :icon`), and in a dumped image that is the build machine's path, so on
+anyone else's machine the window had hyperion-view's default icon and nothing said why. Build
+with `scripts/build-desktop-app.lisp --window-icon <file>`, giving the format the platform reads
+(`.ico` on Windows, `.png` on Linux and macOS). The file is copied into the bundle as
+`window-icon.<type>`, and `run-app` passes that copy to hyperion-view before the caller's path
+(`hyperion/desktop:bundled-window-icon`). This is separate from `--icon`, which sets only the
+`.exe`'s own icon in Explorer, and from `build-dmg.sh --icon`, which sets the `.app`'s icon in
+Finder.
+
 **Honest cost (from ADR-0008):** this glue — updater self-replace, installers, native
 FFIs, CI matrix — is the ~90%; the webview is the easy ~10%. **OS code-signing +
 notarization** is an unavoidable tax, identical for Tauri/Electron.

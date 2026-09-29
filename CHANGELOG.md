@@ -59,6 +59,17 @@ its tag.
   that wants Hunchentoot's own SSL acceptor removes `:hunchentoot-no-ssl` from `*features*`
   before `hunchentoot.asd` is read.
 
+- **hyperion/desktop: a shipped app's window icon is carried in its bundle, so it shows on
+  other machines.** `run-app :icon` is usually a path in the app's source tree, which in a
+  dumped image is the build machine's path. On anyone else's machine `run-app` found no file
+  there and passed no icon, so the window and taskbar showed hyperion-view's default icon
+  (#74). `scripts/build-desktop-app.lisp` takes `--window-icon <file>` and copies it into the
+  bundle as `window-icon.<type>`; `run-app` now passes that copy before the caller's path
+  (`hyperion/desktop:bundled-window-icon`, new). **An app acts by adding `--window-icon` to its
+  build command**: a `.ico` on Windows, a `.png` on Linux and macOS. Its `run-app :icon`
+  argument can stay as it is for development. `--icon` still sets only the `.exe`'s icon on
+  Windows.
+
 - **praxeon: a step of a turn that the output limit cuts off ends the turn with
   `output-truncated` instead of passing as finished.** When a completion's stop reason is
   `:max-tokens`, `run-turn` no longer returns its text as the answer and no longer runs the tool
