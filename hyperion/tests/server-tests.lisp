@@ -622,3 +622,43 @@ thread, then end the thread and wait for it."
              (is (not (search "failed after it started" out))
                  "a normal STOP must not log a backend failure, got: ~S" out)))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
+
+;;; --- :workers (#324) ------------------------------------------------------------------
+;;;
+;;; No suite loads Woo, so what Woo is given is asserted on the plist START hands clackup.
+;;; The native backend's workers are exercised end to end in hyperion/server-uv/tests.
+
+(test workers-map-to-each-backends-own-argument
+  (is (equal '(:worker-num 4) (srv::%backend-args :woo 4)) "Woo takes :worker-num")
+  (is (equal '(:workers 4) (srv::%backend-args :uv 4)) "the native server takes :workers")
+  (is (null (srv::%backend-args :hunchentoot 4))
+      "Hunchentoot is given nothing: its handler refuses an unknown key")
+  (is (null (srv::%backend-args :some-other-backend 4)))
+  (is (every #'null (mapcar (lambda (b) (srv::%backend-args b nil)) '(:woo :uv :hunchentoot)))
+      "without :workers no backend is given anything, which is today's behaviour"))
+
+(test workers-on-hunchentoot-warn-and-still-serve
+  (let* ((warned nil)
+         (port nil)
+         (h (handler-bind ((warning (lambda (c)
+                                      (when (search ":workers" (princ-to-string c))
+                                        (setf warned (princ-to-string c)))
+                                      (muffle-warning c))))
+              (ports:call-with-port
+               (lambda (p)
+                 (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil
+                                                 :workers 4)
+                   (setf port p)))))))
+    (unwind-protect
+         (progn
+           (is (stringp warned) "the ignored :workers was said out loud")
+           (is (and warned (search "Hunchentoot" warned)) "and the warning names the backend")
+           (is (search "200" (%srv-http-get port "/")) "the server serves anyway"))
+      (srv:stop h))))
+
+(test workers-must-be-a-positive-integer
+  (dolist (bad '(0 -1 2.5 "4"))
+    (is (typep (nth-value 1 (ignore-errors (srv:start (%srv-ok-app) :port 1 :server :hunchentoot
+                                                      :check-port nil :workers bad)))
+               'type-error)
+        "~S is refused before anything starts" bad)))

@@ -379,9 +379,24 @@ arguments, or NIL for none."
         ((eq option t) (hyperion/security-headers:wrap-security-headers app))
         (t (apply #'hyperion/security-headers:wrap-security-headers app option))))
 
+(defun %backend-args (server workers)
+  "The extra keyword arguments that give backend SERVER WORKERS threads for handlers, as a
+plist for its start function, or NIL for none. See START's WORKERS.
+
+Pure, so which backend gets what is testable without starting a server, and without loading
+Woo, which no suite in the tree does."
+  (cond
+    ((null workers) '())
+    ((eq server :woo) (list :worker-num workers))
+    ((native-backend-p server) (list :workers workers))
+    ;; Hunchentoot, and any Clack backend unknown to us: nothing is passed. Hunchentoot's
+    ;; handler would refuse a key it does not take, and it has no worker count to set: it
+    ;; already runs each connection on a thread of its own.
+    (t '())))
+
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t)
-                       (security-headers t))
+                       (security-headers t) workers)
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
 the returned handler differs between the two and STOP takes either.
@@ -408,11 +423,33 @@ Content-Security-Policy with no script-src (#119). T uses that module's defaults
 passed to it as keyword arguments, e.g. (:content-security-policy \"default-src 'self'\"
 :hsts \"max-age=31536000\"); NIL sends none of them.
 
+WORKERS (default NIL) is how many threads run request handlers, so that one slow handler
+does not hold up every other request (#324). NIL keeps each backend's own behaviour. What a
+number does depends on the backend:
+
+  :woo          passed to Woo as :worker-num. NIL runs every handler on Woo's one event-loop
+                thread, one request at a time.
+  :uv           handlers run on an aion/pool of WORKERS threads. NIL runs them on the loop
+                thread, one at a time.
+  :hunchentoot  ignored, with a warning. Hunchentoot already runs each connection on a thread
+                of its own, with no limit, whatever this says.
+
+More than one handler thread is only safe for an app whose handlers do not share one database
+connection. An app that keeps a single mnemosyne connection in a global wraps itself in
+HYPERION/DB-CONNECTION:WRAP-CONNECTION first, which lends each request a connection from a
+pool. The same is already true of any app served by Hunchentoot.
+
 CHECK-PORT (default T) refuses to start when PORT is already answering, signalling
 PORT-IN-USE. On by default because the failure it prevents does not look like a port
 problem: a dev window opens onto a SIBLING application and reads as a catastrophically
 broken build (pre-publication issue 238). The probe CONNECTS rather than binding -- see PORT-ANSWERING-P for
 why that distinction is not pedantry on Windows. Pass :check-port nil to start anyway."
+  (check-type workers (or null (integer 1)))
+  (when (and workers (not (%backend-args server workers)))
+    (if (eq server :hunchentoot)
+        (warn "hyperion/server: :workers is ignored by Hunchentoot, which already runs each connection on its own thread.")
+        (warn "hyperion/server: :workers is ignored by the ~S backend; hyperion does not know how to give it worker threads."
+              server)))
   (when (and check-port (port-answering-p host port))
     (error 'port-in-use :host host :port port))
   (let* ((secured (%apply-security-headers app security-headers))
@@ -446,10 +483,11 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
        (handler-bind ((error (lambda (e)
                                (when (%address-in-use-p e)
                                  (error 'port-in-use :host host :port port :cause e)))))
-         (%uv-call "START" wrapped :port port :host host)))
+         (apply #'%uv-call "START" wrapped :port port :host host
+                (%backend-args server workers))))
       (t
        (%clack-start (wrap-content-length (wrap-streaming-body wrapped))
-                     server host port debug)))))
+                     server host port debug (%backend-args server workers))))))
 
 ;;; --- the Clack path: a start that knows whether it started (#159) ---------
 ;;;
@@ -628,8 +666,9 @@ when another Woo server is running, and register the new thread, in one critical
       ;; call in %CLACK-START.
       (sb-thread:make-thread function :name name)))
 
-(defun %clack-start (app server host port debug)
-  "Start APP on a Clack backend and return a CLACK-SERVER once that server answers. Signals
+(defun %clack-start (app server host port debug &optional backend-args)
+  "Start APP on a Clack backend and return a CLACK-SERVER once that server answers.
+BACKEND-ARGS is a plist passed on to clackup, from %BACKEND-ARGS. Signals
 PORT-IN-USE if the bind fails, the backend's own error for any other failure, and
 SERVER-START-TIMEOUT if neither readiness nor an error arrives within *START-TIMEOUT*, and
 WOO-SERVER-RUNNING, before any thread is started, if SERVER is :WOO and another Woo server
@@ -693,8 +732,8 @@ per request."
                                                  :backend (string-downcase (symbol-name server))
                                                  :host host :port port
                                                  :condition-type (prin1-to-string (type-of e))))))))
-                      (clack:clackup served :server server :port port :address host
-                                            :use-thread nil :debug debug))
+                      (apply #'clack:clackup served :server server :port port :address host
+                             :use-thread nil :debug debug backend-args))
                   (error () nil))))
             (format nil "hyperion-server-~(~A~)" server)))
          (deadline (+ (get-internal-real-time)
@@ -870,7 +909,7 @@ Safe from any thread, and safe from a signal handler."
 
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
                                (host "127.0.0.1") debug (log t) (security-headers t)
-                               name (banner :derive) (signals t) on-ready)
+                               workers name (banner :derive) (signals t) on-ready)
   "Start APP and BLOCK until interrupted or until REQUEST-SHUTDOWN is called. Returns NIL.
 
 The production counterpart to START: same arguments, plus a banner and interrupt handling.
@@ -915,7 +954,7 @@ a dead server breaks the next thing you run."
             (funcall *install-signal-handlers*
                      (lambda () (request-shutdown-from-signal session)))))
     (setf handler (start app :server server :port port :host host :debug debug :log log
-                             :security-headers security-headers)
+                             :security-headers security-headers :workers workers)
           (server-session-handler session) handler)
     ;; BANNER has THREE states, not two, so it cannot be a plain string-or-NIL: derive one
     ;; (the default), print this exact line, or print nothing. With NIL as the default there

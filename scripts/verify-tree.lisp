@@ -144,7 +144,7 @@
     :hermes/blob
     :hermes/payments
     :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/session-db
-    :hyperion/auth-db :hyperion/cli
+    :hyperion/auth-db :hyperion/db-connection :hyperion/cli
     :aion/random
     ;; The credential wrapper (pre-publication issue 209) and its Coalton view. Two systems because
     ;; aion/secret must stay Coalton-free for cons; both belong in the gate, since a
@@ -171,6 +171,8 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     :elenchon/tests :klio/tests
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
+    ;; The pooled-connection middleware (#325), registered in the commit that adds it.
+    :hyperion/db-connection/tests
     :hyperion/assets/tests :hermes/blob/tests
     ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
     ;; `hyperion/update/tests' is justified as "invisible to this checker until someone

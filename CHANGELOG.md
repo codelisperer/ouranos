@@ -62,6 +62,43 @@ its tag.
 - **praxeon/event: the `:truncated` event**, with `:step`, `:max-tokens` and `:tool-calls`, the
   names of the tool calls that were not run. The `:answer` event for text kept with
   `accept-truncated` carries `:truncated t`. (#326)
+- **mnemosyne/conn: a connection pool, so an app can serve requests from more than one
+  thread.** `make-pool` takes a backend and `:size` (default 10), and opens connections only
+  when they are needed. `with-connection` now takes a pool as well as a backend: with a pool
+  it lends one connection for the extent of its body, and a `with-connection` on the same
+  pool nested inside it, on the same thread, gets the same connection. `close-pool` closes
+  the pool.
+  - Before a connection is lent again, a transaction the body left open is rolled back. On
+    Postgres the session is then reset as `DISCARD ALL` resets it, except that prepared
+    statements are kept: settings, role, advisory locks, temporary tables, `LISTEN`
+    registrations and open cursors. A session-level advisory lock, such as
+    praxeon/retrieval's per-corpus lock, therefore never passes to the next borrower.
+  - A body that exits with an error has its connection closed instead of returned.
+  - A checkout that finds every connection lent waits up to `:checkout-timeout` seconds
+    (`*checkout-timeout-seconds*`, 30) and then signals `pool-exhausted`, a `db-error`.
+  - A connection idle for longer than `:idle-check` seconds (`*idle-check-seconds*`, 30) is
+    pinged before it is lent and replaced if the server has closed it.
+  - Also new: `call-with-connection`, `pool-open-count`, `pool-idle-count` and `pool-closed`.
+    (#325)
+- **hyperion/db-connection: `wrap-connection`, for an app that keeps its connection in a
+  global.** `(wrap-connection app pool '*db*)`, where `pool` must be a pool, not a backend, binds `*db*` to a connection from the pool for
+  each request, so handlers that read `*db*` keep working when the server runs several
+  requests at once.
+  - When no connection becomes free in time, the answer is 503 with `Retry-After`
+    (`*busy-response*`).
+  - Inside a streaming body, `*db*` is unbound: the body runs after the request's connection
+    has gone back, so it takes one with `with-connection` if it needs one.
+
+  A new system: add `"hyperion/db-connection"` to `:depends-on`. (#325)
+- **hyperion/server: `start` and `serve-forever` take `:workers`, the number of threads that
+  run handlers**, so one slow handler no longer holds up every other request.
+  - On Woo it is passed as `:worker-num`. On the native `:uv` server, the server runs
+    handlers on its own `aion/pool` of that size and stops it in `stop`, and
+    `server-uv:start` takes `:workers` too. Hunchentoot ignores it, with a warning, because
+    Hunchentoot already runs each connection on its own thread.
+  - The default, NIL, keeps today's behaviour: one thread for handlers on Woo and on `:uv`.
+  - An app that shares one connection across handlers wraps itself in `wrap-connection`
+    before it turns this on. The same applies to an app on Hunchentoot today. (#324)
 
 ## v0.1.3 — 2026-09-27
 

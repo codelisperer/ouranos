@@ -889,6 +889,96 @@ exists to make possible, and the thing that was impossible before M2."
       (sb-thread:signal-semaphore gate 10)
       (pool:stop-pool p))))
 
+;;; --- :workers on start: a worker pool per server (#324) ----------------------------------
+
+(defun %worker-threads ()
+  "The live threads a :WORKERS server made for its handlers, by their pool's name."
+  (remove-if-not (lambda (th) (search "server-uv-worker" (sb-thread:thread-name th)))
+                 (sb-thread:list-all-threads)))
+
+(test workers-on-hyperion-start-keep-a-slow-handler-from-blocking-others
+  ;; The #324 defect, through the entry point an app calls. The gate makes /slow wait until
+  ;; /fast has been answered, which one handler thread cannot do.
+  (let ((gate (sb-thread:make-semaphore)))
+    (unwind-protect
+         (with-hyperion-server (port (lambda (env)
+                                       (if (string= "/slow" (getf env :path-info))
+                                           (progn (sb-thread:wait-on-semaphore gate :timeout 10)
+                                                  (list 200 +ok+ (list "slow")))
+                                           (list 200 +ok+ (list "fast"))))
+                                     :log nil :workers 2)
+           (let ((slow (bt:make-thread
+                        (lambda () (get* port "GET /slow HTTP/1.1" "Host: x")))))
+             (is (string= "fast" (body-of (get* port "GET /fast HTTP/1.1" "Host: x")))
+                 "answered while another handler was blocked")
+             (sb-thread:signal-semaphore gate)
+             (is (string= "slow" (body-of (aion/test-threads:join slow))))))
+      (sb-thread:signal-semaphore gate 10))))
+
+(test workers-run-handlers-on-the-servers-own-pool-and-leave-dispatch-alone
+  (flet ((handler-thread (workers)
+           (let ((ran-on nil))
+             (with-hyperion-server (port (lambda (env)
+                                           (declare (ignore env))
+                                           (setf ran-on (sb-thread:thread-name sb-thread:*current-thread*))
+                                           (list 200 +ok+ (list "x")))
+                                         :log nil :workers workers)
+               (get* port "GET / HTTP/1.1" "Host: x"))
+             ran-on)))
+    (is (search "server-uv-worker" (handler-thread 2))
+        "with :workers the handler ran on the server's worker pool")
+    (is (not (search "server-uv-worker" (or (handler-thread nil) "")))
+        "control: without it, it did not")
+    (is (eq srv:*dispatch* srv::*inline-dispatch*)
+        "and the global *DISPATCH* was not changed by either server")))
+
+(test stop-ends-the-worker-threads-start-made
+  (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3)))
+    (is (= 200 (status-of (get* (srv:server-port h) "GET / HTTP/1.1" "Host: x"))))
+    (is (= 3 (length (%worker-threads))) "control: the server made three worker threads")
+    (hsrv:stop h)
+    (is (%wait-until (lambda () (null (%worker-threads))))
+        "and STOP ended them")))
+
+(test a-start-that-fails-to-bind-leaves-no-worker-threads
+  (let ((h (srv:start (const-app 200 +ok+ '("x")) :port 0)))
+    (unwind-protect
+         (progn
+           (is (null (%worker-threads)) "control: no worker threads before")
+           (is (typep (nth-value 1 (ignore-errors
+                                    (srv:start (const-app 200 +ok+ '("y"))
+                                               :port (srv:server-port h) :workers 3)))
+                      'error)
+               "the port is taken, so the second start fails")
+           (is (null (%worker-threads)) "and it left no worker threads behind"))
+      (srv:stop h))))
+
+(test stop-does-not-wait-forever-for-a-handler-that-never-returns
+  (let ((gate (sb-thread:make-semaphore))
+        (entered (sb-thread:make-semaphore)))
+    (unwind-protect
+         (let* ((srv::*stop-wait-seconds* 0.5)
+                (h (hsrv:start (lambda (env)
+                                 (declare (ignore env))
+                                 (sb-thread:signal-semaphore entered)
+                                 (sb-thread:wait-on-semaphore gate :timeout 30)
+                                 (list 200 +ok+ (list "late")))
+                               :server :uv :port 0 :log nil :workers 1))
+                (port (srv:server-port h))
+                ;; THREAD-LIFETIME: scoped -- its request fails once the server stops, and it
+                ;; is joined below.
+                (client (bt:make-thread
+                         (lambda () (ignore-errors (get* port "GET / HTTP/1.1" "Host: x"))))))
+           (is (sb-thread:wait-on-semaphore entered :timeout 10) "control: the handler is running")
+           (let ((start (get-internal-real-time)))
+             (hsrv:stop h)
+             (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 5)
+                 "STOP returned without waiting for the handler"))
+           (sb-thread:signal-semaphore gate 10)
+           (aion/test-threads:join client))
+      (sb-thread:signal-semaphore gate 10)
+      (%wait-until (lambda () (null (%worker-threads)))))))
+
 ;;; --- a streamed body (pre-publication issue 117 M2) ---------------------------------------------
 ;;;
 ;;; The framing assertions matter more here than anywhere else in this file. A fixed-length
