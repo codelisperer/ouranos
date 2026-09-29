@@ -44,6 +44,13 @@ pasting a printed config straight back into a REPL. An unreadable object cannot 
   (print-unreadable-object (s stream :type t)
     (write-string "REDACTED" stream)))
 
+(defmethod describe-object ((s secret) stream)
+  "Describe S without its value. SBCL's default DESCRIBE of a structure prints each slot, and it
+does not go through PRINT-OBJECT for them, so (describe secret) printed the plaintext:
+`%VALUE = \"...\"'. Found by hades/credentials' test that the value never reaches output
+(#357). An editor's or REPL's describe command reaches this too."
+  (format stream "~&~S~%  An aion/secret. Its value is not shown; aion/secret:reveal returns it.~%" s))
+
 (defun reveal (s)
   "The plaintext inside S. THE disclosure point -- see this file's header."
   (secret-%value s))

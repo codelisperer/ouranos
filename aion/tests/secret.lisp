@@ -51,6 +51,13 @@ most damagingly. Holding a SECRET instead redacts without the outer struct knowi
     (is (search "db.example.com" printed))
     (is (search "25060" printed))))
 
+(test describe-redacts
+  "DESCRIBE prints a structure's slots without calling PRINT-OBJECT on the structure, so
+without a DESCRIBE-OBJECT method it printed the plaintext (#357)."
+  (let ((described (with-output-to-string (out) (describe (s:make-secret +plaintext+) out))))
+    (is (null (search +plaintext+ described)) "DESCRIBE printed the plaintext: ~S" described)
+    (is (search "REDACTED" described))))
+
 (test the-printed-form-is-unreadable
   "PRINT-UNREADABLE-OBJECT, so a printed config cannot be pasted back into a REPL and
 re-read -- the second reason the issue gave for this shape, independent of the value."

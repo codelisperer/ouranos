@@ -99,6 +99,15 @@ its tag.
   (#305)
 - **aion/windows/ffi: `create-file-w`** and the constants `+generic-read+`, `+generic-write+`,
   `+open-always+`, `+file-attribute-normal+` and `+error-sharing-violation+`. (#305)
+- **hades/credentials: a credential store over the operating system's own.**
+  `(store-credential service account secret)`, `(fetch-credential service account)` and
+  `(delete-credential service account)` keep a secret by name for the current user; `secret` goes
+  in and comes out as an `aion/secret`. A missing item signals `credential-not-found`. On Windows
+  the store is Credential Manager. macOS and Linux signal `credential-store-unavailable` until
+  their backends are written, and nothing is written to a file instead. An app keeping an API key
+  or password in a file or a setting can move it here. (#357)
+- **aion/windows/ffi: Credential Manager bindings**: `cred-write-w`, `cred-read-w`, `cred-delete-w`,
+  `cred-free`, the `credential-w` struct and its constants. (#357)
 
 ### Fixed
 
@@ -125,6 +134,9 @@ its tag.
   `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
   takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
   the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
+- **aion/secret: `describe` no longer prints a secret's value.** It printed the structure's slot,
+  `%VALUE = "..."`, because `describe` does not go through `print-object`. An editor's describe
+  command reached it too. (#357)
 
 ## v0.1.4 — 2026-09-29
 

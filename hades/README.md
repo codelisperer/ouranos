@@ -64,3 +64,21 @@ The lock is scoped to a directory: by default the app's per-user data directory,
 process is `:busy` too. `hyperion/desktop:run-app` does not take the lock itself, because
 nothing in the dependency line may depend on hades; the app takes it around `run-app`.
 Handing the second launch's arguments to the first copy is not built yet (#305).
+
+## The credential store
+
+`hades/credentials` keeps a secret, such as a user's API key or database password, in the
+operating system's own store, never in a file:
+
+```lisp
+(hades/credentials:store-credential "soloflow/anthropic-api-key" "default"
+                                    (aion/secret:make-secret key))
+(aion/secret:reveal (hades/credentials:fetch-credential "soloflow/anthropic-api-key" "default"))
+(hades/credentials:delete-credential "soloflow/anthropic-api-key" "default")
+```
+
+`fetch-credential` returns an `aion/secret`, which prints as `#<SECRET REDACTED>`, and signals
+`credential-not-found` when nothing is stored. No condition or log line carries the value. On
+Windows the store is Credential Manager, per user and encrypted by DPAPI. The macOS Keychain and
+the Linux Secret Service backends are not written yet, and there every call signals
+`credential-store-unavailable` rather than storing anywhere else (#357).

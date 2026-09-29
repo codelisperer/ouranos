@@ -32,12 +32,15 @@
 ;; the PeekMessage/DispatchMessage trio live there, and an apartment that does not pump
 ;; deadlocks the moment an out-of-process server calls back into it.
 (cffi:define-foreign-library user32   (:windows "user32.dll"))
+;; advapi32 for Credential Manager (CredWriteW, CredReadW, CredDeleteW, CredFree), which
+;; hades/credentials is built on (#357).
+(cffi:define-foreign-library advapi32 (:windows "advapi32.dll"))
 
 (defvar *loaded* nil "Which of the OS libraries have been loaded into this image.")
 
 (defun load-windows-libraries ()
   "Load the OS DLLs this system binds. Idempotent; returns the list loaded."
-  (dolist (lib '(kernel32 ole32 oleaut32 user32) *loaded*)
+  (dolist (lib '(kernel32 ole32 oleaut32 user32 advapi32) *loaded*)
     (unless (member lib *loaded*)
       (cffi:load-foreign-library lib)
       (push lib *loaded*))))

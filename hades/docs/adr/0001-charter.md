@@ -47,6 +47,7 @@ the result: each failure is a facade somebody would otherwise have written.
 | paths / known folders | **facade**, with a delegation rule | concepts map cleanly on all three |
 | service / daemon lifecycle | **facade** — the strongest case | "run supervised, stop cleanly" is real everywhere |
 | single-instance lock | **facade**, with an implementation rule | but only via `flock`, never a lock *file* |
+| credential store (added 2026-09-29, #357) | **facade**, with an implementation rule | Credential Manager, the login Keychain and the Secret Service all store a secret per user by name; where none is running (Linux with no keyring), signal, never write a file |
 | notifications | **platform-scoped** | preconditions differ, and absence is *silent* |
 | clipboard | **platform-scoped** | the *semantics* differ, not the API |
 | autostart | **platform-scoped** | no counterpart at all when headless |
@@ -185,3 +186,16 @@ claims only that iteration 1 is not a guess, rather than that the bar is validat
 
 Assisted-research note: the candidate analysis, the UIOP measurement on Windows, and this
 charter were produced in a Claude Code session; every decision recorded here is the maintainer's.
+
+## Addendum, 2026-09-29: the credential store (#357)
+
+Tested against the bar in section 1: every supported OS has a real counterpart for "store a
+secret for this user under a name, and read it back". Windows has Credential Manager (DPAPI per
+user), macOS the login Keychain, and Linux desktops the Secret Service API over D-Bus. So it is a
+**facade**, `hades/credentials`, with one implementation rule: a Linux machine with no keyring
+running has no counterpart at that moment, and the facade signals `credential-store-unavailable`
+there. It never writes the secret to a file instead, which would be the silent no-op section 1
+forbids, done to a secret.
+
+The Windows backend came first. Until the Keychain and Secret Service backends exist, macOS and
+Linux signal the same condition.

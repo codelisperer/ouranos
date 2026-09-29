@@ -136,7 +136,7 @@
     :aion :aion/csv :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
-    :hades :hades/single-instance
+    :hades :hades/single-instance :hades/credentials
     ;; aux systems -- these hold real code and were previously never compiled here,
     ;; so a change to any of them could break unnoticed. praxeon/web is the case that
     ;; exposed it: a refactor landed in praxeon/src/web.lisp and a green run of this
@@ -169,7 +169,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
 
 (defparameter +test-systems+
   '(:aion/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
-    :elenchon/tests :klio/tests :hades/single-instance/tests
+    :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
