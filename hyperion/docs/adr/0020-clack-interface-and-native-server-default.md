@@ -2,8 +2,8 @@
 
 **Status:** Accepted — 2026-09-29, the maintainer's decision. Supersedes decision points 1, 2
 and 3 of [ADR-0015](0015-ring-calling-convention-without-clack.md) and keeps its point 4.
-Schedules the removal of Woo and Hunchentoot that
-[ADR-0017](0017-native-uv-server-as-default-backend.md) left for later. The work is tracked in
+Accepts [ADR-0017](0017-native-uv-server-as-default-backend.md), and schedules the removal of
+Woo and Hunchentoot that ADR-0017 left for later. The work is tracked in
 [#373](https://github.com/codelisperer/ouranos/issues/373).
 
 ## Context
@@ -86,9 +86,11 @@ Measured at `3d67a34`, with Clack 2.1.0 (`clack-20250622-git`, from the pinned Q
    would skip that. Both paths run the same server. The conformance suite covers the Clack
    path, and `hyperion/server-uv/tests` covers the direct one.
 
-4. **`:uv` becomes the default, as ADR-0017 decided, once ADR-0017's remaining precondition is
-   confirmed:** a bundle built by hand on a machine that has a system libuv must still carry
-   libuv. ADR-0017 stays Proposed until then and is Accepted when the default changes. Because
+4. **`:uv` becomes the default, as ADR-0017 decided, after the comparison with Woo described
+   under Consequences is recorded on #373.** ADR-0017's own remaining precondition, that a
+   bundle built by hand on a machine with a system libuv must not ship without libuv, was
+   closed on 2026-09-15 (pre-publication issue 325): the desktop build now refuses when libuv
+   resolves anywhere outside `vendor/`. ADR-0017 is therefore Accepted with this ADR. Because
    hyperion declares no server (pre-publication issue 139), "the default" means three
    specific changes:
    - `:uv` moves to the head of `+backends+`, so an image with several backends loaded starts
@@ -177,6 +179,12 @@ the tree when it has a problem like these.
 
 The maintainer made the decision in the hub session on 2026-09-29, after asking how far the
 native server was from replacing Woo on every platform, Windows included.
+
+The first draft of this ADR said the default had to wait for ADR-0017's libuv precondition
+to be confirmed. It had been closed and measured on 2026-09-15, before the tree was
+published, but ADR-0017's text still described it as open, and the draft repeated that text.
+Reading `scripts/build-desktop-app.lisp` and the closed issue showed the refusal was already
+in the tree. ADR-0017 now carries a dated note saying so.
 
 Two findings made while writing this ADR changed the plan first filed on #373. That plan
 said conformance would be measured with the `clack-test` system; reading it showed that it

@@ -55,7 +55,7 @@ here as accepted, unedited).
 | [0014](0014-macos-runtime-linked-libraries.md) | macOS: patch the runtime before the dump, not the image after it | Accepted |
 | [0015](0015-ring-calling-convention-without-clack.md) | Keep the Ring calling convention; drop the Clack library | Accepted; points 1–3 superseded by ADR-0020 |
 | [0016](0016-server-to-client-stream-back-pressure.md) | Server→client streams coalesce per key at a subscription's rate | Accepted |
-| [0017](0017-native-uv-server-as-default-backend.md) | The native `:uv` server becomes the default backend | Proposed |
+| [0017](0017-native-uv-server-as-default-backend.md) | The native `:uv` server becomes the default backend | Accepted, with ADR-0020 |
 | [0018](0018-desktop-native-menus-and-tray.md) | Desktop native menus: declared by the app, rendered by the launcher | Proposed |
 | [0019](0019-csrf-and-the-pre-authentication-fork.md) | CSRF: one mechanism, central on both sides, and a session before sign-in | Proposed |
 | [0020](0020-clack-interface-and-native-server-default.md) | Keep Clack as the application interface; ship hyperion's own server as the default and as a Clack handler | Accepted |

@@ -1,11 +1,11 @@
 # ADR-0017 — The native `:uv` server becomes the default backend
 
-**Status:** Proposed — 2026-09-13. Amends
+**Status:** Accepted — 2026-09-29, together with
+[ADR-0020](0020-clack-interface-and-native-server-default.md), which adopts this decision and
+schedules decision 4, the removal of Woo and Hunchentoot. Proposed 2026-09-13. Amends
 [ADR-0011](0011-desktop-server-backend-and-content-length.md), whose backend half was
 explicitly a waypoint: *"Amend or supersede this ADR once the desktop path actually runs on
 the native server."* ADR-0011's Content-Length half is untouched and stands permanently.
-[ADR-0020](0020-clack-interface-and-native-server-default.md) (2026-09-29) adopts this
-decision and schedules decision 4, the removal of Woo and Hunchentoot.
 
 ## Context
 
@@ -63,6 +63,13 @@ than ride in on a commit.
      flip, because the flip concerns released bundles and those are built by CI. It **does**
      gate telling anyone to build their own, and it must be closed before this ADR is
      Accepted.
+
+     **Closed on 2026-09-15** (pre-publication issue 325). `scripts/build-desktop-app.lisp`
+     now refuses, with exit 3, when a lazy native library resolves anywhere outside
+     `vendor/`. On macOS with Homebrew's libuv installed and `vendor/` absent, the build went
+     from exit 0 and a bundle containing no libuv to exit 3 and no bundle; four directions
+     were measured before and after. This note was added on 2026-09-29; the paragraphs above
+     were not updated when the issue closed.
 
      Why it was reported as complete: pre-publication PR 310 measured all three directions on **Windows**,
      where there is no system libuv, so "resolves here" and "will be carried" coincide. The
