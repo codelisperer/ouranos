@@ -425,10 +425,12 @@
   :in-order-to ((test-op (test-op "hyperion/auth-db/tests"))))
 
 (defsystem "hyperion/auth-db/tests"
-  :description "Integration tests for the identity store (in-memory SQLite)."
+  :description "Integration tests for the identity store (SQLite, and Postgres when MNEMOSYNE_TEST_PG_URL is set)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion/auth-db" "mnemosyne" "fiveam" "bordeaux-threads" "aion/test-threads")  ; auth-db-tests.lisp calls mnemosyne: directly
+  ;; The Postgres tests (#371) run when MNEMOSYNE_TEST_PG_URL is set and skip, saying so, when it
+  ;; is not; the rest of the suite is in-memory and file SQLite.
   :serial t
   :components ((:file "tests/auth-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/auth-db/tests :run-tests)))
