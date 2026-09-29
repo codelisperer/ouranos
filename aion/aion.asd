@@ -359,7 +359,7 @@
 
 (defsystem "aion/windows/tests"
   :description "Tests for aion/windows. Windows-only; the layout assertions are the headline."
-  :depends-on ("aion/windows" "fiveam")
+  :depends-on ("aion/fs" "aion/windows" "fiveam")   ; conditions-tests.lisp names aion/fs:file-attributes
   :serial t
   :components ((:module "tests/windows"
                 :serial t
