@@ -41,14 +41,18 @@ its tag.
   of cl+ssl.** mnemosyne does not depend on cl+ssl; it uses TLS only if the app has loaded
   it, and until now Hunchentoot loaded it for every macOS and Linux app. After this change,
   such an app sees:
-  - with `sslmode=prefer`, `DATABASE_URL`'s default: the warning `db tls unavailable,
+  - with `sslmode=prefer`, `DATABASE_URL`'s default, and a Postgres on this machine
+    (`localhost`, `127.0.0.1`, `::1` or a Unix socket): the warning `db tls unavailable,
     connecting in plaintext requested=prefer`, and a plaintext connection, or the server's
     refusal if it only accepts TLS;
+  - with `sslmode=prefer` and any other host: the connection is refused with
+    "sslmode=prefer to HOST, which is not this machine, needs TLS, and CL+SSL is not loaded in
+    this image" (#341);
   - with `sslmode=require`, `verify-ca` or `verify-full`: the connection is refused with
     "sslmode=require needs TLS, and CL+SSL is not loaded in this image".
 
   The fix is to add `"cl+ssl"` to the app's own `:depends-on`, as mnemosyne's design already
-  says. Measured on macOS against a Postgres with SSL enabled: before this change both modes
+  says. Measured on macOS against a Postgres with SSL enabled on 127.0.0.1: before this change both modes
   connected over TLS; after it, `prefer` connected in plaintext and `require` was refused;
   with the app declaring `cl+ssl`, both connected over TLS again. An app that loads
   `aion/http-client` (the updater, praxeon's LLM calls) still has cl+ssl through it. An app
