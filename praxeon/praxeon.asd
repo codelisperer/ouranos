@@ -6,15 +6,20 @@
 ;;;; ontology -- actors apply *means* to attain *ends* through *action*, under
 ;;;; uncertainty, economizing a scarce resource (here, the context/token budget).
 
-;;; --- Hunchentoot without SSL on Windows (#249, #115) --------------------------------
+;;; --- Hunchentoot without SSL, on every platform (#249, #115, #337) ----------------------
 ;;;
-;;; On Windows, Hunchentoot is built without its SSL support, so nothing loads OpenSSL there.
-;;; Windows ships no OpenSSL, and a desktop bundle that loaded it at build time reopens it at
-;;; startup and quits before `main' on any machine without a copy (#249). HTTPS requests the
-;;; application makes are unaffected: dexador uses WinHTTP on Windows and never loads cl+ssl.
-;;; What is lost is Hunchentoot serving HTTPS on Windows. That is a stopgap until
-;;; hyperion/server-uv terminates TLS with the mbedTLS this tree builds and carries (#125);
-;;; Postgres over TLS on Windows is #258.
+;;; Hunchentoot is built without its SSL support, so it does not load cl+ssl and OpenSSL. A
+;;; desktop bundle that loaded OpenSSL at build time reopens it by path at startup, and quits
+;;; before `main' on any machine without that copy: on Windows, which ships no OpenSSL (#249),
+;;; and on a Mac without Homebrew, measured on #332. Nothing in this tree serves HTTPS through
+;;; Hunchentoot -- no SSL acceptor and no certificate options anywhere (#337) -- and TLS
+;;; belongs in front of the app (#125), so only that unused half is dropped. HTTPS requests
+;;; the application makes are unaffected by this: they go through aion/http-client, which on
+;;; macOS and Linux still loads cl+ssl itself when an app uses it.
+;;;
+;;; This was Windows-only until #337, so every macOS and Linux app carried OpenSSL through
+;;; Hunchentoot. An app that does want Hunchentoot's SSL acceptor removes the feature before
+;;; hunchentoot.asd is read.
 ;;;
 ;;; WHY HERE. `:hunchentoot-no-ssl' has to be on *FEATURES* before hunchentoot.asd is read,
 ;;; because that file decides at read time whether Hunchentoot depends on cl+ssl, and its
@@ -25,7 +30,7 @@
 ;;; form is at the top of hyperion/hyperion.asd, the other file whose systems depend on
 ;;; clack-handler-hunchentoot. An application outside the tree that depends on
 ;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
-#+win32 (pushnew :hunchentoot-no-ssl *features*)
+(pushnew :hunchentoot-no-ssl *features*)
 
 (defsystem "praxeon"
   :description "A praxeological framework for agentic AI in Common Lisp + Coalton."

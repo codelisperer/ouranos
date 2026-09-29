@@ -31,6 +31,34 @@ its tag.
   every macOS and Linux app, and a deployed app would otherwise have lost TLS to its database
   with only a warning.
 
+- **hyperion, praxeon: Hunchentoot is built without SSL on every platform, so it no longer
+  loads cl+ssl on macOS and Linux.** `hyperion.asd` and `praxeon.asd` push
+  `:hunchentoot-no-ssl` on every platform; it was Windows-only (#337). A macOS desktop app
+  that loaded OpenSSL through Hunchentoot exited at startup on a Mac without Homebrew (#332),
+  and nothing in the tree serves HTTPS through Hunchentoot.
+
+  **An app acts if it connects to Postgres over TLS through mnemosyne and has no other source
+  of cl+ssl.** mnemosyne does not depend on cl+ssl; it uses TLS only if the app has loaded
+  it, and until now Hunchentoot loaded it for every macOS and Linux app. After this change,
+  such an app sees:
+  - with `sslmode=prefer`, `DATABASE_URL`'s default, and a Postgres on this machine
+    (`localhost`, `127.0.0.1`, `::1` or a Unix socket): the warning `db tls unavailable,
+    connecting in plaintext requested=prefer`, and a plaintext connection, or the server's
+    refusal if it only accepts TLS;
+  - with `sslmode=prefer` and any other host: the connection is refused with
+    "sslmode=prefer to HOST, which is not this machine, needs TLS, and CL+SSL is not loaded in
+    this image" (#341);
+  - with `sslmode=require`, `verify-ca` or `verify-full`: the connection is refused with
+    "sslmode=require needs TLS, and CL+SSL is not loaded in this image".
+
+  The fix is to add `"cl+ssl"` to the app's own `:depends-on`, as mnemosyne's design already
+  says. Measured on macOS against a Postgres with SSL enabled on 127.0.0.1: before this change both modes
+  connected over TLS; after it, `prefer` connected in plaintext and `require` was refused;
+  with the app declaring `cl+ssl`, both connected over TLS again. An app that loads
+  `aion/http-client` (the updater, praxeon's LLM calls) still has cl+ssl through it. An app
+  that wants Hunchentoot's own SSL acceptor removes `:hunchentoot-no-ssl` from `*features*`
+  before `hunchentoot.asd` is read.
+
 - **praxeon: a step of a turn that the output limit cuts off ends the turn with
   `output-truncated` instead of passing as finished.** When a completion's stop reason is
   `:max-tokens`, `run-turn` no longer returns its text as the answer and no longer runs the tool

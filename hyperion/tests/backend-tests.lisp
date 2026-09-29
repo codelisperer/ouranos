@@ -110,3 +110,17 @@ and STOP asks this about every handler it is given."
   "Not `does not designate any package'. The operator asked for a backend that is not in
 the image, which is exactly what NO-SERVER-BACKEND says and tells them how to fix."
   (signals srv:no-server-backend (srv::%uv-call "START" (lambda (env) env))))
+
+(test hunchentoot-is-built-without-its-ssl-half-on-every-platform
+  "#337: hyperion.asd pushes :hunchentoot-no-ssl on every platform, not only Windows, so
+Hunchentoot does not load cl+ssl and OpenSSL. A desktop bundle that loaded OpenSSL at build
+time reopens it at startup and exits on a Mac without Homebrew (#332). Checked by what
+Hunchentoot itself loaded: its ssl.lisp defines SSL-ACCEPTOR, so that class must not exist.
+A fasl compiled before the change can leave a forward reference to it, which is not a
+STANDARD-CLASS."
+  (is (member :hunchentoot-no-ssl *features*))
+  (let ((ssl (asdf:find-component "hunchentoot" "ssl")))
+    (is (and ssl (not (asdf::featurep (asdf::component-if-feature ssl))))
+        "hunchentoot's ssl component would be loaded under these features"))
+  (is (not (typep (find-class 'hunchentoot::ssl-acceptor nil) 'standard-class))
+      "hunchentoot's SSL acceptor is defined, so its ssl.lisp was loaded"))
