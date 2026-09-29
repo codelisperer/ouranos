@@ -149,6 +149,28 @@ list. Returns (values app ran-box)."
     (signals csrf:csrf-failure
       (funcall app (%so-env :host *so-host* :site "same-origin")))))
 
+;;; --- default ports (review of #302) ------------------------------------------
+
+(test normalise-origin-drops-a-default-port-and-keeps-any-other
+  (is (string= "http://127.0.0.1" (csrf:normalise-origin "http://127.0.0.1:80")))
+  (is (string= "http://127.0.0.1" (csrf:normalise-origin "HTTP://127.0.0.1:80/")))
+  (is (string= "https://app.test" (csrf:normalise-origin "https://app.test:443")))
+  (is (string= "http://127.0.0.1:443" (csrf:normalise-origin "http://127.0.0.1:443"))
+      "443 is only the default for https")
+  (is (string= "http://127.0.0.1:8080" (csrf:normalise-origin "http://127.0.0.1:8080"))))
+
+(test an-app-on-port-80-accepts-its-own-requests-as-a-browser-sends-them
+  ;; A browser sends Origin: http://127.0.0.1 for a page on port 80, and may send Host with
+  ;; or without :80. Before the fix the configured "http://127.0.0.1:80" matched neither.
+  (let ((app (csrf:wrap-same-origin (lambda (env) (declare (ignore env)) (list 200 nil nil))
+                                    :origins (list "http://127.0.0.1:80"))))
+    (is (= 200 (first (funcall app (%so-env :host "127.0.0.1" :origin "http://127.0.0.1")))))
+    (is (= 200 (first (funcall app (%so-env :host "127.0.0.1:80" :origin "http://127.0.0.1")))))
+    (%quietly
+      (is (= 403 (first (funcall app (%so-env :host "127.0.0.1" :origin "http://127.0.0.1:8080"))))
+          "another port is still another origin")
+      (is (= 403 (first (funcall app (%so-env :host "attacker.example" :origin "http://127.0.0.1"))))))))
+
 ;;; --- hyperion/desktop installs it, on a real server --------------------------
 
 (defun %so-raw-status (port method path headers)
@@ -201,6 +223,30 @@ name and value; Host included only if listed) and return the status code."
                                                       ("Origin" . "https://attacker.example")))))
         (is (= 403 (%so-raw-status port "GET" "/" `(("Host" . ,(format nil "attacker.example:~D" port))
                                                     ("Sec-Fetch-Site" . "same-origin")))))))))
+
+(test run-app-installs-the-guard-by-default
+  ;; The review of #302: the tests above start the server through %START-EMBEDDED, so they
+  ;; would still pass if RUN-APP stopped passing :REQUEST-GUARD or changed its default. This
+  ;; goes through RUN-APP itself. ON-READY runs once the server listens and before any shell
+  ;; starts; it sends its requests and then leaves RUN-APP with THROW, whose unwind stops the
+  ;; server. The launcher must exist for RUN-APP's up-front check, and is never started.
+  (%quietly
+    (let ((results
+            (catch 'run-app-done
+              (hyperion/desktop:run-app
+               (%srv-ok-app)
+               :server :hunchentoot :shell :webview :launcher sb-ext:*runtime-pathname*
+               :on-ready (lambda (url)
+                           (let* ((port (parse-integer url :start (1+ (position #\: url :from-end t))
+                                                           :junk-allowed t))
+                                  (own (format nil "127.0.0.1:~D" port)))
+                             (throw 'run-app-done
+                               (list (%so-raw-status port "POST" "/x" `(("Host" . ,own)
+                                                                        ("Sec-Fetch-Site" . "same-origin")))
+                                     (%so-raw-status port "POST" "/x" `(("Host" . ,own)
+                                                                        ("Sec-Fetch-Site" . "cross-site")))))))))))
+      (is (equal '(200 403) results)
+          "run-app must refuse a cross-site POST by default: own, cross-site = ~S" results))))
 
 (test a-desktop-app-with-request-guard-none-installs-nothing
   ;; The control for the test above: the same cross-site POST that was refused there is

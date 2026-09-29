@@ -35,6 +35,11 @@ its tag.
   capped at 1,024 tokens, 2,048 left room for the translation; with replies of up to 8,192 it may
   not. An app that translates `run-turn`'s reply, as `praxeon/elise` does, passes `translate` a
   `:max-tokens` large enough for its longest replies. (#326)
+- **aion/tls: a `tls-stream` whose transport ends without `close_notify` signals
+  `aion/tls:tls-truncated`, a `tls-error`.** It used to return end of file, so data cut short by
+  a dropped connection or an attacker read as complete. A caller whose protocol frames its own
+  messages can accept it with the `treat-as-end-of-file` restart:
+  `(handler-bind ((aion/tls:tls-truncated #'aion/tls:treat-as-end-of-file)) ...)`. (#282 review)
 
 ### Added
 
@@ -99,6 +104,15 @@ its tag.
   - The default, NIL, keeps today's behaviour: one thread for handlers on Woo and on `:uv`.
   - An app that shares one connection across handlers wraps itself in `wrap-connection`
     before it turns this on. The same applies to an app on Hunchentoot today. (#324)
+
+### Fixed
+
+- **hyperion/csrf: `wrap-same-origin` accepts an app on a default port.** An origin configured as
+  `http://127.0.0.1:80` refused the app's own requests, because a browser sends
+  `Origin: http://127.0.0.1` without the default port. Origins are compared after
+  `normalise-origin`, which drops `:80` for http and `:443` for https, and the Host check accepts
+  the host with or without the default port. (#302 review)
+
 
 ## v0.1.3 — 2026-09-27
 

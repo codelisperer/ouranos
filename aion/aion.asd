@@ -133,7 +133,8 @@
 (defsystem "aion/tls/tests"
   :description "Tests for aion/tls. Requires a built mbedTLS (scripts/build-mbedtls.lisp)."
   ;; cffi because two tests free a foreign suite list they made themselves.
-  :depends-on ("aion/tls" "fiveam" "cffi" (:require "sb-bsd-sockets"))
+  ;; aion/test-threads for JOIN, which gives up after a deadline and names the thread.
+  :depends-on ("aion/tls" "fiveam" "cffi" "aion/test-threads" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests"
                 :serial t

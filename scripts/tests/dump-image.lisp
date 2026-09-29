@@ -131,14 +131,67 @@ two tests above describe what those two produce."
       (is (search "ouranos-dump:dump-executable" text) "~A must dump through ouranos-dump:dump-executable" file)
       (is (not (search "(sb-ext:save-lisp-and-die" text)) "~A calls save-lisp-and-die itself, so its image skips UIOP's hooks" file))))
 
+(defun %template-forms (text)
+  "The top-level forms of a cons template's build script TEXT, read with {{name}} replaced by a
+placeholder. A symbol in a package this image does not have (ql:quickload, the app's main) is
+read into a scratch package, which is enough to compare symbol names."
+  (let ((pkg (or (find-package "TEMPLATE-FORMS-SCRATCH") (make-package "TEMPLATE-FORMS-SCRATCH" :use '())))
+        (text (uiop:frob-substrings text '("{{name}}") "template-app")))
+    (handler-bind ((sb-int:simple-reader-package-error
+                     (lambda (c) (declare (ignore c)) (invoke-restart 'continue))))
+      (with-input-from-string (s text)
+        (let ((*package* pkg) (*read-eval* nil))
+          (loop for form = (read s nil s) until (eq form s) collect form))))))
+
+(defun %call-named-p (form name)
+  (and (consp form) (symbolp (car form)) (string= (symbol-name (car form)) name)))
+
+(defun %template-hook-order (text)
+  "(values DUMP-HOOK-FIRST RESTORE-HOOK-FIRST) for a template build script TEXT, from its forms
+rather than its characters, so a comment or a string cannot stand in for a call.
+DUMP-HOOK-FIRST: a top-level (uiop:call-image-dump-hook) comes before the top-level
+(sb-ext:save-lisp-and-die ...). RESTORE-HOOK-FIRST: the first form of that call's :toplevel
+lambda is (uiop:call-image-restore-hook), and the lambda calls main after it."
+  (let* ((forms (%template-forms text))
+         (hook (position-if (lambda (f) (%call-named-p f "CALL-IMAGE-DUMP-HOOK")) forms))
+         (dump (position-if (lambda (f) (%call-named-p f "SAVE-LISP-AND-DIE")) forms))
+         (toplevel (and dump (getf (cddr (nth dump forms)) :toplevel)))
+         (body (and (%call-named-p toplevel "LAMBDA") (cddr toplevel)))
+         (main (position-if (lambda (f) (%call-named-p f "MAIN")) body)))
+    (values (and hook dump (< hook dump) t)
+            (and body main (%call-named-p (first body) "CALL-IMAGE-RESTORE-HOOK") (> main 0) t))))
+
 (test cons-templates-dump-with-uiops-hooks
   "The build script every `cons init' project gets must run UIOP's dump hook before its dump
 and the restore hook first in its toplevel (#107). A generated project cannot load
 scripts/dump-image.lisp, which lives in this tree, so each template writes the two calls
 itself, and this checks all three. The behaviour of those two calls is what the tests above
 measure."
+  ;; Order, not only presence (review of #285), and read from the forms (review of #328): a
+  ;; restore hook called after main, or a dump hook after the dump, would be found by a
+  ;; presence check, and a commented-out call before main would satisfy a check on the text.
   (dolist (template '("agent" "cli" "web"))
-    (let* ((file (format nil "cons/templates/~A/files/scripts/build-{{name}}.lisp" template))
-           (text (uiop:read-file-string (merge-pathnames file td-root))))
-      (is (search "(uiop:call-image-dump-hook)" text) "~A must call uiop:call-image-dump-hook before it dumps" file)
-      (is (search "(uiop:call-image-restore-hook)" text) "~A's toplevel must call uiop:call-image-restore-hook first" file))))
+    (let ((file (format nil "cons/templates/~A/files/scripts/build-{{name}}.lisp" template)))
+      (multiple-value-bind (dump-ok restore-ok)
+          (%template-hook-order (uiop:read-file-string (merge-pathnames file td-root)))
+        (is-true dump-ok "~A must call uiop:call-image-dump-hook before save-lisp-and-die" file)
+        (is-true restore-ok "~A's toplevel must call uiop:call-image-restore-hook first, then main" file)))))
+
+(test template-hook-order-is-read-from-forms-not-text
+  "The control for the test above: a template whose restore hook is moved after main, with a
+commented-out call left before main, and one whose dump hook is only in a string, must fail."
+  (let ((text (uiop:read-file-string
+               (merge-pathnames "cons/templates/agent/files/scripts/build-{{name}}.lisp" td-root))))
+    (is-true (nth-value 1 (%template-hook-order text)) "the unmodified template must pass")
+    (let ((moved (uiop:frob-substrings
+                  text '("             (uiop:call-image-restore-hook)
+             ({{name}}:main)))")
+                  (format nil "             ;; (uiop:call-image-restore-hook)~%             ({{name}}:main)~%             (uiop:call-image-restore-hook)))"))))
+      (is (not (equal moved text)) "the control must have changed the template")
+      (is-false (nth-value 1 (%template-hook-order moved))
+                "a restore hook after main, with a comment before it, must fail"))
+    (let ((stringed (uiop:frob-substrings text '("(uiop:call-image-dump-hook)")
+                                          "\"(uiop:call-image-dump-hook)\"")))
+      (is (not (equal stringed text)) "the control must have changed the template")
+      (is-false (nth-value 0 (%template-hook-order stringed))
+                "a dump hook that is only a string must fail"))))

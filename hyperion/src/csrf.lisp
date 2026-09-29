@@ -432,11 +432,43 @@ apart."
 (defun %strip-trailing-slash (s)
   (string-right-trim "/" s))
 
-(defun %origin-authority (origin)
-  "\"http://127.0.0.1:5000\" => \"127.0.0.1:5000\": the part of ORIGIN a Host header carries."
+(defun %default-port-suffix (scheme)
+  (cond ((string-equal scheme "http") ":80")
+        ((string-equal scheme "https") ":443")))
+
+(defun normalise-origin (origin)
+  "ORIGIN in the form a browser sends it: no trailing slash, the scheme lowercased, and no
+port when the port is the scheme's default. \"HTTP://127.0.0.1:80/\" => \"http://127.0.0.1\".
+
+A browser leaves the default port out of the Origin header, so an app configured with
+\"http://127.0.0.1:80\" would otherwise refuse its own requests (review of #302)."
   (let* ((o (%strip-trailing-slash origin))
          (sep (search "://" o)))
-    (if sep (subseq o (+ sep 3)) o)))
+    (if (null sep)
+        o
+        (let* ((scheme (string-downcase (subseq o 0 sep)))
+               (rest (subseq o (+ sep 3)))
+               (suffix (%default-port-suffix scheme)))
+          (when (and suffix (> (length rest) (length suffix))
+                     (string= suffix rest :start2 (- (length rest) (length suffix))))
+            (setf rest (subseq rest 0 (- (length rest) (length suffix)))))
+          (format nil "~A://~A" scheme rest)))))
+
+(defun %origin-hosts (origin)
+  "The Host header values that name ORIGIN. \"http://127.0.0.1:5000\" => (\"127.0.0.1:5000\").
+With the default port, both spellings: \"http://127.0.0.1\" => (\"127.0.0.1\" \"127.0.0.1:80\"),
+because a client may send either."
+  (let* ((o (normalise-origin origin))
+         (sep (search "://" o)))
+    (if (null sep)
+        (list o)
+        (let* ((authority (subseq o (+ sep 3)))
+               (suffix (%default-port-suffix (subseq o 0 sep))))
+          ;; An authority still carrying a colon after normalising has a port that is not
+          ;; the default. (A bracketed IPv6 literal carries colons too, so look after the ].)
+          (if (and suffix (not (find #\: authority :start (1+ (or (position #\] authority) -1)))))
+              (list authority (concatenate 'string authority suffix))
+              (list authority))))))
 
 (defun check-host (env hosts)
   "Signal CSRF-FAILURE unless ENV's Host header is one of HOSTS (host:port strings,
@@ -464,7 +496,8 @@ Does not look at the method: WRAP-SAME-ORIGIN calls this only for unsafe ones."
                (error 'csrf-failure :reason :cross-site :method method :path path)))
           ((null origin)
            (error 'csrf-failure :reason :no-origin :method method :path path))
-          ((not (member (%strip-trailing-slash origin) origins :test #'string-equal))
+          ((not (member (normalise-origin origin) (mapcar #'normalise-origin origins)
+                        :test #'string-equal))
            (error 'csrf-failure :reason :origin-mismatch :method method :path path))
           (t t))))
 
@@ -475,7 +508,9 @@ come from one of the app's own ORIGINS. See the comment above CHECK-HOST for wha
 defends against.
 
 ORIGINS is a non-empty list of origins the app is served from, such as
-\"http://127.0.0.1:5000\". HOSTS defaults to their host:port parts. EXEMPT has the same shape
+\"http://127.0.0.1:5000\"; a default port is normalised away, as a browser's Origin header
+leaves it out (NORMALISE-ORIGIN). HOSTS defaults to their host:port parts, both with and
+without the port when it is the default. EXEMPT has the same shape
 as WRAP-CSRF's and skips the origin check only; exemptions are logged once, here. ON-FAILURE
 is called with (env condition) and defaults to FORBIDDEN.
 
@@ -483,8 +518,9 @@ Needs no session and reads no body, so it can go anywhere in the middleware stac
 not replace WRAP-CSRF for an app that has sessions."
   (when (null origins)
     (error "wrap-same-origin: ORIGINS is empty, so every request would be refused. Pass the origin the app is served from, e.g. \"http://127.0.0.1:5000\"."))
-  (let* ((origins (mapcar #'%strip-trailing-slash origins))
-         (hosts (or hosts (mapcar #'%origin-authority origins)))
+  (let* ((origins (mapcar #'normalise-origin origins))
+         (hosts (or hosts (remove-duplicates (mapcan #'%origin-hosts origins)
+                                             :test #'string-equal)))
          (exemptions (copy-list exempt)))
     (when exemptions
       (log:warn "csrf: same-origin exemptions configured -- each one fails OPEN"
