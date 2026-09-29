@@ -4,6 +4,8 @@
 [ADR-0011](0011-desktop-server-backend-and-content-length.md), whose backend half was
 explicitly a waypoint: *"Amend or supersede this ADR once the desktop path actually runs on
 the native server."* ADR-0011's Content-Length half is untouched and stands permanently.
+[ADR-0020](0020-clack-interface-and-native-server-default.md) (2026-09-29) adopts this
+decision and schedules decision 4, the removal of Woo and Hunchentoot.
 
 ## Context
 

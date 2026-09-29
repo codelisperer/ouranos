@@ -1,6 +1,9 @@
 # ADR-0015 — Keep the Ring calling convention; drop the Clack library
 
-**Status:** Accepted — 2026-08-27
+**Status:** Accepted — 2026-08-27. Decision points 1, 2 and 3 are superseded by
+[ADR-0020](0020-clack-interface-and-native-server-default.md) (2026-09-29): Clack stays, and
+`hyperion/server-uv` also becomes a Clack handler. Point 4, the separate `hyperion/http1`
+parser, stands.
 
 ## Context
 
