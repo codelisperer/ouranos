@@ -100,6 +100,11 @@ its tag.
   remove it. The build refuses a path with no license text, a path under the tree's `vendor/`,
   and two paths with one file name. (#78)
 
+  On macOS, a carried library that needs another carried library is relinked to the copy beside
+  it (`@loader_path/<name>`) and re-signed ad hoc, so carrying Homebrew's `libssl.3.dylib` and
+  `libcrypto.3.dylib` works on a Mac without Homebrew; without it the app stopped with "Library
+  not loaded" for `libcrypto`. System libraries are never touched. (#78)
+
 ### Fixed
 
 - **Directory trees the framework removes are removed without following links.** `cons`'s
