@@ -88,6 +88,17 @@ its tag.
   error code when Windows cannot answer, and signals on other systems. `aion/windows` re-exports
   it. An app that parses `attrib.exe` for a read-only check can call this instead: `attrib.exe`'s
   output did not decode for a non-ASCII path, and the check answered "not read-only". (#349)
+- **hades/single-instance: a lock that keeps a second copy of a desktop app off the same data
+  directory.** `(hades/single-instance:with-single-instance ("app" :on-busy ...) ...)` runs its
+  body holding the lock, or calls `:on-busy` when another copy holds it;
+  `acquire-single-instance` returns a lock or `:busy`, and `release-single-instance` releases
+  it. The operating system releases the lock when the process ends, so a crash does not lock the
+  app out. It is scoped to the app's per-user data directory, or `:directory`. An app that wrote
+  its own lock for this, with `CreateFileW` share mode 0 or `flock`, can use this instead. It is
+  the first code in hades; an app depends on `hades/single-instance` alongside the frameworks.
+  (#305)
+- **aion/windows/ffi: `create-file-w`** and the constants `+generic-read+`, `+generic-write+`,
+  `+open-always+`, `+file-attribute-normal+` and `+error-sharing-violation+`. (#305)
 
 ### Fixed
 

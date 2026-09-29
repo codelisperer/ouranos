@@ -91,6 +91,33 @@
 (cffi:defcfun ("CloseHandle" %close-handle) :int32
   (h-object :pointer))
 
+;;; --- files ------------------------------------------------------------------
+;;;
+;;; CreateFileW, for a caller that needs what CL:OPEN does not offer: a share mode. SBCL opens
+;;; files so that other processes may read and write them too. A share mode of 0 makes the open
+;;; handle exclusive, so a second CreateFileW on the same file, from any process, fails with
+;;; ERROR_SHARING_VIOLATION until the handle is closed, and Windows closes it when the process
+;;; ends. hades/single-instance is built on that.
+;;;
+;;; The failure return is INVALID_HANDLE_VALUE, (HANDLE)-1, not NULL; AION/WINDOWS:WRAP-HANDLE
+;;; and HANDLE-VALID-P treat both as invalid. A NULL security-attributes pointer makes the
+;;; handle non-inheritable, so a child process does not keep the file open.
+
+(defconstant +generic-read+ #x80000000)
+(defconstant +generic-write+ #x40000000)
+(defconstant +open-always+ 4)
+(defconstant +file-attribute-normal+ #x80)
+(defconstant +error-sharing-violation+ 32)
+
+(cffi:defcfun ("CreateFileW" create-file-w) :pointer
+  (lp-file-name :pointer)
+  (dw-desired-access dword)
+  (dw-share-mode dword)
+  (lp-security-attributes :pointer)
+  (dw-creation-disposition dword)
+  (dw-flags-and-attributes dword)
+  (h-template-file :pointer))
+
 ;;; --- the layout gate --------------------------------------------------------
 ;;;
 ;;; Run at LOAD, and deliberately fatal. ADR-0003 s4: "built in from the first commit". A
