@@ -188,8 +188,9 @@ about six octets of buffer for each octet of body the cap counts.")
 
 ;;; --- env synthesis ---------------------------------------------------------
 ;;;
-;;; The nine keys ADR-0015 enumerates. This is now a contract we own: previously Clack
-;;; defined it and drift was impossible, and a missing key is our bug.
+;;; The keys ADR-0015 enumerates, plus :SERVER-PROTOCOL and :REMOTE-PORT, which a Clack app
+;;; reads through hyperion/clack-handler-uv (#373, ADR-0020). This is now a contract we own:
+;;; previously Clack defined it and drift was impossible, and a missing key is our bug.
 
 (defun %headers-table (flat)
   "The parser's flat name/value list as the hash table the env promises: lowercased string
@@ -211,8 +212,8 @@ is no `?' at all -- distinct from an empty query, which `/x?' really does have."
         (values (subseq target 0 q) (subseq target (1+ q)))
         (values target nil))))
 
-(defun %env (head body-octets peer)
-  "The Ring/Lack env for a parsed HEAD and its BODY-OCTETS."
+(defun %env (head body-octets peer &optional peer-port)
+  "The Ring/Lack env for a parsed HEAD and its BODY-OCTETS, from PEER at PEER-PORT."
   (multiple-value-bind (path query) (%split-target (h1:head-target head))
     (let ((headers (%headers-table (h1:head-headers-flat head))))
       (list :request-method (intern (string-upcase (h1:head-method head)) :keyword)
@@ -222,7 +223,10 @@ is no `?' at all -- distinct from an empty query, which `/x?' really does have."
             :content-length (if (h1:head-has-body? head) (h1:head-body-length head) nil)
             :content-type (gethash "content-type" headers)
             :raw-body (and body-octets (%body-stream body-octets))
-            :remote-addr peer))))
+            :remote-addr peer
+            :remote-port peer-port
+            ;; :HTTP/1.1 or :HTTP/1.0, the keyword Clack's env uses (#373).
+            :server-protocol (intern (h1:head-version head) :keyword)))))
 
 ;;; --- writing ---------------------------------------------------------------
 
@@ -1368,8 +1372,7 @@ callback guard and the request hangs -- the exact failure the boundary exists to
 one level up."
   (setf (conn-state-in-flight state) t)
   (multiple-value-bind (host port) (ignore-errors (net:peer-address conn))
-    (declare (ignorable port))
-    (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "")))
+    (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
            (loop* (net:connection-loop conn))
            ;; K ROUTES ITSELF ONTO THE LOOP THREAD, so a dispatcher may call it from
            ;; wherever the work finished. The alternative -- documenting that every

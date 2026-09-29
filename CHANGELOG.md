@@ -56,6 +56,17 @@ its tag.
 
 ### Added
 
+- **hyperion/clack-handler-uv: hyperion's own server as a Clack handler.** Load the system,
+  then `(clack:clackup app :server :uv)` runs any Clack app on `hyperion/server-uv`, and
+  `clack:stop` stops it. The env is Clack's whole environment, including `:script-name`,
+  `:request-uri`, `:url-scheme`, `:server-name`, `:server-port`, `:server-protocol` and
+  `:remote-port`, with `:path-info` percent-decoded as UTF-8. The response may be a list of
+  strings, an octet vector, a pathname, or a delayed response whose responder returns a writer
+  taking `(data &key start end close)`; a header whose value is NIL is not sent. `:workers`, or
+  `:worker-num` as Woo's handler takes it, sets the worker pool, 16 by default. Clack's own
+  handler cases, from Clack 2.1.0, are ported to FiveAM and pass, the streaming case included.
+  server-uv's env gains `:server-protocol` and `:remote-port`. (#373)
+
 - **hyperion/server-uv: `*max-head-octets*`, the largest request head accepted before 431.**
   The default is 65,536, the limit the parser has always applied. An app whose clients send
   larger headers can raise it; each connection may then hold that much memory before its
