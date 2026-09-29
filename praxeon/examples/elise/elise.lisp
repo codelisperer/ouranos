@@ -17,6 +17,7 @@
   (:local-nicknames (#:config #:praxeon/config)
                     (#:boundary #:aion/boundary)
                     (#:llm #:praxeon/llm)
+                    (#:cnd #:praxeon/conditions)
                     (#:actor #:praxeon/actor)
                     (#:turn #:praxeon/turn)
                     (#:evt #:praxeon/event)
@@ -130,6 +131,22 @@ written for."
                                        (turn:turn-reply tn) (crisis-note locale))))
          tn))))
 
+(defun %translate-reply (tr text locale)
+  "TEXT, Elise's English reply, translated into LOCALE on TR. A translation cut off at the output
+limit (#338) is asked for once more at twice the limit; if that is cut off too, the user gets the
+whole English reply. Elise shows the untranslated reply rather than nothing, and a complete reply
+in English rather than part of one in the user's language."
+  (let ((retried nil))
+    (handler-case
+        (handler-bind ((cnd:translation-truncated
+                         (lambda (c)
+                           (unless retried
+                             (setf retried t)
+                             (cnd:retry-with-max-tokens
+                              (* 2 (cnd:output-limit-reached-max-tokens c)) c)))))
+          (values (translate:translate tr text locale :from :en)))
+      (cnd:translation-truncated () text))))
+
 (defun %elise-effect (agent)
   "The single impure pivot of an Elise turn: translate in, deliberate, translate out.
 
@@ -145,7 +162,7 @@ user's original."
                          (turn:turn-input tn)
                          (translate:translate tr (turn:turn-input tn) :en :from locale)))
            (en-reply (actor:run-turn agent en-input))
-           (reply (if en? en-reply (translate:translate tr en-reply locale :from :en))))
+           (reply (if en? en-reply (%translate-reply tr en-reply locale))))
       (turn:with-reply (turn:with-input tn en-input) reply))))
 
 (defun respond (agent user-input &optional (locale :en))
