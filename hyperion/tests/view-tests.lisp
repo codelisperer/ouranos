@@ -165,9 +165,9 @@ resolution moves, this suite must move with it or say so."
     (unwind-protect
          (let ((bundled (%touch (merge-pathnames "window-icon.png" dir)))
                (callers (%touch (merge-pathnames "source-icon.png" dir))))
-           (is (equal (list "--icon" (namestring bundled))
+           (is (equal (list "--icon" (uiop:native-namestring bundled))
                       (hyperion/desktop::%icon-arguments callers bundled)))
-           (is (equal (list "--icon" (namestring callers))
+           (is (equal (list "--icon" (uiop:native-namestring callers))
                       (hyperion/desktop::%icon-arguments callers nil))
                "without a bundled copy, the caller's existing file is used")
            (is (null (hyperion/desktop::%icon-arguments

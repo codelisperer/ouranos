@@ -122,7 +122,7 @@ The bundled copy wins because in a shipped app ICON is usually the build machine
 exists only on the machine that built the app, so preferring it would make the icon depend
 on which machine the app runs on. In development there is no bundled copy, and ICON is used."
   (let ((path (or bundled (and icon (probe-file icon)))))
-    (when path (list "--icon" (namestring path)))))
+    (when path (list "--icon" (uiop:native-namestring path)))))
 
 (define-condition launcher-not-found (error)
   ((path :initarg :path :reader launcher-not-found-path))
