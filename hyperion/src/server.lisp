@@ -666,6 +666,60 @@ when another Woo server is running, and register the new thread, in one critical
       ;; call in %CLACK-START.
       (sb-thread:make-thread function :name name)))
 
+;;; --- status lines Woo cannot write (#372) ------------------------------------
+;;;
+;;; Woo writes a response's status line from a table it builds once, when it is loaded, from
+;;; its own list of reason phrases for the codes 100 to 510 (`woo.response::*status-line*' in
+;;; woo-20241012). A code with no entry has no status line, so writing the response fails
+;;; inside Woo (`The value NIL is not of type VECTOR when binding WOO.EV.SOCKET::DATA') and the
+;;; client receives an empty 500 instead of the handler's response. Woo's list has no 429, so
+;;; every refusal from WRAP-RATE-LIMIT reached the client that way, without its Retry-After or
+;;; its body. The registered codes it lacks are 103, 104, 425, 428, 429, 431 and 511.
+;;;
+;;; So before START runs a Woo server, every code from 100 to 599 that has no entry gets one,
+;;; with the reason phrase from HYPERION/HTTP1:REASON-PHRASE, the table the native server also
+;;; uses: the registered phrase, or an empty one for a code nobody registered, which HTTP/1.1
+;;; allows (RFC 9112 section 4: the reason phrase is optional). Entries Woo already has are
+;;; left as they are. Hyperion declares no backend, so Woo's table is found by name at run
+;;; time, and nothing happens in an image without Woo.
+
+(defun %woo-status-table ()
+  "Woo's table of status lines, a hash table from code to octets, or NIL when Woo is not loaded
+or does not have one by that name."
+  (let* ((package (find-package "WOO.RESPONSE"))
+         (symbol (and package (find-symbol "*STATUS-LINE*" package))))
+    (and symbol (boundp symbol) (hash-table-p (symbol-value symbol)) (symbol-value symbol))))
+
+(defun status-line-octets (code)
+  "CODE's HTTP/1.1 status line with its CRLF, as UTF-8 octets, with the reason phrase
+HYPERION/HTTP1:REASON-PHRASE gives it: the registered one, or an empty one for a code the
+registry does not name. The native server's status line uses the same table."
+  (sb-ext:string-to-octets
+   (format nil "HTTP/1.1 ~D ~A~C~C" code (h1:reason-phrase code) #\Return #\Linefeed)
+   :external-format :utf-8))
+
+(defvar *woo-status-lines-lock* (sb-thread:make-mutex :name "hyperion-woo-status-lines")
+  "Held while COMPLETE-WOO-STATUS-LINES reads and writes Woo's table. Woo's table is an ordinary
+hash table, and two first starts of Woo at the same moment would otherwise write it at once.")
+
+(defun complete-woo-status-lines ()
+  "Add a status line to Woo's table for every code from 100 to 599 that has none, so that Woo can
+send any status a handler returns (#372). Returns the codes added, in order; NIL when Woo is not
+loaded or nothing was missing. START calls it before it runs a Woo server.
+
+It writes only the first time, and under *WOO-STATUS-LINES-LOCK*, so two threads starting Woo at
+once do not write the table together. A Woo server already serving reads the table without that
+lock, so an app that starts Woo some other way calls this before it serves anything."
+  (sb-thread:with-mutex (*woo-status-lines-lock*)
+    (let ((table (%woo-status-table))
+          (added '()))
+      (when table
+        (loop for code from 100 to 599
+              unless (gethash code table)
+                do (setf (gethash code table) (status-line-octets code))
+                   (push code added)))
+      (nreverse added))))
+
 (defun %clack-start (app server host port debug &optional backend-args)
   "Start APP on a Clack backend and return a CLACK-SERVER once that server answers.
 BACKEND-ARGS is a plist passed on to clackup, from %BACKEND-ARGS. Signals
@@ -678,7 +732,11 @@ APP is wrapped OUTERMOST so that, until START returns, one path answers with a r
 and nothing else: the probe request never reaches APP or any of its middleware, so it
 creates no session, is not logged and meets no CSRF or auth check. After START returns,
 every request is forwarded to APP, that path included; what remains is one check of a flag
-per request."
+per request.
+
+For :WOO it first completes Woo's table of status lines (COMPLETE-WOO-STATUS-LINES, #372)."
+  (when (eq server :woo)
+    (complete-woo-status-lines))
   (let* ((failure nil)
          (started nil)
          (lock (sb-thread:make-mutex :name "hyperion-server-start"))

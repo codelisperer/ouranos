@@ -38,6 +38,28 @@ its tag.
   CI added its own strict-build step as a workaround, such as `scripts/build-strict.lisp`, can
   replace it with `cons --strict test`. (#303)
 
+### Fixed
+
+- **hyperion/server: on Woo, a response with status 429 reaches the client as 429, with its
+  headers and body, instead of as an empty 500.** Woo writes a status line from its own table of
+  reason phrases, which has no entry for 429 or for the other registered codes 103, 104, 425,
+  428, 431 and 511, and it failed to write a response with any of them (#372). So
+  `hyperion/ratelimit:wrap-rate-limit`'s refusals, and any handler returning one of those codes,
+  reached a client on Woo as `HTTP/1.1 500` with an empty body and no `Retry-After`.
+  `hyperion/server:start` now adds a line to Woo's table, before it starts a Woo server, for
+  every code from 100 to 599 that has none (`complete-woo-status-lines`). Lines Woo already had
+  are unchanged. An app on Woo needs no change. An app that starts Woo without
+  `hyperion/server:start` calls `(hyperion/server:complete-woo-status-lines)` once after Woo
+  is loaded. Hunchentoot was not affected. A new system, `hyperion/woo`, exists only for its
+  suite, `hyperion/woo/tests`, which serves requests through a real Woo server; the gate runs it
+  on Linux. It is not for an app: an app that wants Woo declares `clack-handler-woo` itself.
+- **hyperion/http1: `reason-phrase` names every registered status code, and gives a code the
+  registry does not name an empty phrase instead of "Unknown".** It is now the one table in
+  hyperion: the native `:uv` server writes it, so a 429 there goes out as
+  `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
+  takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
+  the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
+
 ## v0.1.4 — 2026-09-29
 
 Changes since `v0.1.3`. The tag is on `b68ccd4`.

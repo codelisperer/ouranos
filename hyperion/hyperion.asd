@@ -37,6 +37,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("coalton"
+               "hyperion/http1"                       ; the reason-phrase table (#372); Coalton only
                "aion/log"                             ; neutral logging facade (leftward dep
                "aion/dynamic"   ; carries the request context across a thread (#158))
                "aion/interceptor"                     ; the typed pipeline (pre-publication issue 177; was a file here)
@@ -174,6 +175,34 @@
 ;;;
 ;;; Native: needs a built vendor/libuv (scripts/build-libuv.lisp), so it is opt-in and sits
 ;;; in verify-tree's +UV-SYSTEMS+ rather than +SYSTEMS+ -- see the commentary there.
+
+;;; Hyperion served by Woo (#372). Hyperion declares no HTTP backend (pre-publication issue 139), so no
+;;; suite in the tree ran a real Woo server, and a 429 that Woo could not write reached every
+;;; client as an empty 500 without a test noticing. This system exists for its suite,
+;;; hyperion/woo/tests, which serves real requests through Woo; it loads Woo's Clack handler
+;;; beside hyperion and has nothing of its own. It is not for an app: an app that wants Woo
+;;; declares clack-handler-woo itself, and ADR-0020 (#377) plans to remove Woo from every
+;;; :depends-on in the tree, this one included. Woo binds libev when it loads and does not run on Windows, so the
+;;; system is registered in scripts/platform-packages.lisp, owned by Linux, rather than in
+;;; verify-tree's host-neutral lists.
+(defsystem "hyperion/woo"
+  :description "Woo's Clack handler beside hyperion, for hyperion/woo/tests only (Unix only); an app declares clack-handler-woo itself."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; Guarded on :OS-WINDOWS, as scripts/install-deps.lisp explains: Woo cannot load there, and
+  ;; the Windows CI leg installs only the dependencies that apply to it.
+  :depends-on ("hyperion" (:feature (:not :os-windows) "clack-handler-woo"))
+  :in-order-to ((test-op (test-op "hyperion/woo/tests"))))
+
+(defsystem "hyperion/woo/tests"
+  :description "Responses served through a real Woo server, read back over a TCP socket (#372)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/woo" "hyperion" "hyperion/http1" "hyperion/test-ports" "fiveam"
+               (:require "sb-bsd-sockets"))
+  :components ((:module "tests"
+                :components ((:file "woo-tests"))))
+  :perform (test-op (o c) (symbol-call :hyperion/woo/tests '#:run-tests)))
 
 (defsystem "hyperion/server-uv"
   :description "A native HTTP/1.1 server for Ring handlers, on aion/uv (no Clack)."
