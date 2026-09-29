@@ -12,6 +12,10 @@ its tag.
 
 ## Unreleased
 
+## v0.1.4 — 2026-09-29
+
+Changes since `v0.1.3`. The tag is on `b68ccd4`.
+
 ### An app may have to act
 
 - **mnemosyne: `sslmode=prefer` to another machine refuses to connect when the app has not
