@@ -110,7 +110,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("praxeon" "mnemosyne" "dbi" "ironclad" "bordeaux-threads"
-               "coalton" "named-readtables"   ; fusion.lisp is Coalton (#316)
+               "coalton"                      ; fusion.lisp is Coalton (#316)
                "aion/boundary")               ; the rankings are checked before fusion.lisp (#110)
   :serial t
   :components ((:module "src/retrieval"
