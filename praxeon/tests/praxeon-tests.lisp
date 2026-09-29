@@ -3024,6 +3024,120 @@ vectors of a split call still come back in input order."
   (is (= 1000000 (llm:embedding-max-tokens
                   (make-instance 'llm:voyage-embeddings :api-key "k" :model "voyage-4-lite")))))
 
+;;; A Voyage reranker whose transport is replaced (#316). The request body, the batching, the
+;;; reply parsing and the checks are the real code. Document "N" scores -N, so the best is "0",
+;;; and each reply lists its rows in reverse, so only a reader that goes by `index' and adds the
+;;; batch's offset ranks them right. MANGLE breaks the reply in one way.
+(defclass recording-reranker (llm:voyage-reranker)
+  ((bodies :initform '() :accessor recorded-bodies)
+   (mangle :initarg :mangle :initform nil :reader recording-mangle)))
+
+(defmethod llm:rerank-post ((r recording-reranker) body)
+  (push body (recorded-bodies r))
+  (let* ((documents (gethash "documents" body))
+         (rows (loop for i from 0 below (length documents)
+                     collect (let ((row (make-hash-table :test #'equal)))
+                               (setf (gethash "index" row) i
+                                     (gethash "relevance_score" row)
+                                     (- (parse-integer (aref documents i))))
+                               row)))
+         (reply (make-hash-table :test #'equal)))
+    (case (recording-mangle r)
+      (:drop (setf rows (rest rows)))
+      (:repeat (setf (gethash "index" (second rows)) 0))
+      (:outside (setf (gethash "index" (first rows)) (length documents))))
+    (setf (gethash "data" reply) (coerce (reverse rows) 'vector))
+    reply))
+
+(defun %numbers (n) (loop for i below n collect (format nil "~D" i)))
+
+(test a-voyage-rerank-request-names-the-model-and-never-truncates
+  "#316. The body carries the query, the documents and the model, and `truncation: false', so an
+over-long document is an error rather than a score for part of it. Nothing asks for the
+documents back or for fewer results."
+  (let* ((r (make-instance 'llm:voyage-reranker :api-key "k"))
+         (body (llm:rerank-request-body r "q" (vector "a" "b"))))
+    (is (string= "q" (gethash "query" body)))
+    (is (equalp #("a" "b") (gethash "documents" body)))
+    (is (string= "rerank-2.5" (gethash "model" body)))
+    (is (search "\"truncation\":false" (jzon:stringify body)))
+    (is (null (nth-value 1 (gethash "top_k" body))))
+    (is (null (nth-value 1 (gethash "return_documents" body))))))
+
+(test a-voyage-rerank-reply-is-ranked-by-score-across-requests
+  "1,001 documents go as 1,000 and 1, and the one in the second request keeps its own index.
+Control: 1,000 go as one request. No documents make no request."
+  (let* ((r (make-instance 'recording-reranker :api-key "k"))
+         (ranking (llm:rerank r "q" (reverse (%numbers 1001)))))
+    (is (equal '(1000 1) (reverse (mapcar (lambda (b) (length (gethash "documents" b)))
+                                          (recorded-bodies r)))))
+    (is (= 1001 (length ranking)))
+    (is (equal (loop for i from 1000 downto 0 collect i) (mapcar #'car ranking))
+        "the document \"0\", sent last, is ranked first")
+    (is (every #'realp (mapcar #'cdr ranking))))
+  (let ((r (make-instance 'recording-reranker :api-key "k")))
+    (llm:rerank r "q" (%numbers 1000))
+    (is (= 1 (length (recorded-bodies r))) "control: 1,000 documents are one request"))
+  (let ((r (make-instance 'recording-reranker :api-key "k")))
+    (is (null (llm:rerank r "q" '())))
+    (is (null (recorded-bodies r)) "nothing to rank, nothing sent")))
+
+(test a-voyage-rerank-request-stays-within-the-total-token-limit
+  "rerank-2 allows 600,000 tokens a request, counted as the query's tokens once per document plus
+the documents'. With a one-byte query, 3,000-byte documents cost 3,001 each: 200 of them are
+600,200 and go as 199 and 1, and 199 are 597,199 and go as one."
+  (flet ((sizes (count)
+           (let ((r (make-instance 'recording-reranker :api-key "k" :model "rerank-2"))
+                 (documents (loop for i below count
+                                  collect (let ((s (make-string 3000 :initial-element #\0)))
+                                            (replace s (format nil "~D" i) :start1 (- 3000 (length (format nil "~D" i))))
+                                            s))))
+             (llm:rerank r "q" documents)
+             (reverse (mapcar (lambda (b) (length (gethash "documents" b))) (recorded-bodies r))))))
+    (is (equal '(199 1) (sizes 200)))
+    (is (equal '(199) (sizes 199)) "control: just inside the limit")))
+
+(test a-rerank-reply-that-does-not-score-each-document-once-is-refused
+  "A ranking that left a document out, named one twice or named one not sent would order the
+wrong passages, so each is an error. Control: the unmangled reply passes."
+  (dolist (mangle '(:drop :repeat :outside))
+    (signals cnd:deliberation-failure
+      (llm:rerank (make-instance 'recording-reranker :api-key "k" :mangle mangle)
+                  "q" (%numbers 3))))
+  (is (equal '(0 1 2) (mapcar #'car (llm:rerank (make-instance 'recording-reranker :api-key "k")
+                                                "q" (%numbers 3))))))
+
+(test a-reranker-is-chosen-from-the-environment-and-has-no-default
+  "#316, following #290's rules for embeddings. With no RERANK_IMPL there is no reranker. Voyage
+needs a key and names the variables that would supply one. The model can be set for every role
+or for one."
+  (with-emb-env (("PRAXEON_RERANK_IMPL" nil) ("PRAXEON_SEARCH_RERANK_IMPL" nil)
+                 ("PRAXEON_RERANK_API_KEY" nil) ("PRAXEON_VOYAGE_API_KEY" nil)
+                 ("PRAXEON_RERANK_MODEL" nil) ("PRAXEON_SEARCH_RERANK_MODEL" nil)
+                 ("PRAXEON_VOYAGE_RERANK_MODEL" nil))
+    (handler-case (progn (llm:make-reranker-from-env :role :search)
+                         (fail "expected NO-RERANKER"))
+      (cnd:no-reranker (c)
+        (is (string= "SEARCH" (cnd:no-reranker-role c)))
+        (is (search "PRAXEON_SEARCH_RERANK_IMPL" (princ-to-string c)))))
+    (setf (uiop:getenv "PRAXEON_RERANK_IMPL") "voyage")
+    (handler-case (progn (llm:make-reranker-from-env) (fail "expected MISSING-PROVIDER-KEY"))
+      (cnd:missing-provider-key (c)
+        (is (member "PRAXEON_VOYAGE_API_KEY" (cnd:missing-provider-key-variables c)
+                    :test #'string=))))
+    (setf (uiop:getenv "PRAXEON_VOYAGE_API_KEY") "vk")
+    (let ((r (llm:make-reranker-from-env)))
+      (is (typep r 'llm:voyage-reranker))
+      (is (string= "rerank-2.5" (llm:reranker-model-of r)))
+      (is (string= "vk" (llm:reranker-api-key r))))
+    (setf (uiop:getenv "PRAXEON_VOYAGE_RERANK_MODEL") "rerank-2")
+    (is (string= "rerank-2" (llm:reranker-model-of (llm:make-reranker-from-env))))
+    (setf (uiop:getenv "PRAXEON_SEARCH_RERANK_MODEL") "rerank-2.5-lite")
+    (is (string= "rerank-2.5-lite" (llm:reranker-model-of (llm:make-reranker-from-env :role :search)))
+        "a role's own model comes first")
+    (is (string= "rerank-2" (llm:reranker-model-of (llm:make-reranker-from-env)))
+        "and does not reach other roles")))
+
 (test the-batcher-keeps-order-and-never-drops-or-cuts-a-text
   "SPLIT-INTO-BATCHES is pure, so its edges are checked directly. A text over the token limit
 on its own gets a batch of its own, so that the service refuses it by name."

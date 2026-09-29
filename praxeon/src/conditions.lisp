@@ -95,6 +95,16 @@ and ABANDON-TURN. The functions of the same names below invoke them."))
   (:documentation "Signalled by MAKE-EMBEDDING-PROVIDER-FROM-ENV when no variable names an
 embedding backend. It is signalled before any request is made."))
 
+(define-condition no-reranker (praxeon-error)
+  ((role :initarg :role :initform nil :reader no-reranker-role))
+  (:report
+   (lambda (c s)
+     (let ((role (no-reranker-role c)))
+       (format s "No reranker is configured~@[ for role ~A~].~%~%" role)
+       (format s "Set ~@[PRAXEON_~:@(~A~)_RERANK_IMPL or ~]PRAXEON_RERANK_IMPL to the name of a reranker backend, for example voyage. There is no default reranker (#316). An app that can search without one handles this condition and passes no reranker." role))))
+  (:documentation "Signalled by MAKE-RERANKER-FROM-ENV when no variable names a reranker
+backend. It is signalled before any request is made."))
+
 (define-condition vector-extension-missing (praxeon-error)
   ((database :initarg :database :initform nil :reader vector-extension-missing-database))
   (:report

@@ -27,6 +27,16 @@ its tag.
 
 ### Added
 
+- **praxeon: a reranker, and reranked hybrid search.** (#316)
+  - `praxeon/llm:reranker` is a protocol of its own, like `embedding-provider`: `rerank` returns
+    each document's index and score, best first, and refuses a reply that does not score every
+    document once. `voyage-reranker` is the first backend (`rerank-2.5` by default), and
+    `make-reranker-from-env` chooses one from `PRAXEON_[<ROLE>_]RERANK_IMPL`; with none set it
+    signals `praxeon/conditions:no-reranker`.
+  - `retrieve-hybrid`, `retrieve` and `register-corpus-search` take `:reranker`, which reorders
+    the first `*rerank-candidates*` (150) merged candidates before the limit is taken.
+    `evaluate-retrieval :reranker` reports a `:reranked` configuration as well.
+
 - **praxeon/retrieval: a context for each chunk, and a strategy chosen by the corpus's size.**
   (#316)
   - `make-corpus` takes `:strategy` (`:auto`, the default, `:whole` or `:hybrid`),

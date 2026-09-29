@@ -89,7 +89,7 @@ completeness note."
 
 (defun register-corpus-search (agent corpus embedder render
                                &key (name "search-documents") (description *search-description*)
-                                    limit capability on-result)
+                                    limit capability on-result reranker)
   "Register on AGENT a means NAME that searches CORPUS and returns the matching passages as text
 for the model. Returns NAME.
 
@@ -97,7 +97,8 @@ EMBEDDER is an embedding provider, or NIL when the app has none; with NIL the me
 a search by words. RENDER is a function from a PASSAGE to the string the model reads, and is
 required. LIMIT caps the passages returned, and NIL leaves it to RETRIEVE and RETRIEVE-EXACT.
 CAPABILITY is passed to REGISTER-MEANS. ON-RESULT, a function of the query and the
-RETRIEVAL-RESULT, is called before the text is returned.
+RETRIEVAL-RESULT, is called before the text is returned. RERANKER, a PRAXEON/LLM:RERANKER, is
+passed to RETRIEVE for a search by meaning (#316).
 
 A failed search signals, as any means does, so ACT's restarts apply."
   (check-type corpus corpus)
@@ -108,7 +109,10 @@ A failed search signals, as any means does, so ACT's restarts apply."
     (error "praxeon/retrieval: :limit must be a positive integer or NIL, not ~S" limit))
   (unless (or (null on-result) (functionp on-result))
     (error "praxeon/retrieval: :on-result must be a function or NIL, not ~S" on-result))
-  (let ((limit-args (and limit (list :limit limit))))
+  (unless (or (null reranker) (typep reranker 'llm:reranker))
+    (error "praxeon/retrieval: :reranker must be a PRAXEON/LLM:RERANKER or NIL, not ~S" reranker))
+  (let ((limit-args (append (and limit (list :limit limit))
+                            (and reranker (list :reranker reranker)))))
     (actor:register-means
      agent name description
      (lambda (args)
@@ -121,7 +125,8 @@ A failed search signals, as any means does, so ACT's restarts apply."
                  (cond ((and embedder (equal match "meaning"))
                         (apply #'retrieve corpus embedder query limit-args))
                        ((or (equal match "words") (null embedder))
-                        (apply #'retrieve-exact corpus (%words query) limit-args))
+                        (apply #'retrieve-exact corpus (%words query)
+                               (and limit (list :limit limit))))
                        (t (error "praxeon/retrieval: the ~A means takes a \"match\" of \"meaning\" or \"words\", not ~S"
                                  name match)))))
            (when on-result (funcall on-result query result))
