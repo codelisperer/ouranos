@@ -101,6 +101,19 @@ source tree (dev -- run hyperion-view/build.sh once), else the bare name on PATH
   "The extensions BUNDLED-WINDOW-ICON looks for, as scripts/build-desktop-app.lisp names the
 copy it carries: `window-icon.<type>'.")
 
+(defun %readable-file (path)
+  "PATH's truename when a file can be opened there, or NIL. PROBE-FILE alone is not enough: for
+a symbolic link whose target is missing, SBCL returns the link's own path. A macOS bundle keeps
+the window icon in Contents/Resources behind such a link, so a bundle that lost the file would
+otherwise pass a path hyperion-view cannot read (#74)."
+  (let ((found (probe-file path)))
+    (and found
+         (ignore-errors
+          (with-open-file (in found :element-type '(unsigned-byte 8))
+            (declare (ignore in))
+            t))
+         found)))
+
 (defun bundled-window-icon (&optional (dir (image-directory)))
   "The window icon a shipped bundle carries beside its executable, or NIL (#74).
 
@@ -111,7 +124,7 @@ exist, and the window got hyperion-view's default icon without any message. The 
 is found from the running image's own directory, so it is there wherever the bundle is."
   (and dir
        (some (lambda (type)
-               (probe-file (merge-pathnames (format nil "window-icon.~A" type) dir)))
+               (%readable-file (merge-pathnames (format nil "window-icon.~A" type) dir)))
              +window-icon-types+)))
 
 (defun %icon-arguments (icon &optional (bundled (bundled-window-icon)))
@@ -121,7 +134,7 @@ if it names a file that exists, else none.
 The bundled copy wins because in a shipped app ICON is usually the build machine's path: it
 exists only on the machine that built the app, so preferring it would make the icon depend
 on which machine the app runs on. In development there is no bundled copy, and ICON is used."
-  (let ((path (or bundled (and icon (probe-file icon)))))
+  (let ((path (or bundled (and icon (%readable-file icon)))))
     (when path (list "--icon" (uiop:native-namestring path)))))
 
 (define-condition launcher-not-found (error)
