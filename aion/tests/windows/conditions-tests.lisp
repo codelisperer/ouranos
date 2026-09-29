@@ -101,3 +101,9 @@ close a no-op instead of a decrement against whatever now owns the slot."
     (is-true (w:close-handle h) "the first close should actually close")
     (is-false (w:handle-valid-p h))
     (is-false (w:close-handle h) "the second close must be a no-op, not another CloseHandle")))
+
+(test file-attributes-is-the-aion-fs-function
+  "#349: aion/windows re-exports aion/fs's FILE-ATTRIBUTES rather than binding GetFileAttributesW
+a second time."
+  (is (eq 'w:file-attributes 'aion/fs:file-attributes))
+  (is (member :directory (w:file-attributes (uiop:temporary-directory)))))

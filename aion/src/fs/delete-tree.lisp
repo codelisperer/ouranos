@@ -48,8 +48,10 @@ or symbolic link."))
 
 (defun %native (path)
   "PATH's native namestring without a trailing separator, which Windows and POSIX both need to
-name a directory, or a link to one, as the entry itself."
-  (string-right-trim "/\\" (uiop:native-namestring path)))
+name a directory, or a link to one, as the entry itself. A string is taken as a native path
+already and not parsed: parsing turns [ ] * ? into wildcard syntax, and a file named
+`a[1].txt' would then name nothing (#349)."
+  (string-right-trim "/\\" (if (stringp path) path (uiop:native-namestring path))))
 
 ;;; --- asking the operating system -------------------------------------------------------
 

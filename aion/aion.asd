@@ -339,7 +339,11 @@
   ;; cffi only. No C toolchain (ADR-0003 s8) and no bordeaux-threads: the tree is
   ;; SBCL-exclusive and this system is Windows-exclusive on top of that, so sb-thread is
   ;; already the only thread implementation that can run here.
-  :depends-on ("cffi")
+  :depends-on ("cffi"
+               ;; aion/fs for FILE-ATTRIBUTES, re-exported here (#349). It is one
+               ;; GetFileAttributesW binding, kept in aion/fs because cons and the build scripts
+               ;; load that without CFFI.
+               "aion/fs")
   :serial t
   :components ((:module "src/windows"
                 :serial t
@@ -513,7 +517,8 @@
   :components ((:module "src/fs"
                 :serial t
                 :components ((:file "packages")
-                             (:file "delete-tree"))))
+                             (:file "delete-tree")
+                             (:file "attributes"))))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
 
 (defsystem "aion/fs/tests"
@@ -522,7 +527,8 @@
   :serial t
   :components ((:module "tests/fs"
                 :serial t
-                :components ((:file "delete-tree-tests"))))
+                :components ((:file "delete-tree-tests")
+                             (:file "attributes-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"
