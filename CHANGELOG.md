@@ -12,6 +12,45 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **praxeon/retrieval: `ensure-schema` adds six more columns to the chunk table and creates a
+  corpora table** (#316): `section_index`, `document_fingerprint`, `context`, `context_deriver`,
+  `context_document_fingerprint` and `input_fingerprint`, and `<table>_corpora`, one row per
+  corpus with its size and strategy. They are created the same way, with `IF NOT EXISTS`.
+  Embeddings made before them stay current. Until a document is synced again, `retrieve-whole`
+  orders its sections by section id. A test or tool that drops the chunk table drops
+  `<table>_corpora` too.
+- **praxeon/retrieval: `retrieve` on a corpus made with no `:strategy` returns the whole corpus
+  while it is below 200,000 estimated tokens.** `make-corpus` defaults to `:auto` (see Added).
+  An app that wants search at every size makes the corpus with `:strategy :hybrid`. (#316)
+
+### Added
+
+- **praxeon/retrieval: a context for each chunk, and a strategy chosen by the corpus's size.**
+  (#316)
+  - `make-corpus` takes `:strategy` (`:auto`, the default, `:whole` or `:hybrid`),
+    `:whole-limit` (`*whole-limit*`, 200,000 estimated tokens), `:expected-tokens`,
+    `:contextualizer` and `:backfill` (`:automatic` or `:explicit`).
+  - `retrieve-whole` returns every chunk in the order the app handed the sections in.
+    `corpus-size` estimates a corpus's tokens, and a sync reports it in `sync-report-size` with
+    `sync-report-strategy`. `corpus-effective-strategy` says which strategy `retrieve` follows.
+    When an `:auto` corpus changes strategy, the sync logs it once through `aion/log`.
+  - `make-contextualizer` takes a chat provider. `contextualize-pending` asks it for one or two
+    sentences placing each chunk in its document, with the document before the prompt-cache
+    marker, and writes them, so the chunk's embedding and BM25 terms cover the context and the
+    text. `passage-context` is the context; `passage-text` is still the chunk's own text. A
+    context is written again when anything in its document changes, or when the provider,
+    model, instruction or answer limit does. It does nothing while the corpus is `:whole`.
+  - `contextualize-pending :ledger` charges each call to a `praxeon/ceiling` ledger and signals
+    `budget-exhausted` before a call the ledger cannot afford, keeping the contexts written.
+    `start-backfill` releases the backfill of a corpus made with `:backfill :explicit`.
+  - `ingest` now also calls `contextualize-pending`, before `embed-pending`, and takes `:ledger`.
+  - `retrieve` follows the corpus's strategy: every chunk in document order for a `:whole`
+    corpus, and `retrieve-hybrid` with a default `:limit` of 20 for a `:hybrid` one
+    (`retrieve-keyword` when the embedder is NIL). The v0.1.5 entry for `retrieve`, which
+    describes it as `retrieve-similar` for every corpus, no longer applies.
+
 ## v0.1.5 — 2026-09-30
 
 Changes since `v0.1.4`. The tag is on `f3fdf1a`.

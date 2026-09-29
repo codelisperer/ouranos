@@ -16,6 +16,7 @@
                     (#:der #:mnemosyne/derived)
                     (#:mig #:mnemosyne/migrate)
                     (#:ctx #:praxeon/context)
+                    (#:log #:aion/log)
                     (#:bt #:bordeaux-threads))
   (:export
    ;; sections, as the app hands them in
@@ -48,6 +49,10 @@
    #:passage->ctx-item
    ;; exact retrieval
    #:retrieve-exact
+   #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
+   #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
+   #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
+   #:passage-context
    ;; keyword retrieval, BM25 (#316)
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
@@ -93,6 +98,10 @@
    #:retrieval-result #:retrieval-result-passages #:retrieval-result-completeness
    #:passage->ctx-item
    #:retrieve-exact
+   #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
+   #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
+   #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
+   #:passage-context
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
@@ -104,6 +113,8 @@
                     (#:boundary #:aion/boundary)
                     (#:llm #:praxeon/llm)
                     (#:actor #:praxeon/actor)
+                    (#:ceiling #:praxeon/ceiling)
+                    (#:log #:aion/log)
                     (#:ctx #:praxeon/context)
                     (#:q #:mnemosyne/query)
                     (#:cs #:mnemosyne/changeset)
@@ -121,6 +132,10 @@ argument.")
    #:retrieve-hybrid #:*hybrid-candidates* #:*rrf-k*
    #:eval-question #:make-eval-question #:eval-question-query #:eval-question-document-id
    #:eval-question-section-id #:evaluate-retrieval
+   ;; a context for each chunk (#316)
+   #:contextualizer #:make-contextualizer #:contextualizer-id #:contextualizer-provider
+   #:contextualizer-instruction #:contextualizer-max-tokens #:*context-instruction*
+   #:context-messages #:contextualize-pending
    ;; re-exported from praxeon/retrieval/corpus
    #:section #:make-section #:section-p #:section-id #:section-document-id
    #:section-document-version #:section-locator #:section-locale #:section-locale-role
@@ -146,6 +161,10 @@ argument.")
    #:retrieval-result #:retrieval-result-passages #:retrieval-result-completeness
    #:passage->ctx-item
    #:retrieve-exact
+   #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
+   #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
+   #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
+   #:passage-context
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
