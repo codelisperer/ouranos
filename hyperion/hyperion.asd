@@ -186,7 +186,9 @@
   :description "Hyperion with Woo's Clack handler loaded (Unix only), for an app or a suite that serves on Woo."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "clack-handler-woo")
+  ;; Guarded on :OS-WINDOWS, as scripts/install-deps.lisp explains: Woo cannot load there, and
+  ;; the Windows CI leg installs only the dependencies that apply to it.
+  :depends-on ("hyperion" (:feature (:not :os-windows) "clack-handler-woo"))
   :in-order-to ((test-op (test-op "hyperion/woo/tests"))))
 
 (defsystem "hyperion/woo/tests"
