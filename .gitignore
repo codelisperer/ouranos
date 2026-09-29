@@ -13,8 +13,11 @@
 /cons.core
 /*.core
 
-# Desktop app bundles from scripts/build-desktop-app.lisp (per-machine, per-OS)
+# Desktop app bundles from scripts/build-desktop-app.lisp (per-machine, per-OS). Also any
+# `--out dist-<something>` a verification build used: dist-probe/ was committed once because
+# only /dist/ was ignored (#342).
 /dist/
+/dist-*/
 
 # Vendored native dependencies: fetched + built by scripts/build-libuv.lisp from the
 # libuv.pin. Per-machine and per-OS, so the PIN is committed and the artifact is not.

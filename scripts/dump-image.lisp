@@ -26,12 +26,17 @@
 ;;;; than called, because the dump needs `:save-runtime-options t': with it the runtime does
 ;;;; not parse its own flags from the command line, so every argument reaches the program,
 ;;;; and the heap size in effect at the dump is kept.
+;;;;
+;;;; DUMP-CORE is the macOS form (#98, #332): the core alone, with no runtime in front of it,
+;;;; so the .app can be signed. `:save-runtime-options' does nothing without `:executable t',
+;;;; so the heap and the end of runtime-option processing come from scripts/macos-launcher.c
+;;;; instead, which starts the runtime with them.
 
 (require :asdf)
 
 (defpackage #:ouranos-dump
   (:use #:cl)
-  (:export #:dump-executable))
+  (:export #:dump-executable #:dump-core))
 
 (in-package #:ouranos-dump)
 
@@ -50,3 +55,15 @@ environment it runs in rather than the one it was dumped in."
                (funcall entry))
    :executable t
    :save-runtime-options t))
+
+(defun dump-core (path entry)
+  "Dump this image to PATH as a core with no runtime in it, which calls ENTRY when it starts.
+Does not return. The same hooks as DUMP-EXECUTABLE. The heap and the command line are the
+launcher's to set: see this file's header."
+  (uiop:call-image-dump-hook)
+  (sb-ext:save-lisp-and-die
+   path
+   :toplevel (lambda ()
+               (uiop:call-image-restore-hook)
+               (funcall entry))
+   :executable nil))

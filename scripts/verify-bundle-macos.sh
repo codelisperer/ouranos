@@ -49,10 +49,16 @@ DIR=$(cd "$DIR" && pwd)
 BIN=""
 for f in "$DIR"/*; do
   [ -f "$f" ] && [ -x "$f" ] || continue
-  case "$(basename "$f")" in hyperion-view*|*.dylib) continue ;; esac
+  case "$(basename "$f")" in hyperion-view*|sbcl|*.dylib) continue ;; esac
   BIN=$(basename "$f"); break
 done
 [ -n "$BIN" ] || { echo "verify-bundle-macos: no application binary in $DIR" >&2; exit 2; }
+
+# The Mach-O files the app starts: since #98 a macOS app is a launcher ($BIN) that execs the
+# runtime (sbcl) with sbcl.core, and the runtime is the one linking libzstd. An older bundle
+# has only $BIN, the dumped image.
+MACHOS="$BIN"
+[ -f "$DIR/sbcl" ] && MACHOS="$BIN sbcl"
 
 CARRIED=$(ls "$DIR" | grep '\.dylib$' || true)
 
@@ -67,17 +73,19 @@ FAILED=0
 # The bug ADR-0014 exists for. A path under /opt/homebrew, /usr/local or the source tree is
 # a machine-specific dependency that will not exist on a user's Mac.
 echo "--- check 1: load commands name no build-machine paths ---"
-LEAKED=$(otool -L "$DIR/$BIN" | tail -n +2 | awk '{print $1}' \
-         | grep -vE '^/usr/lib/|^/System/|^@executable_path/|^@loader_path/|^@rpath/' || true)
-if [ -n "$LEAKED" ]; then
-  echo "  FAIL -- the image links absolute non-system paths:"
-  echo "$LEAKED" | sed 's/^/         /'
-  echo "         These exist on this machine and will not on a user's (ADR-0014)."
-  FAILED=1
-else
-  echo "  ok -- every non-system load command is @executable_path-relative"
-  otool -L "$DIR/$BIN" | tail -n +2 | awk '{print $1}' | grep -E '^@' | sed 's/^/         /' || true
-fi
+for m in $MACHOS; do
+  LEAKED=$(otool -L "$DIR/$m" | tail -n +2 | awk '{print $1}' \
+           | grep -vE '^/usr/lib/|^/System/|^@executable_path/|^@loader_path/|^@rpath/' || true)
+  if [ -n "$LEAKED" ]; then
+    echo "  FAIL -- $m links absolute non-system paths:"
+    echo "$LEAKED" | sed 's/^/         /'
+    echo "         These exist on this machine and will not on a user's (ADR-0014)."
+    FAILED=1
+  else
+    echo "  ok -- every non-system load command of $m is @executable_path-relative"
+    otool -L "$DIR/$m" | tail -n +2 | awk '{print $1}' | grep -E '^@' | sed 's/^/         /' || true
+  fi
+done
 
 # --- check 2: run it, and confirm the libraries came from the bundle -------------------
 echo
@@ -139,8 +147,8 @@ done
 # nothing -- check 2 is what covers those.
 echo
 echo "--- check 3: removing a LINKED library must break the app ---"
-LINKED=$(otool -L "$DIR/$BIN" | tail -n +2 | awk '{print $1}' \
-         | grep '^@executable_path/' | sed 's|^@executable_path/||' || true)
+LINKED=$(for m in $MACHOS; do otool -L "$DIR/$m" | tail -n +2 | awk '{print $1}'; done \
+         | grep '^@executable_path/' | sed 's|^@executable_path/||' | sort -u || true)
 if [ -z "$LINKED" ]; then
   echo "  (none -- this image links nothing but system libraries; nothing to control for)"
 else
@@ -159,6 +167,7 @@ else
     [ -f "$DIR/$lib" ] || { echo "  FAIL -- $lib is in a load command but NOT in the bundle"; FAILED=1; continue; }
     CTRL=$(mktemp -d)
     cp "$DIR/$BIN" "$CTRL/" 2>/dev/null || true
+    for f in sbcl sbcl.core; do [ -f "$DIR/$f" ] && cp "$DIR/$f" "$CTRL/"; done
     for d in $CARRIED; do [ "$d" = "$lib" ] || cp "$DIR/$d" "$CTRL/" 2>/dev/null || true; done
     # A nested shell absorbs the "Abort trap: 6" job message, which is the shell's, not the app's.
     if sh -c '"$0" "$@" >/dev/null 2>&1' "$CTRL/$BIN" "$@" 2>/dev/null; then

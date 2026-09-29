@@ -101,7 +101,8 @@ inherited by `hyperion-view`, which links the system WebKit stack.
   therefore needs a different artifact shape — most plausibly runtime and core as separate
   files, where the runtime is an ordinary signable Mach-O — traded against the single-binary
   property the updater ([ADR-0010](0010-desktop-distribution-and-self-update.md)) relies on.
-  That is a real decision and it is not made here.
+  That is a real decision and it is not made here. **Since 2026-09-28 macOS ships runtime
+  and core as separate files, signed ad hoc; see the addendum of that date below.**
 - **The `.app` layout needs no re-layout.** All three resolution mechanisms — `dlopen`ed
   libraries, `@executable_path`, and the `hyperion-view` — mean "the directory the
   executable is in", which in a `.app` is `Contents/MacOS/`. The bundle directory is copied
@@ -375,6 +376,54 @@ Two costs to scope before starting, neither of which is Apple's fee:
    engineering rather than rearrangement.
 
 The maintainer owns the decision; the measurements are no longer the obstacle.
+
+## Addendum (2026-09-28): macOS ships the runtime and the core as separate files (#98, #332)
+
+What a friend's Mac does with the two shapes, measured on macOS 26.6.2 (arm64) for #332, with
+the GUI steps done by the maintainer:
+
+- **One dumped image** (the shape above): a downloaded copy is reported as "damaged and can't
+  be opened". Gatekeeper logs prompt type 1 and no denial breadcrumb, so System Settings offers
+  no Open Anyway. The only way past is `xattr -dr com.apple.quarantine` in a terminal.
+- **Runtime and core as separate files, the whole `.app` signed ad hoc**: `codesign --verify
+  --deep --strict` passes, and a downloaded copy gets the ordinary "Not Opened ... Apple could
+  not verify" prompt (type 6). After Done, a denial breadcrumb is written, and System Settings ›
+  Privacy & Security offers Open Anyway; after a confirmation and Touch ID the app runs.
+
+So `build-desktop-app.lisp` now writes, on macOS only:
+
+| file | what it is |
+|---|---|
+| `<name>` | a small launcher, `scripts/macos-launcher.c`, compiled with `cc` at build time |
+| `sbcl` | the SBCL runtime, patched as in the Decision above, so it links `@executable_path/libzstd.1.dylib` |
+| `sbcl.core` | the app's core, dumped with `:executable nil` |
+
+**Why a launcher, which the 2026-08-07 decision on #98 thought unnecessary.** Core discovery
+needs none: the runtime finds `sbcl.core` beside itself. But `:save-runtime-options` is ignored
+without `:executable t`, and it is what kept the heap size and kept the runtime from reading
+the app's arguments. Measured without a launcher: the heap was 1024 MB against the 4096 MB the
+single file saved, and `app --version` printed SBCL's version instead of reaching the app. The
+launcher starts the runtime with `--core <dir>/sbcl.core --dynamic-space-size <the build's heap>
+--noinform --end-runtime-options` followed by the app's arguments; the app then sees exactly its
+own `argv`.
+
+**Only code in `Contents/MacOS`.** `build-dmg.sh` moves every file there that is not a Mach-O
+(`sbcl.core`, `VERSION`, `LICENSES/`) to `Contents/Resources` and leaves a relative symlink. A
+data file in `Contents/MacOS` is signed through extended attributes, which the update payload
+(`tar --no-xattrs`) drops; measured, the unpacked payload then failed `--verify --strict` while
+the `.app` passed. Through the symlink the core's path is still `Contents/MacOS/sbcl.core`, so
+`*core-pathname*` is beside the runtime in the `.app`'s `Contents/MacOS`, which is how the
+updater now recognises a shipped build on macOS (`%shipped-image-p`,
+`hyperion/src/update/client.lisp`). Only that shape counts, and only on macOS: Windows' SBCL
+installer also keeps `sbcl.exe` and `sbcl.core` in one directory, and must still read as a
+developer's REPL.
+
+**What this does not do.** It is not a Developer ID signature and not notarized; a friend still
+needs Open Anyway once per download. The ad-hoc signature is checked when Gatekeeper assesses a
+downloaded copy, not on every start, so it is not the per-start integrity check #98 plans for
+Windows. And the bundle still has to carry every native library the app loads: on a Mac without
+Homebrew, an app that loads OpenSSL through cl+ssl exits at startup, whichever shape it has
+(#332, #78).
 
 ## Provenance
 
