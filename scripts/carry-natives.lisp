@@ -102,16 +102,43 @@ the directory above does, as for SQLite, which is public domain and ships none. 
 system does."
   (if (uiop:os-windows-p) (string-equal a b) (string= a b)))
 
+(defun %spec-file-names (lib)
+  "The file names LIB's CFFI definition lists for this platform, with the platform's suffix
+added to each (:default \"name\"). cl-sqlite's `(:or (:default \"libsqlite3\") (:default
+\"sqlite3\"))' gives (\"libsqlite3.dll\" \"sqlite3.dll\") on Windows. FOREIGN-LIBRARY-SPEC and
+DEFAULT-LIBRARY-SUFFIX are internal to CFFI, so they are looked up, and a missing one gives
+no names."
+  (let ((spec-fn (let ((s (find-symbol "FOREIGN-LIBRARY-SPEC" "CFFI"))) (and s (fboundp s) s)))
+        (suffix-fn (let ((s (find-symbol "DEFAULT-LIBRARY-SUFFIX" "CFFI"))) (and s (fboundp s) s))))
+    (when spec-fn
+      (let ((suffix (or (and suffix-fn (ignore-errors (funcall suffix-fn))) ""))
+            (names '()))
+        (labels ((walk (x)
+                   (cond ((stringp x) (push (file-namestring x) names))
+                         ((and (consp x) (eq (first x) :default) (stringp (second x)))
+                          (push (concatenate 'string (file-namestring (second x)) suffix) names))
+                         ((consp x) (mapc #'walk (rest x))))))
+          (walk (ignore-errors (funcall spec-fn lib))))
+        (nreverse names)))))
+
 (defun %matching-open-libraries (truename open)
-  "The open libraries in OPEN that are the file TRUENAME, compared as resolved paths. A
-library CFFI opened by bare name is matched by file name, because the OS loader found it and
-did not say where."
-  (loop for (lib . resolved) in open
-        when (if resolved
-                 (equal resolved truename)
-                 (let ((path (funcall (%cffi "FOREIGN-LIBRARY-PATHNAME") lib)))
-                   (and path (%same-file-name-p (file-namestring path) (file-namestring truename)))))
-          collect lib))
+  "The open libraries in OPEN that are the file TRUENAME, compared as resolved paths.
+
+A library CFFI opened by bare name cannot be compared that way, because the OS loader found it
+and did not say where. It matches when its name is TRUENAME's file name, or when its CFFI
+definition lists TRUENAME's file name as one of its alternatives. The second case is
+cl-sqlite on a machine where Ouranos's setup installed libsqlite3.dll: the image opened
+libsqlite3.dll, the app carries its pinned sqlite3.dll, and both are names the definition asks
+for. Unmatched, SBCL would reopen libsqlite3.dll by bare name when the app starts, from
+wherever the user's search path leads."
+  (let ((name (file-namestring truename)))
+    (loop for (lib . resolved) in open
+          when (or (if resolved
+                       (equal resolved truename)
+                       (let ((path (funcall (%cffi "FOREIGN-LIBRARY-PATHNAME") lib)))
+                         (and path (%same-file-name-p (file-namestring path) name))))
+                   (member name (%spec-file-names lib) :test #'%same-file-name-p))
+            collect lib)))
 
 (defun %license-files (truename)
   "License texts for the library at TRUENAME: files and directories whose names start with

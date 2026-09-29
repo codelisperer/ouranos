@@ -33,10 +33,31 @@
         ((uiop:os-macosx-p) "libappnative.dylib")
         (t "libappnative.so")))
 
-(defun %carry-then-run (&key (carry t) (remove-carried nil))
+(defun %alias-file-name ()
+  (cond ((uiop:os-windows-p) "libappalias.dll")
+        ((uiop:os-macosx-p) "libappalias.dylib")
+        (t "libappalias.so")))
+
+(defun %search-path-environment (dir)
+  "This process's environment with DIR first on the path the OS loader searches for a bare
+library name."
+  (let ((var (cond ((uiop:os-windows-p) "PATH")
+                   ((uiop:os-macosx-p) "DYLD_LIBRARY_PATH")
+                   (t "LD_LIBRARY_PATH")))
+        (sep (if (uiop:os-windows-p) ";" ":")))
+    (cons (format nil "~A=~A~@[~A~A~]" var (uiop:native-namestring dir) (and (uiop:getenv var) sep) (uiop:getenv var))
+          (remove-if (lambda (e) (uiop:string-prefix-p (format nil "~A=" var) e)) (sb-ext:posix-environ)))))
+
+(defun %carry-then-run (&key (carry t) (remove-carried nil) (alias nil) (no-definition-match nil))
   "Build an app directory holding a copy of libuv and a LICENSE, dump an image that loaded the
 copy from there into a bundle directory (carrying it when CARRY), delete the app directory, and
 run the bundle. REMOVE-CARRIED deletes the carried copy from the bundle before the run.
+
+ALIAS is cl-sqlite's case. The app directory also holds the library as libappalias, a CFFI
+definition lists libappalias first and appnative second, and the image opens it by bare name
+through the loader's search path, so it opens libappalias. The carried file is appnative.
+NO-DEFINITION-MATCH makes the carry step ignore that definition, which is the control.
+
 Returns (values RUN-OUTPUT DUMP-CODE RUN-CODE DUMP-OUTPUT BUNDLE-DIRECTORY-NAME)."
   (let* ((tree (%fresh-tree))
          (app (ensure-directories-exist (merge-pathnames "app/native/" tree)))
@@ -46,13 +67,21 @@ Returns (values RUN-OUTPUT DUMP-CODE RUN-CODE DUMP-OUTPUT BUNDLE-DIRECTORY-NAME)
          (dump-out (make-string-output-stream))
          (run-out (make-string-output-stream)))
     (uiop:copy-file (%built-libuv) lib)
+    (when alias
+      (uiop:copy-file (%built-libuv) (merge-pathnames (%alias-file-name) app)))
     (%write (merge-pathnames "LICENSE" app) "test license")
     (let* ((forms
              (list "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
                    "(asdf:load-system :cffi)"
                    (format nil "(load ~S)" (uiop:native-namestring (merge-pathnames "carry-natives.lisp" *scripts*)))
                    (format nil "(load ~S)" (uiop:native-namestring (merge-pathnames "dump-image.lisp" *scripts*)))
-                   (format nil "(cffi:load-foreign-library ~S)" (uiop:native-namestring lib))
+                   (if alias
+                       (format nil "(progn (cffi:define-foreign-library appalias (t (:or (:default ~S) (:default ~S)))) (cffi:use-foreign-library appalias))"
+                               (pathname-name (%alias-file-name)) (pathname-name (%app-library-name)))
+                       (format nil "(cffi:load-foreign-library ~S)" (uiop:native-namestring lib)))
+                   (if no-definition-match
+                       "(defun ouranos-carry::%spec-file-names (lib) (declare (ignore lib)) nil)"
+                       "t")
                    (if carry
                        (format nil "(ouranos-carry:carry-declared-libraries (list ~S) ~S)"
                                (uiop:native-namestring lib) (uiop:native-namestring bundle))
@@ -68,7 +97,8 @@ Returns (values RUN-OUTPUT DUMP-CODE RUN-CODE DUMP-OUTPUT BUNDLE-DIRECTORY-NAME)
                                          "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
                                          "--eval" "(require :asdf)")
                                    (mapcan (lambda (f) (list "--eval" f)) forms))
-                           :output dump-out :error-output dump-out :ignore-error-status t))))
+                           :output dump-out :error-output dump-out :ignore-error-status t
+                           :environment (if alias (%search-path-environment app) (sb-ext:posix-environ))))))
       (uiop:delete-directory-tree (merge-pathnames "app/" tree) :validate t :if-does-not-exist :ignore)
       (when remove-carried
         (uiop:delete-file-if-exists (merge-pathnames (%app-library-name) bundle)))
@@ -119,6 +149,32 @@ reopens the library from the app's directory, and fails when that directory is n
         (is (eql 0 dump-code) "the dump failed:~%~A" dump-out)
         (is (not (eql 0 run-code)) "an uncarried library must stop the app, or this fixture cannot see #78:~%~A" out)
         (is (not (search "VERSION " out)) "the app called a library it should not have been able to open:~%~A" out))))
+
+(test a-library-opened-under-another-name-in-its-definition-is-carried
+  "cl-sqlite's case: the image opened libappalias by bare name, and the app carries appnative,
+which the same CFFI definition lists. The carried copy must be what the app opens once the
+app directory is gone."
+  (if (null (%built-libuv))
+      (skip "vendor/libuv is not built here; run scripts/build-libuv.lisp")
+      (multiple-value-bind (out dump-code run-code dump-out)
+          (%carry-then-run :alias t)
+        (is (eql 0 dump-code) "the dump failed:~%~A" dump-out)
+        (is (search "opened beside the executable" dump-out) "the carry did not match the open library:~%~A" dump-out)
+        (is (eql 0 run-code) "the app did not run:~%~A" out)
+        (is (search (format nil "bundle/~A" (%app-library-name)) out)
+            "the app must have opened the carried copy:~%~A" out))))
+
+(test a-library-opened-under-another-name-is-missed-without-its-definition
+  "The control for the test above: with the definition ignored, the carry does not match the
+library the image opened, SBCL reopens libappalias by bare name when the app starts, and with
+the app directory gone that fails."
+  (if (null (%built-libuv))
+      (skip "vendor/libuv is not built here; run scripts/build-libuv.lisp")
+      (multiple-value-bind (out dump-code run-code dump-out)
+          (%carry-then-run :alias t :no-definition-match t)
+        (is (eql 0 dump-code) "the dump failed:~%~A" dump-out)
+        (is (search "not open in this image" dump-out) "without the definition the carry must not match:~%~A" dump-out)
+        (is (not (eql 0 run-code)) "the app must fail without the library it opened by bare name:~%~A" out))))
 
 ;;; --- refusals, which need no dump ---------------------------------------------------
 
