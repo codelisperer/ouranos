@@ -89,6 +89,8 @@
    #:recreate-embedding-column)
   (:local-nicknames (#:rc #:praxeon/retrieval/corpus)
                     (#:llm #:praxeon/llm)
+                    (#:actor #:praxeon/actor)
+                    (#:ctx #:praxeon/context)
                     (#:q #:mnemosyne/query)
                     (#:cs #:mnemosyne/changeset)
                     (#:conn #:mnemosyne/conn)
@@ -99,6 +101,8 @@ argument.")
   (:export
    ;; embedding and similarity
    #:embed-pending #:ingest #:retrieve-similar #:deriver-of
+   ;; the agent-facing search
+   #:retrieve #:register-corpus-search #:*search-description*
    ;; re-exported from praxeon/retrieval/corpus
    #:section #:make-section #:section-p #:section-id #:section-document-id
    #:section-document-version #:section-locator #:section-locale #:section-locale-role

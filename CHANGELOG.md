@@ -81,6 +81,17 @@ its tag.
   takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
   the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
 
+- **praxeon/retrieval: an agent can search a corpus.** `(register-corpus-search agent corpus
+  embedder render)` registers a means, `"search-documents"` unless `:name` says otherwise. The
+  model passes a `query`, and a `match` of `"meaning"` or `"words"`; with a NIL `embedder` only
+  `"words"` is offered. It reads each passage as `render` writes it, through `passage->ctx-item`,
+  in the order the search returned them, and a sentence when the result is truncated.
+  `:on-result` receives the query and the `retrieval-result`, so an app can keep what it will
+  cite. `:description`, `:limit` and `:capability` are optional. (#138)
+- **praxeon/retrieval: `retrieve`**, the call an agent's search makes. For a corpus it is
+  `retrieve-similar` with a default `:limit` of 20; a later version will follow the corpus's
+  retrieval strategy (#316) with no change for callers. (#138)
+
 ## v0.1.4 — 2026-09-29
 
 Changes since `v0.1.3`. The tag is on `b68ccd4`.
