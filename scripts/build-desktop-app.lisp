@@ -17,7 +17,9 @@
 ;;;;
 ;;;; Output: <out>/<name>-<version>-<os>-<arch>/ containing the dumped image, the native
 ;;;; hyperion-view beside it (where hyperion/desktop:default-launcher looks), and a
-;;;; VERSION file. That directory is what the per-OS installer packages.
+;;;; VERSION file. That directory is what the per-OS installer packages. On macOS the dumped
+;;;; image is three files instead of one: <name> (a small launcher), sbcl (the runtime) and
+;;;; sbcl.core (#98, #332; see the dump step at the end).
 ;;;;
 ;;;; This is scripting, not framework: `cons desktop build` absorbs it (ADR-0007).
 
@@ -741,18 +743,57 @@ nothing."
   (format out "~A~%" *version*))
 
 ;;; --- dump ---------------------------------------------------------------------
-;;; Through scripts/dump-image.lisp, which keeps :save-runtime-options t (so the app's OWN
-;;; argv reaches it, and the heap size in effect here is baked in) and also runs UIOP's dump
+;;; Through scripts/dump-image.lisp, which keeps :save-runtime-options t on Linux and Windows
+;;; (so the app's OWN argv reaches it, and the heap size in effect here is baked in; on macOS
+;;; the launcher does both, see below) and also runs UIOP's dump
 ;;; and restore hooks. Without them the app kept this machine's temporary directory and fasl
 ;;; cache: an app built with the CI runner's TEMP and run by another user reported
 ;;; `C:\Users\runneradmin\AppData\Local\Temp\' as its temporary directory, and the updater
 ;;; failed to stage with "Can't create directory C:\Users\runneradmin" (#107).
+;;;
+;;; ON MACOS THE BUNDLE IS A LAUNCHER, THE RUNTIME AND THE CORE, not one dumped image (#98,
+;;; #332). codesign cannot sign a dumped image, so a downloaded copy was reported as damaged
+;;; with no way past it but a terminal; split, the .app signs ad hoc in build-dmg.sh and
+;;; Gatekeeper offers Open Anyway. See scripts/macos-launcher.c for why the launcher exists:
+;;; a core dumped without its runtime cannot keep the heap size or the app's own arguments.
 (load (merge-pathnames "dump-image.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
-(let ((bin (merge-pathnames (if (uiop:os-windows-p)
-                                (format nil "~A.exe" *name*)
-                                *name*)
-                            *bundle*)))
-  (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path bin))
-  (finish-output)
-  (funcall (read-from-string "ouranos-dump:dump-executable")
-           bin (fdefinition (read-from-string *entry*))))
+
+(defun %compile-macos-launcher (target heap-mb)
+  "Compile scripts/macos-launcher.c to TARGET, starting the runtime with HEAP-MB megabytes.
+Exits with code 3, naming the compiler's output, if it does not compile."
+  (let ((source (merge-pathnames "macos-launcher.c"
+                                 (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*)))))
+    (multiple-value-bind (out err code)
+        (uiop:run-program (list "cc" "-O2" "-Wall" (format nil "-DOURANOS_HEAP_MB=~D" heap-mb)
+                                "-o" (namestring target) (namestring source))
+                          :output :string :error-output :string :ignore-error-status t)
+      (unless (eql code 0)
+        (format t "~&build-desktop-app: could not compile the macOS launcher (cc exited ~A):~%~A~A~%"
+                code out err)
+        (format t "~&The Xcode Command Line Tools provide cc: xcode-select --install~%")
+        (sb-ext:exit :code 3)))))
+
+(if (uiop:os-macosx-p)
+    (let ((launcher (merge-pathnames *name* *bundle*))
+          (runtime (merge-pathnames "sbcl" *bundle*))
+          (core (merge-pathnames "sbcl.core" *bundle*))
+          (heap-mb (floor (sb-ext:dynamic-space-size) (* 1024 1024))))
+      ;; The runtime this build is running under: the patched copy when the re-run above
+      ;; happened, so its load commands already say @executable_path and it is already signed.
+      (uiop:copy-file sb-ext:*runtime-pathname* runtime)
+      (uiop:run-program (list "chmod" "755" (namestring runtime)))
+      (format t "~&build-desktop-app: runtime  -> ~A~%" (human-path:human-path runtime))
+      (%compile-macos-launcher launcher heap-mb)
+      (format t "~&build-desktop-app: launcher -> ~A (heap ~D MB)~%" (human-path:human-path launcher) heap-mb)
+      (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path core))
+      (finish-output)
+      (funcall (read-from-string "ouranos-dump:dump-core")
+               core (fdefinition (read-from-string *entry*))))
+    (let ((bin (merge-pathnames (if (uiop:os-windows-p)
+                                    (format nil "~A.exe" *name*)
+                                    *name*)
+                                *bundle*)))
+      (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path bin))
+      (finish-output)
+      (funcall (read-from-string "ouranos-dump:dump-executable")
+               bin (fdefinition (read-from-string *entry*)))))

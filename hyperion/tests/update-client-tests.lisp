@@ -1628,3 +1628,24 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
                      "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)S:AI(AU;OICISAFA;FA;;;WD)")))
     (is (equal '("BA" "SY") principals)
         "the audit section leaked into the DACL principals: ~S" principals)))
+
+(test a-shipped-build-is-one-file-or-a-runtime-with-sbcl-core-beside-it
+  "#98: a macOS build is a launcher, the runtime `sbcl' and `sbcl.core' in one directory, so
+the runtime and core paths differ. Without this the updater took it for a developer's REPL
+and found no install directory. A development SBCL must still read as one: that is what
+stops an update being applied into a Homebrew installation."
+  (flet ((shipped (runtime core) (hyperion/update::%shipped-image-p runtime core)))
+    (is-true (shipped "/Applications/Foo.app/Contents/MacOS/foo"
+                      "/Applications/Foo.app/Contents/MacOS/foo")
+             "one dumped file")
+    (is-true (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                      "/Applications/Foo.app/Contents/MacOS/sbcl.core")
+             "the macOS split")
+    (is-false (shipped "/opt/homebrew/Cellar/sbcl/2.6.8/libexec/bin/sbcl"
+                       "/opt/homebrew/Cellar/sbcl/2.6.8/lib/sbcl/sbcl.core")
+              "Homebrew's own SBCL")
+    (is-false (shipped "/tmp/x/sbcl" "/tmp/x/other.core")
+              "a core beside the runtime under another name")
+    (is-false (shipped "/tmp/x/sbcl" "/tmp/y/sbcl.core")
+              "sbcl.core in another directory")
+    (is-false (shipped nil nil))))

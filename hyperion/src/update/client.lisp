@@ -685,11 +685,29 @@ reports the SAME path for both, because the core is embedded in the executable. 
 being equal is what distinguishes a shipped artifact from a developer's REPL, and it is a
 property of the artifact rather than a flag anyone has to remember to set.
 
+A macOS build since #98 is the other shipped shape: the runtime and its core as two files,
+`sbcl' and `sbcl.core', in one directory. See `%shipped-image-p'.
+
 Returns a namestring, matching the Windows branch: callers treat this as a string and
 `install-writable-p' formats it back into a pathname."
-  (when (equal (ignore-errors (namestring sb-ext:*runtime-pathname*))
-               (ignore-errors (namestring sb-ext:*core-pathname*)))
+  (when (%shipped-image-p (ignore-errors (namestring sb-ext:*runtime-pathname*))
+                          (ignore-errors (namestring sb-ext:*core-pathname*)))
     (%derived-install-dir-1)))
+
+(defun %shipped-image-p (runtime core)
+  "Whether RUNTIME and CORE, two namestrings, are those of a shipped build rather than of a
+developer's REPL.
+
+A shipped build is either one file, a dumped executable with its core inside, so RUNTIME
+and CORE are equal; or, on macOS since #98, a core named `sbcl.core' in the same directory
+as its runtime, which the app's launcher starts with `--core'. A development SBCL keeps its
+core elsewhere: Homebrew's runtime is in libexec/bin/ and its core in lib/sbcl/, so neither
+rule matches it."
+  (and runtime core
+       (or (equal runtime core)
+           (let ((r (pathname runtime)) (c (pathname core)))
+             (and (equal (file-namestring c) "sbcl.core")
+                  (equal (pathname-directory r) (pathname-directory c)))))))
 
 (defun %derived-install-dir-1 ()
   "The location itself, once `%derived-install-dir' has established this is a real build."

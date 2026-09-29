@@ -41,6 +41,30 @@ its tag.
   messages can accept it with the `treat-as-end-of-file` restart:
   `(handler-bind ((aion/tls:tls-truncated #'aion/tls:treat-as-end-of-file)) ...)`. (#282 review)
 
+- **A macOS desktop app is now three files and is signed ad hoc, so a friend can open a
+  downloaded copy from System Settings.** `scripts/build-desktop-app.lisp` no longer dumps one
+  executable on macOS. The bundle directory holds `<name>`, a small launcher compiled from
+  `scripts/macos-launcher.c` with `cc`; `sbcl`, the SBCL runtime; and `sbcl.core`, the app's
+  core. `scripts/build-dmg.sh` signs the whole `.app` with `codesign --force --deep -s -`, fails
+  unless `codesign --verify --deep --strict` passes on the `.app` and on the unpacked
+  `.app.tar.gz` update payload, and moves every file in `Contents/MacOS` that is not a Mach-O
+  (`sbcl.core`, `VERSION`, `LICENSES/`) to `Contents/Resources`, leaving a symlink.
+
+  On another Mac a downloaded copy used to be reported as damaged, with no way past it but
+  `xattr -dr com.apple.quarantine` in a terminal. Now it gets the "Not Opened ... Apple could
+  not verify" prompt; after Done, System Settings > Privacy & Security offers **Open Anyway**
+  (#332). It is still not notarized.
+
+  An app acts if it packages its own macOS bundle, copies the one executable, or runs
+  `codesign` or `otool` on it: the executable is now the launcher, and the runtime is `sbcl`
+  beside it. `build-dmg.sh` refuses a bundle built before this change, with the reason. The
+  app's arguments reach it unchanged, and the heap is the build's (4096 MB unless the build
+  was run with another `--dynamic-space-size`). Linux and Windows builds are unchanged. The
+  updater recognises the new shape (`%shipped-image-p` in `hyperion/update`).
+
+  An app that loads OpenSSL (through `aion/http-client`, for example the updater) still exits
+  at startup on a Mac without Homebrew, whichever shape it has; that is #78 and #334.
+
 ### Added
 
 - **praxeon: an output limit per agent and per turn.** `make-agent` takes `:max-tokens`

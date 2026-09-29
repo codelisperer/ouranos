@@ -6,8 +6,8 @@
 #         [--display-name "Coalton REPL"] \
 #         [--icon hyperion/examples/coalton-repl/assets/lambda.png] [--out dist]
 #
-# Input is exactly what scripts/build-desktop-app.lisp produced -- the dumped image, the
-# hyperion-view, the native libraries it carried (ADR-0013), the libraries the runtime
+# Input is exactly what scripts/build-desktop-app.lisp produced -- the launcher, the SBCL
+# runtime and the app's core (sbcl.core; #98, #332), the hyperion-view, the native libraries it carried (ADR-0013), the libraries the runtime
 # links (ADR-0014), VERSION and LICENSES. Output is the thing a Mac user expects: a disk
 # image they open, containing an app they drag to Applications.
 #
@@ -24,12 +24,15 @@
 # Contents/MacOS/. So packaging is a copy, not a re-layout, and there is nothing here that
 # can disagree with the resolver. A `lib/` subdirectory would have broken all three.
 #
-# WHAT THIS DOES NOT DO: sign or notarize. An unsigned .dmg raises Gatekeeper on another
-# Mac -- the user gets "cannot be opened because the developer cannot be verified" and has
-# to right-click > Open. Fixing that needs a paid Developer ID, `codesign --timestamp
-# --options runtime` and `notarytool`; it is a distribution decision (ADR-0010), not a
-# packaging one, and is deliberately not faked here. The ad-hoc signature applied to the
-# image is what makes it RUN on Apple silicon, which is a different requirement.
+# SIGNING: AD HOC, NOT DEVELOPER ID. The .app is signed with `codesign --force --deep -s -`
+# and the build fails unless `codesign --verify --deep --strict` passes, on the .app and on
+# the update payload unpacked. On another Mac a downloaded copy then gets the ordinary
+# "Not Opened ... Apple could not verify" prompt; after Done, System Settings > Privacy &
+# Security offers Open Anyway, which needs no terminal (measured on macOS 26.6.2, #332).
+# Before the app was split into launcher, runtime and core, it could not be signed at all,
+# and the same download was reported as damaged, with no Open Anyway. A Developer ID
+# signature and notarization (`codesign --timestamp --options runtime`, `notarytool`) remain
+# a distribution decision (ADR-0010) and are not done here.
 
 set -eu
 
@@ -63,17 +66,28 @@ done
 BUNDLE_ABS=$(cd "$BUNDLE" && pwd)
 VERSION=$(cat "$BUNDLE_ABS/VERSION" 2>/dev/null || echo "0.0.0")
 
-# The app binary: the one executable that is neither the launcher nor a dylib. Same rule
-# as verify-bundle.sh, spelled for BSD find (no -printf).
+# The app binary: the one executable that is not the window process (hyperion-view), the
+# SBCL runtime (sbcl) or a dylib. Same rule as verify-bundle-macos.sh.
 BIN=""
 for f in "$BUNDLE_ABS"/*; do
   [ -f "$f" ] && [ -x "$f" ] || continue
   case "$(basename "$f")" in
-    hyperion-view*|*.dylib) continue ;;
+    hyperion-view*|sbcl|*.dylib) continue ;;
   esac
   BIN=$(basename "$f"); break
 done
 [ -n "$BIN" ] || { echo "build-dmg: no application binary found in $BUNDLE" >&2; exit 2; }
+
+# A bundle from before the split has the dumped image as $BIN and no core beside it. codesign
+# cannot sign that, so it is refused here with the reason, rather than failing below.
+for f in sbcl sbcl.core; do
+  [ -f "$BUNDLE_ABS/$f" ] || {
+    echo "build-dmg: $BUNDLE has no $f. It was built before macOS apps were split into a" >&2
+    echo "build-dmg: launcher, the runtime and sbcl.core (#98); rebuild it with this tree's" >&2
+    echo "build-dmg: scripts/build-desktop-app.lisp." >&2
+    exit 2
+  }
+done
 
 [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$BIN"
 
@@ -86,6 +100,23 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # The whole bundle, verbatim -- see the header: Contents/MacOS IS the resolver's directory.
 cp -R "$BUNDLE_ABS"/. "$APP/Contents/MacOS/"
+
+# ONLY CODE STAYS IN Contents/MacOS; everything else moves to Contents/Resources, with a
+# relative symlink left under its old name (#98). codesign treats every file in
+# Contents/MacOS as code, and signs one that is not a Mach-O -- sbcl.core, VERSION, the
+# licence texts -- by writing extended attributes on it. The update payload is made with
+# `tar --no-xattrs` (below), so those signatures were lost: measured, the unpacked payload
+# failed `codesign --verify --deep --strict` with "code object is not signed at all" on
+# LICENSES/libzstd.1-COPYING while the .app itself verified. Resources are sealed in
+# CodeResources instead, which travels. A symlink in Contents/MacOS is followed and sealed
+# (ADR-0014), so everything that looks beside the executable still finds these files.
+for f in "$APP/Contents/MacOS"/* "$APP/Contents/MacOS"/.[!.]*; do
+  [ -e "$f" ] || continue
+  if [ -f "$f" ] && file -b "$f" | grep -q 'Mach-O'; then continue; fi
+  name=$(basename "$f")
+  mv "$f" "$APP/Contents/Resources/$name"
+  ln -s "../Resources/$name" "$APP/Contents/MacOS/$name"
+done
 
 # --- the icon -----------------------------------------------------------------------
 # .icns is generated from the PNG with sips + iconutil, both first-party. No icon is not
@@ -131,33 +162,17 @@ $( [ -n "$ICON_NAME" ] && printf '  <key>CFBundleIconFile</key>          <string
 </plist>
 PLIST
 
-# --- signing: deliberately NOT attempted, and this is the interesting part ---------------
-#
-# `codesign` REFUSES a dumped SBCL image -- "main executable failed strict validation" --
-# for the same reason `install_name_tool` does: save-lisp-and-die appends the Lisp core
-# past the end of the Mach-O, so the file is not a structurally valid Mach-O any more.
-# That is why ADR-0014 patches the runtime BEFORE the dump rather than the image after it.
-#
-# Signing the .app bundle inherits the problem, because the bundle signature covers the
-# main executable. So we do not attempt it, and remove any partial `_CodeSignature` a
-# previous attempt left behind.
-#
-# What that does NOT buy us, measured rather than assumed: `spctl --assess` still reports
-# "code has no resources but signature indicates they must be present". The cause is not the
-# bundle signature but the one EMBEDDED in the image, inherited from the SBCL runtime and
-# signed there as a standalone binary -- as a bundle's main executable it is now expected to
-# be accompanied by a CodeResources file, and it cannot be re-signed to say otherwise.
-# Verified: adding a real Resources payload (an .icns) does not change the verdict.
-#
-# That ad-hoc signature (`flags=0x2(adhoc)`) is also what lets the image execute on Apple
-# silicon at all, so it cannot simply be stripped.
-#
-# CONSEQUENCE, recorded rather than papered over: Developer ID signing and notarization are
-# BLOCKED for a dumped SBCL image by this same limitation, not merely unimplemented. Whoever
-# takes that on (ADR-0010) needs a different artifact shape -- most likely runtime + core as
-# separate files, where the runtime is an ordinary signable Mach-O -- which is a real
-# trade against the single-binary property the updater relies on.
-rm -rf "$APP/Contents/_CodeSignature"
+# --- signing (#98, #332) ----------------------------------------------------------------
+# Ad hoc, over the whole .app: --deep signs every Mach-O inside it (the launcher, the runtime,
+# hyperion-view, each dylib) and seals the rest, sbcl.core included, as resources. Then the
+# strict check that Gatekeeper's assessment rests on. Before the split, the main executable
+# was a dumped image, which codesign cannot sign, and this check could not pass.
+codesign --force --deep -s - "$APP"
+codesign --verify --deep --strict "$APP" || {
+  echo "build-dmg: $APP does not verify after signing (codesign --verify --deep --strict)" >&2
+  exit 1
+}
+echo "build-dmg: signed ad hoc, verifies: $APP"
 
 # --- the update payload (#135) ---------------------------------------------------------
 # scripts/update-manifest.lisp lists macOS as format `app-targz', file
@@ -201,8 +216,13 @@ tar -xzf "$TGZ" -C "$CHECK"
   echo "build-dmg: $TGZ does not unpack to an executable Contents/MacOS/$BIN" >&2
   exit 1
 }
-cmp -s "$CHECK/$DISPLAY_NAME.app/Contents/MacOS/$BIN" "$BUNDLE_ABS/$BIN" || {
-  echo "build-dmg: the $BIN inside $TGZ differs from the bundle's" >&2
+# Compared with the signed .app, not the input bundle: signing rewrote $BIN's signature.
+cmp -s "$CHECK/$DISPLAY_NAME.app/Contents/MacOS/$BIN" "$APP/Contents/MacOS/$BIN" || {
+  echo "build-dmg: the $BIN inside $TGZ differs from the signed .app's" >&2
+  exit 1
+}
+codesign --verify --deep --strict "$CHECK/$DISPLAY_NAME.app" || {
+  echo "build-dmg: the .app unpacked from $TGZ does not verify (codesign --verify --deep --strict)" >&2
   exit 1
 }
 rm -rf "$CHECK"
@@ -235,5 +255,5 @@ hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$STAGE" -size "${SIZE_MB}m" 
 echo "build-dmg: $DMG"
 echo "build-dmg: $(du -h "$DMG" | cut -f1)"
 echo
-echo "build-dmg: NOT signed with a Developer ID and NOT notarized -- on another Mac"
-echo "build-dmg: Gatekeeper will require right-click > Open. See ADR-0010."
+echo "build-dmg: signed ad hoc, NOT with a Developer ID, and NOT notarized. On another Mac:"
+echo "build-dmg: open it, click Done, then System Settings > Privacy & Security > Open Anyway."
