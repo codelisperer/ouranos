@@ -686,7 +686,7 @@ being equal is what distinguishes a shipped artifact from a developer's REPL, an
 property of the artifact rather than a flag anyone has to remember to set.
 
 A macOS build since #98 is the other shipped shape: the runtime and its core as two files,
-`sbcl' and `sbcl.core', in one directory. See `%shipped-image-p'.
+`sbcl' and `sbcl.core', in a bundle's `Contents/MacOS'. See `%shipped-image-p'.
 
 Returns a namestring, matching the Windows branch: callers treat this as a string and
 `install-writable-p' formats it back into a pathname."
@@ -694,20 +694,36 @@ Returns a namestring, matching the Windows branch: callers treat this as a strin
                           (ignore-errors (namestring sb-ext:*core-pathname*)))
     (%derived-install-dir-1)))
 
-(defun %shipped-image-p (runtime core)
+(defun %shipped-image-p (runtime core &key (macos (uiop:os-macosx-p)))
   "Whether RUNTIME and CORE, two namestrings, are those of a shipped build rather than of a
 developer's REPL.
 
-A shipped build is either one file, a dumped executable with its core inside, so RUNTIME
-and CORE are equal; or, on macOS since #98, a core named `sbcl.core' in the same directory
-as its runtime, which the app's launcher starts with `--core'. A development SBCL keeps its
-core elsewhere: Homebrew's runtime is in libexec/bin/ and its core in lib/sbcl/, so neither
-rule matches it."
+A shipped build is either one file, a dumped executable with its core inside, so RUNTIME and
+CORE are equal; or, on macOS only (#98), the runtime `sbcl' with `sbcl.core' beside it in a
+`<name>.app/Contents/MacOS', which is what build-dmg.sh ships and the app's launcher starts.
+
+Only that exact shape, because a development SBCL can also keep its core beside its runtime:
+Windows' official installer puts sbcl.exe and sbcl.core in one directory, and a hand-built
+SBCL can do the same on macOS. Reading such an installation as a shipped build would make
+INSTALL-DIRECTORY name SBCL's own directory, and an update could be applied there. Homebrew
+keeps them apart (libexec/bin/ and lib/sbcl/), so it matches neither rule. The raw bundle
+directory build-desktop-app.lisp writes on macOS is a build step, not something shipped, so it
+does not count either. MACOS is whether this is macOS, a keyword so a test can ask about any
+platform."
   (and runtime core
        (or (equal runtime core)
-           (let ((r (pathname runtime)) (c (pathname core)))
-             (and (equal (file-namestring c) "sbcl.core")
-                  (equal (pathname-directory r) (pathname-directory c)))))))
+           (and macos
+                (let* ((r (pathname runtime))
+                       (c (pathname core))
+                       (dir (pathname-directory r))
+                       (app (and (>= (length dir) 3) (car (last dir 3)))))
+                  (and (equal (file-namestring r) "sbcl")
+                       (equal (file-namestring c) "sbcl.core")
+                       (equal dir (pathname-directory c))
+                       (equal (last dir 2) '("Contents" "MacOS"))
+                       (stringp app)
+                       (> (length app) 4)
+                       (string-equal ".app" app :start2 (- (length app) 4))))))))
 
 (defun %derived-install-dir-1 ()
   "The location itself, once `%derived-install-dir' has established this is a real build."

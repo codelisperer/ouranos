@@ -412,8 +412,11 @@ own `argv`.
 data file in `Contents/MacOS` is signed through extended attributes, which the update payload
 (`tar --no-xattrs`) drops; measured, the unpacked payload then failed `--verify --strict` while
 the `.app` passed. Through the symlink the core's path is still `Contents/MacOS/sbcl.core`, so
-`*core-pathname*` is in the runtime's directory, which is how the updater now recognises a
-shipped build (`%shipped-image-p`, `hyperion/src/update/client.lisp`).
+`*core-pathname*` is beside the runtime in the `.app`'s `Contents/MacOS`, which is how the
+updater now recognises a shipped build on macOS (`%shipped-image-p`,
+`hyperion/src/update/client.lisp`). Only that shape counts, and only on macOS: Windows' SBCL
+installer also keeps `sbcl.exe` and `sbcl.core` in one directory, and must still read as a
+developer's REPL.
 
 **What this does not do.** It is not a Developer ID signature and not notarized; a friend still
 needs Open Anyway once per download. The ad-hoc signature is checked when Gatekeeper assesses a

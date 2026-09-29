@@ -1629,23 +1629,38 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
     (is (equal '("BA" "SY") principals)
         "the audit section leaked into the DACL principals: ~S" principals)))
 
-(test a-shipped-build-is-one-file-or-a-runtime-with-sbcl-core-beside-it
-  "#98: a macOS build is a launcher, the runtime `sbcl' and `sbcl.core' in one directory, so
-the runtime and core paths differ. Without this the updater took it for a developer's REPL
-and found no install directory. A development SBCL must still read as one: that is what
-stops an update being applied into a Homebrew installation."
-  (flet ((shipped (runtime core) (hyperion/update::%shipped-image-p runtime core)))
+(test a-shipped-build-is-one-file-or-a-macos-app-with-sbcl-core-beside-its-runtime
+  "#98: a macOS build is a launcher, the runtime `sbcl' and `sbcl.core' in a bundle's
+Contents/MacOS, so the runtime and core paths differ. Without the second rule the updater took
+it for a developer's REPL and found no install directory. Everything else with a core beside
+its runtime must still read as a REPL, or an update could be applied into SBCL's own
+installation: Windows' installer keeps sbcl.exe and sbcl.core in one directory."
+  (flet ((shipped (runtime core &key macos)
+           (hyperion/update::%shipped-image-p runtime core :macos macos)))
     (is-true (shipped "/Applications/Foo.app/Contents/MacOS/foo"
                       "/Applications/Foo.app/Contents/MacOS/foo")
-             "one dumped file")
+             "one dumped file, on any platform")
     (is-true (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
-                      "/Applications/Foo.app/Contents/MacOS/sbcl.core")
-             "the macOS split")
+                      "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos t)
+             "the macOS .app")
+    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                       "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos nil)
+              "the same paths are not a shipped shape off macOS")
+    (is-false (shipped "C:/Program Files/Steel Bank Common Lisp/sbcl.exe"
+                       "C:/Program Files/Steel Bank Common Lisp/sbcl.core" :macos nil)
+              "Windows' SBCL installation")
     (is-false (shipped "/opt/homebrew/Cellar/sbcl/2.6.8/libexec/bin/sbcl"
-                       "/opt/homebrew/Cellar/sbcl/2.6.8/lib/sbcl/sbcl.core")
-              "Homebrew's own SBCL")
-    (is-false (shipped "/tmp/x/sbcl" "/tmp/x/other.core")
-              "a core beside the runtime under another name")
-    (is-false (shipped "/tmp/x/sbcl" "/tmp/y/sbcl.core")
-              "sbcl.core in another directory")
-    (is-false (shipped nil nil))))
+                       "/opt/homebrew/Cellar/sbcl/2.6.8/lib/sbcl/sbcl.core" :macos t)
+              "Homebrew's SBCL")
+    (is-false (shipped "/opt/sbcl/bin/sbcl" "/opt/sbcl/bin/sbcl.core" :macos t)
+              "a hand-built SBCL on macOS with its core beside the runtime")
+    (is-false (shipped "/tmp/dist/foo-1.0.0-macos-arm64/sbcl"
+                       "/tmp/dist/foo-1.0.0-macos-arm64/sbcl.core" :macos t)
+              "the raw bundle directory the build writes, which is not shipped")
+    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                       "/Applications/Foo.app/Contents/MacOS/other.core" :macos t)
+              "a core under another name")
+    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                       "/Applications/Bar.app/Contents/MacOS/sbcl.core" :macos t)
+              "sbcl.core in another bundle")
+    (is-false (shipped nil nil :macos t))))
