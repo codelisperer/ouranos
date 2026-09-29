@@ -80,8 +80,9 @@ handler runs.
 
 What COUNT-WHEN costs: several requests that arrive while the bucket still has a token all
 pass the check before any of them is counted. Each is counted afterwards all the same, and the
-bucket may go below empty to pay for them (down to minus CAPACITY), which makes the wait
-before the next accepted request longer by the same amount."
+bucket goes below empty to pay for them, which makes the wait before the next accepted request
+longer by the same amount. The overdraft needs no cap: only requests that passed the check
+while a token was left can add to it."
   (unless (and (integerp capacity) (plusp capacity))
     (error "make-limit ~S: CAPACITY must be a positive integer, not ~S." name capacity))
   (unless (and (realp per) (plusp per))
@@ -159,10 +160,10 @@ it: a check happens on every request, including ones that will never be counted.
 (defgeneric debit-token (store bucket-key capacity refill-ms now-ms)
   (:documentation
    "Take one token from the bucket BUCKET-KEY in STORE whether or not one is available,
-refilling it first. A new bucket starts full. The count may go below zero, to no less than
-minus CAPACITY, so a request that passed CHECK-TOKEN is always counted, even when others
-emptied the bucket between its check and its debit. Must be atomic per bucket. The return
-value is not used."))
+refilling it first. A new bucket starts full. The count may go below zero, with no lower
+bound, so every request that passed CHECK-TOKEN is counted, even when others emptied the
+bucket between its check and its debit. Must be atomic per bucket. The return value is not
+used."))
 
 (defgeneric forget-bucket (store bucket-key)
   (:documentation "Remove the bucket BUCKET-KEY from STORE, so its next request starts full."))
@@ -256,7 +257,7 @@ otherwise, so it is cheap to call on every request. Called with the lock held."
            (bucket (or (gethash bucket-key table)
                        (setf (gethash bucket-key table)
                              (vector capacity now-ms capacity refill-ms)))))
-      (setf (aref bucket 0) (max (- capacity) (- (%refilled bucket now-ms) 1))
+      (setf (aref bucket 0) (- (%refilled bucket now-ms) 1)
             (aref bucket 1) now-ms)
       (%sweep store now-ms)
       t)))
@@ -335,6 +336,8 @@ a limit applies, and must use that env rather than the one it was given.
 See WRAP-RATE-LIMIT for the order limits are taken in, and MAKE-LIMIT for COUNT-WHEN."
   (unless store
     (error "call-with-rate-limit: STORE is required, and must be the same store on every call."))
+  (when (null limits)
+    (error "call-with-rate-limit: LIMITS is empty, so nothing would be limited."))
   (let ((applicable (remove-if-not (lambda (l) (%applies-p l env)) limits)))
     (if (null applicable)
         (funcall handler env)

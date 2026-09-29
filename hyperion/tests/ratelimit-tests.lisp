@@ -342,8 +342,8 @@ body. Returns (values app calls-box)."
       (is (null ok))
       (is (= 2000 wait) "one token overdrawn: two refills before the next request"))
     (dotimes (i 5) (rl:debit-token store "k" 1 1000 0))
-    (is (= 2000 (nth-value 1 (rl:check-token store "k" 1 1000 0)))
-        "the overdraft stops at minus CAPACITY")))
+    (is (= 7000 (nth-value 1 (rl:check-token store "k" 1 1000 0)))
+        "every debit is kept, however far below empty: -6 needs seven refills to reach one")))
 
 (test a-limit-without-count-when-still-takes-its-token-before-the-handler
   ;; A mixed pair on one route: the address limit counts failures only, the account limit
@@ -401,6 +401,11 @@ body. Returns (values app calls-box)."
                            (rl:call-with-rate-limit (%rl-env :addr "10.0.0.1") #'identity
                                                     :limits (list (%rl-by-address)))))
              'error))
+  (is (typep (nth-value 1 (ignore-errors
+                           (rl:call-with-rate-limit (%rl-env :addr "10.0.0.1") #'identity
+                                                    :limits '() :store (rl:make-memory-store))))
+             'error)
+      "an empty LIMITS is refused, as WRAP-RATE-LIMIT refuses it, rather than limiting nothing")
   (is (typep (nth-value 1 (ignore-errors
                            (rl:make-limit :x :capacity 1 :per 1 :key (rl:by-address)
                                              :count-when 303)))

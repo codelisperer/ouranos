@@ -46,8 +46,8 @@ be used to clear failures. A handler that signals is counted, because the limite
 it succeeded.
 
 Requests that arrive together can all pass the check before any of them is counted. Each is
-still counted when it finishes, and the bucket may go below empty to pay for them, down to
-minus its capacity, so the wait before the next accepted request grows by the same amount.
+still counted when it finishes, and the bucket goes below empty to pay for them, so the wait
+before the next accepted request grows by the same amount.
 
 **An account limit does not reveal whether an account exists.** The key is whatever was
 submitted, and the limiter never reads the account store, so an address with no account is
@@ -153,7 +153,8 @@ full capacity. A shared store implements four generic functions; see their docst
 
 - `rl:take-token` checks and takes a token in one atomic step, for a limit without `:count-when`.
 - `rl:check-token` says whether a token is available without taking one or creating a bucket,
-  and `rl:debit-token` takes one whether or not it is available. A limit with `:count-when`
+  and `rl:debit-token` takes one whether or not it is available, letting the bucket go below
+empty. A limit with `:count-when`
   uses these, before and after the handler.
 - `rl:forget-bucket` removes a bucket, for `rl:reset-limit`.
 
