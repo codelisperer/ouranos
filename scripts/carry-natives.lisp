@@ -37,7 +37,8 @@
 
 (defpackage #:ouranos-carry
   (:use #:cl)
-  (:export #:declared-carry-paths
+  (:export #:declared-carries
+           #:carry-arguments
            #:carry-declared-libraries
            #:carry-refused
            #:open-carried-libraries))
@@ -55,10 +56,29 @@
 is not built: a bundle missing a library the app declared would start on the build machine
 and fail on a user's."))
 
-(defun declared-carry-paths (argv)
-  "Every value that follows a `--carry' in ARGV, in order."
-  (loop for (flag value) on argv
-        when (and (string= flag "--carry") value) collect value))
+(defun declared-carries (argv)
+  "The libraries ARGV declares, in order, as a list of (PATH . LICENSES). PATH is the value
+after a `--carry'. LICENSES are the values of any `--carry-license' flags that follow it
+before the next `--carry'; they name the library's license text when no file beside it or in
+the directory above does, as for SQLite, which is public domain and ships none. A
+`--carry-license' before any `--carry' signals CARRY-REFUSED."
+  (let ((carries '()))
+    (loop for (flag value) on argv
+          do (cond
+               ((and (string= flag "--carry") value)
+                (push (list value) carries))
+               ((and (string= flag "--carry-license") value)
+                (if carries
+                    (setf (cdr (first carries)) (append (cdr (first carries)) (list value)))
+                    (error 'carry-refused :path (pathname value)
+                                          :reason "--carry-license names the license of the --carry before it, and there is none")))))
+    (nreverse carries)))
+
+(defun carry-arguments (carries)
+  "CARRIES, as returned by DECLARED-CARRIES, as command-line arguments again."
+  (loop for (path . licenses) in carries
+        append (list "--carry" path)
+        append (loop for l in licenses append (list "--carry-license" l))))
 
 (defun %cffi (name)
   "The function CFFI:NAME, or NIL when CFFI is not loaded."
@@ -94,27 +114,61 @@ did not say where."
           collect lib))
 
 (defun %license-files (truename)
-  "License texts for the library at TRUENAME: LICENSE*, COPYING* and NOTICE* in its directory,
-or else in the directory above it (native/pdfium/LICENSE for native/pdfium/bin/pdfium.dll)."
-  (flet ((in (dir)
-           (loop for pattern in '("LICENSE*" "COPYING*" "NOTICE*")
-                 append (directory (merge-pathnames pattern dir)))))
-    (let ((dir (uiop:pathname-directory-pathname truename)))
-      (or (in dir) (in (uiop:pathname-parent-directory-pathname dir))))))
+  "License texts for the library at TRUENAME: files and directories whose names start with
+LICENSE, COPYING or NOTICE, in any case, in its directory, or else in the directory above it
+(win-x64/LICENSE and win-x64/licenses/ for win-x64/bin/pdfium.dll). A directory holds
+third-party notices and is carried whole. Names are compared ignoring case because a pattern
+given to DIRECTORY is not: it missed a directory named licenses/."
+  (flet ((licensep (name)
+           (some (lambda (prefix) (and (>= (length name) (length prefix))
+                                       (string-equal prefix name :end2 (length prefix))))
+                 '("LICENSE" "COPYING" "NOTICE")))
+         (dir-name (d) (car (last (pathname-directory d)))))
+    (flet ((in (dir)
+             (append (remove-if-not (lambda (f) (licensep (file-namestring f)))
+                                    (uiop:directory-files dir))
+                     (remove-if-not (lambda (d) (licensep (dir-name d)))
+                                    (uiop:subdirectories dir)))))
+      (let ((dir (uiop:pathname-directory-pathname truename)))
+        (or (in dir) (in (uiop:pathname-parent-directory-pathname dir)))))))
 
-(defun carry-declared-libraries (paths bundle &key vendor (report *standard-output*))
-  "Copy each library in PATHS into the directory BUNDLE, with its license text under
+(defun %copy-license (license lib-name bundle report)
+  "Copy LICENSE, a file or a directory of notices, to BUNDLE/LICENSES/<lib-name>-<its name>."
+  (if (uiop:directory-pathname-p license)
+      (let ((root (car (last (pathname-directory license)))))
+        (dolist (file (directory (merge-pathnames "**/*.*" license)))
+          (unless (uiop:directory-pathname-p file)
+            (let ((dst (merge-pathnames (uiop:enough-pathname file license)
+                                        (merge-pathnames (format nil "LICENSES/~A-~A/" lib-name root)
+                                                         bundle))))
+              (ensure-directories-exist dst)
+              (uiop:copy-file file dst))))
+        (format report "~&            + LICENSES/~A-~A/~%" lib-name root))
+      (let ((dst (merge-pathnames (format nil "LICENSES/~A-~A" lib-name (file-namestring license))
+                                  bundle)))
+        (ensure-directories-exist dst)
+        (uiop:copy-file license dst)
+        (format report "~&            + LICENSES/~A~%" (file-namestring dst)))))
+
+(defun carry-declared-libraries (carries bundle &key vendor (report *standard-output*))
+  "Copy each library in CARRIES into the directory BUNDLE, with its license text under
 BUNDLE/LICENSES/, and arrange for the dumped image to open the copy at startup.
 
-Signals CARRY-REFUSED, before copying anything, when a path does not exist, when it is under
-VENDOR (the tree's own libraries, which build-desktop-app.lisp already carries), when two
-paths have the same file name, or when no license text is found beside a library.
+Each element of CARRIES is a library's path, or a list (PATH . LICENSES) as DECLARED-CARRIES
+returns. LICENSES, when given, are the library's license texts; otherwise they are found by
+%LICENSE-FILES. A license text can be a file or a directory of notices.
+
+Signals CARRY-REFUSED, before copying anything, when a path or a named license does not exist,
+when a path is under VENDOR (the tree's own libraries, which build-desktop-app.lisp already
+carries), when two paths have the same file name, or when no license text is found for a
+library.
 
 Returns the list of carried file names that the image had open, which are the ones
 OPEN-CARRIED-LIBRARIES opens at startup."
   (let* ((open (%open-libraries))
          (plan
-           (loop for path in paths
+           (loop for carry in carries
+                 for (path . named) = (if (consp carry) carry (list carry))
                  for truename = (probe-file path)
                  for name = (and truename (file-namestring truename))
                  do (cond
@@ -123,7 +177,12 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                       ((and vendor (probe-file vendor) (uiop:subpathp truename (truename vendor)))
                        (error 'carry-refused :path truename
                                              :reason "it is under vendor/, and the bundler already carries the tree's own libraries")))
-                 collect (list truename name (%license-files truename)
+                    (dolist (l named)
+                      (unless (probe-file l)
+                        (error 'carry-refused :path (pathname l)
+                                              :reason (format nil "it is named by --carry-license for ~A and does not exist" name))))
+                 collect (list truename name
+                               (if named (mapcar #'probe-file named) (%license-files truename))
                                (%matching-open-libraries truename open)))))
     (loop for (entry . rest) on plan
           for (truename name) = entry
@@ -133,7 +192,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
     (loop for (truename nil licenses) in plan
           unless licenses
             do (error 'carry-refused :path truename
-                                     :reason "no LICENSE*, COPYING* or NOTICE* file is beside it or in the directory above it. The bundle carries a library's license text with its code"))
+                                     :reason "no LICENSE*, COPYING* or NOTICE* file is beside it or in the directory above it, and no --carry-license names one. The bundle carries a library's license text with its code"))
     (let ((opened '()))
       (loop for (truename name licenses libs) in plan
             for dst = (merge-pathnames name bundle)
@@ -143,12 +202,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                  (uiop:run-program (list "chmod" "+x" (uiop:native-namestring dst)) :ignore-error-status t))
                (format report "~&  carry     ~A  <- ~A~%" name (uiop:native-namestring truename))
                (dolist (license licenses)
-                 (let ((ldst (merge-pathnames (format nil "LICENSES/~A-~A" (pathname-name name)
-                                                      (file-namestring license))
-                                              bundle)))
-                   (ensure-directories-exist ldst)
-                   (uiop:copy-file license ldst)
-                   (format report "~&            + LICENSES/~A~%" (file-namestring ldst))))
+                 (%copy-license license (pathname-name name) bundle report))
                (cond
                  (libs
                   (dolist (lib libs) (funcall (%cffi "CLOSE-FOREIGN-LIBRARY") lib))

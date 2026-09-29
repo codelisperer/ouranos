@@ -109,9 +109,11 @@ installed app started and then failed on its first call into the library.
 An app now names them: `scripts/build-desktop-app.lisp --carry <path>`, once per library.
 `scripts/carry-natives.lisp` does the work, and follows decisions 1, 2 and 4:
 
-- the file is copied beside the executable, and its `LICENSE*`, `COPYING*` or `NOTICE*` text,
-  found beside it or in the directory above, goes under `LICENSES/`. A library with no
-  license text is refused, as is a path under `vendor/` or two paths with one file name;
+- the file is copied beside the executable, and its license text goes under `LICENSES/`: the
+  files and directories whose names start with `LICENSE`, `COPYING` or `NOTICE`, beside it or
+  in the directory above, or the files `--carry-license` names after its `--carry`, for a
+  library that ships none (SQLite is public domain). A library with no license text is
+  refused, as is a path under `vendor/` or two paths with one file name;
 - if the image has the library open, it is closed before the dump, for the reason the
   consequences below give for libuv, and a function added to `sb-ext:*init-hooks*` opens the
   copy by absolute path from the directory of `sb-ext:*runtime-pathname*` when the app

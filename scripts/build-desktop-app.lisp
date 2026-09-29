@@ -6,7 +6,7 @@
 ;;;;          --name   coalton-repl \
 ;;;;          --version 0.1.0 \
 ;;;;          [--out dist] [--icon path/to/app.ico] [--window-icon path/to/window.png]
-;;;;          [--carry path/to/lib ...]
+;;;;          [--carry path/to/lib [--carry-license path/to/license] ...]
 ;;;;
 ;;;; --icon is used on Windows only: see "Windows: the executable's icon" below.
 ;;;; --window-icon is the icon for the app's window on every OS, carried in the bundle (#74).
@@ -14,7 +14,9 @@
 ;;;; --carry, which may be given more than once, names a native library of the app's own
 ;;;; (outside this tree's vendor/) to copy into the bundle, with its license text. If the
 ;;;; image has the library open, the shipped app opens the copy beside its executable when it
-;;;; starts. See scripts/carry-natives.lisp (#78).
+;;;; starts. Its license text is found beside it or in the directory above; --carry-license,
+;;;; after a --carry, names it instead, as for a public-domain library that ships none. See
+;;;; scripts/carry-natives.lisp (#78).
 ;;;;
 ;;;; The command is IDENTICAL on Linux / macOS / Windows -- which is the whole point:
 ;;;; SBCL cannot cross-compile (save-lisp-and-die dumps an image for the HOST platform
@@ -45,18 +47,25 @@
 (defparameter *name*    (or (argv-value "--name")    (error "build-desktop-app: --name is required")))
 (defparameter *version* (or (argv-value "--version") "0.0.0"))
 (defparameter *out*     (argv-value "--out" "dist"))
-(defparameter *carry*   (ouranos-carry:declared-carry-paths (rest sb-ext:*posix-argv*)))
+(defparameter *carry*
+  (handler-case (ouranos-carry:declared-carries (rest sb-ext:*posix-argv*))
+    (ouranos-carry:carry-refused (e)
+      (format *error-output* "~&build-desktop-app: ~A~%" e)
+      (sb-ext:exit :code 3))))
 
 ;;; Checked here, before the minutes-long load, so a mistyped path is reported at once.
 ;;; CARRY-DECLARED-LIBRARIES checks it again, with the rest of its rules, before copying.
-(dolist (path *carry*)
-  (unless (probe-file path)
-    (format *error-output* "~&build-desktop-app: --carry ~A: no such file.~%" path)
-    (sb-ext:exit :code 3)))
+(loop for (path . licenses) in *carry*
+      do (dolist (file (cons path licenses))
+           (unless (probe-file file)
+             (format *error-output* "~&build-desktop-app: ~:[--carry~;--carry-license~] ~A: no such file.~%"
+                     (not (eq file path)) file)
+             (sb-ext:exit :code 3))))
 
 (defun carry-args ()
-  "The --carry arguments again, for a build that re-runs itself under a patched runtime."
-  (loop for path in *carry* append (list "--carry" path)))
+  "The --carry and --carry-license arguments again, for a build that re-runs itself under a
+patched runtime."
+  (ouranos-carry:carry-arguments *carry*))
 
 ;;; --window-icon: the icon for the app's WINDOW, carried into the bundle as
 ;;; `window-icon.<type>' so hyperion/desktop:run-app finds it beside the executable on any

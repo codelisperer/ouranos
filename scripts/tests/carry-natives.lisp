@@ -178,8 +178,51 @@ bundle directory, which must be empty when it refuses."
       (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "got ~A" e)
       (is (search "vendor/" (princ-to-string e))))))
 
-(test declared-carry-paths-reads-every-carry-flag
+(defun %carry-fn (name)
   (%load-carry-natives)
-  (is (equal '("a.dll" "b/c.dll")
-             (funcall (find-symbol "DECLARED-CARRY-PATHS" "OURANOS-CARRY")
-                      '("--system" "x" "--carry" "a.dll" "--name" "n" "--carry" "b/c.dll")))))
+  (fdefinition (find-symbol name "OURANOS-CARRY")))
+
+(test declared-carries-pairs-each-carry-with-the-licenses-after-it
+  (let ((argv '("--system" "x" "--carry" "a.dll" "--name" "n"
+                "--carry" "b/sqlite3.dll" "--carry-license" "pd.txt" "--carry-license" "more.txt")))
+    (is (equal '(("a.dll") ("b/sqlite3.dll" "pd.txt" "more.txt"))
+               (funcall (%carry-fn "DECLARED-CARRIES") argv)))
+    ;; A build re-run under a patched runtime gets the same declarations back.
+    (is (equal (funcall (%carry-fn "DECLARED-CARRIES") argv)
+               (funcall (%carry-fn "DECLARED-CARRIES")
+                        (funcall (%carry-fn "CARRY-ARGUMENTS")
+                                 (funcall (%carry-fn "DECLARED-CARRIES") argv)))))))
+
+(test a-carry-license-before-any-carry-is-refused
+  (let ((e (handler-case (progn (funcall (%carry-fn "DECLARED-CARRIES") '("--carry-license" "pd.txt")) nil)
+             (error (e) e))))
+    (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "got ~A" e)))
+
+(test a-named-license-carries-a-library-with-none-beside-it
+  ;; SQLite is public domain and ships no license file; the build names the note it writes.
+  (let* ((tree (%fresh-tree))
+         (lib (merge-pathnames "dll/sqlite3.dll" tree))
+         (note (merge-pathnames "notes/sqlite-PUBLIC-DOMAIN.txt" tree)))
+    (%write lib "x")
+    (%write note "public domain")
+    (multiple-value-bind (e bundle) (%carry-refusal (list (list lib note)))
+      (is (null e) "a named license must be accepted: ~A" e)
+      (is (probe-file (merge-pathnames "sqlite3.dll" bundle)))
+      (is (probe-file (merge-pathnames "LICENSES/sqlite3-sqlite-PUBLIC-DOMAIN.txt" bundle))))
+    (let ((e (%carry-refusal (list (list lib (merge-pathnames "notes/missing.txt" tree))))))
+      (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "a missing named license must be refused, got ~A" e))))
+
+(test a-license-directory-is-carried-whole
+  ;; PDFium's layout: win-x64/bin/pdfium.dll, win-x64/LICENSE, and third-party notices in
+  ;; win-x64/licenses/. The directory is copied with what is inside it.
+  (let* ((tree (%fresh-tree))
+         (lib (merge-pathnames "win-x64/bin/pdfium.dll" tree)))
+    (%write lib "x")
+    (%write (merge-pathnames "win-x64/LICENSE" tree) "bsd")
+    (%write (merge-pathnames "win-x64/licenses/abseil.txt" tree) "apache")
+    (%write (merge-pathnames "win-x64/licenses/sub/zlib.txt" tree) "zlib")
+    (multiple-value-bind (e bundle) (%carry-refusal (list lib))
+      (is (null e) "got ~A" e)
+      (is (probe-file (merge-pathnames "LICENSES/pdfium-LICENSE" bundle)))
+      (is (probe-file (merge-pathnames "LICENSES/pdfium-licenses/abseil.txt" bundle)))
+      (is (probe-file (merge-pathnames "LICENSES/pdfium-licenses/sub/zlib.txt" bundle))))))
