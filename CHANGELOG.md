@@ -51,6 +51,16 @@ its tag.
 
 ### Added
 
+- **aion/tz: a zone's UTC offset at an instant, and wall-clock time to UTC, from the system's
+  TZif files.** (#367) `(aion/tz:offset "Europe/Kyiv" universal-time)` returns seconds east of
+  UTC and the abbreviation. `(aion/tz:local-to-universal zone y mo d h mi)` returns the
+  instant of a wall-clock time, and a second value, `:unique`, `:gap` or `:overlap`: a time in
+  a spring-forward gap gives the instant of the change, and one in a fall-back overlap gives the
+  earlier instant, with the later as a third value. `valid-zone-p` and `zone-names` list what
+  the system has. Rules come from `$TZDIR` or `/usr/share/zoneinfo`, including the footer rule
+  for instants after a file's last transition, so **a deployment image needs the tzdata
+  package**; Windows has no zone directory, and there an app sets `TZDIR`. `parse-tzif`,
+  `zone-offset-at` and `zone-local-to-universal` are pure, for use on any TZif bytes.
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
   `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
   `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with

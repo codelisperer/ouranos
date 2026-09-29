@@ -25,6 +25,26 @@
 ;;; portable scalar-DFA backend loads on bare SBCL/CCL/ECL/ABCL with no toolchain
 ;;; and no Coalton compile. Native/SIMD backends (zsv, duckdb, sb-simd) will be
 ;;; further opt-in systems behind the same neutral protocol. See docs/csv-design.md.
+(defsystem "aion/tz"
+  :description "Time zones from the system's TZif files: a zone's UTC offset at an instant, and wall-clock time to UTC across daylight-saving changes (#367)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; No :depends-on. uiop arrives with ASDF, and no system here declares it (scripts/checkers.asd).
+  :depends-on ()
+  :serial t
+  :components ((:module "src/tz"
+                :serial t
+                :components ((:file "packages")
+                             (:file "tz"))))
+  :in-order-to ((test-op (test-op "aion/tz/tests"))))
+
+(defsystem "aion/tz/tests"
+  :description "aion/tz on synthetic TZif data everywhere, and on the system's zones where it has them (#367)."
+  :depends-on ("aion/tz" "fiveam")
+  :components ((:module "tests" :components ((:file "tz-tests"))))
+  :perform (test-op (o c) (symbol-call :aion/tz/tests '#:run-tests)))
+
 (defsystem "aion/csv"
   :description "Backend-neutral CSV: dialects, a scalar-DFA reader/writer, and reducible row streams (the dependency-free `portable` backend + conformance oracle)."
   :author "Bob <eternal.recursion@proton.me>"
