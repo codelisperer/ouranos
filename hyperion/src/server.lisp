@@ -698,18 +698,27 @@ registry does not name. The native server's status line uses the same table."
    (format nil "HTTP/1.1 ~D ~A~C~C" code (h1:reason-phrase code) #\Return #\Linefeed)
    :external-format :utf-8))
 
+(defvar *woo-status-lines-lock* (sb-thread:make-mutex :name "hyperion-woo-status-lines")
+  "Held while COMPLETE-WOO-STATUS-LINES reads and writes Woo's table. Woo's table is an ordinary
+hash table, and two first starts of Woo at the same moment would otherwise write it at once.")
+
 (defun complete-woo-status-lines ()
   "Add a status line to Woo's table for every code from 100 to 599 that has none, so that Woo can
 send any status a handler returns (#372). Returns the codes added, in order; NIL when Woo is not
-loaded or nothing was missing. START calls it before it runs a Woo server."
-  (let ((table (%woo-status-table))
-        (added '()))
-    (when table
-      (loop for code from 100 to 599
-            unless (gethash code table)
-              do (setf (gethash code table) (status-line-octets code))
-                 (push code added)))
-    (nreverse added)))
+loaded or nothing was missing. START calls it before it runs a Woo server.
+
+It writes only the first time, and under *WOO-STATUS-LINES-LOCK*, so two threads starting Woo at
+once do not write the table together. A Woo server already serving reads the table without that
+lock, so an app that starts Woo some other way calls this before it serves anything."
+  (sb-thread:with-mutex (*woo-status-lines-lock*)
+    (let ((table (%woo-status-table))
+          (added '()))
+      (when table
+        (loop for code from 100 to 599
+              unless (gethash code table)
+                do (setf (gethash code table) (status-line-octets code))
+                   (push code added)))
+      (nreverse added))))
 
 (defun %clack-start (app server host port debug &optional backend-args)
   "Start APP on a Clack backend and return a CLACK-SERVER once that server answers.
