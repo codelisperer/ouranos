@@ -149,3 +149,72 @@ TEST-SOURCE, also NAME/tests holding it, named by NAME's test-op. Returns DIR."
                                  (eval form) nil)
                    (error (e) e))
                  'error)))))
+
+(test a-relative-root-is-resolved-before-it-is-compared
+  ;; Review of #331: a caller of LOAD-SYSTEM-STRICTLY can pass #P"./". ASDF's directory for
+  ;; the system is absolute, so compared as given, the system was not the project's own and
+  ;; its warning was muffled.
+  (%with-strict-project (dir name "relative" *strict-warning-source*)
+    (let ((*default-pathname-defaults* (truename dir)))
+      (is (typep (%strict-load name #P"./") 'error)
+          "the project's own system, with the root given as ./, must fail on its warning"))))
+
+;;; --- through the targets, as bin/cons runs them ------------------------------------
+;;;
+;;; Review of #331: the tests above call LOAD-SYSTEM-STRICTLY directly, so they would stay
+;;; green if a target went back to loading through Quicklisp. These run `cons build', `cons
+;;; test' and `cons --fresh build' through CLI-RUN in a child SBCL, which is what bin/cons
+;;; calls, and read its exit code and what it printed.
+
+(defun %cons-target-in-child (dir target &key fresh)
+  "Run TARGET of the cons.lisp in DIR through CONS/RUN:CLI-RUN in a child SBCL, which loads
+cons from this tree. Returns (values EXIT-CODE OUTPUT). The child, and the sbcl a --fresh
+target starts, find the fixture and this tree through CL_SOURCE_REGISTRY."
+  (flet ((tree-entry (d) (format nil "~A//" (string-right-trim "/" (namestring (truename d))))))
+    (let* ((tree (uiop:pathname-parent-directory-pathname (asdf:system-source-directory :cons)))
+           (sep (if (uiop:os-windows-p) ";" ":"))
+           (registry (format nil "~A~A~A~A" (tree-entry dir) sep (tree-entry tree) sep)))
+      (multiple-value-bind (out err code)
+          (uiop:run-program
+           (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                 "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                 "--eval" "(require :asdf)"
+                 "--eval" (format nil "(load ~S)" (uiop:native-namestring
+                                                   (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+                 "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cons))"
+                 "--eval" (format nil "(cons/run:cli-run (cons/spec:load-spec ~S) (list ~S) :fresh ~S)"
+                                  (uiop:native-namestring dir) target fresh))
+           :output :string :error-output :output :ignore-error-status t :directory dir
+           :environment (cons (format nil "CL_SOURCE_REGISTRY=~A" registry)
+                              (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
+                                         (sb-ext:posix-environ))))
+        (declare (ignore err))
+        (values code out)))))
+
+(defmacro %with-cons-project ((dir name tag source) &body body)
+  "BODY with DIR a fresh project whose cons.lisp has a `build' target loading system NAME and
+a `test' target testing it; NAME's one file holds SOURCE."
+  `(tempdir:with-temporary-directory (,dir "strict-cli")
+     ;; Lower case: the source registry the child uses indexes .asd files by their exact
+     ;; name, and ASDF looks a system up by its name in lower case.
+     (let ((,name (string-downcase (%strict-name ,tag))))
+       (%strict-project ,dir ,name ,source)
+       (with-open-file (out (merge-pathnames "cons.lisp" ,dir) :direction :output)
+         (format out "(cons:project ~S :system ~S :targets ((build :load ~S) (test :test ~S)))~%"
+                 ,name ,name ,name ,name))
+       ,@body)))
+
+(test cons-build-test-and-fresh-build-fail-on-a-warning-and-print-it
+  (%with-cons-project (dir name "cli" *strict-warning-source*)
+    (dolist (run '(("build" nil) ("test" nil) ("build" t)))
+      (destructuring-bind (target fresh) run
+        (multiple-value-bind (code out) (%cons-target-in-child dir target :fresh fresh)
+          (is (eql 1 code) "cons ~:[~;--fresh ~]~A must exit 1 on the warning, got ~A:~%~A" fresh target code out)
+          (is (search "not a number" out) "cons ~:[~;--fresh ~]~A must print the warning:~%~A" fresh target out))))))
+
+(test cons-build-and-fresh-build-pass-a-clean-project
+  ;; The control: the same child, the same targets, a project without the warning.
+  (%with-cons-project (dir name "clicl" *strict-clean-source*)
+    (dolist (fresh '(nil t))
+      (multiple-value-bind (code out) (%cons-target-in-child dir "build" :fresh fresh)
+        (is (eql 0 code) "cons ~:[~;--fresh ~]build of a clean project must exit 0, got ~A:~%~A" fresh code out)))))
