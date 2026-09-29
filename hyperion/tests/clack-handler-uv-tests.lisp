@@ -139,14 +139,15 @@ instead of a case passing on the wrong file."
         (is (eql 139616 (length body)))))))
 
 (test response-multi-headers
-  "Clack suite, response-tests: \"multi headers (response)\"."
+  "Clack suite, response-tests: \"multi headers (response)\". Deviates from Clack's case only
+in being stricter: Clack matches the regex foo,\\s*bar,\\s*baz, and cl-ppcre is not in this tree,
+so this compares the exact joined value."
   (testing-app (port (lambda (env) (declare (ignore env))
                        '(200 (:content-type "text/plain; charset=utf-8"
                               :x-foo "foo" :x-foo "bar, baz")
                          ("hi"))))
     (let ((value (get-header (nth-value 2 (dex:get (localhost port))) :x-foo)))
-      (is (equal "foo, bar, baz" (remove-if (lambda (c) (member c '(#\Tab))) value))
-          "the suite matches foo,\\s*bar,\\s*baz; got ~S" value))))
+      (is (equal "foo, bar, baz" value)))))
 
 (test response-no-entity-headers-on-304
   "Clack suite, response-tests: \"no entity headers on 304\"."
@@ -369,12 +370,12 @@ Transfer-Encoding: chunked, which server-uv decodes since #374."
       (is (eql (length +big-chunk+) (length body))))))
 
 (test request-multi-headers
-  "Clack suite, request-tests: \"multi headers (request)\"."
+  "Clack suite, request-tests: \"multi headers (request)\". Deviates from Clack's case only in
+being stricter: Clack matches the regex ^bar,\\s*baz$; this compares the exact joined value."
   (testing-app (port (lambda (env)
                        `(200 (:content-type "text/plain; charset=utf-8")
                              (,(gethash "foo" (getf env :headers))))))
-    (is (equal "bar, baz" (dex:get (localhost port) :headers '(("Foo" . "bar") ("Foo" . "baz"))))
-        "the suite matches ^bar,\\s*baz$")))
+    (is (equal "bar, baz" (dex:get (localhost port) :headers '(("Foo" . "bar") ("Foo" . "baz")))))))
 
 (test request-a-big-header-value
   "Clack suite, request-tests: \"a big header value > 128 bytes\". Its header value is 96,000
@@ -442,9 +443,12 @@ by its x-expect header, and \"ng\" otherwise."
       `(200 (:content-type "text/plain") (,(if (search expected raw) "ok" "ng"))))))
 
 (test request-file-upload
-  "Clack suite, request-tests: \"file upload\". The suite parses the multipart body with
-http-body, which is not in this tree; this checks instead that the file's octets arrive intact
-inside the multipart body, which is what the handler is responsible for."
+  "Clack suite, request-tests: \"file upload\". Deviates from Clack's case: Clack's app parses
+the multipart body with http-body and compares the file part; this one checks that the file's
+octets arrive intact inside the raw body. Delivering the octets is the server's job, and
+parsing multipart is the application's or a library's, so this checks what the server does
+without adding a multipart parser to the tree. The test also sends an X-Expect header naming
+the file, so the app knows what to look for."
   (let ((file (fixture "file.txt" 25)))
     (testing-app (port (%upload-app))
       (multiple-value-bind (body status)
@@ -454,8 +458,9 @@ inside the multipart body, which is what the handler is responsible for."
         (is (equal "ok" body))))))
 
 (test request-large-file-upload
-  "Clack suite, request-tests: \"large file upload\". Changed as \"file upload\" is: the suite
-compares SHA-1 digests after parsing with http-body; this checks the file's octets arrive intact."
+  "Clack suite, request-tests: \"large file upload\". Deviates from Clack's case as \"file
+upload\" does, for the same reason: Clack's app compares the SHA-1 of the parsed file part
+with the fixture's; this one checks that the fixture's octets arrive intact in the raw body."
   (let ((file (fixture "jellyfish.jpg" 139616)))
     (testing-app (port (%upload-app))
       (multiple-value-bind (body status)
