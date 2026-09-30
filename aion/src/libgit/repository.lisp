@@ -86,7 +86,17 @@ REPOSITORY-CLOSED if it has been closed."
            ,@body)))))
 
 (defun %directory-namestring (directory)
-  (uiop:native-namestring (uiop:ensure-directory-pathname directory)))
+  "DIRECTORY as libgit2 takes it: native, and without a trailing separator. libgit2 appends
+/.git/ itself, and on Windows it cannot resolve the doubled separator a trailing one leaves
+(\"failed to resolve path 'C:/.../dir//.git/'\", #470's first Windows run). POSIX realpath
+accepts it, which is why macOS and Linux never showed this. A drive root such as C:\\ keeps
+its separator."
+  (let ((name (uiop:native-namestring (uiop:ensure-directory-pathname directory))))
+    (loop while (and (> (length name) 1)
+                     (member (char name (1- (length name))) '(#\/ #\\))
+                     (not (and (= (length name) 3) (char= (char name 1) #\:))))
+          do (setf name (subseq name 0 (1- (length name)))))
+    name))
 
 (defun %wrap (out)
   "A REPOSITORY for the git_repository written to OUT."
