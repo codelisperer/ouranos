@@ -93,7 +93,8 @@
     with one in-memory implementation; Kairos or pgvector implement the same generics later.")
   (:export #:memory-store #:in-memory-store #:make-in-memory-store
            #:provenance #:make-provenance #:provenance-conversation #:provenance-turn
-           #:provenance-at #:observation-provenance #:check-provenance #:provenance-p
+           #:provenance-at #:provenance-through #:observation-provenance #:check-provenance
+           #:provenance-p #:observation-thread
            #:observation #:observation-id #:observation-subject #:observation-content
            #:observation-kind #:observation-value #:observation-tokens
            #:observation-valid-from #:observation-recorded-at
@@ -199,7 +200,7 @@
            #:distillation #:distillation-subject #:distillation-proposals
            #:distillation-replacements
            #:proposal #:proposal-content #:proposal-kind #:proposal-replaces
-           #:proposal-because
+           #:proposal-because #:proposal-applies-from #:parse-date
            #:observation-tool #:*system-prompt*))
 
 (defpackage #:praxeon/prompt
@@ -222,6 +223,22 @@
    ;; the two operations the turn loop calls
    #:trim-history #:render-items #:attach-context
    #:*context-open* #:*context-close*))
+
+(defpackage #:praxeon/observe
+  (:use #:cl)
+  (:local-nicknames (#:llm #:praxeon/llm)
+                    (#:mem #:praxeon/memory)
+                    (#:distil #:praxeon/distil)
+                    (#:prompt #:praxeon/prompt)
+                    (#:bt #:bordeaux-threads))
+  (:documentation
+   "Running distil automatically over a thread (#317). An observer keeps a thread's observed
+    mark, and once the messages past it pass a step it distils them off the request path into
+    the thread's observations, then moves the mark. Supersession needs the app's ACCEPT, and a
+    thread observation becomes a fact about the subject only through the app's PROMOTE.")
+  (:export #:observer #:make-observer #:observe-turn #:await-observer #:observer-busy-p
+           #:observer-mark #:observer-failures #:observer-last-error #:observer-thread
+           #:observer-subject #:unobserved #:supported-proposals #:*step-tokens*))
 
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)

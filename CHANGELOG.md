@@ -67,6 +67,14 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
+  `:thread`, and an app's own memory store must accept it** (#317). A store written outside this
+  tree implements those generics, and a method that does not accept `:thread` now fails to
+  compile against them. `:thread` NIL, the default, means facts about the subject, which is what
+  every observation has been so far, so a call that does not pass it behaves as before.
+- **praxeon/memory-db: `ensure-schema` adds two columns to an existing table**, `thread` and
+  `source_through` (#317). A table made before them gets them the next time `ensure-schema`
+  runs; existing rows are facts about their subject, as before.
 - **hyperion/dev: `serve` on loopback refuses a request whose Host is not `127.0.0.1:PORT` or
   `localhost:PORT`, and a cross-site POST.** It now starts its server with
   `:request-guard :same-origin`, the guard `run-app` has had since #302, because a development
@@ -133,6 +141,21 @@ its tag.
 
 ### Added
 
+- **praxeon/observe: running `distil` automatically over a conversation, off the request
+  path, into observations of that conversation** (#317, step A). `make-observer` takes a
+  provider, a store, a subject and a thread, and `observe-turn` is called with the thread's
+  history after each turn and returns at once. When the messages past its mark reach `:step`
+  estimated tokens (6,000 by default), it distils them on a thread of its own, writes the
+  result into the thread's scope with a provenance naming the conversation and the messages'
+  range, and moves the mark. A proposed replacement is applied only when `:accept` allows it; a
+  thread observation also becomes a fact about the subject only when `:promote` allows it, and
+  by default nothing does. `:verify`, a provider, drops proposals the window does not support.
+  A window that cannot be distilled is skipped and counted in `observer-failures`.
+  - `praxeon/memory` has a thread scope: an observation's `thread` is NIL for a fact about its
+    subject and a thread's id for an observation of that thread, and `:thread :all` reads both.
+  - A provenance can name a range of turns with `:through`.
+  - `distil`'s tool takes an optional `applies_from` date, which becomes the observation's
+    `valid-from`; `apply-distillation` takes `:thread`.
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
   `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,

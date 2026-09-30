@@ -38,7 +38,11 @@ a reason rather than presenting an unreviewable one."
   (content "" :type string)
   (kind :observation :type keyword)
   (replaces nil)
-  (because nil))
+  (because nil)
+  ;; APPLIES-FROM is when the fact holds from, as a universal time, when the window says so
+  ;; ("from next Monday", "since March"), or NIL (#317). It becomes the observation's
+  ;; VALID-FROM; questions about time are where summaries most often go wrong.
+  (applies-from nil :type (or null integer)))
 
 (defstruct (distillation (:constructor %make-distillation))
   "What one window yielded. NOTHING HERE IS STORED. `apply-distillation' writes."
@@ -96,9 +100,25 @@ here would look like validation and not be any. The per-observation checks are i
                                                        "The id of an existing observation this corrects. Omit unless it is the same thing.")
                                      "because" (%hash "type" "string"
                                                       "description"
-                                                      "Required with `replaces': why the two are about the same thing."))
+                                                      "Required with `replaces': why the two are about the same thing.")
+                                     "applies_from" (%hash "type" "string"
+                                                           "description"
+                                                           "The date this holds from, as YYYY-MM-DD, only when the conversation states one. Omit otherwise."))
                               "required" (vector "content" "kind"))))
          "required" (vector "observations")))
+
+(defun parse-date (string)
+  "The universal time at midnight UTC of STRING, a date written YYYY-MM-DD, or NIL when STRING
+is not one."
+  (and (stringp string) (= (length string) 10)
+       (char= (char string 4) #\-) (char= (char string 7) #\-)
+       (every #'digit-char-p (remove #\- string))
+       (ignore-errors
+        (encode-universal-time 0 0 0
+                               (parse-integer string :start 8 :end 10)
+                               (parse-integer string :start 5 :end 7)
+                               (parse-integer string :start 0 :end 4)
+                               0))))
 
 (defun %items (arguments)
   "The observations array from ARGUMENTS as a list, or NIL when it is absent or not a sequence."
@@ -139,7 +159,11 @@ does not say which one."
                   (when (and (stringp replaces) (plusp (length replaces))
                              (not (and (stringp because) (plusp (length because)))))
                     (push (format nil "observation ~D claims to replace ~A with no `because'" i replaces)
-                          problems))))))
+                          problems))
+                  (let ((date (gethash "applies_from" item)))
+                    (when (and date (not (parse-date date)))
+                      (push (format nil "observation ~D has applies_from ~S, which is not a date written YYYY-MM-DD" i date)
+                            problems)))))))
     (when problems
       (format nil "~{~A~^; ~}" (nreverse problems)))))
 
@@ -234,13 +258,14 @@ function's extent would preempt every caller's."
                                                                   (stringp because)
                                                                   (plusp (length because)))
                                                          replaces)
-                                             :because (when (stringp because) because))))
+                                             :because (when (stringp because) because)
+                                             :applies-from (parse-date (gethash "applies_from" item)))))
                   nil))
       ((or llm:structured-result-invalid
            llm:structured-result-not-called) (c)
         (values nil c)))))
 
-(defun apply-distillation (store distillation &key provenance (accept (constantly nil)))
+(defun apply-distillation (store distillation &key provenance (accept (constantly nil)) thread)
   "Write DISTILLATION into STORE. Returns the observations written.
 
 PROVENANCE IS REQUIRED AND BELONGS TO THE WINDOW, NOT TO THIS CALL (#150). A distillation
@@ -262,13 +287,17 @@ doubtful one.
 
 A proposal naming an id that is not in the store is recorded as an ordinary observation too.
 That is a proposal about something this store cannot show anyone, so there is nothing to
-review and nothing to replace."
+review and nothing to replace.
+
+THREAD, when given, writes the observations into that thread's scope, and looks for the
+observation a proposal replaces only there (#317). A proposal's APPLIES-FROM becomes its
+observation's valid-from."
   (let ((written '()))
     (dolist (p (distillation-proposals distillation) (nreverse written))
       (let* ((target (and (proposal-replaces p)
                           (find (proposal-replaces p)
                                 (mem:observations-of
-                                 store (distillation-subject distillation))
+                                 store (distillation-subject distillation) :thread thread)
                                 :key #'mem:observation-id
                                 :test #'equal)))
              (replace-p (and target
@@ -277,9 +306,12 @@ review and nothing to replace."
         (push (if replace-p
                   (mem:supersede store target (proposal-content p)
                                             :provenance provenance
-                                            :kind (proposal-kind p))
+                                            :kind (proposal-kind p)
+                                            :valid-from (proposal-applies-from p))
                   (mem:remember store (distillation-subject distillation)
                                            (proposal-content p)
                                            :provenance provenance
-                                           :kind (proposal-kind p)))
+                                           :kind (proposal-kind p)
+                                           :valid-from (proposal-applies-from p)
+                                           :thread thread))
               written)))))

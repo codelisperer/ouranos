@@ -20,7 +20,8 @@
                     (#:bt #:bordeaux-threads)   ; pre-publication issue 418: fan-out is really concurrent now
                     (#:web-search #:praxeon/web-search)
                     (#:mem #:praxeon/memory)
-                    (#:dst #:praxeon/distil))
+                    (#:dst #:praxeon/distil)
+                    (#:obs #:praxeon/observe))
   (:export #:praxeon))
 
 (cl:in-package #:praxeon/tests)
@@ -4141,3 +4142,170 @@ model, which is what the file's commentary is for."
             (llm:generate-structured p2 '((:role :user :content "b")) (%spec)))
         (is (string= "Ship" (gethash "headline" args)))
         (is (eq :truncated mark))))))
+
+;;; --------------------------------------------------------------------------
+;;; Observational memory, step A (#317): the thread scope, and the observer that runs distil
+;;; off the request path. A scripted model only.
+;;; --------------------------------------------------------------------------
+
+(test a-thread-observation-and-a-subject-fact-are-kept-apart
+  "An observation of a thread stands in for that thread's messages; a fact about the subject is
+recalled everywhere. A recall of one scope never returns the other. :ALL, for the access right,
+returns both, and forgetting the subject erases both."
+  (let ((store (mem:make-in-memory-store)))
+    (remember* store "member-1" "Prefers mornings.")
+    (remember* store "member-1" "Asked about the refund in this chat." :thread "conv-7")
+    (flet ((contents (os) (mapcar #'mem:observation-content os)))
+      (is (equal '("Prefers mornings.") (contents (mem:observations-of store "member-1"))))
+      (is (equal '("Asked about the refund in this chat.")
+                 (contents (mem:observations-of store "member-1" :thread "conv-7"))))
+      (is (null (mem:observations-of store "member-1" :thread "conv-8")) "another thread has none")
+      (is (= 2 (length (mem:observations-of store "member-1" :thread :all))))
+      (is (= 1 (length (mem:recall store "member-1" :thread "conv-7"))))
+      (let ((o (first (mem:observations-of store "member-1" :thread "conv-7"))))
+        (is (equal "conv-7" (mem:observation-thread (supersede* store o "Asked about the refund twice."))))
+        "a supersession stays in the thread")
+      (is (= 3 (mem:forget-subject store "member-1")))
+      (is (null (mem:observations-of store "member-1" :thread :all))))))
+
+(test a-provenance-can-name-a-range-of-turns
+  (let ((p (mem:make-provenance "conv-7" 3 :through 9)))
+    (is (= 3 (mem:provenance-turn p)))
+    (is (= 9 (mem:provenance-through p))))
+  (is (null (mem:provenance-through (mem:make-provenance "conv-7" 3))) "a single turn by default"))
+
+(test a-date-the-conversation-states-becomes-valid-from
+  (let* ((store (mem:make-in-memory-store))
+         (o (let ((ht (%ob "Starts the new job." "fact")))
+              (setf (gethash "applies_from" ht) "2026-11-02")
+              ht))
+         (provider (%provider-returning (%call-with o))))
+    (let ((written (apply-distillation* store (dst:distil provider "member-1" +window+))))
+      (is (= (encode-universal-time 0 0 0 2 11 2026 0) (mem:observation-valid-from (first written))))))
+  (is (null (dst:parse-date "next Monday")))
+  (is (null (dst:parse-date "2026-13-01")) "not a date")
+  (let* ((bad (let ((ht (%ob "Starts." "fact"))) (setf (gethash "applies_from" ht) "soon") ht))
+         (provider (%provider-returning (%call-with bad) (%call-with bad) (%call-with bad))))
+    (is (null (dst:distil provider "member-1" +window+)) "a date that is not YYYY-MM-DD is refused, and the window skipped")))
+
+;;; The observer.
+
+(defclass slow-scripted (scripted)
+  ((delay :initarg :delay :reader slow-delay))
+  (:documentation "A scripted provider that takes DELAY seconds to answer."))
+
+(defmethod llm:complete :before ((p slow-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (sleep (slow-delay p)))
+
+(defun %history (n &optional (words 60))
+  "N messages alternating user and assistant, each WORDS words, so their size is predictable."
+  (loop for i from 1 to n
+        collect (llm:msg (if (oddp i) "user" "assistant")
+                         (format nil "message ~D: ~{~A~^ ~}" i (make-list words :initial-element "word")))))
+
+(test the-observer-distils-off-the-request-path-and-moves-the-mark
+  "The model takes a second to answer; OBSERVE-TURN returns long before that. The observations are
+the thread's, cite the conversation and the window's message range, and the mark moves to the
+window's end. A turn below the step starts nothing."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'slow-scripted :delay 1
+                                                 :script (list (%call-with (%ob "Planning a move to Lisbon." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step 200))
+         (history (%history 6)))
+    (let ((start (get-internal-real-time)))
+      (is-true (obs:observe-turn observer history))
+      (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 0.5)
+          "the turn did not wait for the distillation"))
+    (is-true (obs:observer-busy-p observer))
+    (is-true (obs:await-observer observer :timeout 10))
+    (let ((written (mem:observations-of store "member-1" :thread "conv-7")))
+      (is (= 1 (length written)))
+      (let ((p (mem:observation-provenance (first written))))
+        (is (string= "conv-7" (mem:provenance-conversation p)))
+        (is (= 1 (mem:provenance-turn p)))
+        (is (= 6 (mem:provenance-through p)))))
+    (is (= 6 (obs:observer-mark observer)))
+    (is (null (mem:observations-of store "member-1")) "nothing became a fact about the subject")
+    (is-false (obs:observe-turn observer (append history (%history 1 5)))
+              "one short message past the mark is below the step")))
+
+(test the-next-window-starts-where-the-last-ended
+  (let* ((store (mem:make-in-memory-store))
+         (provider (%provider-returning (%call-with (%ob "First." "fact")) (%call-with (%ob "Second." "fact"))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step 200))
+         (history (%history 6)))
+    (obs:observe-turn observer history)
+    (obs:await-observer observer :timeout 10)
+    (obs:observe-turn observer (append history (%history 6)))
+    (obs:await-observer observer :timeout 10)
+    (let ((second (find "Second." (mem:observations-of store "member-1" :thread "conv-7")
+                        :key #'mem:observation-content :test #'string=)))
+      (is (= 7 (mem:provenance-turn (mem:observation-provenance second))))
+      (is (= 12 (mem:provenance-through (mem:observation-provenance second)))))
+    (is (= 12 (obs:observer-mark observer)))))
+
+(test the-observer-supersedes-only-with-the-apps-accept
+  "A later window proposes that a correction replaces an earlier thread observation. Without the
+app's ACCEPT both are current; with it the earlier one is superseded."
+  (flet ((observe-with (accept)
+           (let* ((store (mem:make-in-memory-store))
+                  (first (remember* store "member-1" "Lives in Porto." :thread "conv-7"))
+                  (provider (%provider-returning
+                             (%call-with (%ob "Lives in Lisbon." "correction"
+                                              :replaces (mem:observation-id first)
+                                              :because "the member corrected where they live"))))
+                  (observer (obs:make-observer provider store "member-1" "conv-7" :step 200 :accept accept)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             ;; Sorted: observations written in the same second have no order between them.
+             (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))
+                   #'string<))))
+    (is (equal '("Lives in Lisbon." "Lives in Porto.") (observe-with (constantly nil))) "default: nothing replaced")
+    (is (equal '("Lives in Lisbon.") (observe-with (constantly t))) "with ACCEPT: the correction replaces it")))
+
+(test nothing-becomes-a-subject-fact-without-promote
+  (flet ((observe-with (&rest keys)
+           (let* ((store (mem:make-in-memory-store))
+                  (provider (%provider-returning (%call-with (%ob "Is vegetarian." "preference"))))
+                  (observer (apply #'obs:make-observer provider store "member-1" "conv-7" :step 200 keys)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (mapcar #'mem:observation-content (mem:observations-of store "member-1")))))
+    (is (null (observe-with)) "by default nothing is promoted")
+    (is (equal '("Is vegetarian.") (observe-with :promote (lambda (o) (eq :preference (mem:observation-kind o)))))
+        "the app's PROMOTE decides")))
+
+(defun %supported (&rest numbers)
+  (llm:make-completion :stop-reason :tool-use
+                       :tool-calls (list (llm:make-tool-call :id "s1" :name "record_supported"
+                                                            :arguments (%args "supported" (coerce numbers 'vector))))))
+
+(test the-support-check-drops-what-the-window-does-not-support
+  "With a VERIFY provider, the proposals it does not find in the window are not written.
+Control: without one, both are. A check that fails keeps none."
+  (flet ((observe-with (verify)
+           (let* ((store (mem:make-in-memory-store))
+                  (provider (%provider-returning (%call-with (%ob "Lives in Lisbon." "fact")
+                                                             (%ob "Has three children." "fact"))))
+                  (observer (obs:make-observer provider store "member-1" "conv-7" :step 200 :verify verify)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))
+                   #'string<))))
+    (is (equal '("Has three children." "Lives in Lisbon.") (observe-with nil)))
+    (is (equal '("Lives in Lisbon.") (observe-with (%provider-returning (%supported 1)))))
+    (is (null (observe-with (%provider-returning (llm:make-completion :text "no tool call" :stop-reason :end))))
+        "a support check that fails keeps nothing")))
+
+(test a-window-that-cannot-be-distilled-is-skipped-and-counted
+  (let* ((store (mem:make-in-memory-store))
+         (provider (%provider-returning (llm:make-completion :text "prose" :stop-reason :end)
+                                        (llm:make-completion :text "prose" :stop-reason :end)
+                                        (llm:make-completion :text "prose" :stop-reason :end)))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step 200)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (obs:observer-failures observer)))
+    (is (= 6 (obs:observer-mark observer)) "the mark moves past it, so it is not paid for again")
+    (is (null (mem:observations-of store "member-1" :thread :all)))))

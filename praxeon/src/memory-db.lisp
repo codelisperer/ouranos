@@ -90,6 +90,11 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     (:source_conversation :string)
     (:source_turn  :integer)
     (:source_at    :integer)
+    ;; THE SCOPE AND THE WINDOW (#317). THREAD is NULL for a fact about the subject and a
+    ;; thread's id for an observation of that thread; SOURCE_THROUGH is the last turn of the
+    ;; window an observation came from. Added to an existing table by ENSURE-SCHEMA.
+    (:thread       :string)
+    (:source_through :integer)
     ,(if (eq dialect :sqlite)
          '(:embedding :text)
          `(:embedding :vector :dimensions ,dimensions))))
@@ -163,13 +168,33 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                                                          "SELECT current_database() AS db"))
                                       :db))))
 
+(defparameter +added-columns+ '(("thread" . "TEXT") ("source_through" . "BIGINT"))
+  "Columns added after a table may already exist, with their SQL types: the thread scope and
+the window's last turn (#317). ENSURE-SCHEMA adds each one a table lacks.")
+
+(defun %existing-columns (store)
+  "The lowercased names of the columns STORE's table has."
+  (let ((c (store-connection store)))
+    (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
+            (if (eq (store-dialect store) :sqlite)
+                (conn:query c (format nil "PRAGMA table_info(~A)" (store-table store)))
+                (conn:query c "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?"
+                            (string-downcase (store-table store)))))))
+
 (defun ensure-schema (store)
-  "Create the table and its index if they are not there. Returns STORE.
-On Postgres the `vector' extension must already be installed; see CHECK-VECTOR-EXTENSION."
+  "Create the table and its index if they are not there, and add the columns +ADDED-COLUMNS+
+names to a table made before them. Returns STORE. On Postgres the `vector' extension must
+already be installed; see CHECK-VECTOR-EXTENSION."
   (when (eq (store-dialect store) :postgres)
     (check-vector-extension (store-connection store)))
-  (dolist (statement (store-ddl store) store)
-    (conn:exec (store-connection store) statement)))
+  (dolist (statement (store-ddl store))
+    (conn:exec (store-connection store) statement))
+  (let ((have (%existing-columns store)))
+    (loop for (name . type) in +added-columns+
+          unless (member name have :test #'string=)
+            do (conn:exec (store-connection store)
+                          (format nil "ALTER TABLE ~A ADD COLUMN ~A ~A" (store-table store) name type))))
+  store)
 
 ;;; --- rows <-> observations ---------------------------------------------------
 
@@ -202,14 +227,16 @@ On Postgres the `vector' extension must already be installed; see CHECK-VECTOR-E
    ;; "the traceable provenance is never reconstructed from the rendered text" -- a citation
    ;; parsed back out of prose is a guess about what the model was told, not a record of
    ;; what was stored.
+   :thread (let ((th (param:row-value row :thread))) (and (stringp th) th))
    :provenance (mem:make-provenance (or (param:row-value row :source_conversation) "")
                                     (or (param:row-value row :source_turn) 0)
-                                    :at (param:row-value row :source_at))))
+                                    :at (param:row-value row :source_at)
+                                    :through (param:row-value row :source_through))))
 
 (defparameter +columns+
   '(:id :subject :content :kind :value :tokens :valid_from :recorded_at
     :supersedes :superseded_by :superseded_at
-    :source_conversation :source_turn :source_at)
+    :source_conversation :source_turn :source_at :thread :source_through)
   "What a read selects. NOT the embedding: it is large, it is never shown to anyone, and
 selecting it would pull a megabyte of floats through every recall to be discarded.")
 
@@ -235,7 +262,7 @@ language of columns."
 (defun %now () (get-universal-time))
 
 (defmethod mem:remember ((store db-memory-store) subject content
-                         &key provenance (kind :observation) (value 1) tokens valid-from)
+                         &key provenance (kind :observation) (value 1) tokens valid-from thread)
   (mem:check-provenance provenance "remember" subject)
   (let* ((id (format nil "obs-~36R-~36R" (get-universal-time) (random (expt 2 32))))
          (now (%now))
@@ -244,7 +271,7 @@ language of columns."
                        :id id :subject subject :content content :kind kind :value value
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))
                        :valid-from (or valid-from now) :recorded-at now
-                       :provenance provenance)))
+                       :thread thread :provenance provenance)))
     (bt:with-lock-held ((store-lock store))
       ;; AN UNRECORDED SOURCE TIME IS OMITTED, NOT CAST. `cast' refuses NIL for an integer
       ;; field -- correctly, because NIL is not an integer -- and the tempting fixes are
@@ -254,6 +281,7 @@ language of columns."
       ;; because nothing was written to it. That is the same distinction the value carries
       ;; in Lisp, kept intact through the write rather than restored afterwards.
       (let* ((at (mem:provenance-at provenance))
+             (through (mem:provenance-through provenance))
              (changeset (cs:cast (store-schema-name store)
                                  (append
                                   (list :id id :subject subject :content content
@@ -267,12 +295,16 @@ language of columns."
                                         :embedding (if (eq (store-dialect store) :sqlite)
                                                        (%vector-text store embedding)
                                                        embedding))
-                                  (when at (list :source_at at)))
+                                  (when at (list :source_at at))
+                                  (when through (list :source_through through))
+                                  (when thread (list :thread thread)))
                                  (append
                                   '(:id :subject :content :kind :value :tokens
                                     :valid_from :recorded_at :embedding
                                     :source_conversation :source_turn)
-                                  (when at '(:source_at))))))
+                                  (when at '(:source_at))
+                                  (when through '(:source_through))
+                                  (when thread '(:thread))))))
         (cs:insert! changeset (store-connection store) :dialect (store-dialect store))))
     observation))
 
@@ -280,6 +312,7 @@ language of columns."
                           &key provenance kind value tokens valid-from)
   (mem:check-provenance provenance "supersede" (mem:observation-subject observation))
   (let ((replacement (mem:remember store (mem:observation-subject observation) content
+                                   :thread (mem:observation-thread observation)
                                    :provenance provenance
                                    :kind (or kind (mem:observation-kind observation))
                                    :value (or value (mem:observation-value observation))
@@ -301,13 +334,17 @@ language of columns."
           (mem:observation-supersedes replacement) (mem:observation-id observation))
     replacement))
 
-(defun %where-current (subject as-of include-superseded)
-  "The WHERE clause for a subject's observations.
+(defun %where-current (subject as-of include-superseded &optional thread)
+  "The WHERE clause for a subject's observations in the scope THREAD names: NIL for facts about
+the subject, a thread's id for that thread, :ALL for both.
 
 AS-OF answers what the store believed then: recorded by then, and superseded only if the
 supersession had happened by then. A row superseded LATER was still current at that time,
 which is the whole point of keeping the old one."
   (let ((clauses (list (list := :subject subject))))
+    (cond ((eq thread :all))
+          ((null thread) (push (list :is-null :thread) clauses))
+          (t (push (list := :thread thread) clauses)))
     (when as-of
       (push (list :<= :recorded_at as-of) clauses))
     (unless include-superseded
@@ -317,13 +354,13 @@ which is the whole point of keeping the old one."
             clauses))
     (if (rest clauses) (cons :and (nreverse clauses)) (first clauses))))
 
-(defmethod mem:observations-of ((store db-memory-store) subject &key as-of include-superseded)
+(defmethod mem:observations-of ((store db-memory-store) subject &key as-of include-superseded thread)
   (bt:with-lock-held ((store-lock store))
     (mapcar #'%row->observation
             (q:fetch (store-connection store)
                      (list :select +columns+
                            :from (list (store-table store))
-                           :where (%where-current subject as-of include-superseded)
+                           :where (%where-current subject as-of include-superseded thread)
                            :order-by '(:recorded_at))
                      :dialect (store-dialect store)))))
 
@@ -363,11 +400,11 @@ of its own -- which is why this is ctx:assemble and not a LIMIT."
       (ctx:add-item context (mem:observation->ctx-item o)))
     (ctx:assemble context)))
 
-(defmethod mem:recall ((store db-memory-store) subject &key (budget 1000) kind as-of)
-  (%assemble (mem:observations-of store subject :as-of as-of) budget kind))
+(defmethod mem:recall ((store db-memory-store) subject &key (budget 1000) kind as-of thread)
+  (%assemble (mem:observations-of store subject :as-of as-of :thread thread) budget kind))
 
 (defmethod mem:recall-similar ((store db-memory-store) subject embedding
-                               &key (budget 1000) kind as-of (limit 20))
+                               &key (budget 1000) kind as-of (limit 20) thread)
   "Nearest by COSINE distance, then budgeted.
 
 TWO STAGES, AND THE ORDER MATTERS. The database ranks by distance and takes LIMIT rows,
@@ -375,19 +412,19 @@ because that is the part an index can serve; the budget is applied afterwards in
 assembly every other context source uses. Budgeting first would mean fetching everything to
 throw most of it away, and ranking in Lisp would mean the index served nothing."
   (let ((rows (if (eq (store-dialect store) :sqlite)
-                  (%sqlite-nearest store subject embedding as-of limit)
+                  (%sqlite-nearest store subject embedding as-of limit thread)
                   (bt:with-lock-held ((store-lock store))
                     (q:fetch (store-connection store)
                              (list :select +columns+
                                    :from (list (store-table store))
-                                   :where (%where-current subject as-of nil)
+                                   :where (%where-current subject as-of nil thread)
                                    :order-by (list (list (list :<=> :embedding
                                                                (%vector-text store embedding))))
                                    :limit limit)
                              :dialect (store-dialect store))))))
     (%assemble (%rank-as-value (mapcar #'%row->observation rows)) budget kind)))
 
-(defun %sqlite-nearest (store subject embedding as-of limit)
+(defun %sqlite-nearest (store subject embedding as-of limit &optional thread)
   "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations with their
 embeddings, the LIMIT nearest EMBEDDING by cosine distance, nearest first, ties by id. The
 query vector is checked for width as a stored one is. An observation with no embedding sorts
@@ -398,7 +435,7 @@ so that case needs a row written some other way."
                  (q:fetch (store-connection store)
                           (list :select (append +columns+ '(:embedding))
                                 :from (list (store-table store))
-                                :where (%where-current subject as-of nil))
+                                :where (%where-current subject as-of nil thread))
                           :dialect :sqlite)))
          (scored (mapcar (lambda (row)
                            (let ((text (param:row-value row :embedding)))
