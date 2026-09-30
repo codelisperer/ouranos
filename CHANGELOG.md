@@ -12,6 +12,8 @@ its tag.
 
 ## Unreleased
 
+## v0.1.7 — 2026-09-30
+
 ### An app may have to act
 
 - **hyperion/dev: `serve` on loopback refuses a request whose Host is not `127.0.0.1:PORT` or
