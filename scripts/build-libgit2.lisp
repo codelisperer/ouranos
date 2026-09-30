@@ -43,13 +43,16 @@
 ;;;; PCRE2_STATIC on Windows), so the bundled pcre2 exports nothing.
 ;;;;
 ;;;; PLATFORM STATUS. Three platforms are not claimed from one.
-;;;;   MACOS    PROVEN: 217 sources, a 1.55 MB dylib exporting 950 git_ functions, linked
+;;;;   MACOS    PROVEN: 217 sources, a 1.55 MB dylib exporting 954 symbols, linked
 ;;;;            against Security, CoreFoundation, libiconv and libSystem only; loaded through
 ;;;;            CFFI, git_libgit2_version reported 1.9.7 (#429).
-;;;;   LINUX    UNVERIFIED until CI builds it: the features and flags follow libgit2's cmake
-;;;;            for glibc.
-;;;;   WINDOWS  UNVERIFIED until CI builds it: the features and flags follow libgit2's cmake
-;;;;            for MSVC.
+;;;;   LINUX    BUILT IN CI: libgit2.so.1.9, 1,996,880 bytes, exporting 954 symbols, on
+;;;;            the ubuntu runner of #469's run 36772461452. Features and flags follow libgit2's
+;;;;            cmake for glibc. aion/libgit's suite (#429, step 2) is what loads and tests it.
+;;;;   WINDOWS  BUILT IN CI: git2.dll, 1,598,464 bytes, exporting 954 symbols, with MSVC on
+;;;;            the windows runner of #469's run 36780302839. Features and flags follow
+;;;;            libgit2's cmake for MSVC. aion/libgit's suite (#429, step 2) is what loads and
+;;;;            tests it.
 
 (require :asdf)
 (require :uiop)
