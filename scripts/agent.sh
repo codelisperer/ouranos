@@ -31,7 +31,6 @@ set -eu
 # https://github.com/orgs/codelisperer/projects/1 and with AGENTS.md.
 VALID='PM
 Mac (home)
-Mac (work)
 Windows
 Linux/WSL
 App
@@ -87,7 +86,7 @@ fi
 
 # 3. refuse to guess
 echo "agent: this machine has no board identity." >&2
-echo "agent: set one with   scripts/agent.sh --set \"Mac (work)\"" >&2
+echo "agent: set one with   scripts/agent.sh --set \"Mac (home)\"" >&2
 echo "agent: or export OURANOS_AGENT. Valid identities:" >&2
 printf '%s\n' "$VALID" | sed 's/^/  /' >&2
 exit 1
