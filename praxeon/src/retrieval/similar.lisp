@@ -12,6 +12,9 @@
 ;;;; chunk that passes. There is no vector index, so no index can return fewer rows than asked
 ;;;; after the filter, and a result is COMPLETE whenever every chunk has a current embedding.
 ;;;; The pull request for #138 reports the scan's time at the first app's corpus sizes.
+;;;;
+;;;; On SQLite (#369) the embedding is text and the cosine distance is computed here, over the
+;;;; same candidates the Postgres query reads: every chunk of the corpus DERIVER embedded.
 
 (in-package #:praxeon/retrieval)
 
@@ -37,9 +40,52 @@ its embedding stays current."
                                   :source (format nil "the chunk store ~A"
                                                   (store-table (corpus-store corpus)))))
 
+(defun %sqlite-vector-text (store vector)
+  "VECTOR as the text a SQLite store keeps, in pgvector's form: [x,y,...]. Refuses a vector of
+the wrong width, as the cast does on Postgres."
+  (unless (= (length vector) (store-dimensions store))
+    (error 'praxeon/conditions:deliberation-failure
+           :detail (format nil "embedding rejected: ~D numbers where the store holds ~D"
+                           (length vector) (store-dimensions store))))
+  (with-standard-io-syntax
+    (let ((*read-default-float-format* 'double-float))
+      (format nil "[~{~A~^,~}]" (map 'list (lambda (x) (coerce x 'double-float)) vector)))))
+
+(defun %parse-vector-text (text)
+  "The numbers of a vector stored by %SQLITE-VECTOR-TEXT, as a simple vector of doubles. Signals
+DELIBERATION-FAILURE if TEXT is not that form."
+  (flet ((bad () (error 'praxeon/conditions:deliberation-failure
+                        :detail (format nil "a stored embedding is not a vector: ~S"
+                                        (subseq text 0 (min 40 (length text)))))))
+    (let ((n (length text)))
+      (unless (and (> n 1) (char= (char text 0) #\[) (char= (char text (1- n)) #\]))
+        (bad))
+      (with-standard-io-syntax
+        (let ((*read-default-float-format* 'double-float)
+              (*read-eval* nil))
+          (coerce (loop for start = 1 then (1+ end)
+                        for end = (or (position #\, text :start start) (1- n))
+                        collect (let ((x (ignore-errors (read-from-string text t nil
+                                                                          :start start :end end))))
+                                  (if (realp x) (coerce x 'double-float) (bad)))
+                        while (< end (1- n)))
+                  'simple-vector))))))
+
+(defun %cosine-distance (a b)
+  "One minus the cosine of the angle between A and B, as pgvector's <=> computes it. A vector of
+all zeros has no direction, and its distance from anything is taken as 1."
+  (let ((dot 0d0) (na 0d0) (nb 0d0))
+    (loop for x across a for y across b
+          do (incf dot (* x y)) (incf na (* x x)) (incf nb (* y y)))
+    (if (or (zerop na) (zerop nb))
+        1d0
+        (- 1d0 (/ dot (sqrt (* na nb)))))))
+
 (defun %vector-text (store vector)
   "VECTOR in the text form pgvector accepts, through mnemosyne's cast, which also refuses a
-vector of the wrong width before it reaches the database."
+vector of the wrong width before it reaches the database. On SQLite, %SQLITE-VECTOR-TEXT."
+  (when (rc::%sqlite-p store)
+    (return-from %vector-text (%sqlite-vector-text store vector)))
   (let ((changeset (cs:cast (rc::store-schema-name store) (list :embedding vector) '(:embedding))))
     (unless (cs:changeset-valid-p changeset)
       (error 'praxeon/conditions:deliberation-failure
@@ -145,9 +191,33 @@ TRUNCATED with reason :NOT-EMBEDDED gives the number of chunks that were not, be
 no embedding from this model yet: the normal state while EMBED-PENDING catches up after a sync
 or a model change."))
 
+(defun %sqlite-similar-rows (corpus deriver vector-text limit)
+  "%SIMILAR-ROWS on SQLite: every chunk DERIVER embedded is read with its embedding, and the
+distances are computed and sorted here, ties by id."
+  (let* ((query (%parse-vector-text vector-text))
+         (rows (mapcar (lambda (row)
+                         (list* :distance
+                                (%cosine-distance query (%parse-vector-text
+                                                         (param:row-value row :embedding)))
+                                row))
+                       (rc::%fetch (corpus-store corpus)
+                                   (list :select (append rc::+passage-columns+ '(:id :embedding))
+                                         :from (list (store-table (corpus-store corpus)))
+                                         :where (corpus-where corpus
+                                                              (list := :embedding_deriver deriver)
+                                                              (list :is-not-null :embedding)))))))
+    (let ((sorted (sort rows (lambda (a b)
+                               (let ((da (getf a :distance)) (db (getf b :distance)))
+                                 (or (< da db)
+                                     (and (= da db)
+                                          (string< (param:row-value a :id) (param:row-value b :id)))))))))
+      (subseq sorted 0 (min limit (length sorted))))))
+
 (defun %similar-rows (corpus deriver vector-text limit)
   "The rows of CORPUS's LIMIT chunks nearest VECTOR-TEXT among those DERIVER embedded, nearest
 first, with their ID and DISTANCE."
+  (when (rc::%sqlite-p (corpus-store corpus))
+    (return-from %similar-rows (%sqlite-similar-rows corpus deriver vector-text limit)))
   (let ((q:*warn-unindexed-vector-distance* nil)) ; the exact scan is the design
     (rc::%fetch (corpus-store corpus)
                 (list :select (append rc::+passage-columns+
@@ -167,12 +237,12 @@ first, with their ID and DISTANCE."
          (vector-text (%vector-text store (llm:embed-query embedder query)))
          rows pending)
     ;; ONE SNAPSHOT FOR BOTH READS. The candidates and the count of chunks that could not be
-    ;; candidates are read in one REPEATABLE READ transaction. Read separately, an
+    ;; candidates are read in one snapshot (REPEATABLE READ on Postgres). Read separately, an
     ;; EMBED-PENDING committing in between would fill a chunk after the candidate query missed
     ;; it and before the count, and the result would say COMPLETE while leaving that chunk out.
     (rc::with-db (store)
       (conn:with-transaction ((store-connection store))
-        (conn:exec (store-connection store) "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        (rc::%begin-snapshot store)
         (setf rows (%similar-rows corpus deriver vector-text limit))
         (when *between-similar-reads* (funcall *between-similar-reads*))
         (setf pending (%pending-count corpus deriver))))
@@ -250,7 +320,7 @@ the current tokenizer; its reason is :NOT-EMBEDDED if any chunk lacks an embeddi
          similar keyword not-ready not-embedded)
     (rc::with-db (store)
       (conn:with-transaction ((store-connection store))
-        (conn:exec (store-connection store) "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        (rc::%begin-snapshot store)
         (setf similar (%similar-rows corpus deriver vector-text candidates)
               keyword (rc::%keyword-rows corpus query candidates locale)
               not-ready (%not-ready-count corpus deriver)

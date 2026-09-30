@@ -736,10 +736,11 @@ and the ordering against #138's semantic-search seam are in
 ## 12. Search an app's documents (`praxeon/retrieval`, #138)
 
 `praxeon/retrieval` searches an app's documents, exactly or by similarity, and returns each
-passage with where it came from. It needs Postgres with pgvector. Load `praxeon/retrieval`
-and use the package of the same name.
+passage with where it came from. It runs on Postgres with pgvector, or on SQLite (#369), so an
+app can offer the same search offline. Load `praxeon/retrieval` and use the package of the same
+name. What differs on SQLite is listed at the end of this section's setup, under **On SQLite**.
 
-**Once per database**, a role with CREATE privilege on the database (on a managed cluster, the
+**Once per Postgres database**, a role with CREATE privilege on the database (on a managed cluster, the
 administrator) installs the extension: `CREATE EXTENSION vector;`. praxeon never runs that
 itself. `ensure-schema` checks for it and signals `praxeon/conditions:vector-extension-missing`,
 naming the database, when it is absent.
@@ -789,7 +790,24 @@ A sync makes the corpus hold exactly the sections it was given, and removes the 
 scope. Unchanged sections are not touched, so running it at every boot is cheap. It needs no
 embedder. `embed-pending` embeds whatever has no embedding from the current model, which
 includes everything after a model change. Syncs and `embed-pending` on one corpus run one at a
-time, across processes as well (a Postgres advisory lock).
+time, across processes as well (a Postgres advisory lock; on SQLite, SQLite's own write lock).
+
+**On SQLite** the store takes a SQLite connection the same way, and every function above behaves
+the same, with these differences:
+
+- There is no extension to install and no width check on the table. The embedding is stored as
+  text, and a vector of the wrong width is refused when it is written.
+- Similarity is computed in Lisp: the store reads every chunk of the corpus that the current
+  model embedded and computes each cosine distance. That is the same exact scan the Postgres
+  store does, done outside the database.
+- BM25 scores are computed in Lisp from the numbers the database returns, because SQLite has a
+  logarithm only in builds that include its math functions.
+- `retrieve-exact` matches case-insensitively for the ASCII letters A to Z only. SQLite's
+  `LOWER` does not fold other letters, so "É" does not match "é" there.
+- Two processes syncing the same database are serialised by SQLite's write lock, not by a
+  per-corpus lock, so a sync of one corpus also waits for a sync of another. A sync that waits
+  longer than mnemosyne's busy timeout (`mnemosyne/conn:*sqlite-busy-timeout-ms*`, 5 seconds)
+  fails with a `mnemosyne/conn:db-error` and writes nothing.
 
 **Search:**
 

@@ -12,6 +12,17 @@ its tag.
 
 ## Unreleased
 
+### Added
+
+- **praxeon/retrieval: a chunk store on SQLite** (#369). `make-chunk-store` takes a SQLite
+  connection as well as a Postgres one, so an app can search its documents with no Postgres,
+  offline for example. Every function behaves the same; the differences are listed in
+  `praxeon/docs/user-guide.md` §12 under "On SQLite". The embedding is stored as text and
+  similarity and BM25 are computed in Lisp; `retrieve-exact` folds the case of ASCII letters
+  only; and syncs from two processes are serialised by SQLite's write lock, not per corpus.
+  The retrieval suite runs every test on both backends, and prints a `BACKEND-CHECKS sqlite`
+  line beside the Postgres one.
+
 ### Fixed
 
 - **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
