@@ -1600,9 +1600,18 @@ platform would otherwise log it on every start."
 
 (defparameter *default-scheme* :auto
   "How connections reach the loops when START is not given :SCHEME. :AUTO is :REUSEPORT on
-Linux and :HANDOFF on other Unix (#463). On macOS, :HANDOFF gave every loop the same share of
-connections (16, 17, 16, 16 over 65 on four loops) where :SHARED left it to the kernel's
-wake-ups (4, 2, 4, 4, 6, 17, 12, 16 on eight).")
+Linux and :HANDOFF on other Unix (#463).
+
+On macOS, where there is no :REUSEPORT, :HANDOFF gave every loop the same share of connections
+(16, 17, 16, 16 of 65 on four loops) where :SHARED left it to the kernel's wake-ups (4, 2, 4, 4,
+6, 17, 12, 16 on eight).
+
+On Linux (4-core WSL2, wrk, four loops, #463 comment 5918737234) :REUSEPORT and :HANDOFF served
+the same rate, with keep-alive and with Connection: close. :HANDOFF spread connections exactly
+evenly, but on short connections it cost about 7% more CPU per request, and its accepting loop
+ran at 0.55 cores against 0.38 for the others: that loop is the one that saturates first as the
+connection rate grows. :REUSEPORT has no such loop, and its uneven spread (12 to 23 connections
+of 64 per loop) did not cost throughput.")
 
 (defun %resolve-scheme (scheme loops)
   "The scheme a server of LOOPS loops runs: :SINGLE for one loop and on Windows."

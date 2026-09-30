@@ -88,9 +88,9 @@ its tag.
   at most 4. Four because nothing measured more: on a 10-core Mac, 6 and 8 loops served no more
   than 4, and the 4-core Linux host could not run more loops than cores. More than one loop needs `:workers` or a pool `*dispatch*`; with the inline
   dispatcher, `start` refuses. How new connections reach the loops is `:scheme`
-  (`*default-scheme*`): `:handoff`, where the first loop accepts and hands connections to the
-  loops in turn; `:reuseport`, one SO_REUSEPORT listener per loop (Linux); or `:shared`, a copy
-  of one listening socket on every loop. Windows always runs one loop. `server-loops` and
+  (`*default-scheme*`): `:reuseport`, one SO_REUSEPORT listener per loop, the default on Linux;
+  `:handoff`, where the first loop accepts and hands connections to the loops in turn, the
+  default on macOS and other Unix; or `:shared`, a copy of one listening socket on every loop. Windows always runs one loop. `server-loops` and
   `server-loop-connections` report the loops and how many connections each has taken. On a
   4-core Linux host with 8 workers, `/tile` in `hyperion/bench` went from 31,724 requests/s on
   one loop to 119,501 on four. `aion/uv/net` gains `listen-tcp`'s `:reuseport`, and
