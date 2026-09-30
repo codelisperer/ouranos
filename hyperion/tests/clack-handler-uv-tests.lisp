@@ -606,13 +606,14 @@ with the fixture's; this one checks that the fixture's octets arrive intact in t
     (loop repeat 100 while (%listening-p port) do (sleep 0.05))
     (is-false (%listening-p port))))
 
-(test clack-stop-as-soon-as-the-port-listens-leaves-no-listener
+(defun %stop-during-start-check (&rest clackup-args)
   "A CLACK:STOP that arrives while RUN is still starting the server still stops it (#444). The
 port listens before SUV:START returns, and a thread kill landing between that and RUN's
 UNWIND-PROTECT used to leave the server running. The window is widened here: SUV:START is
 wrapped to pause 0.3 s after it returns, and the thread is stopped as soon as the port
 listens, which lands the kill inside the pause. Any server that is left running is stopped
-at the end, so a failure does not leave a listener for later tests."
+at the end, so a failure does not leave a listener for later tests. CLACKUP-ARGS go to
+CLACK:CLACKUP, for the same check with several loops."
   (let* ((port (%free-port))
          (started (list nil))
          (handler nil))
@@ -624,8 +625,8 @@ at the end, so a failure does not leave a listener for later tests."
                             server)))
     (unwind-protect
          (progn
-           (setf handler (clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
-                                        :server :uv :port port :use-thread t :silent t))
+           (setf handler (apply #'clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
+                                :server :uv :port port :use-thread t :silent t clackup-args))
            (loop repeat 200 until (%listening-p port) do (sleep 0.005))
            (is-true (%listening-p port))
            (clack:stop handler)
@@ -633,6 +634,39 @@ at the end, so a failure does not leave a listener for later tests."
            (is-false (%listening-p port) "the server started while CLACK:STOP arrived is still listening"))
       (sb-int:unencapsulate 'srv:start 'slow-start)
       (when (car started) (ignore-errors (srv:stop (car started)))))))
+
+(test clack-stop-as-soon-as-the-port-listens-leaves-no-listener
+  (%stop-during-start-check))
+
+#-win32
+(test clack-stop-as-soon-as-the-port-listens-leaves-no-listener-on-any-of-four-loops
+  "The same with four loops (#463). Under :SHARED, the default on macOS, every loop listens on a
+copy of one socket, and under :REUSEPORT each has its own: the port stops answering only when
+every loop's listener is closed."
+  (%stop-during-start-check :loops 4))
+
+#-win32
+(test clack-stop-leaves-no-listener-on-any-of-four-loops
+  "CLACK:STOP on a handler running four loops closes every loop's listener and ends every loop's
+thread (#463)."
+  (let* ((loop-threads (lambda ()
+                         (count-if (lambda (th) (uiop:string-prefix-p "aion/uv loop" (sb-thread:thread-name th)))
+                                   (sb-thread:list-all-threads))))
+         (before (funcall loop-threads))
+         (port (%free-port))
+         (handler (clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
+                                 :server :uv :port port :use-thread t :silent t :loops 4)))
+    (loop repeat 100 until (%listening-p port) do (sleep 0.05))
+    (is-true (%listening-p port))
+    ;; No Content-Type in the response, so dexador returns the body as octets.
+    (is (equal "ok" (let ((body (dex:get (localhost port))))
+                      (if (stringp body) body (sb-ext:octets-to-string body)))))
+    (clack:stop handler)
+    (loop repeat 100 while (%listening-p port) do (sleep 0.05))
+    (is-false (%listening-p port))
+    (loop repeat 100 until (= before (funcall loop-threads)) do (sleep 0.05))
+    (is (= before (funcall loop-threads)) "~D loop threads before, ~D after CLACK:STOP"
+        before (funcall loop-threads))))
 
 (test the-path-is-percent-decoded-as-utf-8
   (is (equal "/foo/bar,baz" (uvh::%decode-path "/foo/bar%2cbaz")))

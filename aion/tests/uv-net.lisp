@@ -499,3 +499,95 @@ and return every octet the listener received."
         (is (search "tcp" (string-downcase report)))
         (is (search "RUN will not return" report)))
       (net:close-listener listener))))
+
+;;; --- more than one loop per server (#463) ---------------------------------------------
+
+(defun pump-both (a b &key (until (constantly nil)) (limit 4000))
+  "PUMP for two loops: run each in NOWAIT slices, alternately, until UNTIL holds."
+  (loop repeat limit
+        until (funcall until)
+        do (uv:run a :mode :nowait)
+           (uv:run b :mode :nowait)
+           (sleep 0.001))
+  (funcall until))
+
+(defun connect-and-close (host port)
+  "Open a TCP connection to HOST:PORT from a plain socket and close it at once."
+  (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (sb-bsd-sockets:socket-connect s (sb-bsd-sockets:make-inet-address host) port)
+    (sb-bsd-sockets:socket-close s)))
+
+#-win32
+(test listen-copy-accepts-on-a-second-loop-from-the-same-socket
+  ;; Two loops, one socket: LISTEN-COPY's listener accepts from the queue of the listener it
+  ;; copies. Twenty connections must all be accepted, by one listener or the other.
+  (uv:with-loop (a)
+    (uv:with-loop (b)
+      (let* ((counts (list 0 0))
+             (first (net:listen-tcp a "127.0.0.1" 0
+                                    :on-connection (lambda (c) (incf (first counts))
+                                                     (uv:close-handle c))))
+             (second (net:listen-copy b first
+                                      :on-connection (lambda (c) (incf (second counts))
+                                                       (uv:close-handle c)))))
+        (multiple-value-bind (host port) (net:listener-address first)
+          (dotimes (i 20) (connect-and-close host port))
+          (is-true (pump-both a b :until (lambda () (= 20 (+ (first counts) (second counts))))))
+          (is (= 20 (+ (first counts) (second counts))) "accepted: ~S" counts))
+        (net:close-listener second)
+        (net:close-listener first)
+        (pump-both a b :limit 20)))))
+
+#-win32
+(test a-detached-socket-keeps-working-on-the-loop-that-adopts-it
+  ;; Accept on loop A, move the socket to loop B, and echo through B: the client must get its
+  ;; bytes back, so the socket really moved and nothing was lost on the way.
+  (uv:with-loop (a)
+    (uv:with-loop (b)
+      (let* ((adopted nil)
+             (listener (net:listen-tcp
+                        a "127.0.0.1" 0
+                        :on-connection
+                        (lambda (c)
+                          (let ((fd (net:detach-socket c)))
+                            (setf adopted (net:adopt-tcp-socket b fd))
+                            (net:start-reading adopted
+                                               (lambda (data conn) (net:write-bytes conn data))
+                                               :on-end (lambda (conn) (uv:close-handle conn))))))))
+        (multiple-value-bind (host port) (net:listener-address listener)
+          (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+                (got nil))
+            (sb-bsd-sockets:socket-connect s (sb-bsd-sockets:make-inet-address host) port)
+            (let ((stream (sb-bsd-sockets:socket-make-stream s :input t :output t
+                                                               :element-type '(unsigned-byte 8))))
+              (write-sequence (octets "moved") stream)
+              (force-output stream)
+              (is-true (pump-both a b :until (lambda () adopted)))
+              (is (eq b (net:connection-loop adopted)) "the connection belongs to loop B")
+              (let ((buf (make-array 5 :element-type '(unsigned-byte 8))) (n 0))
+                ;; Pump while reading, a byte at a time, so B's echo can run.
+                (pump-both a b :until (lambda ()
+                                        (loop while (and (< n 5) (listen stream))
+                                              do (setf (aref buf n) (read-byte stream))
+                                                 (incf n))
+                                        (= n 5)))
+                (setf got (text buf))))
+            (sb-bsd-sockets:socket-close s)
+            (is (string= "moved" got))))
+        (net:close-listener listener)
+        (pump-both a b :limit 50)))))
+
+(test reuseport-shares-a-port-where-the-kernel-spreads-connections
+  ;; Linux spreads connections across SO_REUSEPORT listeners; libuv refuses the flag on macOS
+  ;; (ENOTSUP) and Windows, and the bind must say so rather than quietly bind without it.
+  (uv:with-loop (a)
+    #+linux
+    (let* ((first (net:listen-tcp a "127.0.0.1" 0 :reuseport t))
+           (port (nth-value 1 (net:listener-address first)))
+           (second (net:listen-tcp a "127.0.0.1" port :reuseport t)))
+      (is (= port (nth-value 1 (net:listener-address second))))
+      (net:close-listener second)
+      (net:close-listener first))
+    #-linux
+    (signals uv:uv-error (net:listen-tcp a "127.0.0.1" 0 :reuseport t))
+    (pump a :limit 20)))

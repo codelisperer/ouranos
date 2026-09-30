@@ -218,10 +218,11 @@ boundary is not a message boundary, and that is precisely what a server gets wro
 
 ;;; --- the fixture -----------------------------------------------------------
 
-(defmacro with-server ((port app) &body body)
-  "Start APP on an ephemeral port, bind PORT to the one the OS chose, and always stop it."
+(defmacro with-server ((port app &rest start-args) &body body)
+  "Start APP on an ephemeral port, bind PORT to the one the OS chose, and always stop it.
+START-ARGS go to SRV:START, for a test that pins :LOOPS or :WORKERS."
   (let ((s (gensym "SERVER")))
-    `(let ((,s (srv:start ,app :port 0)))
+    `(let ((,s (srv:start ,app :port 0 ,@start-args)))
        (unwind-protect (let ((,port (srv:server-port ,s))) ,@body)
          (srv:stop ,s)))))
 
@@ -1047,6 +1048,7 @@ exists to make possible, and the thing that was impossible before M2."
       (sb-thread:signal-semaphore gate 10))))
 
 (test workers-run-handlers-on-the-servers-own-pool-and-leave-dispatch-alone
+  (let ((dispatch-before srv:*dispatch*))
   (flet ((handler-thread (workers)
            (let ((ran-on nil))
              (with-hyperion-server (port (lambda (env)
@@ -1060,8 +1062,11 @@ exists to make possible, and the thing that was impossible before M2."
         "with :workers the handler ran on the server's worker pool")
     (is (not (search "server-uv-worker" (or (handler-thread nil) "")))
         "control: without it, it did not")
-    (is (eq srv:*dispatch* srv::*inline-dispatch*)
-        "and the global *DISPATCH* was not changed by either server")))
+    ;; Compared with its value before, not with the inline default: the property is that no
+    ;; server changed it, whatever it was (a run of this suite with a pool *DISPATCH* and
+    ;; several loops, #463, sets it).
+    (is (eq srv:*dispatch* dispatch-before)
+        "and the global *DISPATCH* was not changed by either server"))))
 
 (test stop-ends-the-worker-threads-start-made
   (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3)))
@@ -1257,10 +1262,12 @@ fragment of the first, and not offset by a terminator nobody consumed")))))
 NEVER RETURNS, so under the inline dispatcher the loop stops accepting connections forever
 -- and the symptom, `the whole server went unresponsive', points nowhere near the handler
 that did it. So the always-wrong case is refused rather than documented, exactly as a
-zero-length chunk is."
-  (with-server (port (sse-app))
-    (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))
-        "refused BEFORE the head, so it can still be a status rather than a truncation")))
+zero-length chunk is. The inline dispatcher and one loop are pinned, because they are the
+premise: a server of several loops refuses the inline dispatcher at START (#463)."
+  (with-dispatch (srv:*inline-dispatch*)
+    (with-server (port (sse-app) :loops 1)
+      (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))
+          "refused BEFORE the head, so it can still be a status rather than a truncation"))))
 
 (test the-same-sse-stream-is-served-once-a-pool-is-dispatching
   "The refusal is about WHERE the body runs, not about SSE -- so it must lift when that
@@ -1804,7 +1811,13 @@ platform this test has no way to count them on (Windows)."
 (test several-hundred-finished-connections-leave-no-handle-or-descriptor-behind
   ;; 300 connections through one server, a third ended each way. Afterwards the loop must own
   ;; exactly what it owned before the first one, and so must the process's descriptor table.
+  ;; With several loops (#463), a loop takes one descriptor when it is first handed a
+  ;; connection and keeps it until STOP, so each loop gets one connection before the counts
+  ;; are taken: what is measured is what 300 more connections leave behind.
   (with-running-server (server (const-app 200 +ok+ '("ok")))
+    (dotimes (i (length (srv:server-loops server)))
+      (%finish-one (srv:server-port server) :server-closes))
+    (sleep 0.2)
     (let ((port (srv:server-port server))
           (handles (%owned server))
           (descriptors (%open-descriptors)))
@@ -2186,11 +2199,12 @@ property is the response, not STOP's duration."
 ;; drain itself is tested on every OS by the server-level tests above, and the choice of which
 ;; stop drains by ONLY-SIGTERM-WAITS-THE-GRACE-PERIOD, which sends no signal.
 #-win32
-(test sigterm-drains-a-serve-forever-process
+(defun %sigterm-drain-check (&optional extra-environment)
   "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 2.5 s long
 in flight when SIGTERM arrives: during the grace period the readiness path answers 503 and
 another request is answered; after it, a new connection is refused; the request in flight
-completes; and the process exits by itself, well within grace plus timeout."
+completes; and the process exits by itself, well within grace plus timeout.
+EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings."
   (let* ((root (merge-pathnames "../" (asdf:system-source-directory "hyperion")))
          (child (uiop:launch-program
                  (list "sbcl" "--dynamic-space-size" "2048" "--script"
@@ -2201,9 +2215,11 @@ completes; and the process exits by itself, well within grace plus timeout."
                                             "HYPERION_DRAIN_SECONDS=1.5"
                                             "HYPERION_DRAIN_TIMEOUT_SECONDS=10"
                                             "CHILD_SLOW=2.5")
+                                      extra-environment
                                       (remove-if (lambda (e)
                                                    (some (lambda (p) (uiop:string-prefix-p p e))
-                                                         '("CL_SOURCE_REGISTRY=" "HYPERION_DRAIN" "CHILD_SLOW=")))
+                                                         '("CL_SOURCE_REGISTRY=" "HYPERION_DRAIN" "CHILD_SLOW="
+                                                           "HYPERION_LOOPS=")))
                                                  (sb-ext:posix-environ)))))
          (launched (uiop:process-info-pid child)))
     (unwind-protect
@@ -2238,6 +2254,16 @@ completes; and the process exits by itself, well within grace plus timeout."
       (when (uiop:process-alive-p child)
         (uiop:terminate-process child :urgent t)
         (uiop:wait-process child)))))
+
+#-win32
+(test sigterm-drains-a-serve-forever-process
+  (%sigterm-drain-check))
+
+#-win32
+(test sigterm-drains-a-serve-forever-process-on-four-loops
+  "The same, with HYPERION_LOOPS=4 (#463): the grace period, the refusal of new connections and
+the request in flight must hold on every loop, whichever one the connections landed on."
+  (%sigterm-drain-check '("HYPERION_LOOPS=4")))
 
 (defun %serve-forever-stop-time (reason drain-seconds)
   "How long SERVE-FOREVER on :uv takes to return after its stop function is called with
@@ -2299,8 +2325,9 @@ response arrives at %COMPLETE encoded; inline, it arrives as the handler's list,
     (is (equal '(:encoded) kinds) "with workers: ~S" kinds))
   (let ((kinds (completion-kinds
                 (lambda ()
-                  (with-server (port (const-app 200 +ok+ (list "hello")))
-                    (is (string= "hello" (body-of (get* port "GET / HTTP/1.1" "Host: x")))))))))
+                  (with-dispatch (srv:*inline-dispatch*)
+                   (with-server (port (const-app 200 +ok+ (list "hello")) :loops 1)
+                    (is (string= "hello" (body-of (get* port "GET / HTTP/1.1" "Host: x"))))))))))
     (is (equal '(:raw) kinds) "inline: ~S" kinds)))
 
 (test with-workers-head-still-gets-the-head-only
@@ -2386,3 +2413,204 @@ checks the port the server was asked for, and 0 is not the port a request arrive
       "and with no :workers, dev:serve gives :uv a pool by default")
   (is (not (search "server-uv-worker" (or (%dev-serve-handler-thread :workers nil) "")))
       "control: with :workers nil it ran on the loop thread"))
+
+;;; --- several loops (#463) -----------------------------------------------------------------
+;;;
+;;; A server of several loops, with workers because it refuses the inline dispatcher. The
+;;; schemes that move sockets between loops are Unix-only; on Windows every server has one loop.
+
+(defmacro with-loops-server ((port server app loops &key (scheme :auto) (workers 4)) &body body)
+  "Start APP on LOOPS loops with SCHEME and WORKERS workers on an ephemeral port, bind SERVER
+and PORT, and always stop it."
+  `(let* ((,server (srv:start ,app :port 0 :workers ,workers :loops ,loops :scheme ,scheme))
+          (,port (srv:server-port ,server)))
+     (unwind-protect (progn ,@body) (srv:stop ,server))))
+
+(defun open-connections (port n)
+  "N sockets connected to PORT, each after one request answered on it, so the server has taken
+each one on before this returns. The caller closes them."
+  (loop repeat n
+        collect (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+                  (sb-ext:with-timeout +io-timeout+
+                    (sock:socket-connect s #(127 0 0 1) port)
+                    (let ((stream (sock:socket-make-stream s :input t :output t
+                                                             :element-type '(unsigned-byte 8))))
+                      (write-sequence (sb-ext:string-to-octets (req "GET / HTTP/1.1" "Host: x")
+                                                               :external-format :latin-1)
+                                      stream)
+                      (force-output stream)
+                      (read-response stream)))
+                  s)))
+
+#-win32
+(test handoff-gives-each-loop-its-turn
+  "Under :HANDOFF the first loop accepts every connection and gives them out in turn, itself
+included, so 40 connections to four loops are ten each (#463)."
+  (with-loops-server (port server (const-app 200 +ok+ '("ok")) 4 :scheme :handoff)
+    (is (= 4 (length (srv:server-loops server))))
+    (let ((sockets (open-connections port 40)))
+      (unwind-protect
+           (is (equal '(10 10 10 10) (srv:server-loop-connections server))
+               "connections per loop: ~S" (srv:server-loop-connections server))
+        (mapc #'sock:socket-close sockets)))))
+
+#-win32
+(test every-scheme-takes-every-connection-on-some-loop
+  "Whatever the scheme, each connection is taken on by exactly one loop: 40 connections are 40
+in the per-loop counts. How evenly depends on the scheme and is measured on #463. Only :HANDOFF
+(by construction) and :REUSEPORT (the kernel hashes each connection's addresses) are asserted to
+use more than one loop. :SHARED leaves it to which loop the kernel wakes, and with connections
+arriving one at a time Linux woke the same loop for all 40 (0 0 0 40, #463's first CI run)."
+  (dolist (scheme (append '(:shared :handoff) #+linux '(:reuseport)))
+    (with-loops-server (port server (const-app 200 +ok+ '("ok")) 4 :scheme scheme)
+      (let ((sockets (open-connections port 40)))
+        (unwind-protect
+             (let ((counts (srv:server-loop-connections server)))
+               (is (= 40 (reduce #'+ counts)) "~S: connections per loop ~S" scheme counts)
+               (unless (eq scheme :shared)
+                 (is (< 1 (count-if #'plusp counts)) "~S: every connection on one loop: ~S"
+                     scheme counts))
+               ;; Under :SHARED and :REUSEPORT every loop listens: without that, all of them
+               ;; would be served by the first loop, which the counts cannot show for :SHARED.
+               (unless (eq scheme :handoff)
+                 (is (every #'srv::shard-listener (srv::server-shards server))
+                     "~S: a loop without a listener" scheme)))
+          (mapc #'sock:socket-close sockets))))))
+
+#-win32
+(test each-response-is-written-by-the-loop-that-owns-its-connection
+  "A handler runs on a worker, and its response must be written on the thread of the loop that
+owns the connection, never another loop's or the worker's (#463). Every NET:WRITE-BYTES call is
+recorded with whether it ran on its connection's loop, over 40 connections on four loops."
+  (let ((calls '()) (lock (sb-thread:make-mutex)))
+    (sb-int:encapsulate 'aion/uv/net:write-bytes 'record-owner
+                        (lambda (f conn &rest args)
+                          (sb-thread:with-mutex (lock)
+                            (push (cons (uv:loop-thread-p (aion/uv/net:connection-loop conn))
+                                        (aion/uv/net:connection-loop conn))
+                                  calls))
+                          (apply f conn args)))
+    (unwind-protect
+         (with-loops-server (port server (const-app 200 +ok+ '("ok")) 4 :scheme :handoff)
+           (mapc #'sock:socket-close (open-connections port 40)))
+      (sb-int:unencapsulate 'aion/uv/net:write-bytes 'record-owner))
+    (is (<= 40 (length calls)) "~D writes recorded" (length calls))
+    (is (every #'car calls) "~D of ~D writes ran off their connection's loop"
+        (count-if-not #'car calls) (length calls))
+    (is (= 4 (length (remove-duplicates (mapcar #'cdr calls))))
+        "the writes were spread over ~D loops" (length (remove-duplicates (mapcar #'cdr calls))))))
+
+#-win32
+(test a-draining-stop-finishes-requests-in-flight-on-every-loop
+  "Under :HANDOFF the n-th connection goes to loop n. The first gets a request answered at once
+and the other three a slow one, so when a draining STOP starts the first loop has nothing in
+flight and the others each have one. Each slow request must be answered and told the connection
+closes, a new connection is refused, and STOP returns once they are done, not at the timeout
+(#463, #388). A drain that looked only at the first loop would find nothing to wait for and
+close the other three mid-request."
+  (let ((results (make-array 4 :initial-element nil)) (stop-took nil))
+    (with-loops-server (port server (drain-app 1.0) 4 :scheme :handoff :workers 8)
+      (let ((clients (loop for i below 4
+                           collect (let ((i i))
+                                     (prog1 (bt:make-thread
+                                             (lambda () (setf (aref results i)
+                                                              (handler-case
+                                                                  (get* port (if (zerop i)
+                                                                                 "GET /fast HTTP/1.1"
+                                                                                 "GET /slow HTTP/1.1")
+                                                                        "Host: x")
+                                                                (error (e) e))))
+                                             :name "multi-loop drain test")
+                                       ;; In order, so connection i reaches loop i.
+                                       (%wait-until (lambda () (= (1+ i) (reduce #'+ (srv:server-loop-connections server))))))))))
+        (sleep 0.3)
+        (is (equal '(1 1 1 1) (srv:server-loop-connections server))
+            "one request on each loop: ~S" (srv:server-loop-connections server))
+        (let* ((start (get-internal-real-time))
+               (stopper (bt:make-thread (lambda () (srv:stop server :drain-timeout 5)
+                                          (setf stop-took (%elapsed-since start)))
+                                        :name "multi-loop drain test: stop")))
+          (sleep 0.2)
+          (is-true (connect-refused-p port) "a new connection is refused once the drain has begun")
+          (mapc #'bt:join-thread clients)
+          (bt:join-thread stopper))))
+    (is (and (stringp (aref results 0)) (= 200 (status-of (aref results 0))))
+        "the first loop's request, answered before the drain: ~S" (aref results 0))
+    (loop for i from 1 below 4
+          for r = (aref results i)
+          do (is (and (stringp r) (= 200 (status-of r)) (string= "slow" (body-of r))
+                      (string-equal "close" (header-of r "Connection")))
+                 "the slow request on loop ~D: ~S" i r))
+    (is (and stop-took (< stop-took 3)) "STOP returned once the requests finished: ~A" stop-took)))
+
+#-win32
+(test a-failed-start-of-several-loops-leaves-no-thread-or-listener
+  "When START fails after making its loops, it closes them all and starts no workers (#463).
+:REUSEPORT fails its first bind where libuv refuses the flag (macOS); elsewhere a port already
+bound without SO_REUSEPORT refuses the first loop's bind. Either way START signals, and the
+threads, the descriptors (each loop holds some from the moment it is made) and the port are as
+they were."
+  (let* ((threads (length (sb-thread:list-all-threads)))
+         (blocker (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
+         ;; After the blocker is made, so its own descriptor is in both counts.
+         (descriptors (%open-descriptors)))
+    (setf (sock:sockopt-reuse-address blocker) t)
+    (sock:socket-bind blocker #(127 0 0 1) 0)
+    (sock:socket-listen blocker 5)
+    (let ((port (nth-value 1 (sock:socket-name blocker))))
+      (unwind-protect
+           (progn
+             (signals error (srv:start (const-app 200 +ok+ '("ok"))
+                                       :port port :workers 2 :loops 4 :scheme :reuseport))
+             (is (%wait-until (lambda () (= threads (length (sb-thread:list-all-threads)))))
+                 "~D threads before, ~D after" threads (length (sb-thread:list-all-threads)))
+             (is (%wait-until (lambda () (= descriptors (%open-descriptors))))
+                 "~D open descriptors before, ~D after" descriptors (%open-descriptors)))
+        (sock:socket-close blocker)))))
+
+#-win32
+(test several-loops-refuse-the-inline-dispatcher
+  "The inline dispatcher runs handlers on the loop thread, and with several loops that would be
+several handlers at once for an app written for one; START says so instead (#463)."
+  (with-dispatch (srv:*inline-dispatch*)
+    (signals error (srv:start (const-app 200 +ok+ '("ok")) :port 0 :loops 2))))
+
+(defun %loop-threads ()
+  "The live threads named as server-uv names a loop's thread."
+  (remove-if-not (lambda (th) (uiop:string-prefix-p "aion/uv loop" (sb-thread:thread-name th)))
+                 (sb-thread:list-all-threads)))
+
+#-win32
+(test stop-ends-every-loops-thread
+  "STOP closes every one of a server's loops, not only the first: a server of four loops starts
+four loop threads and leaves none (#463). The port stopping answering does not show this, because
+closing a loop's listener and closing the loop are two separate ways it would."
+  (let ((before (length (%loop-threads))))
+    (let ((server (srv:start (const-app 200 +ok+ '("ok")) :port 0 :workers 2 :loops 4)))
+      (is (= (+ before 4) (length (%loop-threads))) "four loop threads started")
+      (srv:stop server))
+    (is (%wait-until (lambda () (= before (length (%loop-threads)))))
+        "~D loop threads before, ~D after STOP" before (length (%loop-threads)))))
+
+#+win32
+(test windows-runs-one-loop-and-says-so-once
+  "Windows runs one loop per server whatever :LOOPS asks, because moving a socket between loops
+needs WSADuplicateSocket there (#463). Two servers asked for four loops each run one, and the
+notice that says so is logged once, not on every start."
+  (let ((srv::*one-loop-noted* nil) (logged 0))
+    (sb-int:encapsulate 'srv::%note-one-loop 'count-notices
+                        (lambda (f &rest args)
+                          (let ((result (apply f args)))
+                            (when result (incf logged))
+                            result)))
+    (unwind-protect
+         (dotimes (i 2)
+           (let ((server (srv:start (const-app 200 +ok+ '("ok")) :port 0 :workers 2 :loops 4)))
+             (unwind-protect
+                  (progn
+                    (is (= 1 (length (srv:server-loops server))) "server ~D ran ~D loops"
+                        i (length (srv:server-loops server)))
+                    (is (= 200 (status-of (get* (srv:server-port server) "GET / HTTP/1.1" "Host: x")))))
+               (srv:stop server))))
+      (sb-int:unencapsulate 'srv::%note-one-loop 'count-notices))
+    (is (= 1 logged) "the notice was logged ~D times for two servers" logged)))
