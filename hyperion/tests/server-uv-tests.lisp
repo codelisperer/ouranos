@@ -1928,3 +1928,208 @@ is read from the wrong place, which is request smuggling."
                                (read-response stream)))))
       (is (= 100 (status-of (first (first r)))))
       (is (string= "NIL|11|hello world" (body-of (second r)))))))
+
+;;; --- draining on stop (#388) ---------------------------------------------------------
+;;;
+;;; A server with workers, so a slow handler holds a worker and not the loop, as in a
+;;; deployed app. Each test times what STOP does while a request is in flight.
+
+(defmacro with-workers-server ((port server app) &body body)
+  "Start APP with two workers on an ephemeral port, bind SERVER and PORT, and always stop it."
+  `(let* ((,server (srv:start ,app :port 0 :workers 2))
+          (,port (srv:server-port ,server)))
+     (unwind-protect (progn ,@body) (srv:stop ,server))))
+
+(defun drain-app (slow-seconds)
+  "/slow answers after SLOW-SECONDS; anything else answers at once."
+  (lambda (env)
+    (if (string= "/slow" (getf env :path-info))
+        (progn (sleep slow-seconds) (list 200 +ok+ '("slow")))
+        (list 200 +ok+ '("fast")))))
+
+(defun connect-refused-p (port)
+  "Whether a new TCP connection to PORT is refused."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+    (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
+      (sock:connection-refused-error () t)
+      (:no-error (&rest _) (declare (ignore _)) (ignore-errors (sock:socket-close s)) nil))))
+
+(defun %elapsed-since (start)
+  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+
+(test a-draining-stop-lets-a-request-in-flight-finish-and-refuses-new-connections
+  (let ((slow nil) (stop-took nil))
+    (with-workers-server (port server (drain-app 1.0))
+      (let ((client (bt:make-thread
+                     (lambda () (setf slow (get* port "GET /slow HTTP/1.1" "Host: x")))
+                     :name "drain test: slow request")))
+        (sleep 0.3)
+        (let* ((start (get-internal-real-time))
+               (stopper (bt:make-thread
+                         (lambda () (srv:stop server :drain-timeout 5)
+                           (setf stop-took (%elapsed-since start)))
+                         :name "drain test: stop")))
+          (sleep 0.2)
+          (is-true (connect-refused-p port) "a new connection is refused once the drain has begun")
+          (bt:join-thread client)
+          (bt:join-thread stopper))))
+    (is (= 200 (status-of slow)) "the request in flight was answered: ~S" slow)
+    (is (string= "slow" (body-of slow)))
+    (is (string-equal "close" (header-of slow "Connection"))
+        "and told the client the connection closes")
+    (is (and stop-took (< stop-took 3)) "STOP returned once the request finished, not at the timeout: ~A" stop-took)))
+
+(test a-draining-stop-closes-what-outlasts-its-timeout
+  (let ((slow :unset) (stop-took nil))
+    (with-workers-server (port server (drain-app 3.0))
+      (let ((client (bt:make-thread
+                     (lambda () (setf slow (handler-case (get* port "GET /slow HTTP/1.1" "Host: x")
+                                             (error () :error))))
+                     :name "drain test: slow request")))
+        (sleep 0.3)
+        (let ((start (get-internal-real-time)))
+          (srv:stop server :drain-timeout 0.5)
+          (setf stop-took (%elapsed-since start)))
+        (bt:join-thread client)))
+    (is (member slow '(nil :error)) "the request that outlasted the timeout got no response: ~S" slow)
+    (is (< stop-took 2) "STOP returned at the timeout, not when the handler finished: ~A" stop-took)))
+
+(test a-draining-stop-closes-an-idle-keep-alive-connection-at-once
+  (let ((stop-took nil) (after :unset))
+    (with-workers-server (port server (drain-app 0))
+      (converse port (list (req "GET /fast HTTP/1.1" "Host: x"))
+                :then (lambda (stream)
+                        ;; The connection is open and idle: its request was answered.
+                        (let ((start (get-internal-real-time)))
+                          (srv:stop server :drain-timeout 5)
+                          (setf stop-took (%elapsed-since start)))
+                        (setf after (peer-closed-p stream)))))
+    (is (< stop-took 1) "an idle connection is nothing to wait for: ~A" stop-took)
+    (is-true after "and it was closed")))
+
+(test begin-drain-keeps-accepting-and-closes-each-connection-after-its-response
+  (with-workers-server (port server (drain-app 0))
+    (is-false (srv:draining-p server))
+    (srv:begin-drain server)
+    (is-true (srv:draining-p server))
+    (let ((r (get* port "GET /fast HTTP/1.1" "Host: x")))
+      (is (= 200 (status-of r)) "still accepting and answering")
+      (is (string-equal "close" (header-of r "Connection")) "each response now closes its connection"))))
+
+(test stop-without-a-drain-timeout-closes-at-once-as-before
+  "The default STOP closes a connection with a request in flight without answering it, as it
+did before #388. It still waits for its worker threads (up to *STOP-WAIT-SECONDS*), so the
+property is the response, not STOP's duration."
+  (let ((slow :unset))
+    (with-workers-server (port server (drain-app 2.0))
+      (let ((client (bt:make-thread
+                     (lambda () (setf slow (handler-case (get* port "GET /slow HTTP/1.1" "Host: x")
+                                             (error () :error))))
+                     :name "drain test: slow request")))
+        (sleep 0.3)
+        (srv:stop server)
+        (bt:join-thread client)))
+    (is (member slow '(nil :error)) "the request in flight got no response: ~S" slow)))
+
+;;; --- SIGTERM to a serve-forever process drains it (#388, acceptance) -------------------
+;;;
+;;; A real process, so the signal arrives the way a platform sends it. THE SIGNAL GOES ONLY TO
+;;; THE CHILD THIS TEST STARTED: the pid in the child's READY line is checked against the pid
+;;; of the process launched here, and /bin/kill is given that one number. A child still alive
+;;; at the end is terminated by its process handle.
+
+(defun %read-ready (stream seconds)
+  "The pid and port from the child's READY line, or NIL if it does not print one in SECONDS."
+  (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (loop while (< (get-internal-real-time) deadline)
+          do (let ((line (and (listen stream) (read-line stream nil nil))))
+               (cond ((null line) (sleep 0.05))
+                     ((uiop:string-prefix-p "READY " line)
+                      (destructuring-bind (_ pid port) (uiop:split-string line)
+                        (declare (ignore _))
+                        (return (values (parse-integer pid) (parse-integer port)))))
+                     ((uiop:string-prefix-p "CHILD-ERROR" line) (return nil)))))))
+
+(test sigterm-drains-a-serve-forever-process
+  "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 2.5 s long
+in flight when SIGTERM arrives: during the grace period the readiness path answers 503 and
+another request is answered; after it, a new connection is refused; the request in flight
+completes; and the process exits by itself, well within grace plus timeout."
+  (let* ((root (merge-pathnames "../" (asdf:system-source-directory "hyperion")))
+         (child (uiop:launch-program
+                 (list "sbcl" "--dynamic-space-size" "2048" "--script"
+                       (namestring (asdf:system-relative-pathname "hyperion" "tests/drain-child.lisp")))
+                 :output :stream :error-output nil
+                 :environment (append (list (format nil "CL_SOURCE_REGISTRY=~A//~A" (namestring (truename root))
+                                                    #+win32 ";" #-win32 ":")
+                                            "HYPERION_DRAIN_SECONDS=1.5"
+                                            "HYPERION_DRAIN_TIMEOUT_SECONDS=10"
+                                            "CHILD_SLOW=2.5")
+                                      (remove-if (lambda (e)
+                                                   (some (lambda (p) (uiop:string-prefix-p p e))
+                                                         '("CL_SOURCE_REGISTRY=" "HYPERION_DRAIN" "CHILD_SLOW=")))
+                                                 (sb-ext:posix-environ)))))
+         (launched (uiop:process-info-pid child)))
+    (unwind-protect
+         (multiple-value-bind (pid port) (%read-ready (uiop:process-info-output child) 180)
+           (is-true pid "the child printed READY")
+           (is (eql launched pid) "READY names the process this test launched, so only it is signalled")
+           (when (and pid (eql launched pid))
+             (let* ((slow nil)
+                    (client (bt:make-thread
+                             (lambda () (setf slow (handler-case (get* port "GET /slow HTTP/1.1" "Host: x")
+                                                     (error (e) e))))
+                             :name "sigterm test: slow request")))
+               (sleep 0.3)
+               (let ((t0 (get-internal-real-time)))
+                 (uiop:run-program (list "/bin/kill" "-TERM" (princ-to-string pid)))
+                 (sleep 0.3)
+                 (let ((health (get* port "GET /health HTTP/1.1" "Host: x"))
+                       (fast (get* port "GET /fast HTTP/1.1" "Host: x")))
+                   (is (= 503 (status-of health)) "the readiness path answers 503 while draining")
+                   (is (= 200 (status-of fast)) "another request is still answered during the grace period")
+                   (is (string-equal "close" (header-of fast "Connection"))
+                       "and its connection closes, so the next one goes elsewhere"))
+                 (sleep 1.6)
+                 (is-true (connect-refused-p port) "after the grace period a new connection is refused")
+                 (bt:join-thread client)
+                 (is (and (stringp slow) (= 200 (status-of slow)) (string= "slow" (body-of slow)))
+                     "the request in flight when SIGTERM arrived completed: ~S" slow)
+                 (let ((rc (uiop:wait-process child)))
+                   (is (eql 0 rc) "the process exited by itself, with 0")
+                   (is (< (%elapsed-since t0) 6) "within the grace period plus the request's time: ~,1Fs"
+                       (%elapsed-since t0)))))))
+      (when (uiop:process-alive-p child)
+        (uiop:terminate-process child :urgent t)
+        (uiop:wait-process child)))))
+
+(defun %serve-forever-stop-time (reason drain-seconds)
+  "How long SERVE-FOREVER on :uv takes to return after its stop function is called with
+REASON, the way the signal handler calls it. The installer is replaced, so no signal is sent."
+  (let* ((stop-fn nil)
+         (ready (sb-thread:make-semaphore))
+         (hsrv:*install-signal-handlers* (lambda (request-stop)
+                                           (setf stop-fn request-stop)
+                                           (lambda () nil)))
+         (runner (bt:make-thread
+                  (lambda ()
+                    (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
+                                        :server :uv :port 0 :log nil :banner nil
+                                        :drain-seconds drain-seconds :drain-timeout 1
+                                        :on-ready (lambda (s) (declare (ignore s))
+                                                    (sb-thread:signal-semaphore ready))))
+                  :name "drain test: serve-forever"
+                  :initial-bindings `((hsrv:*install-signal-handlers* . ,hsrv:*install-signal-handlers*)
+                                      (*standard-output* . ,(make-broadcast-stream))))))
+    (sb-thread:wait-on-semaphore ready :timeout 10)
+    (let ((start (get-internal-real-time)))
+      (funcall stop-fn reason)
+      (bt:join-thread runner)
+      (%elapsed-since start))))
+
+(test only-sigterm-waits-the-grace-period
+  "SIGINT and Ctrl-C mean someone at a terminal wants it stopped; only SIGTERM drains (#388)."
+  (let ((sigint (%serve-forever-stop-time :sigint 2))
+        (sigterm (%serve-forever-stop-time :sigterm 2)))
+    (is (< sigint 1) "SIGINT stops at once: ~,1Fs" sigint)
+    (is (<= 2 sigterm 4) "SIGTERM keeps serving for the 2 s grace period first: ~,1Fs" sigterm)))

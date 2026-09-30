@@ -26,6 +26,24 @@ Changes since `v0.1.4`. The tag is on `f3fdf1a`.
   as not indexed for keyword and hybrid search until `index-pending` (or `ingest`) writes their
   terms. Similarity and exact search are unaffected. A test or tool that drops the chunk table
   drops `<table>_terms` too.
+
+- **hyperion/server, hyperion/server-uv: `serve-forever` drains on SIGTERM instead of refusing
+  requests at once** (#388). A rolling deploy sends SIGTERM while the platform may still route
+  requests to the old instance. Until now every backend stopped accepting at once and cut off
+  requests in flight, and on Woo the process never exited at all. Now, on SIGTERM:
+  - for `:drain-seconds` (`HYPERION_DRAIN_SECONDS`, default 5) the server keeps accepting and
+    answering, and `:readiness-path`, when given, answers 503;
+  - on `:uv`, it then stops accepting and waits up to `:drain-timeout`
+    (`HYPERION_DRAIN_TIMEOUT_SECONDS`, default 20) for requests in flight to finish;
+  - whatever is left is closed.
+  Each phase is logged once. An app acts by keeping `drain-seconds + drain-timeout` below its
+  platform's termination grace period, and by pointing the platform's health check at
+  `:readiness-path` if it wants the instance taken out of rotation during the grace period.
+  SIGTERM now takes up to 25 seconds by default where it took about 2. Ctrl-C, SIGINT and
+  `request-shutdown` still stop at once. Hunchentoot gets the grace period and then stops as
+  before; Woo still does not see SIGTERM, and is still ended by SIGKILL. `hyperion/server-uv`
+  gains `begin-drain`, `draining-p` and `stop :drain-timeout`; a plain `stop` is unchanged. See
+  `hyperion/docs/signals-and-shutdown.md`, "Draining on SIGTERM".
 - **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
   request threads, and `make-db-auth` takes a pool.** (#371)
   - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
