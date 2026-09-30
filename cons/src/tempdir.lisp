@@ -103,4 +103,4 @@ something has failed inside it and you would like to look."
     `(let ((,dir (make-temporary-directory ,tag)))
        (unwind-protect (let ((,var ,dir)) ,@body)
          (unless ,keep
-           (uiop:delete-directory-tree ,dir :validate t :if-does-not-exist :ignore))))))
+           (aion/fs:delete-tree ,dir :if-does-not-exist :ignore))))))

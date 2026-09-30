@@ -26,6 +26,7 @@
 
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
+(load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
 
 ;;; --- argv -------------------------------------------------------------------
 (defun argv-value (name &optional default)
@@ -163,8 +164,8 @@ itself already finished, and its exit code is what the caller returns."
   (let ((dir (uiop:pathname-directory-pathname patched)))
     (handler-case
         (progn
-          (uiop:delete-directory-tree dir :if-does-not-exist :ignore
-                                          :validate (lambda (d) (equal ".runtime" (car (last (pathname-directory d))))))
+          (when (equal ".runtime" (car (last (pathname-directory dir))))
+            (aion/fs:delete-tree dir :if-does-not-exist :ignore))
           (format t "~&build-desktop-app: removed the patched runtime (~A)~%" (uiop:native-namestring dir)))
       (error (e)
         (format t "~&build-desktop-app: could not remove the patched runtime ~A (~A); delete it before packaging ~A~%"

@@ -16,7 +16,7 @@
          (progn
            (is-true (uiop:directory-exists-p dir) "it must exist when the call returns")
            (is (search "cons-unit-" (namestring dir)) "the tag names it, for a human reading /tmp"))
-      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
+      (aion/fs:delete-tree dir :if-does-not-exist :ignore))))
 
 (test two-temporary-directories-are-not-the-same-one
   ;; Not a randomness assertion -- a collision assertion. *NAME-STATE* is seeded per image
@@ -26,8 +26,8 @@
         (b (tempdir:make-temporary-directory "unit")))
     (unwind-protect
          (is (not (equal (namestring a) (namestring b))))
-      (uiop:delete-directory-tree a :validate t :if-does-not-exist :ignore)
-      (uiop:delete-directory-tree b :validate t :if-does-not-exist :ignore))))
+      (aion/fs:delete-tree a :if-does-not-exist :ignore)
+      (aion/fs:delete-tree b :if-does-not-exist :ignore))))
 
 (test with-temporary-directory-removes-the-tree
   (let ((seen nil))
@@ -47,7 +47,7 @@
            (is-true (uiop:directory-exists-p seen)
                     ":keep is what you want the moment something failed inside it"))
       (when seen
-        (uiop:delete-directory-tree seen :validate t :if-does-not-exist :ignore)))))
+        (aion/fs:delete-tree seen :if-does-not-exist :ignore)))))
 
 (test running-out-of-names-is-an-error-not-a-hang
   (let ((tempdir:*attempts* 0))

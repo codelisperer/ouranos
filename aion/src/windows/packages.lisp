@@ -50,6 +50,8 @@
 
 (cl:defpackage #:aion/windows
   (:use #:common-lisp)
+  ;; Re-exported from aion/fs, which holds the one GetFileAttributesW binding (#349).
+  (:import-from #:aion/fs #:file-attributes #:file-attributes-error #:file-attributes-error-code)
   (:local-nicknames (#:ffi #:aion/windows/ffi))
   (:documentation "The Windows-specific API surface for Ouranos.")
   (:export
@@ -67,4 +69,6 @@
    #:with-wide-string #:wide-string-to-lisp #:lisp-to-wide-string #:free-wide-string
    ;; handles
    #:handle #:handle-p #:wrap-handle #:handle-pointer #:handle-kind
-   #:handle-valid-p #:close-handle #:with-handle))
+   #:handle-valid-p #:close-handle #:with-handle
+   ;; file attributes, from aion/fs
+   #:file-attributes #:file-attributes-error #:file-attributes-error-code))

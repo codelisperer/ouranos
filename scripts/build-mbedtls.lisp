@@ -88,6 +88,7 @@
 
 (require :uiop)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
+(load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
 
 (defparameter *root* (uiop:pathname-parent-directory-pathname
                       (uiop:pathname-directory-pathname *load-truename*)))
@@ -719,7 +720,7 @@ under the name it asks for, and that the entry points we are about to bind are i
       (uiop:quit 0))
     (when (member "--clean" args :test #'string=)
       (format t "~&removing ~A~%" (human-path:human-path *vendor*))
-      (uiop:delete-directory-tree *vendor* :validate t :if-does-not-exist :ignore)
+      (aion/fs:delete-tree *vendor* :if-does-not-exist :ignore)
       (uiop:quit 0))
     (let ((version (pin-field "version"))
           (url (pin-field "url"))

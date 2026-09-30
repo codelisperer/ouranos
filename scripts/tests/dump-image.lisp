@@ -94,7 +94,7 @@ name without depending on how a path is spelled."
                                (list (uiop:native-namestring image))
                                :output run-out :error-output run-out :ignore-error-status t
                                :environment (%environment-with (%where-it-looks (third dirs) (fourth dirs))))))))
-      (uiop:delete-directory-tree tree :validate t :if-does-not-exist :ignore)
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore)
       (values (get-output-stream-string run-out) dump-code run-code (get-output-stream-string dump-out)))))
 
 (test dump-executable-takes-temp-and-cache-from-where-it-runs

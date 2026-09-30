@@ -24,7 +24,7 @@ in a writable directory can be deleted, so there is nothing to do."
                    (merge-pathnames ,name (uiop:temporary-directory)))))
        (unwind-protect (progn ,@body)
          (%clear-read-only ,var)
-         (uiop:delete-directory-tree ,var :validate t :if-does-not-exist :ignore)))))
+         (aion/fs:delete-tree ,var :if-does-not-exist :ignore)))))
 
 (defun %exists (root rel) (probe-file (merge-pathnames rel root)))
 (defun %slurp (root rel) (uiop:read-file-string (merge-pathnames rel root)))

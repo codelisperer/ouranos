@@ -351,7 +351,7 @@ the artifact lookup is the real one rather than a hard-coded guess."
                     (up:*installed-version* "1.0.0")
                     (up:*installed-published* nil))
                 ,@body)))
-       (ignore-errors (uiop:delete-directory-tree ,var :validate t)))))
+       (ignore-errors (aion/fs:delete-tree ,var)))))
 
 (test a-published-directory-reads-exactly-as-a-served-one-does
   (with-published-directory (dist)
@@ -458,11 +458,11 @@ the artifact lookup is the real one rather than a hard-coded guess."
 ;;; not written -- and that refusal is asserted directly, immediately below.
 
 (defun staging-directories ()
-  "Every staging directory currently in the temp directory, as namestrings."
+  "Every staging directory currently in the staging root, as namestrings."
   (remove-if-not (lambda (d)
                    (let ((name (car (last (pathname-directory d)))))
                      (and (stringp name) (up::%staging-name-time name))))
-                 (ignore-errors (uiop:subdirectories (uiop:temporary-directory)))))
+                 (ignore-errors (uiop:subdirectories (up::%staging-root)))))
 
 (defvar *launched* nil "What the stubbed launcher was asked to run, or NIL.")
 (defvar *exited* nil "Whether the handoff exit was reached.")
@@ -523,9 +523,9 @@ shared literal that could collide with a real directory in somebody's home."
                       (setf *launched* (list strategy installer install-dir))))
                   (up:*exit-after-handoff* (lambda () (setf *exited* t))))
               ,@body))
-         (ignore-errors (uiop:delete-directory-tree dir :validate t))
+         (ignore-errors (aion/fs:delete-tree dir))
          (dolist (d (set-difference (staging-directories) before :test #'equal))
-           (ignore-errors (uiop:delete-directory-tree d :validate t)))))))
+           (ignore-errors (aion/fs:delete-tree d)))))))
 
 #-(or win32 linux)
 (test on-a-platform-with-no-apply-strategy-apply-refuses-and-says-which-platform
@@ -884,7 +884,7 @@ find it. A shared literal there could collide with something a developer cares a
        (unwind-protect
             (with-apply (:writable ,writable :before-apply ,before-apply :app-name ,app)
               ,@body)
-         (ignore-errors (uiop:delete-directory-tree ,var :validate t))))))
+         (ignore-errors (aion/fs:delete-tree ,var))))))
 
 (defmacro is-untouched (data before)
   "Assert the app-data tree is byte-identical to BEFORE, naming what changed if it is not."
@@ -1013,20 +1013,20 @@ find it. A shared literal there could collide with something a developer cares a
 ;;; so the moment after a successful stage is the one moment this code never reaches.
 
 (defmacro with-temp-directories ((&rest names) &body body)
-  "Create directories NAMES under the temp directory, and remove any survivors afterwards."
+  "Create directories NAMES in the staging root, and remove any survivors afterwards."
   (let ((paths (gensym "PATHS")))
     `(let ((,paths (mapcar (lambda (n)
                              (let ((d (merge-pathnames (concatenate 'string n "/")
-                                                       (uiop:temporary-directory))))
+                                                       (up::%staging-root))))
                                (ensure-directories-exist d)
                                d))
                            (list ,@names))))
        (unwind-protect (progn ,@body)
-         (dolist (d ,paths) (ignore-errors (uiop:delete-directory-tree d :validate t)))))))
+         (dolist (d ,paths) (ignore-errors (aion/fs:delete-tree d)))))))
 
 (defun temp-subdirectory-exists-p (name)
   (and (probe-file (merge-pathnames (concatenate 'string name "/")
-                                    (uiop:temporary-directory)))
+                                    (up::%staging-root)))
        t))
 
 (test a-staging-directory-name-carries-a-time-this-code-can-read-back
@@ -1049,7 +1049,7 @@ find it. A shared literal there could collide with something a developer cares a
     (unwind-protect
          (is (= 8 (length (remove-duplicates (mapcar #'namestring dirs) :test #'string=)))
              "staging directories collided: ~S" (mapcar #'file-namestring dirs))
-      (dolist (d dirs) (ignore-errors (uiop:delete-directory-tree d :validate t))))))
+      (dolist (d dirs) (ignore-errors (aion/fs:delete-tree d))))))
 
 (test an-old-staging-directory-is-swept-and-a-recent-one-is-not
   ;; THE CONTROL IS THE SECOND HALF. A sweep that simply deleted everything would pass the
@@ -1077,6 +1077,69 @@ find it. A shared literal there could collide with something a developer cares a
                "a directory with a similar name but no parseable stamp was deleted")
       (is-true (temp-subdirectory-exists-p unrelated)
                "an unrelated temp directory was deleted"))))
+
+(defun %make-directory-link (link target)
+  "LINK, a directory link to TARGET: a junction on Windows, a symbolic link elsewhere."
+  (let ((l (string-right-trim "/\\" (uiop:native-namestring link)))
+        (tg (string-right-trim "/\\" (uiop:native-namestring target))))
+    (if (uiop:os-windows-p)
+        (uiop:run-program (list "cmd" "/c" "mklink" "/J" l tg) :output nil)
+        (uiop:run-program (list "ln" "-s" tg l) :output nil))))
+
+(test the-sweep-does-not-delete-through-a-link-with-a-staging-name
+  ;; #347: a link whose name parses as an old staging directory, pointing at a directory
+  ;; elsewhere. The sweep must leave the link and what it points to alone.
+  (let* ((outside (ensure-directories-exist
+                   (merge-pathnames (format nil "sweep-outside-~D/" (random 1000000))
+                                    (uiop:temporary-directory))))
+         (precious (merge-pathnames "precious.txt" outside))
+         (link (merge-pathnames (format nil "ouranos-update-~D-link~D/" 100 (random 100000))
+                                (up::%staging-root))))
+    (with-open-file (s precious :direction :output :if-exists :supersede) (write-string "keep" s))
+    (unwind-protect
+         (progn
+           (%make-directory-link link outside)
+           (is-true (aion/fs:link-p link) "the fixture did not make a link")
+           (up::%sweep-staging)
+           (is-true (probe-file precious) "the sweep deleted a file through a link")
+           (is-true (aion/fs:link-p link) "the sweep removed an entry it did not create")
+           ;; The control: uiop:delete-directory-tree, which the sweep used before #347, given
+           ;; the same entry, deletes the file through the link.
+           (ignore-errors (uiop:delete-directory-tree link :validate t))
+           (is-false (probe-file precious)
+                     "uiop must delete through the link, or this fixture cannot show #347"))
+      (ignore-errors (aion/fs:delete-link link))
+      (ignore-errors (aion/fs:delete-tree outside)))))
+
+(test the-sweep-only-removes-directories-this-user-owns
+  ;; A directory another user owns, with a name the sweep would parse, must be left alone.
+  ;; Making one needs another account, so this asks the check the sweep applies about a
+  ;; directory that already belongs to root, and about one this user made.
+  #+unix
+  (if (zerop (sb-posix:getuid))
+      (skip "running as root, so no directory here belongs to another user")
+      (let ((mine (ensure-directories-exist
+                   (merge-pathnames (format nil "ouranos-update-~D-own~D/" 100 (random 100000))
+                                    (up::%staging-root)))))
+        (unwind-protect
+             (progn
+               (is-false (up::%sweepable-p #p"/usr/") "a directory root owns must not be sweepable")
+               (is-true (up::%sweepable-p mine) "a directory this user made must be sweepable"))
+          (ignore-errors (aion/fs:delete-tree mine)))))
+  #-unix
+  (skip "Windows keeps staging in the per-user temp directory; only links are checked there"))
+
+(test staging-is-made-where-only-this-user-can-write
+  ;; #347: on Linux the staging root is under XDG_CACHE_HOME with mode 700, not the shared /tmp.
+  (let ((root (up::%staging-root)))
+    #+(and unix (not darwin))
+    (let ((st (sb-posix:stat (string-right-trim "/" (uiop:native-namestring root)))))
+      (is (= (sb-posix:stat-uid st) (sb-posix:getuid)) "the staging root must belong to this user")
+      (is (zerop (logand (sb-posix:stat-mode st) #o077)) "the staging root must be mode 700")
+      (is (not (uiop:subpathp root #p"/tmp/")) "the staging root must not be under /tmp"))
+    #-(and unix (not darwin))
+    (is (uiop:pathname-equal root (uiop:temporary-directory))
+        "on Windows and macOS the per-user temp directory is kept")))
 
 (test the-retention-window-is-what-decides-and-it-is-an-hour
   ;; Asserted against the parameter rather than a literal, so the number and the behaviour
@@ -1494,7 +1557,7 @@ left as it was."
                        :test #'string-equal)
                "the user this process runs as is not on its own staging directory's DACL: ~S"
                principals))
-      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+      (ignore-errors (aion/fs:delete-tree dir)))))
 
 #+win32
 (defun rid-500-sid ()
@@ -1562,7 +1625,7 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
                         (is (member "WD" unexpected :test #'string-equal)
                             "Everyone stopped being unexpected once aliases resolve: ~S~%~A"
                             unexpected (icacls-grants dir)))))))
-            (ignore-errors (uiop:delete-directory-tree dir :validate t)))))))
+            (ignore-errors (aion/fs:delete-tree dir)))))))
 
 #+win32
 (test a-staging-directory-writable-by-others-is-refused-and-names-the-principal
@@ -1596,7 +1659,7 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
                      "the refusal did not name the principal that holds write access")
                  (is (search "OURANOS_ALLOW_UNSAFE_STAGING" detail)
                      "the refusal did not say how to proceed deliberately")))))
-      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+      (ignore-errors (aion/fs:delete-tree dir)))))
 
 #+win32
 (test the-staging-permission-refusal-can-be-overridden-affirmatively-and-only-so

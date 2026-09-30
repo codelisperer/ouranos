@@ -75,6 +75,7 @@
 
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
+(load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 (funcall (read-from-string "ql:quickload") '(:hyperion/update :ironclad) :silent t)
 
@@ -243,7 +244,7 @@
                               (good "sha256 matches the bytes the client staged"))
                              (t (fail "~A: manifest sha256 ~A, staged bytes ~A"
                                       key declared actual))))
-                     (ignore-errors (uiop:delete-directory-tree staged-dir :validate t)))
+                     (ignore-errors (aion/fs:delete-tree staged-dir)))
                  (error (e)
                    (fail "~A: the client could not stage its payload -- ~A" key e))))))
 
@@ -268,7 +269,7 @@
                      (good "the full apply path reaches the ~A strategy" launched)
                      (fail "the apply path ended at ~S without launching" (getf state :status))))
              (error (e) (fail "the apply path signalled: ~A" e))))
-      (ignore-errors (uiop:delete-directory-tree dir :validate t))))
+      (ignore-errors (aion/fs:delete-tree dir))))
   #-win32
   (format t "~&  --  the whole-apply check runs on Windows; on ~A it is not run here (Linux: scripts/verify-appimage-update.sh, #251; macOS's strategy is not written)~%"
           (platform:platform-key))
