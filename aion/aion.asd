@@ -386,7 +386,8 @@
                 :components ((:file "packages")
                              (:file "layout-tests")
                              (:file "string-tests")
-                             (:file "conditions-tests"))))
+                             (:file "conditions-tests")
+                             (:file "file-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :aion/windows/tests :run-tests)))
 
 (defsystem "aion/windows/registry"

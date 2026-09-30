@@ -6,9 +6,10 @@ Lisp, and porting between platforms a non-event — over the raw bindings aion p
 *Hades, who rules a realm nobody visits willingly and everybody eventually needs.* Windows is
 first, being furthest from POSIX; macOS and Linux are peers, not afterthoughts.
 
-> **Status: planned — no code.** The charter is
-> [ADR-0001](docs/adr/0001-charter.md); iteration 1 is blocked on `aion/windows/service`, which
-> does not exist yet.
+> **Status: one facade.** The charter is [ADR-0001](docs/adr/0001-charter.md).
+> `hades/single-instance` (#305) is the first code: a per-user, per-directory lock that the
+> operating system holds and releases when the process ends. The service lifecycle facade is
+> still blocked on `aion/windows/service`, which does not exist yet.
 
 ## The two contracts, kept distinct
 
@@ -42,3 +43,24 @@ desktop/interactive.** The interactive surface is where the platforms genuinely 
 **Off the dependency line entirely**, on hermes's terms: nothing in the DAG depends on Hades.
 The only thing that does is a consuming application, which depends on it *alongside* the
 frameworks rather than through them.
+
+## The single-instance lock
+
+`hades/single-instance` keeps a second copy of an app from running against the same data
+directory. The operating system holds the lock for the process and releases it when the
+process ends, however it ends, so a crash never locks the app out of its next start. On
+Windows it is a `CreateFileW` handle with share mode 0; on Linux and macOS it is an `fcntl`
+write lock. The file it is held on, `<directory>/<name>.lock`, holds nothing and is never
+deleted.
+
+```lisp
+(hades/single-instance:with-single-instance ("wordcrafter" :on-busy (lambda () (uiop:quit 0)))
+  (hyperion/desktop:run-app app ...))
+```
+
+The lock is scoped to a directory: by default the app's per-user data directory,
+`(uiop:xdg-data-home "<name>/")`, or `:directory`. `acquire-single-instance` returns a lock or
+`:busy`, and `release-single-instance` releases it early. A second acquire from the same
+process is `:busy` too. `hyperion/desktop:run-app` does not take the lock itself, because
+nothing in the dependency line may depend on hades; the app takes it around `run-app`.
+Handing the second launch's arguments to the first copy is not built yet (#305).

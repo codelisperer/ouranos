@@ -263,6 +263,17 @@ its tag.
   for instants after a file's last transition, so **a deployment image needs the tzdata
   package**; Windows has no zone directory, and there an app sets `TZDIR`. `parse-tzif`,
   `zone-offset-at` and `zone-local-to-universal` are pure, for use on any TZif bytes.
+- **hades/single-instance: a lock that keeps a second copy of a desktop app off the same data
+  directory.** `(hades/single-instance:with-single-instance ("app" :on-busy ...) ...)` runs its
+  body holding the lock, or calls `:on-busy` when another copy holds it;
+  `acquire-single-instance` returns a lock or `:busy`, and `release-single-instance` releases
+  it. The operating system releases the lock when the process ends, so a crash does not lock the
+  app out. It is scoped to the app's per-user data directory, or `:directory`. An app that wrote
+  its own lock for this, with `CreateFileW` share mode 0 or `flock`, can use this instead. It is
+  the first code in hades; an app depends on `hades/single-instance` alongside the frameworks.
+  (#305)
+- **aion/windows/ffi: `create-file-w`** and the constants `+generic-read+`, `+generic-write+`,
+  `+open-always+`, `+file-attribute-normal+` and `+error-sharing-violation+`. (#305)
 
 ### Fixed
 

@@ -42,6 +42,9 @@
    #:+format-message-allocate-buffer+
    ;; memory
    #:local-free #:co-task-mem-free
+   ;; files
+   #:create-file-w #:+generic-read+ #:+generic-write+ #:+open-always+
+   #:+file-attribute-normal+ #:+error-sharing-violation+
    ;; the layout table
    #:*layouts* #:register-layout #:verify-layouts #:layout-report
    #:pointer-width #:layout-column #:layout-mismatch #:layout-mismatch-details
