@@ -9,6 +9,22 @@
 ; and exits, so nothing is locked when files are replaced. That is why the silent path must
 ; relaunch the app at the end -- from the user's point of view the app restarts itself.
 ;
+; THE NEW VERSION IS SWAPPED IN WHOLE (#98, step 3). A Windows bundle is a launcher,
+; sbcl-runtime.exe and sbcl.core, and the launcher refuses a core it was not built with, so a
+; bundle with some files from each version does not start. The files are therefore never
+; written into the install directory. They are extracted to $INSTDIR.new, the staged core is
+; checked by the staged launcher, and then two renames swap the directories: $INSTDIR becomes
+; $INSTDIR.old and $INSTDIR.new becomes $INSTDIR. The launcher deletes $INSTDIR.old once the
+; new version has started. A run that stops part-way leaves the old install whole, or both
+; directories renamed except the last; the next run finishes or undoes that first (RepairSwap).
+;
+; A directory cannot be renamed while a process has its current directory inside it or a file
+; in it open, whatever the sharing mode; a program running from it does not prevent it
+; (measured on Windows 11, #98). So this installer keeps its own current directory out of both
+; directories when it renames them, and retries the first rename while the app finishes
+; exiting. If that never succeeds, the install directory has not been touched: the staged copy
+; is deleted and the update fails, to be tried again next time.
+;
 ; PER-USER ON PURPOSE (design §1): installing to $LOCALAPPDATA\Programs means the app can
 ; rewrite itself with no elevation. A Program Files install would need a UAC prompt on every
 ; single update, or a privileged updater service -- both worse than the disk location is
@@ -129,43 +145,138 @@ Function EnsureWebView2
  wv2_present:
 FunctionEnd
 
+; Stop the install, having changed nothing in $INSTDIR. Silent is the update path: exit code 2,
+; which the app that started the update can report. Interactive gets MESSAGE.
+!macro FailInstall MESSAGE
+  IfSilent 0 +3
+    SetErrorLevel 2
+    Abort
+  MessageBox MB_OK|MB_ICONEXCLAMATION "${MESSAGE}"
+  Abort
+!macroend
+
 ; The app may still be shutting down when an update installer starts (it launches us, then
-; exits). Deleting the old exe is the reliable "is it gone yet?" probe -- retry briefly
-; rather than racing, and say something useful if it never frees up.
+; exits). A running program cannot be opened for writing, so opening the old launcher for
+; appending, which changes nothing, tells whether it has exited. The launcher waits for the
+; runtime, so it exits last. Retry briefly rather than racing.
 !macro WaitForAppToExit
   StrCpy $R1 0
+  IfFileExists "$INSTDIR\${EXENAME}" 0 wait_done
   wait_loop:
     ClearErrors
-    Delete "$INSTDIR\${EXENAME}"
-    IfErrors 0 wait_done
+    FileOpen $R2 "$INSTDIR\${EXENAME}" a
+    IfErrors 0 wait_closed
     IntOp $R1 $R1 + 1
     IntCmp $R1 20 wait_giveup wait_retry wait_giveup
   wait_retry:
     Sleep 500
     Goto wait_loop
   wait_giveup:
-    IfSilent 0 +3
-      SetErrorLevel 2                      ; an update: fail loudly, the app can report it
-      Abort
-    MessageBox MB_OK|MB_ICONEXCLAMATION "${APPNAME} appears to still be running. Close it and run this installer again."
-    Abort
+    !insertmacro FailInstall "${APPNAME} appears to still be running. Close it and run this installer again."
+  wait_closed:
+    FileClose $R2
   wait_done:
 !macroend
+
+; Finish or undo a swap an earlier run of this installer left half done. $INSTDIR.old exists
+; only after the staged copy passed its check, so with no $INSTDIR, a $INSTDIR.new beside
+; $INSTDIR.old is a checked copy and is moved into place; without one, $INSTDIR.old is moved
+; back. Any other $INSTDIR.new is an extraction that did not finish, and is deleted.
+Function RepairSwap
+  IfFileExists "$INSTDIR\*.*" drop_staged
+  IfFileExists "$INSTDIR.old\*.*" 0 drop_staged
+  IfFileExists "$INSTDIR.new\*.*" 0 restore_old
+    Rename "$INSTDIR.new" "$INSTDIR"
+    Return
+  restore_old:
+    Rename "$INSTDIR.old" "$INSTDIR"
+    Return
+  drop_staged:
+    RMDir /r "$INSTDIR.new"
+FunctionEnd
+
+; Swap $INSTDIR.new in for $INSTDIR, keeping the old one as $INSTDIR.old until the new version
+; starts. The first rename is retried for 20 seconds: until it succeeds nothing has changed, so
+; giving up deletes the staged copy and fails. The second is retried for 20 seconds too,
+; because a file open in $INSTDIR.new stops it -- an antivirus scanner reading the files just
+; written, for one (measured with a process reading them, #98) -- and giving up on it undoes
+; the first.
+Function SwapIn
+  StrCpy $R1 0
+  swap_retry:
+    ; A previous version still here from the last update is in the way of the first rename.
+    RMDir /r "$INSTDIR.old"
+    IfFileExists "$INSTDIR.old\*.*" swap_wait
+    IfFileExists "$INSTDIR\*.*" 0 swap_second
+    ClearErrors
+    Rename "$INSTDIR" "$INSTDIR.old"
+    IfErrors 0 swap_second
+  swap_wait:
+    IntOp $R1 $R1 + 1
+    IntCmp $R1 40 swap_giveup
+    Sleep 500
+    Goto swap_retry
+  swap_giveup:
+    RMDir /r "$INSTDIR.new"
+    !insertmacro FailInstall "${APPNAME} could not be updated because its folder is in use: a window or a program may have it open. Close it and run this installer again."
+  swap_second:
+    StrCpy $R1 0
+  swap_second_retry:
+    ClearErrors
+    Rename "$INSTDIR.new" "$INSTDIR"
+    IfErrors 0 swap_done
+    IntOp $R1 $R1 + 1
+    IntCmp $R1 40 swap_second_giveup
+    Sleep 500
+    Goto swap_second_retry
+  swap_second_giveup:
+    Rename "$INSTDIR.old" "$INSTDIR"
+    RMDir /r "$INSTDIR.new"
+    !insertmacro FailInstall "${APPNAME} could not be updated: its new files could not be moved into place."
+  swap_done:
+FunctionEnd
 
 Section "Install"
   SetShellVarContext current                ; per-user shortcuts, never all-users
   Call EnsureWebView2
   !insertmacro WaitForAppToExit
-  SetOutPath "$INSTDIR"
+  ; SetOutPath is also this process's current directory, which must not be inside a directory
+  ; this installer renames (see the header).
+  SetOutPath "$TEMP"
+  Call RepairSwap
+  ; A label, not a relative jump: FailInstall is several instructions.
+  IfFileExists "$INSTDIR.new\*.*" 0 staged_clear
+    !insertmacro FailInstall "${APPNAME} could not be updated: $INSTDIR.new is left from an earlier update and could not be removed."
+  staged_clear:
+
+  SetOutPath "$INSTDIR.new"
   File /r "${SRCDIR}\*.*"
 !ifdef ICON
   ; A separate file rather than the exe's own icon resource, so the shortcut and the
   ; Add/Remove Programs entry show the icon whether or not one is embedded in the exe.
-  File "/oname=$INSTDIR\${APPNAME}.ico" "${ICON}"
+  File "/oname=$INSTDIR.new\${APPNAME}.ico" "${ICON}"
   !define SHORTCUT_ICON "$INSTDIR\${APPNAME}.ico"
 !else
   !define SHORTCUT_ICON "$INSTDIR\${EXENAME}"
 !endif
+  WriteUninstaller "$INSTDIR.new\uninstall.exe"
+  SetOutPath "$TEMP"
+
+  ; The staged launcher checks the staged core, the check it makes at every start, and exits
+  ; without starting the app (OURANOS_LAUNCHER_CHECK_ONLY, scripts/windows-launcher.c). Only a
+  ; bundle with the launcher's layout has a pair to check; a one-file image has no sbcl.core.
+  ; nsExec runs it with no console window.
+  IfFileExists "$INSTDIR.new\sbcl.core" 0 staged_checked
+  IfFileExists "$INSTDIR.new\sbcl-runtime.exe" 0 staged_checked
+    System::Call 'kernel32::SetEnvironmentVariable(t "OURANOS_LAUNCHER_CHECK_ONLY", t "1")'
+    nsExec::Exec '"$INSTDIR.new\${EXENAME}"'
+    Pop $R3
+    System::Call 'kernel32::SetEnvironmentVariable(t "OURANOS_LAUNCHER_CHECK_ONLY", p 0)'
+    StrCmp $R3 "0" staged_checked
+    RMDir /r "$INSTDIR.new"
+    !insertmacro FailInstall "${APPNAME} could not be updated: the downloaded files did not pass their check ($R3)."
+  staged_checked:
+  Call SwapIn
 
   WriteRegStr HKCU "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\${APPNAME}" "Version" "${VERSION}"
@@ -180,8 +291,10 @@ Section "Install"
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
 
+  ; The swap is done. The shortcut's working directory and the relaunched app's below are
+  ; SetOutPath's, and the app starts in its own directory, as it always has.
+  SetOutPath "$INSTDIR"
   CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXENAME}" "" "${SHORTCUT_ICON}" 0
-  WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; Silent == the update path: hand the user back a running app, not a closed one.
   ;
@@ -205,6 +318,8 @@ Section "Uninstall"
   ; This marks the stragglers for removal on next boot instead of silently leaving them.
   Delete /REBOOTOK "$INSTDIR\uninstall.exe"
   RMDir /r /REBOOTOK "$INSTDIR"
+  RMDir /r "$INSTDIR.old"                  ; what an update may have left (see the header)
+  RMDir /r "$INSTDIR.new"
   DeleteRegKey HKCU "${UNINST_KEY}"
   DeleteRegKey HKCU "Software\${APPNAME}"
 SectionEnd

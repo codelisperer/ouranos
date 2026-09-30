@@ -622,17 +622,22 @@ THE HAZARD IS NOW MEASURED, on this platform, against a real running executable:
   rename a RUNNING .exe aside         -> SUCCEEDS.
   rename the whole install DIRECTORY
     while a child runs inside it      -> SUCCEEDS.
+  rename the whole install DIRECTORY
+    while a process's current
+    directory, or an open file, is
+    inside it                         -> FAILS (#98).
 
-The first line is why this hook exists. An installer replaces files in place, so any
-binary in the bundle that is still running -- the webview child above all -- cannot be
-replaced, and the update fails for a reason the updater cannot see and the user cannot
+The first line is why this hook was written. The installers then replaced files in place, so
+any binary in the bundle that was still running -- the webview child above all -- could not
+be replaced, and the update failed for a reason the updater cannot see and the user cannot
 interpret. The consuming-app session that reported it was right about the mechanism, and
 was right to withdraw the claim that it had a working sequencing to hand over.
 
-The second and third lines are the more interesting result, and they are recorded here
-because they bound a FUTURE strategy rather than this one: a stage-beside-and-rename swap
-would not need the application to stop at all. That is not what NSIS or Inno do -- both
-replace files in place -- so the hook is required for the strategies that exist today.")
+Both installers now extract to <install>.new and swap the directories by renaming them (#98,
+step 3), which the third line allows. The fourth line is why the hook still matters: a
+process with its current directory in the install directory, which is how the app itself is
+started, or with a file open there, stops the swap. The installers retry the rename while the
+app exits, and fail without changing anything if it never succeeds.")
 
 ;;; --- where this application is installed -----------------------------------
 
@@ -1434,14 +1439,23 @@ new surface."))
   (declare (ignore installer install-dir))
   (error 'unknown-payload-format :format-name format))
 
+(defun %installer-directory (installer)
+  "The directory to start INSTALLER in: its own staging directory. Started without one, it
+would inherit this process's current directory, which is usually the install directory, and a
+directory cannot be renamed while a process has its current directory inside it (measured on
+Windows 11, #98). Both installers swap the install directory by renaming it (#98, step 3)."
+  (uiop:pathname-directory-pathname (uiop:parse-native-namestring (uiop:native-namestring installer))))
+
 (defmethod launch-installer ((format (eql :nsis)) installer install-dir)
-  (uiop:launch-program (%nsis-arguments installer install-dir)))
+  (uiop:launch-program (%nsis-arguments installer install-dir)
+                       :directory (%installer-directory installer)))
 
 (defmethod launch-installer ((format (eql :inno)) installer install-dir)
   "MEASURED END TO END, not reasoned about: #111's harness runs this method against a real
 Inno installer and a real per-user install, and asserts the bundle actually changed version
 afterwards. Before that assertion existed, this method exited 3 and installed nothing."
-  (uiop:launch-program (%inno-arguments installer install-dir)))
+  (uiop:launch-program (%inno-arguments installer install-dir)
+                       :directory (%installer-directory installer)))
 
 ;;; --- Linux: replace the AppImage file (#251, design section 7) ---------------------
 ;;;

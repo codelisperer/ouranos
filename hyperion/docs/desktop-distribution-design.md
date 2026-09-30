@@ -332,7 +332,7 @@ bundle.
 
 **Windows — `nsis`: hand off to our own installer.** The payload *is* the installer, so
 after verifying it: launch it with `/S` (silent) `/D=<install dir>`, then **exit
-immediately** so nothing is locked; NSIS replaces the files and `Exec`s the new build on
+immediately** so nothing is locked; NSIS installs the new version and `Exec`s it on
 completion. This sidesteps the locked-exe problem entirely — a running `.exe` cannot be
 overwritten, and the process that would be overwritten is gone before the installer starts.
 It also keeps shortcuts, the uninstall entry and the install location correct, which a
@@ -341,6 +341,35 @@ file-level swap silently drifts away from.
 The cost is a brief close-and-reopen (Tauri behaves the same), and that once the installer
 is handed control we can no longer report progress — so the UI states "installing…" until
 the new process reports its version.
+
+**Both Windows installers swap the whole install directory (#98, step 3).** A Windows bundle
+is `<name>.exe` (the launcher), `sbcl-runtime.exe` and `sbcl.core`, and the launcher refuses
+a core it was not built with, so a directory holding some files of each version does not
+start. Until step 3 both installers extracted file by file over the live directory, and an
+install that stopped part-way left exactly that. Now `windows.nsi` and `windows.iss`:
+
+1. finish or undo a swap an earlier run left half done (below);
+2. extract to `<install>.new`, beside the install directory on the same volume;
+3. run the staged launcher with `OURANOS_LAUNCHER_CHECK_ONLY=1`, which checks the staged core
+   as it does at every start and exits 0 or 126 without starting the app;
+4. rename `<install>` to `<install>.old`, then `<install>.new` to `<install>`;
+5. relaunch. The launcher deletes `<install>.old` once it has started the runtime.
+
+`<install>.old` exists only after step 3 passed, so a run that finds no `<install>` beside an
+`<install>.old` moves a `<install>.new` into place, or moves `<install>.old` back when there is
+none. Any other `<install>.new` is an extraction that did not finish, and is deleted.
+
+A directory cannot be renamed while a process has its current directory inside it or a file
+in it open, whatever the sharing mode; a program running from it does not prevent it
+(measured on Windows 11, #98). The app is started in its install directory, and the installer
+inherited the app's current directory until `launch-installer` started it in its staging
+directory. So each installer moves its own current directory out first, and retries the first
+rename for 20 seconds while the app exits. If it never succeeds, nothing has changed: the
+staged copy is deleted and the installer fails (NSIS exits 2), to be tried at the next update.
+`scripts/tests/windows-installer-swap.lisp` runs both installers through a first install, an
+update stopped part-way through the copy with the finished update as its control, a
+directory held for 4 seconds, a file held open throughout, and a swap stopped between its
+renames.
 
 **Windows — `inno`: the same handoff, different flags, and one property that had to be
 measured.** Inno Setup is supported alongside NSIS because it signs the installer *and the
@@ -394,8 +423,9 @@ claims, and only the second one is what an update promises.
 *Fallback, for a portable install with no installer present:* the rename dance ADR-0008
 anticipated — a running `.exe` cannot be deleted or overwritten but **can be renamed**, so
 rename `<app>.exe` → `.old`, write the new one, relaunch, delete `.old` at next startup.
-Kept in the design because a portable/no-install mode is a plausible future ask, and
-because it is the rollback path if an installer run fails midway.
+Kept in the design because a portable/no-install mode is a plausible future ask. An installer
+run that fails midway no longer needs it: the directory swap above leaves the old version
+whole.
 
 **macOS — `app-targz`.** Replacing files inside a signed `.app` invalidates its signature,
 so swap the **whole bundle**: unpack the `.tar.gz` (the system `tar` — no library needed)

@@ -198,6 +198,20 @@ its tag.
   changes is that accepting, reading, parsing and writing use more than one thread, and the
   process has up to four loop threads instead of one. `:loops 1`, or `HYPERION_LOOPS=1` for
   `serve-forever`, keeps one loop. A server without `:workers` still runs one loop. (#463)
+- **A Windows update installs the whole new version or none of it.** Both installers,
+  `scripts/installers/windows.nsi` and `windows.iss`, used to write the new files over the
+  install directory one at a time, so an update that stopped part-way left a launcher and a
+  `sbcl.core` from different versions, which the launcher refuses (exit 126). They now extract
+  to `<install>.new`, have the staged `<name>.exe` check the staged core
+  (`OURANOS_LAUNCHER_CHECK_ONLY=1`), and rename `<install>` to `<install>.old` and
+  `<install>.new` to `<install>`. The launcher deletes `<install>.old` after it starts the
+  runtime, and the next installer run finishes or undoes a swap that stopped between its
+  renames. `hyperion/update`'s `launch-installer` starts the installer in its staging directory.
+  An app acts if something it starts keeps the install directory as its current directory, or a
+  file there open, after the app exits: the installer waits 20 seconds for the directory, then
+  fails without changing anything (NSIS exit code 2). An app acts too if its packaging puts its
+  own files into the install directory after the installer runs, or keeps anything in
+  `<install>.old` or `<install>.new`: both names are now the installers'. (#98)
 
 ### Added
 
