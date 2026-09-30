@@ -132,7 +132,9 @@
   :version "0.0.0"
   ;; ironclad for the archive's SHA-256 names; praxeon already loads it (signed grants).
   :depends-on ("praxeon" "com.inuoe.jzon" "ironclad"
-               "aion/dynamic")  ; the provider backend's call thread carries the caller's bindings
+               "aion/dynamic"   ; the provider backend's call thread carries the caller's bindings
+               "aion/log"       ; turned off at hook start, so nothing logs to the hook's stdout
+               (:feature :unix (:require "sb-posix")))  ; the archive's 0700 directory and 0600 files
   :components ((:module "src/claude-code"
                 :serial t
                 :components ((:file "packages")
@@ -145,7 +147,7 @@
 
 (defsystem "praxeon/claude-code/tests"
   :description "praxeon/claude-code's rules, summary check, hook and report, with no model call (#452)."
-  :depends-on ("praxeon/claude-code" "com.inuoe.jzon" "fiveam"
+  :depends-on ("praxeon/claude-code" "praxeon" "com.inuoe.jzon" "fiveam" "aion/log"
                "aion/fs"      ; the tests' temporary directories are removed with delete-tree (#347)
                (:feature :unix (:require "sb-posix")))  ; chmod for the stand-in programs
   :components ((:module "tests" :components ((:file "claude-code-tests"))))

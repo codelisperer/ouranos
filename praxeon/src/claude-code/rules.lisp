@@ -10,9 +10,12 @@
 ;;;;
 ;;;; WHAT THIS REPOSITORY NEEDS READ EXACTLY (#452, AGENTS.md "Evidence"): the gate's output, CI
 ;;;; logs, `git log', and anything carrying a commit SHA or a run id, because a SHA or an id
-;;;; quoted from a summary is a guess. The command list keeps git and gh out, and the content
-;;;; rules refuse any output that carries a SHA-like or run-id-like token, whichever command
-;;;; produced it, so `grep' over a saved gate log is refused as well.
+;;;; quoted from a summary is a guess. The command list keeps git and gh out. The content rule
+;;;; refuses any output in which the matched lines carry a SHA-like token (7 to 64 hexadecimal
+;;;; characters with digits and letters) or a run-id-like one (10 or more digits), whichever
+;;;; command produced it. That covers a search over a saved log only when the lines it matched
+;;;; carry one: the gate prints SHAs in its provenance block, so a search that matches only its
+;;;; suite lines is not refused by this rule.
 
 (in-package #:praxeon/claude-code/rules)
 
@@ -86,26 +89,61 @@ reduced to its last component, so /usr/bin/rg is rg. \"\" when there is no word.
       (let ((word (first words)))
         (when (and word (not (member word '("cd" "pushd" "popd" "export" "set" "(" "{")
                                      :test #'string=)))
-          (let ((slash (position #\/ word :from-end t)))
+          (let* ((word (string-trim "\"'" word))
+                 (slash (position-if (lambda (c) (member c '(#\/ #\\))) word :from-end t)))
             (return (if slash (subseq word (1+ slash)) word))))))))
 
 (defun tool-category (tool input)
-  "The category a result of TOOL, called with INPUT (a hash table or NIL), is counted under:
-\"Bash:<word>\" for Bash, and the tool's name otherwise, which for an MCP tool is
-mcp__<server>__<tool>."
-  (if (string= tool "Bash")
-      (let ((command (and (hash-table-p input) (gethash "command" input))))
-        (format nil "Bash:~A" (if (stringp command) (bash-category command) "")))
-      tool))
+  "The category a result of TOOL, called with INPUT (a hash table or NIL), is counted under in
+the report and the hook's log: \"Bash:<word>\" for Bash, \"mcp\" for any MCP tool, and the
+tool's name otherwise.
+
+NO PATH OR PRIVATE NAME, because the report is what a user will paste into an issue. A command
+word is its base name only (BASH-CATEGORY), and one with a dot in it, such as tool.exe or
+export.sh, is counted as \"script\", since a script's name can name a client or a project. An
+MCP tool's name carries its server's name, so every MCP tool is \"mcp\"."
+  (cond ((string= tool "Bash")
+         (let* ((command (and (hash-table-p input) (gethash "command" input)))
+                (word (if (stringp command) (bash-category command) "")))
+           (format nil "Bash:~A" (if (find #\. word) "script" word))))
+        ((and (> (length tool) (length *mcp-prefix*))
+              (string= *mcp-prefix* tool :end2 (length *mcp-prefix*)))
+         "mcp")
+        (t tool)))
 
 ;;; --- the command -------------------------------------------------------------------------
 
 (defparameter +exact-words+
-  '("cat" "sed" "head" "tail" "less" "more" "git" "gh" "diff" "patch" "jq" "sbcl" "make"
-    "python" "python3" "node" "npm" "curl" "wget")
-  "Command words that, anywhere in a Bash command, mean its output is read exactly or is not a
-search: a pipeline through `head' is already narrowed, `git' and `gh' print SHAs and run ids,
-and a program's own output is not a list of matches.")
+  '("cat" "tac" "nl" "bat" "sed" "awk" "perl" "head" "tail" "less" "more" "view" "strings" "od"
+    "xxd" "hexdump" "git" "gh" "diff" "patch" "jq" "yq" "sbcl" "make" "python" "python3" "node"
+    "npm" "curl" "wget" "xargs" "while" "for" "do" "until" "sh" "bash" "zsh" "eval" "source")
+  "Words that, anywhere in a Bash command, mean its output is read exactly or is not a list of
+matches: a read or print command (cat, sed -n, head, ...), git and gh, which print SHAs and run
+ids, a program's own output, and xargs, loops and shells, which run some other command on what
+the search found.")
+
+(defparameter +exact-flags+
+  '("-exec" "-execdir" "-ok" "-okdir" "--passthru" "--passthrough" "-v" "--invert-match"
+    "-f" "--file" "-z" "--null-data")
+  "Arguments that make a search print whole files or run a command: find's -exec and -ok, rg's
+--passthru, grep -v, patterns read from a file, and whole-file records.")
+
+(defparameter +whole-file-patterns+ '("" "^" "$" "." ".*" "^.*" ".*$" "^.*$")
+  "Patterns that match every line, so a search with one prints whole files.")
+
+(defun %shell-words (command)
+  "COMMAND's words, split at unquoted whitespace and at | ; & ( ), with quotes removed. A quoted
+empty string is a word of its own, \"\", so rg '' file is seen as a search for the empty pattern."
+  (let ((words '()) (word (make-string-output-stream)) (in-word nil) (quote nil))
+    (flet ((finish ()
+             (when in-word (push (get-output-stream-string word) words) (setf in-word nil))))
+      (loop for c across command
+            do (cond (quote (if (char= c quote) (setf quote nil) (write-char c word)))
+                     ((member c '(#\' #\")) (setf quote c in-word t))
+                     ((member c '(#\Space #\Tab #\Newline #\| #\; #\& #\( #\))) (finish))
+                     (t (write-char c word) (setf in-word t))))
+      (finish))
+    (nreverse words)))
 
 (defun %command-words (command)
   "The first word of every segment of COMMAND, with variable assignments and directory changes
@@ -114,14 +152,33 @@ skipped, as BASH-CATEGORY finds the first."
         for word = (bash-category segment)
         when (plusp (length word)) collect word))
 
+(defun %search-pattern (words)
+  "The pattern a search command's WORDS give it: the value after -e or --regexp, or else the
+first word after the command that is not a flag. NIL for find, which takes no pattern. Only the
+pattern is compared with +WHOLE-FILE-PATTERNS+, since a path such as . is not one."
+  (let ((command (first words)) (args (rest words)))
+    (when (member command '("rg" "grep" "fd") :test #'string=)
+      (let ((e (or (member "-e" args :test #'string=) (member "--regexp" args :test #'string=))))
+        (if e
+            (second e)
+            (find-if (lambda (w) (or (zerop (length w)) (char/= (char w 0) #\-))) args))))))
+
 (defun command-eligible-p (command)
-  "Whether a Bash COMMAND is one whose output may be replaced: its first word is in
-*SEARCH-COMMANDS* and none of its segments starts with a word in +EXACT-WORDS+. Returns the
-reason as a second value when it is not: :NOT-SEARCH or :EXACT."
-  (let ((words (%command-words command)))
-    (cond ((not (member (first words) *search-commands* :test #'string=))
+  "Whether a Bash COMMAND is one whose output may be replaced: its first command is in
+*SEARCH-COMMANDS*, no word anywhere in it is in +EXACT-WORDS+ or +EXACT-FLAGS+, and no word is a
+pattern in +WHOLE-FILE-PATTERNS+. Returns the reason as a second value when it is not:
+:NOT-SEARCH or :EXACT. A word is compared by its last path component, so /bin/cat is cat."
+  (let ((words (mapcar (lambda (w) (let ((slash (position #\/ w :from-end t)))
+                                     (if (and slash (< slash (1- (length w)))) (subseq w (1+ slash)) w)))
+                       (%shell-words command))))
+    (cond ((not (member (first (%command-words command)) *search-commands* :test #'string=))
            (values nil :not-search))
-          ((some (lambda (w) (member w +exact-words+ :test #'string=)) words)
+          ((some (lambda (w) (or (member w +exact-words+ :test #'string=)
+                                 (member w +exact-flags+ :test #'string=)))
+                 words)
+           (values nil :exact))
+          ((let ((pattern (%search-pattern words)))
+             (and pattern (member pattern +whole-file-patterns+ :test #'string=)))
            (values nil :exact))
           (t (values t nil)))))
 
@@ -151,16 +208,33 @@ with no letter, digit or underscore on either side."
     nil))
 
 (defparameter +credential-markers+
-  '("-----BEGIN" "PRIVATE KEY" "AKIA" "ASIA" "ghp_" "gho_" "ghs_" "ghu_" "github_pat_"
-    "glpat-" "xoxb-" "xoxp-" "sk-ant-" "sk-proj-" "Bearer " "Authorization:" "aws_secret"
-    "password=" "password:" "passwd" "api_key" "apikey" "api-key" "secret_key" "client_secret"
-    "access_token" "refresh_token" "private_key")
+  '("-----BEGIN" "PRIVATE KEY" "AKIA" "ASIA" "ghp_" "gho_" "ghs_" "ghu_" "ghr_" "github_pat_"
+    "glpat-" "xoxb-" "xoxp-" "xoxa-" "xoxs-" "hooks.slack.com/services/" "sk-ant-" "sk-proj-"
+    "sk_live_" "sk_test_" "rk_live_" "pk_live_" "AIza" "hf_" "npm_" "_authToken" "Bearer "
+    "Authorization:" "aws_secret" "aws_session_token" "password" "passwd" "pwd=" "api_key"
+    "apikey" "api-key" "secret" "token=" "token:" "_token" "private_key" "credentials"
+    "machine " "eyJ")
   "Substrings that mark text as possibly carrying a credential, matched without regard to
-case. Output with one of them is never replaced and never sent to a second model.")
+case: key prefixes of common services, header and assignment names, a Slack webhook's path, a
+.netrc line (machine ... password), and the start of a JWT (eyJ). They err towards matching,
+since a false match only passes the output through.")
+
+(defun %url-with-password-p (text)
+  "Whether TEXT holds a URL with a password in it, scheme://user:password@host."
+  (loop for at = (search "://" text) then (search "://" text :start2 (1+ at))
+        while at
+        thereis (let* ((start (+ at 3))
+                       (end (or (position-if (lambda (c) (member c '(#\Space #\Tab #\Newline #\/ #\" #\')))
+                                             text :start start)
+                                (length text)))
+                       (colon (position #\: text :start start :end end))
+                       (sign (position #\@ text :start start :end end)))
+                  (and colon sign (< colon sign)))))
 
 (defun credential-like-p (text)
-  "Whether TEXT contains one of +CREDENTIAL-MARKERS+, ignoring case."
-  (some (lambda (m) (search m text :test #'char-equal)) +credential-markers+))
+  "Whether TEXT contains one of +CREDENTIAL-MARKERS+, ignoring case, or a URL with a password."
+  (or (some (lambda (m) (search m text :test #'char-equal)) +credential-markers+)
+      (%url-with-password-p text)))
 
 (defun %line-starts (text prefix)
   (or (and (>= (length text) (length prefix)) (string= prefix text :end2 (length prefix)))
@@ -197,6 +271,11 @@ a summary. Returns :REPLACE, or :PASS and the reason as a keyword:
       (pass :failed))
     (when (< (estimate-tokens (length text)) threshold) (pass :small))
     (when (diff-like-p text) (pass :diff))
-    (when (credential-like-p text) (pass :credential))
+    ;; THE COMMAND TOO, because it goes into the summarizer's prompt: GITHUB_TOKEN=ghp_... rg x
+    ;; would otherwise send the token.
+    (when (or (credential-like-p text)
+              (and (hash-table-p input) (stringp (gethash "command" input))
+                   (credential-like-p (gethash "command" input))))
+      (pass :credential))
     (when (identifier-like-p text) (pass :identifiers))
     :replace))

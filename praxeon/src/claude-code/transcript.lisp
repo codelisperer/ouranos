@@ -71,7 +71,7 @@ a record with no timestamp is kept."
         (calls '()) (results '()) (compactions '()) (n 0) (line-number -1))
     (dolist (line lines)
       (incf line-number)
-      (let ((record (and (plusp (length line)) (ignore-errors (jzon:parse line)))))
+      (let ((record (and (plusp (length line)) (ignore-errors (jzon:parse line :max-string-length (1- array-dimension-limit))))))
         (when (and (hash-table-p record)
                    (or (null since) (%recent-p record since)))
           (let ((type (gethash "type" record))
@@ -139,7 +139,10 @@ a record with no timestamp is kept."
 
 (defun read-session (path &key since)
   "The SESSION in the transcript file PATH. See PARSE-SESSION-LINES."
-  (with-open-file (in path :external-format :utf-8 :element-type 'character)
+  ;; A bad UTF-8 sequence, such as the half-written last line of a session still running, is
+  ;; replaced rather than signalled, so one line cannot stop the report. jzon's default
+  ;; 1 MiB limit on a string would skip the largest tool results without notice, so it is lifted.
+  (with-open-file (in path :external-format '(:utf-8 :replacement #\?) :element-type 'character)
     (parse-session-lines (loop for line = (read-line in nil) while line collect line)
                          :since since)))
 

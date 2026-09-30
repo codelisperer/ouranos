@@ -54,6 +54,7 @@
            #:hook-output #:prompt #:summarize #:claude-cli #:praxeon-provider #:cli-arguments
            #:backend-from-env #:archive #:log-event #:cache-directory #:sha256-hex
            #:summarizer-failure #:summarizer-timeout #:summarizer-exit #:summarizer-bad-reply
+           #:validate-facts #:facts-spec
            #:*timeout-seconds* #:*archive-days*))
 
 (cl:defpackage #:praxeon/claude-code

@@ -29,9 +29,12 @@ sbcl --non-interactive --load praxeon/scripts/build-claude-code.lisp
 ```
 
 This writes `bin/praxeon-claude-code`, a saved SBCL image (about 95 MB) that starts in about
-10 ms. It needs no SBCL or Quicklisp to run. The image is saved uncompressed on purpose: a
-compressed image is decompressed on every start, and the hook starts once per matching tool
-call.
+10 ms. It is dumped through `scripts/dump-image.lisp`, so it takes its temporary and cache
+directories from the environment it runs in, not the build machine's. It needs no SBCL or
+Quicklisp to run. On Linux and macOS it opens OpenSSL at start from the path it was built
+against, so it runs only on a machine that has that library there. The image is saved
+uncompressed on purpose: a compressed image is decompressed on every start, and the hook starts
+once per matching tool call.
 
 ## `report`
 
@@ -54,10 +57,12 @@ prints:
   largest summary it accepts, how many fewer tokens the later calls would read, as a share of
   all their input-side tokens;
 - why the large outputs the hook would not replace were passed through;
-- the categories most read again: the tool's name, or `Bash:` and the command's first word.
+- the categories most read again: the tool's name, or `Bash:` and the command's base name.
 
 It prints no text of any message or result and no path, including the project directories'
-names.
+names. A command whose name has a dot in it, such as `tool.exe` or `export.sh`, is counted as
+`Bash:script`, and every MCP tool as `mcp`, because a script's or an MCP server's name can name a
+client or a project, and the report is what people paste into issues.
 
 On the maintainer's own sessions (15 transcripts, 5,658 calls, measured 2026-09-30), 38 results
 were above 3,500 tokens and accounted for 11.2% of all tool-result tokens read again, and the
@@ -107,31 +112,51 @@ matcher is safe, only slower.
 ## What the hook never replaces
 
 - anything other than Bash and MCP tools: `Read`, `Grep`, `Edit` and the rest pass through;
-- a Bash command whose first word is not a search (`rg`, `grep`, `find`, `fd`), and a search
-  with any of `cat`, `sed`, `head`, `tail`, `git`, `gh`, `diff`, `jq` and similar in its pipeline;
+- a Bash command whose first word is not a search (`rg`, `grep`, `find`, `fd`);
+- a search that reads or runs something else: any word, anywhere in the command, that is a read
+  or print command (`cat`, `sed`, `head`, `tail`, `awk`, `less`, ...), `git` or `gh`, a
+  program, `xargs`, a loop or a shell, and any of find's `-exec` and `-ok` or rg's
+  `--passthru`, or `grep -v`;
+- a search for a pattern that matches every line (`''`, `^`, `$`, `.`, `.*`), which prints whole
+  files;
+- an output Claude Code has already saved to a file: its event carries `persistedOutputPath`, and
+  the model is shown a preview of about 2,000 characters, so a summary would give it more to
+  read, not less. Recorded on 2026-09-30: an output of 205,926 characters arrived with `stdout`
+  cut to 29,999, and on two transcripts the model was shown 2,053 and 2,213 characters of
+  outputs whose events carried 29,869 and 30,000;
 - outputs under the threshold (3,500 tokens by default);
 - a failed or interrupted command, and anything that wrote to stderr;
 - an output containing a diff;
-- an output that looks like it carries a credential (a private key, a token prefix such as
-  `ghp_` or `sk-ant-`, `password=`, `Authorization:`, and similar). Such an output is never sent to
-  the second model;
+- an output or a command that looks like it carries a credential: a private key, a service's key
+  prefix (`ghp_`, `sk-ant-`, `sk_live_`, `AIza`, `hf_`, `xoxb-`, ...), a JWT, a Slack webhook,
+  `Authorization:`, `password`, `secret`, `token=`, `_authToken`, a `.netrc` line, or a URL with
+  a password in it. The command is checked because it goes into the second model's prompt.
+  Nothing matching is ever sent to the second model. The list errs towards matching, so a search
+  over code that mentions `secret` or `password` passes through;
 - an output carrying a SHA-like token (7 to 64 hexadecimal characters with both digits and
-  letters) or a run-id-like one (10 or more digits). In this repository that keeps gate output,
-  CI logs and `git log` out even when a search is run over a saved copy of them, because
-  AGENTS.md requires SHAs and run ids to be read from the raw output.
+  letters) or a run-id-like one (10 or more digits) in the lines it matched. In this repository
+  that keeps `git log` and CI logs out, because AGENTS.md requires SHAs and run ids to be read
+  from the raw output. A search over a saved gate log is refused only when the lines it matched
+  carry one; the gate prints SHAs in its provenance block, not on its suite lines.
 
 ## The check on the summary
 
 The second model's list is refused, and the original passes through, when:
 
-- any file path, identifier-shaped token (with `_`, `::`, a dot between names, letters and
-  digits together, or camelCase) or hexadecimal identifier in it does not occur verbatim in the
-  raw output, or any run of digits in it does not occur there as a whole run;
+- any file path (including a dotfile such as `.envrc`), identifier-shaped token or hexadecimal
+  identifier in it does not occur in the raw output on name boundaries, or any run of digits in
+  it does not occur there as a whole run. Identifier-shaped means: with `_`, a hyphen between
+  names (`%write-response`, so also hyphenated words such as `read-only`), a colon between names
+  (`pkg:sym`, checked as one name), a dot between names, letters and digits together, camelCase,
+  or a leading `%`, `*` or `+`. On name boundaries means not inside a longer name or path:
+  `lib/server.lisp` does not match `mylib/server.lisp`, `foo_bar` does not match `foo_bar_baz`,
+  and `src/http` does not match `src/http.lisp`, but `src/http` matches `src/http/server.lisp`;
 - it is over the size budget (1,800 tokens by default);
 - it is less than 30% smaller than the original.
 
-Markdown's backtick and asterisk are ignored on both sides, a possessive `'s` is removed, and
-`name:line` is checked as the name and the number separately. Nothing else is relaxed.
+Markdown's backticks and `**` are ignored on both sides (a single `*` is kept, since `*name*` is a
+Lisp special variable), a possessive `'s` is removed, and `name:12` is checked as the name and
+the number separately. Nothing else is relaxed.
 
 What the check does not catch: a real name, path or number attached to the wrong thing. A line
 number is refused when it occurs nowhere in the output, not when it occurs only beside another
@@ -161,11 +186,22 @@ All environment variables, so they can be set in the hook's `command`:
 | `PRAXEON_CC_ARCHIVE_DAYS` | 7 | archived originals older than this are deleted |
 | `PRAXEON_CC_CACHE_DIR` | `$XDG_CACHE_HOME/praxeon-claude-code/` or `~/.cache/praxeon-claude-code/` | the archive and the log |
 
+Every whole-number setting must be above zero; anything else is ignored and the default used.
+
 The `claude` backend's call cannot run this hook, a tool or an MCP server:
 `claude -p --tools "" --strict-mcp-config --no-session-persistence --setting-sources ""
 --settings '{"disableAllHooks": true}'`, with `--json-schema` for the list and
 `CLAUDE_CODE_PROMPT_CACHE_TTL=5m`, since a one-shot call never reads a longer-lived cache back.
-`--bare` is not used because it ignores the Claude Code login.
+`--bare` is not used because it ignores the Claude Code login. The call runs in the temporary
+directory, not the session's: from inside this repository the same call's prompt was 1,175 tokens
+larger (8,633 cache-write tokens against 7,458 from an empty directory), because the CLI adds the
+working directory's context, and from the temporary directory it was 7,322. `CLAUDE.md` was not
+among the extra, since this repository's `CLAUDE.md` and `AGENTS.md` are about 10,000 tokens.
+
+The archive's directory is created 0700 and its files 0600 on Unix, as Claude Code keeps its own
+transcripts. A symbolic link where an archive file goes is removed rather than written through,
+the age cleanup deletes only regular files, and nothing is logged through a `hook.log` that is a
+link.
 
 ## The log
 
@@ -180,19 +216,36 @@ grep -c '"decision":"replace"' ~/.cache/praxeon-claude-code/hook.log
 grep -o '"reason":"[a-z-]*"' ~/.cache/praxeon-claude-code/hook.log | sort | uniq -c
 ```
 
-## What the first measurements show
+## What the measurements show
 
-These are from one machine (WSL2, Claude Code 2.1.270, the `claude` backend with Sonnet at
-medium effort), on 2026-09-30, and are a starting point rather than a result.
+From one machine (WSL2, Claude Code 2.1.270, the `claude` backend with Sonnet at medium effort),
+on 2026-09-30. They are a starting point rather than a result.
 
-- On a 7,656-token `rg -n "defun %"` listing over two frameworks, four attempts were all
-  refused: twice over the budget (4,280 and 2,870 tokens), and twice for tokens not in the
-  output, including a placeholder path `src/handler_N.lisp` and line numbers written as `L26`.
-- On a 3,868-token `rg -n -i windows docs`, with the facts bounded in the schema (at most 20, of
-  at most 300 characters), the summaries were 790 to 930 tokens. One of the last three attempts
-  was accepted; the other two were refused for words the model joined with a slash, such as
-  `macOS/Linux`, which the output writes as `macOS / Linux`.
-- In every refused case the original went through, and the main model answered from it.
+**The hook acts on a narrow band of sizes.** It replaces nothing under 3,500 tokens (about
+14,000 characters), and Claude Code itself saves an output of about 30,000 characters or more to
+a file and shows the model a preview of about 2,000 (`persistedOutputPath`), which the hook
+passes through. In a real session a 7,476-token search output was already saved that way, and
+the hook logged `persisted`. So what the hook can replace is a search output of roughly 14,000 to
+30,000 characters.
 
-The check refuses often. A refused summary costs the second model's call and nothing else,
-because the original goes through; an accepted wrong one would cost a wrong answer later.
+**The check refuses most summaries.** Two real searches, a 7,641-token `rg -n "defun %"` listing
+over mnemosyne and hyperion and a 3,869-token `rg -n -i windows docs`, each summarized
+repeatedly, with the facts bounded in the schema (at most 20, of at most 300 characters):
+
+| round (check as of) | listing: accepted | docs search: accepted | why the refused ones were refused |
+|---|---|---|---|
+| before the review's fixes | 0 of 4 | 1 of 3 | over budget; `src/handler_N.lisp`, `L26`, `macOS/Linux` |
+| after the review's fixes | 0 of 1 (1 call failed: `summarizer-exit`) | 0 of 3 | `.lisp`, `19-21`, `build/pass` |
+| after reading ranges and extensions | 0 of 2 | 0 of 3 | `*.lisp` (from the command), `clean-room` (the output has `Clean-room`), `./scripts/setup.sh` after `path:line:` |
+| after reading the command, case and `path:line:` | 1 of 2 (960 tokens for 7,641) | 0 of 3 | `mnemosyne/tests/`, `source-registry`, `fresh-clone`, `libs/1` |
+| final | 0 of 2 | 0 of 3 | `update/signature-verification`, `updates/staging`, `Clack-Hunchentoot`, `built-in` |
+
+The refinements between rounds made the check read a line range as its numbers, an extension
+as an extension, a glob from the command as real text, a hyphenated word without regard to
+case, a name after `path:line:` as on a boundary, and a trailing `/` as the directory. The
+refusals in the final round are all names the output does not contain: invented paths, and words
+the model joined or hyphenated itself. Summaries were 640 to 1,033 tokens, 73% to 92% smaller.
+
+In every refused case the original went through, and in the real sessions the main model
+answered from it. The check refuses often. A refused summary costs the second model's call and
+nothing else; an accepted wrong one would cost a wrong answer later.

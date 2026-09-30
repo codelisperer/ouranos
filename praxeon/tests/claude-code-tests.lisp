@@ -11,6 +11,7 @@
                     (#:tr #:praxeon/claude-code/transcript)
                     (#:report #:praxeon/claude-code/report)
                     (#:hook #:praxeon/claude-code/hook)
+                    (#:llm #:praxeon/llm)
                     (#:jzon #:com.inuoe.jzon))
   (:export #:run-tests))
 
@@ -70,7 +71,7 @@ with a large output in it."
   (is (string= "rg" (rules:bash-category "timeout 60 rg foo")) "and a wrapper with its argument")
   (is (string= "rg" (rules:bash-category "/usr/bin/rg foo")) "a path is reduced to its name")
   (is (string= "Bash:grep" (rules:tool-category "Bash" (%input "grep -r x ."))))
-  (is (string= "mcp__cap__lookup" (rules:tool-category "mcp__cap__lookup" nil))))
+  (is (string= "mcp" (rules:tool-category "mcp__cap__lookup" nil)) "no server name"))
 
 ;;; --- the never-compress rules, each with its control ----------------------------------------
 
@@ -162,8 +163,11 @@ src/http.lisp:55:(defun %read-bounded (stream limit) ...)
 test, so this is the case that shows the path test is there. Control: a directory the output
 does mention."
   (is (equal '("hyperion/lib") (hook:unsupported-tokens "- the helpers live in hyperion/lib" +small-raw+)))
-  (is (null (hook:unsupported-tokens "- the helpers live in src/http" +small-raw+))
-      "control: src/http occurs in src/http.lisp"))
+  (is (equal '("src/http") (hook:unsupported-tokens "- the helpers live in src/http" +small-raw+))
+      "src/http is only the start of src/http.lisp, not a directory the output names")
+  (is (null (hook:unsupported-tokens "- the helpers live in src/http"
+                                     "src/http/server.lisp:3:(defun serve ())"))
+      "control: a directory the output names as the parent of a file"))
 
 (test the-summary-check-refuses-a-number-or-identifier-that-is-not-in-the-output
   "A NUMBER IS CHECKED FOR OCCURRENCE, NOT FOR ITS PAIRING with the path beside it: 56 is refused
@@ -343,10 +347,14 @@ server. A change that drops one fails here rather than in a user's session."
     (is (member "--json-schema" args :test #'string=))))
 
 (test run-hook-prints-nothing-on-bad-input
-  (let ((out (with-output-to-string (o)
-               (with-input-from-string (i "garbage")
-                 (hook:run-hook :input i :output o)))))
-    (is (string= "" out))))
+  (with-directory (dir)
+    (let ((out (with-output-to-string (o)
+                 (with-input-from-string (i "garbage")
+                   (hook:run-hook :input i :output o :directory dir)))))
+      (is (string= "" out))
+      (is (search "\"reason\":\"not-an-event\""
+                  (uiop:read-file-string (merge-pathnames "hook.log" dir)))
+          "and the log line went to DIR, not to the user's cache"))))
 
 ;;; --- the report ----------------------------------------------------------------------------------
 
@@ -416,3 +424,276 @@ server. A change that drops one fails here rather than in a user's session."
                                     :stream (make-broadcast-stream))))
         (is (= 2 (getf summary :sessions)) "the session and its subagent")
         (is (= 5 (getf summary :calls)))))))
+
+;;; --- the review of #454: one test or more per finding --------------------------------------------
+
+;;; Finding 1: the praxeon backend.
+
+(test the-facts-spec-passes-praxeons-schema-check
+  "The schema declares maxItems, maxLength and additionalProperties, which praxeon's schema
+validation does not read, so GENERATE-STRUCTURED refuses the spec before any request unless a
+validator enforces them. Control: the same schema with no validator is refused."
+  (finishes (llm:check-schema-enforceable (hook:facts-spec)))
+  (signals llm:unenforceable-schema
+    (llm:check-schema-enforceable
+     (llm:make-tool-spec :name "record_facts" :description "x"
+                         :schema (jzon:parse (jzon:stringify (llm:tool-spec-schema (hook:facts-spec))))))))
+
+(test the-facts-validator-enforces-the-bounds
+  (flet ((args (&rest pairs) (apply #'%obj pairs)))
+    (is (null (hook:validate-facts (args "facts" (vector "a" "b")))))
+    (is (stringp (hook:validate-facts (args "facts" (make-array 21 :initial-element "a")))) "21 facts")
+    (is (stringp (hook:validate-facts (args "facts" (vector (make-string 301 :initial-element #\x))))) "a long fact")
+    (is (stringp (hook:validate-facts (args "facts" (vector "a") "extra" 1))) "another key")
+    (is (stringp (hook:validate-facts (args "facts" (vector 1)))) "not a string")))
+
+(defclass scripted-provider (llm:provider)
+  ((replies :initarg :replies :accessor scripted-replies)))
+
+(defmethod llm:complete ((p scripted-provider) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (pop (scripted-replies p)))
+
+(defmethod llm:supports-tool-choice-p ((p scripted-provider)) t)
+
+(defun %facts-call (&rest facts)
+  (llm:make-completion :tool-calls (list (llm:make-tool-call :id "c1" :name "record_facts"
+                                                            :arguments (%obj "facts" (coerce facts 'vector))))
+                       :stop-reason :tool-use))
+
+(test the-praxeon-backend-returns-the-providers-facts
+  "The whole praxeon backend, through GENERATE-STRUCTURED, with a scripted provider."
+  (let ((backend (make-instance 'hook:praxeon-provider
+                                :provider (make-instance 'scripted-provider
+                                                         :replies (list (%facts-call "one" "two"))))))
+    (is (equal '("one" "two") (hook:summarize backend "prompt" 10))))
+  (let ((backend (make-instance 'hook:praxeon-provider
+                                :provider (make-instance 'scripted-provider
+                                                         :replies (list (apply #'%facts-call
+                                                                               (make-list 21 :initial-element "x")))))))
+    (signals error (hook:summarize backend "prompt" 10) "a reply over the bounds is refused")))
+
+;;; Finding 2: kebab-case, pkg:sym, and matches on name boundaries.
+
+(test the-summary-check-catches-an-invented-kebab-case-name
+  "The case in the review: the output names %write-response and the summary says %send-response.
+Control: the same summary with the real name."
+  (is (equal '("%send-response")
+             (hook:unsupported-tokens "- src/server.lisp:120 defines %send-response" +small-raw+)))
+  (is (null (hook:unsupported-tokens "- src/server.lisp:120 defines %write-response" +small-raw+)))
+  (is (equal '("*default-max-tokens*")
+             (hook:unsupported-tokens "- it reads *default-max-tokens*" +small-raw+))
+      "a special variable's name keeps its earmuffs and is checked"))
+
+(test the-summary-check-reads-a-package-qualified-name-as-one-name
+  (let ((raw "src/hook.lisp:7:(hook:run-hook :input i)"))
+    (is (null (hook:unsupported-tokens "- src/hook.lisp:7 calls hook:run-hook" raw)))
+    (is (equal '("hook:stop-hook") (hook:unsupported-tokens "- src/hook.lisp:7 calls hook:stop-hook" raw)))))
+
+(test the-summary-check-matches-on-name-boundaries-not-substrings
+  (is (equal '("lib/server.lisp") (hook:unsupported-tokens "- lib/server.lisp" "mylib/server.lisp:1:x")))
+  (is (null (hook:unsupported-tokens "- mylib/server.lisp" "mylib/server.lisp:1:x")) "control")
+  (is (equal '("foo_bar") (hook:unsupported-tokens "- foo_bar is set" "foo_bar_baz = 1")))
+  (is (null (hook:unsupported-tokens "- foo_bar_baz is set" "foo_bar_baz = 1")) "control")
+  (is (equal '(".envrc") (hook:unsupported-tokens "- .envrc sets it" "config/.env.local:2:X=1")))
+  (is (null (hook:unsupported-tokens "- .envrc sets it" "./.envrc:2:X=1")) "control: a dotfile the output names"))
+
+;;; Finding 3: exact reads.
+
+(test a-search-that-reads-whole-files-is-passed-through
+  (dolist (command '("find src -name '*.lisp' -exec cat {} +"
+                     "find src -name '*.lisp' | xargs cat"
+                     "rg -l defun src | xargs sed -n 1,200p"
+                     "rg -N '' src/a.lisp"
+                     "rg --passthru x src/a.lisp"
+                     "grep -v zzz src/a.lisp"
+                     "find src -name '*.lisp' | while read f; do cat \"$f\"; done"
+                     "rg -n '^' src/a.lisp"))
+    (is (equal '(:pass :exact) (multiple-value-list (%eligibility command (%big))))
+        "~A" command))
+  (is (eq :replace (%eligibility "rg -n 'defun handle' src" (%big))) "control: a plain search"))
+
+;;; Finding 4: credentials, in the output and in the command.
+
+(test a-credential-in-the-command-is-never-sent
+  (is (equal '(:pass :credential)
+             (multiple-value-list (%eligibility "GITHUB_TOKEN=ghp_abcdefghij0123456789 rg -n handle src" (%big)))))
+  (with-directory (dir)
+    (let ((backend (make-instance 'stub-backend :facts '("x"))))
+      (hook:decide (%bash-event (%big) :command "API_KEY=abc rg -n handle src") backend :directory dir)
+      (is (= 0 (stub-calls backend)) "the summarizer is not called"))))
+
+(test the-wider-credential-patterns-are-caught
+  (dolist (text '("postgres://app:hunter2@db.internal:5432/prod" "sk_live_51Habcdef" "AIzaSyD-abcdef"
+                  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig" "hf_abcdefghij" "//registry.npmjs.org/:_authToken=abc"
+                  "https://hooks.slack.com/services/T0/B0/X" "machine api.example.com login me password pw"))
+    (is (rules:credential-like-p text) "~A" text))
+  (is-false (rules:credential-like-p "https://example.com/docs/page") "control: a URL with no password"))
+
+;;; Finding 5 and 9: the archive is private and does not follow links.
+
+(test the-archive-is-private-and-its-cleanup-does-not-follow-links
+  (if (uiop:os-windows-p)
+      (skip "file modes and symbolic links are Unix here")
+      (with-directory (dir)
+        (let* ((outside (merge-pathnames "outside/keep.txt" dir))
+               (archive-dir (merge-pathnames "cache/archive/" dir)))
+          (ensure-directories-exist outside)
+          (ensure-directories-exist archive-dir)
+          (with-open-file (o outside :direction :output) (write-string "keep" o))
+          ;; An old file outside the archive, and a link to it inside, named like an archive.
+          (uiop:symbol-call :sb-posix :utimes (uiop:native-namestring outside) 0 0)
+          (uiop:symbol-call :sb-posix :symlink (uiop:native-namestring outside)
+                            (uiop:native-namestring (merge-pathnames "old.txt" archive-dir)))
+          (let* ((path (hook:archive "raw output" :directory (merge-pathnames "cache/" dir) :days 1))
+                 (mode (logand #o777 (uiop:symbol-call :sb-posix :stat-mode
+                                                       (uiop:symbol-call :sb-posix :stat (uiop:native-namestring path)))))
+                 (dir-mode (logand #o777 (uiop:symbol-call :sb-posix :stat-mode
+                                                           (uiop:symbol-call :sb-posix :stat (uiop:native-namestring archive-dir))))))
+            (is (= #o600 mode) "the archived file is 0600, not ~O" mode)
+            (is (= #o700 dir-mode) "its directory is 0700, not ~O" dir-mode)
+            (is (probe-file outside) "the old file the link pointed to is still there"))))))
+
+(test the-archive-deletes-only-its-own-old-files
+  (if (uiop:os-windows-p)
+      (skip "sets a file's time with sb-posix")
+      (with-directory (dir)
+        (let ((archive-dir (merge-pathnames "archive/" dir)))
+          (ensure-directories-exist archive-dir)
+          (let ((old (merge-pathnames "old.txt" archive-dir)))
+            (with-open-file (o old :direction :output) (write-string "old" o))
+            (uiop:symbol-call :sb-posix :utimes (uiop:native-namestring old) 0 0)
+            (let ((new (hook:archive "new output" :directory dir :days 1)))
+              (is-false (probe-file old) "an archive older than DAYS is deleted")
+              (is (probe-file new) "and the new one is kept")))))))
+
+;;; Finding 6: outputs Claude Code already cut to a preview.
+
+(test an-output-claude-code-already-saved-to-a-file-is-passed-through
+  "Recorded 2026-09-30: an output of 205,926 characters arrived with stdout cut to 29,999 and
+persistedOutputPath set, and the model is shown a preview of about 2,000 characters. Replacing
+it with a summary would give the model more to read."
+  (let ((e (hook:parse-event (fixture "bash-persisted-event.json"))))
+    (is (> (length (hook:event-text e)) 25000))
+    (is (equal '(:pass :persisted) (multiple-value-list (hook:event-eligibility e)))))
+  (with-directory (dir)
+    (let ((backend (make-instance 'stub-backend :facts '("x"))))
+      (is (null (hook:decide (fixture "bash-persisted-event.json") backend :directory dir)))
+      (is (= 0 (stub-calls backend))))))
+
+;;; Finding 7 and the process group: the timeout covers the write, and nothing is left running.
+
+(defun %script (dir name body)
+  (let ((path (merge-pathnames name dir)))
+    (with-open-file (s path :direction :output) (format s "#!/bin/sh~%~A~%" body))
+    (uiop:symbol-call :sb-posix :chmod (uiop:native-namestring path) #o755)
+    (uiop:native-namestring path)))
+
+(defun %alive-p (pid)
+  (ignore-errors (uiop:symbol-call :sb-posix :kill pid 0) t))
+
+(test the-timeout-covers-a-prompt-the-child-does-not-read
+  "A 200,000-character prompt, larger than any pipe buffer, to a child that sleeps before it
+reads: the write blocks, and the call must still end at its timeout."
+  (if (uiop:os-windows-p)
+      (skip "the stand-in programs are sh scripts")
+      (with-directory (dir)
+        (let ((program (%script dir "late.sh" "sleep 20; cat > /dev/null; echo '{}'"))
+              (start (get-internal-real-time)))
+          (signals hook:summarizer-timeout
+            (hook:summarize (make-instance 'hook:claude-cli :program program)
+                            (make-string 200000 :initial-element #\x) 1))
+          (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 8))))))
+
+(test the-summarizers-children-are-killed-after-a-timeout-and-after-success
+  "A stand-in that starts a child of its own and records its pid. After a timeout, and after an
+answer in time, the child is gone: the whole process group is killed."
+  (if (uiop:os-windows-p)
+      (skip "the stand-in programs are sh scripts")
+      (with-directory (dir)
+        (let* ((pidfile (uiop:native-namestring (merge-pathnames "child.pid" dir)))
+               (slow (%script dir "slow.sh" (format nil "cat > /dev/null; sleep 30 & echo $! > ~A; wait" pidfile)))
+               (quick (%script dir "quick.sh"
+                               (format nil "cat > /dev/null; sleep 30 & echo $! > ~A; echo '{\"structured_output\":{\"facts\":[\"one\"]},\"modelUsage\":{\"m1\":{}}}'" pidfile))))
+          (flet ((child () (parse-integer (uiop:read-file-string pidfile) :junk-allowed t)))
+            (signals hook:summarizer-timeout
+              (hook:summarize (make-instance 'hook:claude-cli :program slow) "p" 2))
+            (sleep 0.3)
+            (is-false (%alive-p (child)) "the child of a timed-out call is killed")
+            (is (equal '("one") (hook:summarize (make-instance 'hook:claude-cli :program quick) "p" 10)))
+            (sleep 0.3)
+            (is-false (%alive-p (child)) "and the child of a call that answered"))))))
+
+;;; Finding 8: nothing logs to the hook's stdout.
+
+(test after-run-hook-a-log-line-does-not-reach-stdout
+  (with-directory (dir)
+    (let ((out (with-output-to-string (o)
+                 (let ((*standard-output* o))
+                   (with-input-from-string (i "garbage")
+                     (hook:run-hook :input i :output o :directory dir))
+                   (aion/log:warn "a warning after the hook started" :n 1)))))
+      (is (string= "" out)))))
+
+;;; Lower: the report's categories carry no path or private name.
+
+(test a-reports-category-carries-no-path-or-private-name
+  (is (string= "Bash:script" (rules:tool-category "Bash" (%input "C:\\Users\\alice\\clients\\acme\\tool.exe x"))))
+  (is (string= "Bash:script" (rules:tool-category "Bash" (%input "./scripts/acme-corp-export.sh --all"))))
+  (is (string= "Bash:rg" (rules:tool-category "Bash" (%input "\"/usr/bin/rg\" x"))))
+  (is (string= "mcp" (rules:tool-category "mcp__acme-internal__lookup" nil)) "an MCP server's name is dropped"))
+
+;;; Lower: the counterparts of the size rules, and the log line.
+
+(test a-summary-within-the-bounds-is-accepted
+  (let ((raw (%big 300 "src/other.lisp")))
+    (is (eq t (hook:check-summary "- src/other.lisp:1 defines handle-request" raw))
+        "counterpart of :empty, :over-budget and :too-little-smaller")))
+
+(test the-log-line-holds-counts-and-reasons-only
+  (with-directory (dir)
+    (multiple-value-bind (out fields)
+        (hook:decide (%bash-event (%big)) (make-instance 'stub-backend :facts '("src/module.lisp:1 defines handle-request"))
+                     :directory dir)
+      (declare (ignore out))
+      (hook:log-event fields :directory dir)
+      (let ((line (jzon:parse (uiop:read-file-string (merge-pathnames "hook.log" dir)))))
+        (is (equal "Bash:rg" (gethash "category" line)))
+        (is (equal "replace" (gethash "decision" line)))
+        (is (integerp (gethash "raw-tokens" line)))
+        (is (integerp (gethash "sent-tokens" line)))
+        (is (null (gethash "facts" line)))
+        (is-false (search "handle-request" (uiop:read-file-string (merge-pathnames "hook.log" dir)))
+                  "no text of the output or the summary")))))
+
+(test a-line-range-and-an-extension-are-read-as-what-they-are
+  "Found re-measuring after the review: 19-21, a line range, and .lisp, an extension named in
+prose, were refused as names. A range is checked as its numbers, and an extension as the end of
+a file name in the output. Controls: a range with a number not in the output, and a dotfile the
+output does not have."
+  (is (null (hook:unsupported-tokens "- src/server.lisp:120-120 and the .lisp files" +small-raw+)))
+  (is (equal '("121") (hook:unsupported-tokens "- src/server.lisp:120-121" +small-raw+)))
+  (is (equal '(".envrc") (hook:unsupported-tokens "- and .envrc" +small-raw+))))
+
+(test the-command-a-hyphenated-word-and-a-path-after-a-line-number-are-read-as-in-the-output
+  "Found re-measuring after the review. A glob quoted from the command is in the command, which
+the prompt shows; Clean-room and clean-room are one word; and a path that starts a match's text,
+after path:line:, is on a boundary. Controls: the same tokens with nothing to support them."
+  (let ((raw "docs/getting-started.md:24:./scripts/setup.sh for a Clean-room build"))
+    (is (null (hook:unsupported-tokens "- ./scripts/setup.sh does a clean-room build of *.lisp"
+                                       (format nil "~A~%~A" raw "rg -n x --glob *.lisp docs")))
+        "every token is supported by the output or the command")
+    (let ((big (concatenate 'string raw (string #\Newline) (%big 100 "src/other.lisp"))))
+      (is (eq t (hook:check-summary "- ./scripts/setup.sh does a clean-room build of *.lisp" big
+                                    :command "rg -n x --glob *.lisp docs"))
+          "and CHECK-SUMMARY looks the tokens up in the command it is given"))
+    (is (equal '("*.lisp") (hook:unsupported-tokens "- the *.lisp files" raw))
+        "control: without the command, the glob is not supported")
+    (is (equal '("dirty-room") (hook:unsupported-tokens "- a dirty-room build" raw)))
+    (is (equal '("%Clean-room") (hook:unsupported-tokens "- %Clean-room" raw))
+        "a %-name keeps its exact match, since it has a character other than letters and hyphens")))
+
+(test a-directory-with-its-trailing-slash-is-the-directory
+  (is (null (hook:unsupported-tokens "- the helpers are in mnemosyne/tests/" "mnemosyne/tests/pool.lisp:30:x")))
+  (is (equal '("mnemosyne/lib") (hook:unsupported-tokens "- the helpers are in mnemosyne/lib/" "mnemosyne/tests/pool.lisp:30:x"))
+      "control: a directory the output does not have"))

@@ -48,10 +48,13 @@ its tag.
     above 3,500 tokens with a list of facts from a second model, after checking that every path,
     identifier and number in the list occurs in the output; otherwise it prints nothing and the
     original passes through. It never replaces reads, diffs, failed commands, credential-shaped
-    text, or output carrying SHAs or run ids. Settings are `PRAXEON_CC_*` environment variables:
-    the backend (the `claude` CLI, or a `praxeon/llm` provider with the role `compressor`),
-    model, effort, threshold, summary budget, timeout, archive age and cache directory.
-    Installing it is described in `praxeon/docs/claude-code-hook.md`.
+    text in the output or the command, outputs Claude Code already saved to a file, or output
+    carrying SHAs or run ids. The raw output is archived 0600 under the user's cache directory.
+    Settings, all environment variables: `PRAXEON_CC_BACKEND` (`claude`, the default, for the
+    `claude` CLI, or `praxeon` for a `praxeon/llm` provider with the role `compressor`),
+    `PRAXEON_CC_MODEL`, `PRAXEON_CC_EFFORT`, `PRAXEON_CC_CLAUDE`, `PRAXEON_CC_THRESHOLD`,
+    `PRAXEON_CC_SUMMARY_BUDGET`, `PRAXEON_CC_TIMEOUT`, `PRAXEON_CC_ARCHIVE_DAYS` and
+    `PRAXEON_CC_CACHE_DIR`. Installing it is described in `praxeon/docs/claude-code-hook.md`.
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
   `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,
