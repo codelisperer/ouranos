@@ -181,13 +181,25 @@ error message. Detecting it turns all of that into one line."
      (handler-case
       (dolist (f (sort (copy-list files) #'string<) nil)
         (setf current f)
-        (let ((diag (make-string-output-stream)))
+        (let ((diag (make-string-output-stream))
+              (full-warning nil))
           (multiple-value-bind (out warnp failp)
               (let ((*error-output* (make-broadcast-stream *error-output* diag))
                     (*standard-output* (make-broadcast-stream *standard-output* diag)))
-                (compile-file f :verbose nil :print nil))
+                ;; Each file in a compilation unit of its own, and any full WARNING in it
+                ;; counted as a failure, whatever COMPILE-FILE's FAILURE-P says. SBCL defers
+                ;; some warnings, an undefined variable among them, to the end of the
+                ;; outermost compilation unit; when RELOAD! runs inside one -- a REPL form, or
+                ;; ASDF's TEST-OP, where #438's tests first ran in CI -- COMPILE-FILE returns
+                ;; FAILURE-P NIL for a file that warned, and the bad file loaded as if clean.
+                ;; The :OVERRIDE unit ends here, so its deferred warnings are signalled here.
+                (handler-bind ((warning (lambda (c)
+                                          (unless (typep c 'style-warning)
+                                            (setf full-warning t)))))
+                  (with-compilation-unit (:override t)
+                    (compile-file f :verbose nil :print nil))))
             (declare (ignore warnp))
-            (when (or (null out) failp)
+            (when (or (null out) failp full-warning)
               (let ((text (string-trim '(#\Space #\Newline #\Return)
                                        (get-output-stream-string diag))))
                 (error "~A" (if (plusp (length text)) text "compilation failed"))))
