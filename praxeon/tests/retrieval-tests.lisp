@@ -66,7 +66,10 @@ without it skips them all, and the BACKEND-CHECKS line is what keeps that from r
       (if url
           (format t "~&BACKEND-CHECKS postgres ~D~%" (ran results))
           (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
-      (format t "~&BACKEND-CHECKS sqlite ~D~%" (ran sqlite-results)))
+      (format t "~&BACKEND-CHECKS sqlite ~D~%" (ran sqlite-results))
+      ;; Which SQLite file those checks ran against, and its version, in the line
+      ;; scripts/verify-tree.lisp reads (#129).
+      (format t "~&SQLITE-LIBRARY ~A~%" (mnemosyne/sqlite-library:describe-loaded-library)))
     (finish-output)
     (and (results-status chunker-results) (results-status results)
          (results-status sqlite-results))))
