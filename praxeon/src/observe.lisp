@@ -98,6 +98,9 @@ window, Mastra's step.")
    (max-attempts :initarg :max-attempts :reader observer-max-attempts)
    (retry-delay :initarg :retry-delay :reader observer-retry-delay)
    (window-timeout :initarg :window-timeout :reader observer-window-timeout)
+   (reflect-threshold :initarg :reflect-threshold :reader observer-reflect-threshold)
+   (reflect-accept :initarg :reflect-accept :reader observer-reflect-accept)
+   (reflect-accept-protected :initarg :reflect-accept-protected :reader observer-reflect-accept-protected)
    (mark :initarg :mark :accessor observer-mark)
    (skipped :initarg :skipped :accessor observer-skipped)
    (failures :initform 0 :accessor observer-failures)
@@ -153,7 +156,8 @@ before `praxeon/memory:forget-subject'."
 (defun make-observer (provider store subject thread
                       &key (step *step-tokens*) (accept (constantly nil)) (promote (constantly nil))
                            (promote-accept (constantly nil)) verify distil-options
-                           (max-attempts 3) (retry-delay 2) (window-timeout 300) mark)
+                           (max-attempts 3) (retry-delay 2) (window-timeout 300) mark reflect-threshold
+                           (reflect-accept (constantly nil)) (reflect-accept-protected (constantly nil)))
   "An observer of THREAD (a string, usually the conversation's id) about SUBJECT, distilling
 with PROVIDER into STORE, a PRAXEON/MEMORY:MEMORY-STORE.
 
@@ -172,14 +176,22 @@ window may take before OBSERVER-STUCK-P says so. MARK, when given, is where to s
 it is what STORE records (STORED-MARK), and the skipped windows always come from there. Either
 way, a run takes the store's progress instead when that is further on.
 
-ACCEPT, PROMOTE and PROMOTE-ACCEPT must be functions, or names of functions: NIL is refused here
-rather than failing every window later."
+ACCEPT, PROMOTE, PROMOTE-ACCEPT, REFLECT-ACCEPT and REFLECT-ACCEPT-PROTECTED must be functions,
+or names of functions: NIL is refused here rather than failing every window later.
+
+REFLECT-THRESHOLD, when given, makes the observer REFLECT on the thread after each window it
+writes, once the thread's observations pass that many estimated tokens, with REFLECT-ACCEPT and
+REFLECT-ACCEPT-PROTECTED as REFLECT's ACCEPT and ACCEPT-PROTECTED (both refuse by default). A
+reflection that fails is counted and logged, and does not undo or retry the window."
   (check-type thread string)
   (unless (and (integerp step) (plusp step))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":step must be a positive integer, not ~S" step)))
   (unless (and (integerp max-attempts) (plusp max-attempts))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":max-attempts must be a positive integer, not ~S" max-attempts)))
-  (loop for (name value) on (list :accept accept :promote promote :promote-accept promote-accept) by #'cddr
+  (loop for (name value) on (list :accept accept :promote promote :promote-accept promote-accept
+                                 :reflect-accept reflect-accept
+                                 :reflect-accept-protected reflect-accept-protected)
+        by #'cddr
         unless (or (functionp value) (and value (symbolp value) (fboundp value)))
           do (error 'praxeon/conditions:praxeon-error
                     :detail (format nil "~S must be a function, not ~S" name value)))
@@ -199,6 +211,8 @@ rather than failing every window later."
                              :verify verify :distil-options distil-options
                              :max-attempts max-attempts :retry-delay retry-delay
                              :window-timeout window-timeout
+                             :reflect-threshold reflect-threshold :reflect-accept reflect-accept
+                             :reflect-accept-protected reflect-accept-protected
                              :mark (or mark stored 0) :skipped skipped)))
 
 (defun unobserved (observer history)
@@ -431,12 +445,33 @@ was written. Never raises: this runs on a thread of its own."
                (error (e)
                  (incf (observer-failures observer))
                  (setf (observer-last-error observer) e))))
+    (when (and (eq outcome :written) (observer-reflect-threshold observer))
+      (%reflect-thread observer))
     (log:info "memory observer window" :thread (observer-thread observer)
                                        :from (1+ start) :through end :outcome outcome :written written
                                        :failures (observer-failures observer)
                                        :ms (round (* 1000 (- (get-internal-real-time) began))
                                                   internal-time-units-per-second))
     outcome))
+
+(defun %reflect-thread (observer)
+  "REFLECT on the observer's thread after a window was written. A failure is counted, recorded
+and logged; the window stays written and the mark moves past it."
+  (handler-case
+      (let ((written (reflect (observer-provider observer) (observer-store observer)
+                              (observer-subject observer)
+                              :thread (observer-thread observer)
+                              :threshold (observer-reflect-threshold observer)
+                              :accept (observer-reflect-accept observer)
+                              :accept-protected (observer-reflect-accept-protected observer))))
+        (when written
+          (log:info "memory observer reflected" :thread (observer-thread observer)
+                                                :condensed (length written))))
+    (error (e)
+      (incf (observer-failures observer))
+      (setf (observer-last-error observer) e)
+      (log:warn "memory observer reflection failed" :thread (observer-thread observer)
+                                                    :condition (string-downcase (princ-to-string (type-of e)))))))
 
 (define-condition window-not-distilled (praxeon/conditions:praxeon-error) ()
   (:documentation "distil could not read the model's answer for a window; carries its reason."))
@@ -496,15 +531,20 @@ was written. Never raises: this runs on a thread of its own."
   (find content (mem:observations-of store subject) :key #'mem:observation-content :test #'string=))
 
 (defun %lineage-contents (observation thread-observations)
-  "OBSERVATION's content and the content of every thread observation it descends from through
-SUPERSEDES, nearest first. THREAD-OBSERVATIONS includes superseded ones."
-  (let ((seen '()))
-    (loop for o = observation then (and (mem:observation-supersedes o)
-                                        (find (mem:observation-supersedes o) thread-observations
-                                              :key #'mem:observation-id :test #'string=))
-          while (and o (not (member (mem:observation-id o) seen :test #'string=)))
-          do (push (mem:observation-id o) seen)
-          collect (mem:observation-content o))))
+  "OBSERVATION's content and the content of every thread observation it descends from, through
+SUPERSEDES and through CONDENSED-FROM (#317, step B), so a correction of a condensed observation
+reaches the observations it was condensed from. THREAD-OBSERVATIONS includes superseded ones."
+  (let ((seen '()) (contents '()) (queue (list observation)))
+    (loop while queue
+          do (let ((o (pop queue)))
+               (unless (member (mem:observation-id o) seen :test #'string=)
+                 (push (mem:observation-id o) seen)
+                 (push (mem:observation-content o) contents)
+                 (dolist (id (remove nil (cons (mem:observation-supersedes o)
+                                               (mem:observation-condensed-from o))))
+                   (let ((parent (find id thread-observations :key #'mem:observation-id :test #'string=)))
+                     (when parent (setf queue (append queue (list parent)))))))))
+    (nreverse contents)))
 
 (defun %current-successor (fact facts)
   "The current fact FACT was superseded into, following SUPERSEDED-BY through FACTS; FACT itself
@@ -611,3 +651,106 @@ unchecked."
      (distil:distillation-subject distillation)
      (loop for p in proposals for i from 1
            when (member i numbers) collect p))))
+
+;;; --- the reflector (#317, step B) -------------------------------------------------------------
+;;;
+;;; When a scope's current observations pass a threshold, a model condenses them. Each condensed
+;;; observation names the observations it replaces, and `praxeon/memory:condense' writes it:
+;;; it supersedes them and records their ids, so `recall :as-of' before still answers what was
+;;; believed, and an erasure of a conversation still finds it (OBSERVATIONS-FROM-CONVERSATION).
+;;;
+;;; EVERY CONDENSATION GOES THROUGH THE APP. Condensing claims that several observations are
+;;; about one thing, which is the judgement `apply-distillation' already refuses to apply alone.
+;;; ACCEPT decides an ordinary condensation; one that would merge a correction, or an
+;;; observation at or above PROTECT-VALUE, needs ACCEPT-PROTECTED as well. Both refuse by
+;;; default. An app can accept everything for a thread and still keep corrections as they are.
+
+(defparameter *reflect-tokens* 40000
+  "How many estimated tokens of a scope's current observations start a reflection, Mastra's.")
+
+(defun %reflect-spec (ids)
+  (let ((validator
+          (lambda (arguments)
+            ;; One named block, so a problem found in the inner loop ends the whole check.
+            (block check
+              (let ((items (and (hash-table-p arguments) (gethash "condensed" arguments)))
+                    (used '()))
+                (unless (vectorp items)
+                  (return-from check "`condensed' must be an array"))
+                (loop for item across items
+                      for i from 0
+                      do (unless (hash-table-p item)
+                           (return-from check (format nil "item ~D is not an object" i)))
+                         (let ((content (gethash "content" item))
+                               (sources (gethash "sources" item)))
+                           (unless (and (stringp content) (plusp (length content)))
+                             (return-from check (format nil "item ~D has no content" i)))
+                           (unless (and (vectorp sources) (plusp (length sources)))
+                             (return-from check (format nil "item ~D names no sources" i)))
+                           (loop for id across sources
+                                 do (unless (member id ids :test #'equal)
+                                      (return-from check
+                                        (format nil "item ~D names ~S, which is not one of the observations" i id)))
+                                    (when (member id used :test #'equal)
+                                      (return-from check (format nil "~S is condensed twice" id)))
+                                    (push id used))))
+                nil)))))
+    (llm:make-tool-spec
+     :name "record_condensed"
+     :description "Record the condensed observations, each with the ids of the observations it replaces."
+     :schema (jzon:parse "{\"type\":\"object\",\"properties\":{\"condensed\":{\"type\":\"array\",\"description\":\"The condensed observations. Leave out any observation that should stay as it is.\",\"items\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"The condensed observation.\"},\"sources\":{\"type\":\"array\",\"description\":\"The ids of the observations it replaces.\",\"items\":{\"type\":\"string\"}}},\"required\":[\"content\",\"sources\"]}}},\"required\":[\"condensed\"]}")
+     :validators (list validator))))
+
+(defparameter *reflect-instructions*
+  "Below are observations, one per line, each after its id. Some of them repeat each other, or are several small facts about one thing. Condense those: for each group, write one observation that says everything the group says, and list the ids it replaces. Keep every name, date and number exactly. Leave out any observation that should stay as it is; it is kept unchanged. Do not add anything the observations do not say."
+  "What the reflector asks of its provider.")
+
+(defun %combined-provenance (sources)
+  "The provenance of an observation condensed from SOURCES: their conversation and the span of
+their turns when they share one conversation; otherwise a provenance naming no conversation
+(\"\", turn 0), since the sources are then recorded only in CONDENSED-FROM."
+  (let* ((ps (mapcar #'mem:observation-provenance sources))
+         (conversation (mem:provenance-conversation (first ps))))
+    (if (every (lambda (p) (string= (mem:provenance-conversation p) conversation)) ps)
+        (mem:make-provenance conversation
+                             (reduce #'min ps :key #'mem:provenance-turn)
+                             :through (reduce #'max ps :key (lambda (p) (or (mem:provenance-through p)
+                                                                            (mem:provenance-turn p)))))
+        (mem:make-provenance "" 0))))
+
+(defun reflect (provider store subject &key thread (threshold *reflect-tokens*)
+                                           (accept (constantly nil)) (accept-protected (constantly nil))
+                                           protect-value)
+  "Condense SUBJECT's current observations in THREAD's scope (NIL for facts about the subject)
+when they pass THRESHOLD estimated tokens. Returns the condensed observations written, or NIL
+when the scope is under the threshold or nothing was accepted. Signals when the model's answer
+cannot be read, so a caller can tell a failure from a reflection that changed nothing.
+
+ACCEPT is called with a condensation's content and its sources, true to write it. When any
+source is a correction, or has a value at or above PROTECT-VALUE, ACCEPT-PROTECTED must be true
+as well."
+  (let* ((current (mem:observations-of store subject :thread thread))
+         (tokens (reduce #'+ current :key #'mem:observation-tokens)))
+    (when (< tokens threshold)
+      (return-from reflect nil))
+    (let* ((ids (mapcar #'mem:observation-id current))
+           (listing (with-output-to-string (s)
+                      (dolist (o current)
+                        (format s "~A: [~(~A~)] ~A~%" (mem:observation-id o) (mem:observation-kind o)
+                                (mem:observation-content o)))))
+           (arguments (llm:generate-structured provider
+                                               (list (llm:msg "user" (format nil "~A~%~%~A" *reflect-instructions* listing)))
+                                               (%reflect-spec ids)))
+           (written '()))
+      (loop for item across (gethash "condensed" arguments)
+            for sources = (loop for id across (gethash "sources" item)
+                                collect (find id current :key #'mem:observation-id :test #'equal))
+            for content = (gethash "content" item)
+            for protected = (some (lambda (o) (or (eq :correction (mem:observation-kind o))
+                                                  (and protect-value (>= (mem:observation-value o) protect-value))))
+                                  sources)
+            when (and (funcall accept content sources)
+                      (or (not protected) (funcall accept-protected content sources)))
+              do (push (mem:condense store sources content :provenance (%combined-provenance sources))
+                       written))
+      (nreverse written))))

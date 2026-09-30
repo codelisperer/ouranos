@@ -457,14 +457,14 @@ subject's facts does not return a thread observation, and the reverse."
     (is (= 2 (length (mem:observations-of store "member-5" :thread :all))))))
 
 (test ensure-schema-adds-the-thread-columns-to-a-table-made-before-them
-  "A table made before #317 has no thread or source_through column. Every read fails on it, not
-only a thread's, because a read of the subject's facts filters on THREAD IS NULL; that is why
-the CHANGELOG says to run ENSURE-SCHEMA before reading. ENSURE-SCHEMA adds the columns, and the
+  "A table made before #317 has no thread, source_through or condensed_from column. Every read
+fails on it, not only a thread's, because a read of the subject's facts filters on THREAD IS
+NULL; that is why the CHANGELOG says to run ENSURE-SCHEMA before reading. ENSURE-SCHEMA adds the columns, and the
 row written before them reads back as a fact about its subject. Running it again changes
 nothing."
   (with-store (store)
     (mem:remember store "member-6" "Written before the upgrade." :provenance (test-provenance))
-    (dolist (column '("thread" "source_through"))
+    (dolist (column '("thread" "source_through" "condensed_from"))
       (conn:exec (mdb::store-connection store)
                  (format nil "ALTER TABLE ~A DROP COLUMN ~A" (mdb:store-table store) column)))
     (signals error (mem:observations-of store "member-6") "a plain read fails before the upgrade")
@@ -646,3 +646,75 @@ refused and its replacement rolled back."
                  (mapcar #'mem:observation-content
                          (mem:observations-of store "member-16" :include-superseded t)))
           "the replacement was rolled back"))))
+(test condense-round-trips-through-the-database
+  "CONDENSE on the SQL store: the sources are superseded and the new row records their ids,
+read back as written, and the conversation lookup finds it."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-7" "Likes tea." :thread "conv-7"
+                            :provenance (mem:make-provenance "conv-A" 1)))
+           (b (mem:remember store "member-7" "Likes green tea." :thread "conv-7"
+                            :provenance (mem:make-provenance "conv-A" 2)))
+           (c (mem:condense store (list a b) "Likes green tea." :provenance (mem:make-provenance "conv-A" 1 :through 2))))
+      (let ((current (mem:observations-of store "member-7" :thread "conv-7")))
+        (is (equal (list (mem:observation-id c)) (mapcar #'mem:observation-id current)))
+        (is (equal (list (mem:observation-id a) (mem:observation-id b))
+                   (mem:observation-condensed-from (first current))))
+        (is (= 3 (length (mem:observations-from-conversation store "member-7" "conv-A"))))))))
+
+(defclass breaks-after-remember (mdb:db-memory-store) ()
+  (:documentation "A store whose REMEMBER signals after its row is written, standing in for a
+failure part-way through CONDENSE."))
+
+(defmethod mem:remember :after ((store breaks-after-remember) subject content &key &allow-other-keys)
+  (declare (ignore subject content))
+  (error "the database went away"))
+
+(test condense-that-fails-part-way-leaves-nothing-behind
+  "CONDENSE writes the new row and then supersedes its sources. A failure between the two rolls
+back the new row, so the scope does not hold the condensed observation beside its sources."
+  (with-store (store)
+    (let ((a (mem:remember store "member-11" "Likes tea." :thread "conv-8" :provenance (test-provenance)))
+          (b (mem:remember store "member-11" "Likes green tea." :thread "conv-8" :provenance (test-provenance))))
+      (change-class store 'breaks-after-remember)
+      (signals error (mem:condense store (list a b) "Likes green tea." :provenance (test-provenance)))
+      (change-class store 'mdb:db-memory-store)
+      (is (equal '("Likes green tea." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content
+                               (mem:observations-of store "member-11" :thread "conv-8" :include-superseded t))
+                       #'string<))
+          "only the two sources are stored, both current"))))
+
+(test condense-embeds-before-it-takes-the-stores-lock
+  "A condensation whose embedding takes 0.6 s does not hold the store's lock meanwhile."
+  (with-store (store (make-instance 'slow-embedder))
+    (let* ((a (mem:remember store "member-17" "Likes tea." :thread "conv-9" :provenance (test-provenance)))
+           (b (mem:remember store "member-17" "Likes green tea." :thread "conv-9" :provenance (test-provenance 2)))
+           (worker (bt:make-thread (lambda ()
+                                     (mem:condense store (list a b) "Slowly: likes green tea."
+                                                   :provenance (test-provenance 3)))
+                                   :name "condense-test")))
+      (sleep 0.15)
+      (let ((began (get-internal-real-time)))
+        (mem:observations-of store "member-17")
+        (let ((waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))
+          (is (< waited 0.3) "the read waited ~,3F s" waited)))
+      (bt:join-thread worker)
+      (is (equal '("Slowly: likes green tea.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-17" :thread "conv-9")))))))
+
+(test condense-refuses-a-source-another-process-superseded-after-its-check
+  "A source superseded between CONDENSE's check and its update, as by another process, makes the
+condensation fail and roll back."
+  (with-store (store)
+    (let ((a (mem:remember store "member-18" "Likes tea." :thread "conv-9" :provenance (test-provenance)))
+          (b (mem:remember store "member-18" "Likes green tea." :thread "conv-9" :provenance (test-provenance 2))))
+      (change-class store 'interrupted-store)
+      (let ((*superseded-meanwhile* (mem:observation-id b)))
+        (signals cnd:praxeon-error
+          (mem:condense store (list a b) "Likes green tea." :provenance (test-provenance 3))))
+      (change-class store 'mdb:db-memory-store)
+      (is (equal '("Likes green tea." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content
+                               (mem:observations-of store "member-18" :thread "conv-9" :include-superseded t))
+                       #'string<))
+          "the condensed observation was rolled back"))))

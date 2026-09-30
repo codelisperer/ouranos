@@ -35,10 +35,11 @@ its tag.
   observation, in one process or two, no longer leave two current replacements. An app that
   superseded the same observation twice now gets a `praxeon-error` on the second call. The
   embedding is computed before the lock is taken, so a read does not wait for the model.
-- **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
-  `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
+- **praxeon/memory-db: every read needs three new columns, and `ensure-schema` adds them** (#317):
+  `thread` (TEXT), `source_through` (BIGINT on Postgres, INTEGER on SQLite) and `condensed_from`
+  (TEXT). A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
-  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
+  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the three
   columns in its own migration before it reads. Existing rows become facts about their subject,
   as they were. `ensure-schema` also creates a second table, the observations table's name with
   `_progress` appended: `id` (TEXT, the primary key, which `record-thread-progress` upserts on),
@@ -92,8 +93,8 @@ its tag.
     then it is distilled and promoted as if it had never been skipped. Once an observation from a
     later window is in the thread, the skipped window is closed: it is never retried, and
     `observer-skipped` shows it as `(from through tries :closed)`.
-  - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
-    the name of one.
+  - `make-observer` refuses `:accept`, `:promote`, `:promote-accept`, `:reflect-accept` or
+    `:reflect-accept-protected` that is not a function or the name of one.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
     does. A fact the subject already holds is not stored again. A promoted observation is
@@ -120,6 +121,25 @@ its tag.
     `valid-from`; `distil` takes `:today` to tell the model the date (the observer passes the
     time `observe-turn` was called, in UTC); a date that cannot be read drops only its own
     proposal. `apply-distillation` takes `:thread`.
+- **praxeon/observe: `reflect` condenses a scope's observations once they pass a threshold**
+  (#317, step B), 40,000 estimated tokens by default. A model returns condensed observations,
+  each naming the observations it replaces, and each is written only when the app's `:accept`
+  allows it; one that would merge a correction, or an observation at or above `:protect-value`,
+  also needs `:accept-protected`. Both refuse by default. `reflect` signals when the model's
+  answer cannot be read. An observer made with `:reflect-threshold` reflects on its thread after
+  each window it writes; a reflection that fails is counted in `observer-failures` and logged,
+  and the window stays written.
+  - `praxeon/memory:condense` replaces several current observations in one scope with one,
+    which supersedes them and records their ids in `observation-condensed-from`, so `recall
+    :as-of` before still returns them. It checks that every source is still current and writes
+    in the same step: under the store's lock, and on the SQL store in one transaction whose
+    updates change a source only while it is still current. The SQL store computes the
+    condensed observation's embedding before taking the lock. It refuses a source named twice.
+    An app's own memory store implements `condense` before it can be reflected on. A promoted
+    correction of a condensed observation is matched to the subject facts its sources came from.
+  - `praxeon/memory:observations-from-conversation` returns every observation that came from a
+    conversation, including those condensed from one, at any depth: what an erasure of the
+    conversation has to find (#150).
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
