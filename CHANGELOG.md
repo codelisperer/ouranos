@@ -12,6 +12,21 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **hyperion/update-ui: `*poll-interval*` defaults to `"360m"`, and a value htmx would misread
+  is refused.** The default was `"6h"`. The htmx this tree ships (1.9.12) reads only `ms`, `s`
+  and `m`, and reads anything else with `parseFloat`, so `"6h"` meant 6 milliseconds: every page
+  with the update banner asked `/_hyperion/update/status` for its status many times a second.
+  `update-mount` and `update-banner` now check the value each time they render the trigger
+  (`checked-poll-interval`). They signal `invalid-poll-interval` for anything that is not a
+  number followed by `ms`, `s` or `m`, such as `"6h"`, `"1d"` or a bare `"5000"`, and for
+  anything shorter than 1 second.
+
+  An app acts if it sets `*poll-interval*`: write hours as minutes (`"360m"`, not `"6h"`) and
+  give a unit, or the first page that renders the banner signals the error. An app that kept
+  the default needs no change; it stops flooding its status route. (#422)
+
 ## v0.1.5 — 2026-09-30
 
 Changes since `v0.1.4`. The tag is on `f3fdf1a`.

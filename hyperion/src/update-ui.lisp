@@ -87,7 +87,9 @@
    ;; components
    #:update-mount #:update-banner
    ;; app-supplied
-   #:*restart* #:*poll-interval* #:*labels* #:restart-not-supported))
+   #:*restart* #:*poll-interval* #:*labels* #:restart-not-supported
+   ;; the poll interval, checked before it reaches the page (#422)
+   #:checked-poll-interval #:invalid-poll-interval #:invalid-poll-interval-value))
 
 (in-package #:hyperion/update-ui)
 
@@ -106,9 +108,73 @@ two is a banner whose buttons 404.")
   "The element id the banner targets. One id, because every response replaces the element
 that issued the request.")
 
-(defparameter *poll-interval* "6h"
-  "How often the banner re-checks. Design section 8: the check IS the poll -- there is no
-separate schedule, and no state kept between polls beyond hyperion/update's own.")
+(defparameter *poll-interval* "360m"
+  "How often the banner re-checks, as htmx reads it: a number followed by ms, s or m. Design
+section 8: the check IS the poll -- there is no separate schedule, and no state kept between
+polls beyond hyperion/update's own.
+
+Six hours is written 360m because htmx 1.9.12, which this tree vendors, knows no hours. Its
+interval parser strips ms, s or m and otherwise calls parseFloat on the whole string, so the
+old default \"6h\" was read as 6 ms, and every page with the banner polled the status route
+many times a second (#422). CHECKED-POLL-INTERVAL refuses such a value before it reaches the
+page.")
+
+(defparameter +minimum-poll-seconds+ 1
+  "The shortest poll interval the banner accepts. Below a second, htmx itself becomes the
+load: the page asks for the status faster than anyone can read it, and each request re-checks
+for an update. One second is the floor rather than something larger because it is the one
+value that is wrong for every app; how often above that an app wants to check is its own
+decision.")
+
+(define-condition invalid-poll-interval (error)
+  ((value :initarg :value :reader invalid-poll-interval-value)
+   (reason :initarg :reason :reader invalid-poll-interval-reason))
+  (:report (lambda (c s)
+             (format s "hyperion/update-ui: *poll-interval* is ~S, which ~A. Use a number followed by ms, s or m that comes to at least ~D second~:P, such as \"360m\" for six hours; htmx reads no other unit."
+                     (invalid-poll-interval-value c) (invalid-poll-interval-reason c)
+                     +minimum-poll-seconds+)))
+  (:documentation "Signalled when the banner would be rendered with a poll interval htmx
+would misread, or one that would poll more often than +MINIMUM-POLL-SECONDS+ (#422)."))
+
+(defun %interval-milliseconds (value)
+  "VALUE, a string, in milliseconds as htmx 1.9.12 reads it when its unit is ms, s or m, or
+NIL for anything else: another suffix such as h, which htmx would read as milliseconds by
+parseFloat; no suffix at all; or no plain decimal number before the suffix."
+  (flet ((number-of (digits)
+           (and (plusp (length digits))
+                (every (lambda (ch) (or (digit-char-p ch) (char= ch #\.))) digits)
+                (<= (count #\. digits) 1)
+                (some #'digit-char-p digits)
+                (let ((n (with-standard-io-syntax
+                           (let ((*read-eval* nil))
+                             (read-from-string
+                              (if (char= (char digits 0) #\.)
+                                  (concatenate 'string "0" digits)
+                                  digits))))))
+                  (and (realp n) n)))))
+    (when (stringp value)
+      (let ((n (length value)))
+        (cond ((and (> n 2) (string= "ms" value :start2 (- n 2)))
+               (number-of (subseq value 0 (- n 2))))
+              ((and (> n 1) (char= #\s (char value (1- n))))
+               (let ((x (number-of (subseq value 0 (1- n))))) (and x (* x 1000))))
+              ((and (> n 1) (char= #\m (char value (1- n))))
+               (let ((x (number-of (subseq value 0 (1- n))))) (and x (* x 60000))))
+              (t nil))))))
+
+(defun checked-poll-interval (&optional (value *poll-interval*))
+  "VALUE, returned unchanged when htmx will read it as meant and it is at least
++MINIMUM-POLL-SECONDS+; otherwise signals INVALID-POLL-INTERVAL. The banner calls this every
+time it renders its trigger, so an app that sets *POLL-INTERVAL* to something htmx misreads
+gets an error on the first page, not a flood of requests."
+  (let ((ms (%interval-milliseconds value)))
+    (cond ((null ms)
+           (error 'invalid-poll-interval
+                  :value value
+                  :reason "htmx 1.9.12 does not read as intended: it knows only ms, s and m, and reads anything else, such as 6h or a bare number, as milliseconds"))
+          ((< ms (* 1000 +minimum-poll-seconds+))
+           (error 'invalid-poll-interval :value value :reason "is shorter than the minimum"))
+          (t value))))
 
 (defparameter *labels*
   '(:available "A new version (~A) is available."
@@ -173,7 +239,7 @@ session's; omitting this argument in an app that has no CSRF middleware is corre
     (format nil "{\"~A\": \"~A\"}" csrf:*header-name* csrf-token)))
 
 (defun %render (status &key (prefix +update-prefix+) (id +banner-id+)
-                            (trigger (format nil "every ~A" *poll-interval*))
+                            (trigger (format nil "every ~A" (checked-poll-interval)))
                             labels notes-url csrf-token)
   "The banner element. Always the shell; children only when the state has something to say.
 
@@ -240,7 +306,7 @@ which is the only place `load' may appear. Route responses must never carry it: 
 inserts a new element, so a `load' in a reply re-requests itself forever."
   (declare (ignore prefix id labels notes-url csrf-token))
   (apply #'%render (list :status "unchecked" :version "" :block "" :detail "")
-         :trigger (format nil "load, every ~A" *poll-interval*)
+         :trigger (format nil "load, every ~A" (checked-poll-interval))
          args))
 
 ;;; --- the routes -------------------------------------------------------------

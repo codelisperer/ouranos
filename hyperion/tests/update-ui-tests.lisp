@@ -273,3 +273,64 @@ tell the two apart: two requests, two different tokens."
           (second (%body (%dispatch r :get "/status"))))
       (is (%contains first "tok-1"))
       (is (%contains second "tok-2")))))
+
+;;; --- the poll interval is one htmx reads as meant (#422) --------------------------
+;;;
+;;; The default was "6h". htmx 1.9.12 knows ms, s and m, and reads anything else with
+;;; parseFloat, so "6h" was 6 ms: every page with the banner asked for its status many times a
+;;; second, and it helped make the maintainer's machine unresponsive. The route test above
+;;; guarded the trigger against `load'; nothing guarded its interval.
+
+(defun %htmx-source ()
+  (uiop:read-file-string
+   (asdf:system-relative-pathname :hyperion "assets/vendor/htmx.min.js")))
+
+(test the-vendored-htmx-knows-only-ms-s-and-m
+  "The check below is written against this parser. If htmx is upgraded and learns another unit,
+this fails, and the check should be revisited rather than trusted."
+  (let ((src (%htmx-source)))
+    (is (search "version:\"1.9.12\"" src) "the vendored htmx is 1.9.12")
+    (is (search "if(e.slice(-2)==\"ms\"){t=parseFloat(e.slice(0,-2))}else if(e.slice(-1)==\"s\"){t=parseFloat(e.slice(0,-1))*1e3}else if(e.slice(-1)==\"m\"){t=parseFloat(e.slice(0,-1))*1e3*60}else{t=parseFloat(e)}"
+                src)
+        "the interval parser still reads ms, s and m, and parseFloat for anything else")))
+
+(test the-default-poll-interval-is-six-hours-in-minutes
+  (is (string= "360m" ui:*poll-interval*))
+  (is (%contains (ui:update-mount) "load, every 360m"))
+  (is (%contains (ui:update-banner (%status "up-to-date")) "every 360m")))
+
+(test a-poll-interval-htmx-would-misread-is-refused
+  (dolist (bad '("6h" "5000" "1d" "m" "1.2.3m" "-5m" "5 m" ""))
+    (let ((ui:*poll-interval* bad))
+      (signals ui:invalid-poll-interval (ui:update-mount))
+      (signals ui:invalid-poll-interval (ui:update-banner (%status "up-to-date"))))))
+
+(test a-poll-interval-below-a-second-is-refused
+  (dolist (fast '("500ms" "0.5s" "0s"))
+    (let ((ui:*poll-interval* fast))
+      (signals ui:invalid-poll-interval (ui:update-mount))))
+  (dolist (ok '("1s" "1000ms" "0.5m" "90s" "360m"))
+    (let ((ui:*poll-interval* ok))
+      (is (%contains (ui:update-mount) (format nil "load, every ~A" ok))
+          "~S is accepted" ok))))
+
+(test the-refusal-names-the-value-and-what-to-use
+  (let ((ui:*poll-interval* "6h"))
+    (handler-case (progn (ui:update-mount) (fail "6h was not refused"))
+      (ui:invalid-poll-interval (e)
+        (is (equal "6h" (ui:invalid-poll-interval-value e)))
+        (let ((text (princ-to-string e)))
+          (is (search "\"6h\"" text))
+          (is (search "360m" text)))))))
+
+(test without-the-check-6h-reaches-the-page
+  "The control: the refusal above comes from CHECKED-POLL-INTERVAL. With it replaced by the
+identity, the same value renders, and the page would poll every 6 ms."
+  (let ((original (fdefinition 'ui:checked-poll-interval))
+        (ui:*poll-interval* "6h"))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'ui:checked-poll-interval)
+                 (lambda (&optional (value ui:*poll-interval*)) value))
+           (is (%contains (ui:update-mount) "load, every 6h")))
+      (setf (fdefinition 'ui:checked-poll-interval) original))))
