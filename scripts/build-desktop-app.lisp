@@ -316,7 +316,12 @@ itself already finished, and its exit code is what the caller returns."
                                "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
                                "--script" (namestring (or *load-truename* *load-pathname*))
                                "--system" *system* "--entry" *entry*
-                               "--name" *name* "--version" *version* "--out" *out*)
+                               "--name" *name* "--version" *version* "--out" *out*
+                               ;; Passed on so the re-run can put the same icon into the
+                               ;; launcher it compiles (#98). This block runs only when the
+                               ;; build is not already under the patched runtime, so the
+                               ;; re-run does not come back here.
+                               "--icon" (namestring icon))
                          (%window-icon-args)
                          (carry-args))
                         :output t :error-output t :ignore-error-status t
@@ -808,9 +813,9 @@ nothing."
     (format t "~&build-desktop-app: window icon -> ~A~%" (human-path:human-path target))))
 
 ;;; --- dump ---------------------------------------------------------------------
-;;; Through scripts/dump-image.lisp, which keeps :save-runtime-options t on Linux and Windows
-;;; (so the app's OWN argv reaches it, and the heap size in effect here is baked in; on macOS
-;;; the launcher does both, see below) and also runs UIOP's dump
+;;; Through scripts/dump-image.lisp, which keeps :save-runtime-options t on Linux (so the
+;;; app's OWN argv reaches it, and the heap size in effect here is baked in; on macOS and
+;;; Windows the launcher does both, see below) and also runs UIOP's dump
 ;;; and restore hooks. Without them the app kept this machine's temporary directory and fasl
 ;;; cache: an app built with the CI runner's TEMP and run by another user reported
 ;;; `C:\Users\runneradmin\AppData\Local\Temp\' as its temporary directory, and the updater
@@ -838,7 +843,34 @@ Exits with code 3, naming the compiler's output, if it does not compile."
         (format t "~&The Xcode Command Line Tools provide cc: xcode-select --install~%")
         (sb-ext:exit :code 3)))))
 
-(if (uiop:os-macosx-p)
+;;; ON WINDOWS THE BUNDLE IS A LAUNCHER, THE RUNTIME AND THE CORE TOO (#98): <name>.exe (the
+;;; launcher, scripts/windows-launcher.c), sbcl-runtime.exe and sbcl.core. Authenticode
+;;; appends its signature to the end of the file, where a dumped image keeps its core, so a
+;;; signed dumped image does not start; a signed runtime with a separate core does. The
+;;; launcher is compiled with MSVC, found as build-libuv.lisp finds it (scripts/msvc.lisp).
+(load (merge-pathnames "windows-launcher.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
+(defun %compile-windows-launcher (target heap-mb)
+  "Compile scripts/windows-launcher.c to TARGET, starting the runtime with HEAP-MB megabytes.
+Exits with code 3, naming the reason, if MSVC is missing or the compile fails."
+  (multiple-value-bind (ok output)
+      (ouranos-windows-launcher:compile-launcher
+       target heap-mb (merge-pathnames (format nil "~A/.launcher/" *out*) *root*))
+    (unless ok
+      (format t "~&build-desktop-app: could not compile the Windows launcher, scripts/windows-launcher.c:~%~A~%" output)
+      (format t "~&A Windows desktop app needs MSVC for its launcher, as a macOS one needs cc. The Build Tools with the C++ workload are enough:~%")
+      (format t "~&  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%")
+      (sb-ext:exit :code 3))))
+
+(defun %set-windows-icon (exe icon)
+  "Write ICON into EXE with scripts/windows-set-icon.ps1, as the icon step does for the runtime."
+  (uiop:run-program (list "powershell" "-NoProfile" "-ExecutionPolicy" "Bypass"
+                          "-File" (namestring (merge-pathnames "scripts/windows-set-icon.ps1" *root*))
+                          (namestring exe) (namestring icon))
+                    :output t :error-output t))
+
+(cond
+  ((uiop:os-macosx-p)
     (let ((launcher (merge-pathnames *name* *bundle*))
           (runtime (merge-pathnames "sbcl" *bundle*))
           (core (merge-pathnames "sbcl.core" *bundle*))
@@ -853,12 +885,29 @@ Exits with code 3, naming the compiler's output, if it does not compile."
       (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path core))
       (finish-output)
       (funcall (read-from-string "ouranos-dump:dump-core")
-               core (fdefinition (read-from-string *entry*))))
-    (let ((bin (merge-pathnames (if (uiop:os-windows-p)
-                                    (format nil "~A.exe" *name*)
-                                    *name*)
-                                *bundle*)))
-      (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path bin))
-      (finish-output)
-      (funcall (read-from-string "ouranos-dump:dump-executable")
-               bin (fdefinition (read-from-string *entry*)))))
+               core (fdefinition (read-from-string *entry*)))))
+  ((uiop:os-windows-p)
+   (let ((launcher (merge-pathnames (format nil "~A.exe" *name*) *bundle*))
+         (runtime (merge-pathnames "sbcl-runtime.exe" *bundle*))
+         (core (merge-pathnames "sbcl.core" *bundle*))
+         (heap-mb (floor (sb-ext:dynamic-space-size) (* 1024 1024))))
+     ;; The runtime this build is running under: the copy that carries the icon when the
+     ;; re-run above happened, so Task Manager shows the app's icon for it too.
+     (uiop:copy-file sb-ext:*runtime-pathname* runtime)
+     (format t "~&build-desktop-app: runtime  -> ~A~%" (human-path:human-path runtime))
+     (%compile-windows-launcher launcher heap-mb)
+     ;; The icon goes in before any signing, which a later step does: a resource update
+     ;; rewrites the file and drops an Authenticode signature (measured on #98).
+     (when *icon*
+       (%set-windows-icon launcher (probe-file *icon*)))
+     (format t "~&build-desktop-app: launcher -> ~A (heap ~D MB)~%" (human-path:human-path launcher) heap-mb)
+     (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path core))
+     (finish-output)
+     (funcall (read-from-string "ouranos-dump:dump-core")
+              core (fdefinition (read-from-string *entry*)))))
+  (t
+   (let ((bin (merge-pathnames *name* *bundle*)))
+     (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path bin))
+     (finish-output)
+     (funcall (read-from-string "ouranos-dump:dump-executable")
+              bin (fdefinition (read-from-string *entry*))))))

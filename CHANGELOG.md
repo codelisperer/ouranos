@@ -12,6 +12,26 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **A Windows desktop app is now three files: `<name>.exe`, `sbcl-runtime.exe` and
+  `sbcl.core`, and building one needs MSVC.** `scripts/build-desktop-app.lisp` no longer dumps
+  one executable on Windows. `<name>.exe` is a launcher compiled from
+  `scripts/windows-launcher.c` with `cl.exe`. It starts `sbcl-runtime.exe`, a copy of the SBCL
+  runtime, with `sbcl.core` beside it, the heap the build used, and the app's own arguments
+  unchanged, and it exits with the app's exit code. This is the shape a code signature can
+  cover: Authenticode appends its signature where a dumped image keeps its core, so a signed
+  dumped image did not start (#98).
+
+  An app acts if its packaging copies only `<name>.exe` (the installers in `scripts/installers/`
+  copy the whole bundle and need no change), or if it signs, hashes or inspects that one file:
+  the runtime is `sbcl-runtime.exe` beside it, and Task Manager shows that process under that
+  name. A machine that builds a Windows desktop app needs the Visual Studio Build Tools with the
+  C++ workload, as a Mac needs `cc`; without them the build exits with code 3 and says so.
+  `--icon` goes into both executables. `hyperion/update` recognises the new shape as a shipped
+  build (`%shipped-image-p`). `verify-bundle-windows.ps1` treats `sbcl-runtime.exe` as a helper
+  and traces it as the launcher's child. Linux builds are unchanged. (#98)
+
 ## v0.1.5 — 2026-09-30
 
 Changes since `v0.1.4`. The tag is on `f3fdf1a`.
