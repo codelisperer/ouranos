@@ -34,6 +34,12 @@ its tag.
   (NIL in a development image). The same answers are in `aion/platform` as `shipped-image-p` and
   `shipped-image-directory`, for code that does not load `hyperion/desktop`; `hyperion/update`
   now uses them and its private copy is gone. (#416)
+- **hyperion/dev: `serve` on `:uv` runs handlers on 2 worker threads by default.** It passes
+  `:server` and `:workers` to `hyperion/server:start` now (#432). Without workers, `:uv` runs
+  every handler on its loop thread, and a handler that re-enters the loop, as a streaming one
+  does, deadlocks there, so development behaved differently from a production entry point that
+  passes `:workers`. An app acts if it develops on `:uv` (`HYPERION_SERVER=uv`) and relies on
+  inline dispatch: pass `:workers nil`. Other backends keep `start`'s default. (#432)
 
 ### Added
 
@@ -73,6 +79,20 @@ its tag.
   only; and syncs from two processes are serialised by SQLite's write lock, not per corpus.
   The retrieval suite runs every test on both backends, and prints a `BACKEND-CHECKS sqlite`
   line beside the Postgres one.
+- **hyperion/server-uv with `:workers` encodes each plain response on the worker that ran its
+  handler.** The event loop's thread then only writes it. A response whose body is a string, an
+  octet vector or a list of them is encoded on the worker. A streamed body, a file, a HEAD
+  request, a body on a status that carries none, and a header that is refused all take the
+  loop's path as before. If a drain turns keep-alive off while the handler runs, the loop encodes
+  the response again so that it says the connection closes. Inline dispatch, with no
+  `:workers`, is unchanged. On macOS in `hyperion/bench` with 8 workers, the loop's time per
+  request fell from about 33 µs to about 23.5 µs, and `/tile` went from about 29,000 to about
+  41,000 requests/s. (#430)
+- **hyperion/dev: `serve` takes `:server`, `:workers` and `:watch-framework`.** `:server` and
+  `:workers` are passed to `hyperion/server:start`, so development can use the backend and
+  handler threads production uses (#432). `:watch-framework nil` stops watching hyperion's own
+  `src/`, for an app whose framework clone is pulled rather than edited; the default, `t`, is
+  unchanged. (#438)
 
 ### Fixed
 
@@ -99,6 +119,22 @@ its tag.
   before `run` could stop it on the way out left the server listening for as long as the image
   ran. `run` now starts the server with interrupts deferred, inside the cleanup that stops it.
   (#444)
+- **hyperion/server-uv sent the handler's body in responses to HEAD requests; it now sends the
+  status line and headers only, with the Content-Length a GET would get.** On a kept-alive
+  connection the extra octets were read as the start of the next response. A streamed body's
+  function is no longer called for HEAD, and a file body is not read. Hyperion's router already
+  stripped the body for routes it serves, so this affects Clack apps on `:server :uv` and
+  handlers that do not go through the router. (#449)
+- **hyperion/dev: a failed reload stays in the browser until the file loads, and says what
+  happened.** A Lisp file whose compile ended with a full `WARNING` failed its reload, and the
+  error reached the browser overlay, but the next change, such as a stylesheet, found no Lisp to
+  compile, cleared the error and refreshed the page. The failed file was not tried again until
+  it was edited, so from the browser hot reload looked broken and the file's changes never
+  loaded. A failed file is now retried with every later change, and the overlay keeps its error
+  until it compiles; other changes still refresh the page. The message names the file and says
+  that the running code is the version from before the change. When a structure's layout
+  changed, which a running image cannot load, for example after pulling the framework clone
+  under a running dev server, the message starts with "RESTART NEEDED". (#438)
 
 ## v0.1.6 — 2026-09-30
 

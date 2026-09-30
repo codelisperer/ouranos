@@ -440,6 +440,96 @@ an empty piece and a nested list handled like any other."
         (is (string= "12" (header-of r "Content-Length")))
         (is (equalp expected (sb-ext:string-to-octets (body-of r) :external-format :latin-1)))))))
 
+;;; --- HEAD ------------------------------------------------------------------
+
+(defun raw-exchange (port text)
+  "Write TEXT on a new connection and return everything the server sends until it closes, as
+latin-1 text. For responses a framed read would misjudge, such as one to HEAD."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (sb-ext:with-timeout +io-timeout+
+           (sock:socket-connect s #(127 0 0 1) port)
+           (let ((stream (sock:socket-make-stream s :input t :output t
+                                                    :element-type '(unsigned-byte 8))))
+             (write-sequence (sb-ext:string-to-octets text :external-format :latin-1) stream)
+             (force-output stream)
+             (read-all stream)))
+      (ignore-errors (sock:socket-close s)))))
+
+(defun head-then-get (port)
+  "Pipeline a HEAD and a closing GET on one connection. Returns the two responses as text,
+split where the second status line starts, or NIL for the second when only one arrived."
+  (let* ((text (raw-exchange port (concatenate 'string
+                                               (req "HEAD / HTTP/1.1" "Host: x")
+                                               (req "GET / HTTP/1.1" "Host: x"
+                                                    "Connection: close"))))
+         (second (search "HTTP/1.1 " text :start2 1)))
+    (values (subseq text 0 (or second (length text)))
+            (and second (subseq text second))
+            (count-status-lines text))))
+
+(defun body-after-head (response)
+  "The octets of RESPONSE after its head, as text."
+  (subseq response (+ 4 (search +crlfcrlf+ response))))
+
+(test a-head-request-gets-the-head-without-the-body
+  "A response to HEAD carries no body, whatever the handler returned (RFC 9110 9.3.2), and has
+the Content-Length a GET gets. On a kept-alive connection any body octets would be read as the
+start of the next response, so a HEAD and a GET are pipelined and exactly two responses must
+arrive, the first with nothing after its head."
+  (with-server (port (const-app 200 +ok+ (list "hello")))
+    (multiple-value-bind (head get lines) (head-then-get port)
+      (is (= 2 lines))
+      (is (eql 0 (search "HTTP/1.1 200" head)))
+      (is (string= "" (body-after-head head)) "the HEAD response carried a body")
+      (is-true get "no second response")
+      (when get
+        (is (string= "hello" (body-after-head get)))
+        (is (string= (header-of get "Content-Length") (header-of head "Content-Length"))
+            "HEAD's Content-Length ~S is not GET's ~S"
+            (header-of head "Content-Length") (header-of get "Content-Length"))))))
+
+(test a-head-request-for-a-file-gets-its-size-and-no-body
+  "A bare pathname body answers HEAD with the file's size as Content-Length and nothing else."
+  (uiop:with-temporary-file (:pathname path :type "txt")
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string "0123456789abcdef" out))
+    (with-server (port (const-app 200 +ok+ path))
+      (multiple-value-bind (head get lines) (head-then-get port)
+        (is (= 2 lines))
+        (is (string= "16" (header-of head "Content-Length")))
+        (is (string= "" (body-after-head head)))
+        (is (and get (string= "0123456789abcdef" (body-after-head get))))))))
+
+(test a-head-request-to-a-streamed-body-writes-the-head-and-calls-nothing
+  "A function body on HEAD: the head a GET would get (chunked), no chunks and no terminating
+chunk, and the function is not called. The connection stays usable: the pipelined GET that
+follows gets the streamed body."
+  (let ((calls (list 0)))
+    (with-server (port (lambda (env)
+                         (list 200 (list :content-type "text/plain")
+                               (lambda (writer)
+                                 (when (string= "HEAD" (string (getf env :request-method)))
+                                   (sb-ext:atomic-incf (car calls)))
+                                 (funcall writer "streamed")))))
+      (multiple-value-bind (head get lines) (head-then-get port)
+        (is (= 2 lines))
+        (is (string-equal "chunked" (header-of head "Transfer-Encoding")))
+        (is (string= "" (body-after-head head)) "the HEAD response carried chunks")
+        (is (and get (search "streamed" get)))
+        (is (= 0 (car calls)) "the body function ran for HEAD")))))
+
+(test a-head-request-to-a-bodiless-status-is-unchanged
+  "1xx, 204 and 304 carry no body and no Content-Length on any method (#383); HEAD keeps it
+so, and a body the handler supplied is still dropped."
+  (dolist (status '(204 304))
+    (with-server (port (const-app status +ok+ (list "never sent")))
+      (multiple-value-bind (head get lines) (head-then-get port)
+        (is (= 2 lines) "status ~D" status)
+        (is (null (header-of head "Content-Length")) "status ~D has a Content-Length" status)
+        (is (string= "" (body-after-head head)) "status ~D carried a body" status)
+        (is (and get (string= "" (body-after-head get))) "status ~D: GET carried a body" status)))))
+
 (test a-header-we-refuse-to-send-becomes-500
   "A CR in a header value is response splitting. It is never sanitised and never sent: the
 handler produced a bug, and a bug is a 500."
@@ -2179,3 +2269,120 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
         (sigterm (%serve-forever-stop-time :sigterm 2)))
     (is (< sigint 1) "SIGINT stops at once: ~,1Fs" sigint)
     (is (<= 2 sigterm 4) "SIGTERM keeps serving for the 2 s grace period first: ~,1Fs" sigterm)))
+
+;;; --- responses encoded on the worker (#430) --------------------------------------------
+;;;
+;;; With :WORKERS, %PREPARE encodes a plain response on the worker that ran its handler, and
+;;; %COMPLETE only writes it. Every other kind of response takes the loop's path as before.
+;;; The suite above mostly runs inline, where %PREPARE is skipped, so these run with workers.
+
+(defun completion-kinds (thunk)
+  "Call THUNK while recording, for each call to %COMPLETE, whether its result arrived already
+encoded: a list of :ENCODED or :RAW, in call order."
+  (let ((kinds '()) (lock (sb-thread:make-mutex)))
+    (sb-int:encapsulate 'srv::%complete 'record-kind
+                        (lambda (f conn app state result &rest more)
+                          (sb-thread:with-mutex (lock)
+                            (push (if (srv::encoded-p result) :encoded :raw) kinds))
+                          (apply f conn app state result more)))
+    (unwind-protect (funcall thunk)
+      (sb-int:unencapsulate 'srv::%complete 'record-kind))
+    (reverse kinds)))
+
+(test with-workers-a-plain-response-reaches-the-loop-already-encoded
+  "Where the encoding ran is the property, so it is asserted directly: with workers, a plain
+response arrives at %COMPLETE encoded; inline, it arrives as the handler's list, as before."
+  (let ((kinds (completion-kinds
+                (lambda ()
+                  (with-workers-server (port server (const-app 200 +ok+ (list "hello")))
+                    (is (string= "hello" (body-of (get* port "GET / HTTP/1.1" "Host: x")))))))))
+    (is (equal '(:encoded) kinds) "with workers: ~S" kinds))
+  (let ((kinds (completion-kinds
+                (lambda ()
+                  (with-server (port (const-app 200 +ok+ (list "hello")))
+                    (is (string= "hello" (body-of (get* port "GET / HTTP/1.1" "Host: x")))))))))
+    (is (equal '(:raw) kinds) "inline: ~S" kinds)))
+
+(test with-workers-head-still-gets-the-head-only
+  (with-workers-server (port server (const-app 200 +ok+ (list "hello")))
+    (multiple-value-bind (head get lines) (head-then-get port)
+      (is (= 2 lines))
+      (is (string= "" (body-after-head head)) "the HEAD response carried a body")
+      (is (and get (string= (header-of get "Content-Length") (header-of head "Content-Length")))))))
+
+(test with-workers-a-bodiless-status-carries-no-body-and-no-length
+  "1xx, 204 and 304 carry no Content-Length (#383), and a body the handler supplied is dropped.
+A response with such a body is left to the loop, which drops it with a warning; one without
+is encoded on the worker. Both are checked."
+  (dolist (body '(("never sent") nil))
+    (dolist (status '(204 304))
+      (with-workers-server (port server (const-app status +ok+ body))
+        (let ((text (raw-exchange port (concatenate 'string
+                                                    (req "GET / HTTP/1.1" "Host: x")
+                                                    (req "GET / HTTP/1.1" "Host: x"
+                                                         "Connection: close")))))
+          (is (= 2 (count-status-lines text)) "status ~D, body ~S" status body)
+          (is (null (search "Content-Length" text)) "status ~D, body ~S has a length" status body)
+          (is (null (search "never sent" text)) "status ~D: the body was sent" status))))))
+
+(test with-workers-a-streamed-body-stays-on-the-loop-path
+  (let ((kinds (completion-kinds
+                (lambda ()
+                  (with-workers-server (port server (stream-app "one" "two"))
+                    (let ((body (body-of (stream-get port "GET / HTTP/1.1" "Host: x"))))
+                      ;; The chunked text, framing included: "3 one 3 two 0".
+                      (is (and (search "one" body) (search "two" body)) "body: ~S" body)))))))
+    (is (equal '(:raw) kinds) "a function body must not be encoded on the worker: ~S" kinds)))
+
+(test with-workers-pipelined-responses-come-back-in-request-order
+  (with-workers-server (port server (echo-path-app))
+    (let ((rs (converse port (loop for i below 6 collect (req (format nil "GET /r~D HTTP/1.1" i)
+                                                             "Host: x"))
+                        :responses 6)))
+      (is (equal (loop for i below 6 collect (format nil "/r~D" i)) (mapcar #'body-of rs))))))
+
+(test with-workers-a-header-we-refuse-to-send-becomes-500
+  (let ((kinds (completion-kinds
+                (lambda ()
+                  (with-workers-server (port server
+                                        (const-app 200 (list :x-evil
+                                                             (format nil "a~AbSet-Cookie: c=1" +cr+))
+                                                   '("body")))
+                    (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))))))))
+    (is (equal '(:raw) kinds) "a refused header is left to the loop, which answers 500: ~S" kinds)))
+
+;;; --- dev:serve on :uv runs handlers on a worker pool (#432) ---------------------------------
+
+(defun %dev-serve-handler-thread (&rest serve-args)
+  "Start hyperion/dev:serve on :uv with SERVE-ARGS on an ephemeral port, answer one request,
+stop it, and return the name of the thread the handler ran on. The request guard is off: it
+checks the port the server was asked for, and 0 is not the port a request arrives on."
+  (let* ((root (uiop:ensure-directory-pathname
+                (merge-pathnames (format nil "hyperion-dev-uv-~D-~D" (get-universal-time) (random 100000))
+                                 (uiop:temporary-directory))))
+         (ran-on nil)
+         (d nil))
+    (ensure-directories-exist root)
+    (unwind-protect
+         (let ((*standard-output* (make-broadcast-stream)))
+           (setf d (apply #'hyperion/dev:serve
+                          (lambda ()
+                            (lambda (env)
+                              (declare (ignore env))
+                              (setf ran-on (sb-thread:thread-name sb-thread:*current-thread*))
+                              (list 200 +ok+ (list "x"))))
+                          :paths (list root) :server :uv :port 0 :request-guard :none
+                          :watch-framework nil :interval 5
+                          serve-args))
+           (get* (srv:server-port (hyperion/dev::dev-handler d)) "GET / HTTP/1.1" "Host: x")
+           ran-on)
+      (ignore-errors (hyperion/dev:unwatch d))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test dev-serve-on-uv-runs-handlers-on-a-worker-pool
+  (is (search "server-uv-worker" (or (%dev-serve-handler-thread :workers 2) ""))
+      "with :workers 2 the handler ran on the server's pool")
+  (is (search "server-uv-worker" (or (%dev-serve-handler-thread) ""))
+      "and with no :workers, dev:serve gives :uv a pool by default")
+  (is (not (search "server-uv-worker" (or (%dev-serve-handler-thread :workers nil) "")))
+      "control: with :workers nil it ran on the loop thread"))

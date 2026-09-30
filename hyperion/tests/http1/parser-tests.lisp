@@ -280,3 +280,62 @@ evaluates each part to build a failure report, so a bare variable is a compile-t
       (is-true (h1:head-complete? r) "a raised limit accepts it: ~A" (h1:head-reason r)))
     (is (= 431 (h1:head-status (h1:parse-head-limited (req "GET / HTTP/1.1" "X-A: b") 10)))
         "and a lowered one refuses a small head")))
+
+;;; --- CRLF scans agree with the generic search they replaced (#430) -----------------------
+
+(defparameter +crlfcrlf+ (concatenate 'string +crlf+ +crlf+))
+
+;;; This package uses CL, not Coalton, so the Coalton forms below name their symbols in full.
+;;; Each turns an (Optional UFix) into an integer, -1 for None, so CL can compare them.
+
+(defun crlf-index (s)
+  (coalton:coalton (coalton:match (h1::index-of-crlf (coalton:lisp (coalton:-> coalton:String) () s))
+                     ((coalton:Some i) (coalton:the coalton:Integer (coalton/classes:into i)))
+                     ((coalton:None) -1))))
+
+(defun crlf-index-reference (s)
+  (coalton:coalton (coalton:match (coalton/string:substring-index
+                                   h1::crlf (coalton:lisp (coalton:-> coalton:String) () s))
+                     ((coalton:Some i) (coalton:the coalton:Integer (coalton/classes:into i)))
+                     ((coalton:None) -1))))
+
+(defun crlfcrlf-index (s)
+  (coalton:coalton (coalton:match (h1::index-of-crlfcrlf (coalton:lisp (coalton:-> coalton:String) () s))
+                     ((coalton:Some i) (coalton:the coalton:Integer (coalton/classes:into i)))
+                     ((coalton:None) -1))))
+
+(defun crlfcrlf-index-reference (s)
+  (coalton:coalton (coalton:match (coalton/string:substring-index
+                                   h1::crlfcrlf (coalton:lisp (coalton:-> coalton:String) () s))
+                     ((coalton:Some i) (coalton:the coalton:Integer (coalton/classes:into i)))
+                     ((coalton:None) -1))))
+
+(defun split-crlf-reference (s)
+  "S split on CRLF, in plain CL, as the parser's SPLIT-CRLF did it with SUBSTRING-INDEX."
+  (loop with start = 0
+        for i = (search +crlf+ s :start2 start)
+        collect (subseq s start (or i (length s)))
+        while i do (setf start (+ i 2))))
+
+(test crlf-scans-agree-with-the-generic-search-they-replaced
+  ;; The parser finds CRLF and CRLFCRLF by scanning for CR (#430) instead of with
+  ;; STR:SUBSTRING-INDEX. Where a head ends and where each line ends decide what the parser
+  ;; reads as a request, so the two must agree on every input. 5,000 strings of up to 40
+  ;; characters drawn from CR, LF and a letter, from a fixed seed, plus the edge cases.
+  ;; One check per function, reporting the first disagreement, so the count stays small.
+  (let ((state (sb-ext:seed-random-state 430))
+        (alphabet (list +cr+ +lf+ #\a))
+        (cases (list "" (string +cr+) (string +lf+) +crlf+ +crlfcrlf+
+                     (concatenate 'string "a" +crlf+) (concatenate 'string (string +cr+) +crlfcrlf+))))
+    (dotimes (i 5000)
+      (push (coerce (loop repeat (random 41 state) collect (nth (random 3 state) alphabet))
+                    'string)
+            cases))
+    (flet ((first-disagreement (f reference)
+             (find-if (lambda (s) (not (equal (funcall f s) (funcall reference s)))) cases)))
+      (let ((bad (first-disagreement #'crlf-index #'crlf-index-reference)))
+        (is (null bad) "index-of-crlf disagrees on ~S" bad))
+      (let ((bad (first-disagreement #'crlfcrlf-index #'crlfcrlf-index-reference)))
+        (is (null bad) "index-of-crlfcrlf disagrees on ~S" bad))
+      (let ((bad (first-disagreement #'h1::split-crlf #'split-crlf-reference)))
+        (is (null bad) "split-crlf disagrees on ~S" bad)))))

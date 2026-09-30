@@ -343,25 +343,95 @@ fault."
   (boundary:check-elements (%ring-headers-flat headers) 'string
                            :function encoder :argument 'headers))
 
-(defun %write-response (conn status headers body keep-alive)
-  "Encode the head, refuse it if it is dangerous, and write head and body in one write. BODY
-is an octet vector or a list of them (see %BODY-PIECES). Head and body go to NET:WRITE-BYTES
-as pieces, not joined into a new vector first (#430)."
+(defun %encode-response (status headers body keep-alive)
+  "The response as the list of octet vectors NET:WRITE-BYTES writes, head first; or NIL and the
+reason, when a header is one we refuse to send. BODY is an octet vector or a list of them (see
+%BODY-PIECES). Pure: it may run on a worker thread (see %PREPARE)."
   (let* ((pieces (if (listp body) body (list body)))
          (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
                                        (loop for piece in pieces sum (length piece))
                                        keep-alive)))
+    (if (h1:encode-ok? encoded)
+        (cons (%latin1 (h1:encode-text encoded)) pieces)
+        (values nil (h1:encode-reason encoded)))))
+
+(defun %write-response (conn status headers body keep-alive)
+  "Encode the head, refuse it if it is dangerous, and write head and body in one write. BODY
+is an octet vector or a list of them (see %BODY-PIECES). Head and body go to NET:WRITE-BYTES
+as pieces, not joined into a new vector first (#430)."
+  (multiple-value-bind (pieces reason) (%encode-response status headers body keep-alive)
     (cond
-      ((h1:encode-ok? encoded)
-       (net:write-bytes conn (cons (%latin1 (h1:encode-text encoded)) pieces))
+      (pieces
+       (net:write-bytes conn pieces)
        keep-alive)
       (t
        ;; The handler produced a header we will not put on the wire. That is a bug in the
        ;; application, reported as a 500 -- never sanitised, never sent. NIL, because
        ;; H1:ENCODE-ERROR says Connection: close and the socket has to agree with it.
+       (log:warn "server-uv: response refused" :reason reason)
+       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       nil))))
+
+(defun %write-head-only (conn status headers length keep-alive)
+  "Answer a HEAD request: the head a GET would get, and no body (RFC 9110 9.3.2). LENGTH is
+the body's octet count, sent as Content-Length, or :CHUNKED for a streamed body, whose head
+says Transfer-Encoding: chunked as a GET's would. Returns KEEP-ALIVE, or NIL after a refused
+header has been answered with a 500, as %WRITE-RESPONSE does.
+
+Nothing after the head is written. On a kept-alive connection the client reads the next
+octets as the start of the next response, so a body here would have been taken for one."
+  (let ((encoded (if (eq length :chunked)
+                     (h1:encode-head-chunked-flat
+                      status (%head-strings headers 'h1:encode-head-chunked-flat) keep-alive)
+                     (h1:encode-head-flat
+                      status (%head-strings headers 'h1:encode-head-flat) length keep-alive))))
+    (cond
+      ((h1:encode-ok? encoded)
+       (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
+       keep-alive)
+      (t
        (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
        (net:write-bytes conn (%latin1 (h1:encode-error 500)))
        nil))))
+
+(defun %file-size (path)
+  "PATH's size in octets, signalling as %WRITE-FILE-RESPONSE does when it cannot be read."
+  (with-open-file (in path :element-type '(unsigned-byte 8) :if-does-not-exist nil)
+    (unless in
+      (error "hyperion/server-uv: the response body names a file that is not readable: ~A"
+             path))
+    (file-length in)))
+
+(defstruct (encoded (:constructor %make-encoded) (:copier nil))
+  "A response encoded on the worker that ran its handler (#430): the octet PIECES to write,
+the KEEP-ALIVE they were encoded for, and the handler's RESULT, kept in case the loop has to
+encode it again."
+  pieces keep-alive result)
+
+(defun %prepare (result keep-alive)
+  "RESULT encoded into an ENCODED, or RESULT itself when it is not the plain case.
+
+Runs on the worker thread that ran the handler, so the loop thread only writes (#430): the
+profile put encoding the head and body at about 17% of the loop's time, with the workers idle
+most of theirs. Only the plain case is taken here, a response triple whose body is a string,
+an octet vector or a list of them, with nothing to drop and every header one we send. Anything
+else is returned as it is and %COMPLETE handles it on the loop exactly as before: a
+condition, a function body (a stream), a bare pathname (a file), a body on a status that
+carries none, a header we refuse, or any error while encoding. So this can only do the plain
+case's work early, never decide something differently."
+  (or (ignore-errors
+       (when (and (consp result) (= 3 (length result)))
+         (destructuring-bind (status headers body) result
+           (unless (or (functionp body) (pathnamep body)
+                       (and (h1:body-forbidden? status) (not (%empty-body-p body))))
+             (let ((pieces (%encode-response status headers
+                                             (%body-pieces (if (h1:body-forbidden? status)
+                                                               nil
+                                                               body))
+                                             keep-alive)))
+               (when pieces
+                 (%make-encoded :pieces pieces :keep-alive keep-alive :result result)))))))
+      result))
 
 (defun %write-error (conn status)
   (net:write-bytes conn (%latin1 (h1:encode-error status))))
@@ -1320,7 +1390,7 @@ checked rather than assumed -- an unframed string on the wire desynchronises the
     (when (h1:encode-ok? encoded)
       (net:write-bytes conn (%latin1 (h1:encode-text encoded))))))
 
-(defun %complete (conn app state result keep-alive)
+(defun %complete (conn app state result keep-alive &optional head-request)
   "Write the response for the request in flight, then resume the connection.
 
 RUNS ON THE LOOP THREAD, and exactly once per request. RESULT is either the response triple
@@ -1342,47 +1412,27 @@ written into a closed socket."
     (when (car (conn-state-drain state)) (setf keep-alive nil))
     (unless (conn-state-done state)
       (let ((kept
-              (if (typep result 'condition)
-                  (progn
-                    (log:error "server-uv: handler signalled"
-                               :condition (princ-to-string result))
-                    (%write-error conn 500)
-                    nil)
-                  (handler-case
-                      (destructuring-bind (status headers body) result
-                        ;; A 1xx, 204 or 304 carries no body, and the encoder writes no
-                        ;; Content-Length for one. A body a handler supplied anyway is dropped
-                        ;; with a warning rather than refused, as Hunchentoot does, so a Clack
-                        ;; app that works there does not get a 500 here (#373). Writing it would
-                        ;; be read by the client as the start of the next response.
-                        (when (h1:body-forbidden? status)
-                          (unless (%empty-body-p body)
-                            (log:warn "server-uv: dropped the body of a response whose status carries none"
-                                      :status status))
-                          (setf body nil))
-                        (cond
-                          ((functionp body)
-                           (%stream-response conn app state status headers body keep-alive))
-                          ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (pre-publication issue 313):
-                          ;; a known Content-Length with the body written in pieces. A
-                          ;; pathname INSIDE a list still goes through %BODY-OCTETS, because
-                          ;; a list body is pieces to concatenate and there is one length for
-                          ;; the lot -- hyperion/static returns the pathname itself, which is
-                          ;; the case that matters.
-                          ((pathnamep body)
-                           (%write-file-response conn app state status headers body
-                                                 keep-alive))
-                          (t
-                           (%write-response conn status headers (%body-pieces body)
-                                            keep-alive))))
-                    (error (e)
-                      ;; The RESPONSE was unusable -- a bad shape, a header we refuse to
-                      ;; send, a body we cannot render. Same answer as a handler that
-                      ;; signalled, because from the peer's side it is the same event.
-                      (log:error "server-uv: response could not be written"
-                                 :condition (princ-to-string e))
-                      (%write-error conn 500)
-                      nil)))))
+              (cond
+                ((typep result 'condition)
+                 (log:error "server-uv: handler signalled"
+                            :condition (princ-to-string result))
+                 (%write-error conn 500)
+                 nil)
+                ;; Encoded on the worker (#430). Written as it is, unless a drain has turned
+                ;; keep-alive off since: then its head says keep-alive and must not, so the
+                ;; handler's result is encoded again here, closing.
+                ((encoded-p result)
+                 (if (and (encoded-keep-alive result) (not keep-alive))
+                     (%complete-response conn app state (encoded-result result) keep-alive
+                                         head-request)
+                     (handler-case
+                         (progn (net:write-bytes conn (encoded-pieces result))
+                                (encoded-keep-alive result))
+                       (error (e)
+                         (log:error "server-uv: response could not be written"
+                                    :condition (princ-to-string e))
+                         nil))))
+                (t (%complete-response conn app state result keep-alive head-request)))))
         ;; THREE ANSWERS, not two. :STREAMING means the response has begun and the stream
         ;; owns the connection until %STREAM-FINISH ends it -- resuming would start the
         ;; next pipelined request underneath a response still being written, and closing
@@ -1390,6 +1440,57 @@ written into a closed socket."
         (cond ((eq kept :streaming) (setf (conn-state-streaming state) t))
               (kept (%resume conn app state))
               (t (%close-after conn state)))))))
+
+(defun %complete-response (conn app state result keep-alive head-request)
+  "Write the response triple RESULT on the loop thread, and return what %COMPLETE resumes on:
+true to keep the connection, :STREAMING, or NIL to close it. HEAD-REQUEST is true for a HEAD
+request, which gets the head only."
+  (handler-case
+      (destructuring-bind (status headers body) result
+        ;; A 1xx, 204 or 304 carries no body, and the encoder writes no
+        ;; Content-Length for one. A body a handler supplied anyway is dropped
+        ;; with a warning rather than refused, as Hunchentoot does, so a Clack
+        ;; app that works there does not get a 500 here (#373). Writing it would
+        ;; be read by the client as the start of the next response.
+        (when (h1:body-forbidden? status)
+          (unless (%empty-body-p body)
+            (log:warn "server-uv: dropped the body of a response whose status carries none"
+                      :status status))
+          (setf body nil))
+        (cond
+          ;; A HEAD REQUEST GETS THE HEAD ONLY, whatever body the handler
+          ;; returned: the Content-Length or chunked framing a GET would get,
+          ;; and nothing after it. A streamed body's function is not called.
+          ;; Hyperion's router strips a HEAD body itself; a Clack app does not.
+          ((and head-request (functionp body))
+           (%write-head-only conn status headers :chunked keep-alive))
+          ((and head-request (pathnamep body))
+           (%write-head-only conn status headers (%file-size body) keep-alive))
+          (head-request
+           (%write-head-only conn status headers
+                             (length (%body-octets body)) keep-alive))
+          ((functionp body)
+           (%stream-response conn app state status headers body keep-alive))
+          ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (pre-publication issue 313):
+          ;; a known Content-Length with the body written in pieces. A
+          ;; pathname INSIDE a list still goes through %BODY-OCTETS, because
+          ;; a list body is pieces to concatenate and there is one length for
+          ;; the lot -- hyperion/static returns the pathname itself, which is
+          ;; the case that matters.
+          ((pathnamep body)
+           (%write-file-response conn app state status headers body
+                                 keep-alive))
+          (t
+           (%write-response conn status headers (%body-pieces body)
+                            keep-alive))))
+    (error (e)
+      ;; The RESPONSE was unusable -- a bad shape, a header we refuse to
+      ;; send, a body we cannot render. Same answer as a handler that
+      ;; signalled, because from the peer's side it is the same event.
+      (log:error "server-uv: response could not be written"
+                 :condition (princ-to-string e))
+      (%write-error conn 500)
+      nil)))
 
 (defun %respond (conn app state head body-octets keep-alive)
   "Build the env and hand the request to *DISPATCH*; the response is written by %COMPLETE.
@@ -1408,6 +1509,7 @@ one level up."
   (setf (conn-state-in-flight state) t)
   (multiple-value-bind (host port) (%peer conn state)
     (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
+           (head-request (string= "HEAD" (h1:head-method head)))
            (loop* (net:connection-loop conn))
            ;; K ROUTES ITSELF ONTO THE LOOP THREAD, so a dispatcher may call it from
            ;; wherever the work finished. The alternative -- documenting that every
@@ -1417,10 +1519,17 @@ one level up."
            ;; wrap-session owning the Set-Cookie -- the wrong thing is unavailable rather
            ;; than discouraged. The loop-thread test keeps the inline default free of a
            ;; pointless async hop.
+           ;; OFF THE LOOP, the response is encoded before it is handed back (#430), so the
+           ;; loop only writes it; see %PREPARE. ON the loop, as with the inline dispatcher,
+           ;; there is nothing to move, and RESULT goes to %COMPLETE as it always has.
            (k (lambda (result)
-                (%on-loop loop*
-                          (lambda () (%complete conn app state result keep-alive))
-                          "a response completion"))))
+                ;; A HEAD request stays on the loop's path, where its rule is (%COMPLETE-RESPONSE).
+                (let ((ready (if (or head-request (uv:loop-thread-p loop*))
+                                 result
+                                 (%prepare result keep-alive))))
+                  (%on-loop loop*
+                            (lambda () (%complete conn app state ready keep-alive head-request))
+                            "a response completion")))))
       (handler-case
           (funcall (%dispatcher state) app env k)
         (error (e)
