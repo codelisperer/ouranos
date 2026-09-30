@@ -215,7 +215,18 @@ kept in vendor/libgit2/src/: it is the source a bundle that carries the library 
     (unless (probe-file (merge-pathnames "src/libgit2/repository.c" srcdir))
       ;; A .tar.gz: every tar this script meets (GNU tar, bsdtar on macOS and on Windows'
       ;; System32) decompresses gzip itself.
-      (run (tar-program) (list "-xzf" (uiop:native-namestring tarball) "-C"
+      ;;
+      ;; WITHOUT tests/ AND fuzzers/: 11,158 of the tarball's 11,907 files, none of them
+      ;; compiled or in the candidate set. The tree lives under vendor/, inside the checkout,
+      ;; and verify-tree gives every image it starts CL_SOURCE_REGISTRY=<tree>//, so every
+      ;; image walks every file here looking for .asd files. With them, one scan of this tree
+      ;; took 0.7-0.9 s on macOS against 0.15 s without, and the Windows leg of #469's first
+      ;; run ran past its 40-minute limit, where other runs that hour took 24-26 minutes.
+      ;; Leaving them out changes nothing that is built: VERIFY-SOURCES still checks the
+      ;; candidate set against libgit2.pin.
+      (run (tar-program) (list (format nil "--exclude=libgit2-~A/tests" version)
+                               (format nil "--exclude=libgit2-~A/fuzzers" version)
+                               "-xzf" (uiop:native-namestring tarball) "-C"
                                (uiop:native-namestring (merge-pathnames "src/" *vendor*)))
            :timeout 600))
     srcdir))
