@@ -36,10 +36,11 @@ its tag.
   observation, in one process or two, no longer leave two current replacements. An app that
   superseded the same observation twice now gets a `praxeon-error` on the second call. The
   embedding is computed before the lock is taken, so a read does not wait for the model.
-- **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
-  `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
+- **praxeon/memory-db: every read needs three new columns, and `ensure-schema` adds them** (#317):
+  `thread` (TEXT), `source_through` (BIGINT on Postgres, INTEGER on SQLite) and `condensed_from`
+  (TEXT). A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
-  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
+  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the three
   columns in its own migration before it reads. Existing rows become facts about their subject,
   as they were. `ensure-schema` also creates a second table, the observations table's name with
   `_progress` appended: `id` (TEXT, the primary key, which `record-thread-progress` upserts on),
@@ -258,8 +259,8 @@ its tag.
     in a retry, closes every open skipped window before it at once, whatever its tries; a window
     whose tries are spent is not closed by that alone, but by the next run once a later window is
     in the thread.
-  - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
-    the name of one.
+  - `make-observer` refuses `:accept`, `:promote`, `:promote-accept`, `:reflect-accept` or
+    `:reflect-accept-protected` that is not a function or the name of one.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
     does. A fact the subject already holds is not stored again. A promoted observation is
@@ -288,6 +289,25 @@ its tag.
     proposal, and so does an `applies_from` that is a number, an array, an object or `true`.
     JSON null, `false` (which jzon reads as NIL) and an empty string mean no date.
     `apply-distillation` takes `:thread`.
+- **praxeon/observe: `reflect` condenses a scope's observations once they pass a threshold**
+  (#317, step B), 40,000 estimated tokens by default. A model returns condensed observations,
+  each naming the observations it replaces, and each is written only when the app's `:accept`
+  allows it; one that would merge a correction, or an observation at or above `:protect-value`,
+  also needs `:accept-protected`. Both refuse by default. `reflect` signals when the model's
+  answer cannot be read. An observer made with `:reflect-threshold` reflects on its thread after
+  each window it writes; a reflection that fails is counted in `observer-failures` and logged,
+  and the window stays written.
+  - `praxeon/memory:condense` replaces several current observations in one scope with one,
+    which supersedes them and records their ids in `observation-condensed-from`, so `recall
+    :as-of` before still returns them. It checks that every source is still current and writes
+    in the same step: under the store's lock, and on the SQL store in one transaction whose
+    updates change a source only while it is still current. The SQL store computes the
+    condensed observation's embedding before taking the lock. It refuses a source named twice.
+    An app's own memory store implements `condense` before it can be reflected on. A promoted
+    correction of a condensed observation is matched to the subject facts its sources came from.
+  - `praxeon/memory:observations-from-conversation` returns every observation that came from a
+    conversation, including those condensed from one, at any depth: what an erasure of the
+    conversation has to find (#150).
 - **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
   which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
   `--default-channel`** (#408).

@@ -96,7 +96,8 @@
   (:export #:memory-store #:in-memory-store #:make-in-memory-store
            #:provenance #:make-provenance #:provenance-conversation #:provenance-turn
            #:provenance-at #:provenance-through #:observation-provenance #:check-provenance
-           #:provenance-p #:observation-thread
+           #:provenance-p #:observation-thread #:observation-condensed-from
+           #:condense #:observations-from-conversation
            #:observation #:observation-id #:observation-subject #:observation-content
            #:observation-kind #:observation-value #:observation-tokens
            #:observation-valid-from #:observation-recorded-at
@@ -244,7 +245,8 @@
            #:observer-busy-p #:observer-stuck-p #:observer-mark #:observer-skipped
            #:observer-failures #:observer-last-error #:observer-thread #:observer-subject
            #:unobserved #:stored-mark #:running-observer #:supported-proposals #:window-not-distilled
-           #:*step-tokens* #:observer-running #:observer-running-subject #:observer-running-thread))
+           #:*step-tokens* #:observer-running #:observer-running-subject #:observer-running-thread
+           #:reflect #:*reflect-tokens*))
 
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)

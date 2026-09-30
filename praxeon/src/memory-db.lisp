@@ -95,6 +95,8 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     ;; window an observation came from. Added to an existing table by ENSURE-SCHEMA.
     (:thread       :string)
     (:source_through :integer)
+    ;; The ids a condensed observation replaces, comma-separated (#317, step B).
+    (:condensed_from :text)
     ,(if (eq dialect :sqlite)
          '(:embedding :text)
          `(:embedding :vector :dimensions ,dimensions))))
@@ -129,8 +131,8 @@ gives another pair's key."
    (schema :initarg :schema :reader store-schema)
    (schema-name :initarg :schema-name :reader store-schema-name)
    (progress-schema :initarg :progress-schema :reader store-progress-schema)
-   ;; Recursive because SUPERSEDE holds it around REMEMBER, so the check that the observation
-   ;; is still current and the writes that replace it are one step.
+   ;; Recursive because SUPERSEDE and CONDENSE hold it around REMEMBER, so the check that what
+   ;; they replace is still current and the writes that replace it are one step.
    (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock))
   (:documentation "Observations in a mnemosyne-backed table, embedded on write."))
 
@@ -194,9 +196,10 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                                                          "SELECT current_database() AS db"))
                                       :db))))
 
-(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer))
-  "Columns added after a table may already exist, with their schema field types: the thread scope
-and the window's last turn (#317). ENSURE-SCHEMA adds each one a table lacks.")
+(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer) (:condensed_from . :text))
+  "Columns added after a table may already exist, with their schema field types: the thread scope,
+the window's last turn, and the ids an observation was condensed from (#317). ENSURE-SCHEMA adds
+  each one a table lacks.")
 
 (defun %add-column-sql (store name type)
   "The ALTER TABLE statement adding column NAME of field TYPE to STORE's table, in mnemosyne's
@@ -278,6 +281,8 @@ migration, before it reads from a table made before #317."
    ;; parsed back out of prose is a guess about what the model was told, not a record of
    ;; what was stored.
    :thread (let ((th (param:row-value row :thread))) (and (stringp th) th))
+   :condensed-from (let ((ids (param:row-value row :condensed_from)))
+                     (and (stringp ids) (plusp (length ids)) (uiop:split-string ids :separator ",")))
    :provenance (mem:make-provenance (or (param:row-value row :source_conversation) "")
                                     (or (param:row-value row :source_turn) 0)
                                     :at (param:row-value row :source_at)
@@ -286,7 +291,7 @@ migration, before it reads from a table made before #317."
 (defparameter +columns+
   '(:id :subject :content :kind :value :tokens :valid_from :recorded_at
     :supersedes :superseded_by :superseded_at
-    :source_conversation :source_turn :source_at :thread :source_through)
+    :source_conversation :source_turn :source_at :thread :source_through :condensed_from)
   "What a read selects. NOT the embedding: it is large, it is never shown to anyone, and
 selecting it would pull a megabyte of floats through every recall to be discarded.")
 
@@ -417,6 +422,56 @@ the lock (#462's third review: 997 ms behind a 1 s embedder).")
                 (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
                 (mem:observation-supersedes replacement) (mem:observation-id observation))
           replacement)))))
+
+(defmethod mem:condense ((store db-memory-store) sources content
+                         &key provenance kind value tokens valid-from)
+  (mem:check-provenance provenance "condense")
+  (when (null sources)
+    (error 'praxeon/conditions:praxeon-error :detail "nothing to condense"))
+  (mem::%check-distinct-sources sources)
+  ;; THE CHECK AND THE WRITES ARE ONE STEP. Under the store's lock no other thread of this
+  ;; process can supersede a source between the check and the update, and in one transaction a
+  ;; failure part-way through leaves neither the new row nor a superseded source behind. Each
+  ;; UPDATE changes a source only while it is still current and must change one, which holds
+  ;; off another process. The embedding is computed first, outside the lock, as SUPERSEDE's is.
+  (let ((*embedded* (%embed-before-lock store content)))
+  (bt:with-recursive-lock-held ((store-lock store))
+    (conn:with-transaction ((store-connection store))
+      (let* ((first (first sources))
+             (held (mem:observations-of store (mem:observation-subject first)
+                                        :thread (mem:observation-thread first))))
+        ;; The same refusals as the in-memory store: every source current, here, in one scope.
+        (dolist (o sources)
+          (unless (find (mem:observation-id o) held :key #'mem:observation-id :test #'string=)
+            (error 'praxeon/conditions:praxeon-error
+                   :detail (format nil "cannot condense ~A: it is not a current observation in this scope"
+                                   (mem:observation-id o)))))
+        (let ((new (mem:remember store (mem:observation-subject first) content
+                                 :thread (mem:observation-thread first)
+                                 :provenance provenance
+                                 :kind (or kind (mem:observation-kind first))
+                                 :value (or value (mem:observation-value first))
+                                 :tokens tokens :valid-from valid-from))
+              (ids (mapcar #'mem:observation-id sources)))
+          (dolist (id ids)
+            (unless (eql 1 (q:run (store-connection store)
+                                  (list :update (store-table store)
+                                        :set (list :superseded_by (mem:observation-id new)
+                                                   :superseded_at (mem:observation-recorded-at new))
+                                        :where (list :and (list := :id id) (list :is-null :superseded_by)))
+                                  :dialect (store-dialect store)))
+              (error 'praxeon/conditions:praxeon-error
+                     :detail (format nil "cannot condense ~A: it was superseded by another process meanwhile" id))))
+          (q:run (store-connection store)
+                 (list :update (store-table store)
+                       :set (list :condensed_from (format nil "~{~A~^,~}" ids))
+                       :where (list := :id (mem:observation-id new)))
+                 :dialect (store-dialect store))
+          (setf (mem:observation-condensed-from new) ids)
+          (dolist (o sources)
+            (setf (mem:observation-superseded-by o) (mem:observation-id new)
+                  (mem:observation-superseded-at o) (mem:observation-recorded-at new)))
+          new))))))
 
 (defun %where-current (subject as-of include-superseded &optional thread)
   "The WHERE clause for a subject's observations in the scope THREAD names: NIL for facts about
