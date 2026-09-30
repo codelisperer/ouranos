@@ -20,4 +20,6 @@
   (:documentation "The platform key that names a build artifact, and who may produce one.")
   (:export #:normalize-arch #:platform-key #:host-os-name
            #:*verified-platforms* #:verified-platform-p
-           #:executable-directory #:macos-app-bundle))
+           #:executable-directory #:macos-app-bundle
+           ;; is this a shipped build, and where is it (#416)
+           #:shipped-image-p #:shipped-image-directory))

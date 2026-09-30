@@ -85,6 +85,18 @@ its tag.
   build (`%shipped-image-p`). `verify-bundle-windows.ps1` treats `sbcl-runtime.exe` as a helper
   and traces it as the launcher's child. Linux builds are unchanged. (#98)
 
+- **hyperion/desktop: `shipped-image-p` and `install-directory` say whether this image is a
+  shipped build and where it is, on every platform.** The rule was private to `hyperion/update`,
+  so an app without the updater compared `sb-ext:*core-pathname*` with
+  `sb-ext:*runtime-pathname*`. That is the test for a one-file image, and it answers "not
+  shipped" inside a real macOS bundle (`sbcl` and `sbcl.core` in `<name>.app/Contents/MacOS`) or
+  Windows bundle (`sbcl-runtime.exe` and `sbcl.core` beside `<name>.exe`). An app acts if it
+  makes that comparison: call `hyperion/desktop:shipped-image-p` instead, and
+  `hyperion/desktop:install-directory` for the `.app` on macOS or the app's directory elsewhere
+  (NIL in a development image). The same answers are in `aion/platform` as `shipped-image-p` and
+  `shipped-image-directory`, for code that does not load `hyperion/desktop`; `hyperion/update`
+  now uses them and its private copy is gone. (#416)
+
 ### Added
 
 - **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's

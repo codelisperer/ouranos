@@ -693,64 +693,14 @@ property of the artifact rather than a flag anyone has to remember to set.
 
 macOS and Windows builds since #98 are the other shipped shapes: the runtime and its core as
 two files, `sbcl' and `sbcl.core' in a bundle's `Contents/MacOS' on macOS, and
-`sbcl-runtime.exe' and `sbcl.core' in one directory on Windows. See `%shipped-image-p'.
+`sbcl-runtime.exe' and `sbcl.core' in one directory on Windows. The rule and the location are
+aion/platform's SHIPPED-IMAGE-P and SHIPPED-IMAGE-DIRECTORY since #416, so an app without the
+updater can ask the same question.
 
 Returns a namestring, matching the Windows branch: callers treat this as a string and
 `install-writable-p' formats it back into a pathname."
-  (when (%shipped-image-p (ignore-errors (namestring sb-ext:*runtime-pathname*))
-                          (ignore-errors (namestring sb-ext:*core-pathname*)))
-    (%derived-install-dir-1)))
-
-(defun %shipped-image-p (runtime core &key (macos (uiop:os-macosx-p))
-                                            (windows (uiop:os-windows-p)))
-  "Whether RUNTIME and CORE, two namestrings, are those of a shipped build rather than of a
-developer's REPL.
-
-A shipped build is one of three shapes:
-  - one file, a dumped executable with its core inside, so RUNTIME and CORE are equal (Linux);
-  - on macOS (#98, #332), the runtime `sbcl' with `sbcl.core' beside it in a
-    `<name>.app/Contents/MacOS', which is what build-dmg.sh ships and the app's launcher starts;
-  - on Windows (#98), the runtime `sbcl-runtime.exe' with `sbcl.core' beside it, which is what
-    build-desktop-app.lisp writes and the installer copies, and `<name>.exe' starts.
-
-Only those exact shapes, because a development SBCL can also keep its core beside its runtime:
-Windows' official installer puts sbcl.exe and sbcl.core in one directory, and a hand-built
-SBCL can do the same on macOS. Reading such an installation as a shipped build would make
-INSTALL-DIRECTORY name SBCL's own directory, and an update could be applied there. That is
-why the Windows runtime is named sbcl-runtime.exe, a name no SBCL installation uses. Homebrew
-keeps them apart (libexec/bin/ and lib/sbcl/), so it matches no rule. The raw bundle
-directory build-desktop-app.lisp writes on macOS is a build step, not something shipped, so it
-does not count either. MACOS and WINDOWS say which platform this is, as keywords so a test can
-ask about any platform."
-  (and runtime core
-       (or (equal runtime core)
-           (and windows
-                (let ((r (pathname runtime))
-                      (c (pathname core)))
-                  (and (string-equal (file-namestring r) "sbcl-runtime.exe")
-                       (string-equal (file-namestring c) "sbcl.core")
-                       ;; EQUALP: Windows paths compare without regard to case.
-                       (equalp (pathname-device r) (pathname-device c))
-                       (equalp (pathname-directory r) (pathname-directory c)))))
-           (and macos
-                (let* ((r (pathname runtime))
-                       (c (pathname core))
-                       (dir (pathname-directory r))
-                       (app (and (>= (length dir) 3) (car (last dir 3)))))
-                  (and (equal (file-namestring r) "sbcl")
-                       (equal (file-namestring c) "sbcl.core")
-                       (equal dir (pathname-directory c))
-                       (equal (last dir 2) '("Contents" "MacOS"))
-                       (stringp app)
-                       (> (length app) 4)
-                       (string-equal ".app" app :start2 (- (length app) 4))))))))
-
-(defun %derived-install-dir-1 ()
-  "The location itself, once `%derived-install-dir' has established this is a real build."
-  (let ((dir (platform:executable-directory)))
-    (when dir
-      (let ((app (platform:macos-app-bundle dir)))
-        (uiop:native-namestring (or app dir))))))
+  (let ((dir (platform:shipped-image-directory)))
+    (and dir (uiop:native-namestring dir))))
 
 (defun install-directory (&optional (app *app-name*))
   "Where this build is installed, or NIL when it cannot be determined.
