@@ -379,16 +379,18 @@ arguments, or NIL for none."
         ((eq option t) (hyperion/security-headers:wrap-security-headers app))
         (t (apply #'hyperion/security-headers:wrap-security-headers app option))))
 
-(defun %backend-args (server workers)
-  "The extra keyword arguments that give backend SERVER WORKERS threads for handlers, as a
-plist for its start function, or NIL for none. See START's WORKERS.
+(defun %backend-args (server workers &optional loops)
+  "The extra keyword arguments that give backend SERVER WORKERS threads for handlers, and for
+the native server LOOPS event loops (#463), as a plist for its start function, or NIL for
+none. See START's WORKERS and LOOPS.
 
 Pure, so which backend gets what is testable without starting a server, and without loading
 Woo, which no suite in the tree does."
   (cond
+    ((native-backend-p server)
+     (append (and workers (list :workers workers)) (and loops (list :loops loops))))
     ((null workers) '())
     ((eq server :woo) (list :worker-num workers))
-    ((native-backend-p server) (list :workers workers))
     ;; Hunchentoot, and any Clack backend unknown to us: nothing is passed. Hunchentoot's
     ;; handler would refuse a key it does not take, and it has no worker count to set: it
     ;; already runs each connection on a thread of its own.
@@ -432,7 +434,7 @@ and is always loaded by the time a server starts."
 
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t)
-                       (security-headers t) workers (request-guard :none))
+                       (security-headers t) workers loops (request-guard :none))
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
 the returned handler differs between the two and STOP takes either.
@@ -475,6 +477,12 @@ connection. An app that keeps a single mnemosyne connection in a global wraps it
 HYPERION/DB-CONNECTION:WRAP-CONNECTION first, which lends each request a connection from a
 pool. The same is already true of any app served by Hunchentoot.
 
+LOOPS (default NIL, which is server-uv's *DEFAULT-LOOPS*) is how many event loops the :uv
+backend runs, each on its own thread, so accepting, reading, parsing and writing use more
+than one core (#463). More than one needs WORKERS: server-uv refuses to run handlers inline on
+several loop threads at once. Other backends ignore it, with a warning. SERVE-FOREVER reads it
+from HYPERION_LOOPS when it is not given.
+
 CHECK-PORT (default T) refuses to start when PORT is already answering, signalling
 PORT-IN-USE. On by default because the failure it prevents does not look like a port
 problem: a dev window opens onto a SIBLING application and reads as a catastrophically
@@ -492,6 +500,9 @@ proxy on the same machine: the server binds 127.0.0.1 there but receives the pub
 the proxy, and the guard would refuse every real request. HYPERION/DEV:SERVE turns it on by
 default on loopback, and HYPERION/DESKTOP:RUN-APP always has."
   (check-type workers (or null (integer 1)))
+  (check-type loops (or null (integer 1)))
+  (when (and loops (not (native-backend-p server)))
+    (warn "hyperion/server: :loops is ignored by the ~S backend; only :uv runs more than one event loop." server))
   (when (and workers (not (%backend-args server workers)))
     (if (eq server :hunchentoot)
         (warn "hyperion/server: :workers is ignored by Hunchentoot, which already runs each connection on its own thread.")
@@ -534,7 +545,7 @@ default on loopback, and HYPERION/DESKTOP:RUN-APP always has."
                                (when (%address-in-use-p e)
                                  (error 'port-in-use :host host :port port :cause e)))))
          (apply #'%uv-call "START" wrapped :port port :host host
-                (%backend-args server workers))))
+                (%backend-args server workers loops))))
       (t
        (%clack-start (wrap-content-length (wrap-streaming-body wrapped))
                      server host port debug (%backend-args server workers))))))
@@ -1032,6 +1043,16 @@ lock-free and allocation-free: it sets three slots, one of them to a keyword con
   (setf (server-session-stopping session) t)
   t)
 
+(defun %env-count (name)
+  "The positive integer in environment variable NAME, or NIL when it is unset or empty. Any
+other value is an error naming the variable, rather than a silent fallback."
+  (let ((raw (uiop:getenv name)))
+    (unless (or (null raw) (zerop (length raw)))
+      (let ((n (ignore-errors (parse-integer raw))))
+        (unless (and n (plusp n))
+          (error "hyperion/server: ~A must be a positive whole number, not ~S" name raw))
+        n))))
+
 (defun %env-seconds (name default)
   "The non-negative number of seconds in environment variable NAME, or DEFAULT when it is unset.
 A value that is not a non-negative number is an error, naming the variable, rather than a
@@ -1088,7 +1109,8 @@ early. Logged once."
 
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
                                (host "127.0.0.1") debug (log t) (security-headers t)
-                               workers name (banner :derive) (signals t) on-ready
+                               workers (loops (%env-count "HYPERION_LOOPS"))
+                               name (banner :derive) (signals t) on-ready
                                (drain-seconds (%env-seconds "HYPERION_DRAIN_SECONDS" 5))
                                (drain-timeout (%env-seconds "HYPERION_DRAIN_TIMEOUT_SECONDS" 20))
                                readiness-path (request-guard :none))
@@ -1162,7 +1184,7 @@ can read whatever that path returns."
                                                                    readiness-path)
                                          session readiness-path)
                          :server server :port port :host host :debug debug :log log
-                         :security-headers security-headers :workers workers
+                         :security-headers security-headers :workers workers :loops loops
                          :request-guard :none)
           (server-session-handler session) handler)
     ;; BANNER has THREE states, not two, so it cannot be a plain string-or-NIL: derive one

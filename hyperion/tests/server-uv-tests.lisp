@@ -218,10 +218,11 @@ boundary is not a message boundary, and that is precisely what a server gets wro
 
 ;;; --- the fixture -----------------------------------------------------------
 
-(defmacro with-server ((port app) &body body)
-  "Start APP on an ephemeral port, bind PORT to the one the OS chose, and always stop it."
+(defmacro with-server ((port app &rest start-args) &body body)
+  "Start APP on an ephemeral port, bind PORT to the one the OS chose, and always stop it.
+START-ARGS go to SRV:START, for a test that pins :LOOPS or :WORKERS."
   (let ((s (gensym "SERVER")))
-    `(let ((,s (srv:start ,app :port 0)))
+    `(let ((,s (srv:start ,app :port 0 ,@start-args)))
        (unwind-protect (let ((,port (srv:server-port ,s))) ,@body)
          (srv:stop ,s)))))
 
@@ -1047,6 +1048,7 @@ exists to make possible, and the thing that was impossible before M2."
       (sb-thread:signal-semaphore gate 10))))
 
 (test workers-run-handlers-on-the-servers-own-pool-and-leave-dispatch-alone
+  (let ((dispatch-before srv:*dispatch*))
   (flet ((handler-thread (workers)
            (let ((ran-on nil))
              (with-hyperion-server (port (lambda (env)
@@ -1060,8 +1062,11 @@ exists to make possible, and the thing that was impossible before M2."
         "with :workers the handler ran on the server's worker pool")
     (is (not (search "server-uv-worker" (or (handler-thread nil) "")))
         "control: without it, it did not")
-    (is (eq srv:*dispatch* srv::*inline-dispatch*)
-        "and the global *DISPATCH* was not changed by either server")))
+    ;; Compared with its value before, not with the inline default: the property is that no
+    ;; server changed it, whatever it was (a run of this suite with a pool *DISPATCH* and
+    ;; several loops, #463, sets it).
+    (is (eq srv:*dispatch* dispatch-before)
+        "and the global *DISPATCH* was not changed by either server"))))
 
 (test stop-ends-the-worker-threads-start-made
   (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3)))
@@ -1257,10 +1262,12 @@ fragment of the first, and not offset by a terminator nobody consumed")))))
 NEVER RETURNS, so under the inline dispatcher the loop stops accepting connections forever
 -- and the symptom, `the whole server went unresponsive', points nowhere near the handler
 that did it. So the always-wrong case is refused rather than documented, exactly as a
-zero-length chunk is."
-  (with-server (port (sse-app))
-    (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))
-        "refused BEFORE the head, so it can still be a status rather than a truncation")))
+zero-length chunk is. The inline dispatcher and one loop are pinned, because they are the
+premise: a server of several loops refuses the inline dispatcher at START (#463)."
+  (with-dispatch (srv:*inline-dispatch*)
+    (with-server (port (sse-app) :loops 1)
+      (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))
+          "refused BEFORE the head, so it can still be a status rather than a truncation"))))
 
 (test the-same-sse-stream-is-served-once-a-pool-is-dispatching
   "The refusal is about WHERE the body runs, not about SSE -- so it must lift when that
@@ -1804,7 +1811,13 @@ platform this test has no way to count them on (Windows)."
 (test several-hundred-finished-connections-leave-no-handle-or-descriptor-behind
   ;; 300 connections through one server, a third ended each way. Afterwards the loop must own
   ;; exactly what it owned before the first one, and so must the process's descriptor table.
+  ;; With several loops (#463), a loop takes one descriptor when it is first handed a
+  ;; connection and keeps it until STOP, so each loop gets one connection before the counts
+  ;; are taken: what is measured is what 300 more connections leave behind.
   (with-running-server (server (const-app 200 +ok+ '("ok")))
+    (dotimes (i (length (srv:server-loops server)))
+      (%finish-one (srv:server-port server) :server-closes))
+    (sleep 0.2)
     (let ((port (srv:server-port server))
           (handles (%owned server))
           (descriptors (%open-descriptors)))
@@ -2299,8 +2312,9 @@ response arrives at %COMPLETE encoded; inline, it arrives as the handler's list,
     (is (equal '(:encoded) kinds) "with workers: ~S" kinds))
   (let ((kinds (completion-kinds
                 (lambda ()
-                  (with-server (port (const-app 200 +ok+ (list "hello")))
-                    (is (string= "hello" (body-of (get* port "GET / HTTP/1.1" "Host: x")))))))))
+                  (with-dispatch (srv:*inline-dispatch*)
+                   (with-server (port (const-app 200 +ok+ (list "hello")) :loops 1)
+                    (is (string= "hello" (body-of (get* port "GET / HTTP/1.1" "Host: x"))))))))))
     (is (equal '(:raw) kinds) "inline: ~S" kinds)))
 
 (test with-workers-head-still-gets-the-head-only

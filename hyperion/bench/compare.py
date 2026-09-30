@@ -153,19 +153,27 @@ def reference(gen, connections, seconds):
 
 # --- one backend ----------------------------------------------------------------------
 
+def _numbers(field, kind):
+    return None if field in (None, "-") else [kind(x) for x in field.split(",")]
+
+
 def cpu(url):
-    """The server's CPU seconds so far, as (process, loop). loop is None on a backend without
-    a single loop thread to measure."""
+    """The server's CPU seconds so far, as (process, loops, conns): loops is each :uv loop
+    thread's CPU seconds and conns how many connections each loop has taken on (#463), both
+    first to last, or None on a backend without loop threads to measure."""
     text = urllib.request.urlopen(url + "/cpu", timeout=10).read().decode()
     fields = dict(part.split("=") for part in text.split())
-    return float(fields["process"]), (None if fields["loop"] == "-" else float(fields["loop"]))
+    return (float(fields["process"]), _numbers(fields.get("loop"), float),
+            _numbers(fields.get("conns"), int))
 
 
 def busy(before, after, elapsed):
-    """Cores kept busy between two cpu() readings ELAPSED seconds apart."""
+    """Between two cpu() readings ELAPSED seconds apart: cores kept busy by the process, cores
+    kept busy by each loop, and the connections each loop took on."""
     process = (after[0] - before[0]) / elapsed
-    loop = None if before[1] is None else (after[1] - before[1]) / elapsed
-    return process, loop
+    loops = None if before[1] is None else [(b - a) / elapsed for a, b in zip(before[1], after[1])]
+    conns = None if before[2] is None else [b - a for a, b in zip(before[2], after[2])]
+    return process, loops, conns
 
 
 def measure(backend, gen, args):
@@ -173,6 +181,10 @@ def measure(backend, gen, args):
     env = dict(os.environ, HYPERION_SERVER=backend, HYPERION_WORKERS=str(args.workers),
                HYPERION_MAX_REQUESTS_PER_CONNECTION=str(args.uv_max_requests),
                CL_SOURCE_REGISTRY=f"{ROOT}//:")
+    if backend == "uv" and args.loops:
+        env["HYPERION_LOOPS"] = str(args.loops)
+    if backend == "uv" and args.scheme:
+        env["HYPERION_LOOP_SCHEME"] = args.scheme
     log = open(os.path.join(tempfile.gettempdir(), f"bench-{backend}.log"), "w")
     proc = subprocess.Popen(["sbcl", "--dynamic-space-size", "4096", "--script",
                              os.path.join(HERE, "server.lisp"), str(port)],
@@ -185,9 +197,9 @@ def measure(backend, gen, args):
         for path in ("/ping", "/tile"):
             before, started = cpu(url), time.monotonic()
             rps, errors, kept = drive(gen, url + path, args.connections, args.seconds)
-            process, loop = busy(before, cpu(url), time.monotonic() - started)
+            process, loops, conns = busy(before, cpu(url), time.monotonic() - started)
             row[path] = {"rps": rps, "errors": errors, "kept": kept,
-                         "cpu_process": process, "cpu_loop": loop}
+                         "cpu_process": process, "cpu_loops": loops, "conns": conns}
         row["latency"] = load.latency(url, "/tile", args.requests, reuse=True)
         row["idle"] = load.idle_connections(url, proc.pid, args.idle)
         return row
@@ -215,8 +227,14 @@ def cell(m):
 
 
 def cpu_cell(m):
-    loop = "-" if m["cpu_loop"] is None else f"{m['cpu_loop']:.2f}"
-    return f"{m['cpu_process']:.2f} / {loop}"
+    """Process cores / each loop's cores, and with several loops the connections each took."""
+    if m["cpu_loops"] is None:
+        return f"{m['cpu_process']:.2f} / -"
+    loops = ", ".join(f"{c:.2f}" for c in m["cpu_loops"])
+    spread = ""
+    if m["conns"] and len(m["conns"]) > 1:
+        spread = " (connections " + ", ".join(str(n) for n in m["conns"]) + ")"
+    return f"{m['cpu_process']:.2f} / {loops}{spread}"
 
 
 def table(rows, gen_line, ref, args):
@@ -231,8 +249,10 @@ def table(rows, gen_line, ref, args):
         f"reached {ref:,.0f} requests/s; that is not the generator's ceiling. "
         f"`:uv` requests per connection: {args.uv_max_requests:,} (shipped default 100). "
         f"{workers_text} "
-        "CPU is cores kept busy during each throughput run, the whole process / the :uv loop "
-        "thread alone; a loop near 1.00 is saturated.",
+        f"`:uv` loops: {args.loops or 'the default'}, scheme: {args.scheme or 'the default'}. "
+        "CPU is cores kept busy during each throughput run, the whole process / each :uv loop "
+        "thread; a loop near 1.00 is saturated. With several loops, the connections each loop "
+        "took during the run follow.",
         "",
         "| backend | /ping req/s | /ping CPU process / loop | /tile req/s "
         "| /tile CPU process / loop | /tile p50 / p95 / p99 ms (1 connection) "
@@ -258,6 +278,10 @@ def main():
     ap.add_argument("--workers", type=int, default=8,
                     help="worker threads; 0 runs handlers inline, with no pool")
     ap.add_argument("--requests", type=int, default=2000)
+    ap.add_argument("--loops", type=int, default=None,
+                    help=":uv event loops (HYPERION_LOOPS); unset keeps server-uv's default")
+    ap.add_argument("--scheme", default=None, choices=["reuseport", "shared", "handoff"],
+                    help="how connections reach :uv's loops (HYPERION_LOOP_SCHEME)")
     ap.add_argument("--idle", type=int, default=500)
     ap.add_argument("--uv-max-requests", type=int, default=10 ** 9,
                     help=":uv's requests per kept-alive connection (shipped default 100)")

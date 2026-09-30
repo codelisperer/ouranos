@@ -100,22 +100,33 @@
   (multiple-value-bind (sec nsec) (sb-unix:clock-gettime clock)
     (+ sec (/ nsec 1d9))))
 
-(defun on-loop (fn)
-  "FN's value, computed on the :uv loop thread; NIL on another backend."
+(defun uv-server-p ()
   (let ((uv (find-package "HYPERION/SERVER-UV")))
-    (when (and uv *handler* (funcall (find-symbol "SERVER-P" uv) *handler*))
-      (let ((loop (funcall (find-symbol "SERVER-LOOP" uv) *handler*))
-            (done (sb-thread:make-semaphore))
-            (value nil))
-        (if (uiop:symbol-call :aion/uv :loop-thread-p loop)
-            (setf value (funcall fn))
-            (progn
-              (uiop:symbol-call :aion/uv :submit loop
-                                (lambda ()
-                                  (unwind-protect (setf value (funcall fn))
-                                    (sb-thread:signal-semaphore done))))
-              (sb-thread:wait-on-semaphore done :timeout 5)))
-        value))))
+    (and uv *handler* (funcall (find-symbol "SERVER-P" uv) *handler*))))
+
+(defun server-loops ()
+  "The :uv server's loops, first to last; NIL on another backend (#463)."
+  (when (uv-server-p)
+    (uiop:symbol-call :hyperion/server-uv :server-loops *handler*)))
+
+(defun on-a-loop (loop fn)
+  "FN's value, computed on LOOP's thread."
+  (let ((done (sb-thread:make-semaphore))
+        (value nil))
+    (if (uiop:symbol-call :aion/uv :loop-thread-p loop)
+        (setf value (funcall fn))
+        (progn
+          (uiop:symbol-call :aion/uv :submit loop
+                            (lambda ()
+                              (unwind-protect (setf value (funcall fn))
+                                (sb-thread:signal-semaphore done))))
+          (sb-thread:wait-on-semaphore done :timeout 5)))
+    value))
+
+(defun on-loop (fn)
+  "FN's value, computed on the :uv server's first loop thread; NIL on another backend."
+  (let ((loop (first (server-loops))))
+    (and loop (on-a-loop loop fn))))
 
 (defvar *profile* (uiop:getenv "HYPERION_PROFILE"))
 
@@ -143,10 +154,16 @@
   (format nil "report written to ~A" *profile*))
 
 (defun loop-cpu-seconds ()
-  "The :uv loop thread's CPU seconds, or NIL on another backend. The clock is read ON the loop
-thread, because a thread CPU clock measures whichever thread reads it."
+  "Each :uv loop thread's CPU seconds, first to last, or NIL on another backend. Each clock is
+read ON its loop's thread, because a thread CPU clock measures whichever thread reads it."
   (when +thread-cputime-id+
-    (on-loop (lambda () (cpu-seconds +thread-cputime-id+)))))
+    (loop for loop in (server-loops)
+          collect (or (on-a-loop loop (lambda () (cpu-seconds +thread-cputime-id+))) 0))))
+
+(defun loop-connections ()
+  "How many connections each :uv loop has taken on since start, or NIL (#463)."
+  (when (uv-server-p)
+    (uiop:symbol-call :hyperion/server-uv :server-loop-connections *handler*)))
 
 (defvar *gc-count* (list 0)
   "The count of garbage collections since start, in its CAR, counted by an after-GC hook. SBCL's collector stops every
@@ -155,9 +172,12 @@ thread while it runs, so its time is time every request waits (#430).")
 (push (lambda () (sb-ext:atomic-incf (car *gc-count*))) sb-ext:*after-gc-hooks*)
 
 (defun cpu-report ()
-  (let ((loop (loop-cpu-seconds)))
-    (format nil "process=~,3F loop=~:[-~;~:*~,3F~] gc=~,3F gcs=~D consed=~D"
-            (cpu-seconds sb-unix:clock-process-cputime-id) loop
+  "process=S loop=S1,S2,... conns=N1,N2,... gc=S gcs=N consed=N. LOOP and CONNS have one entry
+per :uv loop, first to last, and are - on another backend."
+  (let ((loops (loop-cpu-seconds))
+        (conns (loop-connections)))
+    (format nil "process=~,3F loop=~:[-~;~:*~{~,3F~^,~}~] conns=~:[-~;~:*~{~D~^,~}~] gc=~,3F gcs=~D consed=~D"
+            (cpu-seconds sb-unix:clock-process-cputime-id) loops conns
             (/ sb-ext:*gc-run-time* internal-time-units-per-second)
             (car *gc-count*) (sb-ext:get-bytes-consed))))
 
@@ -189,8 +209,18 @@ thread while it runs, so its time is time every request waits (#430).")
        ;; 0 or unset: no worker pool, handlers run where the backend runs them (inline on :uv).
        (workers (let ((n (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS")))))
                   (and n (plusp n) n)))
-       (handler (srv:start #'app :port port :host "127.0.0.1" :server backend
-                                 :workers workers :log nil)))
+       ;; HYPERION_LOOPS and HYPERION_LOOP_SCHEME: how many loops :uv runs and how
+       ;; connections reach them (#463). Unset leaves server-uv's defaults.
+       (loops (ignore-errors (parse-integer (uiop:getenv "HYPERION_LOOPS"))))
+       (scheme (let ((s (uiop:getenv "HYPERION_LOOP_SCHEME")))
+                 (and s (plusp (length s)) (intern (string-upcase s) :keyword))))
+       (handler (progn
+                  (when (and scheme (find-package "HYPERION/SERVER-UV"))
+                    (setf (symbol-value (find-symbol "*DEFAULT-SCHEME*" "HYPERION/SERVER-UV"))
+                          scheme))
+                  (apply #'srv:start #'app :port port :host "127.0.0.1" :server backend
+                                           :workers workers :log nil
+                                           (and loops (list :loops loops))))))
   (setf *handler* handler)
   (format t "~&bench: ~A listening on 127.0.0.1:~D  (tile ~D B, board ~D B, workers ~A, pid ~D)~%"
           backend port (length *tile*) (length *board*) workers (sb-unix:unix-getpid))
