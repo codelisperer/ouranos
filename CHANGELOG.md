@@ -67,6 +67,16 @@ its tag.
   Trailer fields are checked and discarded. `hyperion/http1` gains `Body-Chunked`,
   `head-chunked?` and the step functions `parse-chunk-size-line`, `parse-chunk-data-end` and
   `parse-trailers`.
+- **klio: a scheduled document is no longer published before its `publish-at`.** `site-app`
+  judged visibility with no clock unless given `:now`, which skipped the schedule, so a
+  document with a future `publish-at` was served at once (#359). Each request is now judged at
+  its own time, and so is any caller of `tree-readable-documents` that passes no `:now`.
+  `publish-at` is parsed at load as an ISO 8601 date (`2030-01-01`, midnight UTC) or date and
+  time (`2030-01-01T09:00:00Z`, or with an offset such as `+02:00`), and a value that is not
+  one fails the load, naming the file, instead of publishing. A site whose pages carry a future
+  `publish-at` will see them disappear until that time. `content-meta-publish-at` is now a
+  universal time. A `date` that is not ISO 8601 is a load warning, and the page is left out of
+  the feeds.
 
 ### Added
 
@@ -187,6 +197,72 @@ its tag.
   `:worker-num` as Woo's handler takes it, sets the worker pool, 16 by default. Clack's own
   handler cases, from Clack 2.1.0, are ported to FiveAM and pass, the streaming case included.
   server-uv's env gains `:server-protocol` and `:remote-port`. (#373)
+- **scripts/build-desktop-app.lisp: `--carry <path>` carries a native library of the app's own
+  into the bundle.** Give it once per library, for example a PDF renderer in the app's
+  repository or a pinned `sqlite3.dll`, which stock Windows does not have. The file is copied
+  beside the executable with its license text under `LICENSES/`: the files and directories named
+  `LICENSE*`, `COPYING*` or `NOTICE*` beside it or in the directory above, or, for a library that
+  ships none, such as public-domain SQLite, the files named by `--carry-license <file>` after its
+  `--carry`. If the image has the library open, the app opens the
+  copy beside its executable when it starts, and stops with exit code 3 naming the file if the
+  copy is missing. An app that added its own post-build copy step for such a library can
+  remove it. The build refuses a path with no license text, a path under the tree's `vendor/`,
+  and two paths with one file name. (#78)
+
+  On macOS, a carried library that needs another carried library is relinked to the copy beside
+  it (`@loader_path/<name>`) and re-signed ad hoc, so carrying Homebrew's `libssl.3.dylib` and
+  `libcrypto.3.dylib` works on a Mac without Homebrew; without it the app stopped with "Library
+  not loaded" for `libcrypto`. System libraries are never touched. (#78)
+- **klio: collections for a site's theme, and a static export.** (#353)
+  - `collection` returns the readable documents under a content subdirectory, such as
+    `roles/`, sorted by a field with `:sort-by` (a core field such as `date`, or an `extra` key
+    such as `start`) and `:order`. A document without the field goes last.
+  - `document-field` reads a core field or an `extra` key, with nested values intact, and
+    `document-by-slug` finds a readable page by its slug. `tree-collection` and
+    `tree-document-by-slug` do the same on a tree.
+  - `site-app` binds the tree it serves a request from (`*request-tree*`, `*request-now*`), and
+    these functions read it through `current-tree`. A theme that lists a collection therefore
+    sees the same tree as the page it is rendering, even when a reload lands mid-request.
+  - `export-site` renders every readable page, `index.html` and `404.html` through the site's
+    theme functions into a directory for a static host. `:layout` is `:file` (`roles/a.html`)
+    or `:directory` (`roles/a/index.html`). It writes nothing unless every page renders. It
+    signals `export-refused` for a non-empty directory without `:clean t`, for the content
+    directory or one containing it, and for a site that has not booted.
+- **klio: a controlled vocabulary checked at load, and a reload on change for development.**
+  (#353)
+  - `make-vocabulary` declares a list held in one document, such as the skills in `groups`,
+    and the paths in other documents that refer to it, such as `skills` on a page or on a
+    bullet. `make-site` and `load-tree` take `:vocabularies`. A reference to a label that is not
+    in the list, matched exactly, is a load failure naming the referring file and the list's
+    file, so boot refuses to start and reload keeps the last good tree. A missing list document
+    is a failure too. `vocabulary-entries` and `vocabulary-entry-p` are the lookups for a theme.
+  - `watch-site` reloads a site whenever a file in its content directory is edited, added or
+    removed, checking every `:interval` seconds, and keeps serving the last good content when
+    an edit breaks a file. `stop-watching` stops it. It is for development; how a production
+    server is told to reload is recorded, not built, in klio's ADR-0002.
+- **klio: RSS and Atom feeds, tag pages, pagination and a search index.** (#353)
+  - `site-app` and `export-site` take the same options, from `make-site-options`.
+  - `:base-url` turns on `/feed.xml` (RSS 2.0) and `/atom.xml`, with absolute links, newest
+    first, for the readable documents that have a `date` (`:feed-collection` limits them to one
+    collection, and `:feed-limit` caps them at 20).
+  - Each tag has a page at `/tags/<slug>/` (`tag-slug`: `C#` is `c-sharp`, `C++` is
+    `c-plus-plus`), through the site's `:tag-theme`.
+  - `:per-page` paginates the index and each tag's listing at `/page/2/` and
+    `/tags/<slug>/page/2/`; a listing theme gets `*page-number*`, `*page-count*`, `page-url` and
+    `tag-url`.
+  - `/search.json` lists every readable page (url, title, tags, date, text) for a search box.
+  - Every path is an option. `resolve-path` answers them all, for the handler and for the
+    export, which now writes each listing, tag page, feed and the search index as well.
+- **aion/tz: a zone's UTC offset at an instant, and wall-clock time to UTC, from the system's
+  TZif files.** (#367) `(aion/tz:offset "Europe/Kyiv" universal-time)` returns seconds east of
+  UTC and the abbreviation. `(aion/tz:local-to-universal zone y mo d h mi)` returns the
+  instant of a wall-clock time, and a second value, `:unique`, `:gap` or `:overlap`: a time in
+  a spring-forward gap gives the instant of the change, and one in a fall-back overlap gives the
+  earlier instant, with the later as a third value. `valid-zone-p` and `zone-names` list what
+  the system has. Rules come from `$TZDIR` or `/usr/share/zoneinfo`, including the footer rule
+  for instants after a file's last transition, so **a deployment image needs the tzdata
+  package**; Windows has no zone directory, and there an app sets `TZDIR`. `parse-tzif`,
+  `zone-offset-at` and `zone-local-to-universal` are pure, for use on any TZif bytes.
 
 ### Fixed
 

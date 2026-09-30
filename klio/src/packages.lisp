@@ -2,7 +2,8 @@
 
 (cl:defpackage #:klio
   (:use #:cl)
-  (:local-nicknames (#:spin #:spinneret))
+  (:local-nicknames (#:spin #:spinneret)
+                    (#:log #:aion/log))
   (:documentation "klio -- a git-backed content engine for hyperion sites.
 
 A LIBRARY, not an application. A site instantiates it with a theme, a content directory and
@@ -17,6 +18,9 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:content-meta #:content-meta-title #:content-meta-date #:content-meta-slug
            #:content-meta-tags #:content-meta-draft #:content-meta-publish-at
            #:content-meta-extra #:content-meta-warnings #:extra #:+core-keys+
+           #:content-meta-timestamp
+           ;; dates -- ISO 8601 in front matter, RFC 822 and 3339 in feeds (#353, #359)
+           #:parse-iso-date #:date-universal-time #:invalid-date #:rfc-822-date #:rfc-3339-date
            ;; search -- tokenised, field-weighted, built at load
            #:tokenize #:make-search-index #:index-document #:search-index-query
            #:*field-weights*
@@ -40,5 +44,20 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:site #:make-site #:site-directory #:site-tree #:site-known-extra
            #:publish #:boot #:reload #:reload-or-fail
            #:*content-extension*
+           ;; collections -- a directory of documents, sorted by a field, for a theme (#353)
+           #:*request-tree* #:*request-now* #:current-tree #:document-field
+           #:tree-collection #:collection #:tree-document-by-slug #:document-by-slug
+           ;; controlled vocabularies -- a list in one file, checked at load (#353)
+           #:vocabulary #:make-vocabulary #:vocabulary-name #:vocabulary-labels
+           #:vocabulary-entries #:vocabulary-entry-p #:content-tree-vocabularies
+           ;; reload on change, for development (#353)
+           #:watch-site #:stop-watching #:watcher #:watcher-reloads #:content-snapshot
+           ;; static export -- the site as files for a static host (#353)
+           #:export-site #:export-refused #:export-refused-directory #:export-refused-reason
            ;; serving -- the tree as a hyperion application; the look is the site's
-           #:site-app #:default-page-theme #:default-index-theme #:default-not-found))
+           #:site-app #:default-page-theme #:default-index-theme #:default-not-found
+           #:default-tag-theme #:make-site-options
+           ;; listings -- feeds, tags, pagination, the search index, and the resolver (#353)
+           #:tag-slug #:tree-tags #:page-url #:tag-url #:*page-number* #:*page-count*
+           #:feed-entries #:rss-feed #:atom-feed #:search-json #:resolve-path #:site-paths
+           #:*site-options*))

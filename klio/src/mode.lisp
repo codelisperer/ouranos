@@ -29,4 +29,8 @@ says otherwise -- the opposite default would make a forgotten flag a disclosure.
 In production, only published content. In dev mode, everything -- a draft is exactly what the
 author wants to look at. This is the only place the two audiences differ, which is why
 VISIBLE-P stays a pure statement about the content and does not consult the mode itself."
-  (or (dev-mode-p) (visible-p :draft draft :publish-at publish-at :now now)))
+  (or (dev-mode-p)
+      ;; NOW defaults to the current time HERE, the one place every reader of visibility goes
+      ;; through. It used to stay NIL, and VISIBILITY skips the schedule without a clock, so a
+      ;; site that passed no clock published scheduled documents at once (#359).
+      (visible-p :draft draft :publish-at publish-at :now (or now (get-universal-time)))))
