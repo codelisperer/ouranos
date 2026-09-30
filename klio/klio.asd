@@ -11,6 +11,7 @@
   ;; backend ADR-0011 called a stop-gap.
   :depends-on ("hyperion"
                "spinneret"
+               "aion/fs"         ; export.lisp empties the directory without following links (#347)
                "aion/log"        ; watch.lisp logs each reload and what refused it (#353)
                "com.inuoe.jzon") ; listing.lisp writes the search index as JSON (#353)
   :serial t

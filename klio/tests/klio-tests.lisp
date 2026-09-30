@@ -908,7 +908,7 @@ It must still list the two roles of the tree the request started with."
                 (uiop:tmpize-pathname (merge-pathnames "klio-export" (uiop:temporary-directory))))))
      (ignore-errors (delete-file (string-right-trim "/" (namestring ,dir))))
      (unwind-protect (progn ,@body)
-       (ignore-errors (uiop:delete-directory-tree ,dir :validate t)))))
+       (ignore-errors (aion/fs:delete-tree ,dir :if-does-not-exist :ignore)))))
 
 (defun %file-text (dir relative)
   (uiop:read-file-string (merge-pathnames relative dir) :external-format :utf-8))

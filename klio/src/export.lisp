@@ -105,8 +105,10 @@ Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first)."
                                       unless (member k '(:layout :clean :now))
                                         append (list k v)))))
                    (%render-site site tree now layout))))
+      ;; AION/FS:DELETE-TREE, which removes a link inside the directory as a link and refuses a
+      ;; directory that is itself one, as the rest of the tree does since #347.
       (when (uiop:directory-exists-p directory)
-        (uiop:delete-directory-tree directory :validate t))
+        (aion/fs:delete-tree directory))
       (dolist (file files)
         (let ((path (merge-pathnames (car file) directory)))
           (ensure-directories-exist path)
