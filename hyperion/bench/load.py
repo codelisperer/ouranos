@@ -131,7 +131,8 @@ def throughput(url, path, workers, seconds):
 
 
 def _proc_stats(pid):
-    """RSS (MB) and thread count for a pid, from /proc -- Linux only, no deps."""
+    """RSS (MB) and thread count for a pid: from /proc on Linux, and from ps elsewhere
+    (macOS), where `ps -M` prints one line per thread. No dependencies either way."""
     try:
         with open(f"/proc/{pid}/status") as f:
             rss = threads = None
@@ -142,6 +143,14 @@ def _proc_stats(pid):
                     threads = int(line.split()[1])
             return {"rss_mb": round(rss, 1) if rss else None, "threads": threads}
     except OSError:
+        pass
+    try:
+        rss_kb = int(subprocess.run(["ps", "-o", "rss=", "-p", str(pid)],
+                                    capture_output=True, text=True, check=True).stdout.strip())
+        lines = subprocess.run(["ps", "-M", "-p", str(pid)],
+                               capture_output=True, text=True, check=True).stdout.splitlines()
+        return {"rss_mb": round(rss_kb / 1024.0, 1), "threads": max(0, len(lines) - 1)}
+    except (OSError, ValueError, subprocess.CalledProcessError):
         return {"rss_mb": None, "threads": None}
 
 

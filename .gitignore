@@ -71,3 +71,6 @@ secrets.lisp
 
 # Which board agent this checkout is (scripts/agent.sh). Machine-local by definition.
 .ouranos-agent
+
+# Python byte-code, written when hyperion/bench/compare.py imports load.py (#413).
+__pycache__/
