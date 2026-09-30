@@ -61,6 +61,12 @@ its tag.
 
 ### Fixed
 
+- **hyperion/auth-db: `make-db-auth … :ensure t` creates the store's own table names.** (#378)
+  It created `hyperion_users` and `hyperion_role_events` whatever `:table` and `:events-table`
+  said, while every query used the store's names, so a store made with other names failed at
+  its first statement on a table that did not exist. `users-ddl` and `role-events-ddl` now take
+  `:table`, as the two index helpers already did, and every one of the four refuses a name
+  that is not letters, digits and underscores.
 - **hyperion/server: on Woo, a response with status 429 reaches the client as 429, with its
   headers and body, instead of as an empty 500.** Woo writes a status line from its own table of
   reason phrases, which has no entry for 429 or for the other registered codes 103, 104, 425,

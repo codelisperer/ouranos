@@ -409,8 +409,7 @@ PBKDF2 passwords, a temp-password flag for forced-change-at-first-login, and a r
 a request is the request's own, so lookups on different request threads run at once. A store
 made over one connection is also safe to share between threads, because every operation takes
 the store's lock, but its operations then run one at a time. `:ensure t` creates the tables
-under their default names, `hyperion_users` and `hyperion_role_events`, even when `:table` or
-`:events-table` names others.
+under the store's `:table` and `:events-table` names (#378).
 
 ### Changing roles after the account exists
 

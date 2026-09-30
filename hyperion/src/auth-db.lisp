@@ -228,17 +228,34 @@ rows, so it costs one round trip and reads nothing."
     (error (e)
       (error 'missing-role-log :table (events-table store) :dialect (dialect store) :cause e))))
 
-(defun users-ddl (&key (dialect :sqlite))
-  "The CREATE TABLE SQL for the users table under DIALECT, **store-less** -- so a consuming
-app can fold the identity schema into its OWN migration timeline (mnemosyne make-migration)
-rather than call ENSURE-SCHEMA. The unique email index is a separate statement,
-USERS-EMAIL-INDEX-DDL, which an app owning its migrations adds as its own step (#221)."
+(defun %check-table (table)
+  "TABLE, when it is a table name: letters, digits and underscores, not starting with a digit.
+Every DDL helper here writes it into SQL, so anything else is refused rather than quoted."
+  (unless (and (stringp table) (plusp (length table))
+               (not (digit-char-p (char table 0)))
+               (every (lambda (ch) (or (alphanumericp ch) (char= ch #\_))) table))
+    (error "hyperion/auth-db: ~S is not a table name (letters, digits and underscores)" table))
+  table)
+
+(defun %schema-ddl (schema-name table dialect)
+  "CREATE TABLE DDL for the registered schema SCHEMA-NAME, under TABLE rather than the table it
+was declared with (#378). The registered schema is copied, not changed."
+  (let ((schema (copy-structure (schema:find-schema schema-name))))
+    (setf (schema:schema-table schema) (%check-table table))
+    (schema:schema-ddl schema :dialect dialect)))
+
+(defun users-ddl (&key (dialect :sqlite) (table *table*))
+  "The CREATE TABLE SQL for the users table under DIALECT, named TABLE (*TABLE* by default),
+**store-less** -- so a consuming app can fold the identity schema into its OWN migration
+timeline (mnemosyne make-migration) rather than call ENSURE-SCHEMA. The unique email index is a
+separate statement, USERS-EMAIL-INDEX-DDL, which an app owning its migrations adds as its own
+step (#221). An app whose store uses another :TABLE passes the same name here (#378)."
   ;; The designator goes straight through (pre-publication issue 432, ADR-0003). This used to be
   ;; `(string-downcase (symbol-name dialect))' -- a fourth hand-rolled conversion, written
   ;; here because hyperion holds the dialect as a KEYWORD and schema-ddl used to take only a
   ;; STRING. It also made this helper keyword-only: a caller with the string spelling hit a
   ;; type error from SYMBOL-NAME. mnemosyne now normalises designators itself.
-  (schema:schema-ddl (schema:find-schema 'hyperion-user) :dialect dialect))
+  (%schema-ddl 'hyperion-user table dialect))
 
 (defun users-email-index-ddl (&key (table *table*))
   "CREATE UNIQUE INDEX DDL for the users table's email column, store-less like USERS-DDL, so an
@@ -247,28 +264,35 @@ app that owns its migrations adds it as its own step (docs/migrations.md, sectio
 THIS INDEX IS WHAT MAKES AN EMAIL UNIQUE (#221). USERS-DDL declares no UNIQUE constraint, and a
 database without this index accepts two rows for one address. CREATE-USER also refuses a known
 duplicate before inserting, but only the index holds when two processes insert at once."
-  (format nil "CREATE UNIQUE INDEX IF NOT EXISTS idx_~A_email ON ~A (email)" table table))
+  (format nil "CREATE UNIQUE INDEX IF NOT EXISTS idx_~A_email ON ~A (email)"
+          (%check-table table) table))
 
 (defun db-auth-ddl (store)
-  (users-ddl :dialect (dialect store)))
+  "The users table DDL for STORE: its dialect and its table name."
+  (users-ddl :dialect (dialect store) :table (table store)))
 
-(defun role-events-ddl (&key (dialect :sqlite))
-  "CREATE TABLE DDL for the append-only role-change log (pre-publication issue 166)."
-  (schema:schema-ddl (schema:find-schema 'hyperion-role-event) :dialect dialect))
+(defun role-events-ddl (&key (dialect :sqlite) (table *events-table*))
+  "CREATE TABLE DDL for the append-only role-change log (pre-publication issue 166), named TABLE
+(*EVENTS-TABLE* by default). An app whose store uses another :EVENTS-TABLE passes the same name
+here (#378)."
+  (%schema-ddl 'hyperion-role-event table dialect))
 
 (defun role-events-index-ddl (&key (table *events-table*))
   "CREATE INDEX DDL for the role-event log, store-less like ROLE-EVENTS-DDL, so an app that owns
 its migrations can add it as its own step. Indexed by (user_id, at) because the question is
 always \"this account's history\", ordered."
-  (format nil "CREATE INDEX IF NOT EXISTS idx_~A_user_at ON ~A (user_id, at)" table table))
+  (format nil "CREATE INDEX IF NOT EXISTS idx_~A_user_at ON ~A (user_id, at)"
+          (%check-table table) table))
 
 (defun ensure-schema (store)
-  "Create the users table, its unique email index, and the role-event log if absent.
-Returns STORE."
+  "Create the users table, its unique email index, and the role-event log if absent, under the
+store's TABLE and EVENTS-TABLE. Returns STORE."
   (with-store-connection (store :exclusive t)
     (conn:exec (conn store) (db-auth-ddl store))
     (conn:exec (conn store) (users-email-index-ddl :table (table store)))
-    (conn:exec (conn store) (role-events-ddl :dialect (dialect store)))
+    ;; The store's own names, not the defaults (#378): the queries use the store's names, so
+    ;; tables created under the defaults left a store with other names unusable.
+    (conn:exec (conn store) (role-events-ddl :dialect (dialect store) :table (events-table store)))
     ;; Never an index on `at' alone: the question is never "every role event ever".
     (conn:exec (conn store) (role-events-index-ddl :table (events-table store))))
   store)
