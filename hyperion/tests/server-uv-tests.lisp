@@ -2138,3 +2138,39 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
         (sigterm (%serve-forever-stop-time :sigterm 2)))
     (is (< sigint 1) "SIGINT stops at once: ~,1Fs" sigint)
     (is (<= 2 sigterm 4) "SIGTERM keeps serving for the 2 s grace period first: ~,1Fs" sigterm)))
+
+;;; --- dev:serve on :uv runs handlers on a worker pool (#432) ---------------------------------
+
+(defun %dev-serve-handler-thread (&rest serve-args)
+  "Start hyperion/dev:serve on :uv with SERVE-ARGS on an ephemeral port, answer one request,
+stop it, and return the name of the thread the handler ran on. The request guard is off: it
+checks the port the server was asked for, and 0 is not the port a request arrives on."
+  (let* ((root (uiop:ensure-directory-pathname
+                (merge-pathnames (format nil "hyperion-dev-uv-~D-~D" (get-universal-time) (random 100000))
+                                 (uiop:temporary-directory))))
+         (ran-on nil)
+         (d nil))
+    (ensure-directories-exist root)
+    (unwind-protect
+         (let ((*standard-output* (make-broadcast-stream)))
+           (setf d (apply #'hyperion/dev:serve
+                          (lambda ()
+                            (lambda (env)
+                              (declare (ignore env))
+                              (setf ran-on (sb-thread:thread-name sb-thread:*current-thread*))
+                              (list 200 +ok+ (list "x"))))
+                          :paths (list root) :server :uv :port 0 :request-guard :none
+                          :watch-framework nil :interval 5
+                          serve-args))
+           (get* (srv:server-port (hyperion/dev::dev-handler d)) "GET / HTTP/1.1" "Host: x")
+           ran-on)
+      (ignore-errors (hyperion/dev:unwatch d))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test dev-serve-on-uv-runs-handlers-on-a-worker-pool
+  (is (search "server-uv-worker" (or (%dev-serve-handler-thread :workers 2) ""))
+      "with :workers 2 the handler ran on the server's pool")
+  (is (search "server-uv-worker" (or (%dev-serve-handler-thread) ""))
+      "and with no :workers, dev:serve gives :uv a pool by default")
+  (is (not (search "server-uv-worker" (or (%dev-serve-handler-thread :workers nil) "")))
+      "control: with :workers nil it ran on the loop thread"))

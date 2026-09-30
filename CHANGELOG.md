@@ -95,6 +95,13 @@ its tag.
   `:request-guard :none`. On a host that is not loopback, `serve` stays unguarded and warns once.
   (#304)
 
+- **hyperion/dev: `serve` on `:uv` runs handlers on 2 worker threads by default.** It passes
+  `:server` and `:workers` to `hyperion/server:start` now (#432). Without workers, `:uv` runs
+  every handler on its loop thread, and a handler that re-enters the loop, as a streaming one
+  does, deadlocks there, so development behaved differently from a production entry point that
+  passes `:workers`. An app acts if it develops on `:uv` (`HYPERION_SERVER=uv`) and relies on
+  inline dispatch: pass `:workers nil`. Other backends keep `start`'s default. (#432)
+
 ### Added
 
 - **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
@@ -158,6 +165,11 @@ its tag.
   there but a status: a DNS-rebinding page can read whatever that path returns.
   `hyperion/server:loopback-host-p` is exported. `hyperion/docs/middleware-security.md` has a
   table of which entry point is guarded by default. (#304)
+- **hyperion/dev: `serve` takes `:server`, `:workers` and `:watch-framework`.** `:server` and
+  `:workers` are passed to `hyperion/server:start`, so development can use the backend and
+  handler threads production uses (#432). `:watch-framework nil` stops watching hyperion's own
+  `src/`, for an app whose framework clone is pulled rather than edited; the default, `t`, is
+  unchanged. (#438)
 
 ### Fixed
 
@@ -197,6 +209,16 @@ its tag.
 - **The desktop Coalton REPL example: `(exit)` and `(quit)` close it, an evaluation stops after
   30 seconds or when its stop button is pressed, and the page says so when the backend stops
   answering.** Served with `serve` or `dev`, `(exit)` is refused instead. (#355)
+- **hyperion/dev: a failed reload stays in the browser until the file loads, and says what
+  happened.** A Lisp file whose compile ended with a full `WARNING` failed its reload, and the
+  error reached the browser overlay, but the next change, such as a stylesheet, found no Lisp to
+  compile, cleared the error and refreshed the page. The failed file was not tried again until
+  it was edited, so from the browser hot reload looked broken and the file's changes never
+  loaded. A failed file is now retried with every later change, and the overlay keeps its error
+  until it compiles; other changes still refresh the page. The message names the file and says
+  that the running code is the version from before the change. When a structure's layout
+  changed, which a running image cannot load, for example after pulling the framework clone
+  under a running dev server, the message starts with "RESTART NEEDED". (#438)
 
 ## v0.1.5 — 2026-09-30
 

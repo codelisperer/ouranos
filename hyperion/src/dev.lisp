@@ -49,7 +49,8 @@ and watching it makes the reload loop feed itself.")
   thread
   (lock (sb-thread:make-mutex :name "hyperion-dev-reload"))
   (running t)
-  last-error)                               ; last compile error string, or NIL
+  last-error                                ; last compile error string, or NIL
+  (failed '()))                             ; Lisp files whose last reload failed (#438)
 
 ;;; --- what is watched ------------------------------------------------------
 ;;;
@@ -174,10 +175,12 @@ passes, because a fresh image only ever has one layout and cannot reproduce it. 
 SELF-HEALS once the last dependent is recompiled, so an unrelated edit minutes later clears
 it and the whole thing reads as intermittent. That is what costs the afternoon, not the
 error message. Detecting it turns all of that into one line."
-  (let ((redefined '()))
+  (let ((redefined '())
+        (current nil))
     (values
      (handler-case
       (dolist (f (sort (copy-list files) #'string<) nil)
+        (setf current f)
         (let ((diag (make-string-output-stream)))
           (multiple-value-bind (out warnp failp)
               (let ((*error-output* (make-broadcast-stream *error-output* diag))
@@ -187,8 +190,7 @@ error message. Detecting it turns all of that into one line."
             (when (or (null out) failp)
               (let ((text (string-trim '(#\Space #\Newline #\Return)
                                        (get-output-stream-string diag))))
-                (error "~A" (if (plusp (length text)) text
-                                (format nil "compilation failed: ~A" f)))))
+                (error "~A" (if (plusp (length text)) text "compilation failed"))))
             ;; The layout-change warning is signalled by LOAD, not by COMPILE-FILE: it is
             ;; the moment the new definition replaces the old one in the image.
             (handler-bind ((warning
@@ -196,13 +198,43 @@ error message. Detecting it turns all of that into one line."
                                (let ((name (%redefined-type-name c)))
                                  (when name (pushnew name redefined :test #'string=))))))
               (load out)))))
-    (serious-condition (c) (princ-to-string c)))
+    (serious-condition (c) (%reload-failure-message current (princ-to-string c))))
      (nreverse redefined))))
+
+(defparameter +restart-needed-markers+
+  '("change in instance length" "Clobbering the compiler's idea of the layout" "incompatibly")
+  "Text SBCL uses when a structure's new definition has a different layout from the one in
+the image (#438). A running image cannot take such a definition: COMPILE-FILE fails on it, or
+LOAD refuses it. It happens when the watched framework tree is pulled under a running dev
+server and a DEFSTRUCT has gained slots, as server-uv's did in v0.1.6.")
+
+(defun %restart-needed-p (text)
+  (some (lambda (marker) (search marker text)) +restart-needed-markers+))
+
+(defun %reload-failure-message (file text)
+  "The message a failed reload of FILE shows, in the console and in the browser overlay (#438):
+what happened in one sentence, then SBCL's own TEXT. It says plainly that the running code is
+the old version, and, when TEXT shows a structure's layout changed, that only a restart loads
+the new one."
+  (let ((name (if file (file-namestring file) "a changed file")))
+    (if (%restart-needed-p text)
+        (format nil "RESTART NEEDED: ~A changes the layout of a structure, and a running image cannot load that. Restart the dev server to load it. Until then the running code is the version from before this change.~%~%~A"
+                name text)
+        (format nil "~A did not reload, so the running code is the version from before this change. Fix the problem below and save again; the file is retried on every save until it compiles.~%~%~A"
+                name text))))
 
 (defun reload! (&optional (d *dev*))
   "Recompile changed watched files; on success rebuild the server via the builder
 (reusing persistent state) and refresh :dev tabs. On failure keep the running
-server and record the error. Returns :reloaded / :no-change / :error."
+server and record the error. Returns :reloaded / :no-change / :error.
+
+A Lisp file whose reload failed stays PENDING (#438): it is compiled again with whatever
+changes next, and the error stays recorded, so the browser overlay keeps showing it, until
+it compiles. Before, the next change -- a stylesheet, say -- found no Lisp to compile,
+cleared the error and refreshed the page, and the failed file was never tried again until
+it was edited: hot reload looked broken, and the file's changes never loaded. When other
+files change while a Lisp file is failing, the server is still rebuilt and the page
+refreshed, so the other change shows, and the overlay stays."
   (when d
     (sb-thread:with-mutex ((dev-lock d))
       (let* ((new (%snapshot (dev-paths d)
@@ -213,7 +245,8 @@ server and record the error. Returns :reloaded / :no-change / :error."
              ;; fixture -- still rebuilds the server and refreshes the browser, but handing
              ;; it to COMPILE-FILE would put a compile error in the overlay every time
              ;; somebody edited a CSS file, which is a worse bug than the one being fixed.
-             (source (remove-if-not #'%lisp-file-p changed))
+             (source (union (remove-if-not #'%lisp-file-p changed) (dev-failed d)
+                            :test #'string=))
              (assets (remove-if #'%lisp-file-p changed)))
         (setf (dev-snapshot d) new)
         (cond
@@ -229,13 +262,14 @@ server and record the error. Returns :reloaded / :no-change / :error."
                        "~&[dev] REDEFINED TYPE~P: ~{~A~^ ~}~%[dev]   dependents were NOT recompiled -- this image now holds two layouts for the same type.~%[dev]   if you see \"the value #S(...) is not of type ...\", that is this: restart, or ql:quickload the system.~%[dev]   it also SELF-HEALS once the last dependent is recompiled, which is why it looks intermittent.~%"
                        (length redefined) redefined)
                (finish-output *error-output*))
+             (setf (dev-failed d) (and err source)
+                   (dev-last-error d) err)
+             (when err
+               (format *error-output* "~&[dev] ~A~%" err)
+               (finish-output *error-output*))
              (cond
-               (err
-                (setf (dev-last-error d) err)
-                (format *error-output* "~&[dev] compile failed:~%~A~%" err)
-                :error)
+               ((and err (null assets)) :error)
                (t
-                (setf (dev-last-error d) nil)
                 (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
                 (sleep 0.1)
                 (handler-case (setf (dev-handler d) (funcall (dev-builder d)))
@@ -244,10 +278,16 @@ server and record the error. Returns :reloaded / :no-change / :error."
                     (format *error-output* "~&[dev] restart failed: ~A~%" e)
                     (return-from reload! :error)))
                 (mark-reloaded)
-                (format *error-output* "~&[dev] reloaded~@[ ~{~A~^ ~}~]~@[ (assets: ~{~A~^ ~})~]~%"
-                        (mapcar #'file-namestring source)
-                        (mapcar #'file-namestring assets))
-                :reloaded)))))))))
+                (cond
+                  (err
+                   (format *error-output* "~&[dev] reloaded assets: ~{~A~^ ~}; the Lisp above still fails~%"
+                           (mapcar #'file-namestring assets))
+                   :error)
+                  (t
+                   (format *error-output* "~&[dev] reloaded~@[ ~{~A~^ ~}~]~@[ (assets: ~{~A~^ ~})~]~%"
+                           (mapcar #'file-namestring source)
+                           (mapcar #'file-namestring assets))
+                   :reloaded)))))))))))
 
 (defun %watch-loop (d)
   ;; Surface reload errors (don't swallow them -- silent failures are the worst),
@@ -597,8 +637,24 @@ the logger hardcoding knowledge of them."
                  host)
            :none)))
 
+(defun %serve-systems (systems watch-framework)
+  "The systems SERVE watches: SYSTEMS, plus hyperion itself when WATCH-FRAMEWORK is true."
+  (if watch-framework
+      (adjoin "hyperion" systems :test #'equal)
+      systems))
+
+(defun %dev-workers (server workers workers-p)
+  "The :WORKERS SERVE starts its server with (#432): WORKERS when given, even NIL; otherwise 2 on
+the native :uv backend, which without workers runs every handler on its loop thread, and NIL on
+the others, whose default is the same as production's."
+  (cond (workers-p workers)
+        ((eq server :uv) 2)
+        (t nil)))
+
 (defun serve (make-app &key paths system systems (port srv:*default-port*)
-                            (host "127.0.0.1") (interval 0.5) block request-guard)
+                            (host "127.0.0.1") (interval 0.5) block request-guard
+                            (server (srv:default-server)) (workers nil workers-p)
+                            (watch-framework t))
   "Turnkey hot-reload dev server -- the framework feature. MAKE-APP is a thunk
 returning a fresh Clack app (a handler lambda). SERVE wraps it (WRAP-DEV: reload
 endpoints + poller injection, so the browser auto-refreshes with no app wiring),
@@ -632,14 +688,27 @@ front, and without the guard a web page the developer visits can post to it, or 
 after a DNS rebinding. It accepts both 127.0.0.1:PORT and localhost:PORT, the two a developer
 types. On any other HOST it is :NONE, with a warning; pass it explicitly to change either.
 
+SERVER and WORKERS are passed to HYPERION/SERVER:START (#432), so development runs on the backend
+and handler threads production uses. SERVER defaults to HYPERION/SERVER:DEFAULT-SERVER. WORKERS
+defaults to 2 when SERVER is :UV: without workers, :uv runs every handler on its loop thread, and
+a handler that re-enters the loop, as a streaming one does, then deadlocks. Pass :WORKERS NIL to
+get that inline dispatch anyway. On other backends WORKERS defaults to START's own default.
+
+WATCH-FRAMEWORK (default T) watches hyperion's own src/ too, so framework edits reload with the
+app's. Pass NIL when the framework is a clone that is pulled, not edited: a pull under a running
+dev server recompiles the framework into it, and a structure that gained slots then cannot load
+until a restart (#438). The failed reload says RESTART NEEDED in the console and in the browser.
+
 Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
   (let* ((guard (%dev-request-guard request-guard host))
+         (workers (%dev-workers server workers workers-p))
          (d (watch (let ((make-app (%normalize-builder make-app "MAKE-APP")))
                     (lambda () (srv:start (wrap-dev (funcall make-app))
-                                          :port port :host host :request-guard guard)))
+                                          :port port :host host :request-guard guard
+                                          :server server :workers workers)))
                   :paths paths
                   :system system
-                  :systems (adjoin "hyperion" systems :test #'equal)
+                  :systems (%serve-systems systems watch-framework)
                   :interval interval)))
     (when block
       ;; Join the watcher rather than sleeping in a loop: the thread already owns the
