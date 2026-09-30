@@ -155,6 +155,41 @@ the commit-msg hook accepts it, 1 when the hook refuses it."
     ;; The `^' anchor earns its keep: prose ABOUT the rule is not a trailer.
     (is (= 0 (%commit-exit root (format nil "docs: say why we add no Co-Authored-By trailer~%"))))))
 
+(test the-hook-refuses-assistants-not-humans-who-share-a-name
+  ;; #311: the hook matched bare names, so it refused a human co-author called Claude Smith.
+  ;; It now refuses an assistant's identity: its name alone or with model words, its
+  ;; company's address, a [bot] account, or its GitHub noreply account.
+  (with-temp-dir (root)
+    (%conform-repo root)
+    (dolist (human '("Claude Smith <claude.smith@example.com>"
+                     "Devin Jones <devin@example.org>"
+                     "Gemini Ortiz <g.ortiz@example.net>"))
+      (is (= 0 (%commit-exit root (format nil "feat: work~%~%Co-Authored-By: ~A~%" human)))
+          "a human co-author must commit: ~A" human))
+    (dolist (bot '("Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+                   "Claude <claude@example.org>"
+                   "Copilot <175728472+Copilot@users.noreply.github.com>"
+                   "Cursor Agent <cursoragent@cursor.com>"
+                   "devin-ai-integration[bot] <158243242+devin-ai-integration[bot]@users.noreply.github.com>"
+                   "Some Name <someone@anthropic.com>"))
+      (is (= 1 (%commit-exit root (format nil "feat: work~%~%Co-Authored-By: ~A~%" bot)))
+          "an assistant's trailer must be refused: ~A" bot))))
+
+(defun %trailer-pattern-line (hook)
+  "The line of HOOK that sets ai_trailer, or NIL."
+  (find-if (lambda (line) (uiop:string-prefix-p "ai_trailer=" line))
+           (uiop:split-string hook :separator (string #\Newline))))
+
+(test the-generated-hook-refuses-with-the-tree-hooks-pattern
+  ;; The patterns are shared word for word, as the refusal text is, so a change to one
+  ;; copy alone fails here.
+  (let ((tree (%trailer-pattern-line
+               (uiop:read-file-string (merge-pathnames "../.githooks/commit-msg"
+                                                       (asdf:system-source-directory :cons)))))
+        (generated (%trailer-pattern-line cons/conform::*commit-msg-hook*)))
+    (is-true tree "the tree hook has no ai_trailer line")
+    (is (equal tree generated) "the generated hook's ai_trailer line differs from .githooks/commit-msg")))
+
 (defun %refusal-text (hook)
   "The text between `cat >&2 <<'MSG'' and the closing `MSG' in HOOK, or NIL."
   (let* ((open-marker (format nil "cat >&2 <<'MSG'~%"))
