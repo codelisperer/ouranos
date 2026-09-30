@@ -1,11 +1,10 @@
-;;;; memory-db-tests.lisp --- observational memory in a real database (#138).
+;;;; memory-db-tests.lisp --- observational memory in a real database (#138, #425).
 ;;;;
-;;;; AGAINST A REAL POSTGRES WITH pgvector, or not at all. The whole claim is that
-;;;; similarity recall works through mnemosyne against the backend the docs tell you to
-;;;; deploy on; a suite that exercised it against SQLite would be testing a backend that
-;;;; refuses the vector column outright, and one that mocked the database would be testing
-;;;; the mock. Without MNEMOSYNE_TEST_PG_URL these skip and say so -- a skip that names its
-;;;; reason is honest, a green that ran nothing is not.
+;;;; AGAINST REAL DATABASES: Postgres with pgvector, and SQLite (#425). The suite runs once
+;;;; per backend. On Postgres it needs MNEMOSYNE_TEST_PG_URL, and without it every test skips
+;;;; and says so -- a skip that names its reason is honest, a green that ran nothing is not.
+;;;; SQLite needs nothing, so it always runs, in a fresh database file per test. A test about
+;;;; something only Postgres has (the vector extension) skips on SQLite and says why.
 ;;;;
 ;;;; A FRESH TABLE PER RUN, never a reused one cleaned up afterwards. A fixture that cleans
 ;;;; up is RELYING on cleanup, and that dependency is invisible until the run where it did
@@ -20,6 +19,7 @@
                     (#:cnd #:praxeon/conditions)
                     (#:conn #:mnemosyne/conn)
                     (#:url #:mnemosyne/url)
+                    (#:be #:mnemosyne/backend)
                     (#:mig #:mnemosyne/migrate)
                     (#:param #:mnemosyne/param)
                     (#:q #:mnemosyne/query))
@@ -54,28 +54,39 @@ inheriting the original's source."
 (def-suite memory-db :description "Observational memory in a database, with similarity.")
 (in-suite memory-db)
 
+(defvar *backend* :postgres
+  "Which backend the suite is running on: :POSTGRES or :SQLITE (#425).")
+
+(defun %sqlite-p () (eq *backend* :sqlite))
+
 (defun run-tests ()
-  "Run the suite, report its Postgres coverage for the gate, and return T on success.
+  "Run the suite on each backend, report each backend's coverage for the gate, and return T
+on success.
 
-Every test here uses Postgres, through WITH-STORE. Without MNEMOSYNE_TEST_PG_URL they all
-skip, and a suite whose checks skip reports no failures, which reads as a pass. So this
-prints a BACKEND-CHECKS line, the format scripts/verify-tree.lisp reads from mnemosyne's
-suite: the number of checks that ran, or SKIPPED with the reason. The gate then fails the
-run, or lists the gap under NOT COVERED when OURANOS_ALLOW_NO_PG excuses it (#171).
+Every test uses a database, through WITH-STORE. On Postgres, without MNEMOSYNE_TEST_PG_URL
+they all skip, and a suite whose checks skip reports no failures, which reads as a pass. So
+this prints a BACKEND-CHECKS line per backend, the format scripts/verify-tree.lisp reads from
+mnemosyne's suite: the number of checks that ran, or SKIPPED with the reason. The gate then
+fails the run, or lists the gap under NOT COVERED when OURANOS_ALLOW_NO_PG excuses it (#171).
 
-The number is every check that ran while Postgres was configured. That includes one check
-that does not need it (that the in-memory store has no RECALL-SIMILAR method), so it is one
-more than the checks that touched the database. The gate only asks whether it is above zero.
+Each number is every check that ran on that backend. That includes one check that needs no
+database (that the in-memory store has no RECALL-SIMILAR method), so it is one more than the
+checks that touched the database. The gate only asks whether it is above zero.
 FIVEAM::TEST-SKIPPED is internal; FiveAM exports no way to tell a skip from a result."
   (let* ((url (%pg-url))
-         (results (run 'memory-db)))
-    (explain! results)
-    (if url
-        (format t "~&BACKEND-CHECKS postgres ~D~%"
-                (count-if-not (lambda (r) (typep r 'fiveam::test-skipped)) results))
-        (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
+         (results (let ((*backend* :postgres)) (run 'memory-db)))
+         (sqlite-results (let ((*backend* :sqlite)) (run 'memory-db))))
+    (explain! (append results sqlite-results))
+    (flet ((ran (rs) (count-if-not (lambda (r) (typep r 'fiveam::test-skipped)) rs)))
+      (if url
+          (format t "~&BACKEND-CHECKS postgres ~D~%" (ran results))
+          (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
+      (format t "~&BACKEND-CHECKS sqlite ~D~%" (ran sqlite-results))
+      ;; Which SQLite file those checks ran against, and its version, in the line
+      ;; scripts/verify-tree.lisp reads (#129).
+      (format t "~&SQLITE-LIBRARY ~A~%" (mnemosyne/sqlite-library:describe-loaded-library)))
     (finish-output)
-    (results-status results)))
+    (and (results-status results) (results-status sqlite-results))))
 
 ;;; --- a deterministic embedder ----------------------------------------------
 
@@ -103,10 +114,33 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
 
 (defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
 
+(defun %fresh-sqlite-file ()
+  (merge-pathnames (format nil "praxeon-memory-~36R-~36R.db" (sb-posix:getpid)
+                           (random (expt 2 40) (make-random-state t)))
+                   (uiop:temporary-directory)))
+
+(defun %delete-sqlite-files (file)
+  (dolist (suffix '("" "-journal" "-wal" "-shm"))
+    (let ((f (probe-file (concatenate 'string (namestring file) suffix))))
+      (when f (delete-file f)))))
+
 (defmacro with-store ((store-var &optional (embedder '(make-instance 'basis-embedder)))
                       &body body)
-  "A fresh table, a fresh store over EMBEDDER, and a connection that is closed afterwards."
-  `(let ((url (%pg-url)))
+  "A fresh table, a fresh store over EMBEDDER, and a connection that is closed afterwards.
+On SQLite the table is in a fresh database file, deleted afterwards."
+  `(if (%sqlite-p)
+       (let ((file (%fresh-sqlite-file)))
+         (unwind-protect
+              (let ((connection (conn:connect (be:make-sqlite (namestring file)))))
+                (unwind-protect
+                     (let ((,store-var (mdb:make-db-memory-store
+                                        connection :embedder ,embedder
+                                                   :table "praxeon_observations"
+                                                   :dialect :sqlite :ensure t)))
+                       ,@body)
+                  (conn:disconnect connection)))
+           (%delete-sqlite-files file)))
+   (let ((url (%pg-url)))
      (if (not url)
          (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
          (let* ((table (format nil "praxeon_obs_~36R_~36R"
@@ -125,7 +159,7 @@ the last are the SAME direction, which is what makes `nearest' a meaningful ques
                   ,@body)
              (ignore-errors
               (conn:exec connection (format nil "DROP TABLE IF EXISTS ~A" table)))
-             (conn:disconnect connection))))))
+             (conn:disconnect connection)))))))
 
 ;;; --- the tests --------------------------------------------------------------
 
@@ -165,6 +199,8 @@ there is no Postgres, or when the test role cannot create a database."
 store checks pg_extension and signals a condition naming the database. Afterwards the
 extension is still absent, which shows the store did not try to create it. Control: once it
 is installed, ENSURE-SCHEMA succeeds."
+  (if (%sqlite-p)
+      (skip "Postgres only: the vector extension")
   (with-scratch-database (c)
     (let ((store (mdb:make-db-memory-store c :embedder (make-instance 'basis-embedder)
                                              :table "praxeon_noext_obs")))
@@ -173,7 +209,7 @@ is installed, ENSURE-SCHEMA succeeds."
           (is (search "praxeon_scratch_" (cnd:vector-extension-missing-database e)))))
       (is-false (mig:extension-present-p c "vector") "the store did not create it")
       (mig:require-extension c "vector")
-      (is (eq store (mdb:ensure-schema store))))))
+      (is (eq store (mdb:ensure-schema store)))))))
 
 (test the-schema-is-built-from-the-embedder-not-from-a-literal
   "#150: a schema hard-coding 1536 has hard-coded OpenAI's text-embedding-3-small.
@@ -183,12 +219,22 @@ The store's width comes from the injected provider, so a 4-wide test embedder pr
   ;; The checks are INSIDE WITH-STORE. When Postgres is absent it skips and returns FiveAM's
   ;; skip object; bound outside, that object was tested for truth and then passed to SOME,
   ;; which is how the suite errored instead of skipping (#171).
+  ;;
+  ;; ON SQLITE (#425) the column is text and there is no index, so the width is checked when a
+  ;; vector is written or queried instead. This asserts the SQLite table's shape; the refusal is
+  ;; asserted by A-QUERY-VECTOR-OF-THE-WRONG-WIDTH-IS-REFUSED-BEFORE-IT-REACHES-THE-DATABASE.
   (with-store (store)
     (let ((store-ddl (mdb::store-ddl store)))
-      (is (some (lambda (s) (search "vector(4)" s)) store-ddl)
-          "the CREATE TABLE must size the column from the embedder, got:~%~{~A~%~}" store-ddl)
-      (is (some (lambda (s) (search "vector_cosine_ops" s)) store-ddl)
-          "and the index must name the operator class that serves `<=>' (pre-publication issue 258)"))))
+      (if (%sqlite-p)
+          (progn
+            (is (= 1 (length store-ddl)) "on SQLite, the table and no index, got:~%~{~A~%~}" store-ddl)
+            (is (notany (lambda (s) (search "vector" s :test #'char-equal)) store-ddl)
+                "and no vector type, which SQLite does not have: ~{~A~%~}" store-ddl))
+          (progn
+            (is (some (lambda (s) (search "vector(4)" s)) store-ddl)
+                "the CREATE TABLE must size the column from the embedder, got:~%~{~A~%~}" store-ddl)
+            (is (some (lambda (s) (search "vector_cosine_ops" s)) store-ddl)
+                "and the index must name the operator class that serves `<=>' (pre-publication issue 258)"))))))
 
 (test an-observation-round-trips-through-the-database
   (with-store (store)

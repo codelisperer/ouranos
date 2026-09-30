@@ -181,6 +181,57 @@ column, which is true and unhelpful."
              :source (or source "the declared schema"))))
   declared)
 
+;;; --- a vector as text, for a store with no vector type (#425) ------------------
+;;;
+;;; SQLite has no vector column, so a store on SQLite keeps an embedding as text and computes
+;;; similarity in Lisp. The text is pgvector's own form, [x,y,...], so one format serves both
+;;; backends and a stored value can be read by eye. These are pure functions; the stores in
+;;; praxeon/memory-db and praxeon/retrieval call them.
+
+(defun vector-text (vector &optional dimensions)
+  "VECTOR, a sequence of reals, as the text [x,y,...], each number written as a double. With
+DIMENSIONS, signals PRAXEON/CONDITIONS:DELIBERATION-FAILURE unless VECTOR has that many
+numbers, as mnemosyne's cast does for a pgvector column."
+  (when (and dimensions (/= (length vector) dimensions))
+    (error 'praxeon/conditions:deliberation-failure
+           :detail (format nil "embedding rejected: ~D numbers where the store holds ~D"
+                           (length vector) dimensions)))
+  (with-standard-io-syntax
+    (let ((*read-default-float-format* 'double-float))
+      (format nil "[~{~A~^,~}]" (map 'list (lambda (x) (coerce x 'double-float)) vector)))))
+
+(defun parse-vector-text (text)
+  "The numbers of TEXT, written by VECTOR-TEXT, as a simple vector of doubles. Signals
+PRAXEON/CONDITIONS:DELIBERATION-FAILURE if TEXT is not that form. Reads with *READ-EVAL* off
+and accepts only reals."
+  (flet ((bad () (error 'praxeon/conditions:deliberation-failure
+                        :detail (format nil "a stored embedding is not a vector: ~S"
+                                        (subseq text 0 (min 40 (length text)))))))
+    (let ((n (length text)))
+      (unless (and (> n 1) (char= (char text 0) #\[) (char= (char text (1- n)) #\]))
+        (bad))
+      (with-standard-io-syntax
+        (let ((*read-default-float-format* 'double-float)
+              (*read-eval* nil))
+          (coerce (loop for start = 1 then (1+ end)
+                        for end = (or (position #\, text :start start) (1- n))
+                        collect (let ((x (ignore-errors (read-from-string text t nil
+                                                                          :start start :end end))))
+                                  (if (realp x) (coerce x 'double-float) (bad)))
+                        while (< end (1- n)))
+                  'simple-vector))))))
+
+(defun cosine-distance (a b)
+  "One minus the cosine of the angle between A and B, the value pgvector's <=> computes. A
+vector of all zeros has no direction, and its distance from anything is taken as 1."
+  (let ((dot 0d0) (na 0d0) (nb 0d0))
+    (map nil (lambda (x y)
+               (incf dot (* x y)) (incf na (* x x)) (incf nb (* y y)))
+         a b)
+    (if (or (zerop na) (zerop nb))
+        1d0
+        (- 1d0 (/ dot (sqrt (* na nb)))))))
+
 ;;; --- batching within a provider's limits -----------------------------------
 
 (defun estimate-tokens (text)
