@@ -59,6 +59,8 @@ SETF rather than LET, because the cancel test evaluates on another thread."
 (test the-cancel-route-stops-the-running-evaluation
   (%with-fresh-session
     (let* ((body nil)
+           ;; THREAD-LIFETIME: independent -- stands in for the request thread that is waiting
+           ;; on /eval while the test posts /cancel; joined before the test ends.
            (thread (sb-thread:make-thread
                     (lambda () (setf body (%post "(lisp (-> Integer) () (cl:loop (cl:sleep 0.02)))"))))))
       (unwind-protect

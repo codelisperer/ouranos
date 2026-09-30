@@ -240,6 +240,9 @@ TIME-LIMIT seconds (NIL: no limit) the thread is interrupted and the result says
 of its own, rather than the caller's, so the caller -- a server's request thread -- is never
 the one interrupted, and CANCEL-EVALUATION has a thread to aim at."
   (let* ((box (list nil))
+         ;; THREAD-LIFETIME: independent -- one evaluation, joined or abandoned before
+         ;; EVAL-INPUT returns. It binds *PACKAGE* itself (see EVAL-INPUT) and does not see the
+         ;; caller's other bindings; the CHANGELOG entry for #355 tells apps so.
          (worker (sb-thread:make-thread
                   (lambda () (setf (car box) (funcall thunk)))
                   :name "coalton-repl evaluation")))
