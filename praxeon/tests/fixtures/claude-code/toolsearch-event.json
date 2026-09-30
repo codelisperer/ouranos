@@ -1,0 +1,23 @@
+{
+  "session_id": "202ab7a5-2057-4e2b-b54c-de38acddbd16",
+  "transcript_path": "/home/user/.claude/projects/-tmp-capture/202ab7a5-2057-4e2b-b54c-de38acddbd16.jsonl",
+  "cwd": "/tmp/capture",
+  "scratchpad_dir": "/tmp/capture-scratch/202ab7a5-2057-4e2b-b54c-de38acddbd16/scratchpad",
+  "prompt_id": "14138e4b-5850-4e6e-9eba-5282cbf048b3",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "ToolSearch",
+  "tool_input": {
+    "query": "select:mcp__cap__lookup",
+    "max_results": 1
+  },
+  "tool_response": {
+    "matches": [
+      "mcp__cap__lookup"
+    ],
+    "query": "select:mcp__cap__lookup",
+    "total_deferred_tools": 17
+  },
+  "tool_use_id": "toolu_01P5CKL2GN73uBXx7n7N4xxL",
+  "duration_ms": 1
+}

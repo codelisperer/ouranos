@@ -37,6 +37,21 @@ its tag.
 
 ### Added
 
+- **praxeon/claude-code: a report on how much of a Claude Code session's reading comes from large
+  tool outputs, and a PostToolUse hook that replaces a large search output with a checked
+  summary.** (#452) `praxeon/scripts/build-claude-code.lisp` builds `bin/praxeon-claude-code`.
+  - `praxeon-claude-code report [--days N] [--threshold TOKENS]` reads
+    `~/.claude/projects/*/*.jsonl` and subagent transcripts and prints counts only: model calls
+    and their token usage, tool results by category with how often each was read again, how
+    many the hook would replace, and an upper bound on the saving.
+  - `praxeon-claude-code hook` replaces the output of `rg`, `grep`, `find`, `fd` and MCP tools
+    above 3,500 tokens with a list of facts from a second model, after checking that every path,
+    identifier and number in the list occurs in the output; otherwise it prints nothing and the
+    original passes through. It never replaces reads, diffs, failed commands, credential-shaped
+    text, or output carrying SHAs or run ids. Settings are `PRAXEON_CC_*` environment variables:
+    the backend (the `claude` CLI, or a `praxeon/llm` provider with the role `compressor`),
+    model, effort, threshold, summary budget, timeout, archive age and cache directory.
+    Installing it is described in `praxeon/docs/claude-code-hook.md`.
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
   `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,
