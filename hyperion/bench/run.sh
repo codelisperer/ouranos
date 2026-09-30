@@ -10,6 +10,10 @@
 #
 # Woo is Unix-only, so this only compares on Linux/macOS. Answers the desktop
 # server-backend question in issue #72 with numbers instead of reasoning.
+#
+# To compare :uv with Woo (and Hunchentoot) in one table, with the load generator's own
+# ceiling measured first, use compare.py in this directory (#413). It runs the same
+# server.lisp and imports load.py's measurements.
 set -eu
 
 # NB: no braces in the :? message -- the first `}` closes the expansion, so

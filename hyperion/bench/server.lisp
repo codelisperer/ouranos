@@ -1,7 +1,13 @@
-;;;; server.lisp --- the benchmark subject: one Hyperion app, either backend.
+;;;; server.lisp --- the benchmark subject: one Hyperion app, on any backend.
 ;;;;
 ;;;;     HYPERION_SERVER=hunchentoot sbcl --dynamic-space-size 4096 --script hyperion/bench/server.lisp 8099
 ;;;;     HYPERION_SERVER=woo         sbcl --dynamic-space-size 4096 --script hyperion/bench/server.lisp 8099
+;;;;     HYPERION_SERVER=uv          sbcl --dynamic-space-size 4096 --script hyperion/bench/server.lisp 8099
+;;;;
+;;;; HYPERION_WORKERS, when set, is the worker count START gives the backend: :worker-num for
+;;;; Woo, :workers for :uv, and nothing for Hunchentoot, which runs a thread per connection
+;;;; (#413). Request logging is off on every backend, so a comparison measures the servers and
+;;;; not the logger.
 ;;;;
 ;;;; Exists to settle one decision with numbers instead of reasoning: can Hunchentoot carry
 ;;;; a DESKTOP app's live-feed rendering, so desktop bundles can drop Woo -- and with it
@@ -26,14 +32,16 @@
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 (funcall (read-from-string "ql:quickload") :hyperion)
 
-;;; hyperion.asd pulls clack-handler-WOO on Unix and clack-handler-HUNCHENTOOT only on
-;;; Windows, so asking for Hunchentoot on Linux otherwise dies with "... is unknown handler".
-;;; Loading it explicitly here is exactly the .asd-level change the desktop decision implies
-;;; -- the handler is baked in at build time, so it is not something HYPERION_SERVER alone
-;;; can switch in a dumped image.
+;;; hyperion.asd depends on no Clack handler (#373): an app declares the one it uses. So the
+;;; benchmark loads the handler for the backend it was asked for, as an app would.
 (let ((want (string-downcase (or (uiop:getenv "HYPERION_SERVER") ""))))
   (when (string= want "hunchentoot")
-    (funcall (read-from-string "ql:quickload") :clack-handler-hunchentoot)))
+    (funcall (read-from-string "ql:quickload") :clack-handler-hunchentoot))
+  (when (string= want "woo")
+    (funcall (read-from-string "ql:quickload") :clack-handler-woo))
+  ;; The native server is its own system, and needs a built vendor/libuv (#413).
+  (when (string= want "uv")
+    (funcall (read-from-string "ql:quickload") :hyperion/server-uv)))
 
 (defpackage #:hyperion/bench
   (:use #:cl)
@@ -81,9 +89,11 @@
 
 (let* ((port (or (ignore-errors (parse-integer (second sb-ext:*posix-argv*))) 8099))
        (backend (srv:default-server))
-       (handler (srv:start #'app :port port :host "127.0.0.1" :server backend)))
-  (format t "~&bench: ~A listening on 127.0.0.1:~D  (tile ~D B, board ~D B)~%"
-          backend port (length *tile*) (length *board*))
+       (workers (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS"))))
+       (handler (srv:start #'app :port port :host "127.0.0.1" :server backend
+                                 :workers workers :log nil)))
+  (format t "~&bench: ~A listening on 127.0.0.1:~D  (tile ~D B, board ~D B, workers ~A, pid ~D)~%"
+          backend port (length *tile*) (length *board*) workers (sb-unix:unix-getpid))
   (finish-output)
   (unwind-protect
        (loop until *stop* do (sleep 0.1))
