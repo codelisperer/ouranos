@@ -49,7 +49,14 @@
    #:*layouts* #:register-layout #:verify-layouts #:layout-report
    #:pointer-width #:layout-column #:layout-mismatch #:layout-mismatch-details
    ;; structs the foundation owns (IID/CLSID are typedefs of GUID)
-   #:filetime #:guid))
+   #:filetime #:guid
+   ;; Credential Manager (#357)
+   #:credential-w #:flags #:target-name #:comment #:last-written
+   #:credential-blob-size #:credential-blob #:persist #:attribute-count #:attributes
+   #:target-alias #:user-name
+   #:cred-write-w #:cred-read-w #:cred-delete-w #:cred-free
+   #:+cred-type-generic+ #:+cred-persist-local-machine+ #:+cred-max-credential-blob-size+
+   #:+error-not-found+))
 
 (cl:defpackage #:aion/windows
   (:use #:common-lisp)
