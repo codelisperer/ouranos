@@ -588,8 +588,17 @@ the logger hardcoding knowledge of them."
                  (list (or (dev-error) ""))))
           (t (%call-app app env script)))))))
 
+(defun %dev-request-guard (request-guard host)
+  "The request guard SERVE starts its server with: REQUEST-GUARD when given, otherwise
+:SAME-ORIGIN on loopback and :NONE elsewhere, with one warning saying so (#304)."
+  (cond (request-guard request-guard)
+        ((srv:loopback-host-p host) :same-origin)
+        (t (warn "hyperion/dev: the dev server on ~A has no same-origin guard, because it is not bound to loopback; a web page on another machine can reach it. Pass :request-guard (:same-origin \"http://HOST:PORT\") with the origins you use."
+                 host)
+           :none)))
+
 (defun serve (make-app &key paths system systems (port srv:*default-port*)
-                            (host "127.0.0.1") (interval 0.5) block)
+                            (host "127.0.0.1") (interval 0.5) block request-guard)
   "Turnkey hot-reload dev server -- the framework feature. MAKE-APP is a thunk
 returning a fresh Clack app (a handler lambda). SERVE wraps it (WRAP-DEV: reload
 endpoints + poller injection, so the browser auto-refreshes with no app wiring),
@@ -617,10 +626,17 @@ target; the function returned, the process exited, and it took the server with i
 printing that it was listening. It printed success. Pass :BLOCK T from any entry point that
 is not a REPL form (pre-publication issue 236).
 
+REQUEST-GUARD is passed to HYPERION/SERVER:START (#304). By default it is :SAME-ORIGIN when
+HOST is loopback: a dev server holds real data on the developer's machine with no proxy in
+front, and without the guard a web page the developer visits can post to it, or read from it
+after a DNS rebinding. It accepts both 127.0.0.1:PORT and localhost:PORT, the two a developer
+types. On any other HOST it is :NONE, with a warning; pass it explicitly to change either.
+
 Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
-  (let ((d (watch (let ((make-app (%normalize-builder make-app "MAKE-APP")))
+  (let* ((guard (%dev-request-guard request-guard host))
+         (d (watch (let ((make-app (%normalize-builder make-app "MAKE-APP")))
                     (lambda () (srv:start (wrap-dev (funcall make-app))
-                                          :port port :host host)))
+                                          :port port :host host :request-guard guard)))
                   :paths paths
                   :system system
                   :systems (adjoin "hyperion" systems :test #'equal)

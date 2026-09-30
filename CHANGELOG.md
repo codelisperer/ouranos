@@ -85,6 +85,16 @@ its tag.
   build (`%shipped-image-p`). `verify-bundle-windows.ps1` treats `sbcl-runtime.exe` as a helper
   and traces it as the launcher's child. Linux builds are unchanged. (#98)
 
+- **hyperion/dev: `serve` on loopback refuses a request whose Host is not `127.0.0.1:PORT` or
+  `localhost:PORT`, and a cross-site POST.** It now starts its server with
+  `:request-guard :same-origin`, the guard `run-app` has had since #302, because a development
+  server holds real data on the developer's machine and a web page they visit could post to it,
+  or read from it after a DNS rebinding. An app acts if its developers reach the dev server by
+  another name: a hosts-file entry, a LAN address from a phone, or a proxy. Pass
+  `:request-guard (:same-origin "http://NAME:PORT" ...)` with those origins, or
+  `:request-guard :none`. On a host that is not loopback, `serve` stays unguarded and warns once.
+  (#304)
+
 ### Added
 
 - **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
@@ -137,6 +147,17 @@ its tag.
   thread**, and `run-app` then stops the server and returns. `run-app` takes `:workers`,
   passed to `hyperion/server:start`: an app whose page makes a second request while a slow one
   runs, such as a cancel button, needs at least 2 on Woo. (#355)
+- **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
+  `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
+  `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,
+  `:none`, is unchanged, because behind a reverse proxy on the same machine the guard would refuse
+  every request. Turn it on for a desktop app's UI or a user's data served headless on 127.0.0.1.
+  In `serve-forever`, the `:readiness-path` is exempt from the request guard, both its Host and
+  its Origin check, so a health checker is never refused. When the server is not draining, a
+  request for that path reaches the app's own handler unguarded, so an app must serve nothing
+  there but a status: a DNS-rebinding page can read whatever that path returns.
+  `hyperion/server:loopback-host-p` is exported. `hyperion/docs/middleware-security.md` has a
+  table of which entry point is guarded by default. (#304)
 
 ### Fixed
 
