@@ -256,3 +256,131 @@ name and value; Host included only if listed) and return the status code."
       (is (= 200 (%so-raw-status port "POST" "/x"
                                  `(("Host" . ,(format nil "127.0.0.1:~D" port))
                                    ("Sec-Fetch-Site" . "cross-site"))))))))
+
+;;; --- the guard on dev:serve and server:start (#304) ------------------------------------
+;;;
+;;; #302 put the guard on RUN-APP only. An app's development server (dev:serve) and a
+;;; headless server:start on 127.0.0.1 serve the same data to the same machine, and a
+;;; DNS-rebinding page could read from and post to either. dev:serve now guards by default on
+;;; loopback; server:start guards when asked, because behind a same-machine reverse proxy it
+;;; binds 127.0.0.1 and receives the public Host, and a default guard would refuse every
+;;; request.
+
+(defmacro %so-with-start ((port-var &rest start-args) &body body)
+  "BODY with PORT-VAR bound to a server START ran with START-ARGS on a free loopback port."
+  (let ((handler (gensym "HANDLER")))
+    `(let* ((,port-var (ports:candidate-port))
+            (,handler (srv:start (%srv-ok-app) :server :hunchentoot :port ,port-var
+                                               :host "127.0.0.1" ,@start-args)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (srv:stop ,handler))
+         (ports:await-released ,port-var)))))
+
+(defmacro %so-with-dev-serve ((port-var &rest serve-args) &body body)
+  "BODY with PORT-VAR bound to a real dev:serve on a free loopback port, started with
+SERVE-ARGS, and torn down afterwards."
+  (let ((root (gensym "ROOT")) (thread (gensym "THREAD")))
+    `(let* ((,root (%dev-serve-root))
+            (,port-var (ports:candidate-port))
+            (,thread (sb-thread:make-thread
+                      (lambda ()
+                        (let ((*standard-output* (make-broadcast-stream)))
+                          (handler-case
+                              (hyperion/dev:serve #'%srv-ok-app :paths (list ,root) :port ,port-var
+                                                                 :host "127.0.0.1" :interval 0.2
+                                                                 ,@serve-args)
+                            (srv:port-in-use (c) c))))
+                      :name "same-origin dev-serve")))
+       (unwind-protect
+            (progn (%srv-await (lambda () (ports:listening-p ,port-var)))
+                   ,@body)
+         (ignore-errors (hyperion/dev:unwatch))
+         (ignore-errors (sb-thread:join-thread ,thread :timeout 10 :default nil))
+         (ports:await-released ,port-var)
+         (ignore-errors (aion/fs:delete-tree ,root :if-does-not-exist :ignore))))))
+
+(defun %so-guarded-answers (port)
+  "Statuses for the requests that tell a guarded server from an unguarded one, as a plist."
+  (let ((ip (format nil "127.0.0.1:~D" port))
+        (name (format nil "localhost:~D" port)))
+    (list :own-get (%so-raw-status port "GET" "/" `(("Host" . ,ip)))
+          :localhost-get (%so-raw-status port "GET" "/" `(("Host" . ,name)))
+          :foreign-get (%so-raw-status port "GET" "/" `(("Host" . ,(format nil "attacker.example:~D" port))))
+          :own-post (%so-raw-status port "POST" "/x" `(("Host" . ,ip) ("Sec-Fetch-Site" . "same-origin")))
+          :cross-post (%so-raw-status port "POST" "/x" `(("Host" . ,ip) ("Sec-Fetch-Site" . "cross-site"))))))
+
+(test dev-serve-on-loopback-guards-by-default
+  (%quietly
+    (%so-with-dev-serve (port)
+      (let ((a (%so-guarded-answers port)))
+        (is (= 200 (getf a :own-get)))
+        (is (= 200 (getf a :localhost-get)) "a developer types localhost too")
+        (is (= 403 (getf a :foreign-get)) "a rebinding page's Host is refused, GET included")
+        (is (= 200 (getf a :own-post)))
+        (is (= 403 (getf a :cross-post)) "a cross-site POST is refused")))))
+
+(test dev-serve-with-request-guard-none-installs-nothing
+  "The control for the test above: the same server with the guard off answers everything."
+  (%quietly
+    (%so-with-dev-serve (port :request-guard :none)
+      (let ((a (%so-guarded-answers port)))
+        (is (= 200 (getf a :foreign-get)))
+        (is (= 200 (getf a :cross-post)))))))
+
+(test server-start-is-unguarded-by-default
+  (%quietly
+    (%so-with-start (port)
+      (let ((a (%so-guarded-answers port)))
+        (is (= 200 (getf a :foreign-get)) "a proxy's public Host must still reach the app")
+        (is (= 200 (getf a :cross-post)))))))
+
+(test server-start-with-request-guard-same-origin-guards-like-run-app
+  (%quietly
+    (%so-with-start (port :request-guard :same-origin)
+      (let ((a (%so-guarded-answers port)))
+        (is (= 200 (getf a :own-get)))
+        (is (= 200 (getf a :localhost-get)))
+        (is (= 403 (getf a :foreign-get)))
+        (is (= 200 (getf a :own-post)))
+        (is (= 403 (getf a :cross-post)))))))
+
+(test server-start-takes-the-origins-it-is-given
+  (%quietly
+    (%so-with-start (port :request-guard (list :same-origin "http://app.example.test:8443"))
+      (is (= 200 (%so-raw-status port "GET" "/" '(("Host" . "app.example.test:8443")))))
+      (is (= 403 (%so-raw-status port "GET" "/" `(("Host" . ,(format nil "127.0.0.1:~D" port)))))
+          "only the origins given are the app's own"))))
+
+(test the-request-guard-refuses-what-it-cannot-apply
+  (signals error (srv::%request-guard-origins "0.0.0.0" 8080))
+  (signals error (srv::%apply-request-guard (%srv-ok-app) :yes "127.0.0.1" 8080))
+  (is (srv:loopback-host-p "localhost"))
+  (is (srv:loopback-host-p "::1"))
+  (is (not (srv:loopback-host-p "192.168.1.5"))))
+
+;;; --- the readiness path is exempt from the guard (#304, with #397's readiness path) --------
+
+(test serve-forever-exempts-the-readiness-path-from-the-request-guard
+  "A platform's health checker sends no Origin and may use another Host; refusing it would take
+a healthy instance out of rotation. Every other path stays guarded."
+  (%quietly
+    (%srv-with-serving (session port :server :hunchentoot :signals nil
+                                     :request-guard :same-origin :readiness-path "/health")
+      (let ((foreign `(("Host" . ,(format nil "health-checker.internal:~D" port)))))
+        (is (= 200 (%so-raw-status port "GET" "/health" foreign))
+            "a foreign Host reaches the readiness path")
+        (is (= 200 (%so-raw-status port "POST" "/health" (cons '("Sec-Fetch-Site" . "cross-site") foreign)))
+            "the Origin check is skipped there too")
+        (is (= 403 (%so-raw-status port "GET" "/" foreign))
+            "every other path is still guarded")
+        (setf (srv::server-session-draining session) t)
+        (is (= 503 (%so-raw-status port "GET" "/health" foreign))
+            "while draining, the readiness path answers 503 to the same checker")
+        (setf (srv::server-session-draining session) nil)))))
+
+(test without-a-readiness-path-the-same-request-is-refused
+  "The control for the test above: the same guard and the same request, with no readiness path."
+  (%quietly
+    (%srv-with-serving (session port :server :hunchentoot :signals nil :request-guard :same-origin)
+      (is (= 403 (%so-raw-status port "GET" "/health"
+                                 `(("Host" . ,(format nil "health-checker.internal:~D" port)))))))))
