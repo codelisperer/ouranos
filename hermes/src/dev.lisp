@@ -10,8 +10,11 @@
 (cl:in-package #:hermes)
 
 (defclass dev-transport (email-provider sms-provider)
-  ((stream :initarg :stream :initform *standard-output* :reader dev-stream))
-  (:documentation "A transport that RENDERS a message to a stream instead of sending it."))
+  ((stream :initarg :stream :initform *standard-output* :reader dev-stream)
+   (last-email :initform nil :accessor dev-last-email))
+  (:documentation "A transport that RENDERS a message to a stream instead of sending it.
+DEV-LAST-EMAIL is the last EMAIL it was given, so a test can read what would have been sent,
+its attachments included (#366)."))
 
 (defun make-dev-transport (&rest initargs &key stream)
   "A dev/log transport. STREAM defaults to *standard-output*."
@@ -32,10 +35,19 @@
   (finish-output stream))
 
 (defmethod deliver ((p dev-transport) (m email))
+  (setf (dev-last-email p) m)
   (%dev-render (dev-stream p) "EMAIL"
                (list "To:" (email-to m) "From:" (email-from m)
                      "Reply-To:" (email-reply-to m) "Subject:" (email-subject m)
-                     "Body:" (email-text m)))
+                     "Body:" (email-text m)
+                     ;; Names, types and sizes only; the content itself is not printed.
+                     "Attachment:" (format nil "~{~A~^~%               ~}"
+                                           (mapcar (lambda (a)
+                                                     (format nil "~A (~A, ~D bytes)"
+                                                             (attachment-filename a)
+                                                             (attachment-content-type a)
+                                                             (length (attachment-octets a))))
+                                                   (email-attachments m)))))
   (make-delivery-result :provider :dev :id (%dev-id) :status :logged :raw m))
 
 (defmethod deliver ((p dev-transport) (m sms))

@@ -151,6 +151,15 @@ its tag.
   - `forget-agent-results` erases a conversation's stored results.
   - Nothing is on by default. `praxeon/bench/tool-results.lisp` measures task success, input
     tokens and the cacheable share under each configuration, with a scripted model or a real one.
+- **hermes: email attachments, so an invitation can carry a calendar file.** (#366)
+  `make-email` takes `:attachments`, a list of `make-attachment` values: `:filename`,
+  `:content-type` with its parameters (`"text/calendar; charset=utf-8; method=REQUEST"`),
+  `:content` as a string (sent as UTF-8) or an octet vector, and `:disposition` (`:attachment`,
+  or `:inline` with a `:content-id`). SendGrid gets each one base64-encoded in its
+  `attachments` array. The dev transport prints each attachment's name, type and size, and
+  `dev-last-email` returns the last email it was given, so a test can check that an `.ics` went
+  out. A value that cannot be sent signals `invalid-message` when it is made. An email without
+  attachments is sent exactly as before.
 
 ### Fixed
 
