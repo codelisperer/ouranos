@@ -505,6 +505,41 @@ Your CSS still owns layout mirroring — prefer logical properties (`margin-inli
 `padding-inline`, `text-align: start`) over `left`/`right` and it follows `dir` for free.
 See [`docs/i18n-design.md`](i18n-design.md) §10.
 
+## Behind a proxy or a CDN (`hyperion/proxy`, #381)
+
+Behind a reverse proxy or a CDN, a request's `:remote-addr` is the proxy. Rate limits keyed on
+it put every visitor in one bucket, and the log shows one address. The proxy reports the
+client in `X-Forwarded-For`, or in a header of its own, but a client can send those headers
+too, so they are believed only as far as the app says which proxies it trusts:
+
+```lisp
+;; One load balancer in front of the app:
+(setf hyperion/proxy:*trusted-proxy* (hyperion/proxy:make-proxy-trust :hops 1))
+
+;; Or proxies known by their address ranges, optionally with the platform's own header:
+(setf hyperion/proxy:*trusted-proxy*
+      (hyperion/proxy:make-proxy-trust :cidrs '("173.245.48.0/20" "2400:cb00::/32")
+                                       :header "CF-Connecting-IP"))
+```
+
+- `(hyperion/proxy:client-address env)` is then the client:
+  - with `:hops N`, the address N entries from the right of `X-Forwarded-For` with the peer
+    after it;
+  - with `:cidrs`, the rightmost address that is not a trusted proxy, or the `:header` value
+    when the peer is trusted and the header is present.
+
+  Entries a client wrote on the left of `X-Forwarded-For` are never read, and ports and IPv6
+  brackets are dropped, so one client is one key.
+- With no setting, the default, it is `:remote-addr`, whatever the headers say.
+- `hyperion/ratelimit:by-address` and the request log's `remote` field use it.
+  `(by-address :trust t2)` uses another setting for one limit.
+- `(hyperion/proxy:request-scheme env)` is `:https` or `:http`, from `X-Forwarded-Proto` only
+  when the peer is a trusted proxy. It reads the same setting.
+
+Do not trust a proxy you do not run or pay for. A hop count is right only when every request
+reaches the app through that many proxies. If the app can also be reached directly, use
+`:cidrs`, so that a direct request's forwarded headers are ignored.
+
 ## Static files + HTTP caching (`hyperion/static`)
 
 `file-response` maps a URL path onto a file under a root directory, refusing `..`

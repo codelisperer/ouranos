@@ -126,6 +126,15 @@ its tag.
   error code when Windows cannot answer, and signals on other systems. `aion/windows` re-exports
   it. An app that parses `attrib.exe` for a read-only check can call this instead: `attrib.exe`'s
   output did not decode for a non-ASCII path, and the check answered "not read-only". (#349)
+- **hyperion/proxy: the client's address behind a trusted proxy, and one setting for it.**
+  (#381) `hyperion/proxy:*trusted-proxy*`, made with `make-proxy-trust` (`:hops N`, or
+  `:cidrs` with an optional platform `:header` such as `CF-Connecting-IP`), says which proxies
+  the app trusts. `client-address` then reads `X-Forwarded-For`, or the platform's header, only
+  as far as those proxies vouch for it, so a forged leftmost entry changes nothing.
+  `hyperion/ratelimit:by-address` and the request log's `remote` field use it, so rate limits
+  count each real client behind a proxy. `request-scheme` reads `X-Forwarded-Proto` under the
+  same setting, for #300. With no setting, the default, nothing changes: the address is
+  `:remote-addr`.
 
 ### Fixed
 

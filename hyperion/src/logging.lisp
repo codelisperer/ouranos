@@ -140,7 +140,8 @@ client sees."
           (unless quiet
             (log:debug "request start" :method method :path path
                                        :query (getf env :query-string)
-                                       :remote (getf env :remote-addr)))
+                                       ;; The client, behind a trusted proxy too (#381).
+                                       :remote (proxy:client-address env)))
           (handler-bind
               ((cl:error (lambda (c)
                            ;; Never quieted, whatever the path.
