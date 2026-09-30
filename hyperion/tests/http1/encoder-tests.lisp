@@ -125,6 +125,22 @@ The length argument is ignored for these: server-uv drops a body a handler suppl
                 0 nil)))
     (is-false (h1:encode-ok? r))))
 
+(test a-forbidden-character-at-either-end-of-a-value-or-name-is-refused
+  ;; The scans read up to a length taken once (#430), so the first and the last character are
+  ;; where an off-by-one would let one through. Each of CR, LF and NUL at each end of a value,
+  ;; and a non-token character at each end of a name.
+  (dolist (code '(13 10 0))
+    (let ((c (string (code-char code))))
+      (is-false (h1:encode-ok? (enc 200 (list "X-Thing" (concatenate 'string c "ab")) 0 nil))
+                "must refuse char ~D first in a value" code)
+      (is-false (h1:encode-ok? (enc 200 (list "X-Thing" (concatenate 'string "ab" c)) 0 nil))
+                "must refuse char ~D last in a value" code)
+      (is-false (h1:encode-ok? (enc 200 (list "X-Thing" c) 0 nil))
+                "must refuse char ~D as the whole value" code)))
+  (dolist (bad '(" XThing" "XThing " "@X" "X@"))
+    (is-false (h1:encode-ok? (enc 200 (list bad "v") 0 nil)) "must refuse the name ~S" bad))
+  (is-true (h1:encode-ok? (enc 200 (list "X-Thing" "") 0 nil)) "an empty value is allowed"))
+
 (test a-header-name-that-is-not-a-token-is-refused
   (dolist (bad '("X Thing" "X:Thing" "" "X\"Thing"))
     (is-false (h1:encode-ok? (enc 200 (list bad "v") 0 nil))

@@ -125,6 +125,16 @@ Changes since `v0.1.5`. The tag is on `905d80f`.
 
 ### Added
 
+- **aion/uv/net: `write-bytes` takes a list of octet vectors and strings, written in order as
+  one write.** Each piece is copied straight into the write's buffer, so a caller with a head
+  and a body no longer joins them into a new vector first. The future and `:on-complete`
+  report the total octet count. `write-bytes` also copies its input in one bulk copy instead
+  of one octet at a time. hyperion/server-uv uses the list form for every response, chunk and
+  file head, and writes a list response body piece by piece instead of joining it first.
+  Together with faster header checks in hyperion/http1 and asking a connection's peer address
+  once instead of per request, this cut the server-uv loop thread's time per `/tile` request
+  in `hyperion/bench` on macOS from about 61 µs to about 39 µs, and `/tile` went from about
+  15,400 to about 22,800 requests/s. (#430)
 - **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
   Secure attribute per request.** (#300) `:auto` sets it when the request came over https: the
   env's `:url-scheme`, or `X-Forwarded-Proto` when it came through a proxy the app trusts,

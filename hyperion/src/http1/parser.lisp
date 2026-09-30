@@ -151,19 +151,40 @@ verbatim), how the body is framed, and whether the connection is persistent."
       ((Some x) (== x c))
       ((None) False)))
 
+  ;; The scans below read with STR:REF-UNCHECKED, after comparing the index with a length taken
+  ;; once. STR:REF checks the bound itself and wraps every character in an Optional, and the
+  ;; profile on #430 put these scans, run over every header name and value, at 13% of the
+  ;; server's loop thread.
+
+  (declare index-of-char-before (String * Char * UFix * UFix -> (Optional UFix)))
+  (define (index-of-char-before s c i n)
+    "The first index from I below N where S holds C. N must not exceed S's length."
+    (if (>= i n)
+        None
+        (if (== (str:ref-unchecked s i) c)
+            (Some i)
+            (index-of-char-before s c (+ i 1) n))))
+
   (declare index-of-char (String * Char * UFix -> (Optional UFix)))
   (define (index-of-char s c i)
-    (if (>= i (str:length s))
-        None
-        (if (char-at? s i c)
-            (Some i)
-            (index-of-char s c (+ i 1)))))
+    (index-of-char-before s c i (str:length s)))
+
+  (declare any-char-before? ((Char -> Boolean) * String * UFix * UFix -> Boolean))
+  (define (any-char-before? p s i n)
+    "Whether P holds for a character of S from I below N. N must not exceed S's length."
+    (if (>= i n)
+        False
+        (if (p (str:ref-unchecked s i))
+            True
+            (any-char-before? p s (+ i 1) n))))
+
+  (declare any-char? ((Char -> Boolean) * String -> Boolean))
+  (define (any-char? p s)
+    (any-char-before? p s 0 (str:length s)))
 
   (declare contains-char? (String * Char -> Boolean))
   (define (contains-char? s c)
-    (match (index-of-char s c 0)
-      ((Some _) True)
-      ((None) False)))
+    (any-char? (fn (x) (== x c)) s))
 
   (declare ows? (Char -> Boolean))
   (define (ows? c)
@@ -219,16 +240,10 @@ deny-list is what lets NUL, DEL or a stray CR through when somebody forgets one.
         (or (== c #\-) (or (== c #\.) (or (== c #\^) (or (== c #\_)
         (or (== c #\`) (or (== c #\|) (== c #\~)))))))))))))))))
 
-  (declare token-from? (String * UFix -> Boolean))
-  (define (token-from? s i)
-    (if (>= i (str:length s))
-        True
-        (and (match (str:ref s i) ((Some c) (token-char? c)) ((None) False))
-             (token-from? s (+ i 1)))))
-
   (declare token? (String -> Boolean))
   (define (token? s)
-    (and (> (str:length s) 0) (token-from? s 0)))
+    (and (> (str:length s) 0)
+         (not (any-char? (fn (c) (not (token-char? c))) s))))
 
   (declare all-digits-from? (String * UFix -> Boolean))
   (define (all-digits-from? s i)
