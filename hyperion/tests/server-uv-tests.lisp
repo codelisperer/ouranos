@@ -2457,15 +2457,24 @@ included, so 40 connections to four loops are ten each (#463)."
 #-win32
 (test every-scheme-takes-every-connection-on-some-loop
   "Whatever the scheme, each connection is taken on by exactly one loop: 40 connections are 40
-in the per-loop counts. How evenly depends on the scheme and is measured on #463, not asserted
-here, except that :REUSEPORT's kernel and :SHARED's accept race put some on more than one loop."
+in the per-loop counts. How evenly depends on the scheme and is measured on #463. Only :HANDOFF
+(by construction) and :REUSEPORT (the kernel hashes each connection's addresses) are asserted to
+use more than one loop. :SHARED leaves it to which loop the kernel wakes, and with connections
+arriving one at a time Linux woke the same loop for all 40 (0 0 0 40, #463's first CI run)."
   (dolist (scheme (append '(:shared :handoff) #+linux '(:reuseport)))
     (with-loops-server (port server (const-app 200 +ok+ '("ok")) 4 :scheme scheme)
       (let ((sockets (open-connections port 40)))
         (unwind-protect
              (let ((counts (srv:server-loop-connections server)))
                (is (= 40 (reduce #'+ counts)) "~S: connections per loop ~S" scheme counts)
-               (is (< 1 (count-if #'plusp counts)) "~S: every connection on one loop: ~S" scheme counts))
+               (unless (eq scheme :shared)
+                 (is (< 1 (count-if #'plusp counts)) "~S: every connection on one loop: ~S"
+                     scheme counts))
+               ;; Under :SHARED and :REUSEPORT every loop listens: without that, all of them
+               ;; would be served by the first loop, which the counts cannot show for :SHARED.
+               (unless (eq scheme :handoff)
+                 (is (every #'srv::shard-listener (srv::server-shards server))
+                     "~S: a loop without a listener" scheme)))
           (mapc #'sock:socket-close sockets))))))
 
 #-win32
