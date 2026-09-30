@@ -161,6 +161,7 @@
   :components ((:module "tests/http1"
                 :serial t
                 :components ((:file "parser-tests")
+                             (:file "chunked-tests")
                              (:file "encoder-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/http1/tests :run-tests)))
 
@@ -215,6 +216,29 @@
   :serial t
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
+
+(defsystem "hyperion/clack-handler-uv"
+  :description "A Clack handler for hyperion/server-uv: (clack:clackup app :server :uv) (#373, ADR-0020)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv" "bordeaux-threads"
+               "aion/dynamic") ; the delayed-response thread inherits the request's bindings (#158)
+  :serial t
+  :components ((:file "src/clack-handler-uv"))
+  :in-order-to ((test-op (test-op "hyperion/clack-handler-uv/tests"))))
+
+(defsystem "hyperion/clack-handler-uv/tests"
+  :description "Clack's handler conformance cases, ported to FiveAM and run against :uv (#373, ADR-0020)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; clack for clackup and its release directory, whose test fixtures the cases read;
+  ;; dexador is the client Clack's own suite uses, and usocket finds a free port as it does.
+  ;; All three are already in the tree.
+  :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "clack" "dexador" "usocket"
+               "fiveam")
+  :serial t
+  :components ((:file "tests/clack-handler-uv-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/clack-handler-uv/tests :run-tests)))
 
 (defsystem "hyperion/server-uv/tests"
   :description "Tests for the native libuv HTTP server -- over a real socket, end to end."

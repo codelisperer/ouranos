@@ -166,11 +166,36 @@ evaluates each part to build a failure report, so a bare variable is a compile-t
       (is-true (h1:head-complete? r) "~S must parse" spelling)
       (is (= 5 (h1:head-body-length r)) "~S must mean 5" spelling))))
 
-(test transfer-encoding-is-refused-loudly-never-ignored
+(test transfer-encoding-chunked-is-a-chunked-body
+  ;; #374. Case-insensitive, as a coding name is (RFC 9110 5.3), and OWS around it is not
+  ;; part of the value.
+  (dolist (spelling '("Transfer-Encoding: chunked" "Transfer-Encoding: Chunked"
+                      "Transfer-Encoding:   chunked  "))
+    (let ((r (parse (req "POST / HTTP/1.1" spelling))))
+      (is-true (h1:head-complete? r) "~S must parse" spelling)
+      (is-true (h1:head-chunked? r) "~S is chunked" spelling)
+      (is-false (h1:head-has-body? r) "a chunked body declares no length")
+      (is (= 0 (h1:head-body-length r))))))
+
+(test transfer-encoding-other-than-chunked-is-refused-loudly-never-ignored
   ;; 501, not "ignore it": silently dropping the header is how a body gets read as a second
-  ;; request. Any coding, not only chunked.
-  (is-rejected 501 (req "POST / HTTP/1.1" "Transfer-Encoding: chunked"))
-  (is-rejected 501 (req "POST / HTTP/1.1" "Transfer-Encoding: gzip")))
+  ;; request. Every coding list except exactly `chunked', including chunked applied twice,
+  ;; chunked split over two field lines, and an empty element.
+  (dolist (lines '(("Transfer-Encoding: gzip")
+                   ("Transfer-Encoding: gzip, chunked")
+                   ("Transfer-Encoding: chunked, chunked")
+                   ("Transfer-Encoding: identity")
+                   ("Transfer-Encoding: , chunked")
+                   ("Transfer-Encoding: chunked" "Transfer-Encoding: chunked")
+                   ("Transfer-Encoding: gzip" "Transfer-Encoding: chunked")))
+    (is-rejected 501 (apply #'req "POST / HTTP/1.1" lines) (format nil "~S" lines))))
+
+(test transfer-encoding-in-http-1-0-is-faulty-framing
+  ;; RFC 9112 6.1: an HTTP/1.0 message with Transfer-Encoding has faulty framing, whatever
+  ;; else it says. HTTP/1.0 has no chunked coding, so a peer sending one is not the peer it
+  ;; claims to be.
+  (is-rejected 400 (req "POST / HTTP/1.0" "Transfer-Encoding: chunked"))
+  (is-rejected 400 (req "POST / HTTP/1.0" "Transfer-Encoding: gzip")))
 
 (test bare-lf-is-not-a-line-terminator
   ;; Accepting bare LF where a peer requires CRLF is a smuggling desync. The head here IS
@@ -235,3 +260,13 @@ evaluates each part to build a failure report, so a bare variable is a compile-t
   (let ((r (parse (apply #'req "GET / HTTP/1.1"
                          (loop for i below 100 collect (format nil "X-~D: v" i))))))
     (is (h1:head-complete? r))))
+
+;;; --- the head limit is a setting (#375) ------------------------------------
+
+(test the-head-limit-can-be-raised-and-its-default-still-holds
+  (let ((big (req "GET / HTTP/1.1" (format nil "X-Foo: ~A" (make-string 96000 :initial-element #\a)))))
+    (is-rejected 431 big "the default limit is 65,536")
+    (let ((r (h1:parse-head-limited big 200000)))
+      (is-true (h1:head-complete? r) "a raised limit accepts it: ~A" (h1:head-reason r)))
+    (is (= 431 (h1:head-status (h1:parse-head-limited (req "GET / HTTP/1.1" "X-A: b") 10)))
+        "and a lowered one refuses a small head")))

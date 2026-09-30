@@ -56,6 +56,17 @@ its tag.
   removes old `ouranos-update-<time>-<hex>` directories looks in the same place, and removes only
   real directories this user owns. An app that cleans up after the updater, or looks for a
   staged installer, looks in the new place on Linux. (#347)
+- **hyperion/server-uv: a request body sent with `Transfer-Encoding: chunked` reaches the
+  handler, where it used to be refused with 501** (#374). The handler gets the decoded body as
+  `:raw-body` and `:content-length` NIL, as under Hunchentoot and Woo. An app acts if a handler
+  sizes its read of `:raw-body` by `:content-length`: it now meets NIL for such a request, and
+  reads to the end of the stream instead. Only the single coding `chunked` is decoded; any
+  other `Transfer-Encoding` is still 501, one in an HTTP/1.0 request is 400, and one alongside
+  `Content-Length` is 400 as before. The decoded body counts against `*max-body-octets*`, and
+  the chunk framing against the new `*max-chunk-overhead-octets*` (1 MiB); either answers 413.
+  Trailer fields are checked and discarded. `hyperion/http1` gains `Body-Chunked`,
+  `head-chunked?` and the step functions `parse-chunk-size-line`, `parse-chunk-data-end` and
+  `parse-trailers`.
 
 ### Added
 
@@ -160,6 +171,22 @@ its tag.
   `dev-last-email` returns the last email it was given, so a test can check that an `.ics` went
   out. A value that cannot be sent signals `invalid-message` when it is made. An email without
   attachments is sent exactly as before.
+- **hyperion/server-uv: `*max-head-octets*`, the largest request head accepted before 431.**
+  The default is 65,536, the limit the parser has always applied. An app whose clients send
+  larger headers can raise it; each connection may then hold that much memory before its
+  request is complete. `hyperion/http1:parse-head-limited` takes the limit as an argument, and
+  `parse-head` still uses the default. Clack's handler suite sends a 96,000-octet header
+  value, which is refused at the default (#375).
+- **hyperion/clack-handler-uv: hyperion's own server as a Clack handler.** Load the system,
+  then `(clack:clackup app :server :uv)` runs any Clack app on `hyperion/server-uv`, and
+  `clack:stop` stops it. The env is Clack's whole environment, including `:script-name`,
+  `:request-uri`, `:url-scheme`, `:server-name`, `:server-port`, `:server-protocol` and
+  `:remote-port`, with `:path-info` percent-decoded as UTF-8. The response may be a list of
+  strings, an octet vector, a pathname, or a delayed response whose responder returns a writer
+  taking `(data &key start end close)`; a header whose value is NIL is not sent. `:workers`, or
+  `:worker-num` as Woo's handler takes it, sets the worker pool, 16 by default. Clack's own
+  handler cases, from Clack 2.1.0, are ported to FiveAM and pass, the streaming case included.
+  server-uv's env gains `:server-protocol` and `:remote-port`. (#373)
 
 ### Fixed
 
@@ -195,6 +222,13 @@ its tag.
   address, and the generated-with footer. The pattern is the `ai_trailer=` line in
   `.githooks/commit-msg`. An app that copied the hook, from `cons conform` or from this tree,
   copies it again. (#311)
+
+- **hyperion/server-uv: a 1xx, 204 or 304 response has no Content-Length and no body.** It
+  used to be sent with `Content-Length: 0`, which on a 304 says the resource is empty (RFC 9110
+  allows Content-Length on a 304 only as the full response's length). A body a handler returns
+  with one of these statuses is now dropped, with the warning `server-uv: dropped the body of a
+  response whose status carries none`, instead of being written after the head, where a client
+  would read it as the next response. Found by Clack's handler suite (#373).
 
 ## v0.1.4 — 2026-09-29
 

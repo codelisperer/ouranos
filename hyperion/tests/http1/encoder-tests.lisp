@@ -48,6 +48,20 @@ cons and building one from CL yields a runtime pattern-match failure, not a type
                    (subseq s (- (length s) 4)))
           "head must end with exactly one blank line"))))
 
+(test a-bodiless-status-gets-no-content-length
+  "1xx, 204 and 304 carry no body, and RFC 9110 forbids Content-Length on 1xx and 204. On a 304
+it may only repeat the full response's length, which the encoder does not know, and
+`Content-Length: 0' there says the resource is empty. Found by Clack's handler suite (#373).
+The length argument is ignored for these: server-uv drops a body a handler supplied."
+  (dolist (status '(204 304))
+    (dolist (length '(0 5))
+      (let ((r (enc status nil length t)))
+        (is-true (h1:encode-ok? r) "~D with length ~D is a head" status length)
+        (is-false (search "Content-Length" (text-of r)) "no Content-Length on ~D" status)
+        (is-true (has-line r "Connection: keep-alive")))))
+  (is-true (has-line (enc 200 nil 0 t) "Content-Length: 0")
+           "a status that may carry a body still states an empty one"))
+
 (test connection-follows-the-keep-alive-argument
   (is-true (has-line (enc 200 nil 0 t) "Connection: keep-alive"))
   (is-true (has-line (enc 200 nil 0 nil) "Connection: close")))

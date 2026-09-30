@@ -56,6 +56,7 @@ Package-per-module:
 | Module | What |
 |---|---|
 | `hyperion/server` | the Clack backend behind a neutral protocol — **your app declares the handler** (`clack-handler-hunchentoot` or `clack-handler-woo`); `default-server` picks from what is loaded, `HYPERION_SERVER` overrides, and no backend at all is a clear error rather than a guess — plus `start`/`stop`. |
+| `hyperion/clack-handler-uv` | hyperion's own server as a **Clack handler**: load it, then `(clack:clackup app :server :uv)` runs any Clack app on `hyperion/server-uv`, not only hyperion's (#373, ADR-0020). It passes Clack's own handler cases. `:workers` (or Woo's `:worker-num`) sets the worker pool, 16 by default; a streamed response holds one worker while it is open. `hyperion/server:start` does not go through it: it calls `:uv` directly. |
 | `hyperion/http` | request/response utilities over the raw Clack env: body, form/query params, cookies, headers, JSON. |
 | `hyperion/session` | cookie-based **HTTP sessions**: a `store` protocol + in-memory backend, `wrap-session` middleware (owns the `Set-Cookie` so an app cannot drop it), `rotate-session` for the privilege boundary, a thread-safe per-session key/value bag, and **REPL/dev management** (list/inspect/reset/kill). |
 | `hyperion/channel` | a **broadcast channel** (fan-out): an append-only log many readers consume by cursor, non-destructively — `publish`, `since` (stateless, for pollers), `subscribe`/`poll` (in-process). Transport-agnostic — the substrate for live updates (polling now, WebSockets/SSE later). |
