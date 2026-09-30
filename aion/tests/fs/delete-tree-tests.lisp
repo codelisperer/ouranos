@@ -160,3 +160,79 @@ the root deletes the target's files."
   ;; A filesystem root is refused by the same check, and deliberately not exercised here: if
   ;; the check were broken, the test would be deleting a drive.
   (signals error (fs:delete-tree #p"relative/dir/")))
+
+;;; --- a file another process still holds (#402) --------------------------------------------
+;;;
+;;; On Windows a file can stay open for a moment after the process that used it exits, for
+;;; example while antivirus scans an executable that has just run. The delete then fails with a
+;;; sharing violation (32). CHECKERS/TESTS failed this way on a CI run while the same commit
+;;; passed on another. Here the file is held open with no sharing, which is what makes DeleteFileW
+;;; answer 32, and released half a second later.
+
+#+win32
+(progn
+  (defun %hold-open (path)
+    "Open PATH with share mode 0, so that nothing else can open or delete it. Returns the handle."
+    (sb-alien:alien-funcall
+     (sb-alien:extern-alien "CreateFileW"
+                            (function (sb-alien:unsigned 64)
+                                      (sb-alien:c-string :external-format :utf-16le)
+                                      (sb-alien:unsigned 32) (sb-alien:unsigned 32)
+                                      (sb-alien:unsigned 64) (sb-alien:unsigned 32)
+                                      (sb-alien:unsigned 32) (sb-alien:unsigned 64)))
+     (uiop:native-namestring path) #x80000000 0 0 3 #x80 0))
+
+  (defun %release (handle)
+    (sb-alien:alien-funcall
+     (sb-alien:extern-alien "CloseHandle" (function sb-alien:int (sb-alien:unsigned 64)))
+     handle)))
+
+(test a-file-held-open-for-a-moment-is-deleted-after-a-retry
+  #-win32 (skip "Windows only: a POSIX unlink does not fail because the file is open")
+  #+win32
+  (let* ((base (%fresh))
+         (tree (merge-pathnames "tree/" base))
+         (held (%write (merge-pathnames "sub/probe.exe" tree) "x"))
+         (handle (%hold-open held)))
+    (unwind-protect
+         (progn
+           (is (/= handle #xFFFFFFFFFFFFFFFF) "the fixture opened the file")
+           (sb-thread:make-thread (lambda () (sleep 0.5) (%release handle)))
+           (is (eq t (fs:delete-tree tree)))
+           (is (null (probe-file tree)) "the tree is gone once the file was released"))
+      (%cleanup base))))
+
+(test without-the-retry-a-held-file-is-a-sharing-violation
+  "The control for the test above: the same fixture with no time to retry signals error 32, so
+the test above passes because of the retry and not because the file was never held."
+  #-win32 (skip "Windows only")
+  #+win32
+  (let* ((base (%fresh))
+         (tree (merge-pathnames "tree/" base))
+         (held (%write (merge-pathnames "sub/probe.exe" tree) "x"))
+         (handle (%hold-open held)))
+    (unwind-protect
+         (let ((aion/fs::*transient-retry-seconds* 0))
+           (handler-case (progn (fs:delete-tree tree)
+                                (fail "delete-tree succeeded while the file was held open"))
+             (fs:delete-tree-error (e)
+               (is (eql 32 (fs:delete-tree-error-code e))
+                   "expected a sharing violation, got error ~A" (fs:delete-tree-error-code e)))))
+      (%release handle)
+      (%cleanup base))))
+
+(test a-refusal-is-not-retried
+  "The retry does not change what is refused: a root that is a link is refused at once."
+  (multiple-value-bind (base tree outside) (%fixture)
+    (declare (ignore tree))
+    (let ((link (merge-pathnames "root-link/" base)))
+      (unwind-protect
+           (progn
+             (%link link outside)
+             (let ((start (get-internal-real-time)))
+               (signals fs:link-root-refused (fs:delete-tree link))
+               (is (< (- (get-internal-real-time) start) (* 1 internal-time-units-per-second))
+                   "a refusal must not wait for a retry"))
+             (is (probe-file (merge-pathnames "precious.txt" outside))))
+        (ignore-errors (fs:delete-link link))
+        (%cleanup base)))))

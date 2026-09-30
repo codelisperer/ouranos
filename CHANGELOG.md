@@ -333,6 +333,14 @@ Changes since `v0.1.4`. The tag is on `f3fdf1a`.
   address, and the generated-with footer. The pattern is the `ai_trailer=` line in
   `.githooks/commit-msg`. An app that copied the hook, from `cons conform` or from this tree,
   copies it again. (#311)
+- **aion/fs: on Windows, `delete-tree` retries a delete that another process blocks for a
+  moment.** A file can stay open briefly after the process that used it exits, for example
+  while antivirus scans an executable that has just run, and the delete then failed at once
+  with a sharing violation (error 32), which made a CHECKERS/TESTS run fail on Windows. A
+  delete that fails with error 5, 32 or 145 is now tried again for up to 3 seconds
+  (`aion/fs::*transient-retry-seconds*`) before `delete-tree-error` is signalled. What
+  `delete-tree` refuses is unchanged: a link is still removed as a link, and a root that is a
+  link is still refused at once. (#402)
 
 - **hyperion/server-uv: a 1xx, 204 or 304 response has no Content-Length and no body.** It
   used to be sent with `Content-Length: 0`, which on a 304 says the resource is empty (RFC 9110
