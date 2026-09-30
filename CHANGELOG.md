@@ -37,6 +37,16 @@ its tag.
 
 ### Added
 
+- **hyperion/server-uv with `:workers` encodes each plain response on the worker that ran its
+  handler.** The event loop's thread then only writes it. A response whose body is a string, an
+  octet vector or a list of them is encoded on the worker. A streamed body, a file, a HEAD
+  request, a body on a status that carries none, and a header that is refused all take the
+  loop's path as before. If a drain turns keep-alive off while the handler runs, the loop encodes
+  the response again so that it says the connection closes. Inline dispatch, with no
+  `:workers`, is unchanged. On macOS in `hyperion/bench` with 8 workers, the loop's time per
+  request fell from about 33 µs to about 23.5 µs, and `/tile` went from about 29,000 to about
+  41,000 requests/s. (#430)
+
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
   `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,
