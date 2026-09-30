@@ -18,6 +18,9 @@
 ;;;;   GET /tile    one server-rendered fragment (~1-2 KB) -- the polling case
 ;;;;   GET /board   40 fragments in one response -- the OOB fan-out case
 ;;;;   GET /ping    a few bytes -- isolates framing cost from rendering cost
+;;;;   GET /cpu     CPU seconds used so far: "process=<s> loop=<s>", read by compare.py before
+;;;;                and after each load run. loop= is the :uv loop thread's own CPU time, and
+;;;;                "-" on other backends, which have no single loop thread to measure.
 ;;;;   GET /quit    stop the server (the harness uses it; keeps runs scriptable)
 
 (require :asdf)
@@ -69,6 +72,41 @@
 
 (defvar *stop* nil)
 
+(defvar *handler* nil
+  "What SRV:START returned: the server, which /cpu asks for its loop under :uv.")
+
+;;; CLOCK_THREAD_CPUTIME_ID, which SB-UNIX does not name: the CPU time of the thread that asks.
+;;; compare.py only runs on Linux and macOS.
+(defparameter +thread-cputime-id+ #+linux 3 #+darwin 16 #-(or linux darwin) nil)
+
+(defun cpu-seconds (clock)
+  (multiple-value-bind (sec nsec) (sb-unix:clock-gettime clock)
+    (+ sec (/ nsec 1d9))))
+
+(defun loop-cpu-seconds ()
+  "The :uv loop thread's CPU seconds, or NIL on another backend. The clock is read ON the loop
+thread, because a thread CPU clock measures whichever thread reads it."
+  (let ((uv (find-package "HYPERION/SERVER-UV")))
+    (when (and uv +thread-cputime-id+ *handler*
+               (funcall (find-symbol "SERVER-P" uv) *handler*))
+      (let ((loop (funcall (find-symbol "SERVER-LOOP" uv) *handler*))
+            (done (sb-thread:make-semaphore))
+            (value nil))
+        (if (uiop:symbol-call :aion/uv :loop-thread-p loop)
+            (setf value (cpu-seconds +thread-cputime-id+))
+            (progn
+              (uiop:symbol-call :aion/uv :submit loop
+                                (lambda ()
+                                  (setf value (cpu-seconds +thread-cputime-id+))
+                                  (sb-thread:signal-semaphore done)))
+              (sb-thread:wait-on-semaphore done :timeout 5)))
+        value))))
+
+(defun cpu-report ()
+  (let ((loop (loop-cpu-seconds)))
+    (format nil "process=~,3F loop=~:[-~;~:*~,3F~]"
+            (cpu-seconds sb-unix:clock-process-cputime-id) loop)))
+
 (defun app (env)
   (let ((path (getf env :path-info)))
     (cond
@@ -83,6 +121,7 @@
              (list *tile*)))
       ((string= path "/board") (list 200 '(:content-type "text/html; charset=utf-8") (list *board*)))
       ((string= path "/ping")  (list 200 '(:content-type "text/plain") (list "ok")))
+      ((string= path "/cpu")   (list 200 '(:content-type "text/plain") (list (cpu-report))))
       ((string= path "/quit")  (setf *stop* t)
                                (list 200 '(:content-type "text/plain") (list "bye")))
       (t (list 404 '(:content-type "text/plain") (list "not found"))))))
@@ -92,6 +131,7 @@
        (workers (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS"))))
        (handler (srv:start #'app :port port :host "127.0.0.1" :server backend
                                  :workers workers :log nil)))
+  (setf *handler* handler)
   (format t "~&bench: ~A listening on 127.0.0.1:~D  (tile ~D B, board ~D B, workers ~A, pid ~D)~%"
           backend port (length *tile*) (length *board*) workers (sb-unix:unix-getpid))
   (finish-output)

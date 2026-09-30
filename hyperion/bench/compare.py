@@ -17,6 +17,11 @@ limited by the generator, not given a number, so the table shows servers, not th
 Per backend:
   throughput      the generator, CONNECTIONS keep-alive connections for SECONDS, on /ping and
                   on /tile. Requests per second, and the errors the generator counted.
+  cpu             during each throughput run, the server's CPU time divided by the run's
+                  length, as cores kept busy: the whole process, and for :uv the loop thread
+                  alone. A loop near 1.00 is the loop thread saturated, and more loops could
+                  raise the rate; a loop well below 1.00 means the limit is elsewhere (#373).
+                  Read from the server's /cpu endpoint before and after the run.
   latency         load.py, one request at a time on one keep-alive connection: p50/p90/p99 of
                   /tile. Not limited by the generator, and finer than ab's whole milliseconds.
   open conns      load.py's idle test: resident memory and threads while IDLE connections
@@ -123,6 +128,21 @@ def ceiling(gen, connections, seconds):
 
 # --- one backend ----------------------------------------------------------------------
 
+def cpu(url):
+    """The server's CPU seconds so far, as (process, loop). loop is None on a backend without
+    a single loop thread to measure."""
+    text = urllib.request.urlopen(url + "/cpu", timeout=10).read().decode()
+    fields = dict(part.split("=") for part in text.split())
+    return float(fields["process"]), (None if fields["loop"] == "-" else float(fields["loop"]))
+
+
+def busy(before, after, elapsed):
+    """Cores kept busy between two cpu() readings ELAPSED seconds apart."""
+    process = (after[0] - before[0]) / elapsed
+    loop = None if before[1] is None else (after[1] - before[1]) / elapsed
+    return process, loop
+
+
 def measure(backend, gen, cap, args):
     port = free_port()
     env = dict(os.environ, HYPERION_SERVER=backend, HYPERION_WORKERS=str(args.workers),
@@ -137,9 +157,12 @@ def measure(backend, gen, cap, args):
         load.latency(url, "/tile", 50, reuse=False)          # warm up, as load.py does
         row = {"backend": backend}
         for path in ("/ping", "/tile"):
+            before, started = cpu(url), time.monotonic()
             rps, errors, kept = drive(gen, url + path, args.connections, args.seconds)
+            process, loop = busy(before, cpu(url), time.monotonic() - started)
             row[path] = {"rps": rps, "errors": errors, "kept": kept,
-                         "bound": rps >= CEILING_SHARE * cap}
+                         "bound": rps >= CEILING_SHARE * cap,
+                         "cpu_process": process, "cpu_loop": loop}
         row["latency"] = load.latency(url, "/tile", args.requests, reuse=True)
         row["idle"] = load.idle_connections(url, proc.pid, args.idle)
         return row
@@ -166,22 +189,31 @@ def cell(m, cap):
     return f"{m['rps']:,.0f}" + (f" ({'; '.join(notes)})" if notes else "")
 
 
+def cpu_cell(m):
+    loop = "-" if m["cpu_loop"] is None else f"{m['cpu_loop']:.2f}"
+    return f"{m['cpu_process']:.2f} / {loop}"
+
+
 def table(rows, gen_line, cap, args):
     osname = {"Darwin": "macOS", "Linux": "Linux"}.get(platform.system(), platform.system())
     lines = [
         f"**{osname}** ({platform.machine()}, {os.cpu_count()} CPUs). Generator: `{gen_line}`, "
         f"{args.connections} keep-alive connections for {args.seconds} s. "
         f"**Generator ceiling** against trivial.c: {cap:,.0f} requests/s. "
-        f"Workers: {args.workers} (Woo `:worker-num`, `:uv` `:workers`).",
+        f"Workers: {args.workers} (Woo `:worker-num`, `:uv` `:workers`). "
+        "CPU is cores kept busy during each throughput run, the whole process / the :uv loop "
+        "thread alone; a loop near 1.00 is saturated.",
         "",
-        "| backend | /ping req/s | /tile req/s | /tile p50 / p90 / p99 ms (1 connection) "
+        "| backend | /ping req/s | /ping CPU process / loop | /tile req/s "
+        "| /tile CPU process / loop | /tile p50 / p90 / p99 ms (1 connection) "
         f"| RSS MB before / with {args.idle} open | threads before / with {args.idle} open |",
-        "|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         lat, idle = r["latency"], r["idle"]
         lines.append(
-            f"| {r['backend']} | {cell(r['/ping'], cap)} | {cell(r['/tile'], cap)} "
+            f"| {r['backend']} | {cell(r['/ping'], cap)} | {cpu_cell(r['/ping'])} "
+            f"| {cell(r['/tile'], cap)} | {cpu_cell(r['/tile'])} "
             f"| {lat.get('p50_ms')} / {lat.get('p90_ms')} / {lat.get('p99_ms')} "
             f"| {idle['before']['rss_mb']} / {idle['during']['rss_mb']} "
             f"| {idle['before']['threads']} / {idle['during']['threads']} |")
