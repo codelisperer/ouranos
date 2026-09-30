@@ -151,7 +151,7 @@
     ;; break here silently un-redacts a password in three frameworks at once.
     :aion/secret :aion/secret/types
     :hyperion/http1
-    :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db
+    :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
     :praxeon/elise :praxeon/chat-rbt
@@ -187,6 +187,8 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; the exit code, and this one would be the easiest of the three to leave that way --
     ;; it needs Postgres, so it is also the easiest to believe is "just skipping".
     :praxeon/memory-db/tests
+    ;; Tool results in a database (#319), registered in the commit that adds it.
+    :praxeon/results-db/tests
     ;; Document retrieval (#138), registered in the commit that adds it, for the reason above.
     :praxeon/retrieval/tests
     ;; The gate's own checkers, tested against trees built to break them (#163). Here

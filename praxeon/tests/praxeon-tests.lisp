@@ -10,6 +10,7 @@
                     (#:cnd #:praxeon/conditions)
                     (#:llm #:praxeon/llm)
                     (#:prompt #:praxeon/prompt)
+                    (#:res #:praxeon/results)
                     (#:jzon #:com.inuoe.jzon)
                     (#:evt #:praxeon/event)
                     (#:actor #:praxeon/actor)
@@ -3677,3 +3678,217 @@ reply contains."
         (is (eq :truncated mark) "the second value was ~S" mark)
         (is (equal "The three steps are: first, gather the[note]" (turn:turn-reply tn))
             "the leave stage did not run on the accepted text: ~S" (turn:turn-reply tn))))))
+
+;;; --------------------------------------------------------------------------
+;;; Tool results kept outside the prompt, read back by handle (#319)
+;;;
+;;; A scripted model and scripted tools only; no provider's own context editing is involved.
+;;; REQUEST-LOG keeps each request's messages as one list, so a test can compare what one step
+;;; sent with what the next sent.
+;;; --------------------------------------------------------------------------
+
+(defclass request-log (llm:provider)
+  ((script :initarg :script :accessor request-log-script)
+   (requests :initform '() :accessor request-log-requests))
+  (:documentation "Replies from SCRIPT, and keeps the messages of every request, oldest first."))
+
+(defmethod llm:supports-tool-choice-p ((p request-log)) t)
+
+(defmethod llm:complete ((p request-log) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (setf (request-log-requests p) (append (request-log-requests p) (list messages)))
+  (or (pop (request-log-script p))
+      (llm:make-completion :text "done" :stop-reason :end)))
+
+(defun %call (id name &rest kvs)
+  (llm:make-completion :text "" :stop-reason :tool-use
+                       :tool-calls (list (llm:make-tool-call :id id :name name
+                                                             :arguments (apply #'%args kvs)))))
+
+(defun %numbered-lines (n &optional (width 60))
+  "N lines, each \"line I: \" padded with dots to WIDTH characters, joined by newlines."
+  (format nil "~{~A~^~%~}"
+          (loop for i from 1 to n
+                collect (let ((head (format nil "line ~D: " i)))
+                          (concatenate 'string head
+                                       (make-string (max 0 (- width (length head)))
+                                                    :initial-element #\.))))))
+
+(defun %tool-result-contents (messages)
+  "id -> content for every tool-result part in MESSAGES."
+  (loop for m in messages
+        for c = (llm:content m)
+        when (listp c)
+          append (loop for part in c
+                       when (eq (getf part :type) :tool-result)
+                         collect (cons (getf part :tool-use-id) (getf part :content)))))
+
+(defun %handle-in (stand-in)
+  (let ((at (search "res-" stand-in)))
+    (subseq stand-in at (+ at 20))))
+
+(test the-pure-readers-return-the-stored-text-exactly
+  (let ((text (format nil "alpha~%Beta two~%gamma")))
+    (is (= 3 (res:line-count text)))
+    (is (= 0 (res:line-count "")))
+    (is (string= (format nil "Beta two~%") (res:lines-of text 2 2)) "a line keeps its newline")
+    (is (string= "gamma" (res:lines-of text 3 9)) "the last line has none, and a range past the end stops there")
+    (is (null (res:lines-of text 4 5)))
+    (is (string= "ta t" (res:characters-of text 8 12)))
+    (is (equal '((2 . "Beta two")) (res:search-lines text "beta")) "case is ignored by default")
+    (is (null (res:search-lines text "beta" :case-sensitive t))))
+  (let ((text (format nil "é~%ö")))
+    (is (string= "é" (res:characters-of text 0 1)) "a character range is characters, not bytes")))
+
+(test a-result-over-the-threshold-is-stored-and-the-history-holds-its-stand-in
+  (let* ((page (%numbered-lines 300))
+         (p (make-instance 'request-log :script (list (%call "c1" "fetch" "url" "https://example.com/a")
+                                                      (llm:make-completion :text "ok" :stop-reason :end))))
+         (agent (actor:make-agent :provider p))
+         (store (res:make-memory-result-store)))
+    (actor:register-means agent "fetch" "fetches a page" (lambda (args) (declare (ignore args)) page))
+    (actor:offload-tool-results agent store :conversation "conv-1" :threshold 100)
+    (actor:run-turn agent "read it")
+    (let* ((content (cdr (assoc "c1" (%tool-result-contents (actor:agent-history agent))
+                                :test #'string=)))
+           (handle (%handle-in content)))
+      (is (search "[Result of fetch" content))
+      (is (search "https://example.com/a" content) "the stand-in names the tool's arguments")
+      (is (search "300 lines" content))
+      (is (search "line 1: " content) "and shows the first lines")
+      (is (< (length content) 1000) "and is short")
+      (is (string= page (res:stored-result-text (res:find-result store "conv-1" handle)))
+          "the store holds the result exactly")
+      (is (null (res:find-result store "conv-2" handle)) "and only for its own conversation"))))
+
+(test read-result-returns-exactly-the-stored-text-for-any-range-and-finds-a-string
+  (let* ((page (concatenate 'string (%numbered-lines 120)
+                            (format nil "~%naïve café needle-42 end")))
+         (agent (actor:make-agent :provider (make-instance 'request-log)))
+         (store (res:make-memory-result-store)))
+    (actor:offload-tool-results agent store :conversation "c" :threshold 10)
+    (let* ((handle (res:put-result store "c" "fetch" nil page))
+           (random (make-random-state t)))
+      (flet ((read-back (&rest kvs) (actor:act agent "read-result" (apply #'%args "handle" handle kvs)))
+             (after-header (reply) (subseq reply (1+ (position #\Newline reply)))))
+        (is (loop repeat 25
+                  for first = (1+ (random 121 random))
+                  for last = (+ first (random 10 random))
+                  always (string= (res:lines-of page first last)
+                                  (after-header (read-back "first_line" first "last_line" last))))
+            "25 line ranges read back exactly")
+        (is (loop repeat 25
+                  for start = (random (length page) random)
+                  for end = (+ start (random 200 random))
+                  always (string= (res:characters-of page start end)
+                                  (after-header (read-back "start" start "end" end))))
+            "25 character ranges read back exactly")
+        (let ((found (read-back "search" "NEEDLE-42")))
+          (is (search "line 121: naïve café needle-42 end" found) "found with its line number")
+          (is (search "1 line of" found)))
+        (let ((actor:*read-result-max-characters* 1000))
+          (is (search "Ask for a smaller range" (read-back "start" 0 "end" 5000))
+              "a range larger than one read may return is refused, not cut")
+          (is (search "Ask for a smaller range" (read-back "first_line" 1 "last_line" 100))))
+        (is (search "No stored result has the handle"
+                    (actor:act agent "read-result" (%args "handle" "res-0000000000000000"))))))))
+
+(test older-results-are-cleared-in-one-batch-keeping-recent-and-never-cleared-ones
+  (let* ((body (lambda (tag) (format nil "~A ~A" tag (make-string 1600 :initial-element #\z))))
+         (p (make-instance 'request-log
+                           :script (list (%call "f1" "fetch" "n" 1) (%call "p1" "pinned")
+                                         (%call "f2" "fetch" "n" 2) (%call "f3" "fetch" "n" 3)
+                                         (llm:make-completion :text "done" :stop-reason :end))))
+         (agent (actor:make-agent :provider p))
+         (store (res:make-memory-result-store))
+         (events '()))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args) (funcall body (format nil "fetch-~D" (gethash "n" args)))))
+    (actor:register-means agent "pinned" "a pinned tool" (lambda (args) (declare (ignore args))
+                                                            (funcall body "pinned")))
+    (actor:offload-tool-results agent store :conversation "c" :threshold nil :clear-budget 1500
+                                            :keep-recent 1 :never-clear '("pinned"))
+    (evt:with-observer ((lambda (e) (push e events)))
+      (actor:run-turn agent "go"))
+    (let* ((clears (remove :results-cleared (reverse events) :key #'evt:event-type :test-not #'eq))
+           (last-request (car (last (request-log-requests p))))
+           (sent (%tool-result-contents last-request)))
+      (is (= 1 (length clears)) "one batch")
+      (is (= 2 (evt:event-get (first clears) :count)))
+      (flet ((content (id) (cdr (assoc id sent :test #'string=))))
+        (is (search "[Earlier result of fetch" (content "f1")))
+        (is (search "[Earlier result of fetch" (content "f2")))
+        (is (search "pinned" (subseq (content "p1") 0 6)) "a never-cleared tool keeps its result")
+        (is (search "fetch-3 zzz" (content "f3")) "the most recent result stays whole")
+        (is (search "fetch-1 zzz"
+                    (actor:act agent "read-result" (%args "handle" (%handle-in (content "f1")))))
+            "a cleared result is still readable by its handle"))
+      (is (search "fetch-1 zzz" (cdr (assoc "f1" (%tool-result-contents (actor:agent-history agent))
+                                             :test #'string=)))
+          "the history, the record, still holds the result"))))
+
+(defun %prefix-p (a b)
+  "True when the list of messages A is the start of B, message for message."
+  (and (<= (length a) (length b)) (every #'equal a (subseq b 0 (length a)))))
+
+(test the-prompt-before-the-newest-messages-changes-only-when-a-batch-is-cleared
+  "Eight results of about 400 estimated tokens each against a budget of 1500. Each batch takes
+the messages down to half the budget, so batches are few and far apart, and between them every
+request starts with the one before it, message for message."
+  (let* ((body (lambda (n) (format nil "result ~D ~A" n (make-string 1600 :initial-element #\y))))
+         (p (make-instance 'request-log
+                           :script (append (loop for n from 1 to 8
+                                                 collect (%call (format nil "c~D" n) "fetch" "n" n))
+                                           (list (llm:make-completion :text "first answer" :stop-reason :end)
+                                                 (llm:make-completion :text "second answer" :stop-reason :end)))))
+         (agent (actor:make-agent :provider p))
+         (batches '())
+         (step 0))
+    (actor:register-means agent "fetch" "fetches" (lambda (args) (funcall body (gethash "n" args))))
+    (actor:offload-tool-results agent (res:make-memory-result-store) :conversation "c"
+                                :threshold nil :clear-budget 1500 :keep-recent 1)
+    (evt:with-observer ((lambda (e)
+                          (case (evt:event-type e)
+                            (:deliberating (setf step (length (request-log-requests p))))
+                            (:results-cleared (push (cons step (evt:event-get e :estimated-tokens))
+                                                    batches)))))
+      (actor:run-turn agent "go" :max-steps 12)
+      (actor:run-turn agent "and again"))
+    (let* ((requests (request-log-requests p))
+           (n (length requests))
+           (at (mapcar #'car batches)))
+      (is (= 10 n))
+      (is (<= 1 (length batches) 2) "few batches, not one per step: ~S" (reverse batches))
+      (is (every (lambda (b) (<= (cdr b) 750)) batches)
+          "each batch leaves the messages at most half the budget: ~S" (reverse batches))
+      (loop for i from 0 below (1- n)
+            do (if (member (1+ i) at)
+                   (is (not (%prefix-p (nth i requests) (nth (1+ i) requests)))
+                       "request ~D, the batch, changed what came before" (1+ i))
+                   (is (%prefix-p (nth i requests) (nth (1+ i) requests))
+                       "request ~D starts with request ~D exactly" (1+ i) i))))))
+
+(test stored-results-are-erased-with-their-conversation
+  (let* ((agent (actor:make-agent :provider (make-instance 'request-log)))
+         (store (res:make-memory-result-store)))
+    (actor:offload-tool-results agent store :conversation "mine")
+    (let ((mine (res:put-result store "mine" "fetch" nil "personal data"))
+          (other (res:put-result store "other" "fetch" nil "someone else's")))
+      (is (= 1 (actor:forget-agent-results agent)))
+      (is (null (res:find-result store "mine" mine)))
+      (is (search "No stored result" (actor:act agent "read-result" (%args "handle" mine))))
+      (is (res:find-result store "other" other) "another conversation's results are kept"))))
+
+(test the-tool-results-benchmark-runs-and-reports-each-configuration
+  "bench/tool-results.lisp, run small, so that a change that breaks it fails here rather than
+the next time someone runs it by hand. It says the tools make the answer reachable in each
+configuration and that offloading spends fewer input tokens; it says nothing about a real
+model, which is what the file's commentary is for."
+  (load (asdf:system-relative-pathname :praxeon "bench/tool-results.lisp"))
+  (let* ((rows (funcall (find-symbol "RUN-BENCHMARK" "PRAXEON/BENCH/TOOL-RESULTS")
+                        :tasks 2 :pages 4 :stream (make-broadcast-stream)))
+         (by (lambda (name) (find name rows :key (lambda (r) (getf r :configuration))))))
+    (is (equal '(:full :offload :clear) (mapcar (lambda (r) (getf r :configuration)) rows)))
+    (is (every (lambda (r) (= 2 (getf r :succeeded))) rows) "every task succeeded: ~S" rows)
+    (is (< (getf (funcall by :offload) :input-tokens) (getf (funcall by :full) :input-tokens)))))

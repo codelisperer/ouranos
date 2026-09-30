@@ -135,6 +135,22 @@ its tag.
   count each real client behind a proxy. `request-scheme` reads `X-Forwarded-Proto` under the
   same setting, for #300. With no setting, the default, nothing changes: the address is
   `:remote-addr`.
+- **praxeon: large tool results can be kept out of the prompt and read back by handle, and
+  older results cleared in batches.** (#319)
+  - `praxeon/actor:offload-tool-results` keeps an agent's tool results in a
+    `praxeon/results:result-store` (`make-memory-result-store`, or `praxeon/results-db`'s
+    `make-db-result-store` over a mnemosyne connection or pool). A result over `:threshold`
+    estimated tokens goes into the conversation as a stand-in naming the tool, its arguments,
+    its size, its first lines and a handle.
+  - The agent gets a `read-result` means: a range of lines or characters, or the lines holding
+    a string, returned exactly as stored.
+  - `:clear-budget` replaces older results by short stand-ins in what is sent, in batches that
+    take the messages down to `:clear-target`, keeping the last `:keep-recent` results and
+    those of the means in `:never-clear`. The history keeps them, and the start of the prompt
+    changes only when a batch is cleared.
+  - `forget-agent-results` erases a conversation's stored results.
+  - Nothing is on by default. `praxeon/bench/tool-results.lisp` measures task success, input
+    tokens and the cacheable share under each configuration, with a scripted model or a real one.
 
 ### Fixed
 
