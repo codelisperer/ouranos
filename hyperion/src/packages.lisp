@@ -274,12 +274,15 @@
   (:export
    #:*clock-ms*
    ;; limits and keys
-   #:limit #:make-limit #:limit-name #:limit-capacity #:limit-per
+   #:limit #:make-limit #:limit-name #:limit-capacity #:limit-per #:limit-count-when
+   #:unless-status
    #:by-address #:by-form-field #:normalise-identifier
    ;; storage
-   #:take-token #:forget-bucket #:memory-store #:make-memory-store #:memory-store-max-keys
+   #:take-token #:check-token #:debit-token #:forget-bucket
+   #:memory-store #:make-memory-store #:memory-store-max-keys
    #:memory-store-count #:reset-limit
-   ;; the refusal
+   ;; the limiter, as a function and as middleware, and the refusal
+   #:call-with-rate-limit #:with-rate-limit
    #:wrap-rate-limit #:too-many-requests))
 
 ;;; --- Request logging + correlation --------------------------------------

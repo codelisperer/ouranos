@@ -24,6 +24,31 @@ account limit stops many clients (a botnet) trying one account.
 By default a limit counts only `POST`, so reloading the page that shows the form never locks
 anyone out. `:paths` lists the exact paths the limit applies to.
 
+## Counting only failed attempts
+
+By default every request a limit applies to takes a token before the handler runs. On sign-in
+that refuses people who did nothing wrong: members who sign in together from one network, such
+as a meeting room's Wi-Fi, share one address and use up its bucket with successful sign-ins.
+
+`:count-when` fixes that (#323). It is a function of the env and the response, and a request
+counts only when it returns true:
+
+```lisp
+(rl:make-limit :sign-in-address :capacity 10 :per 900 :key (rl:by-address)
+               :paths '("/sign-in") :count-when (rl:unless-status 303))
+```
+
+`(rl:unless-status 303)` counts every sign-in whose response is not a 303, the redirect a
+successful sign-in answers with. Before the handler runs, the request is refused only if the
+bucket is already empty. After it, a token is taken only for a counted response. A successful
+sign-in leaves the bucket as it was: it neither takes a token nor gives one back, so it cannot
+be used to clear failures. A handler that signals is counted, because the limiter cannot tell
+it succeeded.
+
+Requests that arrive together can all pass the check before any of them is counted. Each is
+still counted when it finishes, and the bucket goes below empty to pay for them, so the wait
+before the next accepted request grows by the same amount.
+
 **An account limit does not reveal whether an account exists.** The key is whatever was
 submitted, and the limiter never reads the account store, so an address with no account is
 limited exactly like one with an account, and the 429 response is identical for both.
@@ -43,10 +68,13 @@ limited exactly like one with an account, and the 429 response is identical for 
 
 (defvar *limits* (rl:make-memory-store))
 
-;; Sign-in: 10 tries per address per 5 minutes, and 5 per account per 15 minutes.
+;; Sign-in: 10 failed tries per address per 15 minutes, and 5 tries per account per 15
+;; minutes. The address limit counts only failures, so members signing in from one network
+;; are not refused; the handler redirects with 303 after a successful sign-in.
 (defparameter +sign-in-by-address+
-  (rl:make-limit :sign-in-address :capacity 10 :per 300
-                 :key (rl:by-address) :paths '("/sign-in")))
+  (rl:make-limit :sign-in-address :capacity 10 :per 900
+                 :key (rl:by-address) :paths '("/sign-in")
+                 :count-when (rl:unless-status 303)))
 (defparameter +sign-in-by-account+
   (rl:make-limit :sign-in-account :capacity 5 :per 900
                  :key (rl:by-form-field "email") :paths '("/sign-in")))
@@ -76,6 +104,23 @@ limited exactly like one with an account, and the 429 response is identical for 
   (rl:reset-limit *limits* +sign-in-by-account+ (rl:normalise-identifier email)))
 ```
 
+## Building the refusal inside the app's own bindings
+
+`:on-limited` is called with `(env retry-after-seconds limit)` and returns the refusal. It runs
+where the limiter sits. An app that binds something for every request, such as its locale or
+its page layout, and wants the refusal built with it, has two ways to get that:
+
+- Put `wrap-rate-limit` inside the middleware that makes the bindings.
+- Call the limiter itself, inside the bindings, with `rl:call-with-rate-limit` or
+  `rl:with-rate-limit`. Both take the same `:limits`, `:store` and `:on-limited`, and the
+  store is required, since it must be the same store on every call:
+
+  ```lisp
+  (rl:with-rate-limit (env env :limits *sign-in-limits* :store *limits*
+                               :on-limited #'my-refusal)
+    (handle-sign-in env))   ; use the ENV the limiter passes on: its body has been read
+  ```
+
 The limiter goes **outside** `wrap-csrf`, as above, so a flood of requests is refused before
 the CSRF check reads their bodies, and inside `wrap-session`, which `wrap-csrf` needs. It reads a form field through
 `hyperion/csrf:with-cached-body`, so the handler can still read the body afterwards.
@@ -104,8 +149,16 @@ a full bucket again. Keep `:max-keys` well above the number of keys the app sees
 refill period.
 
 Several processes behind a load balancer each have their own memory store, so each allows the
-full capacity. A shared store implements two generic functions, `rl:take-token` and
-`rl:forget-bucket`; see their docstrings. A database-backed store is not written yet.
+full capacity. A shared store implements four generic functions; see their docstrings:
+
+- `rl:take-token` checks and takes a token in one atomic step, for a limit without `:count-when`.
+- `rl:check-token` says whether a token is available without taking one or creating a bucket,
+  and `rl:debit-token` takes one whether or not it is available, letting the bucket go below
+empty. A limit with `:count-when`
+  uses these, before and after the handler.
+- `rl:forget-bucket` removes a bucket, for `rl:reset-limit`.
+
+A database-backed store is not written yet (#307).
 
 ## Testing
 
