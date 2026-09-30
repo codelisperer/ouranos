@@ -35,7 +35,7 @@
 ;;;;            place of -soname -- exactly build-libuv.lisp's split. The only macOS-
 ;;;;            specific code here is the nm flag, because Apple's nm has neither -D nor
 ;;;;            --defined-only, and Mach-O prefixes C symbols with an underscore.
-;;;;   WINDOWS  UNVERIFIED, and **NOT** A MIRROR OF build-libuv.lisp. The mechanism is
+;;;;   WINDOWS  VERIFIED by CI (see below), and **NOT** A MIRROR OF build-libuv.lisp. The mechanism is
 ;;;;            different; assuming it mirrored is the mistake the next block exists to
 ;;;;            stop.
 ;;;;
@@ -54,8 +54,10 @@
 ;;;; files' symbol tables. That is the mechanism reproduced below: compile to objects, read
 ;;;; `dumpbin /symbols', write a .def, link with /DEF:.
 ;;;;
-;;;; THE CODE BELOW MARKED MSVC HAS NEVER EXECUTED. It is a design, not a result. What a
-;;;; Windows lane should expect to have to check:
+;;;; THE CODE BELOW MARKED MSVC NOW RUNS ON EVERY WINDOWS CI LEG: verify.yml builds mbedTLS
+;;;; there, and run 36704398312 logged "generated mbedtls.def (1254 exports)" before
+;;;; verify-built accepted the DLL (#410). It was written before it had ever run; what a
+;;;; Windows lane was told to expect to have to check, kept because each is still what breaks:
 ;;;;   1. dumpbin /symbols column layout. The parse wants `External' and `SECTn' (defined)
 ;;;;      and must reject `UNDEF'; the name is the last field after the `|'.
 ;;;;   2. Name decoration. x64 C symbols are undecorated; a 32-bit build prefixes `_' and
@@ -65,7 +67,7 @@
 ;;;;      the same reason build-libuv.lisp uses one -- cmd.exe truncates at 8191 characters
 ;;;;      and the failure is a syntax error deep in the arguments, not an honest "too long".
 ;;;;
-;;;; What makes this safe to land unverified: `verify-built' on Windows COUNTS the exports
+;;;; What keeps a break here from passing silently: `verify-built' on Windows COUNTS the exports
 ;;;; and insists on the symbols aion/tls will bind. A wrong .def produces a DLL
 ;;;; exporting nothing, and that is the one failure this script must not be silent about --
 ;;;; the same guard build-libuv.lisp grew, for the same reason.
@@ -89,6 +91,12 @@
 (require :uiop)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
+;;; Finding MSVC and running a command inside its environment, shared with build-libuv.lisp and
+;;; build-desktop-app.lisp (#410). Loaded before any form below is read, because those forms
+;;; name NO-TRAILING-SEPARATOR and FIND-MSVC, and a name interned here first would conflict
+;;; with the one USE-PACKAGE brings in.
+(load (merge-pathnames "msvc.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+(use-package :ouranos-msvc)
 
 (defparameter *root* (uiop:pathname-parent-directory-pathname
                       (uiop:pathname-directory-pathname *load-truename*)))
@@ -274,11 +282,6 @@ there is no sh on a stock Windows, which is the same split build-libuv.lisp make
 (defun library-path ()
   (merge-pathnames (concatenate 'string "lib/" (output-name)) *vendor*))
 
-(defun no-trailing-separator (namestring)
-  "NAMESTRING without a trailing separator: `/I\"C:\\x\\inc\\\"' would have the backslash
-escape the closing quote, which is how a path with a space in it silently becomes garbage."
-  (string-right-trim '(#\\ #\/) namestring))
-
 ;;; ------------------------------------------------------------------ the source
 
 (defun ensure-source (version url expected-sha)
@@ -416,40 +419,12 @@ sources-digest, so a stale pin fails here too rather than in a reader's head."
 
 ;;; ------------------------------------------------------------ the MSVC toolchain
 ;;;
-;;; Discovery is build-libuv.lisp's, verbatim in behaviour: vswhere at its fixed location,
-;;; the C++ component required specifically, and the compile run through vcvarsall.bat so
-;;; INCLUDE/LIB/PATH are set without "open a Developer Command Prompt first".
+;;; Discovery is scripts/msvc.lisp, loaded at the top, which build-libuv.lisp and
+;;; build-desktop-app.lisp use too (#410). This file had its own copy, which asked vswhere for
+;;; -latest only and ignored OURANOS_MSVC_PATH, so on a machine with several installs mbedTLS
+;;; was built with a different toolchain from libuv.
 ;;;
 ;;; The COMPILE is where the two scripts part company -- see the header.
-
-(defun vcvarsall-arch ()
-  (let ((machine (string-upcase (machine-type))))
-    (cond ((search "ARM64" machine) "arm64")
-          ((search "X86-64" machine) "x64")
-          ((search "AMD64" machine) "x64")
-          (t "x86"))))
-
-(defun find-vswhere ()
-  (let ((base (or (uiop:getenv "ProgramFiles(x86)") "C:\\Program Files (x86)")))
-    (probe-file (merge-pathnames "Microsoft Visual Studio/Installer/vswhere.exe"
-                                 (uiop:ensure-directory-pathname base)))))
-
-(defun find-msvc ()
-  "VCVARSALL-PATH, or NIL. Requires the C++ tools component specifically -- a Visual Studio
-carrying only the .NET workload answers vswhere but cannot compile this."
-  (let ((vswhere (find-vswhere)))
-    (when vswhere
-      (let* ((path (string-trim
-                    '(#\Space #\Tab #\Newline #\Return)
-                    (or (%run-bounded
-                         (list (namestring vswhere) "-latest" "-products" "*"
-                               "-requires" "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
-                               "-property" "installationPath")
-                         :capture t :ignore-error-status t :timeout 60)
-                        "")))
-             (install (when (plusp (length path)) (uiop:ensure-directory-pathname path))))
-        (when install
-          (probe-file (merge-pathnames "VC/Auxiliary/Build/vcvarsall.bat" install)))))))
 
 (defun no-msvc-error ()
   (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
@@ -461,20 +436,6 @@ prerequisite is a thing to check before you begin, not after a 5 MB fetch and a 
     (:cc (unless (which "cc" "gcc" "clang")
            (error "No C compiler found (looked for cc, gcc, clang).")))
     (:msvc (unless (find-msvc) (no-msvc-error)))))
-
-(defun msvc-command (inner)
-  "INNER wrapped in the MSVC environment: a cmd.exe line that sources vcvarsall.bat first.
-
-vswhere's own directory is prepended to PATH because VCVARSALL ITSELF SHELLS OUT TO
-vswhere.exe by bare name and prints `'vswhere.exe' is not recognized' when it is not there."
-  (let ((vcvarsall (find-msvc))
-        (installer (find-vswhere)))
-    (format nil "set \"PATH=%PATH%;~A\" && call \"~A\" ~A >nul && ~A"
-            (no-trailing-separator
-             (uiop:native-namestring (uiop:pathname-directory-pathname installer)))
-            (uiop:native-namestring vcvarsall)
-            (vcvarsall-arch)
-            inner)))
 
 (defun %msvc-run (inner &key capture (timeout *command-timeout*))
   "INNER in the MSVC environment, from vendor/mbedtls/. Returns (values OUTPUT CODE), OUTPUT

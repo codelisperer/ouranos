@@ -176,6 +176,11 @@ its tag.
 - **The desktop Coalton REPL example: `(exit)` and `(quit)` close it, an evaluation stops after
   30 seconds or when its stop button is pressed, and the page says so when the backend stops
   answering.** Served with `serve` or `dev`, `(exit)` is refused instead. (#355)
+- **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
+  discovery, which asked vswhere for the newest install only, so on a machine with several Visual
+  Studio installs the variable chose the toolchain for libuv and the Windows launcher but not for
+  mbedTLS. It now uses `scripts/msvc.lisp`, as `build-libuv.lisp` and `build-desktop-app.lisp` do,
+  and a path that is not an installation is refused before anything is downloaded. (#410)
 
 ## v0.1.5 — 2026-09-30
 

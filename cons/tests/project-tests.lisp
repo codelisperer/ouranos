@@ -7,9 +7,7 @@
   "Bind ROOT to a fresh empty temp directory and NESTED to a deep subdir under it
 (both created), run BODY, then delete the tree. No .git marker is created -- BODY adds
 markers as it needs them."
-  `(let* ((,root (uiop:ensure-directory-pathname
-                  (merge-pathnames (format nil "cons-project-test-~d/" (get-universal-time))
-                                   (uiop:temporary-directory))))
+  `(let* ((,root (tempdir:make-temporary-directory "project-test"))
           (,nested (uiop:ensure-directory-pathname (merge-pathnames "a/b/c/" ,root))))
      (declare (ignorable ,root ,nested))
      (unwind-protect
