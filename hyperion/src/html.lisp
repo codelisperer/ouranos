@@ -43,7 +43,19 @@ Returns the updated prefix list."
              spinneret:*unvalidated-attribute-prefixes*
              :test #'equal))
 
-  (mapc #'allow-attribute-prefix *client-attribute-prefixes*))
+  (mapc #'allow-attribute-prefix *client-attribute-prefixes*)
+
+  ;; Valid HTML that Spinneret's attribute table does not list (#439). Its complaint is a full
+  ;; WARNING, which fails an ASDF build and, under hyperion/dev, the reload of the whole file,
+  ;; so an app that wrote correct markup saw its change silently not load. Exempted the same
+  ;; way as the client prefixes, the only mechanism Spinneret offers. Add to this list only an
+  ;; attribute the HTML spec allows on the element Spinneret rejects it on.
+  (defparameter *spinneret-missing-attributes*
+    '("autocomplete")      ; allowed on <textarea> (WHATWG), rejected by Spinneret there
+    "Valid HTML attributes Spinneret's validation rejects, exempted by ALLOW-ATTRIBUTE-PREFIX when
+this file is compiled and loaded, so an app's templates using them compile without a WARNING.")
+
+  (mapc #'allow-attribute-prefix *spinneret-missing-attributes*))
 
 (defun swap-string (swap)
   "SWAP keyword -> the hx-swap value, via the typed Coalton renderer.
