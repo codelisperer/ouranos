@@ -59,6 +59,7 @@
                              (:file "praxeology")   ; Coalton-typed core ontology
                              (:file "conditions")   ; recoverable-failure protocol
                              (:file "context")      ; budgeted context (Kairos seed)
+                             (:file "results")      ; tool results outside the prompt (#319)
                              (:file "memory")       ; observational memory (pre-publication issue 60)
                              (:file "llm")          ; provider protocol + Anthropic
                              (:file "embedding")    ; the embedding seam (#138, #150)
@@ -100,6 +101,23 @@
   :components ((:module "tests"
                 :components ((:file "memory-db-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/memory-db/tests '#:run-tests)))
+
+;;; Tool results kept in a database (#319). An aux system for the reason praxeon/memory-db is
+;;; one: it stores externally, so praxeon's core keeps no datastore of its own.
+(defsystem "praxeon/results-db"
+  :description "Tool results kept outside the prompt, in a database through mnemosyne (#319)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("praxeon" "mnemosyne" "com.inuoe.jzon" "bordeaux-threads")
+  :components ((:file "src/results-db"))
+  :in-order-to ((test-op (test-op "praxeon/results-db/tests"))))
+
+(defsystem "praxeon/results-db/tests"
+  :description "praxeon/results-db on SQLite, and on Postgres when MNEMOSYNE_TEST_PG_URL is set (#319)."
+  :depends-on ("praxeon/results-db" "praxeon" "mnemosyne" "fiveam")
+  :components ((:module "tests" :components ((:file "results-db-tests"))))
+  :perform (test-op (o c) (symbol-call :praxeon/results-db/tests '#:run-tests)))
 
 ;;; Document retrieval over an app's corpora (#138). An aux system for the reason
 ;;; praxeon/memory-db is one: it stores externally, so it reaches praxeon as an injected seam

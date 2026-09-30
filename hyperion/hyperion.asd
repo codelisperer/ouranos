@@ -85,6 +85,7 @@
                              (:file "htmx")     ; typed HTMX vocabulary (Coalton)
                              (:file "path")     ; path templates + matching (Coalton)
                              (:file "html")     ; rendering the vocabulary (CL)
+                             (:file "proxy")    ; the client's address behind a trusted proxy (#381)
                              (:file "logging")  ; request id + request logging
                              (:file "security-headers") ; default security headers (#119)
                              (:file "server")   ; configurable Clack backend
@@ -566,6 +567,7 @@
                              ;; (%SRV-OK-APP).
                              (:file "same-origin-tests")
                              (:file "ratelimit-tests")
+                             (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")
                              (:file "channel-tests")
                              (:file "feed-tests")

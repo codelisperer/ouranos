@@ -126,6 +126,40 @@ its tag.
   error code when Windows cannot answer, and signals on other systems. `aion/windows` re-exports
   it. An app that parses `attrib.exe` for a read-only check can call this instead: `attrib.exe`'s
   output did not decode for a non-ASCII path, and the check answered "not read-only". (#349)
+- **hyperion/proxy: the client's address behind a trusted proxy, and one setting for it.**
+  (#381) `hyperion/proxy:*trusted-proxy*`, made with `make-proxy-trust` (`:hops N`, or
+  `:cidrs` with an optional platform `:header` such as `CF-Connecting-IP`), says which proxies
+  the app trusts. `client-address` then reads `X-Forwarded-For`, or the platform's header, only
+  as far as those proxies vouch for it, so a forged leftmost entry changes nothing.
+  `hyperion/ratelimit:by-address` and the request log's `remote` field use it, so rate limits
+  count each real client behind a proxy. `request-scheme` reads `X-Forwarded-Proto` under the
+  same setting, for #300. With no setting, the default, nothing changes: the address is
+  `:remote-addr`.
+- **praxeon: large tool results can be kept out of the prompt and read back by handle, and
+  older results cleared in batches.** (#319)
+  - `praxeon/actor:offload-tool-results` keeps an agent's tool results in a
+    `praxeon/results:result-store` (`make-memory-result-store`, or `praxeon/results-db`'s
+    `make-db-result-store` over a mnemosyne connection or pool). A result over `:threshold`
+    estimated tokens goes into the conversation as a stand-in naming the tool, its arguments,
+    its size, its first lines and a handle.
+  - The agent gets a `read-result` means: a range of lines or characters, or the lines holding
+    a string, returned exactly as stored.
+  - `:clear-budget` replaces older results by short stand-ins in what is sent, in batches that
+    take the messages down to `:clear-target`, keeping the last `:keep-recent` results and
+    those of the means in `:never-clear`. The history keeps them, and the start of the prompt
+    changes only when a batch is cleared.
+  - `forget-agent-results` erases a conversation's stored results.
+  - Nothing is on by default. `praxeon/bench/tool-results.lisp` measures task success, input
+    tokens and the cacheable share under each configuration, with a scripted model or a real one.
+- **hermes: email attachments, so an invitation can carry a calendar file.** (#366)
+  `make-email` takes `:attachments`, a list of `make-attachment` values: `:filename`,
+  `:content-type` with its parameters (`"text/calendar; charset=utf-8; method=REQUEST"`),
+  `:content` as a string (sent as UTF-8) or an octet vector, and `:disposition` (`:attachment`,
+  or `:inline` with a `:content-id`). SendGrid gets each one base64-encoded in its
+  `attachments` array. The dev transport prints each attachment's name, type and size, and
+  `dev-last-email` returns the last email it was given, so a test can check that an `.ics` went
+  out. A value that cannot be sent signals `invalid-message` when it is made. An email without
+  attachments is sent exactly as before.
 
 ### Fixed
 

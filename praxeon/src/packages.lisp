@@ -99,6 +99,21 @@
            #:remember #:supersede #:recall #:recall-similar #:observation->ctx-item
    #:observations-of #:forget #:forget-subject))
 
+(defpackage #:praxeon/results
+  (:use #:cl)
+  (:local-nicknames (#:bt #:bordeaux-threads))
+  (:documentation
+   "Tool results kept outside the prompt and read back by handle (#319). A RESULT-STORE keeps
+    each result per conversation; the pure functions here read it back exactly, by lines, by
+    characters, or by the lines that contain a string. PRAXEON/ACTOR decides when a result is
+    stored, replaced in the conversation by a stand-in, or cleared.")
+  (:export #:result-store #:memory-result-store #:make-memory-result-store
+           #:put-result #:find-result #:forget-conversation-results #:new-handle
+           #:stored-result #:make-stored-result #:stored-result-p #:stored-result-handle
+           #:stored-result-conversation #:stored-result-name #:stored-result-arguments
+           #:stored-result-text #:stored-result-created-at
+           #:line-starts #:line-count #:lines-of #:characters-of #:search-lines))
+
 (defpackage #:praxeon/llm
   (:use #:cl)
   (:local-nicknames (#:http #:aion/http-client)
@@ -254,8 +269,14 @@
                     (#:prompt #:praxeon/prompt)
                     (#:evt #:praxeon/event)
                     (#:turn #:praxeon/turn)
+                    (#:res #:praxeon/results)
+                    (#:jzon #:com.inuoe.jzon)
                     (#:a #:alexandria))
   (:export
+   ;; tool results outside the prompt (#319)
+   #:offload-tool-results #:forget-agent-results #:*read-result-max-characters*
+   #:agent-result-store #:agent-conversation #:agent-offload-threshold #:agent-clear-budget
+   #:agent-clear-target #:agent-keep-recent #:agent-never-clear
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens

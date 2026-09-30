@@ -18,6 +18,13 @@
   (:documentation "A provider is missing a required credential/setting (e.g. an API key or a
 From address), usually because an environment variable is unset."))
 
+(define-condition invalid-message (hermes-error)
+  ((problem :initarg :problem :reader invalid-message-problem))
+  (:report (lambda (c stream)
+             (format stream "hermes cannot build this message: ~A." (invalid-message-problem c))))
+  (:documentation "Signalled by MAKE-EMAIL and MAKE-ATTACHMENT when a value they were given is
+not one a message can carry (#366), before anything is sent."))
+
 (define-condition delivery-failure (hermes-error)
   ((provider :initarg :provider :initform nil :reader delivery-failure-provider)
    (status :initarg :status :initform nil :reader delivery-failure-status)

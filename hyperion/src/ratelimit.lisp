@@ -33,10 +33,11 @@
 ;;;; for one process. It bounds how many buckets it keeps (MAX-KEYS): an attacker who sends
 ;;;; a new email address with every request would otherwise grow it without limit.
 ;;;;
-;;;; THE CLIENT ADDRESS is the env's :REMOTE-ADDR, the peer of the TCP connection. Behind a
-;;;; reverse proxy every request has the proxy's address, so an address limit becomes one
-;;;; bucket for everybody. An app behind a proxy passes its own KEY function that reads the
-;;;; address the proxy reports, and only when it trusts that proxy to set the header.
+;;;; THE CLIENT ADDRESS is HYPERION/PROXY:CLIENT-ADDRESS (#381). With no trusted-proxy setting
+;;;; that is :REMOTE-ADDR, the peer of the TCP connection, and behind a reverse proxy every
+;;;; request then has the proxy's address, so an address limit becomes one bucket for
+;;;; everybody. An app behind a proxy sets HYPERION/PROXY:*TRUSTED-PROXY*, and BY-ADDRESS then
+;;;; keys on the address the trusted proxy reports.
 
 (in-package #:hyperion/ratelimit)
 
@@ -114,12 +115,14 @@ STATUSES. On a sign-in route that redirects after a successful sign-in,
 
 ;;; --- keys -------------------------------------------------------------------
 
-(defun by-address ()
-  "A KEY function returning the client address, :REMOTE-ADDR. See this file's header for
-why that is the wrong key behind a reverse proxy."
+(defun by-address (&key (trust nil trust-p))
+  "A KEY function returning the client's address, HYPERION/PROXY:CLIENT-ADDRESS (#381). TRUST, a
+PROXY-TRUST, overrides HYPERION/PROXY:*TRUSTED-PROXY*, which is otherwise read at each request.
+With neither, the key is :REMOTE-ADDR, as before #381; see this file's header."
   (lambda (env)
-    (let ((addr (getf env :remote-addr)))
-      (and addr (princ-to-string addr)))))
+    (if trust-p
+        (proxy:client-address env :trust trust)
+        (proxy:client-address env))))
 
 (defun normalise-identifier (value)
   "VALUE trimmed of whitespace and lowercased, so `Bob@X.test ' and `bob@x.test' share a

@@ -30,7 +30,10 @@
   (:export
    ;; neutral messages
    #:email #:make-email #:email-to #:email-from #:email-subject
-   #:email-text #:email-html #:email-reply-to
+   #:email-text #:email-html #:email-reply-to #:email-attachments
+   #:attachment #:make-attachment #:attachment-p #:attachment-filename #:attachment-content-type
+   #:attachment-content #:attachment-disposition #:attachment-content-id #:attachment-octets
+   #:dev-last-email
    #:sms #:make-sms #:sms-to #:sms-from #:sms-text
    ;; delivery result
    #:delivery-result #:make-delivery-result #:delivery-result-provider #:delivery-result-id
@@ -43,6 +46,7 @@
    #:register-impl #:email-provider-from-env #:sms-provider-from-env #:send
    ;; conditions
    #:hermes-error #:configuration-error #:configuration-error-missing
+   #:invalid-message #:invalid-message-problem
    #:as-delivery
    #:delivery-failure #:delivery-failure-provider #:delivery-failure-status
    #:delivery-failure-detail #:unsupported-message

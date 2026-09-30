@@ -65,6 +65,24 @@ client rendering `agent-history' still shows the whole conversation."
   ;; binds that variable around RUN-TURN (the workaround #326 was filed with) keeps getting
   ;; its value until it moves the number here.
   (max-tokens nil)
+  ;; TOOL RESULTS OUTSIDE THE PROMPT (#319), all NIL until OFFLOAD-TOOL-RESULTS sets them, so an
+  ;; agent that has not asked keeps every result in its history as before. RESULT-STORE is a
+  ;; PRAXEON/RESULTS:RESULT-STORE and CONVERSATION the id its results are kept under. A result of
+  ;; more than OFFLOAD-THRESHOLD estimated tokens goes into the history as a stand-in. When the
+  ;; messages a deliberation sends pass CLEAR-BUDGET estimated tokens, older results already in
+  ;; the history are replaced by stand-ins in what is sent, oldest first, until it is at most
+  ;; CLEAR-TARGET (half the budget when NIL); the last KEEP-RECENT results and those of the
+  ;; means named in NEVER-CLEAR stay whole. RESULT-INDEX maps a tool call's id to what the
+  ;; stand-in describes, and CLEARED holds the ids of the results replaced so far.
+  (result-store nil)
+  (conversation nil)
+  (offload-threshold nil)
+  (clear-budget nil)
+  (clear-target nil)
+  (keep-recent 3)
+  (never-clear '() :type list)
+  (result-index (make-hash-table :test #'equal))
+  (cleared (make-hash-table :test #'equal))
   (history '() :type list))               ; list of praxeon/llm messages
 
 (defun register-means (agent name description fn &key schema capability)
@@ -120,6 +138,259 @@ capabilities existed, so existing agents are unchanged."
                                     :description (means-entry-description e)
                                     :schema (means-entry-schema e))))
 
+;;; --- tool results outside the prompt (#319) ---------------------------------
+;;;
+;;; A tool result can be large, and it stays in the prompt for every later step of the
+;;; conversation. With OFFLOAD-TOOL-RESULTS an agent keeps each result in a result store, and
+;;; the conversation carries a stand-in wherever the result itself would cost too much: at
+;;; once, for a result over the offload threshold, and later, in a batch, for older results
+;;; once the prompt passes the clearing budget. The agent reads back what it needs through the
+;;; `read-result' means, which returns the stored text exactly.
+;;;
+;;; CLEARING HAPPENS IN BATCHES, AND ONLY IN WHAT IS SENT. The history stays the record, as for
+;;; history trimming (ADR-0001): a result cleared from the prompt is still in AGENT-HISTORY for a
+;;; client to show. The ids of the cleared results are kept on the agent, so the prompt sent at
+;;; each later step has the same stand-ins in the same places, and the part of the prompt
+;;; before the newest messages stays byte-identical from one step to the next, which is what a
+;;; provider's prefix cache needs. It changes only when a new batch is cleared, and a batch takes
+;;; the prompt well below the budget, to CLEAR-TARGET, so the next one is far away.
+
+(defparameter *read-result-max-characters* 16000
+  "The most characters one `read-result' call returns. A larger range is refused with the
+number of characters it holds, so the agent asks for less; it is never cut, since what comes
+back must be the stored text exactly.")
+
+(defparameter *read-result-means* "read-result"
+  "The name the result-reading means is registered under.")
+
+(defparameter *stand-in-preview-lines* 5
+  "How many first lines of a result its stand-in shows, within *STAND-IN-PREVIEW-CHARACTERS*.")
+
+(defparameter *stand-in-preview-characters* 400
+  "The most characters of a result its stand-in shows. Without it a result of one long line
+would get a stand-in as large as itself, and clearing it would save nothing.")
+
+(defun %clip (string n)
+  (if (> (length string) n) (concatenate 'string (subseq string 0 n) "...") string))
+
+(defun %arguments-text (arguments)
+  (%clip (handler-case (if arguments (jzon:stringify arguments) "{}")
+           (error () (princ-to-string arguments)))
+         300))
+
+(defun %result-entry (handle name arguments text)
+  (list :handle handle :name name :arguments arguments
+        :lines (res:line-count text) :characters (length text)
+        :tokens (prompt:estimate-tokens text)
+        :preview (%clip (or (res:lines-of text 1 *stand-in-preview-lines*) "")
+                        *stand-in-preview-characters*)))
+
+(defun %stand-in (entry how)
+  "The text that takes a stored result's place in the conversation. HOW is :OFFLOADED for a
+result kept out from the start, whose stand-in shows its first lines, since the model has not
+seen it; or :CLEARED for one removed later, which the model has already read, so its stand-in
+names it and says where it is, and nothing more. Every cleared result stays in the prompt as
+one of these, so a short one is what lets a batch take the prompt well below the budget."
+  (if (eq how :cleared)
+      (format nil "[Earlier result of ~A ~A, cleared to save space; stored as ~A: ~D line~:P, ~D character~:P. Read it with ~A.]"
+              (getf entry :name) (%clip (%arguments-text (getf entry :arguments)) 80)
+              (getf entry :handle) (getf entry :lines) (getf entry :characters) *read-result-means*)
+      (format nil "[Result of ~A ~A, kept outside the conversation as ~A: ~D line~:P, ~D character~:P, about ~D tokens. Call ~A with this handle to read a range of lines or characters, or the lines that contain a string. First lines:~%~A]"
+              (getf entry :name) (%arguments-text (getf entry :arguments))
+              (getf entry :handle) (getf entry :lines) (getf entry :characters)
+              (getf entry :tokens) *read-result-means* (getf entry :preview))))
+
+(defun %store-result (agent id name arguments text)
+  "Keep TEXT in AGENT's result store when it has one, and return what the conversation gets:
+TEXT itself, or its stand-in when TEXT is over the offload threshold."
+  (let ((store (agent-result-store agent)))
+    (if (or (null store) (equal name *read-result-means*))
+        text
+        (let* ((handle (res:put-result store (agent-conversation agent) name arguments text))
+               (entry (%result-entry handle name arguments text))
+               (threshold (agent-offload-threshold agent))
+               (offloaded (and threshold (> (getf entry :tokens) threshold))))
+          (setf (gethash id (agent-result-index agent)) (list* :offloaded offloaded entry))
+          (evt:emit :result-stored :id id :name name :handle handle
+                                   :tokens (getf entry :tokens) :offloaded offloaded)
+          (if offloaded (%stand-in entry :offloaded) text)))))
+
+(defun %map-tool-results (messages function)
+  "MESSAGES with each tool-result part replaced by FUNCTION's value for it, or kept when that
+is NIL. Messages and parts that do not change are the same objects."
+  (mapcar (lambda (m)
+            (let ((content (llm:content m)))
+              (if (and (listp content)
+                       (some (lambda (p) (eq (getf p :type) :tool-result)) content))
+                  (let* ((changed nil)
+                         (parts (mapcar (lambda (p)
+                                          (let ((new (and (eq (getf p :type) :tool-result)
+                                                          (funcall function p))))
+                                            (if new (progn (setf changed t) new) p)))
+                                        content)))
+                    (if changed (llm:msg (llm:role m) parts) m))
+                  m)))
+          messages))
+
+(defun %with-cleared (agent messages)
+  "MESSAGES with the stand-in in place of every result AGENT has cleared."
+  (if (zerop (hash-table-count (agent-cleared agent)))
+      messages
+      (%map-tool-results
+       messages
+       (lambda (part)
+         (let ((id (getf part :tool-use-id)))
+           (when (gethash id (agent-cleared agent))
+             (llm:tool-result-part id (%stand-in (gethash id (agent-result-index agent)) :cleared)
+                                   (getf part :is-error))))))))
+
+(defun %clear-batch (agent messages)
+  "When MESSAGES are over AGENT's clearing budget, clear the oldest results that may be cleared
+until they are at most the clearing target, and return MESSAGES with every cleared result's
+stand-in in place. Otherwise return MESSAGES unchanged."
+  (let ((budget (agent-clear-budget agent)))
+    (if (or (null budget) (<= (prompt:messages-tokens messages) budget))
+        messages
+        (let* ((target (or (agent-clear-target agent) (floor budget 2)))
+               (index (agent-result-index agent))
+               (stored (loop for m in messages
+                             append (loop for p in (let ((c (llm:content m))) (and (listp c) c))
+                                          when (and (eq (getf p :type) :tool-result)
+                                                    (gethash (getf p :tool-use-id) index))
+                                            collect p)))
+               (recent (last stored (agent-keep-recent agent)))
+               (tokens (prompt:messages-tokens messages))
+               (count 0))
+          (dolist (part stored)
+            (when (<= tokens target) (return))
+            (let* ((id (getf part :tool-use-id))
+                   (entry (gethash id index)))
+              (unless (or (member part recent :test #'eq)
+                          (getf entry :offloaded)
+                          (gethash id (agent-cleared agent))
+                          (member (getf entry :name) (agent-never-clear agent) :test #'equal))
+                (setf (gethash id (agent-cleared agent)) t)
+                (incf count)
+                (decf tokens (- (prompt:part-tokens part)
+                                (prompt:estimate-tokens (%stand-in entry :cleared)))))))
+          (let ((result (%with-cleared agent messages)))
+            (when (plusp count)
+              (evt:emit :results-cleared :count count
+                                         :estimated-tokens (prompt:messages-tokens result)
+                                         :budget budget :target target))
+            result)))))
+
+(defun %read-result-schema ()
+  (let ((props (make-hash-table :test 'equal))
+        (schema (make-hash-table :test 'equal)))
+    (flet ((prop (name type description)
+             (let ((h (make-hash-table :test 'equal)))
+               (setf (gethash "type" h) type (gethash "description" h) description)
+               (setf (gethash name props) h))))
+      (prop "handle" "string" "The handle a stored result's stand-in names, for example res-0a1b2c3d4e5f6a7b.")
+      (prop "first_line" "integer" "The first line to read, counted from 1.")
+      (prop "last_line" "integer" "The last line to read, inclusive. Defaults to 50 lines from first_line.")
+      (prop "start" "integer" "The first character to read, counted from 0, when reading characters instead of lines.")
+      (prop "end" "integer" "The character after the last one to read.")
+      (prop "search" "string" "Return the lines that contain this string, with their line numbers, instead of a range.")
+      (prop "case_sensitive" "boolean" "Whether search distinguishes upper and lower case. Default false."))
+    (setf (gethash "type" schema) "object"
+          (gethash "properties" schema) props
+          (gethash "required" schema) (vector "handle"))
+    schema))
+
+(defun %read-result (agent args)
+  "The `read-result' means: part of a stored result of AGENT's conversation, exactly as stored."
+  (flet ((arg (name) (and (hash-table-p args) (gethash name args)))
+         (too-long (what n)
+           (format nil "~A holds ~D characters, more than ~A returns at once (~D). Ask for a smaller range."
+                   what n *read-result-means* *read-result-max-characters*)))
+    (let* ((handle (arg "handle"))
+           (record (and (stringp handle)
+                        (res:find-result (agent-result-store agent) (agent-conversation agent)
+                                         handle))))
+      (if (null record)
+          (format nil "No stored result has the handle ~S in this conversation." handle)
+          (let ((text (res:stored-result-text record))
+                (search (arg "search")))
+            (cond
+              ((and (stringp search) (plusp (length search)))
+               (multiple-value-bind (found total)
+                   (res:search-lines text search
+                                     :case-sensitive (eq (arg "case_sensitive") t))
+                 (format nil "~D line~:P of ~A contain~:[s~;~] ~S~:[.~;; the first ~D:~]~{~%~A~}"
+                         total handle (/= total 1) search (plusp total) (length found)
+                         (mapcar (lambda (e) (format nil "line ~D: ~A" (car e) (cdr e))) found))))
+              ((integerp (arg "start"))
+               (let* ((start (arg "start"))
+                      (end (if (integerp (arg "end")) (arg "end") (+ start 4000)))
+                      (part (res:characters-of text start (max start end))))
+                 (if (> (length part) *read-result-max-characters*)
+                     (too-long (format nil "Characters ~D to ~D" start end) (length part))
+                     (format nil "Characters ~D to ~D of ~D in ~A, exactly as stored:~%~A"
+                             (min start (length text)) (+ (min start (length text)) (length part))
+                             (length text) handle part))))
+              (t
+               (let* ((first (if (integerp (arg "first_line")) (max 1 (arg "first_line")) 1))
+                      (last (if (integerp (arg "last_line"))
+                                (max first (arg "last_line"))
+                                (+ first 49))))
+                 (multiple-value-bind (part range) (res:lines-of text first last)
+                   (cond ((null part)
+                          (format nil "~A has ~D line~:P; line ~D is past the end."
+                                  handle (res:line-count text) first))
+                         ((> (length part) *read-result-max-characters*)
+                          (too-long (format nil "Lines ~D to ~D" first last) (length part)))
+                         (t (format nil "Lines ~D to ~D of ~D in ~A, exactly as stored:~%~A"
+                                    (first range) (second range) (res:line-count text)
+                                    handle part))))))))))))
+
+(defun offload-tool-results (agent store &key conversation (threshold 2000) clear-budget
+                                             clear-target (keep-recent 3) never-clear)
+  "Keep AGENT's tool results in STORE, a PRAXEON/RESULTS:RESULT-STORE, and let it read them back
+(#319). Returns AGENT.
+
+CONVERSATION is the id the results are kept and erased under (FORGET-AGENT-RESULTS); an app
+that keeps conversations passes its own, and NIL makes a new one. A result of more than
+THRESHOLD estimated tokens is kept out of the history from the start, which gets a stand-in
+naming the tool, its arguments, the result's size, its first lines and a handle. CLEAR-BUDGET,
+when set, clears older results from what is sent once the messages pass it, down to
+CLEAR-TARGET (half the budget when NIL), keeping the last KEEP-RECENT results and those of the
+means named in NEVER-CLEAR whole; see the commentary above REQUEST-MESSAGES.
+
+Registers the means `read-result', which returns part of a stored result by its handle: a
+range of lines, a range of characters, or the lines that contain a string, exactly as stored.
+
+Nothing here is a default: every setting is the app's until a measurement with a real model
+shows which values keep the task succeeding (#319, and the maintainer's rule on #316)."
+  (check-type store res:result-store)
+  (unless (or (null threshold) (typep threshold '(integer 1)))
+    (error "praxeon/actor: :threshold must be a positive integer or NIL, not ~S" threshold))
+  (unless (or (null clear-budget) (typep clear-budget '(integer 1)))
+    (error "praxeon/actor: :clear-budget must be a positive integer or NIL, not ~S" clear-budget))
+  (unless (typep keep-recent '(integer 0))
+    (error "praxeon/actor: :keep-recent must be a non-negative integer, not ~S" keep-recent))
+  (setf (agent-result-store agent) store
+        (agent-conversation agent) (or conversation (format nil "conv-~A" (res:new-handle)))
+        (agent-offload-threshold agent) threshold
+        (agent-clear-budget agent) clear-budget
+        (agent-clear-target agent) clear-target
+        (agent-keep-recent agent) keep-recent
+        (agent-never-clear agent) never-clear)
+  (register-means agent *read-result-means*
+                  "Read part of a tool result that is kept outside the conversation, by the handle its stand-in names: a range of lines, a range of characters, or the lines that contain a string. What it returns is the stored text exactly."
+                  (lambda (args) (%read-result agent args))
+                  :schema (%read-result-schema))
+  agent)
+
+(defun forget-agent-results (agent)
+  "Erase every result AGENT's conversation has in its store (#150), and forget which were
+cleared. Returns how many were erased. A stand-in that names one of them then reads nothing."
+  (let ((store (agent-result-store agent)))
+    (clrhash (agent-result-index agent))
+    (clrhash (agent-cleared agent))
+    (if store (res:forget-conversation-results store (agent-conversation agent)) 0)))
+
 (defun request-messages (agent)
   "The messages a deliberation SENDS. Returns (values messages estimated-tokens).
 
@@ -134,8 +405,8 @@ Not `agent-history', and the difference is the whole of pre-publication issue 40
 Nothing is mutated: the agent's history is the record, this is the request, and the
 facts are never written back into the conversation (which would make them
 permanent, and pay for them on every later turn)."
-  (let* ((trimmed (prompt:trim-history (agent-history agent)
-                                       (agent-history-budget agent)))
+  (let* ((history (%clear-batch agent (%with-cleared agent (agent-history agent))))
+         (trimmed (prompt:trim-history history (agent-history-budget agent)))
          (facts (prompt:render-items (ctx:assemble (agent-context agent))))
          (messages (if facts
                        (prompt:attach-context trimmed facts)
@@ -293,7 +564,9 @@ each so a client can report progress."
                 (evt:emit :tool-call :id id :name name :arguments args)
                 (let ((result (%result-string (act agent name args :permit permit))))
                   (evt:emit :tool-result :id id :name name :content result)
-                  (llm:tool-result-part id result))))
+                  ;; What the history carries: the result, or its stand-in when it is kept
+                  ;; outside the conversation (#319).
+                  (llm:tool-result-part id (%store-result agent id name args result)))))
             calls)))
 
 (defun %append-history (agent &rest messages)
