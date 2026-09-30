@@ -20,7 +20,7 @@
     port on 127.0.0.1, then launch an out-of-process native webview at it (ADR-0008). The
     embedded server is the default; :backend (:remote URL) points at a remote backend
     instead (ADR-0009). SBCL-only.")
-  (:export #:run-app #:free-port #:wait-until-listening
+  (:export #:run-app #:request-close #:free-port #:wait-until-listening
            #:*launcher* #:default-launcher #:image-directory #:bundled-window-icon
            #:launcher-not-found #:*remote-backend*))
 
@@ -187,6 +187,47 @@ immediately."
   (handler-case (loop (sleep 3600))
     #+sbcl (sb-sys:interactive-interrupt () nil)))
 
+;;; --- the window's lifetime (#355) -------------------------------------------
+
+(defvar *window* nil
+  "The launcher process RUN-APP is waiting on, or NIL. Set globally rather than bound, so that
+REQUEST-CLOSE sees it from a server's request thread.")
+
+(defparameter *window-poll-seconds* 0.1
+  "How often RUN-APP checks whether the window has closed.")
+
+(defun %end-window (process)
+  "Stop the launcher PROCESS if it is still running."
+  (when (and process (uiop:process-alive-p process))
+    (ignore-errors (uiop:terminate-process process :urgent t))))
+
+(defun %wait-for-window (process)
+  "Return when the launcher PROCESS exits. If this is left any other way -- a throw, an error,
+or the process exiting from another thread -- the launcher is stopped on the way out, so the
+window never outlives its backend.
+
+It polls rather than calling UIOP:WAIT-PROCESS, because a thread blocked in that call cannot
+be interrupted. When code on another thread calls SB-EXT:EXIT, SBCL interrupts the main
+thread to unwind it and waits up to SB-EXT:*EXIT-TIMEOUT* (60 seconds) for that. Blocked in
+the wait, the main thread took the whole 60 seconds on Windows, with the server no longer
+answering, and the window stayed open after the process had gone (#355)."
+  (setf *window* process)
+  (unwind-protect
+       (loop while (uiop:process-alive-p process)
+             do (sleep *window-poll-seconds*))
+    (setf *window* nil)
+    (%end-window process)
+    (ignore-errors (uiop:wait-process process))))
+
+(defun request-close ()
+  "Close the window RUN-APP is showing, so that RUN-APP stops the server and returns. Callable
+from any thread, including a request handler, which is how an app closes itself: the desktop
+Coalton REPL calls it when the user types (exit). Returns T if there was a window to close."
+  (let ((window *window*))
+    (when (and window (uiop:process-alive-p window))
+      (%end-window window)
+      t)))
+
 ;;; --- lifecycle --------------------------------------------------------------
 
 (defvar *remote-backend* nil
@@ -209,16 +250,18 @@ because an unprotected local server is otherwise invisible."
                :origin origin)
      app)))
 
-(defun %start-embedded (app port server &optional (request-guard :same-origin))
+(defun %start-embedded (app port server &optional (request-guard :same-origin) workers)
   "Start APP on a free (or given) loopback port, behind REQUEST-GUARD (see %GUARD); wait
 until it listens. Returns (values URL HANDLER). Signals if the server never comes up.
+WORKERS is passed to HYPERION/SERVER:START.
 
 The guard is applied here rather than by the caller because the origin it checks against
 includes the port, and the port is not known until this function picks it."
   (let* ((p (if (eq port :auto) (free-port) port))
          (origin (format nil "http://127.0.0.1:~D" p))
          (handler (hyperion/server:start (%guard app origin request-guard)
-                                         :port p :host "127.0.0.1" :server server)))
+                                         :port p :host "127.0.0.1" :server server
+                                         :workers workers)))
     (unless (wait-until-listening p)
       (ignore-errors (hyperion/server:stop handler))
       (error "hyperion/desktop: server did not start listening on 127.0.0.1:~D" p))
@@ -231,7 +274,7 @@ includes the port, and the port is not known until this function picks it."
                          (shell :webview)
                          (request-guard :same-origin)
                          (launcher (default-launcher))
-                         icon
+                         icon workers
                          on-ready on-close)
   "Run a Hyperion APP as a native desktop window, blocking until the window closes.
 See hyperion/docs/desktop.md.
@@ -254,24 +297,31 @@ ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon 
   Windows, nor a bundled .app's icon on macOS -- both come from elsewhere. A shipped bundle
   built with --window-icon carries its own copy, and that copy is used instead
   (BUNDLED-WINDOW-ICON), because ICON is usually a path on the machine that built the app.
-ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits."
+WORKERS -- the number of threads that run the embedded server's handlers, passed to
+  HYPERION/SERVER:START (NIL, the default, keeps the server's own). An app whose page makes a
+  second request while a slow one runs, such as a cancel button, needs at least 2 on Woo.
+ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits.
+
+The window and the server end together. REQUEST-CLOSE, from any thread, closes the window,
+and RUN-APP then stops the server and returns. If RUN-APP is left any other way, including the
+process exiting from another thread, it stops the launcher on the way out (#355)."
   ;; Fail before booting anything if the native half was never built on this machine.
   (when (eq shell :webview) (%check-launcher launcher))
   (multiple-value-bind (url handler)
       (cond
-        ((eq backend :embedded) (%start-embedded app port server request-guard))
+        ((eq backend :embedded) (%start-embedded app port server request-guard workers))
         ((and (consp backend) (eq (first backend) :remote))
          (values (second backend) nil))
         ((and (consp backend) (eq (first backend) :hybrid))
          (setf *remote-backend* (second backend))
-         (%start-embedded app port server request-guard))
+         (%start-embedded app port server request-guard workers))
         (t (error "hyperion/desktop: unrecognized :backend ~S" backend)))
     (unwind-protect
          (progn
            (when on-ready (funcall on-ready url))
            (ecase shell
              (:webview
-              (uiop:wait-process
+              (%wait-for-window
                (uiop:launch-program
                 (append (list (namestring launcher) url title
                               (princ-to-string width)

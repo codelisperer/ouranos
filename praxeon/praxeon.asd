@@ -63,6 +63,7 @@
                              (:file "memory")       ; observational memory (pre-publication issue 60)
                              (:file "llm")          ; provider protocol + Anthropic
                              (:file "embedding")    ; the embedding seam (#138, #150)
+                             (:file "rerank")       ; the rerank seam (#316)
                              (:file "structured")   ; forced tool calls (pre-publication issue 416)
                              (:file "distil")       ; window -> observations (pre-publication issue 452)
                              (:file "prompt")       ; what is SENT: trim + placement (pre-publication issue 402)
@@ -129,7 +130,8 @@
   :version "0.0.0"
   :depends-on ("praxeon" "mnemosyne" "dbi" "ironclad" "bordeaux-threads"
                "coalton"                      ; fusion.lisp is Coalton (#316)
-               "aion/boundary")               ; the rankings are checked before fusion.lisp (#110)
+               "aion/boundary"                ; the rankings are checked before fusion.lisp (#110)
+               "aion/log")                    ; a corpus's change of strategy is logged (#316)
   :serial t
   :components ((:module "src/retrieval"
                 :serial t
@@ -137,12 +139,14 @@
                              (:file "fusion")    ; reciprocal rank fusion, Coalton (#316)
                              (:file "terms")     ; the BM25 tokenizer (#316)
                              (:file "corpus")
+                             (:file "context")   ; a context for each chunk (#316)
                              (:file "similar")
                              (:file "tool")))))
 
 (defsystem "praxeon/retrieval/tests"
   :description "praxeon/retrieval against a real Postgres with pgvector (#138)."
   :depends-on ("praxeon/retrieval" "praxeon" "mnemosyne" "bordeaux-threads" "aion/test-threads"
+               "aion/log"                     ; a test reads the strategy-change log line (#316)
                "fiveam")
   :components ((:module "tests"
                 :components ((:file "retrieval-tests"))))

@@ -253,6 +253,19 @@ both naming the same table."))
     ;; terms themselves are in the store's terms table.
     (:term_count         :integer)
     (:terms_tokenizer    :string)
+    ;; Contexts and document order (#316, step 3). SECTION_INDEX is the section's position in
+    ;; its document and locale as the app handed the sections in. DOCUMENT_FINGERPRINT is
+    ;; %DOCUMENT-FINGERPRINT of that document and locale's chunks, written by every sync that
+    ;; changes them. A context is current while CONTEXT_DERIVER is the corpus's contextualizer
+    ;; and CONTEXT_DOCUMENT_FINGERPRINT is the chunk's DOCUMENT_FINGERPRINT. INPUT_FINGERPRINT
+    ;; is SECTION-FINGERPRINT of what is embedded and indexed (%EMBED-INPUT); an embedding
+    ;; whose fingerprint differs from it is stale.
+    (:section_index      :integer)
+    (:document_fingerprint :string)
+    (:context            :text)
+    (:context_deriver    :string)
+    (:context_document_fingerprint :string)
+    (:input_fingerprint  :string)
     (:embedding          :vector :dimensions ,dimensions :derived-from :text)))
 
 (defun make-chunk-store (connection &key (table *table*) dimensions ensure)
@@ -275,18 +288,65 @@ wide. DIMENSIONS is required: it is the width of the embedding model the app use
     (when ensure (ensure-schema store))
     store))
 
+(defparameter *whole-limit* 200000
+  "The size, in estimated tokens, at which an :AUTO corpus stops being retrieved whole and is
+searched instead (#316). The figure is the one Anthropic's contextual-retrieval article gives
+for a knowledge base better put in the prompt than searched. The right figure for an app depends
+on its chat model's context window and on what each query may cost, since a cached prompt is
+still paid for at the cache-read price on every call, so MAKE-CORPUS takes :WHOLE-LIMIT.")
+
 (defclass corpus ()
   ((store :initarg :store :reader corpus-store)
    (name :initarg :name :reader corpus-name)
-   (chunker :initarg :chunker :reader corpus-chunker))
+   (chunker :initarg :chunker :reader corpus-chunker)
+   (strategy :initarg :strategy :reader corpus-strategy)
+   (whole-limit :initarg :whole-limit :reader corpus-whole-limit)
+   (expected-tokens :initarg :expected-tokens :reader corpus-expected-tokens)
+   (contextualizer :initarg :contextualizer :reader corpus-contextualizer)
+   (backfill :initarg :backfill :reader corpus-backfill))
   (:documentation "A named set of documents searched together. Its rows are in its store's
-table, marked with its NAME. Creating one writes nothing: a corpus exists once it has rows."))
+table, marked with its NAME. Creating one writes nothing: a corpus exists once it has rows.
+MAKE-CORPUS describes the other slots."))
 
-(defun make-corpus (store name &key (chunker (make-instance 'section-chunker)))
-  "The corpus NAME (a non-empty string) in STORE. Cheap, and runs no SQL."
+(defun make-corpus (store name &key (chunker (make-instance 'section-chunker))
+                                    (strategy :auto) (whole-limit *whole-limit*)
+                                    expected-tokens contextualizer (backfill :automatic))
+  "The corpus NAME (a non-empty string) in STORE. Cheap, and runs no SQL.
+
+STRATEGY is how RETRIEVE answers a query (#316):
+  :WHOLE   every chunk, in document order, for the app to put in the prompt before a cache
+           marker (RETRIEVE-WHOLE).
+  :HYBRID  embedding similarity and BM25 merged (RETRIEVE-HYBRID), over chunks that carry a
+           context when the corpus has a CONTEXTUALIZER.
+  :AUTO    :WHOLE while the corpus is smaller than WHOLE-LIMIT estimated tokens, and :HYBRID
+           from then on. The default.
+
+EXPECTED-TOKENS is the size the app expects the corpus to reach. When it is WHOLE-LIMIT or more,
+an :AUTO corpus is :HYBRID from its first sync, so its chunks get contexts from the start and
+nothing has to be done again when it grows.
+
+CONTEXTUALIZER, from PRAXEON/RETRIEVAL:MAKE-CONTEXTUALIZER, writes a context for each chunk of a
+:HYBRID corpus (CONTEXTUALIZE-PENDING). NIL, the default, writes none, and hybrid retrieval then
+searches the chunks' text alone.
+
+BACKFILL says when an :AUTO corpus that has grown past WHOLE-LIMIT gets its contexts written:
+:AUTOMATIC (the default) at the next CONTEXTUALIZE-PENDING, or :EXPLICIT only after the app calls
+START-BACKFILL. That backfill writes a context for every chunk and re-embeds every chunk, which
+is the one large cost of this design."
   (unless (and (stringp name) (plusp (length name)))
     (error "praxeon/retrieval: a corpus name must be a non-empty string, not ~S" name))
-  (make-instance 'corpus :store store :name name :chunker chunker))
+  (unless (member strategy '(:auto :whole :hybrid))
+    (error "praxeon/retrieval: :strategy must be :AUTO, :WHOLE or :HYBRID, not ~S" strategy))
+  (unless (typep whole-limit '(integer 1))
+    (error "praxeon/retrieval: :whole-limit must be a positive integer, not ~S" whole-limit))
+  (unless (or (null expected-tokens) (typep expected-tokens '(integer 0)))
+    (error "praxeon/retrieval: :expected-tokens must be a non-negative integer or NIL, not ~S"
+           expected-tokens))
+  (unless (member backfill '(:automatic :explicit))
+    (error "praxeon/retrieval: :backfill must be :AUTOMATIC or :EXPLICIT, not ~S" backfill))
+  (make-instance 'corpus :store store :name name :chunker chunker :strategy strategy
+                         :whole-limit whole-limit :expected-tokens expected-tokens
+                         :contextualizer contextualizer :backfill backfill))
 
 (defun corpus-where (corpus &rest clauses)
   "The WHERE clause restricting a query to CORPUS, ANDed with CLAUSES.
@@ -338,6 +398,17 @@ indexed count over this table."
         (format nil "CREATE INDEX IF NOT EXISTS ~A_corpus_term_idx ON ~A (corpus, tokenizer, term)"
                 (terms-table store) (terms-table store))))
 
+(defun corpora-table (store)
+  "The table recording, for each corpus in STORE, its size in estimated tokens and the strategy
+the last sync chose: the chunk table's name with \"_corpora\" (#316)."
+  (format nil "~A_corpora" (store-table store)))
+
+(defun %corpora-ddl (store)
+  "One row per corpus. STRATEGY and TOKENS are what the last sync measured; CHANGED_AT is when
+STRATEGY last changed, in universal time. BACKFILL_STARTED_AT is set by START-BACKFILL."
+  (format nil "CREATE TABLE IF NOT EXISTS ~A (corpus TEXT PRIMARY KEY, strategy TEXT NOT NULL, tokens BIGINT NOT NULL, changed_at BIGINT NOT NULL, backfill_started_at BIGINT)"
+          (corpora-table store)))
+
 (defun %live-embedding-type (store)
   "The live embedding column's type, for example \"vector(1024)\", or NIL."
   (let ((row (first (conn:query (store-connection store)
@@ -379,11 +450,17 @@ every result is complete; an index would let the database drop rows after the co
       ;; indexed until INDEX-PENDING writes their terms. Postgres answers IF NOT EXISTS on an
       ;; object that exists with a notice, which cl-postgres signals as a warning; that is the
       ;; expected case on every start after the first, so it is muffled here and nowhere else.
+      ;; The same holds for the columns #316's step 3 added: a chunk of an older table has no
+      ;; context and no document fingerprint, and is contextualized like a new one.
       (handler-bind ((warning #'muffle-warning))
-        (dolist (column '("term_count INTEGER" "terms_tokenizer TEXT"))
+        (dolist (column '("term_count INTEGER" "terms_tokenizer TEXT"
+                          "section_index INTEGER" "document_fingerprint TEXT" "context TEXT"
+                          "context_deriver TEXT" "context_document_fingerprint TEXT"
+                          "input_fingerprint TEXT"))
           (conn:exec c (format nil "ALTER TABLE ~A ADD COLUMN IF NOT EXISTS ~A" table column)))
         (dolist (statement (%terms-ddl store))
-          (conn:exec c statement)))
+          (conn:exec c statement))
+        (conn:exec c (%corpora-ddl store)))
       (let ((live (%live-embedding-type store))
             (want (format nil "vector(~D)" (store-dimensions store))))
         (unless (equal live want)
@@ -435,8 +512,10 @@ process does that."
 ;;; --- sync --------------------------------------------------------------------------
 
 (defstruct (sync-report (:constructor %make-sync-report))
-  "What a sync did, counted in sections (a section being one locale of one section id)."
-  (added 0) (replaced 0) (updated 0) (unchanged 0) (removed 0))
+  "What a sync did, counted in sections (a section being one locale of one section id). SIZE is
+the corpus's size afterwards in estimated tokens (CORPUS-SIZE), and STRATEGY is the one RETRIEVE
+follows at that size, :WHOLE or :HYBRID (#316)."
+  (added 0) (replaced 0) (updated 0) (unchanged 0) (removed 0) size strategy)
 
 (defparameter +provenance-columns+
   '(:document_id :document_version :locator :locale_role :derived_from :source_fingerprint))
@@ -468,9 +547,18 @@ because a section id is stable within its document and need not be unique across
   (list (param:row-value row :document_id) (param:row-value row :section_id)
         (param:row-value row :locale)))
 
+(defun %embed-input (context text)
+  "What is embedded and indexed for BM25 for a chunk with TEXT and CONTEXT: the context, a blank
+line and the text, or the text alone when there is no context (#316). The passage a reader sees
+is TEXT alone."
+  (if (and context (plusp (length context)))
+      (concatenate 'string context (string #\Newline) (string #\Newline) text)
+      text))
+
 (defun %write-terms (corpus chunk-id text locale)
   "Write CHUNK-ID's terms, tokenized from TEXT in LOCALE, and return how many terms there were.
-Called with the store's database lock held, inside the caller's transaction."
+TEXT is the chunk's %EMBED-INPUT. Called with the store's database lock held, inside the
+caller's transaction."
   (multiple-value-bind (counts total) (term-counts text :locale locale)
     (when counts
       (%run (corpus-store corpus)
@@ -494,7 +582,7 @@ Called with the store's database lock held, inside the caller's transaction."
                                                :from (list (store-table (corpus-store corpus)))
                                                :where chunk-where))))))
 
-(defun %insert-section (corpus section fingerprint)
+(defun %insert-section (corpus section fingerprint section-index)
   (let* ((chunker (corpus-chunker corpus))
          (chunks (chunk-section chunker section)))
     (loop for ch in chunks
@@ -516,7 +604,11 @@ Called with the store's database lock held, inside the caller's transaction."
                                               :boundary (string-downcase
                                                          (symbol-name (chunk-boundary ch)))
                                               :text (chunk-text ch)
-                                              :section_fingerprint fingerprint)
+                                              :section_fingerprint fingerprint
+                                              :section_index section-index
+                                              ;; No context yet, so the input is the text.
+                                              :input_fingerprint (section-fingerprint
+                                                                  (chunk-text ch)))
                                         (%section-provenance section)))))
              ;; The terms are written with the chunk, in the sync's transaction, so a synced
              ;; chunk is indexed for BM25 as soon as the sync commits.
@@ -538,6 +630,44 @@ Called with the store's database lock held, inside the caller's transaction."
         (list :delete-from (store-table (corpus-store corpus))
               :where (%section-where corpus key))))
 
+(defun %section-indexes (sections)
+  "SECTION -> its position among the sections of its document and locale in SECTIONS."
+  (let ((next (make-hash-table :test #'equal))
+        (index (make-hash-table :test #'eq)))
+    (dolist (s sections index)
+      (let ((group (list (section-document-id s) (section-locale s))))
+        (setf (gethash s index) (gethash group next 0))
+        (incf (gethash group next 0))))))
+
+(defun %document-rows (corpus document-id locale &optional (columns '(:text)))
+  "COLUMNS of the chunks of DOCUMENT-ID in LOCALE, in document order."
+  (%fetch (corpus-store corpus)
+          (list :select columns
+                :from (list (store-table (corpus-store corpus)))
+                :where (corpus-where corpus (list := :document_id document-id)
+                                     (list := :locale locale))
+                :order-by '(:section_index :section_id :chunk_index))))
+
+(defun %document-fingerprint (texts)
+  "The fingerprint of a document in one locale, from its chunks' TEXTS in document order. A
+context is written against it, so any change to it makes every context of that document stale."
+  (der:content-fingerprint texts :hash #'%sha256-hex))
+
+(defun %refresh-document-fingerprint (corpus document-id locale)
+  "Recompute DOCUMENT-ID's fingerprint in LOCALE from its stored chunks and write it on each of
+them where it differs. Returns the fingerprint, or NIL when the document has no chunks."
+  (let ((rows (%document-rows corpus document-id locale)))
+    (when rows
+      (let ((fp (%document-fingerprint (mapcar (lambda (r) (param:row-value r :text)) rows))))
+        (%run (corpus-store corpus)
+              (list :update (store-table (corpus-store corpus))
+                    :set (list :document_fingerprint fp)
+                    :where (corpus-where corpus (list := :document_id document-id)
+                                         (list := :locale locale)
+                                         (list :or (list :is-null :document_fingerprint)
+                                               (list :<> :document_fingerprint fp)))))
+        fp))))
+
 (defun %sync (corpus sections scope-clause)
   "Make CORPUS's chunks within SCOPE-CLAUSE match SECTIONS exactly. See SYNC-DOCUMENT."
   (mapc #'%check-section sections)
@@ -551,50 +681,79 @@ Called with the store's database lock held, inside the caller's transaction."
         (setf (gethash key seen) t))))
   (let* ((store (corpus-store corpus))
          (report (%make-sync-report))
-         (chunker-id (chunker-id (corpus-chunker corpus))))
-    (with-corpus-lock (corpus)
-      (with-db (store)
-        (conn:with-transaction ((store-connection store))
-          (let ((existing (make-hash-table :test #'equal)))
-            (dolist (row (%fetch store (list :select (append '(:section_id :locale
-                                                                :section_fingerprint :chunker)
-                                                              +provenance-columns+)
-                                             :from (list (store-table store))
-                                             :where (if scope-clause
-                                                        (corpus-where corpus scope-clause)
-                                                        (corpus-where corpus)))))
-              (setf (gethash (%row-key row) existing) row))
-            (dolist (s sections)
-              (let* ((key (%section-key s))
-                     (row (gethash key existing))
-                     (fp (section-fingerprint (section-text s))))
-                (remhash key existing)
-                (cond
-                  ((and row
-                        (equal fp (param:row-value row :section_fingerprint))
-                        (equal chunker-id (param:row-value row :chunker)))
-                   (if (%provenance-differs-p row s)
-                       (progn
-                         ;; Provenance can change without the text changing. It is updated
-                         ;; in place, and the embedding, which depends on the text alone, is
-                         ;; kept.
-                         (%run store (list :update (store-table store)
-                                           :set (%section-provenance s)
-                                           :where (%section-where corpus key)))
-                         (incf (sync-report-updated report)))
-                       (incf (sync-report-unchanged report))))
-                  (t
-                   (%delete-section corpus key)
-                   (%insert-section corpus s fp)
-                   (if row
-                       (incf (sync-report-replaced report))
-                       (incf (sync-report-added report)))))))
-            ;; Whatever is left in scope was not handed in, so it no longer exists.
-            (maphash (lambda (key row)
-                       (declare (ignore row))
-                       (%delete-section corpus key)
-                       (incf (sync-report-removed report)))
-                     existing)))))
+         (chunker-id (chunker-id (corpus-chunker corpus)))
+         (indexes (%section-indexes sections))
+         ;; (document-id locale) pairs whose chunks changed, so whose document fingerprint must
+         ;; be recomputed after the writes.
+         (changed (make-hash-table :test #'equal))
+         (previous nil))
+    (flet ((touch (key) (setf (gethash (list (first key) (third key)) changed) t)))
+      (with-corpus-lock (corpus)
+        (with-db (store)
+          (conn:with-transaction ((store-connection store))
+            (let ((existing (make-hash-table :test #'equal)))
+              (dolist (row (%fetch store (list :select (append '(:section_id :locale
+                                                                  :section_fingerprint :chunker
+                                                                  :section_index
+                                                                  :document_fingerprint)
+                                                                +provenance-columns+)
+                                               :from (list (store-table store))
+                                               :where (if scope-clause
+                                                          (corpus-where corpus scope-clause)
+                                                          (corpus-where corpus)))))
+                ;; A chunk synced before #316's step 3 has no document fingerprint yet.
+                (unless (param:row-value row :document_fingerprint)
+                  (touch (%row-key row)))
+                (setf (gethash (%row-key row) existing) row))
+              (dolist (s sections)
+                (let* ((key (%section-key s))
+                       (row (gethash key existing))
+                       (fp (section-fingerprint (section-text s)))
+                       (index (gethash s indexes)))
+                  (remhash key existing)
+                  (cond
+                    ((and row
+                          (equal fp (param:row-value row :section_fingerprint))
+                          (equal chunker-id (param:row-value row :chunker)))
+                     (let ((moved (not (eql index (param:row-value row :section_index)))))
+                       (if (or moved (%provenance-differs-p row s))
+                           (progn
+                             ;; Provenance and position can change without the text changing.
+                             ;; Both are updated in place, and the embedding is kept. A section
+                             ;; that moved changes its document, so the document's contexts
+                             ;; become stale.
+                             (%run store (list :update (store-table store)
+                                               :set (append (%section-provenance s)
+                                                            (list :section_index index))
+                                               :where (%section-where corpus key)))
+                             (when moved (touch key))
+                             (incf (sync-report-updated report)))
+                           (incf (sync-report-unchanged report)))))
+                    (t
+                     (%delete-section corpus key)
+                     (%insert-section corpus s fp index)
+                     (touch key)
+                     (if row
+                         (incf (sync-report-replaced report))
+                         (incf (sync-report-added report)))))))
+              ;; Whatever is left in scope was not handed in, so it no longer exists.
+              (maphash (lambda (key row)
+                         (declare (ignore row))
+                         (%delete-section corpus key)
+                         (touch key)
+                         (incf (sync-report-removed report)))
+                       existing))
+            (maphash (lambda (group v)
+                       (declare (ignore v))
+                       (%refresh-document-fingerprint corpus (first group) (second group)))
+                     changed)
+            (multiple-value-bind (size strategy was) (%record-strategy corpus)
+              (setf (sync-report-size report) size
+                    (sync-report-strategy report) strategy
+                    previous was))))
+        ;; Logged after the commit, so a sync that rolled back logs nothing.
+        (%log-strategy-change corpus previous (sync-report-strategy report)
+                              (sync-report-size report))))
     report))
 
 (defun sync-document (corpus document-id sections)
@@ -618,6 +777,110 @@ SYNC-REPORT."
 boot. Anything in the corpus that is not in SECTIONS is removed. Otherwise as SYNC-DOCUMENT."
   (%sync corpus sections nil))
 
+;;; --- size and strategy (#316) ----------------------------------------------------------
+;;;
+;;; An :AUTO corpus is retrieved whole while it is small and searched once it is large. The size
+;;; is measured by each sync and recorded in the corpora table with the strategy it implies, so
+;;; the crossing is logged once however many processes sync the corpus, and a query reads the
+;;; strategy without measuring the corpus again.
+
+(defun corpus-size (corpus)
+  "CORPUS's size in estimated tokens: its chunks' characters divided by four, rounded up. That is
+the estimate PASSAGE->CTX-ITEM uses; the exact count depends on the model's tokenizer."
+  (let ((row (first (%fetch (corpus-store corpus)
+                            (list :select (list (list :as (list :coalesce (list :sum (list :length :text)) 0)
+                                                      :n))
+                                  :from (list (store-table (corpus-store corpus)))
+                                  :where (corpus-where corpus))))))
+    (ceiling (or (and row (param:row-value row :n)) 0) 4)))
+
+(defun %expected-large-p (corpus)
+  (let ((expected (corpus-expected-tokens corpus)))
+    (and expected (>= expected (corpus-whole-limit corpus)))))
+
+(defun %strategy-for (corpus size)
+  "The strategy CORPUS follows at SIZE estimated tokens: :WHOLE or :HYBRID."
+  (ecase (corpus-strategy corpus)
+    (:whole :whole)
+    (:hybrid :hybrid)
+    (:auto (if (or (%expected-large-p corpus) (>= size (corpus-whole-limit corpus)))
+               :hybrid
+               :whole))))
+
+(defun %recorded-row (corpus)
+  (first (%fetch (corpus-store corpus)
+                 (list :select '(:strategy :tokens :changed_at :backfill_started_at)
+                       :from (list (corpora-table (corpus-store corpus)))
+                       :where (corpus-where corpus)))))
+
+(defun %record-strategy (corpus)
+  "Measure CORPUS and record its size and strategy. Returns the size, the strategy, and the
+strategy recorded before, or NIL when there was none. Called inside the sync's transaction."
+  (let* ((size (corpus-size corpus))
+         (strategy (%strategy-for corpus size))
+         (row (%recorded-row corpus))
+         (was (and row (%keyword (param:row-value row :strategy)))))
+    (%run (corpus-store corpus)
+          (list :insert-into (corpora-table (corpus-store corpus))
+                :values (list (list :corpus (corpus-name corpus)
+                                    :strategy (string-downcase (symbol-name strategy))
+                                    :tokens size
+                                    :changed_at (if (eq was strategy)
+                                                    (param:row-value row :changed_at)
+                                                    (get-universal-time))))
+                :on-conflict '(:corpus)
+                :do-update '(:strategy (:excluded :strategy) :tokens (:excluded :tokens)
+                             :changed_at (:excluded :changed_at))))
+    (values size strategy was)))
+
+(defun %log-strategy-change (corpus was now size)
+  "Log, once, that an :AUTO corpus changed strategy. A corpus's first sync at :WHOLE is the
+normal start and is not logged."
+  (when (and (eq (corpus-strategy corpus) :auto)
+             (not (eq was now))
+             (not (and (null was) (eq now :whole))))
+    (log:info "retrieval corpus changed strategy"
+              :corpus (corpus-name corpus)
+              :from (if was (string-downcase (symbol-name was)) "none")
+              :to (string-downcase (symbol-name now))
+              :tokens size
+              :whole-limit (corpus-whole-limit corpus))))
+
+(defun corpus-effective-strategy (corpus)
+  "The strategy RETRIEVE follows for CORPUS now: :WHOLE or :HYBRID. For an :AUTO corpus it is
+decided by the size its last sync recorded, or by CORPUS-SIZE when no sync has recorded one."
+  (if (eq (corpus-strategy corpus) :auto)
+      (let ((row (%recorded-row corpus)))
+        (%strategy-for corpus (if row (param:row-value row :tokens) (corpus-size corpus))))
+      (corpus-strategy corpus)))
+
+(defun %backfill-held-p (corpus)
+  "True when CORPUS is :HYBRID only because it grew past its limit, the app asked for the
+backfill to be started explicitly, and it has not been."
+  (and (eq (corpus-backfill corpus) :explicit)
+       (eq (corpus-strategy corpus) :auto)
+       (not (%expected-large-p corpus))
+       (let ((row (%recorded-row corpus)))
+         (not (and row (param:row-value row :backfill_started_at))))))
+
+(defun start-backfill (corpus)
+  "Allow CONTEXTUALIZE-PENDING to write the contexts of CORPUS, an :AUTO corpus made with
+:BACKFILL :EXPLICIT, once it has grown past its limit. Recorded in the database, so it holds for
+every process. Returns CORPUS."
+  (let ((store (corpus-store corpus))
+        (now (get-universal-time)))
+    (with-corpus-lock (corpus)
+      (let ((size (corpus-size corpus)))
+        (%run store
+              (list :insert-into (corpora-table store)
+                    :values (list (list :corpus (corpus-name corpus)
+                                        :strategy (string-downcase
+                                                   (symbol-name (%strategy-for corpus size)))
+                                        :tokens size :changed_at now :backfill_started_at now))
+                    :on-conflict '(:corpus)
+                    :do-update '(:backfill_started_at (:excluded :backfill_started_at))))))
+    corpus))
+
 ;;; --- passages and results ------------------------------------------------------------
 
 (defstruct (provenance (:constructor %make-provenance))
@@ -632,9 +895,12 @@ made from is the original stored now, :OLDER-ORIGINAL when the original has chan
 (defstruct (passage (:constructor %make-passage))
   "A retrieved chunk. DISTANCE is the cosine distance for a similarity result, NIL otherwise.
 SCORE is a keyword or hybrid result's score, higher meaning a better match, NIL otherwise: the
-BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE-HYBRID. The two
-are on different scales, so compare scores only within one result."
-  text provenance distance score)
+BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE-HYBRID, or the
+reranker's score when a reranker ordered the result. They are on different scales, so compare
+scores only within one result. CONTEXT is the context the
+corpus's contextualizer wrote for the chunk, or NIL (#316). TEXT is always the chunk's own text,
+without the context."
+  text provenance distance score context)
 
 (defstruct (complete (:constructor make-complete))
   "Every chunk of the corpus was a candidate, and nothing was cut off.")
@@ -653,7 +919,7 @@ missing both says :NOT-EMBEDDED, and PENDING counts every chunk missing either."
 
 (defparameter +passage-columns+
   '(:text :section_id :document_id :document_version :locator :sub_locator :locale
-    :locale_role :derived_from :source_fingerprint :chunker :boundary)
+    :locale_role :derived_from :source_fingerprint :chunker :boundary :context)
   "What a retrieval selects. Never the embedding.")
 
 (defun %qualified (alias columns)
@@ -709,6 +975,7 @@ list of scores parallel to ROWS."
     (mapcar (lambda (row score)
               (%make-passage
                :text (param:row-value row :text)
+               :context (param:row-value row :context)
                :score (and score (coerce score 'double-float))
                :distance (and with-distance
                               (let ((d (param:row-value row :distance :if-missing nil)))
@@ -785,6 +1052,26 @@ when there were more than LIMIT."))
          (make-truncated :reason :limit)
          (make-complete)))))
 
+;;; --- the whole corpus (#316) ----------------------------------------------------------
+
+(defgeneric retrieve-whole (corpus)
+  (:documentation "Every chunk of CORPUS, in document order: by document, then locale, then the
+order the app handed the sections in, then position within the section. The result is always
+COMPLETE. This is what RETRIEVE returns for a corpus whose strategy is :WHOLE, for the app to put
+in the prompt before a cache marker. Needs no provider, and neither selects nor compares the
+embedding column."))
+
+(defmethod retrieve-whole ((corpus corpus))
+  (%make-retrieval-result
+   (%rows->passages corpus
+                    (%fetch (corpus-store corpus)
+                            (list :select +passage-columns+
+                                  :from (list (store-table (corpus-store corpus)))
+                                  :where (corpus-where corpus)
+                                  :order-by '(:document_id :locale :section_index :section_id
+                                              :chunk_index))))
+   (make-complete)))
+
 ;;; --- keyword retrieval: BM25 (#316) --------------------------------------------------
 
 (defparameter *bm25-k1* 1.2d0 "BM25's term-frequency saturation, #316's starting value.")
@@ -815,7 +1102,7 @@ Serialised per corpus with the syncs (WITH-CORPUS-LOCK)."
         (count 0))
     (with-corpus-lock (corpus)
       (loop
-        (let ((rows (%fetch store (list :select '(:id :text :locale)
+        (let ((rows (%fetch store (list :select '(:id :text :context :locale)
                                         :from (list (store-table store))
                                         :where (corpus-where corpus (%unindexed-clause))
                                         :order-by '(:id)
@@ -828,7 +1115,10 @@ Serialised per corpus with the syncs (WITH-CORPUS-LOCK)."
                   (%delete-terms corpus (list := :id id))
                   (%run store (list :update (store-table store)
                                     :set (list :term_count
-                                               (%write-terms corpus id (param:row-value row :text)
+                                               (%write-terms corpus id
+                                                             (%embed-input
+                                                              (param:row-value row :context)
+                                                              (param:row-value row :text))
                                                              (param:row-value row :locale))
                                                :terms_tokenizer +tokenizer-id+)
                                     :where (corpus-where corpus (list := :id id))))

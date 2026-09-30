@@ -174,6 +174,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
     :hyperion/db-connection/tests
+    ;; The desktop Coalton REPL example's answers to (exit), a long evaluation and a cancel
+    ;; (#355), registered in the commit that adds the suite.
+    :hyperion/examples/coalton-repl/tests
     :hyperion/assets/tests :hermes/blob/tests
     ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
     ;; `hyperion/update/tests' is justified as "invisible to this checker until someone

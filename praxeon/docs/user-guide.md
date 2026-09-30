@@ -841,10 +841,98 @@ strategy (`:similar`, `:keyword`, `:hybrid`) how often that section is in the to
 `passage->ctx-item` turns a passage into a context item, and takes a function that writes the
 text the model reads, so the app decides how a citation looks.
 
-`retrieve` takes the same arguments as `retrieve-similar` and returns the same result, with a
-default `:limit` of 20. It is the call to make when the app does not care how a corpus is
-searched: today it is `retrieve-similar`, and a later version will follow the corpus's retrieval
-strategy (#316) without a change at the call.
+**Whole or searched, by the corpus's size (#316).** `retrieve` is the call to make when the app
+does not care how a corpus is searched. It follows the corpus's `:strategy`:
+
+- `:whole` returns every chunk in document order (`retrieve-whole`), for the app to put in the
+  prompt before a cache marker. The query and `:limit` are not used.
+- `:hybrid` returns `retrieve-hybrid` with `:limit` (default 20) and `:locale`, or
+  `retrieve-keyword` when the embedder is NIL.
+- `:auto`, the default, is `:whole` while the corpus is smaller than `:whole-limit` estimated
+  tokens (200,000 by default, `*whole-limit*`) and `:hybrid` from then on.
+
+Anthropic's article on contextual retrieval advises putting a knowledge base smaller than about
+200,000 tokens in the prompt rather than searching it. The right limit for an app depends on its
+chat model's context window and on what each query may cost, since a cached prompt is still paid
+for at the cache-read price on every call, so `make-corpus` takes `:whole-limit`.
+
+Each sync measures the corpus (`corpus-size`: its characters divided by four) and reports the
+size and the strategy in `sync-report-size` and `sync-report-strategy`.
+`corpus-effective-strategy` says which one `retrieve` follows now. When an `:auto` corpus
+changes strategy, the sync logs it once through `aion/log`, with the corpus name and its size.
+
+**A context for each chunk (#316).** A chunk often cannot be understood on its own: "it is sent
+on the first business day" does not say what is sent. When a `:hybrid` corpus has a
+contextualizer, a chat model writes one or two sentences placing each chunk in its document, and
+those sentences are put before the chunk's text when it is embedded and when its BM25 terms are
+written. The passage a reader or the model sees is still the chunk's own text; the context is in
+`passage-context`.
+
+```lisp
+(defparameter *docs*
+  (praxeon/retrieval:make-corpus
+   *store* "docs"
+   :contextualizer (praxeon/retrieval:make-contextualizer
+                    (praxeon/llm:make-provider-from-env :role :contextualize))))
+
+(praxeon/retrieval:sync-document *docs* "doc-7" doc-sections)
+(praxeon/retrieval:contextualize-pending *docs* :ledger ledger) ; does nothing while :whole
+(praxeon/retrieval:embed-pending *docs* *embedder*)             ; embeds context and text
+(praxeon/retrieval:retrieve *docs* *embedder* "error TS-999 on renewal" :locale "en")
+```
+
+- Each context is one chat call. The whole document comes first in the prompt and carries the
+  cache marker, so on a provider with a prompt cache a document is read in full once and from
+  the cache for its other chunks. `contextualize-pending` works through one document at a time
+  for that reason.
+- A context depends on the whole document. A sync that changes, adds, removes or reorders any
+  section of a document makes every context of that document stale, so documents that change
+  often cost more. Changing the contextualizer's provider, model, `:instruction` or `:max-tokens`
+  makes every context stale. A new context makes the chunk's embedding stale, and
+  `embed-pending` embeds it again; `ingest` writes contexts before embedding.
+- `:ledger`, a `praxeon/ceiling` ledger, bounds the calls: each is charged to it, with its
+  cache-read and cache-write counts, and a call it cannot afford signals
+  `praxeon/ceiling:budget-exhausted` before it is made. The contexts written before that are
+  kept, and the next run carries on.
+- `contextualize-pending` returns the number written and, as a second value, `:done`,
+  `:no-contextualizer`, `:whole` or `:backfill-not-started`.
+
+**When an `:auto` corpus grows past its limit**, the next `contextualize-pending` has every chunk
+to do, and every chunk is embedded again. That backfill is the one large cost of this design. An
+app can avoid it by saying at the start that the corpus will be large, with `:strategy :hybrid`
+or `:expected-tokens`, so chunks get their context from the first sync. An app can also make the
+corpus with `:backfill :explicit`, so that the backfill waits until the app calls
+`(start-backfill corpus)`; that is recorded in the database, so it holds for every process.
+
+**Reranking (#316).** A reranker reads the query and each candidate passage together and scores
+the passage, which orders candidates better than either search does, at the cost of one more
+call per query. `retrieve-hybrid` and `retrieve` take `:reranker`: the first 150 merged
+candidates (`:rerank-candidates`, `*rerank-candidates*`) are reordered by it before `:limit` is
+taken, and each passage's `passage-score` is then the reranker's. What the reranker reads for a
+passage is its context and text, as embedded. A `:whole` corpus is not reranked.
+
+```lisp
+(defparameter *reranker*            ; NIL when none is configured
+  (handler-case (praxeon/llm:make-reranker-from-env)
+    (praxeon/conditions:no-reranker () nil)))
+
+(praxeon/retrieval:retrieve *docs* *embedder* "error TS-999 on renewal" :reranker *reranker*)
+(praxeon/retrieval:register-corpus-search agent *docs* *embedder* render :reranker *reranker*)
+```
+
+The first backend is Voyage's rerank endpoint: `PRAXEON_RERANK_IMPL=voyage`, a key in
+`PRAXEON_RERANK_API_KEY` or `PRAXEON_VOYAGE_API_KEY`, and the model in `PRAXEON_RERANK_MODEL` or
+`PRAXEON_VOYAGE_RERANK_MODEL` (default `rerank-2.5`). A role's own
+`PRAXEON_<ROLE>_RERANK_<SETTING>` comes first, as for embeddings. There is no default reranker.
+Requests never ask Voyage to shorten a document, and are split to stay within 1,000 documents
+and the model's tokens per request.
+
+Whether contexts are worth their cost on an app's documents is a measurement, not a default.
+Build one corpus with a contextualizer and one without, sync the same sections into both, and
+compare `evaluate-retrieval` on each. praxeon writes no contexts unless the app gives a corpus a
+contextualizer. The same holds for a reranker: `evaluate-retrieval :reranker` adds a
+`:reranked` configuration beside `:similar`, `:keyword` and `:hybrid`, and no search is reranked
+unless the app passes one.
 
 **Let an agent search.** `register-corpus-search` gives an agent a means that searches one
 corpus:
@@ -866,7 +954,9 @@ corpus:
   words is offered, and the schema has no `match`.
 - The model reads the passages in the order the search returned them, each as the function
   writes it, and one sentence when the result is truncated: more matches than `:limit`, or parts
-  of the corpus a search by meaning could not consider yet. It never sees a passage's distance.
+  of the corpus a search by meaning could not consider yet. It never sees a passage's distance. For a corpus
+  whose strategy is `:whole`, a search by meaning returns the whole corpus; an app with such a
+  corpus usually puts it in the prompt instead of offering a search.
 - `:on-result` is called with the query and the `retrieval-result` before the model sees
   anything, so the app can keep the provenance it cites from. `:limit` and `:capability` are
   optional; a failed search reaches the caller as `means-failure`, as any means does.

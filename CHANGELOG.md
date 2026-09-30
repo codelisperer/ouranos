@@ -19,6 +19,25 @@ its tag.
   unless a caller passed it. An app whose `*app-name*` is not the `product` its manifests carry
   now gets the `manifest-mismatch` block. Set `*app-name*` to the manifest's product, which is
   also the name the Windows installer registers under `HKCU\Software\<name>`. (#301)
+- **praxeon/retrieval: `ensure-schema` adds six more columns to the chunk table and creates a
+  corpora table** (#316): `section_index`, `document_fingerprint`, `context`, `context_deriver`,
+  `context_document_fingerprint` and `input_fingerprint`, and `<table>_corpora`, one row per
+  corpus with its size and strategy. They are created the same way, with `IF NOT EXISTS`.
+  Embeddings made before them stay current. Until a document is synced again, `retrieve-whole`
+  orders its sections by section id. A test or tool that drops the chunk table drops
+  `<table>_corpora` too.
+- **praxeon/retrieval: `retrieve` on a corpus made with no `:strategy` returns the whole corpus
+  while it is below 200,000 estimated tokens.** `make-corpus` defaults to `:auto` (see Added).
+  An app that wants search at every size makes the corpus with `:strategy :hybrid`. (#316)
+- **cons/coalton-repl: `eval-input` can return a result of kind `:exit-requested`, and runs
+  each evaluation on a thread of its own.** An input that asks to end the process, `(exit)`
+  or `(quit)` or a `lisp` escape naming `sb-ext:exit`, `sb-ext:quit` or `uiop:quit`, is not
+  evaluated; `process-ending-p` is the test. An app that dispatches on `result-kind` with
+  `ecase` adds a clause for `:exit-requested` and decides what it means: the desktop example
+  closes, and a REPL served to other people refuses. Because the evaluation runs on its own
+  thread, a dynamic binding the caller made around `eval-input` is not seen by the code being
+  evaluated; set the global value instead. A second input that arrives while one is running
+  gets an `:error` result at once. (#355)
 
 ### Added
 
@@ -30,6 +49,48 @@ its tag.
   unchanged. One middleware then serves a site that runs on plain http in development and
   behind a TLS proxy in production, which SoloFlow's website does today by building the
   middleware twice.
+- **praxeon: a reranker, and reranked hybrid search.** (#316)
+  - `praxeon/llm:reranker` is a protocol of its own, like `embedding-provider`: `rerank` returns
+    each document's index and score, best first, and refuses a reply that does not score every
+    document once. `voyage-reranker` is the first backend (`rerank-2.5` by default), and
+    `make-reranker-from-env` chooses one from `PRAXEON_[<ROLE>_]RERANK_IMPL`; with none set it
+    signals `praxeon/conditions:no-reranker`.
+  - `retrieve-hybrid`, `retrieve` and `register-corpus-search` take `:reranker`, which reorders
+    the first `*rerank-candidates*` (150) merged candidates before the limit is taken.
+    `evaluate-retrieval :reranker` reports a `:reranked` configuration as well.
+- **praxeon/retrieval: a context for each chunk, and a strategy chosen by the corpus's size.**
+  (#316)
+  - `make-corpus` takes `:strategy` (`:auto`, the default, `:whole` or `:hybrid`),
+    `:whole-limit` (`*whole-limit*`, 200,000 estimated tokens), `:expected-tokens`,
+    `:contextualizer` and `:backfill` (`:automatic` or `:explicit`).
+  - `retrieve-whole` returns every chunk in the order the app handed the sections in.
+    `corpus-size` estimates a corpus's tokens, and a sync reports it in `sync-report-size` with
+    `sync-report-strategy`. `corpus-effective-strategy` says which strategy `retrieve` follows.
+    When an `:auto` corpus changes strategy, the sync logs it once through `aion/log`.
+  - `make-contextualizer` takes a chat provider. `contextualize-pending` asks it for one or two
+    sentences placing each chunk in its document, with the document before the prompt-cache
+    marker, and writes them, so the chunk's embedding and BM25 terms cover the context and the
+    text. `passage-context` is the context; `passage-text` is still the chunk's own text. A
+    context is written again when anything in its document changes, or when the provider,
+    model, instruction or answer limit does. It does nothing while the corpus is `:whole`.
+  - `contextualize-pending :ledger` charges each call to a `praxeon/ceiling` ledger and signals
+    `budget-exhausted` before a call the ledger cannot afford, keeping the contexts written.
+    A context that stops at the contextualizer's answer limit signals `deliberation-failure`
+    rather than being stored cut off. `start-backfill` releases the backfill of a corpus made
+    with `:backfill :explicit`.
+  - `ingest` now also calls `contextualize-pending`, before `embed-pending`, and takes `:ledger`.
+  - `retrieve` follows the corpus's strategy: every chunk in document order for a `:whole`
+    corpus, and `retrieve-hybrid` with a default `:limit` of 20 for a `:hybrid` one
+    (`retrieve-keyword` when the embedder is NIL). The v0.1.5 entry for `retrieve`, which
+    describes it as `retrieve-similar` for every corpus, no longer applies.
+- **cons/coalton-repl: `eval-input` takes `:time-limit`, in seconds, and `cancel-evaluation`
+  stops a running evaluation from another thread.** Either way the result is an `:error`
+  saying why, and the session can evaluate again. The stop is signalled as a
+  `serious-condition`, so `ignore-errors` in the user's own code does not swallow it. (#355)
+- **hyperion/desktop: `request-close` closes the window `run-app` is showing, from any
+  thread**, and `run-app` then stops the server and returns. `run-app` takes `:workers`,
+  passed to `hyperion/server:start`: an app whose page makes a second request while a slow one
+  runs, such as a cancel button, needs at least 2 on Woo. (#355)
 
 ### Fixed
 
@@ -53,6 +114,22 @@ its tag.
   routes used the stable channel and no product, so an app that checked on beta and mounted the
   router with `:check nil` had Apply re-check against stable. The apply path's second manifest
   fetch now also refuses a manifest for another channel. (#301)
+- **hyperion/auth-db: `make-db-auth … :ensure t` creates the store's own table names.** (#378)
+  It created `hyperion_users` and `hyperion_role_events` whatever `:table` and `:events-table`
+  said, while every query used the store's names, so a store made with other names failed at
+  its first statement on a table that did not exist. `users-ddl` and `role-events-ddl` now take
+  `:table`, as the two index helpers already did, and every one of the four refuses a name
+  that is not letters, digits and underscores.
+- **hyperion/desktop: the window closes when the app's process exits, and an exit from another
+  thread takes a second instead of a minute on Windows.** `run-app` blocked in
+  `uiop:wait-process` on the launcher, where the main thread cannot be interrupted. When code
+  on another thread called `sb-ext:exit`, SBCL waited `sb-ext:*exit-timeout*` (60 seconds) for
+  the main thread, with the server no longer answering, and the process then ended with the
+  window still open. `run-app` now polls, and stops the launcher whenever it is left other than
+  by the window closing. (#355)
+- **The desktop Coalton REPL example: `(exit)` and `(quit)` close it, an evaluation stops after
+  30 seconds or when its stop button is pressed, and the page says so when the backend stops
+  answering.** Served with `serve` or `dev`, `(exit)` is refused instead. (#355)
 
 ## v0.1.5 — 2026-09-30
 

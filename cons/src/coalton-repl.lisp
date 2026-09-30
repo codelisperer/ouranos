@@ -22,7 +22,7 @@
     EVAL-INPUT evaluates one Coalton form string and returns a RESULT (value + inferred
     type, a definition, or an error). The visual front-end (hyperion) renders RESULTs.")
   (:export #:make-session #:session #:session-package-name #:reset-session
-           #:eval-input #:input-complete-p
+           #:eval-input #:input-complete-p #:cancel-evaluation #:process-ending-p
            #:result #:result-p #:result-kind #:result-input
            #:result-value #:result-type #:result-message))
 (cl:in-package #:cons/coalton-repl)
@@ -32,8 +32,11 @@
 (defstruct (session (:constructor %make-session) (:copier nil))
   "A REPL session. PACKAGE is its own package (uses COALTON + COALTON-PRELUDE) in which
 inputs are read and toplevel definitions land -- so definitions persist across inputs and
-independent sessions don't collide."
-  package)
+independent sessions don't collide. LOCK lets one evaluation run at a time; WORKER is the
+thread running it, which CANCEL-EVALUATION interrupts (#355)."
+  package
+  (lock (sb-thread:make-mutex :name "coalton-repl session"))
+  (worker nil))
 
 (defun session-package-name (session)
   "The name of SESSION's package (handy for display/reset)."
@@ -60,11 +63,16 @@ independent sessions don't collide."
 ;;; --- result ----------------------------------------------------------------
 
 (defstruct (result (:constructor %make-result) (:copier nil))
-  "One evaluation outcome. KIND is :VALUE | :DEFINITION | :ERROR.
+  "One evaluation outcome. KIND is :VALUE | :DEFINITION | :ERROR | :EXIT-REQUESTED.
 INPUT   -- the source string as entered;
 VALUE   -- (:value) the printed result value;
 TYPE    -- (:value) the inferred type scheme string, or NIL if unavailable;
-MESSAGE -- (:definition) the defined name; (:error) the error text."
+MESSAGE -- (:definition) the defined name; (:error) the error text; (:exit-requested) what
+           was asked for.
+
+:EXIT-REQUESTED means the input asked to end the process (see PROCESS-ENDING-P) and nothing
+in it was evaluated. What to do about it is the front end's decision: a desktop app closes,
+and a server that other people use refuses."
   kind input value type message)
 
 ;;; --- classification --------------------------------------------------------
@@ -138,6 +146,122 @@ fire. Its reader-error counts as complete, and EVAL-INPUT then reads it for real
           (end-of-file () nil)
           (error () t)))))
 
+;;; --- forms that end the process (#355) ----------------------------------------
+
+(defparameter *process-ending-packages* '("SB-EXT" "UIOP/IMAGE" "COMMON-LISP-USER")
+  "Packages whose EXIT and QUIT end the process: SBCL's own, UIOP's (the home of UIOP:QUIT),
+and CL-USER, where an image may define a QUIT of its own.")
+
+(defun %process-ending-symbol-p (symbol)
+  "True when SYMBOL is an EXIT or QUIT from *PROCESS-ENDING-PACKAGES*."
+  (and (symbolp symbol)
+       (member (symbol-name symbol) '("EXIT" "QUIT") :test #'string=)
+       (symbol-package symbol)
+       (member (package-name (symbol-package symbol)) *process-ending-packages*
+               :test #'string=)
+       t))
+
+(defun %mentions-process-ending-symbol-p (form)
+  "True when FORM contains a process-ending symbol anywhere, quoted or not, such as inside a
+`lisp' escape. Walks conses only, and visits each once, so a circular form read with #1= ends."
+  (let ((seen (make-hash-table :test #'eq)))
+    (labels ((walk (x)
+               (cond ((%process-ending-symbol-p x) t)
+                     ((and (consp x) (not (gethash x seen)))
+                      (setf (gethash x seen) t)
+                      (or (walk (car x)) (walk (cdr x))))
+                     (t nil))))
+      (walk form))))
+
+(defun %session-exit-form-p (form package)
+  "True when FORM is `(exit)' or `(quit)', with or without arguments, read in PACKAGE: what a
+user types to leave a REPL. Only as a whole toplevel form, so a Coalton definition whose
+body merely mentions a name EXIT is left alone."
+  (and (consp form)
+       (symbolp (car form))
+       (eq (symbol-package (car form)) package)
+       (member (symbol-name (car form)) '("EXIT" "QUIT") :test #'string=)
+       t))
+
+(defun process-ending-p (forms &optional (package *package*))
+  "True when any of FORMS would end the process: `(exit)' or `(quit)' typed as a toplevel
+form in PACKAGE, or SB-EXT:EXIT, SB-EXT:QUIT or UIOP:QUIT anywhere, such as in a `lisp'
+escape. EVAL-INPUT checks this before evaluating anything and returns :EXIT-REQUESTED.
+
+This recognises the ordinary ways of asking to leave. It is not a sandbox: a form that builds
+the symbol at run time, with INTERN or FIND-SYMBOL, is not caught. The REPL runs the user's
+own code in the user's own process, and is not a security boundary."
+  (some (lambda (form)
+          (or (%session-exit-form-p form package)
+              (%mentions-process-ending-symbol-p form)))
+        forms))
+
+;;; --- stopping an evaluation (#355) --------------------------------------------
+
+(define-condition evaluation-stopped (serious-condition)
+  ((reason :initarg :reason :reader evaluation-stopped-reason)
+   (seconds :initarg :seconds :initform nil :reader evaluation-stopped-seconds))
+  (:report (lambda (c s)
+             (ecase (evaluation-stopped-reason c)
+               (:time-limit
+                (format s "The evaluation was stopped after ~A second~:P, the time limit. The REPL is still running." (evaluation-stopped-seconds c)))
+               (:cancelled
+                (format s "The evaluation was cancelled. The REPL is still running.")))))
+  (:documentation "Signalled inside an evaluation's thread to stop it. A SERIOUS-CONDITION
+rather than an ERROR, so that IGNORE-ERRORS or a HANDLER-CASE for ERROR in the user's own
+code does not swallow it and carry on."))
+
+(defparameter *stop-grace-seconds* 5
+  "How long EVAL-INPUT waits for an evaluation to stop once it has been interrupted, before it
+gives up on the thread and returns anyway.")
+
+(defun %interrupt-worker (thread reason seconds)
+  "Make THREAD signal EVALUATION-STOPPED with REASON. Returns T if it was interrupted."
+  (when (and thread (sb-thread:thread-alive-p thread))
+    (ignore-errors
+     (sb-thread:interrupt-thread
+      thread
+      (lambda () (error 'evaluation-stopped :reason reason :seconds seconds)))
+     t)))
+
+(defun cancel-evaluation (session)
+  "Stop the evaluation SESSION is running, if any: it returns an :ERROR result saying it was
+cancelled, and the session can evaluate again. Returns T if an evaluation was running.
+Safe to call from any thread; a front end calls it from the request for its cancel button."
+  (%interrupt-worker (session-worker session) :cancelled nil))
+
+(defun %busy-result (input)
+  (%make-result :kind :error :input input
+                :message "Another evaluation is still running in this session. Wait for it, or cancel it."))
+
+(defun %run-in-worker (session input thunk time-limit)
+  "Call THUNK, which returns a RESULT, on a thread of its own, and return its RESULT. After
+TIME-LIMIT seconds (NIL: no limit) the thread is interrupted and the result says so. A thread
+of its own, rather than the caller's, so the caller -- a server's request thread -- is never
+the one interrupted, and CANCEL-EVALUATION has a thread to aim at."
+  (let* ((box (list nil))
+         ;; THREAD-LIFETIME: independent -- one evaluation, joined or abandoned before
+         ;; EVAL-INPUT returns. It binds *PACKAGE* itself (see EVAL-INPUT) and does not see the
+         ;; caller's other bindings; the CHANGELOG entry for #355 tells apps so.
+         (worker (sb-thread:make-thread
+                  (lambda () (setf (car box) (funcall thunk)))
+                  :name "coalton-repl evaluation")))
+    (setf (session-worker session) worker)
+    (unwind-protect
+         (multiple-value-bind (value outcome)
+             (sb-thread:join-thread worker :default nil :timeout time-limit)
+           (declare (ignore value))
+           (when (eq outcome :timeout)
+             (%interrupt-worker worker :time-limit time-limit)
+             (sb-thread:join-thread worker :default nil :timeout *stop-grace-seconds*))
+           (or (car box)
+               (%make-result
+                :kind :error :input input
+                :message (if (sb-thread:thread-alive-p worker)
+                             (format nil "The evaluation did not stop within ~A seconds of being interrupted, and was left running. Restart the REPL if it keeps the machine busy." *stop-grace-seconds*)
+                             "The evaluation ended without a result."))))
+      (setf (session-worker session) nil))))
+
 ;;; --- evaluation ------------------------------------------------------------
 
 (defun %eval-forms (forms)
@@ -166,37 +290,70 @@ than \"all definitions first\", so evaluation order still reads top to bottom."
                           any-expression t))))))
     (values last-form last-value any-expression defined)))
 
-(defun eval-input (session input)
+(defun eval-input (session input &key time-limit)
   "Evaluate INPUT (Coalton source: one form, or several) in SESSION; return a RESULT.
 The LAST expression yields the value and inferred type; definitions are registered; any
 error (read, type, or codegen) is captured as an :ERROR result rather than signalled.
 
 Several forms per input is what makes a `declare` writable at all -- see %EVAL-FORMS. An
 input that is only definitions reports the names it defined; otherwise the last expression's
-value is the result, since that is the one a reader is asking about."
+value is the result, since that is the one a reader is asking about.
+
+An input that asks to end the process (PROCESS-ENDING-P) is not evaluated at all, not even
+its other forms, and the result's kind is :EXIT-REQUESTED (#355).
+
+The evaluation runs on a thread of its own. TIME-LIMIT, in seconds (NIL, the default: none),
+stops it with an :ERROR result, and so does CANCEL-EVALUATION from another thread; either way
+the session can evaluate again. One evaluation runs per session at a time: an input that
+arrives while another is running gets an :ERROR result at once."
   (let ((*package* (session-package session)))
     (if (%blankp input)
         (%make-result :kind :value :input input :value "")
-        (handler-case
-            (multiple-value-bind (last-form value any-expression defined)
-                (%eval-forms (%read-forms input))
-              (cond
-                (any-expression
-                 ;; (Best effort) infer the type scheme of the expression whose value we are
-                 ;; showing. type-of can fail (ambiguous types) -> NIL type. It does NOT
-                 ;; re-run the expression: it compiles to a quoted scheme.
-                 (let ((type (ignore-errors
-                               (princ-to-string
-                                (eval `(coalton:coalton (coalton:type-of ,last-form)))))))
-                   (%make-result :kind :value :input input
-                                 :value (prin1-to-string value)
-                                 :type type)))
-                (defined
-                 (%make-result :kind :definition :input input
-                               :message (format nil "~{~A~^, ~}" defined)))
-                ;; Readable, but nothing in it: whitespace-only input never reaches here
-                ;; (%BLANKP catches it), so this is a comment-only input.
-                (t (%make-result :kind :value :input input :value ""))))
-          (error (e)
-            (%make-result :kind :error :input input
-                          :message (princ-to-string e)))))))
+        (let ((forms (handler-case (%read-forms input)
+                       (error (e)
+                         (return-from eval-input
+                           (%make-result :kind :error :input input
+                                         :message (princ-to-string e)))))))
+          (cond
+            ((process-ending-p forms)
+             (%make-result :kind :exit-requested :input input
+                           :message "The input asks to end the REPL's process, and was not evaluated."))
+            (t
+             ;; WITH-MUTEX with :WAIT-P NIL skips its body, and returns NIL, when another
+             ;; evaluation holds the lock; the busy answer is given then.
+             (let ((package (session-package session)))
+               (or (sb-thread:with-mutex ((session-lock session) :wait-p nil)
+                     (%run-in-worker session input
+                                     (lambda ()
+                                       (let ((*package* package))
+                                         (%evaluate-forms input forms)))
+                                     time-limit))
+                   (%busy-result input)))))))))
+
+(defun %evaluate-forms (input forms)
+  "Evaluate FORMS, already read from INPUT, in *PACKAGE*, and return a RESULT: the body of
+EVAL-INPUT that runs on the evaluation's own thread."
+  (handler-case
+      (multiple-value-bind (last-form value any-expression defined)
+          (%eval-forms forms)
+        (cond
+          (any-expression
+           ;; (Best effort) infer the type scheme of the expression whose value we are
+           ;; showing. type-of can fail (ambiguous types) -> NIL type. It does NOT
+           ;; re-run the expression: it compiles to a quoted scheme.
+           (let ((type (ignore-errors
+                         (princ-to-string
+                          (eval `(coalton:coalton (coalton:type-of ,last-form)))))))
+             (%make-result :kind :value :input input
+                           :value (prin1-to-string value)
+                           :type type)))
+          (defined
+           (%make-result :kind :definition :input input
+                         :message (format nil "~{~A~^, ~}" defined)))
+          ;; Readable, but nothing in it: whitespace-only input never reaches here
+          ;; (%BLANKP catches it), so this is a comment-only input.
+          (t (%make-result :kind :value :input input :value ""))))
+    (evaluation-stopped (e)
+      (%make-result :kind :error :input input :message (princ-to-string e)))
+    (error (e)
+      (%make-result :kind :error :input input :message (princ-to-string e)))))

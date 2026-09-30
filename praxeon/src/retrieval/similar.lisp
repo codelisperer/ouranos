@@ -23,10 +23,14 @@
           (llm:embedding-dimensions embedder)))
 
 (defun %stale-clause (deriver)
-  "Chunks with no embedding from DERIVER: never embedded, or embedded by another model."
+  "Chunks with no current embedding from DERIVER: never embedded, embedded by another model, or
+embedded from an input that has since changed because a context was written (#316). A chunk
+synced before #316's step 3 has no INPUT_FINGERPRINT, so the last comparison is NULL for it and
+its embedding stays current."
   (list :or (list :is-null :embedding_fingerprint)
         (list :is-null :embedding_deriver)
-        (list :<> :embedding_deriver deriver)))
+        (list :<> :embedding_deriver deriver)
+        (list :<> :embedding_fingerprint :input_fingerprint)))
 
 (defun %check-width (corpus embedder)
   (llm:check-embedding-dimensions embedder (store-dimensions (corpus-store corpus))
@@ -46,9 +50,14 @@ vector of the wrong width before it reaches the database."
   "Embed every chunk of CORPUS that has no embedding from EMBEDDER's current model, as
 documents, in batches of BATCH-SIZE texts. Returns the number of chunks embedded.
 
+What is embedded is the chunk's context, a blank line and its text, or the text alone when it has
+no context (#316). The embedding's fingerprint covers exactly that input, so a new context makes
+the chunk pending again.
+
 This is also the re-embed after a model change: every chunk whose recorded deriver differs is
-pending. A vector is written only if its chunk still holds the text that was embedded, so a
-chunk replaced by a sync in the meantime keeps its NULL embedding and is embedded next time.
+pending. A vector is written only if its chunk still holds the text and context that were
+embedded, so a chunk replaced by a sync, or given a new context, in the meantime is embedded
+next time.
 Serialised per corpus with the syncs (WITH-CORPUS-LOCK). The provider is called outside the
 database lock, so searches on the same store can run during the call."
   (unless (typep batch-size '(integer 1))
@@ -62,7 +71,7 @@ database lock, so searches on the same store can run during the call."
     (with-corpus-lock (corpus)
       (loop
         (let ((rows (rc::%fetch store
-                                (list :select '(:id :text :section_fingerprint)
+                                (list :select '(:id :text :context :section_fingerprint)
                                       :from (list table)
                                       :where (apply #'corpus-where corpus
                                                     (%stale-clause deriver)
@@ -70,36 +79,47 @@ database lock, so searches on the same store can run during the call."
                                       :order-by '(:id)
                                       :limit batch-size))))
           (when (null rows) (return count))
-          (let ((vectors (llm:embed-documents
-                          embedder (mapcar (lambda (r) (param:row-value r :text)) rows))))
+          (let* ((inputs (mapcar (lambda (r) (rc::%embed-input (param:row-value r :context)
+                                                                (param:row-value r :text)))
+                                 rows))
+                 (vectors (llm:embed-documents embedder inputs)))
             (rc::with-db (store)
               (conn:with-transaction ((store-connection store))
                 (loop for row in rows
                       for vector in vectors
-                      for text = (param:row-value row :text)
+                      for input in inputs
+                      for context = (param:row-value row :context)
+                      for fp = (section-fingerprint input)
                       for n = (rc::%run store
                                         (list :update table
                                               :set (list :embedding (%vector-text store vector)
-                                                         ;; The embedding's input is the chunk
-                                                         ;; text, so its fingerprint covers that
-                                                         ;; text alone (ADR-0002).
-                                                         :embedding_fingerprint
-                                                         (section-fingerprint text)
+                                                         ;; The fingerprint covers what was
+                                                         ;; embedded, context and text
+                                                         ;; (ADR-0002).
+                                                         :embedding_fingerprint fp
+                                                         :input_fingerprint fp
                                                          :embedding_deriver deriver)
                                               :where (corpus-where
                                                       corpus
                                                       (list := :id (param:row-value row :id))
                                                       (list := :section_fingerprint
-                                                            (param:row-value row :section_fingerprint)))))
+                                                            (param:row-value row :section_fingerprint))
+                                                      (if context
+                                                          (list := :context context)
+                                                          (list :is-null :context)))))
                       do (when (and (integerp n) (plusp n)) (incf count)))))
             (setf last-id (param:row-value (car (last rows)) :id))))))))
 
-(defun ingest (corpus sections embedder &key (batch-size 64))
-  "SYNC-CORPUS, then INDEX-PENDING and EMBED-PENDING. Returns the SYNC-REPORT and the number
-embedded. INDEX-PENDING finds nothing to do unless chunks were synced before #316 or the
-tokenizer changed, since a sync writes the terms of what it inserts."
+(defun ingest (corpus sections embedder &key (batch-size 64) ledger)
+  "SYNC-CORPUS, then INDEX-PENDING, CONTEXTUALIZE-PENDING and EMBED-PENDING. Returns the
+SYNC-REPORT and the number embedded. INDEX-PENDING finds nothing to do unless chunks were synced
+before #316 or the tokenizer changed, since a sync writes the terms of what it inserts.
+CONTEXTUALIZE-PENDING does nothing unless the corpus has a contextualizer and its strategy is
+:HYBRID; LEDGER is passed to it. The contexts are written before the embeddings, so no chunk is
+embedded twice."
   (let ((report (sync-corpus corpus sections)))
     (index-pending corpus)
+    (contextualize-pending corpus :ledger ledger)
     (values report (embed-pending corpus embedder :batch-size batch-size))))
 
 (defvar *between-similar-reads* nil
@@ -162,21 +182,6 @@ first, with their ID and DISTANCE."
          (make-truncated :reason :not-embedded :pending pending)
          (make-complete)))))
 
-;;; --- the entry point a caller searches through ----------------------------------------
-
-(defgeneric retrieve (corpus embedder query &key limit)
-  (:documentation "The passages of CORPUS that answer QUERY, best first, as a RETRIEVAL-RESULT:
-the same type RETRIEVE-SIMILAR and RETRIEVE-EXACT return, with the same COMPLETE and TRUNCATED
-values. This is the call an agent's search tool makes (REGISTER-CORPUS-SEARCH), so that how a
-corpus is searched can change without changing the tool.
-
-For a CORPUS it is RETRIEVE-SIMILAR with a default LIMIT of 20. A later version will choose the
-method by the corpus's retrieval strategy (#316); a keyword added for that will default to NIL,
-so a call written against this one keeps working."))
-
-(defmethod retrieve ((corpus corpus) embedder query &key (limit 20))
-  (retrieve-similar corpus embedder query :limit limit))
-
 ;;; --- hybrid retrieval (#316) -----------------------------------------------------------
 
 (defparameter *hybrid-candidates* 150
@@ -197,7 +202,27 @@ DERIVER, or no terms from the current tokenizer."
                                                                  (rc::%unindexed-clause))))))))
     (or (and row (param:row-value row :n)) 0)))
 
-(defgeneric retrieve-hybrid (corpus embedder query &key limit locale candidates)
+(defparameter *rerank-candidates* 150
+  "How many of the merged candidates RETRIEVE-HYBRID gives a reranker, best first, #316's
+figure: the article reranked the top 150 and kept 20.")
+
+(defun %rerank-passages (reranker query passages limit)
+  "PASSAGES ordered by RERANKER against QUERY, the first LIMIT of them, each with the
+reranker's score as its SCORE. What the reranker reads for a passage is what was embedded for
+it: its context, a blank line and its text, or its text alone. The reranker is called outside
+the database lock."
+  (let* ((documents (mapcar (lambda (p) (rc::%embed-input (passage-context p) (passage-text p)))
+                            passages))
+         (ranking (llm:rerank reranker query documents))
+         (by-index (coerce passages 'vector)))
+    (loop for (index . score) in ranking
+          for i below limit
+          collect (let ((p (aref by-index index)))
+                    (setf (passage-score p) (coerce score 'double-float))
+                    p))))
+
+(defgeneric retrieve-hybrid (corpus embedder query &key limit locale candidates reranker
+                                                        rerank-candidates)
   (:documentation "The LIMIT chunks of CORPUS that best match QUERY by embedding similarity and
 BM25 together (#316). Each search contributes up to CANDIDATES chunks, and the two rankings are
 merged by reciprocal rank fusion (PRAXEON/RETRIEVAL/FUSION), which uses ranks only, so the
@@ -205,13 +230,18 @@ distance and the BM25 score never have to be compared. A chunk found by both sea
 once. Each passage's SCORE is its fused score; its DISTANCE is NIL. LOCALE chooses the stop
 words dropped from QUERY for the keyword search, as in RETRIEVE-KEYWORD.
 
+With a RERANKER (a PRAXEON/LLM:RERANKER), the first RERANK-CANDIDATES of the merged chunks
+(*RERANK-CANDIDATES*, 150) are reordered by it against QUERY before the first LIMIT are taken,
+and each passage's SCORE is the reranker's. Chunks beyond RERANK-CANDIDATES are not returned.
+
 Returns a RETRIEVAL-RESULT. COMPLETE means every chunk was a candidate in both searches.
 TRUNCATED counts, as PENDING, the chunks that have no embedding from this model or no terms from
 the current tokenizer; its reason is :NOT-EMBEDDED if any chunk lacks an embedding, and
 :NOT-INDEXED otherwise."))
 
 (defmethod retrieve-hybrid ((corpus corpus) embedder query
-                            &key (limit 20) locale (candidates *hybrid-candidates*))
+                            &key (limit 20) locale (candidates *hybrid-candidates*) reranker
+                                 (rerank-candidates *rerank-candidates*))
   (%check-width corpus embedder)
   (let* ((store (corpus-store corpus))
          (deriver (deriver-of embedder))
@@ -234,11 +264,15 @@ the current tokenizer; its reason is :NOT-EMBEDDED if any chunk lacks an embeddi
                                                 :function 'fusion:fused-ids :argument 'rankings))
              (ids (fusion:fused-ids *rrf-k* rankings))
              (scores (fusion:fused-scores *rrf-k* rankings))
-             (n (min limit (length ids))))
+             (n (min (if reranker rerank-candidates limit) (length ids)))
+             (passages (rc::%rows->passages corpus
+                                            (mapcar (lambda (id) (gethash id by-id))
+                                                    (subseq ids 0 n))
+                                            :scores (subseq scores 0 n))))
         (rc::%make-retrieval-result
-         (rc::%rows->passages corpus
-                              (mapcar (lambda (id) (gethash id by-id)) (subseq ids 0 n))
-                              :scores (subseq scores 0 n))
+         (if reranker
+             (%rerank-passages reranker query passages limit)
+             passages)
          (cond ((zerop not-ready) (make-complete))
                ((plusp not-embedded) (make-truncated :reason :not-embedded :pending not-ready))
                (t (make-truncated :reason :not-indexed :pending not-ready))))))))
@@ -255,29 +289,41 @@ DOCUMENT-ID and SECTION-ID (in any locale)."
     (and (equal (provenance-document-id p) (eval-question-document-id question))
          (equal (provenance-section-id p) (eval-question-section-id question)))))
 
-(defun %retrieve-by (strategy corpus embedder query k locale)
+(defun %retrieve-by (strategy corpus embedder query k locale reranker)
   (ecase strategy
     (:similar (retrieve-similar corpus embedder query :limit k))
     (:keyword (retrieve-keyword corpus query :limit k :locale locale))
-    (:hybrid (retrieve-hybrid corpus embedder query :limit k :locale locale))))
+    (:hybrid (retrieve-hybrid corpus embedder query :limit k :locale locale))
+    (:reranked (retrieve-hybrid corpus embedder query :limit k :locale locale
+                                                     :reranker reranker))))
 
 (defun evaluate-retrieval (corpus embedder questions
-                           &key (k 20) locale (strategies '(:similar :keyword :hybrid)))
+                           &key (k 20) locale reranker
+                                (strategies (if reranker
+                                                '(:similar :keyword :hybrid :reranked)
+                                                '(:similar :keyword :hybrid))))
   "For each of STRATEGIES, how often the section that answers a question in QUESTIONS (a list
 of EVAL-QUESTIONs) is among the top K passages (#316). Returns one plist per strategy:
 (:strategy S :k K :questions N :hits H :recall H/N :incomplete I), where RECALL is a ratio and
 INCOMPLETE counts the questions whose result was TRUNCATED, which means the corpus was not fully
 embedded or indexed when the figure was taken.
 
-The strategies are :SIMILAR (embeddings only), :KEYWORD (BM25 only) and :HYBRID (both, merged).
-EMBEDDER is needed for :SIMILAR and :HYBRID. An app runs this on its own documents and questions
+The strategies are :SIMILAR (embeddings only), :KEYWORD (BM25 only), :HYBRID (both, merged)
+and :RERANKED (:HYBRID, then RERANKER), which is included by default when RERANKER is given.
+EMBEDDER is needed for every strategy but :KEYWORD. An app runs this on its own documents and questions
 before choosing a default, as the maintainer's rule on #316 requires: a cheaper configuration
-becomes the default only if its recall is at least as high."
+becomes the default only if its recall is at least as high.
+
+To measure what contexts add, sync the same sections into two corpora, one made with a
+:CONTEXTUALIZER and one without, run CONTEXTUALIZE-PENDING and EMBED-PENDING on both, and call
+this on each. Every strategy then searches the chunks with their contexts in one and without in
+the other."
   (loop for strategy in strategies
         collect (let ((hits 0) (incomplete 0))
                   (dolist (question questions)
                     (let ((result (%retrieve-by strategy corpus embedder
-                                                (eval-question-query question) k locale)))
+                                                (eval-question-query question) k locale
+                                                reranker)))
                       (when (truncated-p (retrieval-result-completeness result))
                         (incf incomplete))
                       (when (find-if (lambda (p) (%answers-p p question))
@@ -286,3 +332,35 @@ becomes the default only if its recall is at least as high."
                   (list :strategy strategy :k k :questions (length questions) :hits hits
                         :recall (if questions (/ hits (length questions)) 0)
                         :incomplete incomplete))))
+
+;;; --- the entry point a caller searches through ----------------------------------------
+
+(defgeneric retrieve (corpus embedder query &key limit locale reranker)
+  (:documentation "The passages of CORPUS that answer QUERY, as a RETRIEVAL-RESULT: the same
+type RETRIEVE-SIMILAR and RETRIEVE-EXACT return, with the same COMPLETE and TRUNCATED values.
+This is the call an agent's search tool makes (REGISTER-CORPUS-SEARCH), so that how a corpus is
+searched can change without changing the tool.
+
+It follows the corpus's strategy (#316), as CORPUS-EFFECTIVE-STRATEGY reports it:
+  :WHOLE   RETRIEVE-WHOLE: every chunk, in document order. QUERY and LIMIT are not used.
+  :HYBRID  RETRIEVE-HYBRID with LIMIT (default 20), LOCALE and RERANKER, best first. With a
+           NIL EMBEDDER, RETRIEVE-KEYWORD, its candidates reordered by RERANKER when there is
+           one.
+RERANKER is not called for a :WHOLE corpus.
+So a small :AUTO corpus returns everything, and returns the best matches once it has grown past
+its limit, without the caller changing."))
+
+(defmethod retrieve ((corpus corpus) embedder query &key (limit 20) locale reranker)
+  (ecase (corpus-effective-strategy corpus)
+    (:whole (retrieve-whole corpus))
+    (:hybrid
+     (cond (embedder
+            (retrieve-hybrid corpus embedder query :limit limit :locale locale
+                                                   :reranker reranker))
+           (reranker
+            (let ((result (retrieve-keyword corpus query :limit *rerank-candidates*
+                                                         :locale locale)))
+              (rc::%make-retrieval-result
+               (%rerank-passages reranker query (retrieval-result-passages result) limit)
+               (retrieval-result-completeness result))))
+           (t (retrieve-keyword corpus query :limit limit :locale locale))))))

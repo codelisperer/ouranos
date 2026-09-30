@@ -59,6 +59,7 @@
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
    #:embedding-dimension-mismatch-source
    #:no-embedding-provider #:no-embedding-provider-role
+   #:no-reranker #:no-reranker-role
    #:vector-extension-missing #:vector-extension-missing-database
    #:missing-provider-key #:missing-provider-key-impl #:missing-provider-key-role
    #:missing-provider-key-variables
@@ -134,6 +135,10 @@
    #:voyage-embeddings
    #:register-embedding-impl #:make-embedding-provider-from-env
    #:check-embedding-dimensions
+   ;; the rerank seam (#316) -- also a separate hierarchy
+   #:reranker #:rerank #:reranker-model-of #:rerank-request-body #:rerank-post
+   #:voyage-reranker #:reranker-model #:reranker-base-url #:reranker-api-key
+   #:register-reranker-impl #:make-reranker-from-env
    ;; neutral messages + content parts
    #:msg #:role #:content
    #:text-part #:tool-use-part #:tool-result-part

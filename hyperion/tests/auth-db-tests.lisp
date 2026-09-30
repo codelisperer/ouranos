@@ -667,18 +667,6 @@ a request that already holds one from the same pool (WRAP-CONNECTION), it uses t
     (values (string-downcase (format nil "hyperion_users_~A" suffix))
             (string-downcase (format nil "hyperion_role_events_~A" suffix)))))
 
-(defun %create-pg-tables (c users events)
-  "Create the users table USERS and the role log EVENTS on C from the store's own DDL.
-ENSURE-SCHEMA creates the default table names whatever the store's :TABLE says, so a test that
-wants tables of its own creates them here."
-  (flet ((renamed (ddl from to)
-           (let ((at (search from ddl)))
-             (concatenate 'string (subseq ddl 0 at) to (subseq ddl (+ at (length from)))))))
-    (conn:exec c (renamed (auth:users-ddl :dialect :postgres) "hyperion_users" users))
-    (conn:exec c (auth:users-email-index-ddl :table users))
-    (conn:exec c (renamed (auth:role-events-ddl :dialect :postgres) "hyperion_role_events" events))
-    (conn:exec c (auth:role-events-index-ddl :table events))))
-
 (defun %sixty-lookups (store id)
   "Look up user ID from 60 threads at once. Returns the number of lookups that failed or found
 the wrong user, and the first error."
@@ -705,9 +693,8 @@ at once. 9 of 60 failed before #371."
       (multiple-value-bind (users events) (%pg-names)
         (let ((c (conn:connect (mnemosyne/url:backend-from-url (%pg-url)))))
           (unwind-protect
-               (let* ((a (progn (%create-pg-tables c users events)
-                                (auth:make-db-auth c :dialect :postgres :table users
-                                                     :events-table events)))
+               (let* ((a (auth:make-db-auth c :dialect :postgres :table users
+                                              :events-table events :ensure t))
                       (id (auth:user-id (auth:create-user a :email "sixty@x.com"))))
                  (multiple-value-bind (failed first) (%sixty-lookups a id)
                    (is (= 0 failed) "~D of 60 lookups failed, the first with: ~A" failed first)))
@@ -721,9 +708,8 @@ at once. 9 of 60 failed before #371."
       (multiple-value-bind (users events) (%pg-names)
         (let ((pool (conn:make-pool (mnemosyne/url:backend-from-url (%pg-url)) :size 8)))
           (unwind-protect
-               (let* ((a (progn (conn:with-connection (c pool) (%create-pg-tables c users events))
-                                (auth:make-db-auth pool :dialect :postgres :table users
-                                                        :events-table events)))
+               (let* ((a (auth:make-db-auth pool :dialect :postgres :table users
+                                                 :events-table events :ensure t))
                       (id (auth:user-id (auth:create-user a :email "pool60@x.com"))))
                  (multiple-value-bind (failed first) (%sixty-lookups a id)
                    (is (= 0 failed) "~D of 60 lookups failed, the first with: ~A" failed first))
@@ -766,3 +752,33 @@ for the connection that A holds, until B's checkout timeout fails it. Found in r
            (is (auth:find-user-by-email a "in@x.com")))
       (conn:close-pool pool)
       (ignore-errors (delete-file file)))))
+
+;;; --- a store with tables of its own names (#378) -----------------------------------------
+
+(defun %table-names (c)
+  (mapcar (lambda (row) (second row))
+          (conn:query c "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")))
+
+(test ensure-schema-creates-the-store-s-own-table-names
+  "Before #378, :ENSURE T created hyperion_users and hyperion_role_events whatever :TABLE and
+:EVENTS-TABLE said, and the store's first statement failed on a table that did not exist."
+  (let ((c (conn:connect (be:make-sqlite ":memory:"))))
+    (unwind-protect
+         (let* ((a (auth:make-db-auth c :dialect :sqlite :table "members" :events-table "member_roles"
+                                        :ensure t))
+                (id (auth:user-id (auth:create-user a :email "own@x.com" :password "pw"))))
+           (is (equal '("member_roles" "members") (%table-names c))
+               "the store's names and no others: ~S" (%table-names c))
+           (is (auth:authenticate a "own@x.com" "pw"))
+           (is (auth:grant-role a id :moderator :actor "test"))
+           (is (equal '(:moderator) (mapcar (lambda (e) (getf e :role)) (auth:role-history a id)))))
+      (conn:disconnect c))))
+
+(test the-ddl-helpers-take-a-table-name-and-leave-the-registered-schema-alone
+  (is (search "CREATE TABLE IF NOT EXISTS members (" (auth:users-ddl :dialect :sqlite :table "members")))
+  (is (search "CREATE TABLE IF NOT EXISTS member_roles (" (auth:role-events-ddl :dialect :sqlite :table "member_roles")))
+  (is (search "CREATE TABLE IF NOT EXISTS hyperion_users (" (auth:users-ddl :dialect :sqlite))
+      "the default is still hyperion_users, so a name given once does not stick")
+  (signals error (auth:users-ddl :table "users; DROP TABLE x"))
+  (signals error (auth:users-email-index-ddl :table "1users"))
+  (signals error (auth:role-events-index-ddl :table "")))
