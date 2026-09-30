@@ -58,15 +58,23 @@ its tag.
   once instead of per request, this cut the server-uv loop thread's time per `/tile` request
   in `hyperion/bench` on macOS from about 61 µs to about 39 µs, and `/tile` went from about
   15,400 to about 22,800 requests/s. (#430)
+- **praxeon/memory-db: a store on SQLite** (#425). `make-db-memory-store` takes
+  `:dialect :sqlite` with a SQLite connection, so a desktop app can keep observations and
+  recall them by similarity with no Postgres. The embedding is stored as text and
+  `recall-similar` ranks the subject's current observations by cosine distance in Lisp; there
+  is no index and no extension. `:dialect` other than `:postgres` or `:sqlite` is refused.
+  `praxeon/llm` gains the pure functions both stores use for that: `vector-text`,
+  `parse-vector-text` and `cosine-distance`.
+- **praxeon/retrieval: a chunk store on SQLite** (#369). `make-chunk-store` takes a SQLite
+  connection as well as a Postgres one, so an app can search its documents with no Postgres,
+  offline for example. Every function behaves the same; the differences are listed in
+  `praxeon/docs/user-guide.md` §12 under "On SQLite". The embedding is stored as text and
+  similarity and BM25 are computed in Lisp; `retrieve-exact` folds the case of ASCII letters
+  only; and syncs from two processes are serialised by SQLite's write lock, not per corpus.
+  The retrieval suite runs every test on both backends, and prints a `BACKEND-CHECKS sqlite`
+  line beside the Postgres one.
 
 ### Fixed
-
-- **`clack:stop` on a `:server :uv` handler stops the server even when it is called as soon as
-  the port listens.** The port listens before server-uv's `start` returns, and `clack:stop`
-  kills the thread that `run` blocks in. A kill that landed after the server started and
-  before `run` could stop it on the way out left the server listening for as long as the image
-  ran. `run` now starts the server with interrupts deferred, inside the cleanup that stops it.
-  (#444)
 
 - **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
   discovery, which asked vswhere for the newest install only, so on a machine with several Visual
@@ -85,6 +93,12 @@ its tag.
   whole file. Hyperion now exempts it, as it already exempts `hx-` and the other client-framework
   prefixes (`*spinneret-missing-attributes*`), so an app that passed it through `:attrs`, or
   pushed it onto `spinneret:*unvalidated-attribute-prefixes*` itself, can stop. (#439)
+- **`clack:stop` on a `:server :uv` handler stops the server even when it is called as soon as
+  the port listens.** The port listens before server-uv's `start` returns, and `clack:stop`
+  kills the thread that `run` blocks in. A kill that landed after the server started and
+  before `run` could stop it on the way out left the server listening for as long as the image
+  ran. `run` now starts the server with interrupts deferred, inside the cleanup that stops it.
+  (#444)
 
 ## v0.1.6 — 2026-09-30
 
