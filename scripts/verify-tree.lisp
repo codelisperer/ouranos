@@ -260,14 +260,16 @@ decision someone made, not an accident -- which is the difference that matters."
     ;; cannot load without a built vendor/libuv. Its PARSER is separate and pure precisely
     ;; so the security-critical half stays in +TEST-SYSTEMS+ where every run reaches it --
     ;; see ADR-0015 and the commentary in hyperion/src/http1/packages.lisp.
-    :hyperion/server-uv)
+    :hyperion/server-uv
+    ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
+    :hyperion/clack-handler-uv)
   "The libuv-backed systems. Absent from +SYSTEMS+ because they need
 scripts/build-libuv.lisp to have run first, so on a machine without it their absence is
 not evidence of anything.")
 
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
-    :hyperion/server-uv/tests)
+    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)
@@ -440,7 +442,8 @@ the section reports and why."
 (defun report-uv-declined (name)
   "The uv axis is off. One cause only: the caller did not ask for it."
   (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
-  (dolist (s '(:aion/uv :aion/uv/net :aion/uv/process :hyperion/server-uv))
+  (dolist (s '(:aion/uv :aion/uv/net :aion/uv/process :hyperion/server-uv
+               :hyperion/clack-handler-uv))
     (format t "          ~(~a~)~%" s))
   (format t "          OURANOS_WITH_UV is unset. Set it to 1 to include them (needs scripts/build-libuv.lisp to have run).~%")
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
