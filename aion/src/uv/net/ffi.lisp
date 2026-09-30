@@ -38,6 +38,11 @@
   (handle :pointer) (addr :pointer) (flags :uint))
 (cffi:defcfun ("uv_tcp_connect" uv-tcp-connect) :int
   (req :pointer) (handle :pointer) (addr :pointer) (cb :pointer))
+;;; For more than one loop per server (#463): the socket under a handle, and a handle made
+;;; around a socket that already exists. uv_os_fd_t and uv_os_sock_t are int on Unix, which is
+;;; the only place these are used; on Windows they are a HANDLE and a SOCKET.
+(cffi:defcfun ("uv_fileno" uv-fileno) :int (handle :pointer) (fd :pointer))
+(cffi:defcfun ("uv_tcp_open" uv-tcp-open) :int (handle :pointer) (sock :int))
 (cffi:defcfun ("uv_tcp_getsockname" uv-tcp-getsockname) :int
   (handle :pointer) (name :pointer) (namelen :pointer))
 (cffi:defcfun ("uv_tcp_getpeername" uv-tcp-getpeername) :int

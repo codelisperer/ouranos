@@ -183,18 +183,97 @@ usually what you want for a server and is the answer when a process will not exi
                 :operation operation :path path))
     listener))
 
-(defun listen-tcp (loop host port &key (backlog 128) on-connection (nodelay t))
+(defconstant +uv-tcp-reuseport+ 2
+  "UV_TCP_REUSEPORT, uv_tcp_bind's flag for SO_REUSEPORT with the kernel spreading
+connections across the sockets bound to one port. libuv 1.52 honours it on Linux, FreeBSD,
+DragonFly, Solaris 11.4 and AIX, and refuses it elsewhere (ENOTSUP on macOS, an error on
+Windows).")
+
+(defun listen-tcp (loop host port &key (backlog 128) on-connection (nodelay t) reuseport)
   "Listen on HOST (an IP literal) and PORT, calling ON-CONNECTION with each accepted
 CONNECTION, on the loop thread.
 
 PORT 0 asks the OS to choose one; LOCAL-ADDRESS on the listener's connections, or
-LISTENER-PORT, reports what it chose. NODELAY is applied to every accepted connection."
+LISTENER-PORT, reports what it chose. NODELAY is applied to every accepted connection.
+
+REUSEPORT binds with SO_REUSEPORT (+UV-TCP-REUSEPORT+), so several listeners, typically one
+per loop, can bind the same port and the kernel spreads new connections across them (#463).
+Every listener on the port must set it. Where libuv refuses it, the bind signals."
   (%listen loop :tcp
            (lambda (pointer)
              (%with-sockaddr (addr host port)
-               (ffi:uv-tcp-bind pointer addr 0)))
+               (ffi:uv-tcp-bind pointer addr (if reuseport +uv-tcp-reuseport+ 0))))
            :backlog backlog :on-connection on-connection :nodelay nodelay
            :operation :listen-tcp :path host))
+
+;;; -------------------------------------------------- more than one loop per server (#463)
+;;;
+;;; Unix only: a socket descriptor is an int that dup(2) copies and uv_tcp_open wraps. On
+;;; Windows a SOCKET moves between loops only through WSADuplicateSocket or libuv's IPC pipes,
+;;; neither of which is here, so these signal there.
+
+(defun %fileno (pointer operation)
+  "The socket descriptor under the handle at POINTER."
+  (cffi:with-foreign-object (fd :int)
+    (uv:check (ffi:uv-fileno pointer fd) :operation operation)
+    (cffi:mem-ref fd :int)))
+
+(defun %dup (fd operation)
+  "A new descriptor for the socket FD refers to, from dup(2)."
+  (let ((copy (cffi:foreign-funcall "dup" :int fd :int)))
+    (when (minusp copy)
+      (error 'uv:uv-error :code -1 :name "EDUP" :operation operation
+                          :message "dup(2) failed on a socket descriptor"))
+    copy))
+
+(defun %close-fd (fd)
+  (cffi:foreign-funcall "close" :int fd :int))
+
+(defun %unix-only (operation)
+  #+win32 (error 'uv:uv-error :code -1 :name "ENOTSUP" :operation operation
+                              :message "moving a socket between loops is not supported on Windows")
+  #-win32 (declare (ignore operation)))
+
+(defun listen-copy (loop listener &key (backlog 128) on-connection (nodelay t))
+  "A listener on LOOP on a copy of LISTENER's socket, calling ON-CONNECTION with each
+connection it accepts, on LOOP's thread. Both listeners accept from the one queue the kernel
+keeps for the socket; which one gets a connection is the kernel's choice (#463). Unix only.
+
+Call it before LOOP's thread starts, or on that thread: it creates a handle on LOOP."
+  (%unix-only :listen-copy)
+  (let ((fd (%dup (%fileno (listener-pointer listener) :listen-copy) :listen-copy)))
+    (%listen loop :tcp
+             (lambda (pointer)
+               (let ((code (ffi:uv-tcp-open pointer fd)))
+                 (when (minusp code) (%close-fd fd))
+                 code))
+             :backlog backlog :on-connection on-connection :nodelay nodelay
+             :operation :listen-copy)))
+
+(defun detach-socket (connection)
+  "Take CONNECTION's socket away from its loop: return a new descriptor for the socket and
+close CONNECTION's handle, which closes only the old descriptor. The connection must not
+have started reading. ON CONNECTION'S LOOP THREAD. Unix only (#463)."
+  (%unix-only :detach-socket)
+  (let ((fd (%dup (%fileno (connection-pointer connection) :detach-socket) :detach-socket)))
+    (uv:close-handle connection)
+    fd))
+
+(defun adopt-tcp-socket (loop fd &key (nodelay t))
+  "A CONNECTION on LOOP for the connected socket FD, which it now owns and closes. ON LOOP'S
+THREAD, or before it starts. Closes FD and signals if libuv refuses it. Unix only (#463)."
+  (%unix-only :adopt-tcp-socket)
+  (uv:ensure-available)
+  (let* ((pointer (handler-bind ((error (lambda (e) (declare (ignore e)) (%close-fd fd))))
+                    (%init-handle loop :tcp :adopt-tcp-socket)))
+         (code (ffi:uv-tcp-open pointer fd)))
+    (when (minusp code)
+      (uv:close-pointer pointer)
+      (%close-fd fd)
+      (uv:signal-uv-error code :operation :adopt-tcp-socket))
+    (let ((connection (%adopt-connection pointer loop :tcp)))
+      (when nodelay (set-nodelay connection t))
+      connection)))
 
 (defun listener-address (listener)
   "The address this listener actually bound to, as (values HOST PORT). The port is the

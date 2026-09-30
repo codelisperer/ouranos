@@ -189,14 +189,16 @@ open, so an app with many long streams (server-sent events) wants more.")
 
 ;;; --- run and stop ----------------------------------------------------------
 
-(defun run (app &key (address "127.0.0.1") (port 5000) workers worker-num &allow-other-keys)
+(defun run (app &key (address "127.0.0.1") (port 5000) workers worker-num loops
+                &allow-other-keys)
   "Serve the Clack APP on server-uv at ADDRESS and PORT, and block until this thread is
 destroyed, which is how Clack stops a handler started with :USE-THREAD T. The server is
 stopped on the way out, so CLACK:STOP leaves no listener behind.
 
 WORKERS, or WORKER-NUM (the key Woo's Clack handler takes, so `:server :woo :worker-num n'
 runs unchanged as `:server :uv'), is the size of server-uv's worker pool; see
-*DEFAULT-WORKERS*. :DEBUG and the other clackup keys are accepted and ignored.
+*DEFAULT-WORKERS*. LOOPS is how many event loops server-uv runs (#463), its *DEFAULT-LOOPS*
+when not given. :DEBUG and the other clackup keys are accepted and ignored.
 
 THE START RUNS WITH INTERRUPTS DEFERRED, inside the UNWIND-PROTECT (#444). The port is
 listening before SUV:START returns, so a caller that sees it listening may call CLACK:STOP at
@@ -211,7 +213,8 @@ the server is recorded, inside the UNWIND-PROTECT, whose cleanup stops it."
            (sb-sys:without-interrupts
              (setf server (suv:start (%adapt app address port-box)
                                      :host address :port port
-                                     :workers (or workers worker-num *default-workers*))
+                                     :workers (or workers worker-num *default-workers*)
+                                     :loops loops)
                    (car port-box) (suv:server-port server)))
            (loop (sleep 60)))
       (when server (suv:stop server)))))

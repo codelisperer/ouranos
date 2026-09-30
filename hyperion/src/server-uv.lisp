@@ -62,6 +62,7 @@
            #:*stream-write-timeout-seconds*
            #:*file-chunk-bytes* #:*file-write-observer*
            #:server #:server-p #:server-host #:server-port
+           #:server-loops #:server-loop-connections #:*default-loops* #:*default-scheme*
            #:*dispatch* #:*max-body-octets* #:*max-head-octets* #:*max-chunk-overhead-octets*
            #:*max-requests-per-connection* #:*keep-alive-timeout-ms* #:*inline-dispatch*))
 
@@ -1538,20 +1539,126 @@ one level up."
 
 ;;; --- lifecycle -------------------------------------------------------------
 
-(defstruct (server (:constructor %make-server) (:copier nil))
-  loop thread listener host port
-  ;; The aion/pool the handlers run on when START was given :WORKERS, else NIL (#324).
-  workers
-  ;; The open connections, CONN -> CONN-STATE. Touched only on the loop thread: added at
-  ;; accept, removed by %FINISH, walked by STOP (#262).
-  live
-  ;; The drain box every connection's state shares; see CONN-STATE-DRAIN (#388).
-  (drain (list nil))
+;;; A SERVER RUNS ONE OR MORE LOOPS (#463), each on its own thread with its own connections, so
+;;; accepting, reading, parsing and writing can use more than one core. Everything that was
+;;; one loop's lives in a SHARD. One worker pool serves every shard: a handler's result reaches
+;;; the loop that owns its connection through NET:CONNECTION-LOOP (see %RESPOND).
+;;;
+;;; How new connections reach the loops is the server's SCHEME:
+;;;   :SINGLE     one loop, one listener: what every server was before #463.
+;;;   :REUSEPORT  one listener per loop, each bound with SO_REUSEPORT, and the kernel spreads
+;;;               connections across them. Linux (and the BSDs); libuv refuses it on macOS and
+;;;               Windows.
+;;;   :SHARED     one listening socket, a copy of it listening on every loop (NET:LISTEN-COPY);
+;;;               whichever loop the kernel wakes accepts. Unix.
+;;;   :HANDOFF    the first loop accepts every connection and hands them to the loops in turn,
+;;;               itself included (NET:DETACH-SOCKET, NET:ADOPT-TCP-SOCKET). Unix.
+;;; Windows runs one loop whatever is asked: moving a socket between loops needs
+;;; WSADuplicateSocket there, which is not bound.
+
+(defparameter *default-loops* :auto
+  "How many loops a server runs when START is not given :LOOPS: a positive integer, or :AUTO.
+
+:AUTO is one loop when handlers run inline (no :WORKERS and the inline *DISPATCH*), because
+several loops would run several handlers at once; otherwise the machine's online cores, at
+most 4. Measured on #463 with 8 workers on /tile: on a 4-core Linux host, 1 loop served
+31,724 requests/s, 2 served 97,236 and 4 served 112,364 to 119,501; on a 10-core Mac, 1 loop
+41,732, 2 loops 64,244 and 4 loops 82,335, with 6 and 8 no better because the load generators
+and the kernel had the machine by then. The Linux host could not measure more loops than its 4
+cores. So 4 is the most any measurement supports, and one loop per core is what a loop needs to
+be worth its thread.")
+
+(defun %online-cores ()
+  "The number of online CPUs, from sysconf(_SC_NPROCESSORS_ONLN), or 1 where it is not known."
+  (let ((name #+linux 84 #+darwin 58 #-(or linux darwin) nil))
+    (or (and name
+             (let ((n (ignore-errors (cffi:foreign-funcall "sysconf" :int name :long))))
+               (and n (plusp n) n)))
+        1)))
+
+(defun %default-loop-count (workers)
+  "The loop count *DEFAULT-LOOPS* gives a server with WORKERS; see there. :AUTO is one loop on
+Windows, which runs one whatever is asked (see the section header)."
+  (let ((setting *default-loops*))
+    (cond ((integerp setting) setting)
+          #+win32 (t 1)
+          ((and (null workers) (eq *dispatch* *inline-dispatch*)) 1)
+          (t (min 4 (%online-cores))))))
+
+(defvar *one-loop-noted* nil
+  "True once this process has logged that a request for several loops runs one here.")
+
+(defun %note-one-loop (requested)
+  "Log, once per process, that a server asked for REQUESTED loops runs one on this platform.
+Returns true when it logged. Once, because an app that sets HYPERION_LOOPS for every
+platform would otherwise log it on every start."
+  (unless *one-loop-noted*
+    (setf *one-loop-noted* t)
+    (log:info "server-uv: this platform runs one event loop per server; the loops asked for are not used"
+              :loops-asked requested)
+    t))
+
+(defparameter *default-scheme* :auto
+  "How connections reach the loops when START is not given :SCHEME. :AUTO is :REUSEPORT on
+Linux and :HANDOFF on other Unix (#463).
+
+On macOS, where there is no :REUSEPORT, :HANDOFF gave every loop the same share of connections
+(16, 17, 16, 16 of 65 on four loops) where :SHARED left it to the kernel's wake-ups (4, 2, 4, 4,
+6, 17, 12, 16 on eight).
+
+On Linux (4-core WSL2, wrk, four loops, #463 comment 5918737234) :REUSEPORT and :HANDOFF served
+the same rate, with keep-alive and with Connection: close. :HANDOFF spread connections exactly
+evenly, but on short connections it cost about 7% more CPU per request, and its accepting loop
+ran at 0.55 cores against 0.38 for the others: that loop is the one that saturates first as the
+connection rate grows. :REUSEPORT has no such loop, and its uneven spread (12 to 23 connections
+of 64 per loop) did not cost throughput.")
+
+(defun %resolve-scheme (scheme loops)
+  "The scheme a server of LOOPS loops runs: :SINGLE for one loop and on Windows."
+  (cond ((<= loops 1) :single)
+        #+win32 (t :single)
+        ((eq scheme :auto) #+linux :reuseport #-linux :handoff)
+        (t (check-type scheme (member :reuseport :shared :handoff)) scheme)))
+
+(defstruct (shard (:constructor %make-shard) (:copier nil))
+  "One of a server's loops: the loop, its thread, its listener if it has one, and the
+connections it owns, CONN -> CONN-STATE, touched only on its thread."
+  (index 0)
+  loop thread listener
   ;; The listener has been closed, by a draining STOP's second phase, so the third does not
   ;; close it again.
-  (listener-closed nil))
+  (listener-closed nil)
+  (live (make-hash-table :test 'eq))
+  ;; Connections this loop has taken on since START, for measuring the spread (#463).
+  ;; Incremented on the loop's thread; read from others as a statistic.
+  (accepted 0))
 
-(defun start (app &key (host "127.0.0.1") (port 8080) workers)
+(defstruct (server (:constructor %make-server) (:copier nil))
+  shards host port scheme
+  ;; The aion/pool the handlers run on when START was given :WORKERS, else NIL (#324).
+  workers
+  ;; The drain box every connection's state shares; see CONN-STATE-DRAIN (#388).
+  (drain (list nil))
+  ;; Connections accepted by the first loop and not yet adopted by the loop they were
+  ;; handed to (:HANDOFF), in the CAR. They are in no shard's LIVE table meanwhile, so a
+  ;; drain counts them here.
+  (handoffs (list 0)))
+
+(defun server-loops (server)
+  "SERVER's loops, first to last."
+  (loop for shard across (server-shards server) collect (shard-loop shard)))
+
+(defun server-loop (server)
+  "SERVER's first loop: the only one for a server of one loop. NIL once STOP has run."
+  (let ((shards (server-shards server)))
+    (and shards (plusp (length shards)) (shard-loop (aref shards 0)))))
+
+(defun server-loop-connections (server)
+  "How many connections each of SERVER's loops has taken on since START, first to last: the
+spread of connections across its loops (#463)."
+  (loop for shard across (server-shards server) collect (shard-accepted shard)))
+
+(defun start (app &key (host "127.0.0.1") (port 8080) workers loops scheme)
   "Serve APP -- a Ring handler, (lambda (env) -> (status headers body)) -- on HOST:PORT.
 
 Returns a SERVER; STOP it. PORT 0 asks the OS to choose, and SERVER-PORT reports what it
@@ -1561,58 +1668,133 @@ WORKERS, when given, is how many threads run this server's handlers: the server 
 aion/pool of that size, dispatches through POOL-DISPATCH on it, and stops it in STOP (#324).
 It applies to this server only; NIL leaves *DISPATCH* in charge, as before.
 
+LOOPS is how many event loops the server runs, each on its own thread (#463); *DEFAULT-LOOPS*
+when not given. SCHEME is how new connections reach them, *DEFAULT-SCHEME* when not given;
+see the section header. With more than one loop, handlers must run on WORKERS or a pool
+*DISPATCH*: the inline dispatcher would run handlers on every loop's thread at once, which is
+concurrency an app written for one loop never had, so START refuses it.
+
 TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is the
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
 Clack -- owning the socket is what makes it available at all."
   (check-type workers (or null (integer 1)))
-  (let* ((loop (uv:make-loop))
-         (live (make-hash-table :test 'eq))
+  (let* ((requested (or loops (%default-loop-count workers)))
+         (scheme (progn (check-type requested (integer 1))
+                        (%resolve-scheme (or scheme *default-scheme*) requested)))
+         (loops (if (eq scheme :single) 1 requested))
          (drain (list nil))
-         ;; Set below, once the bind has succeeded. The connection callback reads it only
-         ;; after the loop thread starts, which is after that.
+         (handoffs (list 0))
+         (shards (coerce (loop for i below loops
+                               collect (%make-shard :index i :loop (uv:make-loop)))
+                         'vector))
+         ;; Set below, once the binds have succeeded. The connection callbacks read it only
+         ;; after the loop threads start, which is after that.
          (workers-pool nil)
          (dispatch nil)
-         (listener (net:listen-tcp
-                    loop host port
-                    :on-connection
-                    (lambda (conn)
-                      (let ((state (%make-conn-state :live live :dispatch dispatch
-                                                     :drain drain)))
-                        (setf (gethash conn live) state)
-                        (net:start-reading
-                         conn
-                         (lambda (octets connection)
-                           (%serve connection app state octets))
-                         ;; Both ways the peer can end the connection reach %FINISH, which
-                         ;; releases the timer (a live timer holds the loop open) and closes
-                         ;; the handle (#262). The orderly one goes through %SHUTDOWN first.
-                         :on-end (lambda (connection)
-                                   (%peer-ended connection state))
-                         :on-error (lambda (e connection)
-                                     (%finish connection state)
-                                     (log:debug "server-uv: connection error"
-                                                :condition (princ-to-string e)))))))))
-    ;; THE WORKER POOL IS MADE AFTER THE BIND, so a port that is taken starts no worker
-    ;; threads. After this point a failure stops the pool before it propagates: START has
-    ;; not returned a SERVER, so the caller has nothing to STOP.
-    (when workers
-      (setf workers-pool (pool:make-pool :size workers :name "server-uv-worker")
-            dispatch (pool-dispatch workers-pool)))
-    (let ((started nil))
+         (started nil))
+    (when (and (> requested 1) (= loops 1))
+      (%note-one-loop requested))
+    (when (and (> loops 1) (null workers) (eq *dispatch* *inline-dispatch*))
+      (map nil (lambda (shard) (ignore-errors (uv:close-loop (shard-loop shard)))) shards)
+      (error "hyperion/server-uv: ~D loops need :WORKERS (or a pool *DISPATCH*); the inline dispatcher would run handlers on ~:*~D threads at once" loops))
+    (labels ((serve-connection (shard conn)
+               ;; ON SHARD'S LOOP THREAD: the connection is SHARD's from here on.
+               (incf (shard-accepted shard))
+               (let ((state (%make-conn-state :live (shard-live shard) :dispatch dispatch
+                                              :drain drain)))
+                 (setf (gethash conn (shard-live shard)) state)
+                 (net:start-reading
+                  conn
+                  (lambda (octets connection)
+                    (%serve connection app state octets))
+                  ;; Both ways the peer can end the connection reach %FINISH, which releases
+                  ;; the timer (a live timer holds the loop open) and closes the handle (#262).
+                  ;; The orderly one goes through %SHUTDOWN first.
+                  :on-end (lambda (connection)
+                            (%peer-ended connection state))
+                  :on-error (lambda (e connection)
+                              (%finish connection state)
+                              (log:debug "server-uv: connection error"
+                                         :condition (princ-to-string e))))))
+             (hand-off (conn next)
+               ;; ON THE FIRST LOOP: give CONN to the next shard in turn (:HANDOFF).
+               (let ((target (aref shards (mod (sb-ext:atomic-incf (car next)) loops))))
+                 (if (zerop (shard-index target))
+                     (serve-connection target conn)
+                     (let ((fd (net:detach-socket conn)))
+                       (sb-ext:atomic-incf (car handoffs))
+                       (unless (%on-loop
+                                (shard-loop target)
+                                (lambda ()
+                                  (unwind-protect
+                                       (handler-case
+                                           (serve-connection target
+                                                             (net:adopt-tcp-socket
+                                                              (shard-loop target) fd))
+                                         (error (e)
+                                           (log:debug "server-uv: a handed-off connection could not be adopted"
+                                                      :condition (princ-to-string e))))
+                                    (sb-ext:atomic-decf (car handoffs))))
+                                "a connection handed to another loop")
+                         ;; The target loop is closing, so the socket goes nowhere: close it.
+                         (cffi:foreign-funcall "close" :int fd :int)
+                         (sb-ext:atomic-decf (car handoffs))))))))
       (unwind-protect
-           (multiple-value-bind (bound-host bound-port) (net:listener-address listener)
-             (let ((thread (uv:start-loop-thread loop)))
-               (log:info "server-uv: listening" :host bound-host :port bound-port)
-               (prog1 (%make-server :loop loop :thread thread :listener listener
-                                    :host bound-host :port bound-port :live live
-                                    :workers workers-pool :drain drain)
+           (let* ((first (aref shards 0))
+                  (next (list -1))
+                  (listener (net:listen-tcp
+                             (shard-loop first) host port
+                             :reuseport (eq scheme :reuseport)
+                             :on-connection (if (eq scheme :handoff)
+                                                (lambda (conn) (hand-off conn next))
+                                                (lambda (conn) (serve-connection first conn))))))
+             (setf (shard-listener first) listener)
+             (multiple-value-bind (bound-host bound-port) (net:listener-address listener)
+               (loop for shard across shards
+                     for i from 0
+                     when (plusp i)
+                       do (let ((shard shard))
+                            (setf (shard-listener shard)
+                                  (ecase scheme
+                                    (:reuseport
+                                     (net:listen-tcp (shard-loop shard) host bound-port
+                                                     :reuseport t
+                                                     :on-connection (lambda (conn)
+                                                                      (serve-connection shard conn))))
+                                    (:shared
+                                     (net:listen-copy (shard-loop shard) listener
+                                                      :on-connection (lambda (conn)
+                                                                       (serve-connection shard conn))))
+                                    (:handoff nil)))))
+               ;; THE WORKER POOL IS MADE AFTER THE BINDS, so a port that is taken starts no
+               ;; worker threads.
+               (when workers
+                 (setf workers-pool (pool:make-pool :size workers :name "server-uv-worker")
+                       dispatch (pool-dispatch workers-pool)))
+               (loop for shard across shards
+                     for i from 0
+                     do (setf (shard-thread shard)
+                              (uv:start-loop-thread (shard-loop shard)
+                                                    :name (if (= loops 1)
+                                                              "aion/uv loop"
+                                                              (format nil "aion/uv loop ~D" i)))))
+               (log:info "server-uv: listening" :host bound-host :port bound-port
+                                                :loops loops :scheme scheme)
+               (prog1 (%make-server :shards shards :host bound-host :port bound-port
+                                    :scheme scheme :workers workers-pool :drain drain
+                                    :handoffs handoffs)
                  (setf started t))))
-        (when (and workers-pool (not started))
-          (%stop-workers workers-pool))))))
+        ;; START has not returned a SERVER, so the caller has nothing to STOP: release what
+        ;; was made here. Closing a loop closes its listener and stops its thread if it runs.
+        (unless started
+          (loop for shard across shards
+                do (ignore-errors (uv:close-loop (shard-loop shard))))
+          (when workers-pool
+            (%stop-workers workers-pool)))))))
 
 (defparameter *stop-wait-seconds* 5
-  "How long STOP waits for the loop thread to close the listener and the open connections
-before it closes the loop regardless.")
+  "How long STOP waits for the loop threads to close the listeners and the open connections
+before it closes the loops regardless.")
 
 (defun begin-drain (server)
   "Begin draining SERVER (#388): it keeps accepting and answering, and every response from now
@@ -1636,50 +1818,77 @@ already received."
       (conn-state-streaming state)
       (plusp (fill-pointer (conn-state-buffer state)))))
 
-(defun %close-idle (server)
-  "Close every connection of SERVER that is not busy, and return how many are still open.
-LOOP THREAD ONLY. An idle keep-alive connection has nothing to wait for, and while draining no
-new request should start on it."
+(defun %close-idle (shard)
+  "Close every connection of SHARD that is not busy, and return how many are still open.
+ON SHARD'S LOOP THREAD. An idle keep-alive connection has nothing to wait for, and while
+draining no new request should start on it."
   (let ((idle '()))
     (maphash (lambda (conn state) (unless (%busy-p state) (push (cons conn state) idle)))
-             (server-live server))
+             (shard-live shard))
     (loop for (conn . state) in idle do (%finish conn state))
-    (hash-table-count (server-live server))))
+    (hash-table-count (shard-live shard))))
 
-(defun %on-loop-value (server thunk what)
-  "THUNK's value, computed on SERVER's loop thread, or NIL if the loop is closing or does not
-answer within *STOP-WAIT-SECONDS*."
-  (let ((done (sb-thread:make-semaphore))
-        (value nil))
-    (when (%on-loop (server-loop server)
-                    (lambda () (unwind-protect (setf value (funcall thunk))
-                                 (sb-thread:signal-semaphore done)))
-                    what)
-      (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*))
-    value))
+(defun %close-listener (shard)
+  "Close SHARD's listener, once. ON SHARD'S LOOP THREAD."
+  (unless (shard-listener-closed shard)
+    (when (shard-listener shard)
+      (net:close-listener (shard-listener shard)))
+    (setf (shard-listener-closed shard) t)))
+
+(defun %on-every-loop (server thunk what)
+  "Call THUNK with each of SERVER's shards on that shard's loop thread, all at once, and
+return their values in shard order: NIL for a loop that is closing or does not answer within
+*STOP-WAIT-SECONDS*. The loops work in parallel, so a stop takes as long as its slowest loop,
+not the sum of them."
+  (let ((pending
+          (loop for shard across (server-shards server)
+                collect (let ((done (sb-thread:make-semaphore))
+                              (cell (list nil))
+                              (shard shard))
+                          (list (%on-loop (shard-loop shard)
+                                          (lambda ()
+                                            (unwind-protect (setf (car cell) (funcall thunk shard))
+                                              (sb-thread:signal-semaphore done)))
+                                          what)
+                                done cell)))))
+    (loop with deadline = (+ (get-internal-real-time)
+                             (* *stop-wait-seconds* internal-time-units-per-second))
+          for (queued done cell) in pending
+          collect (and queued
+                       (sb-thread:wait-on-semaphore
+                        done :timeout (max 0 (/ (- deadline (get-internal-real-time))
+                                                internal-time-units-per-second)))
+                       (car cell)))))
+
+(defun %open-connections (counts server)
+  "The sum of COUNTS, one per loop, plus the connections being handed between loops; NIL when
+a loop did not answer."
+  (and (every #'integerp counts)
+       (+ (reduce #'+ counts) (car (server-handoffs server)))))
 
 (defun %drain (server timeout)
-  "The second phase of a draining STOP (#388): stop accepting, close idle connections, and wait
-up to TIMEOUT seconds for the busy ones to finish. Each finishes by closing, because the server
-is draining. Returns how many connections were still open when it stopped waiting."
+  "The second phase of a draining STOP (#388): stop accepting on every loop, close idle
+connections, and wait up to TIMEOUT seconds for the busy ones to finish. Each finishes by
+closing, because the server is draining. Returns how many connections were still open when
+it stopped waiting."
   (begin-drain server)
-  (let ((open (%on-loop-value server
-                              (lambda ()
-                                (net:close-listener (server-listener server))
-                                (setf (server-listener-closed server) t)
-                                (%close-idle server))
-                              "a draining stop's listener close")))
+  (let ((open (%open-connections
+               (%on-every-loop server
+                               (lambda (shard) (%close-listener shard) (%close-idle shard))
+                               "a draining stop's listener close")
+               server)))
     (log:info "server-uv: stopped accepting; waiting for requests in flight"
               :open (or open 0) :timeout-seconds timeout)
     (loop with deadline = (+ (get-internal-real-time) (* timeout internal-time-units-per-second))
           while (and open (plusp open) (< (get-internal-real-time) deadline))
           do (sleep 0.05)
-             (setf open (%on-loop-value server (lambda () (%close-idle server))
-                                        "a draining stop's idle check")))
+             (setf open (%open-connections
+                         (%on-every-loop server #'%close-idle "a draining stop's idle check")
+                         server)))
     (or open 0)))
 
 (defun stop (server &key (drain-timeout 0))
-  "Stop SERVER and release its loop. Idempotent.
+  "Stop SERVER and release its loops. Idempotent.
 
 With DRAIN-TIMEOUT, a number of seconds above zero, STOP drains first (#388): it stops
 accepting, closes idle connections, and waits up to DRAIN-TIMEOUT seconds for requests in
@@ -1688,11 +1897,12 @@ still open then is closed. With the default, 0, it closes everything at once, as
 SERVE-FOREVER passes a timeout on SIGTERM; a grace period before that, still accepting, is
 SERVE-FOREVER's (see hyperion/server).
 
-Connections still open are closed through %FINISH, on the loop thread, before the loop is
+Connections still open are closed through %FINISH, on their loop's thread, before the loop is
 closed (#262). CLOSE-LOOP would otherwise close their handles as bare pointers, which never
-runs a connection's own close and so never frees its read buffer."
+runs a connection's own close and so never frees its read buffer. Every loop does this at
+once (#463)."
   (let ((overdue nil))
-    (when (server-loop server)
+    (when (server-shards server)
       (let ((left (when (and (realp drain-timeout) (plusp drain-timeout))
                     (%drain server drain-timeout))))
         (when (and left (plusp left))
@@ -1700,29 +1910,35 @@ runs a connection's own close and so never frees its read buffer."
           (log:warn "server-uv: closing connections still open at the drain timeout"
                     :open left :timeout-seconds drain-timeout)))
       ;; A loop already closed by another route leaves nothing to close the listener ON --
-      ;; and CLOSE-LOOP below is what frees it in that case. Refusing to stop because the
-      ;; loop is already gone would make STOP fail exactly when it has least to do.
-      (let* ((done (sb-thread:make-semaphore))
-             (queued (%on-loop (server-loop server)
-                               (lambda ()
-                                 (unwind-protect
-                                      (progn
-                                        (unless (server-listener-closed server)
-                                          (net:close-listener (server-listener server))
-                                          (setf (server-listener-closed server) t))
-                                        (let ((open '()))
-                                          (maphash (lambda (conn state) (push (cons conn state) open))
-                                                   (server-live server))
-                                          (loop for (conn . state) in open
-                                                do (%finish conn state))))
-                                   (sb-thread:signal-semaphore done)))
-                               "the listener close and the open connections")))
-        ;; Waited for, not only queued: CLOSE-LOOP stops the loop thread first, and work still
-        ;; in its queue then never runs.
-        (when queued
-          (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)))
-      (uv:close-loop (server-loop server))
-      (setf (server-loop server) nil))
+      ;; and CLOSE-LOOP below is what frees it in that case. Refusing to stop because a loop
+      ;; is already gone would make STOP fail exactly when it has least to do.
+      (%on-every-loop server
+                      (lambda (shard)
+                        (%close-listener shard)
+                        (let ((open '()))
+                          (maphash (lambda (conn state) (push (cons conn state) open))
+                                   (shard-live shard))
+                          (loop for (conn . state) in open do (%finish conn state))))
+                      "the listener close and the open connections")
+      ;; A connection handed between loops is queued on the loop that will adopt it. With
+      ;; the listeners closed no more are made, so wait for those to be adopted and closed
+      ;; before closing the loops, or a queued one's socket would never be closed.
+      (loop with deadline = (+ (get-internal-real-time)
+                               (* *stop-wait-seconds* internal-time-units-per-second))
+            while (and (plusp (car (server-handoffs server)))
+                       (< (get-internal-real-time) deadline))
+            do (sleep 0.01))
+      (when (plusp (car (server-handoffs server)))
+        (%on-every-loop server
+                        (lambda (shard)
+                          (let ((open '()))
+                            (maphash (lambda (conn state) (push (cons conn state) open))
+                                     (shard-live shard))
+                            (loop for (conn . state) in open do (%finish conn state))))
+                        "the connections adopted during stop"))
+      (loop for shard across (server-shards server)
+            do (uv:close-loop (shard-loop shard)))
+      (setf (server-shards server) nil))
     (when (server-workers server)
       (%stop-workers (server-workers server) (if overdue 0.1 *stop-wait-seconds*))
       (setf (server-workers server) nil))

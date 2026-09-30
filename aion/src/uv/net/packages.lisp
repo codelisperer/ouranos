@@ -36,6 +36,7 @@ commentary in ffi.lisp.")
   (:export
    ;; tcp
    #:uv-tcp-init #:uv-tcp-bind #:uv-tcp-connect #:uv-tcp-nodelay #:uv-tcp-keepalive
+   #:uv-fileno #:uv-tcp-open
    #:uv-tcp-getsockname #:uv-tcp-getpeername
    ;; streams
    #:uv-listen #:uv-accept #:uv-read-start #:uv-read-stop #:uv-write #:uv-shutdown
@@ -100,6 +101,8 @@ return; see the ref/unref discussion in aion/uv's introspect.lisp and ask
    #:connection #:connection-p #:connection-kind #:connection-loop
    #:listener #:listener-p #:listener-loop #:listener-address #:close-listener
    #:listen-tcp #:connect-tcp #:listen-pipe #:connect-pipe #:make-pipe-connection
+   ;; one server on more than one loop (#463); Unix only
+   #:listen-copy #:detach-socket #:adopt-tcp-socket
    #:connection-pointer
    ;; reading, with the pause/resume pair that makes backpressure real
    #:start-reading #:stop-reading #:pause-reading #:resume-reading #:reading-p #:paused-p
