@@ -220,6 +220,9 @@ def cpu_cell(m):
 
 
 def table(rows, gen_line, ref, args):
+    workers_text = (f"Workers: {args.workers} (Woo `:worker-num`, `:uv` `:workers`)."
+                    if args.workers else
+                    "Workers: none; handlers run inline (on `:uv`, on the loop thread).")
     osname = {"Darwin": "macOS", "Linux": "Linux"}.get(platform.system(), platform.system())
     lines = [
         f"**{osname}** ({platform.machine()}, {os.cpu_count()} CPUs). Generator: `{gen_line}`, "
@@ -227,7 +230,7 @@ def table(rows, gen_line, ref, args):
         f"Reference: the same generator against trivial.c (single-threaded, one poll() loop) "
         f"reached {ref:,.0f} requests/s; that is not the generator's ceiling. "
         f"`:uv` requests per connection: {args.uv_max_requests:,} (shipped default 100). "
-        f"Workers: {args.workers} (Woo `:worker-num`, `:uv` `:workers`). "
+        f"{workers_text} "
         "CPU is cores kept busy during each throughput run, the whole process / the :uv loop "
         "thread alone; a loop near 1.00 is saturated.",
         "",
@@ -252,7 +255,8 @@ def main():
     ap.add_argument("backends", nargs="*", default=["uv", "woo"])
     ap.add_argument("--connections", type=int, default=64)
     ap.add_argument("--seconds", type=int, default=10)
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=8,
+                    help="worker threads; 0 runs handlers inline, with no pool")
     ap.add_argument("--requests", type=int, default=2000)
     ap.add_argument("--idle", type=int, default=500)
     ap.add_argument("--uv-max-requests", type=int, default=10 ** 9,
