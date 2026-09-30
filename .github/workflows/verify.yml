@@ -229,6 +229,17 @@ jobs:
         id: build-the-pinned-mbedtls
         run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
 
+      # From the committed libgit2.pin, with the same first-party toolchains and no cmake
+      # (#429). Nothing loads this library yet: aion/libgit comes in the next step. The step is
+      # here because it is the only proof that the pinned libgit2 builds on all three OSes, and
+      # build-libgit2.lisp fails unless the result exports every entry point aion/libgit will
+      # bind, exports nothing but libgit2's API, and on Windows does not need the VC++ runtime.
+      # Not cached, like mbedTLS: a rebuild from the pin every run is what makes a pass mean
+      # the pinned source builds.
+      - name: Build the pinned libgit2
+        id: build-the-pinned-libgit2
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
+
       # --- the native webview launcher (pre-publication issue 276) ---------------------------------------
       #
       # WHY AT ALL. hyperion-view is the launcher every desktop app shells out to, and
