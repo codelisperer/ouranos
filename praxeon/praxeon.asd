@@ -144,7 +144,7 @@
                              (:file "tool")))))
 
 (defsystem "praxeon/retrieval/tests"
-  :description "praxeon/retrieval against a real Postgres with pgvector (#138)."
+  :description "praxeon/retrieval against a real Postgres with pgvector, and against SQLite (#138, #369)."
   :depends-on ("praxeon/retrieval" "praxeon" "mnemosyne" "bordeaux-threads" "aion/test-threads"
                "aion/log"                     ; a test reads the strategy-change log line (#316)
                "fiveam")

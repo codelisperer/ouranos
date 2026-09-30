@@ -1,7 +1,10 @@
-;;;; retrieval-tests.lisp --- praxeon/retrieval against a real Postgres with pgvector (#138).
+;;;; retrieval-tests.lisp --- praxeon/retrieval against Postgres with pgvector, and SQLite (#138, #369).
 ;;;;
-;;;; Every test needs Postgres, and skips with the reason when MNEMOSYNE_TEST_PG_URL is not set.
-;;;; Each test gets a fresh table, named with the pid and a random suffix, and drops it after.
+;;;; RETRIEVAL runs twice: on Postgres, which skips every test with the reason when
+;;;; MNEMOSYNE_TEST_PG_URL is not set, and on SQLite, in a fresh database file per test. A test
+;;;; about something only Postgres has (pgvector's extension and widths, advisory locks,
+;;;; REPEATABLE READ) skips on SQLite and says so. Each Postgres test gets a fresh table, named
+;;;; with the pid and a random suffix, and drops it after.
 ;;;; The embedder is a deterministic stand-in: the protocol, the width checks, the store and the
 ;;;; SQL are the real code.
 
@@ -16,6 +19,7 @@
                     (#:ceiling #:praxeon/ceiling)
                     (#:conn #:mnemosyne/conn)
                     (#:url #:mnemosyne/url)
+                    (#:be #:mnemosyne/backend)
                     (#:mig #:mnemosyne/migrate)
                     (#:param #:mnemosyne/param)
                     (#:q #:mnemosyne/query)
@@ -31,23 +35,44 @@
 
 (defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
 
+(defvar *backend* :postgres
+  "Which backend RETRIEVAL is running on: :POSTGRES or :SQLITE (#369).")
+
+(defvar *sqlite-file* nil
+  "The database file of the SQLite test running now, so a test's second connection opens the
+same database.")
+
+(defun %sqlite-p () (eq *backend* :sqlite))
+
+(defmacro postgres-only ((reason) &body body)
+  "BODY, except on SQLite, where the test skips and says what it is about."
+  `(if (%sqlite-p)
+       (skip "Postgres only: ~A" ,reason)
+       (progn ,@body)))
+
 (def-suite chunkers :description "Tests that need no database: the chunkers (#322) and the text the search means writes (#138).")
 
 (defun run-tests ()
-  "Run both suites and print the Postgres coverage in the form scripts/verify-tree.lisp reads.
-Every check in RETRIEVAL needs Postgres, so a run without it skips them all, and the
-BACKEND-CHECKS line is what keeps that from reading as a pass (#171). CHUNKERS needs no
-database, so its checks are not counted in that line."
+  "Run CHUNKERS, and RETRIEVAL on each backend, and print each backend's coverage in the form
+scripts/verify-tree.lisp reads. On Postgres every check in RETRIEVAL needs the server, so a run
+without it skips them all, and the BACKEND-CHECKS line is what keeps that from reading as a pass
+(#171). CHUNKERS needs no database, so its checks are not counted in either line."
   (let* ((url (%pg-url))
          (chunker-results (run 'chunkers))
-         (results (run 'retrieval)))
-    (explain! (append chunker-results results))
-    (if url
-        (format t "~&BACKEND-CHECKS postgres ~D~%"
-                (count-if-not (lambda (r) (typep r 'fiveam::test-skipped)) results))
-        (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
+         (results (let ((*backend* :postgres)) (run 'retrieval)))
+         (sqlite-results (let ((*backend* :sqlite)) (run 'retrieval))))
+    (explain! (append chunker-results results sqlite-results))
+    (flet ((ran (rs) (count-if-not (lambda (r) (typep r 'fiveam::test-skipped)) rs)))
+      (if url
+          (format t "~&BACKEND-CHECKS postgres ~D~%" (ran results))
+          (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
+      (format t "~&BACKEND-CHECKS sqlite ~D~%" (ran sqlite-results))
+      ;; Which SQLite file those checks ran against, and its version, in the line
+      ;; scripts/verify-tree.lisp reads (#129).
+      (format t "~&SQLITE-LIBRARY ~A~%" (mnemosyne/sqlite-library:describe-loaded-library)))
     (finish-output)
-    (and (results-status chunker-results) (results-status results))))
+    (and (results-status chunker-results) (results-status results)
+         (results-status sqlite-results))))
 
 ;;; --- a deterministic embedder ------------------------------------------------------
 ;;;
@@ -90,12 +115,37 @@ database, so its checks are not counted in that line."
   (string-downcase (format nil "praxeon_chunks_~36R_~36R" (sb-posix:getpid)
                            (random (expt 2 32) (make-random-state t)))))
 
-(defun %connect () (conn:connect (url:backend-from-url (%pg-url))))
+(defun %connect ()
+  (conn:connect (if (%sqlite-p)
+                    (be:make-sqlite (namestring *sqlite-file*))
+                    (url:backend-from-url (%pg-url)))))
+
+(defun %fresh-sqlite-file ()
+  (merge-pathnames (format nil "praxeon-retrieval-~36R-~36R.db" (sb-posix:getpid)
+                           (random (expt 2 40) (make-random-state t)))
+                   (uiop:temporary-directory)))
+
+(defun %delete-sqlite-files (file)
+  (dolist (suffix '("" "-journal" "-wal" "-shm"))
+    (let ((f (probe-file (concatenate 'string (namestring file) suffix))))
+      (when f (delete-file f)))))
 
 (defmacro with-store ((store-var &key (dimensions 4) (table '(%table-name))) &body body)
-  "A fresh chunk table and a store over it; the table is dropped afterwards."
+  "A fresh chunk table and a store over it; the table is dropped afterwards. On SQLite the
+table is in a fresh database file, deleted afterwards."
   (let ((c (gensym "CONN")) (tb (gensym "TABLE")))
-    `(if (not (%pg-url))
+    `(if (%sqlite-p)
+         (let ((*sqlite-file* (%fresh-sqlite-file)))
+           (unwind-protect
+                (let ((,c (%connect)))
+                  (unwind-protect
+                       (let ((,store-var (rt:make-chunk-store ,c :table ,table
+                                                                 :dimensions ,dimensions
+                                                                 :ensure t)))
+                         ,@body)
+                    (conn:disconnect ,c)))
+             (%delete-sqlite-files *sqlite-file*)))
+     (if (not (%pg-url))
          (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
          (let* ((,tb ,table)
                 (,c (%connect)))
@@ -110,7 +160,7 @@ database, so its checks are not counted in that line."
              (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A" ,tb)))
              (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A_terms" ,tb)))
              (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A_corpora" ,tb)))
-             (conn:disconnect ,c))))))
+             (conn:disconnect ,c)))))))
 
 (defun sec (id text &rest keys &key (document-id "doc-1") (locale "en") &allow-other-keys)
   (apply #'rt:make-section :id id :text text :document-id document-id :locale locale
@@ -121,6 +171,12 @@ database, so its checks are not counted in that line."
 (defun ids (result)
   (mapcar (lambda (p) (rt:provenance-section-id (rt:passage-provenance p)))
           (rt:retrieval-result-passages result)))
+
+(defun %drop-columns (store columns)
+  "Drop COLUMNS from STORE's table, one statement each, since SQLite drops one per ALTER TABLE."
+  (dolist (column columns)
+    (conn:exec (rt:store-connection store)
+               (format nil "ALTER TABLE ~A DROP COLUMN ~A" (rt:store-table store) column))))
 
 (defun %column-count (store where-sql &rest params)
   (param:row-value (first (apply #'conn:query (rt:store-connection store)
@@ -146,6 +202,7 @@ database, so its checks are not counted in that line."
 pg_extension and signals VECTOR-EXTENSION-MISSING, naming the database. The extension is still
 absent afterwards. Control: once it is installed, the same call succeeds. Uses a scratch
 database, because the test database already has the extension."
+  (postgres-only ("the vector extension")
   (if (not (%pg-url))
       (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
       (let ((admin (%connect))
@@ -169,7 +226,7 @@ database, because the test database already has the extension."
                           (is (eq store (rt:ensure-schema store))))
                      (conn:disconnect c))))
           (when made (ignore-errors (conn:exec admin (format nil "DROP DATABASE ~A" name))))
-          (conn:disconnect admin)))))
+          (conn:disconnect admin))))))
 
 ;;; --- exact retrieval -------------------------------------------------------------------
 
@@ -408,6 +465,44 @@ request is made."
       (signals cnd:embedding-dimension-mismatch (rt:retrieve-similar corpus wide "refund"))
       (is (null (recorded-calls wide))))))
 
+(defclass short-embedder (word-embedder) ()
+  (:documentation "Says it is four wide and returns three numbers."))
+
+(defmethod llm:embed ((p short-embedder) text)
+  (subseq (call-next-method) 0 3))
+
+(test a-vector-shorter-than-the-provider-says-is-refused-before-it-is-stored
+  "The width check before the call trusts what the provider says its width is, so the reply is
+checked too, and nothing is stored. This matters most on SQLite (#369), whose embedding column is
+text and would hold any list of numbers."
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy")))
+      (rt:sync-corpus corpus +policy+)
+      (signals cnd:embedding-dimension-mismatch
+        (rt:embed-pending corpus (make-instance 'short-embedder)))
+      (is (= 3 (%column-count store "embedding IS NULL")) "nothing was stored")
+      (is (= 3 (rt:embed-pending corpus (make-instance 'word-embedder))) "control: four numbers are"))))
+
+(test (a-stored-vector-reads-back-as-the-numbers-written :suite chunkers)
+  "The text a SQLite store keeps for a vector (#369) reads back as the same doubles, including
+numbers written with an exponent. Text that is not a vector is refused rather than read as one."
+  (let* ((store (make-instance 'rc::chunk-store :dimensions 4))
+         (numbers #(0.1d0 -2.5d0 1.0d-7 3.0d12))
+         (text (rt::%sqlite-vector-text store numbers)))
+    (is (char= #\[ (char text 0)))
+    (is (equalp numbers (rt::%parse-vector-text text)))
+    (is (< (abs (- 0.1d0 (aref (rt::%parse-vector-text
+                                (rt::%sqlite-vector-text store (vector 0.1f0 0 1 2)))
+                               0)))
+           1d-6)
+        "single floats and integers are written as doubles")
+    (signals cnd:deliberation-failure (rt::%sqlite-vector-text store #(1d0 2d0)))
+    (signals cnd:deliberation-failure (rt::%parse-vector-text "1,2,3"))
+    (signals cnd:deliberation-failure (rt::%parse-vector-text "[1,#.(quit),3]"))
+    (is (= 0d0 (rt::%cosine-distance #(1d0 0d0) #(2d0 0d0))))
+    (is (= 1d0 (rt::%cosine-distance #(1d0 0d0) #(0d0 1d0))))
+    (is (= 1d0 (rt::%cosine-distance #(0d0 0d0) #(1d0 0d0))) "a zero vector is distance 1")))
+
 (test a-vector-for-replaced-text-is-dropped
   "A vector is written only if its chunk still holds the text that was embedded. Here the
 section is replaced while its batch is being embedded; the old vector is not written, the new
@@ -434,6 +529,7 @@ chunk stays pending, and the next run embeds it."
   "A vector of one width cannot be stored in a column of another. ENSURE-SCHEMA compares the
 live column with the store's width and signals EMBEDDING-WIDTH-CHANGED. The restart recreates
 the column empty at the new width and clears every deriver, so everything is pending again."
+  (postgres-only ("a pgvector column's width")
   (with-store (store)
     (let ((corpus (rt:make-corpus store "policy")))
       (rt:ingest corpus +policy+ (make-instance 'word-embedder))
@@ -447,7 +543,7 @@ the column empty at the new width and clears every deriver, so everything is pen
                          (lambda (c) (invoke-restart (find-restart 'rt:recreate-embedding-column c)))))
           (rt:ensure-schema wider))
         (is (= 3 (%column-count store "embedding IS NULL AND embedding_deriver IS NULL")))
-        (is (eq wider (rt:ensure-schema wider)) "and the check now passes")))))
+        (is (eq wider (rt:ensure-schema wider)) "and the check now passes"))))))
 
 ;;; --- serialising ingest ---------------------------------------------------------------
 
@@ -464,6 +560,7 @@ would be. While one holds a corpus's lock, a sync of that corpus from the other 
 finishes once the lock is released. Control: a sync of another corpus from the second session
 does not wait. Postgres advisory locks belong to sessions, so two connections are two
 processes as far as the lock can tell."
+  (postgres-only ("the corpus lock is an advisory lock")
   (with-store (store-a)
     (let* ((conn-b (%connect))
            (store-b (rt:make-chunk-store conn-b :table (rt:store-table store-a) :dimensions 4))
@@ -509,7 +606,7 @@ processes as far as the lock can tell."
         ;; A deadline here too, and its failure ignored: the test's own failure is the one
         ;; worth reporting, and cleanup must still close the connection.
         (ignore-errors (tt:join-all threads))
-        (conn:disconnect conn-b)))))
+        (conn:disconnect conn-b))))))
 
 (test concurrent-syncs-of-one-corpus-do-not-collide
   "The case the ruling named: two sessions replacing the same sections at once. Without
@@ -618,7 +715,10 @@ pending. It is refused before any query. Control: 1 works."
 (test completeness-and-candidates-come-from-one-snapshot
   "Between the candidate query and the count of chunks not yet embedded, another session
 embeds the pending chunk and commits. Both reads use one snapshot, so the result, which left
-that chunk out, still says TRUNCATED with one pending, not COMPLETE."
+that chunk out, still says TRUNCATED with one pending, not COMPLETE. Postgres only: on SQLite
+the reading transaction's lock keeps another connection from committing until the reads end,
+so there is no moment between them in which the other session could commit."
+  (postgres-only ("another session committing between two reads of one transaction")
   (with-store (store)
     (let* ((corpus (rt:make-corpus store "policy"))
            (embedder (make-instance 'word-embedder))
@@ -640,7 +740,41 @@ that chunk out, still says TRUNCATED with one pending, not COMPLETE."
              (is (rt:complete-p (rt:retrieval-result-completeness
                                  (rt:retrieve-similar corpus embedder "refund")))
                  "and the next search sees it"))
-        (conn:disconnect conn-b)))))
+        (conn:disconnect conn-b))))))
+
+(test on-sqlite-no-session-commits-between-the-two-reads
+  "The SQLite counterpart of the test above (#369). Between the candidate query and the count of
+chunks not yet embedded, another session tries to embed the pending chunk. The reading
+transaction holds SQLite's lock, so that session is refused, and the result counts the chunk as
+pending. The other session waits no time for the lock, so the refusal comes at once. Control:
+after the search, the same call succeeds and the next search is COMPLETE."
+  (if (not (%sqlite-p))
+      (skip "SQLite only: the Postgres test above covers REPEATABLE READ")
+      (with-store (store)
+        (let* ((corpus (rt:make-corpus store "policy"))
+               (embedder (make-instance 'word-embedder))
+               (conn-b (%connect))
+               (other (rt:make-corpus (rt:make-chunk-store conn-b :table (rt:store-table store)
+                                                                   :dimensions 4)
+                                      "policy"))
+               (refused nil))
+          (unwind-protect
+               (progn
+                 (conn:exec conn-b "PRAGMA busy_timeout = 0")
+                 (rt:ingest corpus +policy+ embedder)
+                 (rt:sync-document corpus "doc-1" (append +policy+ (list (sec "4" "Refund refund."))))
+                 (let* ((rt::*between-similar-reads*
+                          (lambda ()
+                            (handler-case (rt:embed-pending other embedder)
+                              (error () (setf refused t)))))
+                        (r (rt:retrieve-similar corpus embedder "refund" :limit 10)))
+                   (is-true refused "the other session could not commit during the reads")
+                   (is (= 3 (length (rt:retrieval-result-passages r))))
+                   (is (eql 1 (rt:truncated-pending (rt:retrieval-result-completeness r)))))
+                 (is (= 1 (rt:embed-pending other embedder)) "control: afterwards it can")
+                 (is (rt:complete-p (rt:retrieval-result-completeness
+                                     (rt:retrieve-similar corpus embedder "refund")))))
+            (conn:disconnect conn-b))))))
 
 ;;; --- the paragraph chunker (#322) ----------------------------------------------------
 ;;;
@@ -1026,8 +1160,7 @@ chunk."
     (let ((corpus (rt:make-corpus store "policy"))
           (c (rt:store-connection store)))
       (rt:sync-corpus corpus +policy+)
-      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN term_count, DROP COLUMN terms_tokenizer"
-                           (rt:store-table store)))
+      (%drop-columns store '("term_count" "terms_tokenizer"))
       (conn:exec c (format nil "DROP TABLE ~A" (rt:terms-table store)))
       (rt:ensure-schema store)
       (is (= 0 (%count-table-in store (rt:terms-table store))) "the terms table is back, empty")
@@ -1390,8 +1523,8 @@ contextualizer consults and charges a ledger; how a grant is verified is praxeon
     (let ((embedder (make-instance 'word-embedder))
           (c (rt:store-connection store)))
       (rt:ingest (rt:make-corpus store "handbook" :strategy :hybrid) +handbook+ embedder)
-      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN section_index, DROP COLUMN document_fingerprint, DROP COLUMN context, DROP COLUMN context_deriver, DROP COLUMN context_document_fingerprint, DROP COLUMN input_fingerprint"
-                           (rt:store-table store)))
+      (%drop-columns store '("section_index" "document_fingerprint" "context" "context_deriver"
+                             "context_document_fingerprint" "input_fingerprint"))
       (conn:exec c (format nil "DROP TABLE ~A" (rt:corpora-table store)))
       (rt:ensure-schema store)
       (let ((plain (rt:make-corpus store "handbook" :strategy :hybrid)))

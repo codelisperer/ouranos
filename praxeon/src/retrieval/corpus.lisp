@@ -17,8 +17,12 @@
 ;;;; CORPUS-WHERE, the one function that writes the corpus predicate, and it binds the corpus
 ;;;; name as a parameter.
 ;;;;
-;;;; POSTGRES ONLY in this first build: the table has a `vector' column, which mnemosyne
-;;;; reports as unsupported on SQLite, and exact retrieval uses ILIKE.
+;;;; POSTGRES AND SQLITE (#369). The store takes either connection and records which in
+;;;; STORE-DIALECT. On Postgres the embedding is a pgvector `vector' column and similarity is
+;;;; computed by the database. SQLite has no vector type, so there the embedding is stored as
+;;;; text and similarity is computed here, over the same candidates: still an exact scan within
+;;;; one corpus. Where the two differ otherwise (exact matching, BM25's logarithm, locking and
+;;;; snapshots, the schema upgrade) the function that differs says how.
 
 (in-package #:praxeon/retrieval/corpus)
 
@@ -217,6 +221,7 @@ stays within TARGET characters. A span longer than TARGET is a run on its own."
 
 (defclass chunk-store ()
   ((connection :initarg :connection :reader store-connection)
+   (dialect :initarg :dialect :reader store-dialect)
    (table :initarg :table :reader store-table)
    (dimensions :initarg :dimensions :reader store-dimensions)
    (schema-name :initarg :schema-name :reader store-schema-name)
@@ -232,7 +237,7 @@ run two statements at once. An ingest holds the connection for as long as a sync
 app that ingests while it serves searches gives each its own store over its own connection,
 both naming the same table."))
 
-(defun %schema-fields (dimensions)
+(defun %schema-fields (dimensions dialect)
   `((:id                 :string :primary t)
     (:corpus             :string :required t)
     (:section_id         :string :required t)
@@ -266,27 +271,36 @@ both naming the same table."))
     (:context_deriver    :string)
     (:context_document_fingerprint :string)
     (:input_fingerprint  :string)
-    (:embedding          :vector :dimensions ,dimensions :derived-from :text)))
+    ;; On SQLite, which has no vector type, the vector's numbers as text (#369).
+    ,(if (eq dialect :sqlite)
+         '(:embedding :text :derived-from :text)
+         `(:embedding :vector :dimensions ,dimensions :derived-from :text))))
 
 (defun make-chunk-store (connection &key (table *table*) dimensions ensure)
-  "A chunk store over CONNECTION (a Postgres connection) in TABLE, with embeddings DIMENSIONS
-wide. DIMENSIONS is required: it is the width of the embedding model the app uses, for example
-(praxeon/llm:embedding-dimensions embedder). With ENSURE, runs ENSURE-SCHEMA."
+  "A chunk store over CONNECTION, a Postgres or a SQLite connection (#369), in TABLE, with
+embeddings DIMENSIONS wide. DIMENSIONS is required: it is the width of the embedding model the
+app uses, for example (praxeon/llm:embedding-dimensions embedder). With ENSURE, runs
+ENSURE-SCHEMA."
   (check-type table string)
   (unless (and (integerp dimensions) (plusp dimensions))
     (error "praxeon/retrieval: :dimensions must be the embedding width, a positive integer, not ~S"
            dimensions))
-  (unless (eq (dbi:connection-driver-type connection) :postgres)
-    (error "praxeon/retrieval: the first build runs on Postgres only (#138); this connection's driver is ~S"
-           (dbi:connection-driver-type connection)))
-  (let* ((name (intern (format nil "RETRIEVAL-~:@(~A~)" table) '#:praxeon/retrieval/corpus))
+  (let ((dialect (case (dbi:connection-driver-type connection)
+                   (:postgres :postgres)
+                   (:sqlite3 :sqlite)
+                   (t (error "praxeon/retrieval: a chunk store runs on Postgres or SQLite; this connection's driver is ~S"
+                             (dbi:connection-driver-type connection))))))
+  (let* ((name (intern (format nil "RETRIEVAL-~:@(~A~)-~A" table dialect) '#:praxeon/retrieval/corpus))
          (store (progn
                   (schema:register-schema
-                   (schema:make-schema name table (%schema-fields dimensions)))
+                   (schema:make-schema name table (%schema-fields dimensions dialect)))
                   (make-instance 'chunk-store :connection connection :table table
+                                              :dialect dialect
                                               :dimensions dimensions :schema-name name))))
     (when ensure (ensure-schema store))
-    store))
+    store)))
+
+(defun %sqlite-p (store) (eq (store-dialect store) :sqlite))
 
 (defparameter *whole-limit* 200000
   "The size, in estimated tokens, at which an :AUTO corpus stops being retrieved whole and is
@@ -363,10 +377,27 @@ which the query DSL always binds as a parameter."
   `(bt:with-recursive-lock-held ((store-db-lock ,store)) ,@body))
 
 (defun %fetch (store query)
-  (with-db (store) (q:fetch (store-connection store) query :dialect :postgres)))
+  (with-db (store) (q:fetch (store-connection store) query :dialect (store-dialect store))))
 
 (defun %run (store query)
-  (with-db (store) (q:run (store-connection store) query :dialect :postgres)))
+  (with-db (store) (q:run (store-connection store) query :dialect (store-dialect store))))
+
+(defun %begin-snapshot (store)
+  "Make the transaction just begun read one snapshot. On Postgres that is REPEATABLE READ. A
+SQLite transaction already reads one snapshot, since it holds its read lock until it ends."
+  (unless (%sqlite-p store)
+    (conn:exec (store-connection store) "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")))
+
+(defun %begin-write (store)
+  "Make the transaction just begun a writer from its first statement. On SQLite a transaction
+that reads first and writes later has to upgrade its lock, and when another connection is
+writing, SQLite refuses the upgrade with BUSY at once rather than wait, since each would be
+waiting for the other. A write as the first statement takes the write lock before any read, as
+BEGIN IMMEDIATE would (the driver begins every transaction as a deferred one), so a second
+writer waits its busy timeout instead. This write changes no rows. Nothing on Postgres."
+  (when (%sqlite-p store)
+    (conn:exec (store-connection store)
+               (format nil "UPDATE ~A SET id = id WHERE 0" (store-table store)))))
 
 (defun check-vector-extension (connection)
   "Signal PRAXEON/CONDITIONS:VECTOR-EXTENSION-MISSING unless the `vector' extension is
@@ -377,13 +408,19 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                                                          "SELECT current_database() AS db"))
                                       :db))))
 
-(defun %index-ddl (table suffix columns)
+(defun %index-ddl (table suffix columns &optional (dialect :postgres))
   (ddl:ddl (list :create-index
                  :name (intern (string-upcase (format nil "~A_~A_idx" table suffix)) :keyword)
                  :on (intern (string-upcase table) :keyword)
                  :columns columns
                  :if-not-exists t)
-           :dialect "postgres"))
+           :dialect (string-downcase (symbol-name dialect))))
+
+(defun %sqlite-columns (store)
+  "The names of the columns STORE's table has on SQLite, lowercased."
+  (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
+          (conn:query (store-connection store)
+                      (format nil "PRAGMA table_info(~A)" (store-table store)))))
 
 (defun terms-table (store)
   "The table holding STORE's chunk terms for BM25: the chunk table's name with \"_terms\"."
@@ -428,6 +465,33 @@ STRATEGY last changed, in universal time. BACKFILL_STARTED_AT is set by START-BA
                    (format nil "UPDATE ~A SET embedding_fingerprint = NULL, embedding_deriver = NULL"
                            table))))))
 
+(defparameter +added-columns+
+  '("term_count INTEGER" "terms_tokenizer TEXT"
+    "section_index INTEGER" "document_fingerprint TEXT" "context TEXT"
+    "context_deriver TEXT" "context_document_fingerprint TEXT" "input_fingerprint TEXT")
+  "The columns #316 added to the chunk table, as `name type', for a table made before them.")
+
+(defun %ensure-sqlite-schema (store)
+  "ENSURE-SCHEMA on SQLite (#369). There is no extension to check and no width to compare: the
+embedding is text, and a vector of another width is from another deriver, which similarity
+never compares with the query. A column is added when PRAGMA table_info does not list it, since
+SQLite has no ADD COLUMN IF NOT EXISTS."
+  (let ((c (store-connection store))
+        (table (store-table store)))
+    (with-db (store)
+      (conn:exec c (schema:schema-ddl (schema:find-schema (store-schema-name store))
+                                      :dialect "sqlite"))
+      (conn:exec c (%index-ddl table "corpus_deriver" '(:corpus :embedding_deriver) :sqlite))
+      (conn:exec c (%index-ddl table "corpus_document" '(:corpus :document_id) :sqlite))
+      (let ((have (%sqlite-columns store)))
+        (dolist (column +added-columns+)
+          (unless (member (subseq column 0 (position #\Space column)) have :test #'string=)
+            (conn:exec c (format nil "ALTER TABLE ~A ADD COLUMN ~A" table column)))))
+      (dolist (statement (%terms-ddl store))
+        (conn:exec c statement))
+      (conn:exec c (%corpora-ddl store))))
+  store)
+
 (defun ensure-schema (store)
   "Create STORE's table and indexes when they are absent, and check the live embedding width.
 Returns STORE.
@@ -438,6 +502,8 @@ because the app's role on a managed Postgres usually cannot (#138).
 
 There is no vector index. Similarity within a corpus is an exact scan in the first build, so
 every result is complete; an index would let the database drop rows after the corpus filter."
+  (when (%sqlite-p store)
+    (return-from ensure-schema (%ensure-sqlite-schema store)))
   (let ((c (store-connection store))
         (table (store-table store)))
     (with-db (store)
@@ -453,10 +519,7 @@ every result is complete; an index would let the database drop rows after the co
       ;; The same holds for the columns #316's step 3 added: a chunk of an older table has no
       ;; context and no document fingerprint, and is contextualized like a new one.
       (handler-bind ((warning #'muffle-warning))
-        (dolist (column '("term_count INTEGER" "terms_tokenizer TEXT"
-                          "section_index INTEGER" "document_fingerprint TEXT" "context TEXT"
-                          "context_deriver TEXT" "context_document_fingerprint TEXT"
-                          "input_fingerprint TEXT"))
+        (dolist (column +added-columns+)
           (conn:exec c (format nil "ALTER TABLE ~A ADD COLUMN IF NOT EXISTS ~A" table column)))
         (dolist (statement (%terms-ddl store))
           (conn:exec c statement))
@@ -501,10 +564,16 @@ process does that."
   (let* ((store (corpus-store corpus))
          (key (%advisory-key store corpus)))
     (bt:with-recursive-lock-held ((%corpus-lock store corpus))
-      (with-db (store) (conn:query (store-connection store) "SELECT pg_advisory_lock(?)" key))
-      (unwind-protect (funcall thunk)
-        (with-db (store)
-          (conn:query (store-connection store) "SELECT pg_advisory_unlock(?)" key))))))
+      (if (%sqlite-p store)
+          ;; SQLite lets one writer at a time into the database, and a sync is one transaction,
+          ;; so two processes' syncs are serialised by SQLite itself; the second waits for the
+          ;; database lock, or gets SQLite's busy error once its busy timeout runs out.
+          (funcall thunk)
+          (progn
+            (with-db (store) (conn:query (store-connection store) "SELECT pg_advisory_lock(?)" key))
+            (unwind-protect (funcall thunk)
+              (with-db (store)
+                (conn:query (store-connection store) "SELECT pg_advisory_unlock(?)" key))))))))
 
 (defmacro with-corpus-lock ((corpus) &body body)
   `(call-with-corpus-lock ,corpus (lambda () ,@body)))
@@ -691,6 +760,7 @@ them where it differs. Returns the fingerprint, or NIL when the document has no 
       (with-corpus-lock (corpus)
         (with-db (store)
           (conn:with-transaction ((store-connection store))
+            (%begin-write store)
             (let ((existing (make-hash-table :test #'equal)))
               (dolist (row (%fetch store (list :select (append '(:section_id :locale
                                                                   :section_fingerprint :chunker
@@ -1035,10 +1105,20 @@ when there were more than LIMIT."))
 
 (defmethod retrieve-exact ((corpus corpus) terms &key (limit 20))
   (let* ((terms (if (stringp terms) (list terms) terms))
+         (sqlite (%sqlite-p (corpus-store corpus)))
          (clauses (mapcar (lambda (term)
-                            (let ((pattern (%like-pattern term)))
-                              (list :or (list :ilike :text pattern)
-                                    (list :ilike :locator pattern))))
+                            (if sqlite
+                                ;; SQLite has no ILIKE, and its LIKE has no escape character
+                                ;; by default. INSTR matches literally; LOWER folds ASCII
+                                ;; letters only, so other letters match with their case.
+                                (flet ((has (column)
+                                         (list :> (list :call :instr (list :lower column)
+                                                        (list :lower term))
+                                               0)))
+                                  (list :or (has :text) (has :locator)))
+                                (let ((pattern (%like-pattern term)))
+                                  (list :or (list :ilike :text pattern)
+                                        (list :ilike :locator pattern)))))
                           terms))
          (rows (%fetch (corpus-store corpus)
                        (list :select +passage-columns+
@@ -1153,13 +1233,21 @@ average length."
          (stats (list :select '((:as (:count :*) :n) (:as (:avg :term_count) :avgdl))
                       :from (list chunks)
                       :where (corpus-where corpus (list := :terms_tokenizer +tokenizer-id+))))
+         (joins (list (list :inner (list :as frequencies :d) '(:= :d.term :m.term))
+                      (list :inner (list :as chunks :c2) '(:= :c2.id :m.chunk_id))
+                      (list :cross (list :as stats :st))))
          (scored (list :select (list :m.chunk_id
                                      (list :as (list :sum (list :raw (%bm25-expression))) :score))
                        :from (list (list :as matches :m))
-                       :join (list (list :inner (list :as frequencies :d) '(:= :d.term :m.term))
-                                   (list :inner (list :as chunks :c2) '(:= :c2.id :m.chunk_id))
-                                   (list :cross (list :as stats :st)))
+                       :join joins
                        :group-by '(:m.chunk_id))))
+    (when (%sqlite-p store)
+      ;; The numbers each matched term contributes, one row per chunk and term, for
+      ;; %SQLITE-KEYWORD-ROWS to score.
+      (return-from %bm25-query
+        (list :select '(:m.chunk_id :m.tf :d.df :c2.term_count :st.n :st.avgdl)
+              :from (list (list :as matches :m))
+              :join joins)))
     (list :select (append (%qualified "c" +passage-columns+) '(:c.id :s.score))
           :from (list (list :as chunks :c))
           :join (list (list :inner (list :as scored :s) '(:= :s.chunk_id :c.id)))
@@ -1167,11 +1255,48 @@ average length."
           :order-by '((:s.score :desc) :c.id)
           :limit limit)))
 
+(defun %bm25-term-score (tf df term-count n avgdl)
+  "%BM25-EXPRESSION computed here, for SQLite, whose LN exists only in builds with its math
+functions."
+  (let ((k1 *bm25-k1*) (b *bm25-b*))
+    (* (log (+ (/ (+ (- n df) 0.5d0) (+ df 0.5d0)) 1))
+       (/ (* tf (+ k1 1))
+          (+ tf (* k1 (+ (- 1 b) (if (and avgdl (plusp avgdl))
+                                     (* b (/ term-count avgdl))
+                                     0))))))))
+
+(defun %sqlite-keyword-rows (corpus terms limit)
+  "%KEYWORD-ROWS on SQLite: the per-term numbers from %BM25-QUERY, summed per chunk here, then
+the passage rows of the LIMIT best, each with its SCORE. Ties are ordered by id, as on Postgres."
+  (let* ((store (corpus-store corpus))
+         (sums (make-hash-table :test #'equal)))
+    (dolist (row (%fetch store (%bm25-query corpus terms limit)))
+      (flet ((num (key) (let ((v (param:row-value row key))) (and v (coerce v 'double-float)))))
+        (incf (gethash (param:row-value row :chunk_id) sums 0d0)
+              (%bm25-term-score (num :tf) (num :df) (num :term_count) (num :n) (num :avgdl)))))
+    (let* ((ranked (sort (loop for id being the hash-keys of sums using (hash-value score)
+                               collect (cons id score))
+                         (lambda (a b) (or (> (cdr a) (cdr b))
+                                           (and (= (cdr a) (cdr b)) (string< (car a) (car b)))))))
+           (best (subseq ranked 0 (min limit (length ranked)))))
+      (when best
+        (let ((by-id (make-hash-table :test #'equal)))
+          (dolist (row (%fetch store (list :select (append +passage-columns+ '(:id))
+                                           :from (list (store-table store))
+                                           :where (corpus-where corpus
+                                                                (list :in :id (mapcar #'car best))))))
+            (setf (gethash (param:row-value row :id) by-id) row))
+          (loop for (id . score) in best
+                for row = (gethash id by-id)
+                when row collect (append row (list :score score))))))))
+
 (defun %keyword-rows (corpus query limit locale)
   "The rows of the LIMIT best BM25 matches for QUERY, best first. NIL when QUERY has no terms."
   (let ((terms (remove-duplicates (tokenize query :locale locale) :test #'string= :from-end t)))
     (and terms
-         (%fetch (corpus-store corpus) (%bm25-query corpus terms limit)))))
+         (if (%sqlite-p (corpus-store corpus))
+             (%sqlite-keyword-rows corpus terms limit)
+             (%fetch (corpus-store corpus) (%bm25-query corpus terms limit))))))
 
 (defgeneric retrieve-keyword (corpus query &key limit locale)
   (:documentation "The LIMIT chunks of CORPUS that best match QUERY by BM25, best first, each
@@ -1189,7 +1314,7 @@ tokenizer; INDEX-PENDING writes them. A query whose words are all stop words mat
     ;; for the reason RETRIEVE-SIMILAR gives.
     (with-db (store)
       (conn:with-transaction ((store-connection store))
-        (conn:exec (store-connection store) "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        (%begin-snapshot store)
         (setf rows (%keyword-rows corpus query limit locale)
               pending (%unindexed-count corpus))))
     (%make-retrieval-result
