@@ -379,3 +379,93 @@ and the editor droppings that appear beside a file on every save."
                "naming every root"))
       (ignore-errors (aion/fs:delete-tree a))
       (ignore-errors (aion/fs:delete-tree b)))))
+
+;;; --- a failed reload stays visible until the file loads (#438) ----------------------------
+;;;
+;;; A Lisp file that compiled with a full WARNING failed its reload, and the error reached the
+;;; browser overlay. The next change -- a stylesheet -- then found no Lisp to compile, cleared
+;;; the error and refreshed the page, and the failed file was never tried again until it was
+;;; edited. From the browser, hot reload looked broken. These drive RELOAD! directly on a temp
+;;; root, with a builder that starts nothing.
+
+(defun %fresh-dev-root ()
+  (let ((root (uiop:ensure-directory-pathname
+               (merge-pathnames (format nil "hyperion-dev-438-~D-~D"
+                                        (get-universal-time) (incf *dev-tree-seq*))
+                                (uiop:temporary-directory)))))
+    (ensure-directories-exist root)
+    root))
+
+(defun %write-dev-file (root name text)
+  "Write TEXT to ROOT/NAME, waiting first so the new write date differs from the last one:
+file write dates have a resolution of one second."
+  (sleep 1.1)
+  (with-open-file (s (merge-pathnames name root) :direction :output :if-exists :supersede
+                                                 :if-does-not-exist :create)
+    (write-string text s)))
+
+(defparameter +dev-438-bad+ "(defun cl-user::dev-438-probe () cl-user::dev-438-not-a-variable)"
+  "A file whose compile ends with a full WARNING (an undefined variable), which fails a reload.")
+(defparameter +dev-438-good+ "(defun cl-user::dev-438-probe () 438)")
+
+(defmacro %with-dev-reloader ((dev root) &body body)
+  `(let* ((,root (%fresh-dev-root))
+          (,dev (hyperion/dev::make-dev :builder (lambda () nil) :paths (list ,root))))
+     (unwind-protect (let ((*error-output* (make-broadcast-stream))) ,@body)
+       (ignore-errors (aion/fs:delete-tree ,root)))))
+
+(test a-failed-lisp-file-stays-failed-through-an-asset-change
+  (%with-dev-reloader (d root)
+    (%write-dev-file root "app.lisp" +dev-438-bad+)
+    (%write-dev-file root "style.css" "body{}")
+    (is (eq :error (hyperion/dev:reload! d)))
+    (let ((err (hyperion/dev::dev-last-error d)))
+      (is (and err (search "app.lisp did not reload" err)) "the error names the file: ~A" err)
+      (is (and err (search "DEV-438-NOT-A-VARIABLE" (string-upcase err)))
+          "and carries the compiler's own text"))
+    (%write-dev-file root "style.css" "body{color:red}")
+    (is (eq :error (hyperion/dev:reload! d)) "a stylesheet change retries the failed file")
+    (is (hyperion/dev::dev-last-error d) "the error is still there for the overlay")
+    (%write-dev-file root "app.lisp" +dev-438-good+)
+    (is (eq :reloaded (hyperion/dev:reload! d)))
+    (is (null (hyperion/dev::dev-last-error d)) "and cleared once the file compiles")
+    (is (eql 438 (funcall 'cl-user::dev-438-probe)) "the fixed definition is the one loaded")))
+
+(test without-the-pending-list-an-asset-change-clears-the-error
+  "The control: what kept the error above is the list of failed files. Emptied, the same
+stylesheet change clears the error while the file still has never loaded -- the reported bug."
+  (%with-dev-reloader (d root)
+    (%write-dev-file root "app.lisp" +dev-438-bad+)
+    (is (eq :error (hyperion/dev:reload! d)))
+    (setf (hyperion/dev::dev-failed d) '())
+    (%write-dev-file root "style.css" "body{}")
+    (is (eq :reloaded (hyperion/dev:reload! d)))
+    (is (null (hyperion/dev::dev-last-error d)))))
+
+(test a-structure-that-changes-layout-asks-for-a-restart
+  (%with-dev-reloader (d root)
+    (%write-dev-file root "thing.lisp" "(defstruct cl-user::dev-438-thing a)")
+    (is (eq :reloaded (hyperion/dev:reload! d)))
+    (%write-dev-file root "thing.lisp" "(defstruct cl-user::dev-438-thing a b)")
+    (is (eq :error (hyperion/dev:reload! d)))
+    (let ((err (hyperion/dev::dev-last-error d)))
+      (is (and err (eql 0 (search "RESTART NEEDED: thing.lisp" err))) "error: ~A" err))))
+
+(test the-restart-message-is-only-for-a-layout-change
+  (is (eql 0 (search "RESTART NEEDED" (hyperion/dev::%reload-failure-message
+                                       "/x/a.lisp" "WARNING: change in instance length of class FOO:"))))
+  (is (null (search "RESTART NEEDED" (hyperion/dev::%reload-failure-message
+                                      "/x/a.lisp" "WARNING: undefined variable: X")))))
+
+;;; --- what serve watches and runs on (#438, #432) -------------------------------------------
+
+(test serve-can-leave-the-framework-tree-unwatched
+  (is (equal '("hyperion" "app") (hyperion/dev::%serve-systems '("app") t)))
+  (is (equal '("app") (hyperion/dev::%serve-systems '("app") nil))))
+
+(test serve-gives-uv-two-workers-unless-told-otherwise
+  (is (eql 2 (hyperion/dev::%dev-workers :uv nil nil)))
+  (is (null (hyperion/dev::%dev-workers :uv nil t)) ":workers nil asks for inline dispatch")
+  (is (eql 6 (hyperion/dev::%dev-workers :uv 6 t)))
+  (is (null (hyperion/dev::%dev-workers :hunchentoot nil nil)) "other backends keep START's default")
+  (is (eql 3 (hyperion/dev::%dev-workers :woo 3 t))))
