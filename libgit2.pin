@@ -1,0 +1,72 @@
+# The libgit2 release this tree builds `aion/libgit` against (#429).
+#
+# Same doctrine as libuv.pin and mbedtls.pin: the REPO declares the version, so adopting a new
+# one is an ordinary commit that propagates through git, and the library is FETCHED AND BUILT
+# FROM SOURCE by
+#   sbcl --script scripts/build-libgit2.lisp
+# with a C compiler alone: no cmake, no make. A native dependency we do not build is one we
+# cannot bundle (ADR-0011).
+#
+# `aion/libgit` is an OPT-IN system. Nothing that merely uses aion loads libgit2; an app that
+# keeps no versioned history never carries it.
+#
+# The maintainer approved this dependency on #429 (comment 5916493345): libgit2 v1.9.7, built
+# without cmake, HTTPS through the platform (SecureTransport on macOS, WinHTTP on Windows,
+# OpenSSL loaded at run time on Linux), and bundles that carry the binary ship this tarball and
+# its licence beside it.
+
+version 1.9.7
+sha256  1a4fbe7589e814777ae76b64734ad80f4ecad22cd33a22682a2aaea4ae5375e7
+url     https://github.com/libgit2/libgit2/archive/refs/tags/v1.9.7.tar.gz
+
+# The licence: GPL version 2 with the libgit2 linking exception (COPYING in the tarball). The
+# exception allows linking the library from a program under any licence; the library itself
+# stays GPLv2, so a bundle that carries the binary also carries its source (the tarball above)
+# and COPYING. build-libgit2.lisp copies COPYING beside the built library, where the bundler
+# picks up licence texts.
+licence GPL-2.0 with the libgit2 linking exception
+
+# On the checksum. Recorded trust-on-first-use on 2026-09-30: fetched over TLS from GitHub's
+# archive of the v1.9.7 tag and hashed here. libgit2 publishes no release asset, only the tag;
+# GitHub keeps tag archives byte-stable. Every later fetch is verified against this line.
+
+# THE CANDIDATE SOURCE SET: every .c file the build could compile, on any platform. That is
+# src/util (all of it, with its unix/, win32/, allocators/ and hash/ trees), src/libgit2 with
+# streams/ and transports/, and deps/zlib, deps/llhttp, deps/pcre2 and deps/xdiff. The count
+# and the sha256 of their tarball-relative paths, sorted, one per line, each ending in a
+# newline. build-libgit2.lisp refuses a tree whose set differs, so a new version that adds,
+# moves or drops a file fails loudly instead of building something nobody reviewed.
+sources-count  234
+sources-digest baa8f340c5ac254627dae52c3d9ac5e93d8fd84faacb245dac64ab11c560fdfd
+
+# To adopt a new libgit2:
+#   1. curl -sSLO https://github.com/libgit2/libgit2/archive/refs/tags/vX.Y.Z.tar.gz
+#   2. shasum -a 256, and update version, sha256 and url above;
+#   3. run build-libgit2.lisp: it prints the new source count and digest when they differ.
+#      Read what changed before updating them, and compare each platform's features header in
+#      the script with the new src/util/git2_features.h.in, whose names do change;
+#   4. delete vendor/libgit2/, rebuild, and run the aion/libgit suite on all three OSes.
+
+# --- staying current ---------------------------------------------------------
+#
+# REVIEWED is the date a human last read the advisories page. It is the only thing that
+# distinguishes "no advisory affects us" from "nobody has looked".
+
+# Reviewed on 2026-09-30: all eleven advisories on that page. v1.9.7 is past every one with a
+# fix, and two have none yet. Both concern only fetching from and pushing to a remote over
+# HTTPS, which aion/libgit's first step does not do. What each means for us, and what the
+# pull and push step will do, as the maintainer settled on #429:
+#   GHSA-2889-x8f6-mc4x  the HTTP transport follows an offsite redirect on its first request
+#                        and can send the credentials meant for the original remote to the
+#                        new host. aion/libgit will set follow_redirects to
+#                        GIT_REMOTE_REDIRECT_NONE by default, with a test that an offsite
+#                        redirect is refused.
+#   GHSA-h7gc-w2gg-p9xp  the OpenSSL stream compares a certificate's IP addresses the wrong
+#                        way round, so a remote given as an IP literal can be impersonated.
+#                        This build uses OpenSSL on Linux only. aion/libgit will refuse an
+#                        https remote whose host is an IP literal on Linux, with a condition
+#                        naming the advisory, until upstream fixes it.
+# Re-check both whenever this pin moves, and update the date.
+
+advisories https://github.com/libgit2/libgit2/security/advisories
+reviewed   2026-09-30
