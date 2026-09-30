@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/retrieval: `ensure-schema` adds two columns to the chunk table and creates a terms
+  table.** The chunk table gains `term_count` and `terms_tokenizer`, and `<table>_terms` holds
+  each chunk's terms for keyword search (#316). Both are created with `IF NOT EXISTS` the next
+  time the app calls `ensure-schema`, or makes the store with `:ensure t`; the app's role needs
+  the right to alter its own table and create one next to it. Chunks synced before then count
+  as not indexed for keyword and hybrid search until `index-pending` (or `ingest`) writes their
+  terms. Similarity and exact search are unaffected. A test or tool that drops the chunk table
+  drops `<table>_terms` too.
 - **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
   request threads, and `make-db-auth` takes a pool.** (#371)
   - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
@@ -51,6 +59,20 @@ its tag.
 
 ### Added
 
+- **praxeon/retrieval: keyword search by BM25, hybrid search, and a way to measure them.**
+  (#316)
+  - `retrieve-keyword` ranks a corpus's chunks by BM25 (`*bm25-k1*` 1.2, `*bm25-b*` 0.75),
+    computed in one SQL statement, so it needs no Postgres extension. `passage-score` is the
+    score.
+  - `tokenize` and `term-counts` are the tokenizer, and `register-stop-words` adds a language's
+    stop words (English is built in). `index-pending` writes the terms of chunks that have none
+    from the current tokenizer. The result reason `:not-indexed` counts them.
+  - `retrieve-hybrid` merges up to `*hybrid-candidates*` (150) results from similarity and from
+    BM25 by reciprocal rank fusion (`*rrf-k*` 60), and returns each chunk once. The merge is
+    `praxeon/retrieval/fusion`, in Coalton.
+  - `evaluate-retrieval` reports, for `:similar`, `:keyword` and `:hybrid`, how often the section
+    that answers each `make-eval-question` is in the top `:k`.
+  - `ingest` now also calls `index-pending`.
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
   `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
   `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with

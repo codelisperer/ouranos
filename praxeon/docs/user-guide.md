@@ -806,6 +806,38 @@ Each passage carries its `provenance`: corpus, document and version, section, lo
 and for a translation whether it was made from the current original (`:current`,
 `:older-original` or `:unknown`). A search never returns another corpus's chunks.
 
+**Keyword and hybrid search (#316):**
+
+```lisp
+(praxeon/retrieval:retrieve-keyword *terms* "error TS-999" :locale "en")         ; BM25, no embedder
+(praxeon/retrieval:retrieve-hybrid *terms* *embedder* "error TS-999 on renewal" :locale "en")
+```
+
+`retrieve-keyword` ranks chunks by BM25, computed by praxeon in one SQL statement, so it works
+on any Postgres without an extension. A sync writes each chunk's terms with the chunk. The
+tokenizer lowercases, keeps an identifier such as `TS-999` or `PRAXEON_EMBED_MODEL` whole as
+well as in parts, and drops the stop words of the chunk's locale (English only so far;
+`register-stop-words` adds a language). `:locale` chooses the stop words dropped from the query.
+Chunks synced before this existed, or indexed by an older tokenizer, make the result `truncated`
+with reason `:not-indexed` until `index-pending` writes their terms; `ingest` calls it.
+
+`retrieve-hybrid` takes up to 150 candidates from each search (`*hybrid-candidates*`) and merges
+the two rankings by reciprocal rank fusion, which uses only ranks. A chunk found by both appears
+once. Each passage's `passage-score` is its fused score, higher being better; `passage-distance`
+is NIL. The result is `truncated` while any chunk lacks an embedding or its terms.
+
+To choose between them on the app's own documents, `evaluate-retrieval` takes a list of
+`make-eval-question`s, each a query and the section that answers it, and reports for each
+strategy (`:similar`, `:keyword`, `:hybrid`) how often that section is in the top `:k`:
+
+```lisp
+(praxeon/retrieval:evaluate-retrieval *terms* *embedder*
+  (list (praxeon/retrieval:make-eval-question :query "error TS-999" :document-id "doc-7"
+                                              :section-id "4.2"))
+  :k 20 :locale "en")
+;; => ((:strategy :similar :k 20 :questions 1 :hits 0 :recall 0 :incomplete 0) ...)
+```
+
 `passage->ctx-item` turns a passage into a context item, and takes a function that writes the
 text the model reads, so the app decides how a citation looks.
 

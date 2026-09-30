@@ -48,11 +48,21 @@
    #:passage->ctx-item
    ;; exact retrieval
    #:retrieve-exact
+   ;; keyword retrieval, BM25 (#316)
+   #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
+   #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    ;; conditions
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
    #:embedding-width-changed #:embedding-width-changed-table
    #:embedding-width-changed-stored #:embedding-width-changed-configured
    #:recreate-embedding-column))
+
+;;; Reciprocal rank fusion, the typed and pure part of hybrid retrieval (#316).
+(cl:defpackage #:praxeon/retrieval/fusion
+  (:use #:coalton #:coalton-prelude)
+  (:local-nicknames (#:list #:coalton-library/list))
+  (:documentation "Reciprocal rank fusion of ranked lists of chunk ids (#316). Pure.")
+  (:export #:fused-ids #:fused-scores #:rrf-score))
 
 (cl:defpackage #:praxeon/retrieval
   (:use #:cl)
@@ -83,11 +93,15 @@
    #:retrieval-result #:retrieval-result-passages #:retrieval-result-completeness
    #:passage->ctx-item
    #:retrieve-exact
+   #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
+   #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
    #:embedding-width-changed #:embedding-width-changed-table
    #:embedding-width-changed-stored #:embedding-width-changed-configured
    #:recreate-embedding-column)
   (:local-nicknames (#:rc #:praxeon/retrieval/corpus)
+                    (#:fusion #:praxeon/retrieval/fusion)
+                    (#:boundary #:aion/boundary)
                     (#:llm #:praxeon/llm)
                     (#:actor #:praxeon/actor)
                     (#:ctx #:praxeon/context)
@@ -103,6 +117,10 @@ argument.")
    #:embed-pending #:ingest #:retrieve-similar #:deriver-of
    ;; the agent-facing search
    #:retrieve #:register-corpus-search #:*search-description*
+   ;; hybrid retrieval and its evaluation (#316)
+   #:retrieve-hybrid #:*hybrid-candidates* #:*rrf-k*
+   #:eval-question #:make-eval-question #:eval-question-query #:eval-question-document-id
+   #:eval-question-section-id #:evaluate-retrieval
    ;; re-exported from praxeon/retrieval/corpus
    #:section #:make-section #:section-p #:section-id #:section-document-id
    #:section-document-version #:section-locator #:section-locale #:section-locale-role
@@ -128,6 +146,8 @@ argument.")
    #:retrieval-result #:retrieval-result-passages #:retrieval-result-completeness
    #:passage->ctx-item
    #:retrieve-exact
+   #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
+   #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
    #:embedding-width-changed #:embedding-width-changed-table
    #:embedding-width-changed-stored #:embedding-width-changed-configured
