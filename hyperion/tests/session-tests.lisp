@@ -381,3 +381,56 @@ mint under WRAP-SESSION."
     (let ((set-cookie (getf (second response) :set-cookie)))
       (is (stringp set-cookie) "the middleware emitted a Set-Cookie the handler dropped")
       (is (search session:*cookie-name* set-cookie)))))
+
+;;; --- :secure decided per request (#300) -----------------------------------------------
+
+(defun %scheme-env (scheme peer &rest headers)
+  (let ((h (make-hash-table :test 'equal)))
+    (loop for (k v) on headers by #'cddr do (setf (gethash (string-downcase k) h) v))
+    (list :headers h :url-scheme scheme :remote-addr peer)))
+
+(defun %secure-cookie-p (app env)
+  (let ((sc (getf (second (funcall app env)) :set-cookie)))
+    (and (stringp sc) (search "; Secure" sc) t)))
+
+(test secure-auto-follows-the-request-s-scheme
+  (let ((app (%wrapped (session:make-memory-store) #'%ok :secure :auto)))
+    (is (%secure-cookie-p app (%scheme-env "https" "203.0.113.9")) "Secure over https")
+    (is (not (%secure-cookie-p app (%scheme-env "http" "203.0.113.9")))
+        "and not over plain http, so development sign-in keeps working")))
+
+(test secure-auto-believes-x-forwarded-proto-only-through-a-trusted-proxy
+  (let ((app (%wrapped (session:make-memory-store) #'%ok :secure :auto)))
+    (is (not (%secure-cookie-p app (%scheme-env "http" "10.0.0.1" "X-Forwarded-Proto" "https")))
+        "with no trusted proxy the header is ignored")
+    (let ((hyperion/proxy:*trusted-proxy* (hyperion/proxy:make-proxy-trust :cidrs '("10.0.0.0/8"))))
+      (is (%secure-cookie-p app (%scheme-env "http" "10.0.0.1" "X-Forwarded-Proto" "https"))
+          "from the TLS-terminating proxy it decides")
+      (is (not (%secure-cookie-p app (%scheme-env "http" "6.6.6.6" "X-Forwarded-Proto" "https")))
+          "a client that sends it itself changes nothing")
+      (is (not (%secure-cookie-p app (%scheme-env "https" "10.0.0.1" "X-Forwarded-Proto" "http")))
+          "and the proxy's http is believed too"))))
+
+(test secure-can-be-a-function-of-the-env-and-t-and-nil-are-unchanged
+  (let ((store (session:make-memory-store)))
+    (let ((app (%wrapped store #'%ok :secure (lambda (env) (getf env :secure-please)))))
+      (is (%secure-cookie-p app (list* :secure-please t (%scheme-env "http" "1.1.1.1"))))
+      (is (not (%secure-cookie-p app (%scheme-env "https" "1.1.1.1")))))
+    (is (%secure-cookie-p (%wrapped store #'%ok :secure t) (%scheme-env "http" "1.1.1.1")))
+    (is (not (%secure-cookie-p (%wrapped store #'%ok :secure nil) (%scheme-env "https" "1.1.1.1"))))
+    (is (not (%secure-cookie-p (%wrapped store #'%ok) (%scheme-env "https" "1.1.1.1")))
+        "the default is still NIL")))
+
+(test secure-auto-applies-to-a-rotation-as-to-a-mint
+  (let* ((store (session:make-memory-store))
+         (rotate (%wrapped store (lambda (env)
+                                   (session:rotate-session store (session:request-session env))
+                                   (%ok env))
+                           :secure :auto))
+         (first (funcall (%wrapped store #'%ok :secure :auto) (%scheme-env "https" "1.1.1.1")))
+         (cookie (%cookie-for (%cookie-id (getf (second first) :set-cookie))))
+         (env (%scheme-env "https" "1.1.1.1" "Cookie" cookie)))
+    (is (%secure-cookie-p rotate env) "the cookie a rotation owes is Secure over https")))
+
+(test secure-that-is-not-a-flag-or-a-function-is-refused
+  (signals error (session:wrap-session #'%ok (session:make-memory-store) :secure :always)))

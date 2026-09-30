@@ -312,6 +312,18 @@ session; implement `store-sweep` to do it in one query.
     (list 200 '(:content-type "text/html; charset=utf-8") (list "…"))))
 ```
 
+**`:secure :auto` for a site on plain http in development and behind TLS in production**
+(#300). `:secure` also takes `:auto`, which sets the cookie's `Secure` attribute when the
+request came over https: the env's `:url-scheme`, or `X-Forwarded-Proto` when the request came
+through a proxy the app trusts (`hyperion/proxy:*trusted-proxy*`, see "Behind a proxy or a
+CDN"). A client cannot turn it on or off by sending the header. `:secure` can also be a
+function of the env. `t` and `nil` mean what they always did.
+
+```lisp
+(setf hyperion/proxy:*trusted-proxy* (hyperion/proxy:make-proxy-trust :cidrs '("10.0.0.0/8")))
+(session:wrap-session #'handle-request *store* :secure :auto)
+```
+
 `wrap-session` resolves the browser's session (minting one, with a 128-bit CSPRNG
 id, when there is none), puts it on the env where `request-session` reads it, and
 attaches the `Set-Cookie` the response owes — including after a `rotate-session`
