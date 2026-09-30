@@ -44,7 +44,9 @@ its tag.
     model, instruction or answer limit does. It does nothing while the corpus is `:whole`.
   - `contextualize-pending :ledger` charges each call to a `praxeon/ceiling` ledger and signals
     `budget-exhausted` before a call the ledger cannot afford, keeping the contexts written.
-    `start-backfill` releases the backfill of a corpus made with `:backfill :explicit`.
+    A context that stops at the contextualizer's answer limit signals `deliberation-failure`
+    rather than being stored cut off. `start-backfill` releases the backfill of a corpus made
+    with `:backfill :explicit`.
   - `ingest` now also calls `contextualize-pending`, before `embed-pending`, and takes `:ledger`.
   - `retrieve` follows the corpus's strategy: every chunk in document order for a `:whole`
     corpus, and `retrieve-hybrid` with a default `:limit` of 20 for a `:hybrid` one

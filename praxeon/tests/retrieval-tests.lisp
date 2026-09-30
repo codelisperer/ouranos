@@ -1103,6 +1103,7 @@ chunk."
 (defclass context-writer (llm:provider)
   ((model :initarg :model :initform "writer-1" :reader writer-model)
    (answer :initarg :answer :initform nil :reader writer-answer)
+   (stop :initarg :stop :initform :end :reader writer-stop)
    (calls :initform '() :accessor writer-calls)
    (seen :initform (make-hash-table :test 'equal) :reader writer-seen)))
 
@@ -1127,6 +1128,7 @@ chunk."
                (funcall (writer-answer p) document)
                (format nil "  This passage is from the document that begins: ~A~%"
                        (%document-first-line document)))
+     :stop-reason (writer-stop p)
      :input-tokens 20 :output-tokens 10
      :cache-read-tokens (if hit 50 0) :cache-write-tokens (if hit 0 50))))
 
@@ -1419,3 +1421,13 @@ contextualizer consults and charges a ledger; how a grant is verified is praxeon
                      :hits)))
         (is (= 0 (hits plain)) "without contexts, the shorter chunk that says payout ranks first")
         (is (= 1 (hits contextual)) "with them, the chunk that says both words")))))
+
+(test a-context-cut-off-at-the-answer-limit-is-not-stored
+  "#338's rule for every caller of COMPLETE: a context that stopped at the output limit is not
+written as though it were whole."
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer :stop :max-tokens))
+           (corpus (%contextual store "handbook" :writer writer)))
+      (%sync-handbook corpus)
+      (signals cnd:deliberation-failure (rt:contextualize-pending corpus))
+      (is (= 0 (%column-count store "context IS NOT NULL")) "nothing was stored"))))

@@ -107,6 +107,12 @@ PRAXEON/CEILING:BUDGET-EXHAUSTED, before calling the model, when LEDGER cannot a
       (when (eq (llm:completion-stop-reason completion) :refusal)
         (error 'praxeon/conditions:deliberation-failure
                :detail "the contextualizer's model refused to write a chunk's context"))
+      ;; A context cut off at the answer limit is not stored as though it were whole (#338's
+      ;; rule for every caller of COMPLETE). The contexts written before it are kept.
+      (when (eq (llm:completion-stop-reason completion) :max-tokens)
+        (error 'praxeon/conditions:deliberation-failure
+               :detail (format nil "a chunk's context reached the contextualizer's answer limit of ~D tokens before the model had finished; make the contextualizer with a larger :max-tokens"
+                               (contextualizer-max-tokens contextualizer))))
       (string-trim '(#\Space #\Tab #\Newline #\Return) (llm:completion-text completion)))))
 
 (defun %context-stale-clause (deriver)
