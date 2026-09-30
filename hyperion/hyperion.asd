@@ -161,6 +161,7 @@
   :components ((:module "tests/http1"
                 :serial t
                 :components ((:file "parser-tests")
+                             (:file "chunked-tests")
                              (:file "encoder-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/http1/tests :run-tests)))
 
