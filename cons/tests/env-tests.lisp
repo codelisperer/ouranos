@@ -46,7 +46,7 @@ blank/comment lines yield no key."
     path))
 
 (defvar *fake-system-counter* 0
-  "Distinguishes temp directories created inside the same second.")
+  "Distinguishes the temp files env-scan-tests creates inside the same second.")
 
 (defmacro with-fake-system ((system-var dir-var) &body body)
   "A throwaway ASDF system object rooted at a temp directory, so LOAD-PROJECT-ENV's
@@ -55,19 +55,14 @@ system-relative resolution is exercised the way a real app uses it.
 The system is never REGISTERED -- an ASDF system object is itself a valid designator, so
 passing the instance exercises the same path a name would without leaving anything behind
 in the registry for the next test to trip over."
-  (let ((counter (gensym)))
-    `(let* ((,counter (incf *fake-system-counter*))
-            (,dir-var (merge-pathnames (format nil "cons-env-test-~D-~D/"
-                                               (get-universal-time) ,counter)
-                                       (uiop:temporary-directory)))
-            (,system-var (make-instance 'asdf:system
-                                        :name "cons-env-test-app"
-                                        :source-file (merge-pathnames "cons-env-test-app.asd"
-                                                                      ,dir-var))))
-       (declare (ignorable ,dir-var))
-       (ensure-directories-exist ,dir-var)
-       (unwind-protect (progn ,@body)
-         (ignore-errors (aion/fs:delete-tree ,dir-var))))))
+  `(let* ((,dir-var (tempdir:make-temporary-directory "env-test"))
+          (,system-var (make-instance 'asdf:system
+                                      :name "cons-env-test-app"
+                                      :source-file (merge-pathnames "cons-env-test-app.asd"
+                                                                    ,dir-var))))
+     (declare (ignorable ,dir-var))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (aion/fs:delete-tree ,dir-var)))))
 
 (test load-project-env-resolves-against-the-system-not-the-current-directory
   ;; The property that makes it correct for a BUILT BINARY, which is normally run from a

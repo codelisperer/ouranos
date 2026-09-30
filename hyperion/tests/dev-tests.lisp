@@ -308,7 +308,7 @@ and the editor droppings that appear beside a file on every save."
   ;; silent there and the docstring is what addresses it. This catches the empty root.
   (let ((root (uiop:ensure-directory-pathname
                (uiop:ensure-directory-pathname
-                (merge-pathnames (format nil "hyp-dev-empty-~D/" (random 100000))
+                (merge-pathnames (format nil "hyp-dev-empty-~D/" (random 100000 (make-random-state t)))
                                  (uiop:temporary-directory))))))
     (unwind-protect
          (progn

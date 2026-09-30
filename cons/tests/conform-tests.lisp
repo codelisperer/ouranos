@@ -17,14 +17,33 @@ in a writable directory can be deleted, so there is nothing to do."
                       :output nil :error-output nil :ignore-error-status t)))
 
 (defmacro with-temp-dir ((var) &body body)
-  "Bind VAR to a fresh, uniquely-named temp directory pathname; remove it after."
-  (let ((name (gensym)))
-    `(let* ((,name (format nil "cons-conform-~A/" (symbol-name (gensym "T"))))  ; unique per call
-            (,var (ensure-directories-exist
-                   (merge-pathnames ,name (uiop:temporary-directory)))))
-       (unwind-protect (progn ,@body)
-         (%clear-read-only ,var)
-         (aion/fs:delete-tree ,var :if-does-not-exist :ignore)))))
+  "Bind VAR to a new, empty temp directory; remove it after.
+
+The directory is created by CONS/TEMPDIR, which picks a random name and creates it
+exclusively, so a directory left behind by an earlier run can never be handed back. The name
+used to come from GENSYM, whose counter starts at the same value in every fresh image, so a
+second run found the first run's directory, with the first run's files in it (#418)."
+  `(let ((,var (tempdir:make-temporary-directory "conform")))
+     (unwind-protect (progn ,@body)
+       (%clear-read-only ,var)
+       (aion/fs:delete-tree ,var :if-does-not-exist :ignore))))
+
+(test with-temp-dir-never-reuses-a-directory-left-behind
+  ;; The old macro named its directory cons-conform-T<n>/ from *GENSYM-COUNTER*. Pre-create
+  ;; the directory it would pick for a known counter value, with a stale file in it, and check
+  ;; that WITH-TEMP-DIR gives a different, empty directory instead.
+  (let* ((*gensym-counter* 424242)
+         (stale (merge-pathnames "cons-conform-T424242/" (uiop:temporary-directory))))
+    (ensure-directories-exist stale)
+    (with-open-file (o (merge-pathnames "left-behind.txt" stale) :direction :output
+                                                                 :if-exists :supersede)
+      (write-string "from an earlier run" o))
+    (unwind-protect
+         (with-temp-dir (root)
+           (is (not (equal (namestring (truename root)) (namestring (truename stale)))))
+           (is (null (uiop:directory-files root)))
+           (is (null (uiop:subdirectories root))))
+      (aion/fs:delete-tree stale :if-does-not-exist :ignore))))
 
 (defun %exists (root rel) (probe-file (merge-pathnames rel root)))
 (defun %slurp (root rel) (uiop:read-file-string (merge-pathnames rel root)))
