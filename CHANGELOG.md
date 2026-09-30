@@ -23,6 +23,17 @@ its tag.
   `:request-guard (:same-origin "http://NAME:PORT" ...)` with those origins, or
   `:request-guard :none`. On a host that is not loopback, `serve` stays unguarded and warns once.
   (#304)
+- **hyperion/desktop: `shipped-image-p` and `install-directory` say whether this image is a
+  shipped build and where it is, on every platform.** The rule was private to `hyperion/update`,
+  so an app without the updater compared `sb-ext:*core-pathname*` with
+  `sb-ext:*runtime-pathname*`. That is the test for a one-file image, and it answers "not
+  shipped" inside a real macOS bundle (`sbcl` and `sbcl.core` in `<name>.app/Contents/MacOS`) or
+  Windows bundle (`sbcl-runtime.exe` and `sbcl.core` beside `<name>.exe`). An app acts if it
+  makes that comparison: call `hyperion/desktop:shipped-image-p` instead, and
+  `hyperion/desktop:install-directory` for the `.app` on macOS or the app's directory elsewhere
+  (NIL in a development image). The same answers are in `aion/platform` as `shipped-image-p` and
+  `shipped-image-directory`, for code that does not load `hyperion/desktop`; `hyperion/update`
+  now uses them and its private copy is gone. (#416)
 
 ### Added
 
@@ -37,6 +48,16 @@ its tag.
   there but a status: a DNS-rebinding page can read whatever that path returns.
   `hyperion/server:loopback-host-p` is exported. `hyperion/docs/middleware-security.md` has a
   table of which entry point is guarded by default. (#304)
+- **aion/uv/net: `write-bytes` takes a list of octet vectors and strings, written in order as
+  one write.** Each piece is copied straight into the write's buffer, so a caller with a head
+  and a body no longer joins them into a new vector first. The future and `:on-complete`
+  report the total octet count. `write-bytes` also copies its input in one bulk copy instead
+  of one octet at a time. hyperion/server-uv uses the list form for every response, chunk and
+  file head, and writes a list response body piece by piece instead of joining it first.
+  Together with faster header checks in hyperion/http1 and asking a connection's peer address
+  once instead of per request, this cut the server-uv loop thread's time per `/tile` request
+  in `hyperion/bench` on macOS from about 61 µs to about 39 µs, and `/tile` went from about
+  15,400 to about 22,800 requests/s. (#430)
 
 ### Fixed
 
@@ -45,6 +66,18 @@ its tag.
   Studio installs the variable chose the toolchain for libuv and the Windows launcher but not for
   mbedTLS. It now uses `scripts/msvc.lisp`, as `build-libuv.lisp` and `build-desktop-app.lisp` do,
   and a path that is not an installation is refused before anything is downloaded. (#410)
+- **aion/pool: a job finishing no longer wakes every idle worker.** `%finish-job` broadcast on
+  the pool's waitqueue after every job, and the only threads waiting there are idle workers,
+  so each completion woke all of them to find nothing to do. With hyperion/server-uv's
+  `:workers`, that made the event loop wait for the pool's lock on every request. On macOS in
+  `hyperion/bench`, `/ping` with 8 workers went from about 24,000 to about 30,400 requests/s
+  and the server from 2.2 to 1.16 cores. (#430)
+- **hyperion/html: `autocomplete` on `<textarea>` compiles without a WARNING.** It is valid HTML,
+  but Spinneret's attribute table does not list it there and signals a full WARNING while
+  compiling the template. That failed an ASDF build and, under `hyperion/dev`, the reload of the
+  whole file. Hyperion now exempts it, as it already exempts `hx-` and the other client-framework
+  prefixes (`*spinneret-missing-attributes*`), so an app that passed it through `:attrs`, or
+  pushed it onto `spinneret:*unvalidated-attribute-prefixes*` itself, can stop. (#439)
 
 ## v0.1.6 — 2026-09-30
 
@@ -123,30 +156,8 @@ Changes since `v0.1.5`. The tag is on `905d80f`.
   build (`%shipped-image-p`). `verify-bundle-windows.ps1` treats `sbcl-runtime.exe` as a helper
   and traces it as the launcher's child. Linux builds are unchanged. (#98)
 
-- **hyperion/desktop: `shipped-image-p` and `install-directory` say whether this image is a
-  shipped build and where it is, on every platform.** The rule was private to `hyperion/update`,
-  so an app without the updater compared `sb-ext:*core-pathname*` with
-  `sb-ext:*runtime-pathname*`. That is the test for a one-file image, and it answers "not
-  shipped" inside a real macOS bundle (`sbcl` and `sbcl.core` in `<name>.app/Contents/MacOS`) or
-  Windows bundle (`sbcl-runtime.exe` and `sbcl.core` beside `<name>.exe`). An app acts if it
-  makes that comparison: call `hyperion/desktop:shipped-image-p` instead, and
-  `hyperion/desktop:install-directory` for the `.app` on macOS or the app's directory elsewhere
-  (NIL in a development image). The same answers are in `aion/platform` as `shipped-image-p` and
-  `shipped-image-directory`, for code that does not load `hyperion/desktop`; `hyperion/update`
-  now uses them and its private copy is gone. (#416)
-
 ### Added
 
-- **aion/uv/net: `write-bytes` takes a list of octet vectors and strings, written in order as
-  one write.** Each piece is copied straight into the write's buffer, so a caller with a head
-  and a body no longer joins them into a new vector first. The future and `:on-complete`
-  report the total octet count. `write-bytes` also copies its input in one bulk copy instead
-  of one octet at a time. hyperion/server-uv uses the list form for every response, chunk and
-  file head, and writes a list response body piece by piece instead of joining it first.
-  Together with faster header checks in hyperion/http1 and asking a connection's peer address
-  once instead of per request, this cut the server-uv loop thread's time per `/tile` request
-  in `hyperion/bench` on macOS from about 61 µs to about 39 µs, and `/tile` went from about
-  15,400 to about 22,800 requests/s. (#430)
 - **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
   Secure attribute per request.** (#300) `:auto` sets it when the request came over https: the
   env's `:url-scheme`, or `X-Forwarded-Proto` when it came through a proxy the app trusts,
@@ -199,13 +210,6 @@ Changes since `v0.1.5`. The tag is on `905d80f`.
   runs, such as a cancel button, needs at least 2 on Woo. (#355)
 
 ### Fixed
-
-- **aion/pool: a job finishing no longer wakes every idle worker.** `%finish-job` broadcast on
-  the pool's waitqueue after every job, and the only threads waiting there are idle workers,
-  so each completion woke all of them to find nothing to do. With hyperion/server-uv's
-  `:workers`, that made the event loop wait for the pool's lock on every request. On macOS in
-  `hyperion/bench`, `/ping` with 8 workers went from about 24,000 to about 30,400 requests/s
-  and the server from 2.2 to 1.16 cores. (#430)
 
 - **aion/fs: on Windows, `delete-tree` retries a delete that another process blocks for a
   moment.** A file can stay open briefly after the process that used it exits, for example
