@@ -49,6 +49,16 @@ its tag.
   real directories this user owns. An app that cleans up after the updater, or looks for a
   staged installer, looks in the new place on Linux. (#347)
 
+- **cons/coalton-repl: `eval-input` can return a result of kind `:exit-requested`, and runs
+  each evaluation on a thread of its own.** An input that asks to end the process, `(exit)`
+  or `(quit)` or a `lisp` escape naming `sb-ext:exit`, `sb-ext:quit` or `uiop:quit`, is not
+  evaluated; `process-ending-p` is the test. An app that dispatches on `result-kind` with
+  `ecase` adds a clause for `:exit-requested` and decides what it means: the desktop example
+  closes, and a REPL served to other people refuses. Because the evaluation runs on its own
+  thread, a dynamic binding the caller made around `eval-input` is not seen by the code being
+  evaluated; set the global value instead. A second input that arrives while one is running
+  gets an `:error` result at once. (#355)
+
 ### Added
 
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
@@ -88,6 +98,14 @@ its tag.
   error code when Windows cannot answer, and signals on other systems. `aion/windows` re-exports
   it. An app that parses `attrib.exe` for a read-only check can call this instead: `attrib.exe`'s
   output did not decode for a non-ASCII path, and the check answered "not read-only". (#349)
+- **cons/coalton-repl: `eval-input` takes `:time-limit`, in seconds, and `cancel-evaluation`
+  stops a running evaluation from another thread.** Either way the result is an `:error`
+  saying why, and the session can evaluate again. The stop is signalled as a
+  `serious-condition`, so `ignore-errors` in the user's own code does not swallow it. (#355)
+- **hyperion/desktop: `request-close` closes the window `run-app` is showing, from any
+  thread**, and `run-app` then stops the server and returns. `run-app` takes `:workers`,
+  passed to `hyperion/server:start`: an app whose page makes a second request while a slow one
+  runs, such as a cancel button, needs at least 2 on Woo. (#355)
 
 ### Fixed
 
@@ -114,6 +132,16 @@ its tag.
   `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
   takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
   the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
+- **hyperion/desktop: the window closes when the app's process exits, and an exit from another
+  thread takes a second instead of a minute on Windows.** `run-app` blocked in
+  `uiop:wait-process` on the launcher, where the main thread cannot be interrupted. When code
+  on another thread called `sb-ext:exit`, SBCL waited `sb-ext:*exit-timeout*` (60 seconds) for
+  the main thread, with the server no longer answering, and the process then ended with the
+  window still open. `run-app` now polls, and stops the launcher whenever it is left other than
+  by the window closing. (#355)
+- **The desktop Coalton REPL example: `(exit)` and `(quit)` close it, an evaluation stops after
+  30 seconds or when its stop button is pressed, and the page says so when the backend stops
+  answering.** Served with `serve` or `dev`, `(exit)` is refused instead. (#355)
 
 ## v0.1.4 — 2026-09-29
 
