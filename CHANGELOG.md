@@ -14,28 +14,6 @@ its tag.
 
 ### An app may have to act
 
-- **praxeon/translate: a translation cut off at the output limit signals
-  `praxeon/conditions:translation-truncated` instead of being returned as the translation.**
-  `translate`'s `:max-tokens` now defaults to NIL, which sizes the limit from the text:
-  `translation-max-tokens` is twice the text's UTF-8 bytes plus 256, at least 1,024 and at most
-  `praxeon/llm:*default-max-tokens*`. Before, the limit was a fixed 2,048, and a translation that
-  reached it was returned cut off with nothing to say so. That became more likely once #326
-  allowed a turn's reply of up to 8,192 tokens. The condition is a `deliberation-failure`, so an
-  app's handler for a failed translation receives it, and it offers `retry-with-max-tokens` and
-  `accept-truncated`; after `accept-truncated`, `translate` returns the cut-off translation with
-  a second value, `:truncated`. With no handler, an app that translates `run-turn`'s reply now
-  gets an error where it used to show part of a reply, so such an app adds one. `praxeon/elise` asks once
-  more at twice the limit, and if that is cut off too, shows the whole English reply. The
-  `translate` means that `register` installs fails rather than handing the agent part of a
-  translation. The v0.1.4 note that `translate` is limited to 2,048 tokens and returns a
-  cut-off translation without signalling no longer applies. (#338)
-- **praxeon: `generate-structured` signals `structured-result-truncated` when the reply stopped
-  at the output limit.** It is a `structured-result-invalid`, so an existing handler for an
-  unusable result receives it. Before, a reply cut off before the tool call was reported as
-  `structured-result-not-called`, and one cut off inside it was re-asked at the same limit
-  until `:attempts` ran out. `retry-with-max-tokens` asks again with a larger limit without
-  counting an attempt, and `accept-truncated` returns the cut-off arguments with a second value,
-  `:truncated`. `structured-result-invalid-arguments` is now exported. (#338)
 - **hyperion/dev: `serve` on loopback refuses a request whose Host is not `127.0.0.1:PORT` or
   `localhost:PORT`, and a cross-site POST.** It now starts its server with
   `:request-guard :same-origin`, the guard `run-app` has had since #302, because a development
@@ -62,7 +40,6 @@ its tag.
   does, deadlocks there, so development behaved differently from a production entry point that
   passes `:workers`. An app acts if it develops on `:uv` (`HYPERION_SERVER=uv`) and relies on
   inline dispatch: pass `:workers nil`. Other backends keep `start`'s default. (#432)
-
 - **A Windows desktop app refuses to start a `sbcl.core` that is not the one it was built
   with.** `<name>.exe`, the launcher, is compiled with the SHA-256 of the core built beside it
   and checks it before starting `sbcl-runtime.exe`. On a mismatch it exits with code 126 and says
@@ -73,14 +50,31 @@ its tag.
   `scripts/build-desktop-app.lisp` on Windows now loads the app and dumps the core in a child
   process, and compiles the launcher afterwards. An app acts if its packaging changes
   `sbcl.core` after the build: rebuild instead, or the launcher refuses the result. (#98)
+- **praxeon/translate: a translation cut off at the output limit signals
+  `praxeon/conditions:translation-truncated` instead of being returned as the translation.**
+  `translate`'s `:max-tokens` now defaults to NIL, which sizes the limit from the text:
+  `translation-max-tokens` is twice the text's UTF-8 bytes plus 256, at least 1,024 and at most
+  `praxeon/llm:*default-max-tokens*`. Before, the limit was a fixed 2,048, and a translation that
+  reached it was returned cut off with nothing to say so. That became more likely once #326
+  allowed a turn's reply of up to 8,192 tokens. The condition is a `deliberation-failure`, so an
+  app's handler for a failed translation receives it, and it offers `retry-with-max-tokens` and
+  `accept-truncated`; after `accept-truncated`, `translate` returns the cut-off translation with
+  a second value, `:truncated`. With no handler, an app that translates `run-turn`'s reply now
+  gets an error where it used to show part of a reply, so such an app adds one. `praxeon/elise` asks once
+  more at twice the limit, and if that is cut off too, shows the whole English reply. The
+  `translate` means that `register` installs fails rather than handing the agent part of a
+  translation. The v0.1.4 note that `translate` is limited to 2,048 tokens and returns a
+  cut-off translation without signalling no longer applies. (#338)
+- **praxeon: `generate-structured` signals `structured-result-truncated` when the reply stopped
+  at the output limit.** It is a `structured-result-invalid`, so an existing handler for an
+  unusable result receives it. Before, a reply cut off before the tool call was reported as
+  `structured-result-not-called`, and one cut off inside it was re-asked at the same limit
+  until `:attempts` ran out. `retry-with-max-tokens` asks again with a larger limit without
+  counting an attempt, and `accept-truncated` returns the cut-off arguments with a second value,
+  `:truncated`. `structured-result-invalid-arguments` is now exported. (#338)
 
 ### Added
 
-- **praxeon/conditions: `output-limit-reached`, the parent of every condition for a result cut
-  off at the output limit**: `output-truncated` from `run-turn`, and the new
-  `translation-truncated` and `praxeon/llm:structured-result-truncated`. Each is signalled inside
-  `retry-with-max-tokens` and `accept-truncated`, so one handler on `output-limit-reached` can
-  raise the limit or accept the cut-off result in all three. (#338)
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
   `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,
@@ -131,6 +125,11 @@ its tag.
   handler threads production uses (#432). `:watch-framework nil` stops watching hyperion's own
   `src/`, for an app whose framework clone is pulled rather than edited; the default, `t`, is
   unchanged. (#438)
+- **praxeon/conditions: `output-limit-reached`, the parent of every condition for a result cut
+  off at the output limit**: `output-truncated` from `run-turn`, and the new
+  `translation-truncated` and `praxeon/llm:structured-result-truncated`. Each is signalled inside
+  `retry-with-max-tokens` and `accept-truncated`, so one handler on `output-limit-reached` can
+  raise the limit or accept the cut-off result in all three. (#338)
 
 ### Fixed
 
