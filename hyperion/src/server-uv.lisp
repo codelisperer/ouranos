@@ -1556,9 +1556,31 @@ one level up."
 ;;; Windows runs one loop whatever is asked: moving a socket between loops needs
 ;;; WSADuplicateSocket there, which is not bound.
 
-(defparameter *default-loops* 1
-  "How many loops a server runs when START is not given :LOOPS. See #463 for the measurement
-that chose it.")
+(defparameter *default-loops* :auto
+  "How many loops a server runs when START is not given :LOOPS: a positive integer, or :AUTO.
+
+:AUTO is one loop when handlers run inline (no :WORKERS and the inline *DISPATCH*), because
+several loops would run several handlers at once; otherwise the machine's online cores, at
+most 4. Measured on #463 with 8 workers on /tile: on a 4-core Linux host, 1 loop served
+31,724 requests/s, 2 served 97,236 and 4 served 112,364 to 119,501; on a 10-core Mac, 1 loop
+41,732, 2 loops 64,244 and 4 loops 82,335, with 6 and 8 no better because the load generators
+and the kernel had the machine by then. So 4 is the most any measurement supports, and one loop
+per core is what a loop needs to be worth its thread.")
+
+(defun %online-cores ()
+  "The number of online CPUs, from sysconf(_SC_NPROCESSORS_ONLN), or 1 where it is not known."
+  (let ((name #+linux 84 #+darwin 58 #-(or linux darwin) nil))
+    (or (and name
+             (let ((n (ignore-errors (cffi:foreign-funcall "sysconf" :int name :long))))
+               (and n (plusp n) n)))
+        1)))
+
+(defun %default-loop-count (workers)
+  "The loop count *DEFAULT-LOOPS* gives a server with WORKERS; see there."
+  (let ((setting *default-loops*))
+    (cond ((integerp setting) setting)
+          ((and (null workers) (eq *dispatch* *inline-dispatch*)) 1)
+          (t (min 4 (%online-cores))))))
 
 (defparameter *default-scheme* :auto
   "How connections reach the loops when START is not given :SCHEME. :AUTO is :REUSEPORT on
@@ -1629,7 +1651,7 @@ TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
 Clack -- owning the socket is what makes it available at all."
   (check-type workers (or null (integer 1)))
-  (let* ((loops (or loops *default-loops*))
+  (let* ((loops (or loops (%default-loop-count workers)))
          (scheme (progn (check-type loops (integer 1))
                         (%resolve-scheme (or scheme *default-scheme*) loops)))
          (loops (if (eq scheme :single) 1 loops))
