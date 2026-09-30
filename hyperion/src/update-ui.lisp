@@ -254,7 +254,18 @@ inserts a new element, so a `load' in a reply re-requests itself forever."
         when (member k '(:prefix :id :labels :notes-url :csrf-token))
           append (list k v)))
 
-(defun update-router (&rest args &key (check t) prefix id labels notes-url csrf-token)
+(defun %update-args (channel product env)
+  "The :CHANNEL and :PRODUCT keywords for CHECK-FOR-UPDATE and APPLY-UPDATE, from
+UPDATE-ROUTER's arguments. Each is a string or a function of ENV, resolved per request. A
+NIL value is left out, so the client's own default applies: stable, and *APP-NAME*."
+  (flet ((resolve (v) (if (functionp v) (funcall v env) v)))
+    (let ((ch (resolve channel))
+          (pr (resolve product)))
+      (append (and ch (list :channel ch))
+              (and pr (list :product pr))))))
+
+(defun update-router (&rest args &key (check t) channel product
+                                      prefix id labels notes-url csrf-token)
   "A router answering the three update routes. MOUNT it under +UPDATE-PREFIX+.
 
     (router:router (router:mount up-ui:+update-prefix+ (up-ui:update-router)))
@@ -263,6 +274,12 @@ CHECK (default T) makes GET /status perform the check rather than report the las
 Design section 8: \"the check itself is the poll\". Pass NIL for an app that checks on its
 own schedule and wants the route to read the cached state -- and for a suite that must not
 reach the network.
+
+CHANNEL and PRODUCT are passed to both the check and the apply (#301). Each is a string, or
+a function of the request env for a per-user setting such as a beta opt-in. Left NIL, the
+client's defaults apply: the stable channel, and *APP-NAME* as the product. They matter even
+with CHECK NIL, because applying re-checks: an app that checked on beta itself and mounts
+this router without its channel would have Apply re-check against stable.
 
 CSRF-TOKEN is a string or a thunk of no arguments; a thunk is re-called per request, which
 is what a per-session token requires."
@@ -280,7 +297,10 @@ is what a per-session token requires."
        (router:route
         :get +status-path+
         (lambda (env)
-          (render (if check (up:check-for-update) (up:update-status)) env))
+          (render (if check
+                      (apply #'up:check-for-update (%update-args channel product env))
+                      (up:update-status))
+                  env))
         :name :update-status)
        (router:route
         :post +apply-path+
@@ -289,7 +309,7 @@ is what a per-session token requires."
           ;; strategy is not written (#251), which today is macOS. That is an ordinary
           ;; answer with a sentence attached, not a 500: render it as a block so the user
           ;; reads the reason instead of a stack trace.
-          (render (handler-case (up:apply-update)
+          (render (handler-case (apply #'up:apply-update (%update-args channel product env))
                     (up:update-not-implemented (e)
                       (list :status "blocked" :version (getf (up:update-status) :version)
                             :block "not-implemented"

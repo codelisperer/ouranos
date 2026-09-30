@@ -12,6 +12,48 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **hyperion/update: `check-for-update` and `apply-update` check the manifest's product against
+  `*app-name*` by default.** Before, `:product` defaulted to NIL and the product was not checked
+  unless a caller passed it. An app whose `*app-name*` is not the `product` its manifests carry
+  now gets the `manifest-mismatch` block. Set `*app-name*` to the manifest's product, which is
+  also the name the Windows installer registers under `HKCU\Software\<name>`. (#301)
+
+### Added
+
+- **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
+  Secure attribute per request.** (#300) `:auto` sets it when the request came over https: the
+  env's `:url-scheme`, or `X-Forwarded-Proto` when it came through a proxy the app trusts,
+  read through `hyperion/proxy:request-scheme` and the same `*trusted-proxy*` setting that
+  `client-address` reads (#381). A function of the env decides it too. `t` and `nil` are
+  unchanged. One middleware then serves a site that runs on plain http in development and
+  behind a TLS proxy in production, which SoloFlow's website does today by building the
+  middleware twice.
+
+### Fixed
+
+- **aion/fs: on Windows, `delete-tree` retries a delete that another process blocks for a
+  moment.** A file can stay open briefly after the process that used it exits, for example
+  while antivirus scans an executable that has just run, and the delete then failed at once
+  with a sharing violation (error 32), which made a CHECKERS/TESTS run fail on Windows. A
+  delete that fails with error 5, 32 or 145 is now tried again for up to 3 seconds
+  (`aion/fs::*transient-retry-seconds*`) before `delete-tree-error` is signalled. What
+  `delete-tree` refuses is unchanged: a link is still removed as a link, and a root that is a
+  link is still refused at once. (#402)
+- **mnemosyne: a SQLite transaction whose `COMMIT` is refused is rolled back** (#400). SQLite
+  refuses a `COMMIT` with `BUSY` while another connection holds a read lock, and keeps the
+  transaction open so the `COMMIT` can be retried. `with-transaction` did not roll it back, so the
+  connection stayed inside that transaction: its later statements were never committed, and its
+  write lock made every other connection's writes fail with "database is locked" until it was
+  closed. `with-transaction` now rolls the transaction back and signals the refusal as a
+  `mnemosyne/conn:db-error`; it used to reach the caller as a `sqlite:sqlite-error`.
+- **hyperion/update-ui: `update-router` takes `:channel` and `:product` and passes them to both the
+  status and the apply route.** Each is a string or a function of the request env. Before, both
+  routes used the stable channel and no product, so an app that checked on beta and mounted the
+  router with `:check nil` had Apply re-check against stable. The apply path's second manifest
+  fetch now also refuses a manifest for another channel. (#301)
+
 ## v0.1.5 — 2026-09-30
 
 Changes since `v0.1.4`. The tag is on `f3fdf1a`.

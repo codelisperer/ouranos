@@ -70,3 +70,31 @@ A and B, then close both and delete the file."
          (is (search "locked" (princ-to-string err) :test #'char-equal)
              "as \"database is locked\": ~A" err)
          (is (< (%seconds-since start) 0.25) "and fail at once, without waiting"))))))
+
+(test a-commit-refused-while-another-connection-reads-leaves-no-transaction-open
+  ;; A holds a read lock inside its transaction. B's transaction writes, and SQLite refuses its
+  ;; COMMIT with BUSY, keeping the transaction open for a retry. WITH-TRANSACTION rolls it back
+  ;; and signals the refusal, so B is outside a transaction, its row was not written, and once A
+  ;; finishes, B writes normally. Control: before the rollback was added, B stayed inside the
+  ;; refused transaction, and its next statement ran inside it (#400).
+  (let* ((conn:*sqlite-busy-timeout-ms* nil)
+         (path (%busy-db-path))
+         (a (conn:connect (be:make-sqlite (namestring path))))
+         (b (conn:connect (be:make-sqlite (namestring path)))))
+    (unwind-protect
+         (progn
+           (conn:exec a "CREATE TABLE busy_t (x INTEGER)")
+           (conn:with-transaction (a)
+             (conn:query a "SELECT x FROM busy_t")
+             (signals conn:db-error
+               (conn:with-transaction (b)
+                 (conn:exec b "INSERT INTO busy_t VALUES (1)")))
+             (is-true (mnemosyne/conn::%sqlite-autocommit-p b)
+                      "B is outside a transaction after the refused commit"))
+           (is (null (conn:query a "SELECT x FROM busy_t")) "the refused row was not written")
+           (conn:with-transaction (b)
+             (conn:exec b "INSERT INTO busy_t VALUES (2)"))
+           (is (equal '(2) (mapcar (lambda (r) (getf r :|x|)) (conn:query a "SELECT x FROM busy_t")))))
+      (conn:disconnect a)
+      (conn:disconnect b)
+      (ignore-errors (delete-file path)))))

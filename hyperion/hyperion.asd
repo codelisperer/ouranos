@@ -421,7 +421,11 @@
   :description "The update surface: the routes exist, the banner renders, and the poll survives."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/update-ui" "hyperion" "hyperion/update" "fiveam")  ; update-ui-tests.lisp calls both
+  :depends-on ("hyperion/update-ui" "hyperion" "hyperion/update" "fiveam"  ; update-ui-tests.lisp calls both
+               ;; The client suite's signed-manifest fixtures, so the router tests for #301 sign
+               ;; real manifests with a real key instead of a second copy of that code. Loading
+               ;; the system defines its tests; it does not run them.
+               "hyperion/update/tests")
   :serial t
   :components ((:file "tests/update-ui-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/update-ui/tests :run-tests)))

@@ -61,6 +61,19 @@ Set by the application; there is no default, for the same reason no source has o
 Ships INSIDE the bundle and is exactly as trusted as the installer that placed it. NIL
 disables updating entirely rather than disabling verification -- see `%trusted-key'.")
 
+(defvar *app-name* nil
+  "The product's install name, as `windows.nsi' -DAPPNAME sees it. The application sets it.
+
+Needed to find the install directory, which is the one thing the Windows apply path must
+get exactly right: the installer is handed `/D=' and will happily install a second copy
+somewhere else if we guess wrong, leaving the running one untouched and the user
+convinced the update silently did nothing.
+
+It is also the product name a manifest must carry: `check-for-update' and `apply-update'
+default their PRODUCT to it (#301). The installer's registry key and the manifest's product
+are the same name, so one setting serves both. Defined here, ahead of those two functions,
+because their argument lists read it.")
+
 ;;; --- update sources: a protocol, so the back end is a deployment choice -----
 
 (defgeneric fetch-manifest (source channel)
@@ -450,16 +463,17 @@ Before any check it reports `unchecked' rather than inventing an answer -- notab
 `up-to-date', which would be a claim nothing has established."
   (or *update-state* (list :status "unchecked" :version "" :block "" :detail "")))
 
-(defun check-for-update (&key (source *update-source*) (channel "stable") (product nil))
+(defun check-for-update (&key (source *update-source*) (channel "stable") (product *app-name*))
   "Ask SOURCE whether a newer build exists. Updates and returns `update-status'.
 
 NEVER SIGNALS. A failed update check is background noise -- the network is down, the user
 is on a plane -- and an application that interrupts someone's work to report that it could
 not reach a server has misjudged whose problem that is.
 
-PRODUCT, when given, is the name this build expects the manifest to carry. A correctly
-signed manifest for a DIFFERENT product, or for a channel that was not asked for, is a
-substitution: signed does not mean addressed to us."
+PRODUCT is the name this build expects the manifest to carry, and defaults to *APP-NAME*
+(#301). A correctly signed manifest for a DIFFERENT product, or for a channel that was not
+asked for, is a substitution: signed does not mean addressed to us. With PRODUCT NIL (no
+*APP-NAME* set, and none passed) the product is not checked."
   (setf *update-state*
         (handler-case (%check source channel product)
           (update-source-error (e)
@@ -621,14 +635,6 @@ would not need the application to stop at all. That is not what NSIS or Inno do 
 replace files in place -- so the hook is required for the strategies that exist today.")
 
 ;;; --- where this application is installed -----------------------------------
-
-(defvar *app-name* nil
-  "The product's install name, as `windows.nsi' -DAPPNAME sees it. The application sets it.
-
-Needed to find the install directory, which is the one thing the Windows apply path must
-get exactly right: the installer is handed `/D=' and will happily install a second copy
-somewhere else if we guess wrong, leaving the running one untouched and the user
-convinced the update silently did nothing.")
 
 (defun %registry-install-dir (app)
   "The install directory NSIS recorded, or NIL.
@@ -1550,12 +1556,17 @@ window between checking and applying is exactly where a channel gets a security 
            (entry (manifest-platform manifest)))
       (when (and product (string/= product (manifest-product manifest)))
         (error 'update-source-error :detail "the manifest is for another product"))
+      ;; The same channel test the check makes. Without it the second fetch would accept a
+      ;; manifest for another channel that the first fetch would have refused (#301).
+      (when (and (plusp (length (manifest-channel manifest)))
+                 (string/= channel (manifest-channel manifest)))
+        (error 'update-source-error :detail "the manifest is for another channel"))
       (unless entry
         (error 'update-not-implemented
                :detail "the manifest carries no artifact for this platform"))
       (values source entry))))
 
-(defun apply-update (&key (source *update-source*) (channel "stable") (product nil))
+(defun apply-update (&key (source *update-source*) (channel "stable") (product *app-name*))
   "Install the available update.
 
 WINDOWS AND LINUX. macOS refuses, because its apply strategy, `app-targz', is not written

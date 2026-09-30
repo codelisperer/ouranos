@@ -73,15 +73,44 @@ already and not parsed: parsing turns [ ] * ? into wildcard syntax, and a file n
   (defun %last-error ()
     (sb-alien:alien-funcall (sb-alien:extern-alien "GetLastError" (function (sb-alien:unsigned 32)))))
 
+  (defparameter +transient-errors+ '(5 32 145)
+    "Windows errors a delete retries on, because another process can cause them for a moment:
+ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32), when a file is still open, such as an
+executable that has just exited while antivirus scans it; and ERROR_DIR_NOT_EMPTY (145), when a
+directory still holds a file whose deletion is pending until that other process closes it
+(#402).")
+
+  (defvar *transient-retry-seconds* 3
+    "How long a Windows delete keeps retrying an error in +TRANSIENT-ERRORS+ before it signals
+DELETE-TREE-ERROR. A test binds it to 0 to see the error the retry would otherwise hide.")
+
+  (defun %retrying (path operation call)
+    "Call CALL on PATH until it returns non-zero. A zero return with an error in
++TRANSIENT-ERRORS+ is tried again every 50 ms for up to *TRANSIENT-RETRY-SECONDS*; any other
+error, or the time running out, signals DELETE-TREE-ERROR with the last error code.
+
+Only the delete of an entry already found to be inside the tree is retried. What DELETE-TREE
+removes, and what it refuses, is decided before this runs and does not change."
+    (let ((deadline (+ (get-internal-real-time)
+                       (* *transient-retry-seconds* internal-time-units-per-second))))
+      (loop
+        (unless (zerop (funcall call path))
+          (return t))
+        (let ((code (%last-error)))
+          (unless (and (member code +transient-errors+)
+                       (< (get-internal-real-time) deadline))
+            (error 'delete-tree-error :pathname path :operation operation :code code))
+          (sleep 0.05)))))
+
   (defmacro %win-call (name path operation)
     "Call the Win32 function NAME, a literal string, on PATH; signal DELETE-TREE-ERROR when it
-returns FALSE. A macro because EXTERN-ALIEN takes the function's name literally."
-    (let ((p (gensym "PATH")))
-      `(let ((,p ,path))
-         (when (zerop (sb-alien:alien-funcall
-                       (sb-alien:extern-alien ,name (function sb-alien:int (sb-alien:c-string :external-format :utf-16le)))
-                       (%native ,p)))
-           (error 'delete-tree-error :pathname ,p :operation ,operation :code (%last-error))))))
+returns FALSE, after the retry described at %RETRYING. A macro because EXTERN-ALIEN takes the
+function's name literally."
+    `(%retrying ,path ,operation
+                (lambda (p)
+                  (sb-alien:alien-funcall
+                   (sb-alien:extern-alien ,name (function sb-alien:int (sb-alien:c-string :external-format :utf-16le)))
+                   (%native p)))))
 
   (defun %clear-readonly (path attributes)
     ;; A read-only file cannot be deleted on Windows; git's object store is read-only, which is
