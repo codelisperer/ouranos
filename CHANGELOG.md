@@ -298,6 +298,13 @@ Changes since `v0.1.4`. The tag is on `f3fdf1a`.
 
 ### Fixed
 
+- **mnemosyne: a SQLite transaction whose `COMMIT` is refused is rolled back** (#400). SQLite
+  refuses a `COMMIT` with `BUSY` while another connection holds a read lock, and keeps the
+  transaction open so the `COMMIT` can be retried. `with-transaction` did not roll it back, so the
+  connection stayed inside that transaction: its later statements were never committed, and its
+  write lock made every other connection's writes fail with "database is locked" until it was
+  closed. `with-transaction` now rolls the transaction back and signals the refusal as a
+  `mnemosyne/conn:db-error`; it used to reach the caller as a `sqlite:sqlite-error`.
 - **Directory trees the framework removes are removed without following links.** `cons`'s
   `with-temporary-directory`, `cons` templates, hyperion/update's staging, the build scripts and
   the test fixtures used `uiop:delete-directory-tree`, which on Windows follows a junction inside
