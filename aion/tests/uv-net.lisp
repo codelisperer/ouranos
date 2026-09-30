@@ -324,6 +324,23 @@ and return every octet the listener received."
     (is (= (length expected) (length sunk)))
     (is (equalp expected sunk))))
 
+(test write-bytes-sends-a-list-of-pieces-as-one-write
+  ;; A list is written in order as ONE write (#430): the future reports the total, not the
+  ;; size of any one piece, and the octets arrive in order with nothing between them.
+  (let* ((head (octets (format nil "HTTP/1.1 200 OK~C~CContent-Length: 70000~C~C~C~C"
+                               #\Return #\Newline #\Return #\Newline #\Return #\Newline)))
+         (body (counting-payload 70000))
+         (empty (make-array 0 :element-type '(unsigned-byte 8)))
+         (expected (concatenate '(vector (unsigned-byte 8)) head body (octets "end")))
+         (reported nil)
+         (sunk (sink-of-writes
+                (list (lambda (c)
+                        (net:write-bytes c (list head empty body "end")
+                                         :on-complete (lambda (n) (setf reported n))))))))
+    (is (eql (length expected) reported))
+    (is (= (length expected) (length sunk)))
+    (is (equalp expected sunk))))
+
 (test pipe-into-relays-everything-and-carries-backpressure
   ;; A proxy: client -> relay -> sink. PIPE-INTO owns the pause/resume policy, so the
   ;; test wires none of it, which is precisely the property being tested. The payload is

@@ -335,14 +335,13 @@ fault."
                            :function encoder :argument 'headers))
 
 (defun %write-response (conn status headers body-octets keep-alive)
-  "Encode the head, refuse it if it is dangerous, and write head+body as one buffer."
+  "Encode the head, refuse it if it is dangerous, and write head and body in one write. They
+go to NET:WRITE-BYTES as two pieces, not joined into a new vector first (#430)."
   (let ((encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
                                       (length body-octets) keep-alive)))
     (cond
       ((h1:encode-ok? encoded)
-       (net:write-bytes conn (concatenate '(vector (unsigned-byte 8))
-                                          (%latin1 (h1:encode-text encoded))
-                                          body-octets))
+       (net:write-bytes conn (list (%latin1 (h1:encode-text encoded)) body-octets))
        keep-alive)
       (t
        ;; The handler produced a header we will not put on the wire. That is a bug in the
@@ -429,9 +428,9 @@ vector passes through. NIL and empty are NIL, which callers read as `write nothi
 (defun %stream-emit (so octets)
   "Write one chunk: size line, the octets, CRLF. LOOP THREAD ONLY.
 
-Three writes rather than one concatenation would be three small segments on the wire, and
-the terminating one is exactly the write Nagle holds -- the 44 ms defect ADR-0011 measured.
-One buffer per chunk instead."
+Three writes would be three small segments on the wire, and the terminating one is exactly
+the write Nagle holds -- the 44 ms defect ADR-0011 measured. One write per chunk instead, of
+three pieces that NET:WRITE-BYTES copies into one buffer (#430)."
   (let ((header (h1:encode-chunk-header (length octets))))
     (unless (h1:encode-ok? header)
       ;; Unreachable: %CHUNK-OCTETS has already refused the empty chunk, which is the only
@@ -439,10 +438,7 @@ One buffer per chunk instead."
       ;; unframed write here desynchronises the connection instead of failing.
       (error 'stream-write-failed :reason (h1:encode-reason header)))
     (net:write-bytes (so-conn so)
-                     (concatenate '(vector (unsigned-byte 8))
-                                  (%latin1 (h1:encode-text header))
-                                  octets
-                                  +crlf-octets+)
+                     (list (%latin1 (h1:encode-text header)) octets +crlf-octets+)
                      :on-complete (lambda (&rest _) (declare (ignore _))
                                     (%stream-settle so))
                      :on-error (lambda (&rest _) (declare (ignore _))
@@ -715,9 +711,7 @@ the whole body was held in memory."
     (if (and (null chunk) (null head-octets))
         (%file-finish fo)
         (let* ((body (or chunk +no-octets+))
-               (buffer (if head-octets
-                           (concatenate '(vector (unsigned-byte 8)) head-octets body)
-                           body)))
+               (buffer (if head-octets (list head-octets body) body)))
           (incf (fo-written fo) (length body))
           (when *file-write-observer*
             (funcall *file-write-observer* (length body)))
