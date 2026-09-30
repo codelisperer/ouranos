@@ -177,6 +177,77 @@ given to DIRECTORY is not: it missed a directory named licenses/."
         (uiop:copy-file license dst)
         (format report "~&            + LICENSES/~A~%" (file-namestring dst)))))
 
+(defvar *relink* t
+  "Whether CARRY-DECLARED-LIBRARIES relinks carried Mach-O files to each other on macOS. Only a
+test turns it off, as the control for the relink.")
+
+(defun %run-tool (args)
+  "Run ARGS, returning (values OUTPUT EXIT-CODE). Output includes standard error."
+  (multiple-value-bind (out err code)
+      (uiop:run-program args :output :string :error-output :string :ignore-error-status t)
+    (values (concatenate 'string out err) code)))
+
+(defun %macho-dependencies (file)
+  "The install names FILE's load commands name, as otool -L lists them, without FILE's own
+install name (otool -D). NIL for a file that is not a Mach-O."
+  (multiple-value-bind (out code) (%run-tool (list "otool" "-L" (uiop:native-namestring file)))
+    (when (eql code 0)
+      (let ((own (second (uiop:split-string
+                          (string-trim '(#\Newline) (%run-tool (list "otool" "-D" (uiop:native-namestring file))))
+                          :separator '(#\Newline)))))
+        (loop for line in (rest (uiop:split-string out :separator '(#\Newline)))
+              for trimmed = (string-trim '(#\Space #\Tab) line)
+              for dep = (subseq trimmed 0 (or (position #\Space trimmed) (length trimmed)))
+              unless (or (string= dep "") (equal dep own)) collect dep)))))
+
+(defun %relink-carried (plan bundle report)
+  "On macOS, point each carried Mach-O's load commands that name ANOTHER carried file at the
+copy beside it, as @loader_path/<name>, and re-sign what changed ad hoc (#78, macOS).
+
+Why: a dylib records each library it needs by that library's install name, which for a
+Homebrew library is an absolute path under /opt/homebrew. The carried copies are reopened by
+absolute path at startup (OPEN-CARRIED-LIBRARIES), but when one needs another, dyld looks for
+the recorded path. That path is not there on a Mac without Homebrew, and dyld reuses an
+already-open copy only when its install name is the same string, which for OpenSSL it is not:
+libssl.3.dylib names .../Cellar/openssl@3/<version>/lib/libcrypto.3.dylib, while
+libcrypto.3.dylib's own name is .../opt/openssl@3/lib/libcrypto.3.dylib. Measured on #334:
+the app exited 3 on `Library not loaded' for libcrypto, and started once libssl was relinked.
+
+A load command is rewritten only when it names another carried file, by resolved path or by
+file name. System libraries and names already relative (@...) are never touched. Rewriting
+invalidates the signature, and arm64 will not load an invalidly signed dylib, so each changed
+file is re-signed with `codesign --force -s -'."
+  (let ((truenames (mapcar #'first plan))
+        (names (mapcar #'second plan)))
+    (loop for (nil name) in plan
+          for dst = (merge-pathnames name bundle)
+          for changed = nil
+          do (dolist (dep (%macho-dependencies dst))
+               (unless (or (char= (char dep 0) #\@)
+                           (uiop:string-prefix-p "/usr/lib/" dep)
+                           (uiop:string-prefix-p "/System/" dep))
+                 (let* ((dep-true (ignore-errors (probe-file dep)))
+                        (target (or (and dep-true
+                                         (let ((i (position dep-true truenames :test #'equal)))
+                                           (and i (nth i names))))
+                                    (find (file-namestring dep) names :test #'%same-file-name-p))))
+                   (when (and target (not (%same-file-name-p target name)))
+                     (multiple-value-bind (out code)
+                         (%run-tool (list "install_name_tool" "-change" dep
+                                          (format nil "@loader_path/~A" target)
+                                          (uiop:native-namestring dst)))
+                       (unless (eql code 0)
+                         (error 'carry-refused :path dst
+                                               :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
+                     (format report "~&            ~A now names @loader_path/~A~%" dep target)
+                     (setf changed t)))))
+             (when changed
+               (multiple-value-bind (out code)
+                   (%run-tool (list "codesign" "--force" "-s" "-" (uiop:native-namestring dst)))
+                 (unless (eql code 0)
+                   (error 'carry-refused :path dst
+                                         :reason (format nil "codesign could not re-sign it after relinking: ~A" out))))))))
+
 (defun carry-declared-libraries (carries bundle &key vendor (report *standard-output*))
   "Copy each library in CARRIES into the directory BUNDLE, with its license text under
 BUNDLE/LICENSES/, and arrange for the dumped image to open the copy at startup.
@@ -237,6 +308,8 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                   (format report "~&            opened beside the executable when the app starts~%"))
                  (t
                   (format report "~&            not open in this image, so the app must open it itself, from beside sb-ext:*runtime-pathname*~%"))))
+      (when (and *relink* (uiop:os-macosx-p))
+        (%relink-carried plan bundle report))
       (setf opened (nreverse opened))
       (when opened
         (let ((names opened))

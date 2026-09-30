@@ -282,3 +282,105 @@ bundle directory, which must be empty when it refuses."
       (is (probe-file (merge-pathnames "LICENSES/pdfium-LICENSE" bundle)))
       (is (probe-file (merge-pathnames "LICENSES/pdfium-licenses/abseil.txt" bundle)))
       (is (probe-file (merge-pathnames "LICENSES/pdfium-licenses/sub/zlib.txt" bundle))))))
+
+;;; --- macOS: carried libraries that link each other (#78, the macOS follow-up) ----------
+;;;
+;;; A dylib records each library it needs by that library's install name, an absolute path
+;;; for anything built outside an app bundle. So a carried libssl still asked for Homebrew's
+;;; libcrypto, and the bundle failed on a Mac without Homebrew although it carried libcrypto
+;;; too (measured on #334). The fixture reproduces the shape with two dylibs compiled here: A
+;;; needs B by B's absolute install name. Both are carried, their directory is deleted, and A
+;;; is loaded from the bundle in a fresh image. These need macOS and a C compiler; elsewhere they
+;;; are skipped, and say why.
+
+(defun %dylib-pair (dir)
+  "Compile libfixb.dylib and libfixa.dylib in DIR, A needing B by B's absolute install name,
+and sign both with codesign, as Homebrew's libraries are. Returns true when both were built.
+
+The codesign is what makes the fixture as hard as the real case. cc leaves a `linker-signed'
+ad-hoc signature, which install_name_tool refreshes by itself, so a fixture left like that
+passes even when the carry step never re-signs. A signature made by codesign is only
+invalidated by install_name_tool, and arm64 will not load the result, so re-signing matters."
+  (let ((b (merge-pathnames "b.c" dir)) (a (merge-pathnames "a.c" dir))
+        (libb (merge-pathnames "libfixb.dylib" dir)) (liba (merge-pathnames "libfixa.dylib" dir)))
+    (%write b "int fixb(void) { return 42; }")
+    (%write a "int fixb(void); int fixa(void) { return fixb() + 1; }")
+    (and (eql 0 (nth-value 2 (uiop:run-program
+                              (list "cc" "-dynamiclib" "-o" (uiop:native-namestring libb) (uiop:native-namestring b)
+                                    "-install_name" (uiop:native-namestring libb))
+                              :ignore-error-status t :output nil :error-output nil)))
+         (eql 0 (nth-value 2 (uiop:run-program
+                              (list "cc" "-dynamiclib" "-o" (uiop:native-namestring liba) (uiop:native-namestring a)
+                                    "-L" (uiop:native-namestring dir) "-lfixb"
+                                    "-install_name" (uiop:native-namestring liba))
+                              :ignore-error-status t :output nil :error-output nil)))
+         (every (lambda (lib)
+                  (eql 0 (nth-value 2 (uiop:run-program
+                                       (list "codesign" "--force" "-s" "-" (uiop:native-namestring lib))
+                                       :ignore-error-status t :output nil :error-output nil))))
+                (list libb liba)))))
+
+(defun %carry-pair-then-load (&key (relink t))
+  "Carry the fixture pair into a bundle directory, delete the directory they were built in, and
+load the carried libfixa.dylib in a fresh image, calling into it. RELINK NIL is the control.
+Returns (values LOAD-OUTPUT LOAD-CODE REPORT OTOOL-OF-CARRIED-A CODESIGN-CODE), or NIL when the
+pair could not be compiled."
+  (%load-carry-natives)
+  (let* ((tree (%fresh-tree))
+         (app (ensure-directories-exist (merge-pathnames "app/" tree)))
+         (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+         (report (make-string-output-stream)))
+    (unwind-protect
+         (when (%dylib-pair app)
+           (%write (merge-pathnames "LICENSE" app) "test license")
+           (progv (list (find-symbol "*RELINK*" "OURANOS-CARRY")) (list relink)
+             (funcall (%carry-fn "CARRY-DECLARED-LIBRARIES")
+                      (list (merge-pathnames "libfixb.dylib" app) (merge-pathnames "libfixa.dylib" app))
+                      bundle :report report))
+           (aion/fs:delete-tree app)
+           (let* ((carried-a (uiop:native-namestring (merge-pathnames "libfixa.dylib" bundle)))
+                  (otool (uiop:run-program (list "otool" "-L" carried-a) :output :string :ignore-error-status t))
+                  (sign-code (nth-value 2 (uiop:run-program (list "codesign" "--verify" "--strict" carried-a)
+                                                            :ignore-error-status t :output nil :error-output nil)))
+                  (out (make-string-output-stream))
+                  (code (nth-value 2 (uiop:run-program
+                                      (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                                            "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                                            "--eval" "(require :asdf)"
+                                            "--eval" "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
+                                            "--eval" "(asdf:load-system :cffi)"
+                                            "--eval" (format nil "(cffi:load-foreign-library ~S)" carried-a)
+                                            "--eval" "(format t \"~&FIXA ~A~%\" (cffi:foreign-funcall \"fixa\" :int))")
+                                      :output out :error-output out :ignore-error-status t))))
+             (values (get-output-stream-string out) code (get-output-stream-string report) otool sign-code)))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(defun %relink-skip-reason ()
+  (cond ((not (uiop:os-macosx-p)) "macOS only: install names are a Mach-O property")
+        ((not (ignore-errors (eql 0 (nth-value 2 (uiop:run-program '("cc" "--version") :ignore-error-status t
+                                                                    :output nil :error-output nil)))))
+         "no C compiler (cc) to build the fixture dylibs")))
+
+(test carried-dylibs-that-link-each-other-load-without-their-build-directory
+  "#78 on macOS: A needs B by B's absolute install name. After carrying both, A's load command
+names @loader_path/libfixb.dylib, A is re-signed, and A loads from the bundle and calls into B
+with the directory they were built in gone."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (multiple-value-bind (out code report otool sign-code) (%carry-pair-then-load)
+          (is (search "FIXA 43" (or out "")) "the carried library did not load or call B (exit ~A):~%~A" code out)
+          (is (search "@loader_path/libfixb.dylib" (or otool "")) "A still names B by path:~%~A" otool)
+          (is (eql 0 sign-code) "the relinked A does not verify: codesign --verify --strict exited ~A" sign-code)
+          (is (search "now names @loader_path/libfixb.dylib" (or report "")) "the build did not report the relink:~%~A" report)))))
+
+(test carried-dylibs-that-link-each-other-fail-without-the-relink
+  "The control: the same carry with the relink off. A still names B's build path, which has
+been deleted, so A cannot load. Without this, the test above could pass on a machine where B
+was found some other way."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (multiple-value-bind (out code) (%carry-pair-then-load :relink nil)
+          (is (not (search "FIXA 43" (or out ""))) "A loaded without the relink:~%~A" out)
+          (is (search "Library not loaded" (or out "")) "expected dyld's refusal (exit ~A):~%~A" code out)))))
