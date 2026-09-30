@@ -12,6 +12,10 @@ its tag.
 
 ## Unreleased
 
+## v0.1.5 — 2026-09-30
+
+Changes since `v0.1.4`. The tag is on `f3fdf1a`.
+
 ### An app may have to act
 
 - **praxeon/retrieval: `ensure-schema` adds two columns to the chunk table and creates a terms
