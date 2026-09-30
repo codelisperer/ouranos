@@ -14,6 +14,12 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/server-uv: a server started with `:workers` now runs one event loop per core, up
+  to 4.** Before, every server ran one loop. Handlers already ran on the workers, so what
+  changes is that accepting, reading, parsing and writing use more than one thread, and the
+  process has up to four loop threads instead of one. `:loops 1`, or `HYPERION_LOOPS=1` for
+  `serve-forever`, keeps one loop. A server without `:workers` still runs one loop. (#463)
+
 - **hyperion/dev: `serve` on loopback refuses a request whose Host is not `127.0.0.1:PORT` or
   `localhost:PORT`, and a cross-site POST.** It now starts its server with
   `:request-guard :same-origin`, the guard `run-app` has had since #302, because a development
@@ -74,6 +80,22 @@ its tag.
   `:truncated`. `structured-result-invalid-arguments` is now exported. (#338)
 
 ### Added
+
+- **hyperion/server-uv: `:loops`, the number of event loops a server runs, each on its own
+  thread.** It is a keyword of server-uv's `start`, of `hyperion/server`'s `start` and
+  `serve-forever` (which read `HYPERION_LOOPS`), and of `clack.handler.uv`'s `run`. Its default
+  is `*default-loops*`, `:auto`: one loop when handlers run inline, otherwise the online cores,
+  at most 4. Four because nothing measured more: on a 10-core Mac, 6 and 8 loops served no more
+  than 4, and the 4-core Linux host could not run more loops than cores. More than one loop needs `:workers` or a pool `*dispatch*`; with the inline
+  dispatcher, `start` refuses. How new connections reach the loops is `:scheme`
+  (`*default-scheme*`): `:handoff`, where the first loop accepts and hands connections to the
+  loops in turn; `:reuseport`, one SO_REUSEPORT listener per loop (Linux); or `:shared`, a copy
+  of one listening socket on every loop. Windows always runs one loop. `server-loops` and
+  `server-loop-connections` report the loops and how many connections each has taken. On a
+  4-core Linux host with 8 workers, `/tile` in `hyperion/bench` went from 31,724 requests/s on
+  one loop to 119,501 on four. `aion/uv/net` gains `listen-tcp`'s `:reuseport`, and
+  `listen-copy`, `detach-socket` and `adopt-tcp-socket`, which move sockets between loops on
+  Unix. (#463)
 
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and

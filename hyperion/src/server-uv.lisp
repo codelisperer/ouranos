@@ -1564,8 +1564,9 @@ several loops would run several handlers at once; otherwise the machine's online
 most 4. Measured on #463 with 8 workers on /tile: on a 4-core Linux host, 1 loop served
 31,724 requests/s, 2 served 97,236 and 4 served 112,364 to 119,501; on a 10-core Mac, 1 loop
 41,732, 2 loops 64,244 and 4 loops 82,335, with 6 and 8 no better because the load generators
-and the kernel had the machine by then. So 4 is the most any measurement supports, and one loop
-per core is what a loop needs to be worth its thread.")
+and the kernel had the machine by then. The Linux host could not measure more loops than its 4
+cores. So 4 is the most any measurement supports, and one loop per core is what a loop needs to
+be worth its thread.")
 
 (defun %online-cores ()
   "The number of online CPUs, from sysconf(_SC_NPROCESSORS_ONLN), or 1 where it is not known."
@@ -1576,21 +1577,38 @@ per core is what a loop needs to be worth its thread.")
         1)))
 
 (defun %default-loop-count (workers)
-  "The loop count *DEFAULT-LOOPS* gives a server with WORKERS; see there."
+  "The loop count *DEFAULT-LOOPS* gives a server with WORKERS; see there. :AUTO is one loop on
+Windows, which runs one whatever is asked (see the section header)."
   (let ((setting *default-loops*))
     (cond ((integerp setting) setting)
+          #+win32 (t 1)
           ((and (null workers) (eq *dispatch* *inline-dispatch*)) 1)
           (t (min 4 (%online-cores))))))
 
+(defvar *one-loop-noted* nil
+  "True once this process has logged that a request for several loops runs one here.")
+
+(defun %note-one-loop (requested)
+  "Log, once per process, that a server asked for REQUESTED loops runs one on this platform.
+Returns true when it logged. Once, because an app that sets HYPERION_LOOPS for every
+platform would otherwise log it on every start."
+  (unless *one-loop-noted*
+    (setf *one-loop-noted* t)
+    (log:info "server-uv: this platform runs one event loop per server; the loops asked for are not used"
+              :loops-asked requested)
+    t))
+
 (defparameter *default-scheme* :auto
   "How connections reach the loops when START is not given :SCHEME. :AUTO is :REUSEPORT on
-Linux and :SHARED on other Unix; see #463.")
+Linux and :HANDOFF on other Unix (#463). On macOS, :HANDOFF gave every loop the same share of
+connections (16, 17, 16, 16 over 65 on four loops) where :SHARED left it to the kernel's
+wake-ups (4, 2, 4, 4, 6, 17, 12, 16 on eight).")
 
 (defun %resolve-scheme (scheme loops)
   "The scheme a server of LOOPS loops runs: :SINGLE for one loop and on Windows."
   (cond ((<= loops 1) :single)
         #+win32 (t :single)
-        ((eq scheme :auto) #+linux :reuseport #-linux :shared)
+        ((eq scheme :auto) #+linux :reuseport #-linux :handoff)
         (t (check-type scheme (member :reuseport :shared :handoff)) scheme)))
 
 (defstruct (shard (:constructor %make-shard) (:copier nil))
@@ -1651,10 +1669,10 @@ TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
 Clack -- owning the socket is what makes it available at all."
   (check-type workers (or null (integer 1)))
-  (let* ((loops (or loops (%default-loop-count workers)))
-         (scheme (progn (check-type loops (integer 1))
-                        (%resolve-scheme (or scheme *default-scheme*) loops)))
-         (loops (if (eq scheme :single) 1 loops))
+  (let* ((requested (or loops (%default-loop-count workers)))
+         (scheme (progn (check-type requested (integer 1))
+                        (%resolve-scheme (or scheme *default-scheme*) requested)))
+         (loops (if (eq scheme :single) 1 requested))
          (drain (list nil))
          (handoffs (list 0))
          (shards (coerce (loop for i below loops
@@ -1665,6 +1683,8 @@ Clack -- owning the socket is what makes it available at all."
          (workers-pool nil)
          (dispatch nil)
          (started nil))
+    (when (and (> requested 1) (= loops 1))
+      (%note-one-loop requested))
     (when (and (> loops 1) (null workers) (eq *dispatch* *inline-dispatch*))
       (map nil (lambda (shard) (ignore-errors (uv:close-loop (shard-loop shard)))) shards)
       (error "hyperion/server-uv: ~D loops need :WORKERS (or a pool *DISPATCH*); the inline dispatcher would run handlers on ~:*~D threads at once" loops))

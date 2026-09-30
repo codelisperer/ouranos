@@ -2582,3 +2582,26 @@ closing a loop's listener and closing the loop are two separate ways it would."
       (srv:stop server))
     (is (%wait-until (lambda () (= before (length (%loop-threads)))))
         "~D loop threads before, ~D after STOP" before (length (%loop-threads)))))
+
+#+win32
+(test windows-runs-one-loop-and-says-so-once
+  "Windows runs one loop per server whatever :LOOPS asks, because moving a socket between loops
+needs WSADuplicateSocket there (#463). Two servers asked for four loops each run one, and the
+notice that says so is logged once, not on every start."
+  (let ((srv::*one-loop-noted* nil) (logged 0))
+    (sb-int:encapsulate 'srv::%note-one-loop 'count-notices
+                        (lambda (f &rest args)
+                          (let ((result (apply f args)))
+                            (when result (incf logged))
+                            result)))
+    (unwind-protect
+         (dotimes (i 2)
+           (let ((server (srv:start (const-app 200 +ok+ '("ok")) :port 0 :workers 2 :loops 4)))
+             (unwind-protect
+                  (progn
+                    (is (= 1 (length (srv:server-loops server))) "server ~D ran ~D loops"
+                        i (length (srv:server-loops server)))
+                    (is (= 200 (status-of (get* (srv:server-port server) "GET / HTTP/1.1" "Host: x")))))
+               (srv:stop server))))
+      (sb-int:unencapsulate 'srv::%note-one-loop 'count-notices))
+    (is (= 1 logged) "the notice was logged ~D times for two servers" logged)))
