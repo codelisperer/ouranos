@@ -14,6 +14,13 @@ its tag.
 
 ### Fixed
 
+- **`clack:stop` on a `:server :uv` handler stops the server even when it is called as soon as
+  the port listens.** The port listens before server-uv's `start` returns, and `clack:stop`
+  kills the thread that `run` blocks in. A kill that landed after the server started and
+  before `run` could stop it on the way out left the server listening for as long as the image
+  ran. `run` now starts the server with interrupts deferred, inside the cleanup that stops it.
+  (#444)
+
 - **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
   discovery, which asked vswhere for the newest install only, so on a machine with several Visual
   Studio installs the variable chose the toolchain for libuv and the Windows launcher but not for

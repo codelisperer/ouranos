@@ -196,15 +196,25 @@ stopped on the way out, so CLACK:STOP leaves no listener behind.
 
 WORKERS, or WORKER-NUM (the key Woo's Clack handler takes, so `:server :woo :worker-num n'
 runs unchanged as `:server :uv'), is the size of server-uv's worker pool; see
-*DEFAULT-WORKERS*. :DEBUG and the other clackup keys are accepted and ignored."
-  (let* ((port-box (list port))
-         (server (suv:start (%adapt app address port-box)
-                            :host address :port port
-                            :workers (or workers worker-num *default-workers*))))
-    (setf (car port-box) (suv:server-port server))
+*DEFAULT-WORKERS*. :DEBUG and the other clackup keys are accepted and ignored.
+
+THE START RUNS WITH INTERRUPTS DEFERRED, inside the UNWIND-PROTECT (#444). The port is
+listening before SUV:START returns, so a caller that sees it listening may call CLACK:STOP at
+once. Its thread kill used to be able to land after the server had started and before the
+UNWIND-PROTECT was entered, and then nothing stopped the server: the port stayed open after
+CLACK:STOP returned, for as long as the image ran. Deferred, the kill takes effect as soon as
+the server is recorded, inside the UNWIND-PROTECT, whose cleanup stops it."
+  (let ((port-box (list port))
+        (server nil))
     (unwind-protect
-         (loop (sleep 60))
-      (suv:stop server))))
+         (progn
+           (sb-sys:without-interrupts
+             (setf server (suv:start (%adapt app address port-box)
+                                     :host address :port port
+                                     :workers (or workers worker-num *default-workers*))
+                   (car port-box) (suv:server-port server)))
+           (loop (sleep 60)))
+      (when server (suv:stop server)))))
 
 (defun stop (server)
   "Stop SERVER. Clack calls this only for a handler started without :USE-THREAD, and RUN does
