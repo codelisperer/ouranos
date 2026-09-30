@@ -9,6 +9,10 @@
 ;;;; (#413). Request logging is off on every backend, so a comparison measures the servers and
 ;;;; not the logger.
 ;;;;
+;;;; HYPERION_MAX_REQUESTS_PER_CONNECTION, when set, replaces :uv's cap on requests per
+;;;; kept-alive connection (*MAX-REQUESTS-PER-CONNECTION*, 100 by default). compare.py raises it
+;;;; so that :uv is not the only backend reconnecting during a run.
+;;;;
 ;;;; Exists to settle one decision with numbers instead of reasoning: can Hunchentoot carry
 ;;;; a DESKTOP app's live-feed rendering, so desktop bundles can drop Woo -- and with it
 ;;;; libev, a CFFI load-time dependency that makes every Linux/macOS bundle fail on a clean
@@ -45,6 +49,11 @@
   ;; The native server is its own system, and needs a built vendor/libuv (#413).
   (when (string= want "uv")
     (funcall (read-from-string "ql:quickload") :hyperion/server-uv)))
+
+(let ((cap (ignore-errors (parse-integer (uiop:getenv "HYPERION_MAX_REQUESTS_PER_CONNECTION"))))
+      (uv (find-package "HYPERION/SERVER-UV")))
+  (when (and cap uv)
+    (setf (symbol-value (find-symbol "*MAX-REQUESTS-PER-CONNECTION*" uv)) cap)))
 
 (defpackage #:hyperion/bench
   (:use #:cl)
