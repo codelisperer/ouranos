@@ -54,6 +54,13 @@ CDN in front reports them as errors (a consuming app saw 10 of 33 post-deploy ch
    responses to finish.
 3. **Close the rest.** Whatever is still open is closed, and `serve-forever` returns.
 
+**Only `serve-forever` drains.** It installs the SIGTERM handler that runs these phases. An
+entry point that calls `start` and then waits in its own loop, for example sleeping until
+the process is killed, gets none of them: SIGTERM stops it without a grace period and without
+waiting for requests in flight. A consuming app's deployed entry point was written that way,
+and it kept seeing the errors described above until it moved to `serve-forever`. A deployed
+app's entry point should be `serve-forever`.
+
 Ctrl-C, SIGINT and `request-shutdown` stop at once, without a grace period: they come from
 someone who wants the process stopped now, not from a platform rotating instances.
 
