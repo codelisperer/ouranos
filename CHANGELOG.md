@@ -188,6 +188,13 @@ Changes since `v0.1.5`. The tag is on `905d80f`.
 
 ### Fixed
 
+- **aion/pool: a job finishing no longer wakes every idle worker.** `%finish-job` broadcast on
+  the pool's waitqueue after every job, and the only threads waiting there are idle workers,
+  so each completion woke all of them to find nothing to do. With hyperion/server-uv's
+  `:workers`, that made the event loop wait for the pool's lock on every request. On macOS in
+  `hyperion/bench`, `/ping` with 8 workers went from about 24,000 to about 30,400 requests/s
+  and the server from 2.2 to 1.16 cores. (#430)
+
 - **aion/fs: on Windows, `delete-tree` retries a delete that another process blocks for a
   moment.** A file can stay open briefly after the process that used it exits, for example
   while antivirus scans an executable that has just run, and the delete then failed at once

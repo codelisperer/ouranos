@@ -186,7 +186,9 @@ thread while it runs, so its time is time every request waits (#430).")
 
 (let* ((port (or (ignore-errors (parse-integer (second sb-ext:*posix-argv*))) 8099))
        (backend (srv:default-server))
-       (workers (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS"))))
+       ;; 0 or unset: no worker pool, handlers run where the backend runs them (inline on :uv).
+       (workers (let ((n (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS")))))
+                  (and n (plusp n) n)))
        (handler (srv:start #'app :port port :host "127.0.0.1" :server backend
                                  :workers workers :log nil)))
   (setf *handler* handler)
