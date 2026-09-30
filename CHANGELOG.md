@@ -35,6 +35,17 @@ its tag.
   `shipped-image-directory`, for code that does not load `hyperion/desktop`; `hyperion/update`
   now uses them and its private copy is gone. (#416)
 
+- **A Windows desktop app refuses to start a `sbcl.core` that is not the one it was built
+  with.** `<name>.exe`, the launcher, is compiled with the SHA-256 of the core built beside it
+  and checks it before starting `sbcl-runtime.exe`. On a mismatch it exits with code 126 and says
+  the file is not the one the app was built with: on standard error, or in a message box when it
+  has no console. This is what makes a per-user install safe to sign: anything running as the
+  user can write the install directory, and Authenticode does not cover the core. The check
+  costs about 0.1 s at each start for a 100 MB core (measured on Windows 11). To have the hash,
+  `scripts/build-desktop-app.lisp` on Windows now loads the app and dumps the core in a child
+  process, and compiles the launcher afterwards. An app acts if its packaging changes
+  `sbcl.core` after the build: rebuild instead, or the launcher refuses the result. (#98)
+
 ### Added
 
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts

@@ -205,6 +205,17 @@ with the C++ workload). `--icon` goes into both `<name>.exe` and `sbcl-runtime.e
 runtime is not named `sbcl.exe`, so that `hyperion/update` can tell an installed app from an
 SBCL installation.
 
+**On Windows the launcher checks the core before it starts it (#98).** `<name>.exe` is compiled
+with the SHA-256 of the `sbcl.core` built beside it, and it refuses to start a core whose hash
+differs: it exits with code 126 and says that the file is not the one the app was built with,
+on standard error or, when started without a console, in a message box. This is what makes a
+per-user install safe to sign. The install directory can be written by anything running as the
+user, and Authenticode covers the executables but not the core, so without the check a replaced
+core would run under the app's signature. Because the hash is known only after the core is
+dumped, and the dump ends the process that does it, the Windows build runs the dump in a child
+process and compiles the launcher after it. Anything that rewrites `sbcl.core` after the build,
+for example to patch it, must rebuild the launcher too.
+
 **Honest cost (from ADR-0008):** this glue — updater self-replace, installers, native
 FFIs, CI matrix — is the ~90%; the webview is the easy ~10%. **OS code-signing +
 notarization** is an unavoidable tax, identical for Tauri/Electron.
