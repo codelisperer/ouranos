@@ -113,8 +113,9 @@ $BundleDir = (Resolve-Path -LiteralPath $Bundle).Path.TrimEnd('\')
 $WinDir = $env:WINDIR.TrimEnd('\')
 $Sys32 = [Environment]::SystemDirectory.TrimEnd('\')
 
-# The app is the one executable that is not a helper the bundle also carries.
-$helpers = @('hyperion-view.exe', 'webview-launcher.exe', 'uninstall.exe')
+# The app is the one executable that is not a helper the bundle also carries. sbcl-runtime.exe is
+# the runtime the app's launcher starts (#98); it is traced as the launcher's child.
+$helpers = @('hyperion-view.exe', 'webview-launcher.exe', 'uninstall.exe', 'sbcl-runtime.exe')
 $apps = @(Get-ChildItem -LiteralPath $BundleDir -Filter *.exe -File | Where-Object { $helpers -notcontains $_.Name.ToLower() })
 if ($apps.Count -ne 1) {
   Write-Host "ERROR: expected one application .exe in $BundleDir, found $($apps.Count): $($apps.Name -join ', ')" -ForegroundColor Red

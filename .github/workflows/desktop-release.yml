@@ -187,9 +187,11 @@ jobs:
             --icon hyperion/examples/coalton-repl/assets/lambda.ico \
             --window-icon "hyperion/examples/coalton-repl/assets/lambda.$(if [ "$RUNNER_OS" = Windows ]; then echo ico; else echo png; fi)"
 
-      # save-lisp-and-die writes a CONSOLE-subsystem PE, so a desktop app would drag a
-      # console window behind it. editbin (MSVC, already on the runner) rewrites the one
-      # header field. Post-dump because save-lisp-and-die ends the process.
+      # <name>.exe is the launcher (scripts/windows-launcher.c, #98), compiled as a CONSOLE
+      # program, so a desktop app would drag a console window behind it. editbin (MSVC,
+      # already on the runner) rewrites the one header field. With no console of its own, the
+      # launcher starts sbcl-runtime.exe with DETACHED_PROCESS, so it has no console or console
+      # window either.
       - name: No console window (Windows)
         if: runner.os == 'Windows'
         shell: bash
