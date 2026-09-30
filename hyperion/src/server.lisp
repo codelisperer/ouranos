@@ -394,9 +394,45 @@ Woo, which no suite in the tree does."
     ;; already runs each connection on a thread of its own.
     (t '())))
 
+;;; --- the request guard (#304) ------------------------------------------------------------
+
+(defun loopback-host-p (host)
+  "True when HOST names this machine only: 127.0.0.1, ::1 or localhost."
+  (and (stringp host)
+       (member host '("127.0.0.1" "::1" "localhost") :test #'string-equal)
+       t))
+
+(defun %request-guard-origins (host port)
+  "The origins a server bound to HOST:PORT is served from, for WRAP-SAME-ORIGIN. On loopback
+that is the address and localhost, because a developer types either and a DNS-rebinding page
+can present neither: its Host is the attacker's domain."
+  (flet ((origin (h) (format nil "http://~A:~D" h port)))
+    (cond ((string-equal host "::1") (list (origin "[::1]") (origin "localhost")))
+          ((loopback-host-p host) (list (origin "127.0.0.1") (origin "localhost")))
+          ((member host '("0.0.0.0" "::" "") :test #'string=)
+           (error "hyperion/server: :request-guard :same-origin cannot work out the app's origins when the server is bound to every interface (~S). Bind 127.0.0.1, or pass the origins it is reached by: :request-guard (:same-origin \"http://example.test:~D\")."
+                  host port))
+          (t (list (origin host))))))
+
+(defun %apply-request-guard (app request-guard host port)
+  "APP behind the CSRF defence REQUEST-GUARD names (#304):
+  :NONE                    nothing;
+  :SAME-ORIGIN             HYPERION/CSRF:WRAP-SAME-ORIGIN with the origins of HOST:PORT;
+  (:SAME-ORIGIN ORIGIN...) the same guard with the origins given.
+HYPERION/CSRF loads after this file, so it is called by name; it is part of the same system
+and is always loaded by the time a server starts."
+  (flet ((wrap (origins)
+           (uiop:symbol-call :hyperion/csrf :wrap-same-origin app :origins origins)))
+    (cond ((eq request-guard :none) app)
+          ((eq request-guard :same-origin) (wrap (%request-guard-origins host port)))
+          ((and (consp request-guard) (eq (first request-guard) :same-origin) (rest request-guard))
+           (wrap (rest request-guard)))
+          (t (error "hyperion/server: :request-guard is ~S; it must be :none, :same-origin or (:same-origin ORIGIN ...)."
+                    request-guard)))))
+
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t)
-                       (security-headers t) workers)
+                       (security-headers t) workers (request-guard :none))
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
 the returned handler differs between the two and STOP takes either.
@@ -443,7 +479,18 @@ CHECK-PORT (default T) refuses to start when PORT is already answering, signalli
 PORT-IN-USE. On by default because the failure it prevents does not look like a port
 problem: a dev window opens onto a SIBLING application and reads as a catastrophically
 broken build (pre-publication issue 238). The probe CONNECTS rather than binding -- see PORT-ANSWERING-P for
-why that distinction is not pedantry on Windows. Pass :check-port nil to start anyway."
+why that distinction is not pedantry on Windows. Pass :check-port nil to start anyway.
+
+REQUEST-GUARD (default :NONE) puts HYPERION/CSRF:WRAP-SAME-ORIGIN in front of APP (#304):
+:SAME-ORIGIN refuses a request whose Host is not this server's, and an unsafe request that did
+not come from its own page. On loopback it accepts both 127.0.0.1:PORT and localhost:PORT.
+(:SAME-ORIGIN ORIGIN ...) names the origins instead, for a server reached by another name. Turn
+it on for a server that serves a desktop app's UI or a user's data on this machine with no
+proxy in front, such as an app run headless on 127.0.0.1: without it, a web page the user
+visits can post to it, or read from it after a DNS rebinding. Leave it off behind a reverse
+proxy on the same machine: the server binds 127.0.0.1 there but receives the public Host from
+the proxy, and the guard would refuse every real request. HYPERION/DEV:SERVE turns it on by
+default on loopback, and HYPERION/DESKTOP:RUN-APP always has."
   (check-type workers (or null (integer 1)))
   (when (and workers (not (%backend-args server workers)))
     (if (eq server :hunchentoot)
@@ -452,7 +499,10 @@ why that distinction is not pedantry on Windows. Pass :check-port nil to start a
               server)))
   (when (and check-port (port-answering-p host port))
     (error 'port-in-use :host host :port port))
-  (let* ((secured (%apply-security-headers app security-headers))
+  (let* ((guarded (%apply-request-guard app request-guard host port))
+         ;; The guard sits inside the logging and the security headers, so a refusal is
+         ;; logged with its request id and carries the same headers as any response.
+         (secured (%apply-security-headers guarded security-headers))
          (wrapped (if log (hyperion/logging:wrap secured) secured)))
     (cond
       ((native-backend-p server)
@@ -1006,6 +1056,23 @@ grace period, while it still answers everything else."
                   (list "draining"))
             (funcall app env)))))
 
+(defun %guard-except-readiness (app request-guard host port readiness-path)
+  "APP behind REQUEST-GUARD (see %APPLY-REQUEST-GUARD) for every path except READINESS-PATH,
+which reaches APP unguarded (#304).
+
+THE READINESS PATH IS EXEMPT FROM THE REQUEST GUARD, both its Host check and its Origin check.
+A platform's health checker sends no Origin and may use another Host, and refusing it would
+take a healthy instance out of rotation. When the server is not draining, a request for that
+path reaches the app's own handler, so an app must serve nothing there but a status: a
+DNS-rebinding page can read whatever that path returns."
+  (let ((guarded (%apply-request-guard app request-guard host port)))
+    (if (or (null readiness-path) (eq guarded app))
+        guarded
+        (lambda (env)
+          (if (equal readiness-path (getf env :path-info))
+              (funcall app env)
+              (funcall guarded env))))))
+
 (defun %drain-grace (session handler seconds)
   "The first phase of a drain on SIGTERM (#388): keep serving for SECONDS, with the readiness
 path answering 503 and, on :uv, every response closing its connection. A second SIGTERM ends it
@@ -1024,7 +1091,7 @@ early. Logged once."
                                workers name (banner :derive) (signals t) on-ready
                                (drain-seconds (%env-seconds "HYPERION_DRAIN_SECONDS" 5))
                                (drain-timeout (%env-seconds "HYPERION_DRAIN_TIMEOUT_SECONDS" 20))
-                               readiness-path)
+                               readiness-path (request-guard :none))
   "Start APP and BLOCK until interrupted or until REQUEST-SHUTDOWN is called. Returns NIL.
 
 The production counterpart to START: same arguments, plus a banner and interrupt handling.
@@ -1056,7 +1123,13 @@ while its proxy may still send it requests for a few seconds:
   3. Whatever is still open is closed, and SERVE-FOREVER returns.
 Keep DRAIN-SECONDS + DRAIN-TIMEOUT below the platform's termination grace period (often 30 s),
 after which it sends SIGKILL. Ctrl-C, SIGINT and REQUEST-SHUTDOWN stop at once. Hunchentoot gets
-phase 1 and then stops as it always has; Woo does not see SIGTERM at all."
+phase 1 and then stops as it always has; Woo does not see SIGTERM at all.
+
+REQUEST-GUARD is START's (#304), with one difference: READINESS-PATH is exempt from it, both
+its Host check and its Origin check, so a health checker that sends no Origin or another Host
+is never refused. When the server is not draining, a request for that path reaches the app's
+own handler unguarded, so an app must serve nothing there but a status: a DNS-rebinding page
+can read whatever that path returns."
   (let* ((session (%make-server-session :handler nil))
          (restore-signals nil)
          handler)
@@ -1082,9 +1155,15 @@ phase 1 and then stops as it always has; Woo does not see SIGTERM at all."
             (funcall *install-signal-handlers*
                      (lambda (&optional (reason :sigterm))
                        (request-shutdown-from-signal session reason)))))
-    (setf handler (start (%readiness-app app session readiness-path)
+    ;; The guard wraps the app for every path but READINESS-PATH, and %READINESS-APP sits
+    ;; outside both, so a health checker is never refused (#304). START gets :NONE, so the
+    ;; guard is not applied twice.
+    (setf handler (start (%readiness-app (%guard-except-readiness app request-guard host port
+                                                                   readiness-path)
+                                         session readiness-path)
                          :server server :port port :host host :debug debug :log log
-                             :security-headers security-headers :workers workers)
+                         :security-headers security-headers :workers workers
+                         :request-guard :none)
           (server-session-handler session) handler)
     ;; BANNER has THREE states, not two, so it cannot be a plain string-or-NIL: derive one
     ;; (the default), print this exact line, or print nothing. With NIL as the default there
