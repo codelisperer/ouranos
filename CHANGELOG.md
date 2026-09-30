@@ -32,6 +32,14 @@ its tag.
   build (`%shipped-image-p`). `verify-bundle-windows.ps1` treats `sbcl-runtime.exe` as a helper
   and traces it as the launcher's child. Linux builds are unchanged. (#98)
 
+### Fixed
+
+- **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
+  discovery, which asked vswhere for the newest install only, so on a machine with several Visual
+  Studio installs the variable chose the toolchain for libuv and the Windows launcher but not for
+  mbedTLS. It now uses `scripts/msvc.lisp`, as `build-libuv.lisp` and `build-desktop-app.lisp` do,
+  and a path that is not an installation is refused before anything is downloaded. (#410)
+
 ## v0.1.5 — 2026-09-30
 
 Changes since `v0.1.4`. The tag is on `f3fdf1a`.
