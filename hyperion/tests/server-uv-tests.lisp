@@ -440,6 +440,96 @@ an empty piece and a nested list handled like any other."
         (is (string= "12" (header-of r "Content-Length")))
         (is (equalp expected (sb-ext:string-to-octets (body-of r) :external-format :latin-1)))))))
 
+;;; --- HEAD ------------------------------------------------------------------
+
+(defun raw-exchange (port text)
+  "Write TEXT on a new connection and return everything the server sends until it closes, as
+latin-1 text. For responses a framed read would misjudge, such as one to HEAD."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (sb-ext:with-timeout +io-timeout+
+           (sock:socket-connect s #(127 0 0 1) port)
+           (let ((stream (sock:socket-make-stream s :input t :output t
+                                                    :element-type '(unsigned-byte 8))))
+             (write-sequence (sb-ext:string-to-octets text :external-format :latin-1) stream)
+             (force-output stream)
+             (read-all stream)))
+      (ignore-errors (sock:socket-close s)))))
+
+(defun head-then-get (port)
+  "Pipeline a HEAD and a closing GET on one connection. Returns the two responses as text,
+split where the second status line starts, or NIL for the second when only one arrived."
+  (let* ((text (raw-exchange port (concatenate 'string
+                                               (req "HEAD / HTTP/1.1" "Host: x")
+                                               (req "GET / HTTP/1.1" "Host: x"
+                                                    "Connection: close"))))
+         (second (search "HTTP/1.1 " text :start2 1)))
+    (values (subseq text 0 (or second (length text)))
+            (and second (subseq text second))
+            (count-status-lines text))))
+
+(defun body-after-head (response)
+  "The octets of RESPONSE after its head, as text."
+  (subseq response (+ 4 (search +crlfcrlf+ response))))
+
+(test a-head-request-gets-the-head-without-the-body
+  "A response to HEAD carries no body, whatever the handler returned (RFC 9110 9.3.2), and has
+the Content-Length a GET gets. On a kept-alive connection any body octets would be read as the
+start of the next response, so a HEAD and a GET are pipelined and exactly two responses must
+arrive, the first with nothing after its head."
+  (with-server (port (const-app 200 +ok+ (list "hello")))
+    (multiple-value-bind (head get lines) (head-then-get port)
+      (is (= 2 lines))
+      (is (eql 0 (search "HTTP/1.1 200" head)))
+      (is (string= "" (body-after-head head)) "the HEAD response carried a body")
+      (is-true get "no second response")
+      (when get
+        (is (string= "hello" (body-after-head get)))
+        (is (string= (header-of get "Content-Length") (header-of head "Content-Length"))
+            "HEAD's Content-Length ~S is not GET's ~S"
+            (header-of head "Content-Length") (header-of get "Content-Length"))))))
+
+(test a-head-request-for-a-file-gets-its-size-and-no-body
+  "A bare pathname body answers HEAD with the file's size as Content-Length and nothing else."
+  (uiop:with-temporary-file (:pathname path :type "txt")
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string "0123456789abcdef" out))
+    (with-server (port (const-app 200 +ok+ path))
+      (multiple-value-bind (head get lines) (head-then-get port)
+        (is (= 2 lines))
+        (is (string= "16" (header-of head "Content-Length")))
+        (is (string= "" (body-after-head head)))
+        (is (and get (string= "0123456789abcdef" (body-after-head get))))))))
+
+(test a-head-request-to-a-streamed-body-writes-the-head-and-calls-nothing
+  "A function body on HEAD: the head a GET would get (chunked), no chunks and no terminating
+chunk, and the function is not called. The connection stays usable: the pipelined GET that
+follows gets the streamed body."
+  (let ((calls (list 0)))
+    (with-server (port (lambda (env)
+                         (list 200 (list :content-type "text/plain")
+                               (lambda (writer)
+                                 (when (string= "HEAD" (string (getf env :request-method)))
+                                   (sb-ext:atomic-incf (car calls)))
+                                 (funcall writer "streamed")))))
+      (multiple-value-bind (head get lines) (head-then-get port)
+        (is (= 2 lines))
+        (is (string-equal "chunked" (header-of head "Transfer-Encoding")))
+        (is (string= "" (body-after-head head)) "the HEAD response carried chunks")
+        (is (and get (search "streamed" get)))
+        (is (= 0 (car calls)) "the body function ran for HEAD")))))
+
+(test a-head-request-to-a-bodiless-status-is-unchanged
+  "1xx, 204 and 304 carry no body and no Content-Length on any method (#383); HEAD keeps it
+so, and a body the handler supplied is still dropped."
+  (dolist (status '(204 304))
+    (with-server (port (const-app status +ok+ (list "never sent")))
+      (multiple-value-bind (head get lines) (head-then-get port)
+        (is (= 2 lines) "status ~D" status)
+        (is (null (header-of head "Content-Length")) "status ~D has a Content-Length" status)
+        (is (string= "" (body-after-head head)) "status ~D carried a body" status)
+        (is (and get (string= "" (body-after-head get))) "status ~D: GET carried a body" status)))))
+
 (test a-header-we-refuse-to-send-becomes-500
   "A CR in a header value is response splitting. It is never sanitised and never sent: the
 handler produced a bug, and a bug is a 500."

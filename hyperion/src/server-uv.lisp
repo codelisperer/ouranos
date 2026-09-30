@@ -363,6 +363,36 @@ as pieces, not joined into a new vector first (#430)."
        (net:write-bytes conn (%latin1 (h1:encode-error 500)))
        nil))))
 
+(defun %write-head-only (conn status headers length keep-alive)
+  "Answer a HEAD request: the head a GET would get, and no body (RFC 9110 9.3.2). LENGTH is
+the body's octet count, sent as Content-Length, or :CHUNKED for a streamed body, whose head
+says Transfer-Encoding: chunked as a GET's would. Returns KEEP-ALIVE, or NIL after a refused
+header has been answered with a 500, as %WRITE-RESPONSE does.
+
+Nothing after the head is written. On a kept-alive connection the client reads the next
+octets as the start of the next response, so a body here would have been taken for one."
+  (let ((encoded (if (eq length :chunked)
+                     (h1:encode-head-chunked-flat
+                      status (%head-strings headers 'h1:encode-head-chunked-flat) keep-alive)
+                     (h1:encode-head-flat
+                      status (%head-strings headers 'h1:encode-head-flat) length keep-alive))))
+    (cond
+      ((h1:encode-ok? encoded)
+       (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
+       keep-alive)
+      (t
+       (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
+       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       nil))))
+
+(defun %file-size (path)
+  "PATH's size in octets, signalling as %WRITE-FILE-RESPONSE does when it cannot be read."
+  (with-open-file (in path :element-type '(unsigned-byte 8) :if-does-not-exist nil)
+    (unless in
+      (error "hyperion/server-uv: the response body names a file that is not readable: ~A"
+             path))
+    (file-length in)))
+
 (defun %write-error (conn status)
   (net:write-bytes conn (%latin1 (h1:encode-error status))))
 
@@ -1320,7 +1350,7 @@ checked rather than assumed -- an unframed string on the wire desynchronises the
     (when (h1:encode-ok? encoded)
       (net:write-bytes conn (%latin1 (h1:encode-text encoded))))))
 
-(defun %complete (conn app state result keep-alive)
+(defun %complete (conn app state result keep-alive &optional head-request)
   "Write the response for the request in flight, then resume the connection.
 
 RUNS ON THE LOOP THREAD, and exactly once per request. RESULT is either the response triple
@@ -1361,6 +1391,17 @@ written into a closed socket."
                                       :status status))
                           (setf body nil))
                         (cond
+                          ;; A HEAD REQUEST GETS THE HEAD ONLY, whatever body the handler
+                          ;; returned: the Content-Length or chunked framing a GET would get,
+                          ;; and nothing after it. A streamed body's function is not called.
+                          ;; Hyperion's router strips a HEAD body itself; a Clack app does not.
+                          ((and head-request (functionp body))
+                           (%write-head-only conn status headers :chunked keep-alive))
+                          ((and head-request (pathnamep body))
+                           (%write-head-only conn status headers (%file-size body) keep-alive))
+                          (head-request
+                           (%write-head-only conn status headers
+                                             (length (%body-octets body)) keep-alive))
                           ((functionp body)
                            (%stream-response conn app state status headers body keep-alive))
                           ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (pre-publication issue 313):
@@ -1408,6 +1449,7 @@ one level up."
   (setf (conn-state-in-flight state) t)
   (multiple-value-bind (host port) (%peer conn state)
     (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
+           (head-request (string= "HEAD" (h1:head-method head)))
            (loop* (net:connection-loop conn))
            ;; K ROUTES ITSELF ONTO THE LOOP THREAD, so a dispatcher may call it from
            ;; wherever the work finished. The alternative -- documenting that every
@@ -1419,7 +1461,7 @@ one level up."
            ;; pointless async hop.
            (k (lambda (result)
                 (%on-loop loop*
-                          (lambda () (%complete conn app state result keep-alive))
+                          (lambda () (%complete conn app state result keep-alive head-request))
                           "a response completion"))))
       (handler-case
           (funcall (%dispatcher state) app env k)
