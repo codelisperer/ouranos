@@ -12,6 +12,7 @@
 (cl:defpackage #:praxeon/translate
   (:use #:cl)
   (:local-nicknames (#:llm #:praxeon/llm)
+                    (#:cnd #:praxeon/conditions)
                     (#:actor #:praxeon/actor))
   (:documentation
    "One-shot LLM translation for Praxeon. MAKE-TRANSLATOR builds a provider (a
@@ -19,6 +20,7 @@
     provider); TRANSLATE renders text between locales; REGISTER exposes it as an
     agent Means. Locale keywords (:es, :ru, ...) map to language names.")
   (:export #:make-translator #:translate #:language-name #:*language-names*
+           #:translation-max-tokens #:*minimum-translation-tokens*
            #:register))
 
 (in-package #:praxeon/translate)
@@ -61,31 +63,81 @@ main agent; prefer a higher-quality model on sensitive paths."
   (or (null s)
       (string= "" (string-trim '(#\Space #\Tab #\Newline #\Return) s))))
 
-(defun %run (provider text target-lang source-lang max-tokens)
-  "The one-shot call: translate TEXT into TARGET-LANG (a language name), optionally
-from SOURCE-LANG. Returns only the translation."
-  (let ((system
-          (if source-lang
-              (format nil "You are a translation engine. Translate the user's message from ~A into ~A. Preserve meaning, tone, register, and any Markdown formatting. Do not answer, interpret, or add anything -- output ONLY the translation." source-lang target-lang)
-              (format nil "You are a translation engine. Translate the user's message into ~A. Preserve meaning, tone, register, and any Markdown formatting. Do not answer, interpret, or add anything -- output ONLY the translation."
-                      target-lang))))
-    (llm:completion-text
-     (llm:complete provider (list (llm:msg "user" text))
-                   :system system :max-tokens max-tokens))))
+(defparameter *minimum-translation-tokens* 1024
+  "The smallest output limit TRANSLATE gives a translation it sizes itself (#338).")
 
-(defun translate (provider text to &key from (max-tokens 2048))
+(defun translation-max-tokens (text)
+  "The output limit TRANSLATE uses for TEXT when the caller gives none (#338): twice TEXT's
+length in UTF-8 bytes, plus 256, at least *MINIMUM-TRANSLATION-TOKENS* and at most
+PRAXEON/LLM:*DEFAULT-MAX-TOKENS*, read when it is called.
+
+A translation is about as long as its source, and TEXT's UTF-8 bytes are already at least its
+tokens, since a byte-level tokenizer makes at most one token of each byte, so twice that leaves
+room for a target language that takes more
+tokens than the source, as scripts other than Latin often do. The ceiling is the limit an app
+has set for its model, since a provider can refuse a request above the model's maximum. A text
+long enough to need more is cut off and signals TRANSLATION-TRUNCATED rather than returning
+part of a translation."
+  (max *minimum-translation-tokens*
+       (min llm:*default-max-tokens*
+            (+ 256 (* 2 (length (sb-ext:string-to-octets text :external-format :utf-8)))))))
+
+(defun %system-prompt (target-lang source-lang)
+  (if source-lang
+      (format nil "You are a translation engine. Translate the user's message from ~A into ~A. Preserve meaning, tone, register, and any Markdown formatting. Do not answer, interpret, or add anything -- output ONLY the translation." source-lang target-lang)
+      (format nil "You are a translation engine. Translate the user's message into ~A. Preserve meaning, tone, register, and any Markdown formatting. Do not answer, interpret, or add anything -- output ONLY the translation."
+              target-lang)))
+
+(defun %run (provider text target-lang source-lang max-tokens)
+  "The one-shot call: translate TEXT into TARGET-LANG (a language name), optionally from
+SOURCE-LANG, with an output limit of MAX-TOKENS, or TRANSLATION-MAX-TOKENS of TEXT when that is
+NIL. Returns only the translation.
+
+A translation that stopped at the output limit signals TRANSLATION-TRUNCATED (#338), inside
+the restarts RETRY-WITH-MAX-TOKENS, which asks again with a larger limit, and ACCEPT-TRUNCATED,
+which returns the cut-off translation with a second value, :TRUNCATED."
+  (let ((limit (or max-tokens (translation-max-tokens text)))
+        (system (%system-prompt target-lang source-lang)))
+    (loop
+      (let* ((completion (llm:complete provider (list (llm:msg "user" text))
+                                       :system system :max-tokens limit))
+             (out (llm:completion-text completion)))
+        (if (not (eq (llm:completion-stop-reason completion) :max-tokens))
+            (return out)
+            (restart-case (error 'cnd:translation-truncated :max-tokens limit :text out)
+              (cnd:retry-with-max-tokens (new-limit)
+                :report "Translate again with a larger output limit."
+                :interactive (lambda ()
+                               (format *query-io* "~&New output limit, in tokens: ")
+                               (finish-output *query-io*)
+                               (list (parse-integer (read-line *query-io*))))
+                (check-type new-limit (integer 1))
+                (setf limit new-limit))
+              (cnd:accept-truncated ()
+                :report "Return the cut-off translation, marked as truncated."
+                (return (values out :truncated)))))))))
+
+(defun translate (provider text to &key from max-tokens)
   "Translate TEXT into the TO locale on PROVIDER, returning the translated string.
 FROM (a locale) names the source language when known -- worth passing, it sharpens
 the result. Returns TEXT unchanged when it is blank or FROM eq TO (nothing to do),
 or when the translator comes back empty. **Never returns a blank string**: a blank
 would render as an empty chat bubble (the handoff silently 'losing' the reply), so
 on an empty translation we fall back to the source TEXT -- the user sees the
-untranslated reply rather than nothing."
+untranslated reply rather than nothing.
+
+MAX-TOKENS is the output limit. When it is NIL, the default, the limit is sized from TEXT by
+TRANSLATION-MAX-TOKENS (#338). A translation that reaches the limit is not returned as though
+it were complete: it signals PRAXEON/CONDITIONS:TRANSLATION-TRUNCATED, with the restarts
+RETRY-WITH-MAX-TOKENS and ACCEPT-TRUNCATED; after ACCEPT-TRUNCATED this returns the cut-off
+translation with a second value, :TRUNCATED."
   (if (or (%blank-p text) (eql from to))
       text
-      (let ((out (%run provider text (language-name to)
-                       (and from (language-name from)) max-tokens)))
-        (if (%blank-p out) text out))))
+      (multiple-value-bind (out truncated)
+          (%run provider text (language-name to) (and from (language-name from)) max-tokens)
+        (if (%blank-p out)
+            text
+            (if truncated (values out truncated) out)))))
 
 ;;; --- Optional: translation as an agent-callable Means ----------------------
 
@@ -115,6 +167,8 @@ web-search:register). Uses a dedicated translator provider (see MAKE-TRANSLATOR)
   (let ((tr (make-translator :provider provider :model model)))
     (actor:register-means agent name *description*
                           (lambda (args)
-                            (%run tr (gethash "text" args)
-                                  (gethash "target_language" args) nil 2048))
+                            ;; A translation cut off at the limit signals, and the means
+                            ;; fails, rather than handing the agent part of a translation.
+                            (values (%run tr (gethash "text" args)
+                                          (gethash "target_language" args) nil nil)))
                           :schema (%schema))))

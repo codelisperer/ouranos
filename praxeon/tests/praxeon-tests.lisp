@@ -4031,3 +4031,113 @@ model, which is what the file's commentary is for."
     (is (equal '(:full :offload :clear) (mapcar (lambda (r) (getf r :configuration)) rows)))
     (is (every (lambda (r) (= 2 (getf r :succeeded))) rows) "every task succeeded: ~S" rows)
     (is (< (getf (funcall by :offload) :input-tokens) (getf (funcall by :full) :input-tokens)))))
+
+;;; --------------------------------------------------------------------------
+;;; A translation or a structured result cut off at the output limit (#338)
+;;;
+;;; The scripted provider returns a completion with stop reason :max-tokens, as for #326 above.
+;;; Before #338, TRANSLATE returned the cut-off text as the translation and GENERATE-STRUCTURED
+;;; either reported that the tool was not called or spent its repair attempts at the same limit.
+;;; --------------------------------------------------------------------------
+
+(defun %translated (text &optional (stop :end))
+  (llm:make-completion :text text :stop-reason stop))
+
+(test a-cut-off-translation-signals-instead-of-returning
+  (let ((p (make-instance 'scripted :script (list (%translated "Los tres pasos son: primero, reunir" :max-tokens)))))
+    (handler-case (progn (praxeon/translate:translate p "The three steps are: first, gather the notes." :es)
+                         (fail "expected TRANSLATION-TRUNCATED"))
+      (cnd:translation-truncated (c)
+        (is (typep c 'cnd:output-limit-reached))
+        (is (typep c 'cnd:deliberation-failure) "an app's handler for a failed call receives it")
+        (is (string= "Los tres pasos son: primero, reunir" (cnd:translation-truncated-text c)))
+        (is (= (first (scripted-limits p)) (cnd:output-limit-reached-max-tokens c))))))
+  (let ((p (make-instance 'scripted :script (list (%translated "Hola.")))))
+    (is (string= "Hola." (praxeon/translate:translate p "Hello." :es))
+        "control: a finished translation is returned")))
+
+(test a-cut-off-translation-can-be-retried-with-a-larger-limit-or-accepted
+  (let ((p (make-instance 'scripted :script (list (%translated "Hola, esto" :max-tokens)
+                                                  (%translated "Hola, esto es todo.")))))
+    (is (string= "Hola, esto es todo."
+                 (handler-bind ((cnd:output-limit-reached
+                                  (lambda (c) (cnd:retry-with-max-tokens 5000 c))))
+                   (praxeon/translate:translate p "Hello, this is everything." :es))))
+    (is (= 5000 (second (scripted-limits p))) "the second request carried the larger limit"))
+  (let ((p (make-instance 'scripted :script (list (%translated "Hola, esto" :max-tokens)))))
+    (multiple-value-bind (text mark)
+        (handler-bind ((cnd:translation-truncated (lambda (c) (cnd:accept-truncated c))))
+          (praxeon/translate:translate p "Hello, this is everything." :es))
+      (is (string= "Hola, esto" text))
+      (is (eq :truncated mark) "the accepted translation is marked as cut off"))))
+
+(test translate-sizes-its-output-limit-from-its-input
+  (flet ((limit-for (text &rest keys)
+           (let ((p (make-instance 'scripted :script (list (%translated "x")))))
+             (apply #'praxeon/translate:translate p text :es keys)
+             (first (scripted-limits p)))))
+    (is (= 1024 (limit-for "Hello.")) "a short text gets the minimum")
+    (is (= 6256 (limit-for (make-string 3000 :initial-element #\a)))
+        "3,000 bytes: twice that, plus 256")
+    (is (= 4256 (limit-for (make-string 1000 :initial-element #\LATIN_SMALL_LETTER_E_WITH_ACUTE)))
+        "counted in UTF-8 bytes, two for each e-acute")
+    (is (= llm:*default-max-tokens* (limit-for (make-string 100000 :initial-element #\a)))
+        "at most the limit the app set for its model")
+    (let ((llm:*default-max-tokens* 20000))
+      (is (= 20000 (limit-for (make-string 100000 :initial-element #\a)))
+          "read when TRANSLATE is called"))
+    (is (= 300 (limit-for (make-string 3000 :initial-element #\a) :max-tokens 300))
+        "an explicit :max-tokens wins")))
+
+(test the-translate-means-fails-rather-than-returning-a-cut-off-translation
+  (let ((agent (actor:make-agent :name "t"))
+        (p (make-instance 'scripted :script (list (%translated "Hola, esto" :max-tokens)))))
+    (praxeon/translate:register agent :provider p)
+    (signals error (actor:act agent "translate" (%args "text" "Hello, this is everything."
+                                                       "target_language" "Spanish")))))
+
+(test a-cut-off-structured-result-signals-and-is-not-repaired-at-the-same-limit
+  (let ((p (make-instance 'recording
+                          :script (list (llm:make-completion
+                                         :text "" :stop-reason :max-tokens
+                                         :tool-calls (list (llm:make-tool-call
+                                                            :id "c1" :name "draft_copy"
+                                                            :arguments (%args "headline" "Ship"))))))))
+    (handler-case (progn (llm:generate-structured p '((:role :user :content "b")) (%spec)
+                                                  :max-tokens 50)
+                         (fail "expected STRUCTURED-RESULT-TRUNCATED"))
+      (llm:structured-result-truncated (c)
+        (is (typep c 'llm:structured-result-invalid) "an app's handler for a bad result receives it")
+        (is (typep c 'cnd:output-limit-reached))
+        (is (= 50 (cnd:output-limit-reached-max-tokens c)))
+        (is (string= "Ship" (gethash "headline" (llm:structured-result-invalid-arguments c))))))
+    (is (= 1 (length (recording-requests p)))
+        "no repair was attempted at the limit that cut it off"))
+  (let ((p (make-instance 'recording
+                          :script (list (llm:make-completion :text "Here is" :stop-reason :max-tokens)))))
+    (signals llm:structured-result-truncated
+      (llm:generate-structured p '((:role :user :content "b")) (%spec)))
+    (is (= 1 (length (recording-requests p))) "a cut-off reply with no call is not NOT-CALLED")))
+
+(test a-cut-off-structured-result-can-be-retried-or-accepted
+  (let* ((cut (lambda () (llm:make-completion
+                          :text "" :stop-reason :max-tokens
+                          :tool-calls (list (llm:make-tool-call :id "c1" :name "draft_copy"
+                                                                :arguments (%args "headline" "Ship"))))))
+         (p (make-instance 'scripted
+                           :script (list (funcall cut)
+                                         (%call-completion "draft_copy"
+                                                           (%args "headline" "Ship it" "characters" 7))))))
+    (let ((result (handler-bind ((cnd:output-limit-reached
+                                   (lambda (c) (cnd:retry-with-max-tokens 4000 c))))
+                    (llm:generate-structured p '((:role :user :content "b")) (%spec)
+                                             :max-tokens 50 :attempts 1))))
+      (is (string= "Ship it" (gethash "headline" result))
+          "the retry succeeded although :attempts is 1, so it did not count as an attempt")
+      (is (equal '(50 4000) (scripted-limits p))))
+    (let ((p2 (make-instance 'scripted :script (list (funcall cut)))))
+      (multiple-value-bind (args mark)
+          (handler-bind ((llm:structured-result-truncated (lambda (c) (cnd:accept-truncated c))))
+            (llm:generate-structured p2 '((:role :user :content "b")) (%spec)))
+        (is (string= "Ship" (gethash "headline" args)))
+        (is (eq :truncated mark))))))
