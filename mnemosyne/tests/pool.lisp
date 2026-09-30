@@ -205,9 +205,13 @@ from a backend, not from a connection."
 (test many-threads-share-a-small-pool-without-exceeding-its-size
   (with-each-pool-backend (backend)
     (with-test-pool (pool backend :size 3 :checkout-timeout 30)
-      (let* ((lock (sb-thread:make-mutex))
+      (let* ((backend-name *current-backend*)
+             (lock (sb-thread:make-mutex))
              (most-open 0)
              (failures 0)
+             ;; The first error a checkout signalled, kept so a failure says what it was
+             ;; (#447): the test catches every error and would otherwise only count it.
+             (first-error nil)
              (done 0)
              (threads
                (loop for i below 8
@@ -221,14 +225,21 @@ from a backend, not from a connection."
                                                (sb-thread:with-mutex (lock)
                                                  (setf most-open (max most-open (conn:pool-open-count pool)))
                                                  (incf done)))
-                                           (error () (sb-thread:with-mutex (lock) (incf failures))))))
+                                           (error (e)
+                                             (sb-thread:with-mutex (lock)
+                                               (incf failures)
+                                               (unless first-error
+                                                 (setf first-error
+                                                       (format nil "~S: ~A" (type-of e) e))))))))
                               :name (format nil "pool-borrower-~D" i)))))
         (aion/test-threads:join-all threads :timeout 60)
-        (is* (= 160 done) "every checkout ran its query")
-        (is* (= 0 failures))
-        (is* (<= most-open 3) "the pool never had more than SIZE open, saw ~D" most-open)
+        (is* (= 160 done) "~A: every checkout ran its query, but ~D of 160 did" backend-name done)
+        (is* (= 0 failures) "~A: ~D checkouts signalled; the first: ~A"
+             backend-name failures first-error)
+        (is* (<= most-open 3) "~A: the pool never had more than SIZE open, saw ~D"
+             backend-name most-open)
         (is* (= (conn:pool-open-count pool) (conn:pool-idle-count pool))
-             "and every connection came back")))))
+             "~A: and every connection came back" backend-name)))))
 
 (test a-closed-pool-refuses-and-closes-what-comes-back
   (with-each-pool-backend (backend)
