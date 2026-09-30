@@ -278,11 +278,19 @@ its tag.
   `(store-credential service account secret)`, `(fetch-credential service account)` and
   `(delete-credential service account)` keep a secret by name for the current user; `secret` goes
   in and comes out as an `aion/secret`. A missing item signals `credential-not-found`. On Windows
-  the store is Credential Manager. macOS and Linux signal `credential-store-unavailable` until
-  their backends are written, and nothing is written to a file instead. An app keeping an API key
-  or password in a file or a setting can move it here. (#357)
+  the store is Credential Manager. On macOS it is the login Keychain, one generic-password item
+  per credential with the item's service and account set to `service` and `account`. Linux
+  signals `credential-store-unavailable` until its backend is written, and nothing is written to a
+  file instead. A value over 2560 bytes of UTF-8 signals `credential-too-large` on both Windows and
+  macOS. An app keeping an API key or password in a file or a setting can move it here. (#357)
 - **aion/windows/ffi: Credential Manager bindings**: `cred-write-w`, `cred-read-w`, `cred-delete-w`,
   `cred-free`, the `credential-w` struct and its constants. (#357)
+- **aion/darwin: a macOS binding over CoreFoundation and Security.framework** (aion ADR-0004).
+  `make-cf-string`, `make-cf-data`, `make-cf-dictionary`, `cf-string-to-lisp`, `cf-data-octets`,
+  `cf-constant`, `with-cf` (releases what it binds on every exit), and `osstatus-error` with
+  `check-osstatus`. The raw `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and
+  `SecItemDelete` calls are in `aion/darwin/ffi`. macOS only; it uses cffi and the frameworks
+  every macOS ships, and adds no dependency. (#357)
 
 ### Fixed
 

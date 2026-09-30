@@ -36,6 +36,7 @@ An ADR here is for a decision **Aion owns and nothing else records.**
 | [0001](0001-stream-contract.md) | The stream contract: backpressure, NODELAY, and loop introspection | Proposed |
 | [0002](0002-libuv-integration-strategy.md) | libuv integration strategy: one async substrate, bound but not abstracted | Provisional |
 | [0003](0003-windows-platform-binding.md) | The Windows platform binding: one Windows surface in aion, COM first | Provisional |
+| [0004](0004-darwin-platform-binding.md) | The macOS platform binding: aion/darwin, over CoreFoundation and Security | Provisional |
 
 **Start with [0002](0002-libuv-integration-strategy.md)** for the whole libuv picture — it
 is the umbrella, and it cross-references everything else (the five founding decisions in

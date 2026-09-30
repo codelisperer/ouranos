@@ -18,7 +18,10 @@
 (defun %token ()
   (format nil "~36R" (random (expt 36 12) (make-random-state t))))
 
-(defun %service () (concatenate 'string "hades-credentials-test/" (%token)))
+(defun %service ()
+  "A service name unique to the run. The prefix is the one to search for when checking that no
+test item was left behind: security find-generic-password on macOS, cmdkey /list on Windows."
+  (concatenate 'string "ouranos-test-hades-credentials/" (%token)))
 
 (defun %marker ()
   "A value to store: unique to the run, with a non-ASCII character, and never printed."
@@ -34,7 +37,7 @@
        (let ((,text (progn ,@body (get-output-stream-string ,out))))
          ,text))))
 
-#+win32
+#+(or win32 darwin)
 (progn
   (test a-credential-round-trips-and-is-deleted
     (let ((service (%service)) (value (%marker)) (second (%marker)))
@@ -88,7 +91,7 @@
              (is (search value (format nil "~A" (sec:reveal (sec:make-secret value))))))
         (ignore-errors (cred:delete-credential service "user"))))))
 
-#-win32
+#-(or win32 darwin)
 (test with-no-backend-every-call-signals-and-nothing-is-stored
   ;; No file fallback: the store refuses, and a fetch afterwards does not find anything either.
   (let ((service (%service)))

@@ -3,6 +3,7 @@
 (defpackage #:hades/credentials
   (:use #:cl)
   #+win32 (:local-nicknames (#:ffi #:aion/windows/ffi))
+  #+darwin (:local-nicknames (#:ffi #:aion/darwin/ffi) (#:darwin #:aion/darwin))
   (:documentation "A credential store over the operating system's own: store, fetch and delete a
 secret by service and account. Fetch returns an AION/SECRET (hades ADR-0001, #357).")
   (:export #:store-credential #:fetch-credential #:delete-credential

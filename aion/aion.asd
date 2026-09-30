@@ -351,6 +351,30 @@
 ;;; Dependency-free apart from Coalton itself, and deliberately NOT owned by a framework:
 ;;; the shape is request-response, not web, and the tree had already reimplemented it twice
 ;;; (hyperion inbound, hermes outbound in hand-rolled CL) before it moved here.
+(defsystem "aion/darwin"
+  :description "The macOS-specific API surface: owned CoreFoundation strings, data and dictionaries, Security.framework's keychain item calls, and OSStatus as a condition. macOS-only (ADR-0004)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; cffi only: CoreFoundation and Security ship with macOS, so nothing is built (ADR-0004).
+  :depends-on ("cffi")
+  :serial t
+  :components ((:module "src/darwin"
+                :serial t
+                :components ((:file "packages")
+                             (:file "ffi")
+                             (:file "cf"))))
+  :in-order-to ((test-op (test-op "aion/darwin/tests"))))
+
+(defsystem "aion/darwin/tests"
+  :description "Tests for aion/darwin. macOS-only, and they never touch a keychain."
+  :depends-on ("aion/darwin" "cffi" "fiveam")
+  :serial t
+  :components ((:module "tests/darwin"
+                :serial t
+                :components ((:file "cf-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/darwin/tests '#:run-tests)))
+
 (defsystem "aion/windows"
   :description "The Windows-specific API surface: UTF-16 marshalling, GetLastError/HRESULT as conditions, handle lifetime, and struct layouts asserted at load. Windows-only (ADR-0003)."
   :author "Bob <eternal.recursion@proton.me>"
