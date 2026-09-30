@@ -2414,6 +2414,82 @@ checks the port the server was asked for, and 0 is not the port a request arrive
   (is (not (search "server-uv-worker" (or (%dev-serve-handler-thread :workers nil) "")))
       "control: with :workers nil it ran on the loop thread"))
 
+;;; --- a desktop app on :uv (#472) ---------------------------------------------------------
+;;;
+;;; hyperion/desktop:run-app gives :uv a worker pool unless told otherwise, because on the loop
+;;; thread a handler that waits holds up every other request. These go through RUN-APP itself:
+;;; ON-READY runs once the server listens and before any shell starts, sends its requests, and
+;;; leaves RUN-APP with THROW, whose unwind stops the server. The launcher must exist for
+;;; RUN-APP's up-front check, and is never started.
+
+(defparameter +slow-seconds+ 1.5
+  "How long the slow handler in the tests below waits before it answers.")
+
+(defun %desktop-uv-fast-seconds (&rest run-app-args)
+  "Start a desktop app on :uv through RUN-APP with RUN-APP-ARGS. While a request to /slow is
+waiting in its handler, time a request to /fast, and return the seconds it took."
+  (let ((app (lambda (env)
+               (when (equal (getf env :path-info) "/slow") (sleep +slow-seconds+))
+               (list 200 +ok+ (list "x")))))
+    (catch 'run-app-done
+      (apply #'hyperion/desktop:run-app app
+             :server :uv :shell :webview :launcher sb-ext:*runtime-pathname*
+             :on-ready
+             (lambda (url)
+               (let* ((port (parse-integer url :start (1+ (position #\: url :from-end t))
+                                               :junk-allowed t))
+                      (host (format nil "Host: 127.0.0.1:~D" port))
+                      (slow (sb-thread:make-thread
+                             (lambda () (get* port "GET /slow HTTP/1.1" host))
+                             :name "desktop-uv-slow-client")))
+                 (sleep 0.3)            ; the slow request is in its handler
+                 (let ((start (get-internal-real-time)))
+                   (get* port "GET /fast HTTP/1.1" host)
+                   (let ((took (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                     (sb-thread:join-thread slow :default nil)
+                     (throw 'run-app-done (float took))))))
+             run-app-args))))
+
+(defun %desktop-uv-thread-names (&rest run-app-args)
+  "Start a desktop app on :uv through RUN-APP with RUN-APP-ARGS, and return the names of the
+server's loop and worker threads while it runs, sorted."
+  (catch 'run-app-done
+    (apply #'hyperion/desktop:run-app (const-app 200 +ok+ '("x"))
+           :server :uv :shell :webview :launcher sb-ext:*runtime-pathname*
+           :on-ready
+           (lambda (url)
+             (declare (ignore url))
+             (throw 'run-app-done
+               (sort (loop for th in (sb-thread:list-all-threads)
+                           for name = (or (sb-thread:thread-name th) "")
+                           when (or (search "aion/uv loop" name)
+                                    (search "server-uv-worker" name))
+                             collect name)
+                     #'string<)))
+           run-app-args)))
+
+(test a-desktop-app-on-uv-runs-one-loop-and-two-workers-by-default
+  (let ((names (%desktop-uv-thread-names)))
+    (is (equal '("aion/uv loop" "server-uv-worker-0" "server-uv-worker-1") names)
+        "run-app's defaults on :uv: ~S" names))
+  (let ((names (%desktop-uv-thread-names :workers 3)))
+    (is (= 3 (count-if (lambda (n) (search "server-uv-worker" n)) names))
+        ":workers 3 given to run-app reached the server: ~S" names))
+  #-win32
+  (let ((names (%desktop-uv-thread-names :loops 2)))
+    (is (equal '("aion/uv loop 0" "aion/uv loop 1")
+               (remove-if-not (lambda (n) (search "aion/uv loop" n)) names))
+        ":loops 2 given to run-app reached the server: ~S" names)))
+
+(test a-desktop-app-on-uv-answers-while-a-slow-handler-waits
+  (let ((took (%desktop-uv-fast-seconds)))
+    (is (< took 0.75)
+        "with run-app's default workers, /fast took ~,2F s behind a ~A s handler" took +slow-seconds+))
+  (let ((took (%desktop-uv-fast-seconds :workers nil)))
+    (is (>= took 1.0)
+        "control: with :workers nil, /fast waited for the slow handler, took ~,2F s" took)))
+
 ;;; --- several loops (#463) -----------------------------------------------------------------
 ;;;
 ;;; A server of several loops, with workers because it refuses the inline dispatcher. The

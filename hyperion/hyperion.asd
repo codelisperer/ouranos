@@ -258,6 +258,7 @@
                "hyperion/http1"                                       ; and the encoder it names (#110)
                "aion/uv/net"                                          ; and its connection class (#262)
                "aion/fs"                                              ; and the dev:serve test's temp root (#432)
+               "hyperion/desktop"                                     ; and run-app's :uv default (#472)
                "fiveam" "aion/test-threads" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/server-uv-tests"))

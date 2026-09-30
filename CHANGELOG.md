@@ -40,6 +40,16 @@ its tag.
   does, deadlocks there, so development behaved differently from a production entry point that
   passes `:workers`. An app acts if it develops on `:uv` (`HYPERION_SERVER=uv`) and relies on
   inline dispatch: pass `:workers nil`. Other backends keep `start`'s default. (#432)
+- **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
+  by default.**
+  `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
+  a handler that waits (a model call, a slow query, a large file) held up every other request,
+  including the page's polling and server-to-client streams. Hunchentoot hid this with a thread
+  per connection. An app acts if it runs `run-app` with `:server :uv` (or `HYPERION_SERVER=uv`)
+  and relies on inline dispatch: pass `:workers nil`. `run-app` also takes `:loops` now, which
+  defaults to 1 on `:uv`: with workers, `:uv`'s own default is one loop per core, up to 4, on
+  macOS and Linux, and one person's window does not need more than one. Pass `:loops nil` for
+  that default. Other backends keep `start`'s defaults for both. (#472)
 - **A Windows desktop app refuses to start a `sbcl.core` that is not the one it was built
   with.** `<name>.exe`, the launcher, is compiled with the SHA-256 of the core built beside it
   and checks it before starting `sbcl-runtime.exe`. On a mismatch it exits with code 126 and says
