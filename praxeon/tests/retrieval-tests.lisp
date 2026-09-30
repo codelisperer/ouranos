@@ -13,6 +13,7 @@
                     (#:cnd #:praxeon/conditions)
                     (#:ctx #:praxeon/context)
                     (#:actor #:praxeon/actor)
+                    (#:ceiling #:praxeon/ceiling)
                     (#:conn #:mnemosyne/conn)
                     (#:url #:mnemosyne/url)
                     (#:mig #:mnemosyne/migrate)
@@ -108,6 +109,7 @@ database, so its checks are not counted in that line."
                     ,@body))
              (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A" ,tb)))
              (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A_terms" ,tb)))
+             (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A_corpora" ,tb)))
              (conn:disconnect ,c))))))
 
 (defun sec (id text &rest keys &key (document-id "doc-1") (locale "en") &allow-other-keys)
@@ -748,9 +750,9 @@ chunk."
 (defun %expected-text (result)
   (format nil "~{~A~^~%~%~}" (mapcar #'%render (rt:retrieval-result-passages result))))
 
-(test retrieve-is-retrieve-similar-with-a-default-limit-of-20
+(test retrieve-on-a-hybrid-corpus-is-retrieve-hybrid-with-a-default-limit-of-20
   (with-store (store)
-    (let ((corpus (rt:make-corpus store "many"))
+    (let ((corpus (rt:make-corpus store "many" :strategy :hybrid))
           (embedder (make-instance 'word-embedder)))
       ;; Section I mentions "refund" I times, so every section is at a different distance from
       ;; the query and the order has no ties.
@@ -762,9 +764,9 @@ chunk."
                  embedder)
       (let ((default (rt:retrieve corpus embedder "refund")))
         (is (= 20 (length (rt:retrieval-result-passages default))))
-        (is (equal (ids (rt:retrieve-similar corpus embedder "refund" :limit 20)) (ids default))
-            "the same passages in the same order as RETRIEVE-SIMILAR at 20"))
-      (is (equal (ids (rt:retrieve-similar corpus embedder "refund" :limit 3))
+        (is (equal (ids (rt:retrieve-hybrid corpus embedder "refund" :limit 20)) (ids default))
+            "the same passages in the same order as RETRIEVE-HYBRID at 20"))
+      (is (equal (ids (rt:retrieve-hybrid corpus embedder "refund" :limit 3))
                  (ids (rt:retrieve corpus embedder "refund" :limit 3)))
           ":limit is passed through"))))
 
@@ -825,22 +827,26 @@ chunk."
 
 (test the-model-is-told-when-a-search-result-is-truncated
   (with-store (store)
-    (let* ((corpus (rt:make-corpus store "policy"))
+    (let* ((corpus (rt:make-corpus store "policy" :strategy :hybrid))
            (embedder (make-instance 'word-embedder))
            (agent (actor:make-agent)))
-      ;; Synced and never embedded: a search by meaning has no candidates, and says why.
+      ;; Synced and never embedded: the similarity half of a hybrid search has no candidates,
+      ;; and the result says why. The keyword half still finds the best refund passage.
       (rt:sync-corpus corpus (list (sec "1" "A refund is issued.") (sec "2" "Refund rules.")
                                    (sec "3" "Privacy.")))
       (rt:register-corpus-search agent corpus embedder #'%render :limit 1)
-      (is (string= (format nil "No passages matched.~%~%3 parts of this collection could not be searched by meaning yet, so this result may be missing passages. A search with \"match\": \"words\" covers every part.")
-                   (actor:act agent "search-documents" (%args "query" "refund"))))
+      (let ((text (actor:act agent "search-documents" (%args "query" "refund"))))
+        (is (search (format nil "~%~%3 parts of this collection could not be searched by meaning yet, so this result may be missing passages. A search with \"match\": \"words\" covers every part.")
+                    text))
+        (is (= 1 (count #\[ text)) "one passage, found by keyword"))
       ;; Two passages contain "refund" and the limit is 1.
       (let ((text (actor:act agent "search-documents" (%args "query" "refund" "match" "words"))))
         (is (search "More passages matched than are shown here." text))
         (is (= 1 (count #\[ text)) "one passage, as :limit 1 asks")))))
 
 (test (every-truncation-reason-gets-a-sentence-for-the-model :suite chunkers)
-  ;; RETRIEVE cannot produce :NOT-INDEXED yet (#316 adds it), so the note is checked directly.
+  ;; Checked directly, with a TRUNCATED value built for each reason, so every reason has a
+  ;; sentence whether or not a test's corpus can be brought into that state.
   (flet ((note (reason &optional pending)
            (rt::%completeness-note
             (rc::%make-retrieval-result '() (rt:make-truncated :reason reason :pending pending)))))
@@ -1086,3 +1092,342 @@ chunk."
         (is (= 1/2 (getf (funcall by :similar) :recall)))
         (is (every (lambda (r) (and (= 2 (getf r :questions)) (= 0 (getf r :incomplete)) (= 1 (getf r :k))))
                    report))))))
+
+;;; --- contexts (#316, step 3) ----------------------------------------------------------------
+;;;
+;;; The chat model is a stand-in that answers with the first line of the document it was given,
+;;; so a chunk's context carries a word its own text may lack, and a test can see that word reach
+;;; the BM25 terms and the embedding. It reports a cache write for the first call with a document
+;;; and a cache read for every later one, as a provider with a prefix cache does.
+
+(defclass context-writer (llm:provider)
+  ((model :initarg :model :initform "writer-1" :reader writer-model)
+   (answer :initarg :answer :initform nil :reader writer-answer)
+   (stop :initarg :stop :initform :end :reader writer-stop)
+   (calls :initform '() :accessor writer-calls)
+   (seen :initform (make-hash-table :test 'equal) :reader writer-seen)))
+
+(defmethod llm:model-of ((p context-writer)) (writer-model p))
+
+(defun %document-first-line (document-text)
+  "The first line inside \"<document>...\"."
+  (let* ((start (1+ (position #\Newline document-text)))
+         (end (position #\Newline document-text :start start)))
+    (subseq document-text start end)))
+
+(defmethod llm:complete ((p context-writer) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools temperature tool-choice))
+  (let* ((parts (llm:content (first messages)))
+         (document (getf (first parts) :text))
+         (hit (gethash document (writer-seen p))))
+    (setf (gethash document (writer-seen p)) t)
+    (push (list :parts parts :max-tokens max-tokens) (writer-calls p))
+    (llm:make-completion
+     :text (if (writer-answer p)
+               (funcall (writer-answer p) document)
+               (format nil "  This passage is from the document that begins: ~A~%"
+                       (%document-first-line document)))
+     :stop-reason (writer-stop p)
+     :input-tokens 20 :output-tokens 10
+     :cache-read-tokens (if hit 50 0) :cache-write-tokens (if hit 0 50))))
+
+(defun %contextual (store name &rest keys &key (writer (make-instance 'context-writer))
+                    &allow-other-keys)
+  "A corpus NAME whose contextualizer is WRITER, :HYBRID unless KEYS say otherwise."
+  (apply #'rt:make-corpus store name
+         :contextualizer (rt:make-contextualizer writer)
+         (append (loop for (k v) on keys by #'cddr unless (eq k :writer) append (list k v))
+                 (list :strategy :hybrid))))
+
+(defparameter +handbook+
+  (list (sec "1" "Payout rules.")
+        (sec "2" "It is sent on the first business day of the month.")
+        (sec "3" "Refund rules." :document-id "doc-2")
+        (sec "4" "It is issued within 30 days." :document-id "doc-2")))
+
+(defun %sync-handbook (corpus)
+  (rt:sync-document corpus "doc-1" (subseq +handbook+ 0 2))
+  (rt:sync-document corpus "doc-2" (subseq +handbook+ 2 4)))
+
+(defun %passage (result section-id)
+  (find section-id (rt:retrieval-result-passages result)
+        :key (lambda (p) (rt:provenance-section-id (rt:passage-provenance p))) :test #'equal))
+
+(test each-chunk-gets-a-context-with-its-document-in-the-cached-prefix
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer))
+           (corpus (%contextual store "handbook" :writer writer)))
+      (%sync-handbook corpus)
+      (multiple-value-bind (n status) (rt:contextualize-pending corpus)
+        (is (= 4 n))
+        (is (eq :done status)))
+      (let* ((calls (reverse (writer-calls writer)))
+             (documents (mapcar (lambda (c) (getf (first (getf c :parts)) :text)) calls)))
+        (is (= 4 (length calls)) "one call per chunk")
+        (dolist (call calls)
+          (destructuring-bind (document chunk) (getf call :parts)
+            (is (llm:cache-boundary-p document) "the document ends the cacheable prefix")
+            (is (not (llm:cache-boundary-p chunk)) "the chunk and the instruction come after it")
+            (is (search "<chunk>" (getf chunk :text)))
+            (is (= 200 (getf call :max-tokens)))))
+        (is (search (format nil "Payout rules.~%~%It is sent on the first business day")
+                    (first documents))
+            "the whole document, its chunks in order")
+        (is (and (equal (first documents) (second documents))
+                 (equal (third documents) (fourth documents))
+                 (not (equal (first documents) (third documents))))
+            "one document's chunks are asked for together, so the cached document is reused"))
+      (let* ((r (rt:retrieve-whole corpus))
+             (second (%passage r "2")))
+        (is (equal '("1" "2" "3" "4") (ids r)))
+        (is (equal "It is sent on the first business day of the month." (rt:passage-text second))
+            "the passage is the chunk's own text")
+        (is (equal "This passage is from the document that begins: Payout rules."
+                   (rt:passage-context second))
+            "and its context, trimmed, is beside it"))
+      (is (= 0 (rt:contextualize-pending corpus)) "nothing is left to do")
+      (is (= 4 (length (writer-calls writer)))))))
+
+(test a-context-is-searched-with-its-chunk-by-keyword-and-by-similarity
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder))
+          (plain (rt:make-corpus store "plain" :strategy :hybrid))
+          (contextual (%contextual store "contextual")))
+      (rt:ingest plain +handbook+ embedder)
+      (rt:ingest contextual +handbook+ embedder)
+      (is (equal '("1") (ids (rt:retrieve-keyword plain "payout" :locale "en")))
+          "control: without contexts, only the section that says payout")
+      (is (equal '("1" "2") (sort (ids (rt:retrieve-keyword contextual "payout" :locale "en"))
+                                  #'string<))
+          "with contexts, the section after it as well")
+      ;; The test embedder's query vector for "payout" points along the payout axis. Section 2's
+      ;; text alone has no payout component; with its context it has.
+      (let ((plain-2 (%passage (rt:retrieve-similar plain embedder "payout") "2"))
+            (contextual-2 (%passage (rt:retrieve-similar contextual embedder "payout") "2")))
+        (is (> (rt:passage-distance plain-2) 0.5d0))
+        (is (< (rt:passage-distance contextual-2) 1d-9))))))
+
+(test an-edit-makes-every-context-of-its-document-stale-and-only-those
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer))
+           (corpus (%contextual store "handbook" :writer writer)))
+      (%sync-handbook corpus)
+      (is (= 4 (rt:contextualize-pending corpus)))
+      (setf (writer-calls writer) '())
+      (rt:sync-document corpus "doc-1" (list (first +handbook+)
+                                             (sec "2" "It is sent on the second business day.")))
+      (is (= 2 (rt:contextualize-pending corpus))
+          "both chunks of the edited document, including the one whose text did not change")
+      (is (every (lambda (c) (search "second business day" (getf (first (getf c :parts)) :text)))
+                 (writer-calls writer))
+          "each was written against the new document")
+      (let ((report (rt:sync-document corpus "doc-1"
+                                      (list (sec "2" "It is sent on the second business day.")
+                                            (first +handbook+)))))
+        (is (= 2 (rt:sync-report-updated report)) "a change of order is an update in place"))
+      (is (= 2 (rt:contextualize-pending corpus)) "and it changes the document")
+      (is (equal '("2" "1" "3" "4") (ids (rt:retrieve-whole corpus))) "in the new order")
+      (rt:sync-document corpus "doc-2" (list (third +handbook+)))
+      (is (= 1 (rt:contextualize-pending corpus)) "a removed section changes its document")
+      (rt:sync-document corpus "doc-2" (list (third +handbook+)))
+      (is (= 0 (rt:contextualize-pending corpus)) "an unchanged sync changes nothing"))))
+
+(test a-new-model-or-instruction-makes-every-context-stale
+  (with-store (store)
+    (let ((first (%contextual store "handbook")))
+      (%sync-handbook first)
+      (is (= 4 (rt:contextualize-pending first)))
+      (flet ((again (&rest keys)
+               (rt:contextualize-pending
+                (rt:make-corpus store "handbook" :strategy :hybrid
+                                :contextualizer (apply #'rt:make-contextualizer
+                                                       (make-instance 'context-writer
+                                                                      :model "writer-2")
+                                                       keys)))))
+        (is (= 4 (again)) "another model")
+        (is (= 4 (again :instruction "Say where this chunk sits in the document.")) "another instruction")
+        (is (= 0 (again :instruction "Say where this chunk sits in the document.")) "the same again")
+        (is (= 4 (again :instruction "Say where this chunk sits in the document." :max-tokens 100))
+            "another answer limit")))))
+
+(test a-changed-context-is-embedded-again-and-an-unchanged-one-is-not
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder)))
+      (flet ((corpus (model tag)
+               (%contextual store "handbook"
+                            :writer (make-instance 'context-writer
+                                                   :model model
+                                                   :answer (lambda (document)
+                                                             (format nil "~A: ~A" tag
+                                                                     (%document-first-line document)))))))
+        (rt:ingest (corpus "writer-1" "one") +handbook+ embedder)
+        (let ((c (corpus "writer-1" "one")))
+          (is (= 0 (rt:embed-pending c embedder)) "contexts are written before the embeddings")
+          (let ((c2 (corpus "writer-2" "two")))
+            (is (= 4 (rt:contextualize-pending c2)))
+            (let ((completeness (rt:retrieval-result-completeness
+                                 (rt:retrieve-similar c2 embedder "payout"))))
+              (is (eq :not-embedded (rt:truncated-reason completeness)))
+              (is (= 4 (rt:truncated-pending completeness))))
+            (is (= 4 (rt:embed-pending c2 embedder)) "a new context is embedded again")
+            (is (rt:complete-p (rt:retrieval-result-completeness
+                                (rt:retrieve-similar c2 embedder "payout")))))
+          ;; Another model that writes the same words: the contexts are rewritten, and what is
+          ;; embedded is unchanged, so nothing is embedded again.
+          (let ((c3 (corpus "writer-3" "two")))
+            (is (= 4 (rt:contextualize-pending c3)))
+            (is (= 0 (rt:embed-pending c3 embedder)))))))))
+
+(test retrieve-follows-the-corpus-strategy
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder))
+          (whole (rt:make-corpus store "whole" :strategy :whole))
+          (hybrid (rt:make-corpus store "hybrid" :strategy :hybrid)))
+      (rt:sync-document whole "doc-1" (list (sec "b" "Second.") (sec "a" "First.") (sec "c" "Third.")))
+      (let ((r (rt:retrieve whole nil "anything" :limit 1)))
+        (is (equal '("b" "a" "c") (ids r)) "every chunk, in the order the app handed them in")
+        (is (rt:complete-p (rt:retrieval-result-completeness r))))
+      (is (eq :whole (rt:corpus-effective-strategy whole)))
+      (rt:ingest hybrid +policy+ embedder)
+      (is (eq :hybrid (rt:corpus-effective-strategy hybrid)))
+      (is (equal (ids (rt:retrieve-hybrid hybrid embedder "refund" :locale "en"))
+                 (ids (rt:retrieve hybrid embedder "refund" :locale "en"))))
+      (is (equal (ids (rt:retrieve-keyword hybrid "refund"))
+                 (ids (rt:retrieve hybrid nil "refund")))
+          "with no embedder, keyword search"))))
+
+(defun %lines-containing (text stream)
+  (remove-if-not (lambda (line) (search text line))
+                 (uiop:split-string (get-output-stream-string stream) :separator '(#\Newline))))
+
+(test an-auto-corpus-changes-strategy-at-its-limit-and-logs-that-once
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer))
+           (corpus (%contextual store "growing" :writer writer :strategy :auto :whole-limit 20))
+           (out (make-string-output-stream))
+           (long (make-string 80 :initial-element #\x)))
+      (unwind-protect
+           (progn
+             (aion/log:setup :env :dev :level :info :stream out)
+             (let ((report (rt:sync-document corpus "doc-1" (list (sec "1" "Payout rules.")))))
+               (is (= 4 (rt:sync-report-size report)) "13 characters is 4 estimated tokens")
+               (is (eq :whole (rt:sync-report-strategy report))))
+             (is (eq :whole (rt:corpus-effective-strategy corpus)))
+             (multiple-value-bind (n status) (rt:contextualize-pending corpus)
+               (is (= 0 n))
+               (is (eq :whole status)))
+             (is (null (writer-calls writer)) "a :WHOLE corpus needs no contexts")
+             (let ((report (rt:sync-document corpus "doc-2" (list (sec "2" long :document-id "doc-2")))))
+               (is (= 24 (rt:sync-report-size report)) "93 characters")
+               (is (= 24 (rt:corpus-size corpus)))
+               (is (eq :hybrid (rt:sync-report-strategy report))))
+             (rt:sync-document corpus "doc-2" (list (sec "2" long :document-id "doc-2")))
+             (is (eq :hybrid (rt:corpus-effective-strategy corpus)))
+             (is (= 2 (rt:contextualize-pending corpus)) "the backfill includes the older chunk")
+             (let ((lines (%lines-containing "changed strategy" out)))
+               (is (= 1 (length lines)) "logged once, though the corpus was synced again: ~S" lines)
+               (is (search "corpus=growing" (first lines)))
+               (is (search "from=whole" (first lines)))
+               (is (search "to=hybrid" (first lines)))
+               (is (search "tokens=24" (first lines)))))
+        (aion/log:setup :env :dev :level :warn :stream *standard-output*)))))
+
+(defun %ledger (&key (token-cap 100000) (call-cap 2))
+  "A ledger for a grant built with the ceiling's own constructor. What is tested here is how the
+contextualizer consults and charges a ledger; how a grant is verified is praxeon/tests's."
+  (ceiling:make-ledger (ceiling::%make-grant :principal "ingest" :group "app"
+                                             :token-cap token-cap :call-cap call-cap
+                                             :expires-at (+ (get-universal-time) 3600))))
+
+(test a-backfill-stops-at-the-ledger-s-ceiling-and-keeps-what-it-wrote
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer))
+           (corpus (%contextual store "handbook" :writer writer))
+           (ledger (%ledger :call-cap 2)))
+      (%sync-handbook corpus)
+      (signals ceiling:budget-exhausted (rt:contextualize-pending corpus :ledger ledger))
+      (is (= 2 (length (writer-calls writer))) "the third call was refused before it was made")
+      (is (= 2 (%column-count store "context IS NOT NULL")) "the two written are kept")
+      (let ((lines (ceiling:usage-report ledger)))
+        (is (= 2 (length lines)))
+        (is (every (lambda (l) (equal "contextualize" (getf l :means))) lines))
+        (is (equal '(0 50) (mapcar (lambda (l) (getf l :cache-read)) lines))
+            "the cache counts reach the ledger"))
+      (is (= 2 (rt:contextualize-pending corpus :ledger (%ledger :call-cap 2)))
+          "the next run carries on where the last stopped")
+      (setf (writer-calls writer) '())
+      (let ((other (%contextual store "other" :writer writer)))
+        (rt:sync-document other "doc-1" (list (first +handbook+)))
+        (signals ceiling:budget-exhausted
+          (rt:contextualize-pending other :ledger (%ledger :token-cap 10)))
+        (is (null (writer-calls writer)) "a call the tokens cannot cover is not made")))))
+
+(test an-explicit-backfill-waits-for-start-backfill
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer))
+           (corpus (%contextual store "held" :writer writer :strategy :auto :whole-limit 5
+                                             :backfill :explicit)))
+      (%sync-handbook corpus)
+      (is (eq :hybrid (rt:corpus-effective-strategy corpus)))
+      (multiple-value-bind (n status) (rt:contextualize-pending corpus)
+        (is (= 0 n))
+        (is (eq :backfill-not-started status)))
+      (is (null (writer-calls writer)))
+      (is (eq corpus (rt:start-backfill corpus)))
+      (is (= 4 (rt:contextualize-pending corpus)))
+      ;; Control: a corpus the app said would be large is :HYBRID from its first sync, so there
+      ;; is no backfill to hold.
+      (let ((expected (%contextual store "expected" :strategy :auto :whole-limit 1000
+                                                    :expected-tokens 5000 :backfill :explicit)))
+        (let ((report (rt:sync-document expected "doc-1" (subseq +handbook+ 0 2))))
+          (is (< (rt:sync-report-size report) 1000))
+          (is (eq :hybrid (rt:sync-report-strategy report))))
+        (is (= 2 (rt:contextualize-pending expected)))))))
+
+(test a-table-made-before-contexts-keeps-its-embeddings-and-gets-contexts
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder))
+          (c (rt:store-connection store)))
+      (rt:ingest (rt:make-corpus store "handbook" :strategy :hybrid) +handbook+ embedder)
+      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN section_index, DROP COLUMN document_fingerprint, DROP COLUMN context, DROP COLUMN context_deriver, DROP COLUMN context_document_fingerprint, DROP COLUMN input_fingerprint"
+                           (rt:store-table store)))
+      (conn:exec c (format nil "DROP TABLE ~A" (rt:corpora-table store)))
+      (rt:ensure-schema store)
+      (let ((plain (rt:make-corpus store "handbook" :strategy :hybrid)))
+        (is (= 0 (rt:embed-pending plain embedder)) "an embedding made before contexts stays current")
+        (is (equal '("1" "2" "3" "4") (ids (rt:retrieve-whole plain)))))
+      (let ((contextual (%contextual store "handbook")))
+        (is (= 4 (rt:contextualize-pending contextual)))
+        (is (= 4 (rt:embed-pending contextual embedder)))
+        (is (equal '("1" "2") (sort (ids (rt:retrieve-keyword contextual "payout" :locale "en"))
+                                    #'string<)))))))
+
+(test evaluate-retrieval-measures-what-contexts-add
+  ;; The maintainer's rule on #316: contexts become a default only if the evaluation shows they
+  ;; keep recall at least as high. An app measures that by evaluating the same questions on a
+  ;; corpus without contexts and on one with them.
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder))
+          (plain (rt:make-corpus store "plain" :strategy :hybrid))
+          (contextual (%contextual store "contextual"))
+          (questions (list (rt:make-eval-question :query "payout sent" :document-id "doc-1"
+                                                  :section-id "2"))))
+      (rt:ingest plain +handbook+ embedder)
+      (rt:ingest contextual +handbook+ embedder)
+      (flet ((hits (corpus)
+               (getf (first (rt:evaluate-retrieval corpus embedder questions :k 1 :locale "en"
+                                                                               :strategies '(:keyword)))
+                     :hits)))
+        (is (= 0 (hits plain)) "without contexts, the shorter chunk that says payout ranks first")
+        (is (= 1 (hits contextual)) "with them, the chunk that says both words")))))
+
+(test a-context-cut-off-at-the-answer-limit-is-not-stored
+  "#338's rule for every caller of COMPLETE: a context that stopped at the output limit is not
+written as though it were whole."
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer :stop :max-tokens))
+           (corpus (%contextual store "handbook" :writer writer)))
+      (%sync-handbook corpus)
+      (signals cnd:deliberation-failure (rt:contextualize-pending corpus))
+      (is (= 0 (%column-count store "context IS NOT NULL")) "nothing was stored"))))

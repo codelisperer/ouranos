@@ -3,8 +3,8 @@
 ;;;; REGISTER-CORPUS-SEARCH registers one means on an agent. The model passes a QUERY, and, when
 ;;;; the app gave an embedder, a MATCH of "meaning" or "words":
 ;;;;
-;;;;   "meaning"  RETRIEVE, which is RETRIEVE-SIMILAR today and will follow the corpus's
-;;;;              retrieval strategy later (#316). The default.
+;;;;   "meaning"  RETRIEVE, which follows the corpus's strategy (#316): the whole corpus while
+;;;;              it is :WHOLE, and hybrid search once it is :HYBRID. The default.
 ;;;;   "words"    RETRIEVE-EXACT, with every word of the query required. The only kind offered
 ;;;;              when the app has no embedder, and it needs none.
 ;;;;
