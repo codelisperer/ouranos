@@ -197,6 +197,14 @@ resolution moves, this suite must move with it or say so."
                "so the caller's icon is used instead"))
       (aion/fs:delete-tree dir))))
 
+(test shipped-image-p-and-install-directory-answer-for-a-development-image
+  "#416: hyperion/desktop's public answers are aion/platform's, and in this development SBCL the
+image is not a shipped build and has no installation."
+  (is-false (desktop:shipped-image-p))
+  (is (null (desktop:install-directory)))
+  (is (eq (desktop:shipped-image-p) (aion/platform:shipped-image-p)))
+  (is (equal (desktop:install-directory) (aion/platform:shipped-image-directory))))
+
 (defun run-tests ()
   (let ((results (run 'view)))
     (explain! results)

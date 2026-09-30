@@ -1691,43 +1691,6 @@ nothing. `Get-LocalUser' is a different lookup against a different store."
                      "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)S:AI(AU;OICISAFA;FA;;;WD)")))
     (is (equal '("BA" "SY") principals)
         "the audit section leaked into the DACL principals: ~S" principals)))
-
-(test a-shipped-build-is-one-file-or-a-macos-app-with-sbcl-core-beside-its-runtime
-  "#98: a macOS build is a launcher, the runtime `sbcl' and `sbcl.core' in a bundle's
-Contents/MacOS, so the runtime and core paths differ. Without the second rule the updater took
-it for a developer's REPL and found no install directory. Everything else with a core beside
-its runtime must still read as a REPL, or an update could be applied into SBCL's own
-installation: Windows' installer keeps sbcl.exe and sbcl.core in one directory."
-  (flet ((shipped (runtime core &key macos)
-           (hyperion/update::%shipped-image-p runtime core :macos macos :windows nil)))
-    (is-true (shipped "/Applications/Foo.app/Contents/MacOS/foo"
-                      "/Applications/Foo.app/Contents/MacOS/foo")
-             "one dumped file, on any platform")
-    (is-true (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
-                      "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos t)
-             "the macOS .app")
-    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
-                       "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos nil)
-              "the same paths are not a shipped shape off macOS")
-    (is-false (shipped "C:/Program Files/Steel Bank Common Lisp/sbcl.exe"
-                       "C:/Program Files/Steel Bank Common Lisp/sbcl.core" :macos nil)
-              "Windows' SBCL installation")
-    (is-false (shipped "/opt/homebrew/Cellar/sbcl/2.6.8/libexec/bin/sbcl"
-                       "/opt/homebrew/Cellar/sbcl/2.6.8/lib/sbcl/sbcl.core" :macos t)
-              "Homebrew's SBCL")
-    (is-false (shipped "/opt/sbcl/bin/sbcl" "/opt/sbcl/bin/sbcl.core" :macos t)
-              "a hand-built SBCL on macOS with its core beside the runtime")
-    (is-false (shipped "/tmp/dist/foo-1.0.0-macos-arm64/sbcl"
-                       "/tmp/dist/foo-1.0.0-macos-arm64/sbcl.core" :macos t)
-              "the raw bundle directory the build writes, which is not shipped")
-    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
-                       "/Applications/Foo.app/Contents/MacOS/other.core" :macos t)
-              "a core under another name")
-    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
-                       "/Applications/Bar.app/Contents/MacOS/sbcl.core" :macos t)
-              "sbcl.core in another bundle")
-    (is-false (shipped nil nil :macos t))))
-
 ;;; --- the product defaults to *app-name*, and the apply fetch checks the channel (#301) ---
 
 (test the-product-defaults-to-app-name
@@ -1752,31 +1715,3 @@ installation: Windows' installer keeps sbcl.exe and sbcl.core in one directory."
         (up::%apply-inputs source "beta" nil))
       ;; The control: the same fetch on the channel the manifest names is accepted.
       (is (eq source (up::%apply-inputs source "stable" nil))))))
-
-(test a-windows-build-is-sbcl-runtime-exe-with-sbcl-core-beside-it
-  "#98: a Windows build is <name>.exe (a launcher), sbcl-runtime.exe and sbcl.core in one
-directory, so the runtime and core paths differ. SBCL's own Windows installation also keeps a
-runtime and sbcl.core together, as sbcl.exe, and must still read as a REPL, or an update could
-be applied into SBCL's directory."
-  (flet ((shipped (runtime core &key (windows t))
-           (hyperion/update::%shipped-image-p runtime core :macos nil :windows windows)))
-    (is-true (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
-                      "C:/Users/me/AppData/Local/Programs/Foo/sbcl.core")
-             "the installed Windows build")
-    (is-true (shipped "C:/Users/me/AppData/Local/Programs/Foo/SBCL-Runtime.EXE"
-                      "c:/users/me/appdata/local/programs/foo/sbcl.core")
-             "Windows paths compare without regard to case")
-    (is-false (shipped "C:/Program Files/Steel Bank Common Lisp/sbcl.exe"
-                       "C:/Program Files/Steel Bank Common Lisp/sbcl.core")
-              "SBCL's own installation")
-    (is-false (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
-                       "C:/Users/me/AppData/Local/Programs/Bar/sbcl.core")
-              "sbcl.core in another directory")
-    (is-false (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
-                       "C:/Users/me/AppData/Local/Programs/Foo/other.core")
-              "a core under another name")
-    (is-false (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
-                       "D:/Users/me/AppData/Local/Programs/Foo/sbcl.core")
-              "the same directory names on another drive")
-    (is-false (shipped "/opt/foo/sbcl-runtime.exe" "/opt/foo/sbcl.core" :windows nil)
-              "the Windows shape is not a shipped build off Windows")))
