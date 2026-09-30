@@ -32,8 +32,11 @@ OK OUTPUT) from the compile."
          "--eval" (format nil "(sb-ext:save-lisp-and-die ~S :toplevel (lambda () (format t \"ARGV ~~S~~%HEAP ~~D~~%RUNTIME ~~A~~%\" (rest sb-ext:*posix-argv*) (floor (sb-ext:dynamic-space-size) 1048576) (file-namestring sb-ext:*runtime-pathname*)) (finish-output) (sb-ext:exit :code 42)))"
                           (uiop:native-namestring (merge-pathnames "sbcl.core" tree))))
    :output nil :error-output nil)
+  ;; The core's hash is computed here with ironclad, not by the build's own route, so the
+  ;; launcher's check is compared with an independent answer (#98, step 2).
   (uiop:symbol-call :ouranos-windows-launcher :compile-launcher
-                    (merge-pathnames "app.exe" tree) heap-mb (merge-pathnames "obj/" tree)))
+                    (merge-pathnames "app.exe" tree) heap-mb (merge-pathnames "obj/" tree)
+                    (%sha256-hex (merge-pathnames "sbcl.core" tree))))
 
 (defun %probe-report (program args)
   "Run PROGRAM with ARGS; return (values EXIT-CODE ARGV HEAP RUNTIME-NAME) as the probe reported them."
@@ -84,3 +87,38 @@ OK OUTPUT) from the compile."
              (is (equal '("--foo") argv) "the runtime took --dynamic-space-size for itself: ~S" argv)
              (is (eql 700 heap) "and used it as its own heap: ~A MB" heap)))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+;;; --- the launcher checks the core's SHA-256 (#98, step 2) ---------------------------------
+
+(test a-core-changed-after-the-build-is-refused
+  "A per-user install can be written by anything running as the user, and the core is data the
+signature does not cover. The launcher is compiled with the core's hash and refuses a core that
+differs, before starting the runtime."
+  #-win32 (skip "The Windows launcher is built and run on Windows only")
+  #+win32
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (multiple-value-bind (ok output) (%launcher-bundle tree 777)
+           (if (and (not ok) (search "no MSVC" output))
+               (skip "No MSVC here: ~A" output)
+               (progn
+                 (is-true ok "the launcher compiled: ~A" output)
+                 (is (eql 42 (%probe-report (merge-pathnames "app.exe" tree) '("x")))
+                     "the control: the core it was built with starts")
+                 (with-open-file (s (merge-pathnames "sbcl.core" tree) :direction :output
+                                    :if-exists :append :element-type '(unsigned-byte 8))
+                   (write-byte 0 s))
+                 (multiple-value-bind (out err code)
+                     (uiop:run-program (list (uiop:native-namestring (merge-pathnames "app.exe" tree)) "x")
+                                       :output :string :error-output :string :ignore-error-status t)
+                   (is (eql 126 code) "a core one byte longer is refused with 126, got ~A" code)
+                   (is (search "is not the file this app was built with" err) "stderr: ~A" err)
+                   (is (null (search "ARGV" out)) "and the runtime was not started")))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test the-launcher-is-not-compiled-without-a-well-formed-hash
+  (load (merge-pathnames "windows-launcher.lisp" *scripts*))
+  (dolist (bad (list nil "" "abc" (make-string 64 :initial-element #\g)))
+    (is-false (uiop:symbol-call :ouranos-windows-launcher :compile-launcher
+                                "app.exe" 777 (uiop:temporary-directory) bad)
+              "refused ~S" bad)))

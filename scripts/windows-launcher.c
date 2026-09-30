@@ -33,26 +33,96 @@
  * tail of GetCommandLineW after the launcher's own name. Re-quoting argv would change
  * arguments that contain quotes or trailing backslashes.
  *
- * OURANOS_HEAP_MB is set when build-desktop-app.lisp compiles this file, to the heap of the
- * process that dumped the core.
+ * BEFORE STARTING THE RUNTIME it checks sbcl.core's SHA-256 against the one compiled in
+ * (OURANOS_CORE_SHA256, below) and exits with 126, saying so, when they differ (#98, step 2).
+ *
+ * OURANOS_HEAP_MB and OURANOS_CORE_SHA256 are set when build-desktop-app.lisp compiles this
+ * file, after the core is dumped: the heap of the process that dumped it, and its hash.
  */
 
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <bcrypt.h>
 #include <stdio.h>
 #include <wchar.h>
+
+#pragma comment(lib, "bcrypt")
+#pragma comment(lib, "user32")
 
 #ifndef OURANOS_HEAP_MB
 #error "compile with /DOURANOS_HEAP_MB=<megabytes>"
 #endif
 
+/* THE CORE'S HASH (#98, step 2). The SHA-256 of sbcl.core, as 64 lowercase hex digits, written
+ * in when build-desktop-app.lisp compiles this file after the core is dumped. The launcher
+ * hashes sbcl.core before starting the runtime and refuses to start it when the hashes differ.
+ *
+ * Why here: the launcher is the signed file, and the core is data that Authenticode does not
+ * cover. An app installed per user, where anything running as the user can write the install
+ * directory, is safe to sign only if the signed code checks what it loads; otherwise a replaced
+ * core would run under the app's signature (#98, 2026-08-07 decision). The hash is compiled in,
+ * not read from a file beside the core, because a file beside the core can be replaced with it. */
+#ifndef OURANOS_CORE_SHA256
+#error "compile with /DOURANOS_CORE_SHA256=<64 hex digits of sbcl.core's SHA-256>"
+#endif
+
 #define WSTR2(x) L## #x
 #define WSTR(x) WSTR2(x)
 
+/* Exit code for a core that is not the one the launcher was built with. */
+#define EXIT_CORE_CHANGED 126
+
 static void fail(const wchar_t *what, const wchar_t *path) {
   fwprintf(stderr, L"launcher: %ls %ls (error %lu)\n", what, path ? path : L"", GetLastError());
+}
+
+/* MESSAGE to whoever started the launcher: standard error when there is one, which is how a
+   terminal, a script or a test starts it, and otherwise a message box, which is how a user who
+   double-clicked the app sees anything at all. */
+static void tell(const wchar_t *message) {
+  HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+  if (err == NULL || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN) {
+    MessageBoxW(NULL, message, L"This app cannot start", MB_OK | MB_ICONERROR);
+  } else {
+    fwprintf(stderr, L"launcher: %ls\n", message);
+    fflush(stderr);
+  }
+}
+
+/* The SHA-256 of the file at PATH into HEX, 64 lowercase hex digits and a NUL. Returns 0 on
+   success, or the Windows or CNG error code. */
+static DWORD sha256_file(const wchar_t *path, wchar_t hex[65]) {
+  BCRYPT_ALG_HANDLE alg = NULL;
+  BCRYPT_HASH_HANDLE hash = NULL;
+  HANDLE file = INVALID_HANDLE_VALUE;
+  UCHAR digest[32];
+  static UCHAR buffer[1 << 20];
+  DWORD result = 0, got = 0;
+  NTSTATUS st;
+
+  file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                     FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+  if (file == INVALID_HANDLE_VALUE) return GetLastError();
+  st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+  if (!BCRYPT_SUCCESS(st)) { result = (DWORD)st; goto done; }
+  st = BCryptCreateHash(alg, &hash, NULL, 0, NULL, 0, 0);
+  if (!BCRYPT_SUCCESS(st)) { result = (DWORD)st; goto done; }
+  for (;;) {
+    if (!ReadFile(file, buffer, sizeof buffer, &got, NULL)) { result = GetLastError(); goto done; }
+    if (got == 0) break;
+    st = BCryptHashData(hash, buffer, got, 0);
+    if (!BCRYPT_SUCCESS(st)) { result = (DWORD)st; goto done; }
+  }
+  st = BCryptFinishHash(hash, digest, sizeof digest, 0);
+  if (!BCRYPT_SUCCESS(st)) { result = (DWORD)st; goto done; }
+  for (int i = 0; i < 32; i++) swprintf_s(hex + 2 * i, 3, L"%02x", digest[i]);
+done:
+  if (hash) BCryptDestroyHash(hash);
+  if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+  CloseHandle(file);
+  return result;
 }
 
 /* The rest of the command line after the program name, following the rules the C runtime
@@ -94,6 +164,28 @@ int wmain(void) {
       swprintf_s(core, sizeof core / sizeof core[0], L"%ls\\sbcl.core", dir) < 0) {
     fail(L"path too long:", dir);
     return 127;
+  }
+
+  /* The core must be the one this launcher was built with (see OURANOS_CORE_SHA256 above). */
+  {
+    wchar_t found[65] = L"";
+    wchar_t message[MAX_PATH * 4 + 512];
+    DWORD err = sha256_file(core, found);
+    if (err != 0) {
+      swprintf_s(message, sizeof message / sizeof message[0],
+                 L"cannot read %ls to check it (error %lu). Reinstall the app.", core, err);
+      tell(message);
+      return EXIT_CORE_CHANGED;
+    }
+    if (_wcsicmp(found, WSTR(OURANOS_CORE_SHA256)) != 0) {
+      swprintf_s(message, sizeof message / sizeof message[0],
+                 L"%ls is not the file this app was built with, so it was not started. "
+                 L"It may have been changed or replaced since the app was installed. "
+                 L"Reinstall the app. (SHA-256 expected %ls, found %ls)",
+                 core, WSTR(OURANOS_CORE_SHA256), found);
+      tell(message);
+      return EXIT_CORE_CHANGED;
+    }
   }
 
   /* The app sees the launcher's own path as its program name, as it did as one file. */
