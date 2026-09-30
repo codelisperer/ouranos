@@ -151,9 +151,7 @@ client rather than merely wrong."
 An allow-everything-but-these check rather than a full field-value grammar: obs-text makes
 most bytes legal in a value, and the three that end or truncate the header block are the
 three that turn a value into a forged header."
-    (and (not (contains-char? v cr))
-         (and (not (contains-char? v lf))
-              (not (contains-char? v nul)))))
+    (not (any-char? (fn (c) (or (== c cr) (or (== c lf) (== c nul)))) v)))
 
   (declare framing-header? (String -> Boolean))
   (define (framing-header? name)
