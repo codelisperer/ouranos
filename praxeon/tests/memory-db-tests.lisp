@@ -81,7 +81,10 @@ FIVEAM::TEST-SKIPPED is internal; FiveAM exports no way to tell a skip from a re
       (if url
           (format t "~&BACKEND-CHECKS postgres ~D~%" (ran results))
           (format t "~&BACKEND-CHECKS postgres SKIPPED (MNEMOSYNE_TEST_PG_URL is not set)~%"))
-      (format t "~&BACKEND-CHECKS sqlite ~D~%" (ran sqlite-results)))
+      (format t "~&BACKEND-CHECKS sqlite ~D~%" (ran sqlite-results))
+      ;; Which SQLite file those checks ran against, and its version, in the line
+      ;; scripts/verify-tree.lisp reads (#129).
+      (format t "~&SQLITE-LIBRARY ~A~%" (mnemosyne/sqlite-library:describe-loaded-library)))
     (finish-output)
     (and (results-status results) (results-status sqlite-results))))
 
