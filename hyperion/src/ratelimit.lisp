@@ -21,8 +21,15 @@
 ;;;; an address that has no account is limited exactly like one that has. The refusal is the
 ;;;; same response whatever the key was.
 ;;;;
-;;;; STORAGE is a protocol, TAKE-TOKEN and FORGET-BUCKET, so a deployment with several
-;;;; processes can keep buckets in a shared store. MEMORY-STORE is the default and is right
+;;;; A LIMIT THAT COUNTS ONLY SOME REQUESTS (#323). By default every request a limit applies to
+;;;; takes a token before the handler runs. A limit made with :COUNT-WHEN instead checks, before
+;;;; the handler, that a token is available, and takes one after the handler only when
+;;;; COUNT-WHEN says the response should count, such as a failed sign-in. Members of a club
+;;;; signing in together from one network then cost nothing, and failed guesses from that
+;;;; network are still limited.
+;;;;
+;;;; STORAGE is a protocol, TAKE-TOKEN, CHECK-TOKEN, DEBIT-TOKEN and FORGET-BUCKET, so a
+;;;; deployment with several processes can keep buckets in a shared store. MEMORY-STORE is the default and is right
 ;;;; for one process. It bounds how many buckets it keeps (MAX-KEYS): an attacker who sends
 ;;;; a new email address with every request would otherwise grow it without limit.
 ;;;;
@@ -51,24 +58,50 @@ test without sleeping.")
   (per 0 :read-only t)
   (key nil :read-only t)
   (paths nil :read-only t)
-  (methods nil :read-only t))
+  (methods nil :read-only t)
+  (count-when nil :read-only t))
 
-(defun make-limit (name &key capacity per key paths (methods '(:post)))
+(defun make-limit (name &key capacity per key paths (methods '(:post)) count-when)
   "A limit named NAME (a keyword, used in logs and as part of the bucket key): at most
 CAPACITY requests at once, refilling at CAPACITY per PER seconds, counted per value of KEY.
 
 KEY is a function of the env returning a string, or NIL when this limit does not apply to
 the request. PATHS is a list of exact PATH-INFO strings the limit applies to; NIL means
 every path. METHODS defaults to (:POST), since a sign-in or reset is a POST and counting the
-GET that renders its form would lock a user out for reloading the page."
+GET that renders its form would lock a user out for reloading the page.
+
+COUNT-WHEN, when given, is a function of the env and the response that says whether this
+request counts against the limit, for example (UNLESS-STATUS 303) on a sign-in route whose
+successful sign-in redirects with 303 (#323). Before the handler runs, the request is refused
+only if the bucket is already empty; after it, a token is taken only when COUNT-WHEN returns
+true. A handler that signals instead of returning a response is counted, since the limiter
+cannot tell that it succeeded. Without COUNT-WHEN every request takes a token before the
+handler runs.
+
+What COUNT-WHEN costs: several requests that arrive while the bucket still has a token all
+pass the check before any of them is counted. Each is counted afterwards all the same, and the
+bucket goes below empty to pay for them, which makes the wait before the next accepted request
+longer by the same amount. The overdraft needs no cap: only requests that passed the check
+while a token was left can add to it."
   (unless (and (integerp capacity) (plusp capacity))
     (error "make-limit ~S: CAPACITY must be a positive integer, not ~S." name capacity))
   (unless (and (realp per) (plusp per))
     (error "make-limit ~S: PER must be a positive number of seconds, not ~S." name per))
   (unless (functionp key)
     (error "make-limit ~S: KEY must be a function of the env, such as (by-address) or (by-form-field \"email\")." name))
+  (unless (or (null count-when) (functionp count-when))
+    (error "make-limit ~S: COUNT-WHEN must be a function of the env and the response, such as (unless-status 303), not ~S." name count-when))
   (%make-limit :name name :capacity capacity :per per :key key
-               :paths (copy-list paths) :methods (copy-list methods)))
+               :paths (copy-list paths) :methods (copy-list methods)
+               :count-when count-when))
+
+(defun unless-status (&rest statuses)
+  "A COUNT-WHEN function that counts a request unless its response's status is one of
+STATUSES. On a sign-in route that redirects after a successful sign-in,
+(UNLESS-STATUS 302 303) counts every attempt that did not sign in."
+  (lambda (env response)
+    (declare (ignore env))
+    (not (and (consp response) (member (first response) statuses)))))
 
 (defun %refill-ms (limit)
   "Milliseconds for one token to refill."
@@ -112,7 +145,25 @@ multipart body; WRAP-RATE-LIMIT caches the body first so the handler can still r
    "Take one token from the bucket BUCKET-KEY in STORE, refilling it first for the time
 since it was last touched. A new bucket starts full. Returns T, or NIL and the milliseconds
 until a token will be available. CAPACITY and REFILL-MS describe the bucket; NOW-MS is the
-current time. Must be atomic per bucket."))
+current time. Must be atomic per bucket: the check and the take are one step.
+
+Used for a limit without COUNT-WHEN. A limit with COUNT-WHEN uses CHECK-TOKEN before the
+handler and DEBIT-TOKEN after it instead, so a store must implement all three."))
+
+(defgeneric check-token (store bucket-key capacity refill-ms now-ms)
+  (:documentation
+   "Whether the bucket BUCKET-KEY in STORE has a token, after refilling it for the time since
+it was last touched, without taking one. Returns T, or NIL and the milliseconds until a token
+will be available. A bucket that does not exist counts as full, and checking must not create
+it: a check happens on every request, including ones that will never be counted."))
+
+(defgeneric debit-token (store bucket-key capacity refill-ms now-ms)
+  (:documentation
+   "Take one token from the bucket BUCKET-KEY in STORE whether or not one is available,
+refilling it first. A new bucket starts full. The count may go below zero, with no lower
+bound, so every request that passed CHECK-TOKEN is counted, even when others emptied the
+bucket between its check and its debit. Must be atomic per bucket. The return value is not
+used."))
 
 (defgeneric forget-bucket (store bucket-key)
   (:documentation "Remove the bucket BUCKET-KEY from STORE, so its next request starts full."))
@@ -189,6 +240,28 @@ otherwise, so it is cheap to call on every request. Called with the lock held."
                      (values nil (ceiling (* (- 1 tokens) refill-ms)))))
         (%sweep store now-ms)))))
 
+(defmethod check-token ((store memory-store) bucket-key capacity refill-ms now-ms)
+  (declare (ignore capacity))
+  (bt:with-lock-held ((%lock store))
+    (let ((bucket (gethash bucket-key (%buckets store))))
+      (if (null bucket)
+          t
+          (let ((tokens (%refilled bucket now-ms)))
+            (if (>= tokens 1)
+                t
+                (values nil (ceiling (* (- 1 tokens) refill-ms)))))))))
+
+(defmethod debit-token ((store memory-store) bucket-key capacity refill-ms now-ms)
+  (bt:with-lock-held ((%lock store))
+    (let* ((table (%buckets store))
+           (bucket (or (gethash bucket-key table)
+                       (setf (gethash bucket-key table)
+                             (vector capacity now-ms capacity refill-ms)))))
+      (setf (aref bucket 0) (- (%refilled bucket now-ms) 1)
+            (aref bucket 1) now-ms)
+      (%sweep store now-ms)
+      t)))
+
 (defmethod forget-bucket ((store memory-store) bucket-key)
   (bt:with-lock-held ((%lock store))
     (remhash bucket-key (%buckets store))))
@@ -222,7 +295,7 @@ every key, so it says nothing about which key was limited or whether an account 
               :retry-after (princ-to-string retry-after-seconds))
         (list (format nil "Too many requests. Try again in ~D seconds." retry-after-seconds))))
 
-;;; --- the middleware ---------------------------------------------------------
+;;; --- the limiter ------------------------------------------------------------
 
 (defun %release-parts (env)
   "Delete the temp files a multipart parse spilled for ENV. Only on the refusal path, where
@@ -230,6 +303,81 @@ no handler runs to delete them; WRAP-CSRF gives the full reasoning."
   (let ((parts (getf env http:+multipart-parts-key+)))
     (when (and parts (listp parts))
       (ignore-errors (http:delete-parts parts)))))
+
+(defun %refuse (env limit wait-ms on-limited)
+  (let ((seconds (max 1 (ceiling wait-ms 1000))))
+    (log:warn "ratelimit: refused"
+              :limit (limit-name limit)
+              :method (getf env :request-method)
+              :path (getf env :path-info)
+              :retry-after seconds)
+    (%release-parts env)
+    (funcall on-limited env seconds limit)))
+
+(defun %counts-p (limit env response)
+  "Whether RESPONSE counts against LIMIT, by its COUNT-WHEN. A COUNT-WHEN that signals counts
+the request: the limiter errs toward counting an attempt it cannot judge."
+  (handler-case (funcall (limit-count-when limit) env response)
+    (error (e)
+      (log:warn "ratelimit: count-when signalled, counting the request"
+                :limit (limit-name limit) :condition (type-of e))
+      t)))
+
+(defun call-with-rate-limit (env handler &key limits store (on-limited #'too-many-requests))
+  "Call HANDLER with ENV, unless the bucket of a limit in LIMITS that applies to ENV is empty;
+then return ON-LIMITED's response instead. The limiter WRAP-RATE-LIMIT installs, as a function,
+so an app can call it where it chooses: inside the bindings it makes for every request, for
+example, so that ON-LIMITED builds its refusal with them in effect (#323).
+
+STORE is required here, and must be the same store on every call, since it holds the buckets.
+HANDLER is called with the env the limiter passes on, whose body has been read and cached when
+a limit applies, and must use that env rather than the one it was given.
+
+See WRAP-RATE-LIMIT for the order limits are taken in, and MAKE-LIMIT for COUNT-WHEN."
+  (unless store
+    (error "call-with-rate-limit: STORE is required, and must be the same store on every call."))
+  (when (null limits)
+    (error "call-with-rate-limit: LIMITS is empty, so nothing would be limited."))
+  (let ((applicable (remove-if-not (lambda (l) (%applies-p l env)) limits)))
+    (if (null applicable)
+        (funcall handler env)
+        (let ((env (csrf:with-cached-body env))
+              (now (%now))
+              (after '()))
+          (dolist (limit applicable)
+            (let ((key (funcall (limit-key limit) env)))
+              (when key
+                (let ((bucket (%bucket-key limit key)))
+                  (multiple-value-bind (ok wait-ms)
+                      (if (limit-count-when limit)
+                          (check-token store bucket (limit-capacity limit) (%refill-ms limit) now)
+                          (take-token store bucket (limit-capacity limit) (%refill-ms limit) now))
+                    (unless ok
+                      (return-from call-with-rate-limit
+                        (%refuse env limit wait-ms on-limited)))
+                    (when (limit-count-when limit)
+                      (push (cons limit bucket) after)))))))
+          (if (null after)
+              (funcall handler env)
+              (let ((response nil) (returned nil))
+                (unwind-protect
+                     (progn (setf response (funcall handler env)
+                                  returned t)
+                            response)
+                  (let ((then (%now)))
+                    (dolist (entry (reverse after))
+                      (destructuring-bind (limit . bucket) entry
+                        (when (or (not returned) (%counts-p limit env response))
+                          (debit-token store bucket (limit-capacity limit)
+                                       (%refill-ms limit) then))))))))))))
+
+(defmacro with-rate-limit ((env-var env &rest options &key limits store on-limited) &body body)
+  "Run BODY with ENV-VAR bound to the env CALL-WITH-RATE-LIMIT passes on, unless a limit
+refuses ENV; BODY returns the response. OPTIONS are CALL-WITH-RATE-LIMIT's."
+  (declare (ignore limits store on-limited))
+  `(call-with-rate-limit ,env (lambda (,env-var) ,@body) ,@options))
+
+;;; --- the middleware ---------------------------------------------------------
 
 (defun wrap-rate-limit (app &key limits (store (make-memory-store))
                                  (on-limited #'too-many-requests))
@@ -242,7 +390,12 @@ Limits are taken in order and the first refusal stops the request, so a request 
 the first limit takes no token from the later ones. The app is not called for a refused
 request. When a limit applies, the body is read once and cached (HYPERION/CSRF's
 WITH-CACHED-BODY), so a key read from a form field does not use up the body the handler
-reads.
+reads. A limit made with COUNT-WHEN is checked before the app and counted after it; see
+MAKE-LIMIT.
+
+ON-LIMITED runs where this middleware sits in the app's chain. An app that builds its
+refusal with bindings it makes for every request puts this middleware inside the middleware
+that makes them, or calls CALL-WITH-RATE-LIMIT itself (#323).
 
 Each refusal is logged with the limit's name, method and path. The key is not logged,
 because it is often an email address."
@@ -250,23 +403,4 @@ because it is often an email address."
     (when (null limits)
       (error "wrap-rate-limit: LIMITS is empty, so nothing would be limited."))
     (lambda (env)
-      (let ((applicable (remove-if-not (lambda (l) (%applies-p l env)) limits)))
-        (if (null applicable)
-            (funcall app env)
-            (let ((env (csrf:with-cached-body env))
-                  (now (%now)))
-              (dolist (limit applicable (funcall app env))
-                (let ((key (funcall (limit-key limit) env)))
-                  (when key
-                    (multiple-value-bind (ok wait-ms)
-                        (take-token store (%bucket-key limit key)
-                                    (limit-capacity limit) (%refill-ms limit) now)
-                      (unless ok
-                        (let ((seconds (max 1 (ceiling wait-ms 1000))))
-                          (log:warn "ratelimit: refused"
-                                    :limit (limit-name limit)
-                                    :method (getf env :request-method)
-                                    :path (getf env :path-info)
-                                    :retry-after seconds)
-                          (%release-parts env)
-                          (return (funcall on-limited env seconds limit))))))))))))))
+      (call-with-rate-limit env app :limits limits :store store :on-limited on-limited))))

@@ -19,7 +19,8 @@
                     (#:param #:mnemosyne/param)
                     (#:q #:mnemosyne/query)
                     (#:bt #:bordeaux-threads)
-                    (#:tt #:aion/test-threads))
+                    (#:tt #:aion/test-threads)
+                    (#:fusion #:praxeon/retrieval/fusion))
   (:export #:run-tests))
 
 (in-package #:praxeon/retrieval/tests)
@@ -106,6 +107,7 @@ database, so its checks are not counted in that line."
                                                             :ensure t)))
                     ,@body))
              (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A" ,tb)))
+             (ignore-errors (conn:exec ,c (format nil "DROP TABLE IF EXISTS ~A_terms" ,tb)))
              (conn:disconnect ,c))))))
 
 (defun sec (id text &rest keys &key (document-id "doc-1") (locale "en") &allow-other-keys)
@@ -865,3 +867,222 @@ chunk."
       (signals cnd:means-failure (actor:act agent "search-documents" (%args)))
       (signals cnd:means-failure
         (actor:act agent "search-documents" (%args "query" "refund" "match" "fuzzy"))))))
+
+;;; --- the tokenizer (#316) -----------------------------------------------------------------
+;;;
+;;; Pure: these need no Postgres.
+
+(test the-tokenizer-keeps-an-identifier-whole-and-in-parts
+  (is (equal '("error" "ts-999" "ts" "999" "renewal")
+             (rt:tokenize "Error TS-999 on renewal." :locale "en")))
+  (is (equal '("praxeon_embed_model" "praxeon" "embed" "model")
+             (rt:tokenize "PRAXEON_EMBED_MODEL" :locale "en")))
+  (is (equal '("v1.2.3" "v1" "2" "3") (rt:tokenize "v1.2.3." :locale "en"))
+      "a trailing full stop is not part of the identifier"))
+
+(test the-tokenizer-drops-stop-words-only-for-a-language-it-has-a-list-for
+  (is (equal '("refund" "policy") (rt:tokenize "The refund policy" :locale "en-GB"))
+      "en-GB uses the en list")
+  (is (equal '("the" "refund" "policy") (rt:tokenize "The refund policy"))
+      "no locale drops nothing")
+  (is (equal '("the" "refund" "policy") (rt:tokenize "The refund policy" :locale "xx"))
+      "a language with no list drops nothing")
+  (is (equal '("café" "straße") (rt:tokenize "Café Straße" :locale "de"))
+      "letters outside ASCII are kept and lowercased"))
+
+(test the-tokenizer-drops-a-term-longer-than-the-limit
+  (let ((blob (make-string 65 :initial-element #\a)))
+    (is (equal '("short") (rt:tokenize (format nil "~A short" blob))))))
+
+(test term-counts-gives-each-term-once-with-its-count-and-the-length
+  (multiple-value-bind (counts total) (rt:term-counts "refund Refund policy the" :locale "en")
+    (is (equal '(("refund" . 2) ("policy" . 1)) counts))
+    (is (= 3 total))))
+
+;;; --- reciprocal rank fusion (#316), pure --------------------------------------------------
+
+(test fusion-sums-reciprocal-ranks-and-keeps-each-id-once
+  (let ((rankings '(("a" "b" "c") ("c" "d" "a"))))
+    (is (equal '("a" "c" "b" "d") (fusion:fused-ids 60 rankings))
+        "a and c tie, and a appears first; b and d tie, and b appears first")
+    (let ((scores (fusion:fused-scores 60 rankings)))
+      (is (< (abs (- (first scores) (+ (/ 1d0 61) (/ 1d0 63)))) 1d-12)
+          "a: first in one list, third in the other")
+      (is (< (abs (- (third scores) (/ 1d0 62))) 1d-12) "b: second in one list only")
+      (is (apply #'>= scores) "best first"))))
+
+(test fusion-counts-an-id-once-per-list-at-its-first-position
+  (is (equal '("x" "y") (fusion:fused-ids 60 '(("x" "y" "x")))))
+  (is (< (abs (- (first (fusion:fused-scores 60 '(("x" "y" "x")))) (/ 1d0 61))) 1d-12)))
+
+(test fusion-of-nothing-is-nothing
+  (is (null (fusion:fused-ids 60 '())))
+  (is (null (fusion:fused-ids 60 '(() ())))))
+
+;;; --- BM25 against Postgres (#316) ---------------------------------------------------------
+
+(defun %bm25 (tf dl n df avgdl &key (k1 1.2d0) (b 0.75d0))
+  "BM25 for one term, computed here independently of the SQL."
+  (* (log (+ (/ (+ (- n df) 0.5d0) (+ df 0.5d0)) 1))
+     (/ (* tf (+ k1 1)) (+ tf (* k1 (+ (- 1 b) (* b (/ dl avgdl))))))))
+
+(defun %scores-by-id (result)
+  (mapcar (lambda (p) (cons (rt:provenance-section-id (rt:passage-provenance p)) (rt:passage-score p)))
+          (rt:retrieval-result-passages result)))
+
+(test bm25-scores-match-a-hand-computed-example
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "fruit")))
+      (rt:sync-document corpus "doc-1" (list (sec "1" "apple banana")
+                                             (sec "2" "apple apple cherry")
+                                             (sec "3" "banana date")))
+      (let* ((r (rt:retrieve-keyword corpus "apple" :locale "en"))
+             (scores (%scores-by-id r))
+             (avgdl (/ 7d0 3)))
+        (is (equal '("2" "1") (mapcar #'car scores)) "the chunk with apple twice ranks first")
+        (is (< (abs (- (cdr (assoc "2" scores :test #'equal)) (%bm25 2 3 3 2 avgdl))) 1d-9))
+        (is (< (abs (- (cdr (assoc "1" scores :test #'equal)) (%bm25 1 2 3 2 avgdl))) 1d-9))
+        (is (rt:complete-p (rt:retrieval-result-completeness r))))
+      (let ((scores (%scores-by-id (rt:retrieve-keyword corpus "apple date" :locale "en")))
+            (avgdl (/ 7d0 3)))
+        (is (< (abs (- (cdr (assoc "3" scores :test #'equal)) (%bm25 1 2 3 1 avgdl))) 1d-9)
+            "a rarer term weighs more: date is in one chunk of three")))))
+
+(test keyword-search-finds-an-identifier-that-similarity-does-not
+  ;; The word embedder sees payouts, refunds and privacy, and nothing else, so a query for a
+  ;; refund and an error code lands on the refund policy by similarity, and on the error code
+  ;; by keyword.
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "support"))
+          (embedder (make-instance 'word-embedder)))
+      (rt:ingest corpus (append +policy+ (list (sec "4" "Error TS-999 appears when a card expires.")))
+                 embedder)
+      (is (equal "4" (first (ids (rt:retrieve-keyword corpus "refund TS-999" :locale "en"))))
+          "keyword search puts the error code first")
+      (is (not (equal "4" (first (ids (rt:retrieve-similar corpus embedder "refund TS-999")))))
+          "control: similarity with the test embedder does not"))))
+
+(test a-query-of-stop-words-matches-nothing
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy")))
+      (rt:sync-corpus corpus +policy+)
+      (let ((r (rt:retrieve-keyword corpus "the of and" :locale "en")))
+        (is (null (rt:retrieval-result-passages r)))
+        (is (rt:complete-p (rt:retrieval-result-completeness r)))))))
+
+(test keyword-search-and-its-statistics-stay-within-one-corpus
+  (with-store (store)
+    (let ((a (rt:make-corpus store "a"))
+          (b (rt:make-corpus store "b")))
+      (rt:sync-document a "doc-1" (list (sec "1" "apple banana") (sec "2" "cherry")))
+      (rt:sync-document b "doc-1" (list (sec "1" "apple") (sec "2" "apple") (sec "3" "apple")))
+      (let ((scores (%scores-by-id (rt:retrieve-keyword a "apple"))))
+        (is (equal '("1") (mapcar #'car scores)) "only corpus a's chunk")
+        (is (< (abs (- (cdar scores) (%bm25 1 2 2 1 (/ 3d0 2)))) 1d-9)
+            "N, df and the average length are corpus a's, not the table's")))))
+
+(defun %count-table-in (store table)
+  (param:row-value (first (conn:query (rt:store-connection store)
+                                      (format nil "SELECT count(*) AS n FROM ~A" table)))
+                   :n))
+
+(test a-sync-keeps-the-terms-in-step-with-the-text
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy")))
+      (rt:sync-document corpus "doc-1" (list (sec "1" "apple banana")))
+      (is (= 2 (%count-table-in store (rt:terms-table store))))
+      (rt:sync-document corpus "doc-1" (list (sec "1" "cherry")))
+      (is (= 1 (%count-table-in store (rt:terms-table store))) "the old text's terms are gone")
+      (is (equal '("1") (ids (rt:retrieve-keyword corpus "cherry"))))
+      (is (null (ids (rt:retrieve-keyword corpus "apple"))))
+      (rt:sync-document corpus "doc-1" '())
+      (is (= 0 (%count-table-in store (rt:terms-table store))) "a removed section takes its terms"))))
+
+(test chunks-without-current-terms-are-reported-and-index-pending-writes-them
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy")))
+      (rt:sync-corpus corpus +policy+)
+      ;; As a table synced before #316, or by an older tokenizer, would be.
+      (conn:exec (rt:store-connection store)
+                 (format nil "UPDATE ~A SET terms_tokenizer = 'terms/0'" (rt:store-table store)))
+      (let ((c (rt:retrieval-result-completeness (rt:retrieve-keyword corpus "refund"))))
+        (is (rt:truncated-p c))
+        (is (eq :not-indexed (rt:truncated-reason c)))
+        (is (= 3 (rt:truncated-pending c))))
+      (is (= 3 (rt:index-pending corpus)))
+      (is (= 0 (rt:index-pending corpus)) "and nothing is left to do")
+      (let ((r (rt:retrieve-keyword corpus "refund")))
+        (is (rt:complete-p (rt:retrieval-result-completeness r)))
+        (is (equal '("2") (ids r)))))))
+
+(test ensure-schema-upgrades-a-table-made-before-bm25
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy"))
+          (c (rt:store-connection store)))
+      (rt:sync-corpus corpus +policy+)
+      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN term_count, DROP COLUMN terms_tokenizer"
+                           (rt:store-table store)))
+      (conn:exec c (format nil "DROP TABLE ~A" (rt:terms-table store)))
+      (rt:ensure-schema store)
+      (is (= 0 (%count-table-in store (rt:terms-table store))) "the terms table is back, empty")
+      (is (eq :not-indexed (rt:truncated-reason (rt:retrieval-result-completeness
+                                                 (rt:retrieve-keyword corpus "refund")))))
+      (is (= 3 (rt:index-pending corpus)))
+      (is (equal '("2") (ids (rt:retrieve-keyword corpus "refund")))))))
+
+;;; --- hybrid retrieval (#316) ---------------------------------------------------------------
+
+(test hybrid-merges-both-searches-and-lists-each-chunk-once
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "support"))
+          (embedder (make-instance 'word-embedder)))
+      (rt:ingest corpus (append +policy+ (list (sec "4" "Error TS-999 appears when a card expires.")))
+                 embedder)
+      (let* ((r (rt:retrieve-hybrid corpus embedder "refund TS-999" :limit 2 :locale "en"))
+             (got (ids r)))
+        (is (equal '("2" "4") (sort (copy-list got) #'string<))
+            "the similarity winner and the keyword winner are the top two")
+        (is (every #'rt:passage-score (rt:retrieval-result-passages r)))
+        (is (notany #'rt:passage-distance (rt:retrieval-result-passages r)))
+        (is (rt:complete-p (rt:retrieval-result-completeness r))))
+      (let ((all (ids (rt:retrieve-hybrid corpus embedder "refund TS-999" :limit 20 :locale "en"))))
+        (is (= 4 (length all)) "every chunk once, though both searches returned them")
+        (is (= 4 (length (remove-duplicates all :test #'equal))))))))
+
+(test hybrid-says-what-it-could-not-consider
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "policy"))
+          (embedder (make-instance 'word-embedder)))
+      (rt:ingest corpus +policy+ embedder)
+      (rt:sync-document corpus "doc-1" (append +policy+ (list (sec "4" "Refund again."))))
+      (let ((c (rt:retrieval-result-completeness (rt:retrieve-hybrid corpus embedder "refund"))))
+        (is (eq :not-embedded (rt:truncated-reason c)))
+        (is (= 1 (rt:truncated-pending c))))
+      (rt:embed-pending corpus embedder)
+      (conn:exec (rt:store-connection store)
+                 (format nil "UPDATE ~A SET terms_tokenizer = NULL WHERE section_id = '1'"
+                         (rt:store-table store)))
+      (let ((c (rt:retrieval-result-completeness (rt:retrieve-hybrid corpus embedder "refund"))))
+        (is (eq :not-indexed (rt:truncated-reason c)) "every chunk embedded, one not indexed")
+        (is (= 1 (rt:truncated-pending c)))))))
+
+;;; --- the evaluation helper (#316) ----------------------------------------------------------
+
+(test evaluate-retrieval-reports-top-k-hits-per-strategy
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "support"))
+          (embedder (make-instance 'word-embedder)))
+      (rt:ingest corpus (append +policy+ (list (sec "4" "Error TS-999 appears when a card expires.")))
+                 embedder)
+      (let* ((questions (list (rt:make-eval-question :query "refund TS-999" :document-id "doc-1"
+                                                     :section-id "4")
+                              (rt:make-eval-question :query "when is my payout" :document-id "doc-1"
+                                                     :section-id "1")))
+             (report (rt:evaluate-retrieval corpus embedder questions :k 1 :locale "en"))
+             (by (lambda (s) (find s report :key (lambda (r) (getf r :strategy))))))
+        (is (equal '(:similar :keyword :hybrid) (mapcar (lambda (r) (getf r :strategy)) report)))
+        (is (= 1 (getf (funcall by :similar) :hits)) "similarity finds the payout, not the error code")
+        (is (= 2 (getf (funcall by :keyword) :hits)) "keywords find both")
+        (is (= 1/2 (getf (funcall by :similar) :recall)))
+        (is (every (lambda (r) (and (= 2 (getf r :questions)) (= 0 (getf r :incomplete)) (= 1 (getf r :k))))
+                   report))))))

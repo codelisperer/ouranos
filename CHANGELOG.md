@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/retrieval: `ensure-schema` adds two columns to the chunk table and creates a terms
+  table.** The chunk table gains `term_count` and `terms_tokenizer`, and `<table>_terms` holds
+  each chunk's terms for keyword search (#316). Both are created with `IF NOT EXISTS` the next
+  time the app calls `ensure-schema`, or makes the store with `:ensure t`; the app's role needs
+  the right to alter its own table and create one next to it. Chunks synced before then count
+  as not indexed for keyword and hybrid search until `index-pending` (or `ingest`) writes their
+  terms. Similarity and exact search are unaffected. A test or tool that drops the chunk table
+  drops `<table>_terms` too.
 - **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
   request threads, and `make-db-auth` takes a pool.** (#371)
   - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
@@ -51,6 +59,36 @@ its tag.
 
 ### Added
 
+- **praxeon/retrieval: keyword search by BM25, hybrid search, and a way to measure them.**
+  (#316)
+  - `retrieve-keyword` ranks a corpus's chunks by BM25 (`*bm25-k1*` 1.2, `*bm25-b*` 0.75),
+    computed in one SQL statement, so it needs no Postgres extension. `passage-score` is the
+    score.
+  - `tokenize` and `term-counts` are the tokenizer, and `register-stop-words` adds a language's
+    stop words (English is built in). `index-pending` writes the terms of chunks that have none
+    from the current tokenizer. The result reason `:not-indexed` counts them.
+  - `retrieve-hybrid` merges up to `*hybrid-candidates*` (150) results from similarity and from
+    BM25 by reciprocal rank fusion (`*rrf-k*` 60), and returns each chunk once. The merge is
+    `praxeon/retrieval/fusion`, in Coalton.
+  - `evaluate-retrieval` reports, for `:similar`, `:keyword` and `:hybrid`, how often the section
+    that answers each `make-eval-question` is in the top `:k`.
+  - `ingest` now also calls `index-pending`.
+- **hyperion/ratelimit: a limit that counts only failed attempts, and a limiter an app can
+  call inside its own bindings.** (#323)
+  - `make-limit` takes `:count-when`, a function of the env and the response. Before the
+    handler, such a limit refuses only when its bucket is already empty. After the handler, it
+    takes a token only when `:count-when` returns true, and always when the handler signals.
+    `(unless-status 303)` counts every response that is not a 303.
+  - A successful sign-in then costs nothing and restores nothing, so members signing in
+    together from one address are not refused. An app that called `reset-limit` on the address
+    limit after a successful sign-in, as a workaround, should stop: the recipe advises against
+    it. `hyperion/docs/rate-limit.md` now counts sign-in failures per address this way.
+  - `call-with-rate-limit` and `with-rate-limit` run the limiter as a function, so its
+    `:on-limited` refusal is built inside whatever bindings the app has made. `wrap-rate-limit`
+    is now that function as middleware, with no change in behaviour.
+  - The store protocol gains `check-token` and `debit-token`, next to `take-token` and
+    `forget-bucket`. A store written for the old protocol still serves limits without
+    `:count-when`. `memory-store` implements all four.
 - **praxeon/retrieval: `paragraph-chunker`, which cuts a long section at blank lines.** Pass it as
   `(make-corpus store name :chunker (make-instance 'paragraph-chunker))`. A section of up to
   `:long-section` characters (default 1500) stays one chunk with boundary `:whole-section`, as with
@@ -114,6 +152,15 @@ its tag.
   `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
   takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
   the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
+
+- **cons conform: the commit-msg hook refuses an AI assistant's identity, not a human whose
+  name contains an assistant's name.** `Co-Authored-By: Claude Smith <claude.smith@example.com>`
+  was refused. The hook now refuses a name that is an assistant's name alone or followed only by
+  model and version words (`Claude`, `Claude Opus 5.5 (1M context)`, `GPT-5`, `Cursor Agent`),
+  an address at anthropic.com or openai.com, a `[bot]` account, an assistant's GitHub noreply
+  address, and the generated-with footer. The pattern is the `ai_trailer=` line in
+  `.githooks/commit-msg`. An app that copied the hook, from `cons conform` or from this tree,
+  copies it again. (#311)
 
 ## v0.1.4 — 2026-09-29
 
