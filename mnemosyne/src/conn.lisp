@@ -236,8 +236,36 @@ a single list.)"
 
 (defmacro with-transaction ((connection) &body body)
   "Run BODY inside a transaction on CONNECTION: commit on normal exit, roll back on a
-non-local exit."
-  `(dbi:with-transaction ,connection ,@body))
+non-local exit, including when the commit itself fails. See CALL-WITH-TRANSACTION."
+  `(call-with-transaction ,connection (lambda () ,@body)))
+
+(defun call-with-transaction (connection thunk)
+  "WITH-TRANSACTION's function. A SQLITE COMMIT THAT FAILS IS ROLLED BACK. SQLite refuses a
+COMMIT with BUSY while another connection still holds a read lock, and it leaves the transaction
+open so the COMMIT can be retried. cl-dbi only rolls back when the body fails, so the
+connection used to stay inside that transaction: its later statements ran inside it, and its
+write lock kept every other connection from writing. Here the refused transaction is rolled
+back and the refusal signalled as a DB-ERROR, so the connection is outside a transaction
+afterwards, as after any other failure. Only the outermost WITH-TRANSACTION does this; an inner
+one is a savepoint (#400)."
+  (let ((outermost (not (dbi:in-transaction connection)))
+        (body-done nil))
+    (handler-bind ((error (lambda (e)
+                            ;; After the body has returned, the only code left is cl-dbi's
+                            ;; COMMIT, so an error now is the commit's. An error from the body
+                            ;; is left alone: it is not wrapped, and restarts the body
+                            ;; established are still there for handlers further out.
+                            (when (and body-done outermost)
+                              (when (and (eq (dbi:connection-driver-type connection) :sqlite3)
+                                         (not (%sqlite-autocommit-p connection)))
+                                (log:warn "db commit failed, rolling back")
+                                (ignore-errors (dbi:do-sql connection "ROLLBACK")))
+                              (unless (typep e 'db-error)
+                                (error 'db-error :message (format nil "commit: ~A" e)
+                                                 :cause e))))))
+      (dbi:with-transaction connection
+        (multiple-value-prog1 (funcall thunk)
+          (setf body-done t))))))
 
 ;;; --- the pool (#325) ------------------------------------------------------------
 ;;;
