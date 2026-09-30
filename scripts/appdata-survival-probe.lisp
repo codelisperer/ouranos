@@ -56,5 +56,7 @@
 (ensure-directories-exist *out*)
 (format *error-output* "~&dumping the probe application to ~A~%" *out*)
 (finish-output *error-output*)
-(sb-ext:save-lisp-and-die *out* :executable t :toplevel #'probe-main
-                                :save-runtime-options t)
+;; Through dump-image.lisp like every other executable the tree builds (#287), so the scan in
+;; scripts/tests/dump-image.lisp needs no exception for this one.
+(load (merge-pathnames "dump-image.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+(ouranos-dump:dump-executable *out* #'probe-main)

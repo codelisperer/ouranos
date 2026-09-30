@@ -35,10 +35,13 @@
                       :load "hyperion/examples/active-search-db"
                       :call ("hyperion/examples/active-search-db:dev" :host host))
 
-   ;; Native binary for the example (save-lisp-and-die must run out-of-image -> :sh).
+   ;; Native binary for the example (save-lisp-and-die must run out-of-image -> :sh). Through
+   ;; scripts/dump-image.lisp, so the binary reads its environment when it starts (#107, #287).
    (example-search-bin
     :doc "build example #1 to bin/active-search (native)"
     :sh ("sbcl" "--dynamic-space-size" "4096" "--non-interactive"
          "--eval" "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
          "--eval" "(ql:quickload :hyperion/examples/active-search)"
-         "--eval" "(sb-ext:save-lisp-and-die \"bin/active-search\" :toplevel (function hyperion/examples/active-search:main) :executable t)"))))
+         "--eval" "(ensure-directories-exist \"bin/\")"
+         "--eval" "(load \"../scripts/dump-image.lisp\")"
+         "--eval" "(ouranos-dump:dump-executable \"bin/active-search\" 'hyperion/examples/active-search:main)"))))
