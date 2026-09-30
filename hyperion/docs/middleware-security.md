@@ -18,7 +18,7 @@ page the user visits posting to it, and a DNS-rebinding page reading from it.
 | `hyperion/desktop:run-app`, `:embedded` or `:hybrid` | on (`:request-guard :same-origin`) | never, unless the app does its own checking (`:none`) |
 | `hyperion/dev:serve` on loopback (127.0.0.1, ::1, localhost) | on | never for a real app; `:request-guard :none` only for a test that needs it off |
 | `hyperion/dev:serve` on any other host | off, with a warning | pass `:request-guard (:same-origin "http://HOST:PORT" ...)` with the origins you browse to |
-| `hyperion/server:start`, `serve-forever` | off (`:none`) | on (`:same-origin`) when it serves a desktop app's UI or a user's data headless on 127.0.0.1 |
+| `hyperion/server:start`, `serve-forever` | off (`:none`) | on (`:same-origin`) when it serves a desktop app's UI or a user's data headless on 127.0.0.1. `serve-forever`'s `:readiness-path` is always exempt (below) |
 | `run-app :backend (:remote URL)` | none of its own | guard the server at URL instead |
 
 On loopback the guard accepts both `127.0.0.1:PORT` and `localhost:PORT`. A rebinding page cannot
@@ -30,6 +30,13 @@ would refuse every real request. For a server reached by a name other than its b
 the origins: `:request-guard (:same-origin "https://app.example.com")`. `:same-origin` with a
 server bound to every interface (`0.0.0.0`) signals an error, because the guard cannot know which
 names are the app's own.
+
+**The readiness path is exempt from the request guard.** In `serve-forever`, a request for
+`:readiness-path` skips both the Host check and the Origin check, because a platform's health
+checker sends no Origin and may use another Host, and refusing it would take a healthy instance
+out of rotation. When the server is not draining, that request reaches the app's own handler
+unguarded, so an app must serve nothing there but a status: a DNS-rebinding page can read
+whatever that path returns.
 
 ## The question
 

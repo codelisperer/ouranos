@@ -357,3 +357,30 @@ SERVE-ARGS, and torn down afterwards."
   (is (srv:loopback-host-p "localhost"))
   (is (srv:loopback-host-p "::1"))
   (is (not (srv:loopback-host-p "192.168.1.5"))))
+
+;;; --- the readiness path is exempt from the guard (#304, with #397's readiness path) --------
+
+(test serve-forever-exempts-the-readiness-path-from-the-request-guard
+  "A platform's health checker sends no Origin and may use another Host; refusing it would take
+a healthy instance out of rotation. Every other path stays guarded."
+  (%quietly
+    (%srv-with-serving (session port :server :hunchentoot :signals nil
+                                     :request-guard :same-origin :readiness-path "/health")
+      (let ((foreign `(("Host" . ,(format nil "health-checker.internal:~D" port)))))
+        (is (= 200 (%so-raw-status port "GET" "/health" foreign))
+            "a foreign Host reaches the readiness path")
+        (is (= 200 (%so-raw-status port "POST" "/health" (cons '("Sec-Fetch-Site" . "cross-site") foreign)))
+            "the Origin check is skipped there too")
+        (is (= 403 (%so-raw-status port "GET" "/" foreign))
+            "every other path is still guarded")
+        (setf (srv::server-session-draining session) t)
+        (is (= 503 (%so-raw-status port "GET" "/health" foreign))
+            "while draining, the readiness path answers 503 to the same checker")
+        (setf (srv::server-session-draining session) nil)))))
+
+(test without-a-readiness-path-the-same-request-is-refused
+  "The control for the test above: the same guard and the same request, with no readiness path."
+  (%quietly
+    (%srv-with-serving (session port :server :hunchentoot :signals nil :request-guard :same-origin)
+      (is (= 403 (%so-raw-status port "GET" "/health"
+                                 `(("Host" . ,(format nil "health-checker.internal:~D" port)))))))))
