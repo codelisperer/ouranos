@@ -51,6 +51,38 @@
     (dotimes (i n data)
       (setf (aref data i) (mod i 251)))))
 
+(defun sink-of-writes (writes)
+  "Connect to a local listener, call each of WRITES with the connection in order, half-close,
+and return every octet the listener received."
+  (with-loop-and-cleanup (l)
+    (let ((sunk (make-array 0 :element-type '(unsigned-byte 8)))
+          (finished nil)
+          (listener nil))
+      (setf listener
+            (net:listen-tcp
+             l "127.0.0.1" 0
+             :on-connection
+             (lambda (conn)
+               (net:start-reading conn
+                                  (lambda (data c)
+                                    (declare (ignore c))
+                                    (setf sunk (concatenate '(vector (unsigned-byte 8))
+                                                            sunk data)))
+                                  :on-end (lambda (c)
+                                            (uv:close-handle c)
+                                            (setf finished t))))))
+      (multiple-value-bind (host port) (net:listener-address listener)
+        (net:connect-tcp l host port
+                         :on-connect (lambda (conn)
+                                       (dolist (w writes) (funcall w conn))
+                                       (net:shutdown-write
+                                        conn :on-complete (lambda (&rest _)
+                                                            (declare (ignore _))
+                                                            (uv:close-handle conn)))))
+        (pump l :until (lambda () finished) :limit 20000)
+        (net:close-listener listener)
+        sunk))))
+
 ;;; --- the typed core (pure Coalton, no sockets involved) -------------------------
 
 (test read-outcomes-keep-the-four-cases-apart
@@ -270,6 +302,27 @@
             (uv:close-handle client))
           (uv:close-handle accepted)
           (net:close-listener listener))))))
+
+(test write-bytes-sends-every-input-shape-byte-for-byte
+  ;; WRITE-BYTES copies into foreign memory in bulk (#430), so a wrong offset or length would
+  ;; corrupt or truncate silently. Each shape it accepts goes through once: a vector with a
+  ;; fill pointer, of which only the filled part may be sent; a string with characters above
+  ;; U+007F, which is sent as UTF-8; and a simple octet vector.
+  (let* ((filled (let ((v (make-array 5000 :element-type '(unsigned-byte 8) :fill-pointer 4000
+                                           :adjustable t)))
+                   (dotimes (i 5000 v) (setf (aref v i) (mod (* i 7) 256)))))
+         ;; "héllo ✓": 7 characters, 10 octets in UTF-8.
+         (text (coerce (list #\h (code-char #xE9) #\l #\l #\o #\Space (code-char #x2713))
+                       'string))
+         (simple (counting-payload 70000))
+         (expected (concatenate '(vector (unsigned-byte 8))
+                                (subseq filled 0 4000) (octets text) simple))
+         (sunk (sink-of-writes (list (lambda (c) (net:write-bytes c filled))
+                                     (lambda (c) (net:write-bytes c text))
+                                     (lambda (c) (net:write-bytes c simple))))))
+    (is (= (+ 4000 10 70000) (length expected)))
+    (is (= (length expected) (length sunk)))
+    (is (equalp expected sunk))))
 
 (test pipe-into-relays-everything-and-carries-backpressure
   ;; A proxy: client -> relay -> sink. PIPE-INTO owns the pause/resume policy, so the
