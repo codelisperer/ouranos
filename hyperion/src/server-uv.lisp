@@ -288,6 +288,15 @@ been produced yet -- the streaming shape is a function AS the body, not among th
     (function
      (error "hyperion/server-uv: a function inside a list body is not a stream. A streamed body is the function ITSELF: (status headers (lambda (writer) ...)). See pre-publication issue 117."))))
 
+(defun %body-pieces (body)
+  "A Ring response body as a list of octet vectors, for NET:WRITE-BYTES to write as one write.
+A list body gives one piece per element, without %BODY-OCTETS' join into a new vector, which
+the profile on #430 measured at 5% of the loop thread on a one-element list. Anything else is
+%BODY-OCTETS' single vector."
+  (if (consp body)
+      (loop for piece in body nconc (%body-pieces piece))
+      (list (%body-octets body))))
+
 (defun %empty-body-p (body)
   "Whether BODY would write no octets: NIL, an empty string or vector, or a list of those. A
 pathname or a function is never empty here, because it is not read to find out."
@@ -334,14 +343,17 @@ fault."
   (boundary:check-elements (%ring-headers-flat headers) 'string
                            :function encoder :argument 'headers))
 
-(defun %write-response (conn status headers body-octets keep-alive)
-  "Encode the head, refuse it if it is dangerous, and write head and body in one write. They
-go to NET:WRITE-BYTES as two pieces, not joined into a new vector first (#430)."
-  (let ((encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
-                                      (length body-octets) keep-alive)))
+(defun %write-response (conn status headers body keep-alive)
+  "Encode the head, refuse it if it is dangerous, and write head and body in one write. BODY
+is an octet vector or a list of them (see %BODY-PIECES). Head and body go to NET:WRITE-BYTES
+as pieces, not joined into a new vector first (#430)."
+  (let* ((pieces (if (listp body) body (list body)))
+         (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
+                                       (loop for piece in pieces sum (length piece))
+                                       keep-alive)))
     (cond
       ((h1:encode-ok? encoded)
-       (net:write-bytes conn (list (%latin1 (h1:encode-text encoded)) body-octets))
+       (net:write-bytes conn (cons (%latin1 (h1:encode-text encoded)) pieces))
        keep-alive)
       (t
        ;; The handler produced a header we will not put on the wire. That is a bug in the
@@ -1346,7 +1358,7 @@ written into a closed socket."
                            (%write-file-response conn app state status headers body
                                                  keep-alive))
                           (t
-                           (%write-response conn status headers (%body-octets body)
+                           (%write-response conn status headers (%body-pieces body)
                                             keep-alive))))
                     (error (e)
                       ;; The RESPONSE was unusable -- a bad shape, a header we refuse to

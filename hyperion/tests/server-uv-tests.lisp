@@ -399,6 +399,23 @@ accepting it would produce a wrong Content-Length rather than a stream."
                                                      (declare (ignore writer)) nil))))
     (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x"))))))
 
+(test a-list-body-is-sent-piece-by-piece-under-one-length
+  "A list body's pieces go to the socket as they are, without being joined first (#430). The
+octets must still arrive in order, strings as UTF-8, with one Content-Length for the lot and
+an empty piece and a nested list handled like any other."
+  (let* ((accented (coerce (list #\h (code-char #xE9) #\l #\l #\o) 'string)) ; 6 octets
+         (octets (make-array 3 :element-type '(unsigned-byte 8) :initial-contents '(65 66 67)))
+         (expected (concatenate '(vector (unsigned-byte 8))
+                                (sb-ext:string-to-octets accented :external-format :utf-8)
+                                octets
+                                (sb-ext:string-to-octets "xyz" :external-format :utf-8))))
+    (with-server (port (const-app 200 +ok+ (list accented "" octets (list "x" (list "yz")))))
+      (let ((r (get* port "GET / HTTP/1.1" "Host: x")))
+        (is (= 200 (status-of r)))
+        (is (= 12 (length expected)))
+        (is (string= "12" (header-of r "Content-Length")))
+        (is (equalp expected (sb-ext:string-to-octets (body-of r) :external-format :latin-1)))))))
+
 (test a-header-we-refuse-to-send-becomes-500
   "A CR in a header value is response splitting. It is never sanitised and never sent: the
 handler produced a bug, and a bug is a 500."
