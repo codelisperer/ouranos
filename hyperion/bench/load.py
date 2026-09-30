@@ -87,6 +87,7 @@ def latency(url, path, n, reuse=True):
         "status": status, "bytes": size, "keepalive": reuse,
         "p50_ms": round(statistics.median(samples), 3),
         "p90_ms": round(samples[int(len(samples) * 0.90)], 3),
+        "p95_ms": round(samples[int(len(samples) * 0.95)], 3),
         "p99_ms": round(samples[int(len(samples) * 0.99)], 3),
         "max_ms": round(samples[-1], 3),
     }
