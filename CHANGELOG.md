@@ -12,20 +12,7 @@ its tag.
 
 ## Unreleased
 
-## v0.1.5 — 2026-09-30
-
-Changes since `v0.1.4`. The tag is on `f3fdf1a`.
-
 ### An app may have to act
-
-- **praxeon/retrieval: `ensure-schema` adds two columns to the chunk table and creates a terms
-  table.** The chunk table gains `term_count` and `terms_tokenizer`, and `<table>_terms` holds
-  each chunk's terms for keyword search (#316). Both are created with `IF NOT EXISTS` the next
-  time the app calls `ensure-schema`, or makes the store with `:ensure t`; the app's role needs
-  the right to alter its own table and create one next to it. Chunks synced before then count
-  as not indexed for keyword and hybrid search until `index-pending` (or `ingest`) writes their
-  terms. Similarity and exact search are unaffected. A test or tool that drops the chunk table
-  drops `<table>_terms` too.
 
 - **hyperion/server, hyperion/server-uv: `serve-forever` drains on SIGTERM instead of refusing
   requests at once** (#388). A rolling deploy sends SIGTERM while the platform may still route
@@ -44,6 +31,21 @@ Changes since `v0.1.4`. The tag is on `f3fdf1a`.
   before; Woo still does not see SIGTERM, and is still ended by SIGKILL. `hyperion/server-uv`
   gains `begin-drain`, `draining-p` and `stop :drain-timeout`; a plain `stop` is unchanged. See
   `hyperion/docs/signals-and-shutdown.md`, "Draining on SIGTERM".
+
+## v0.1.5 — 2026-09-30
+
+Changes since `v0.1.4`. The tag is on `f3fdf1a`.
+
+### An app may have to act
+
+- **praxeon/retrieval: `ensure-schema` adds two columns to the chunk table and creates a terms
+  table.** The chunk table gains `term_count` and `terms_tokenizer`, and `<table>_terms` holds
+  each chunk's terms for keyword search (#316). Both are created with `IF NOT EXISTS` the next
+  time the app calls `ensure-schema`, or makes the store with `:ensure t`; the app's role needs
+  the right to alter its own table and create one next to it. Chunks synced before then count
+  as not indexed for keyword and hybrid search until `index-pending` (or `ingest`) writes their
+  terms. Similarity and exact search are unaffected. A test or tool that drops the chunk table
+  drops `<table>_terms` too.
 - **hyperion/auth-db: a `make-db-auth` store over one connection is safe to share between
   request threads, and `make-db-auth` takes a pool.** (#371)
   - **The hazard.** Only a store's writes (`create-user`, `grant-role`, `revoke-role`,
