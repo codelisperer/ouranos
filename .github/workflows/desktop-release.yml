@@ -190,8 +190,8 @@ jobs:
       # <name>.exe is the launcher (scripts/windows-launcher.c, #98), compiled as a CONSOLE
       # program, so a desktop app would drag a console window behind it. editbin (MSVC,
       # already on the runner) rewrites the one header field. With no console of its own, the
-      # launcher starts sbcl-runtime.exe with CREATE_NO_WINDOW, so no window appears for that
-      # either.
+      # launcher starts sbcl-runtime.exe with DETACHED_PROCESS, so it has no console or console
+      # window either.
       - name: No console window (Windows)
         if: runner.os == 'Windows'
         shell: bash

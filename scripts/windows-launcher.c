@@ -24,9 +24,10 @@
  * Windows has no exec: the runtime is a child process. The launcher waits for it and exits
  * with its exit code. It ignores Ctrl-C and Ctrl-Break, which reach every process on the
  * console, so that the runtime decides how to stop and the launcher reports what it did.
- * When the launcher has no console -- the build or CI switched it to the GUI subsystem --
- * the runtime, a console program, is started with CREATE_NO_WINDOW, so no console window
- * appears behind the app.
+ * When the launcher has no console -- the build or CI switched it to the GUI subsystem -- the
+ * runtime, a console program, is started with DETACHED_PROCESS, so it has no console either,
+ * as the one-file GUI image had none. CREATE_NO_WINDOW would hide the window but still start
+ * a conhost.exe for it (seen in desktop-release run 36699201220).
  *
  * The app's own arguments are passed on as the text they were given in, not re-quoted: the
  * tail of GetCommandLineW after the launcher's own name. Re-quoting argv would change
@@ -123,7 +124,7 @@ int wmain(void) {
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
   si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-  DWORD flags = GetConsoleWindow() == NULL ? CREATE_NO_WINDOW : 0;
+  DWORD flags = GetConsoleWindow() == NULL ? DETACHED_PROCESS : 0;
   if (!CreateProcessW(runtime, line, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi)) {
     fail(L"cannot start", runtime);
     return 127;
