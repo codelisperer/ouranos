@@ -41,21 +41,25 @@
 
 (in-package #:ouranos-dump)
 
-(defun dump-executable (path entry)
+(defun dump-executable (path entry &key compression)
   "Dump this image to PATH as an executable that calls ENTRY, a function designator, when it
 starts. Does not return: `save-lisp-and-die' ends this process.
 
 UIOP's dump hook runs first, and the new image runs UIOP's restore hook before ENTRY, so the
 executable takes its temporary directory, its fasl cache and ASDF's configuration from the
-environment it runs in rather than the one it was dumped in."
+environment it runs in rather than the one it was dumped in.
+
+COMPRESSION, when true, is passed to `save-lisp-and-die' as :COMPRESSION, for an SBCL built
+with core compression; it is not passed at all otherwise (#287)."
   (uiop:call-image-dump-hook)
-  (sb-ext:save-lisp-and-die
-   path
-   :toplevel (lambda ()
-               (uiop:call-image-restore-hook)
-               (funcall entry))
-   :executable t
-   :save-runtime-options t))
+  (apply #'sb-ext:save-lisp-and-die
+         path
+         :toplevel (lambda ()
+                     (uiop:call-image-restore-hook)
+                     (funcall entry))
+         :executable t
+         :save-runtime-options t
+         (and compression (list :compression compression))))
 
 (defun dump-core (path entry)
   "Dump this image to PATH as a core with no runtime in it, which calls ENTRY when it starts.

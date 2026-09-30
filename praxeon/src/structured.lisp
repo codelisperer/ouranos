@@ -172,6 +172,24 @@ first and the caller's checks see arguments that are at least the right shape."
              (structured-result-invalid-problems c))))
   (:documentation "The forced tool was called with arguments that failed validation."))
 
+(define-condition structured-result-truncated (structured-result-invalid
+                                               praxeon/conditions:output-limit-reached)
+  ()
+  (:report
+   (lambda (c s)
+     (format s "The model's call to ~S reached the output limit of ~D tokens before the model had finished (attempt ~D), so its arguments may be incomplete (#338).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS) or take the cut-off arguments (ACCEPT-TRUNCATED). GENERATE-STRUCTURED's :max-tokens sets the limit."
+             (structured-result-invalid-tool c)
+             (praxeon/conditions:output-limit-reached-max-tokens c)
+             (structured-result-invalid-attempt c))))
+  (:documentation "Signalled by GENERATE-STRUCTURED when the completion stopped at the output limit
+\(stop reason :MAX-TOKENS), whether or not the forced tool was called (#338). ARGUMENTS are the
+arguments the provider parsed from the cut-off output, or NIL when there was no call.
+
+A subtype of STRUCTURED-RESULT-INVALID, so a handler an app already has for a result it cannot
+use also receives this, and of OUTPUT-LIMIT-REACHED. Signalled with ERROR inside the restarts
+RETRY-WITH-MAX-TOKENS and ACCEPT-TRUNCATED. It is not repaired by asking again at the same
+limit, which would be cut off again."))
+
 (define-condition structured-result-rejected (condition)
   ((tool :initarg :tool :reader structured-result-rejected-tool)
    (problems :initarg :problems :initform '() :reader structured-result-rejected-problems)
@@ -236,7 +254,13 @@ it did and what was wrong. Re-asking without that is asking the same question ag
 
 Returns the arguments hash-table. Never returns a partial record: a result that fails
 validation is signalled, not returned with bad fields dropped or defaulted, because a
-half-valid record is the failure this exists to remove."
+half-valid record is the failure this exists to remove.
+
+A REPLY CUT OFF AT THE OUTPUT LIMIT signals STRUCTURED-RESULT-TRUNCATED (#338), inside the
+restarts RETRY-WITH-MAX-TOKENS, which asks again with a larger MAX-TOKENS without counting an
+attempt, and ACCEPT-TRUNCATED, which returns the cut-off arguments (NIL when there was no call)
+with a second value, :TRUNCATED. That is the one way this returns an unvalidated record, and it
+takes a handler that asked for it."
   (check-tool-choice provider (list :tool (tool-spec-name spec)))
   ;; BEFORE THE FIRST REQUEST, not after a reply comes back. A schema declaring what nothing
   ;; checks is wrong on every call, so failing on the first one costs no tokens and points at
@@ -252,47 +276,75 @@ half-valid record is the failure this exists to remove."
                                    :max-tokens max-tokens
                                    :temperature temperature
                                    :tool-choice (list :tool (tool-spec-name spec))))
-             (call (%find-call completion (tool-spec-name spec))))
-        (unless call
-          (error 'structured-result-not-called :tool (tool-spec-name spec)))
-        (let ((problems (validate-arguments spec (tool-call-arguments call))))
-          (when (null problems)
-            (return-from generate-structured (tool-call-arguments call)))
-          ;; SIGNAL, not ERROR, so a caller's handler runs and can transfer control.
-          ;; An inner HANDLER-BIND would run first -- handlers are searched innermost
-          ;; outward -- so establishing the default repair here would make the caller's
-          ;; handler unreachable, which is the opposite of what the restart is for.
-          ;; SIGNAL returns when nobody transfers control, and the default applies then.
-          ;; SIGNAL the per-attempt notification, not the error. SIGNAL returns when
-          ;; nobody transfers control, and handlers are searched innermost outward -- so a
-          ;; HANDLER-BIND established inside this function would run before the caller's and
-          ;; make the caller's unreachable.
-          (let ((retry nil))
-            (restart-case
-                (signal 'structured-result-rejected
-                        :tool (tool-spec-name spec)
-                        :problems problems
-                        :arguments (tool-call-arguments call)
-                        :attempt attempt)
-              (re-ask ()
-                :report "Ask again, appending the validation problems."
-                (setf retry t)))
-            ;; Nobody took control and nobody asked for a repair: repair while attempts
-            ;; remain. Unbounded repair against a metered API is a bill rather than a retry.
-            (when (and (not retry) (< attempt attempts))
-              (setf retry t))
-            (unless retry
-              (error 'structured-result-invalid
-                     :tool (tool-spec-name spec)
-                     :problems problems
-                     :arguments (tool-call-arguments call)
-                     :attempt attempt))
-            (unless retry (return))
-            (setf conversation
-                  (append conversation
-                          ;; A message is a plist (:role R :content C) -- see the note at
-                          ;; the top of llm.lisp. There is no message struct.
-                          (list (list :role :assistant
-                                      :content (format nil "Called ~A." (tool-spec-name spec)))
-                                (list :role :user
-                                      :content (%repair-message problems)))))))))))
+             (call (%find-call completion (tool-spec-name spec)))
+             (retried nil))
+        ;; A reply cut off at the output limit is checked before anything else. Its call may be
+        ;; missing or its arguments incomplete, and neither is the model's mistake to repair at
+        ;; the same limit (#338).
+        (when (eq (completion-stop-reason completion) :max-tokens)
+          (restart-case (error 'structured-result-truncated
+                               :tool (tool-spec-name spec)
+                               :problems (list (format nil "the output reached the limit of ~D tokens"
+                                                       max-tokens))
+                               :arguments (and call (tool-call-arguments call))
+                               :attempt attempt
+                               :max-tokens max-tokens)
+            (praxeon/conditions:retry-with-max-tokens (new-limit)
+              :report "Ask again with a larger output limit."
+              :interactive (lambda ()
+                             (format *query-io* "~&New output limit, in tokens: ")
+                             (finish-output *query-io*)
+                             (list (parse-integer (read-line *query-io*))))
+              (check-type new-limit (integer 1))
+              ;; The same attempt again: a limit too small is not the model's error.
+              (setf max-tokens new-limit
+                    retried t)
+              (decf attempt))
+            (praxeon/conditions:accept-truncated ()
+              :report "Return the cut-off arguments, marked as truncated."
+              (return-from generate-structured
+                (values (and call (tool-call-arguments call)) :truncated)))))
+        (unless retried
+          (unless call
+            (error 'structured-result-not-called :tool (tool-spec-name spec)))
+          (let ((problems (validate-arguments spec (tool-call-arguments call))))
+            (when (null problems)
+              (return-from generate-structured (tool-call-arguments call)))
+            ;; SIGNAL, not ERROR, so a caller's handler runs and can transfer control.
+            ;; An inner HANDLER-BIND would run first -- handlers are searched innermost
+            ;; outward -- so establishing the default repair here would make the caller's
+            ;; handler unreachable, which is the opposite of what the restart is for.
+            ;; SIGNAL returns when nobody transfers control, and the default applies then.
+            ;; SIGNAL the per-attempt notification, not the error. SIGNAL returns when
+            ;; nobody transfers control, and handlers are searched innermost outward -- so a
+            ;; HANDLER-BIND established inside this function would run before the caller's and
+            ;; make the caller's unreachable.
+            (let ((retry nil))
+              (restart-case
+                  (signal 'structured-result-rejected
+                          :tool (tool-spec-name spec)
+                          :problems problems
+                          :arguments (tool-call-arguments call)
+                          :attempt attempt)
+                (re-ask ()
+                  :report "Ask again, appending the validation problems."
+                  (setf retry t)))
+              ;; Nobody took control and nobody asked for a repair: repair while attempts
+              ;; remain. Unbounded repair against a metered API is a bill rather than a retry.
+              (when (and (not retry) (< attempt attempts))
+                (setf retry t))
+              (unless retry
+                (error 'structured-result-invalid
+                       :tool (tool-spec-name spec)
+                       :problems problems
+                       :arguments (tool-call-arguments call)
+                       :attempt attempt))
+              (unless retry (return))
+              (setf conversation
+                    (append conversation
+                            ;; A message is a plist (:role R :content C) -- see the note at
+                            ;; the top of llm.lisp. There is no message struct.
+                            (list (list :role :assistant
+                                        :content (format nil "Called ~A." (tool-spec-name spec)))
+                                  (list :role :user
+                                        :content (%repair-message problems))))))))))))

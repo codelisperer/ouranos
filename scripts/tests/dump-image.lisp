@@ -123,13 +123,42 @@ TEMP and cache. This is the defect #107 measured, and it shows the fixture can s
     (is (search "dumpcache" out) "a bare dump must keep the dump-time cache, or this fixture cannot see #107:~%~A" out)))
 
 (test bin-cons-and-desktop-apps-dump-through-dump-executable
-  "bootstrap.lisp (bin/cons) and build-desktop-app.lisp (every desktop app) must both dump
-through ouranos-dump:dump-executable, and neither may call save-lisp-and-die itself, so the
-two tests above describe what those two produce."
-  (dolist (file '("bootstrap.lisp" "scripts/build-desktop-app.lisp"))
+  "bootstrap.lisp (bin/cons), build-desktop-app.lisp (every desktop app), and the example and
+sample-app builds #287 moved (hyperion's active-search `bin' target, the contacts example,
+Elise, and #111's probe application) must dump through ouranos-dump:dump-executable, and none
+may call save-lisp-and-die itself, so the two tests above describe what they produce."
+  (dolist (file '("bootstrap.lisp" "scripts/build-desktop-app.lisp"
+                  "hyperion/cons.lisp"
+                  "mnemosyne/examples/contacts/scripts/build-contacts.lisp"
+                  "praxeon/scripts/build-elise.lisp"
+                  "scripts/appdata-survival-probe.lisp"))
     (let ((text (uiop:read-file-string (merge-pathnames file td-root))))
       (is (search "ouranos-dump:dump-executable" text) "~A must dump through ouranos-dump:dump-executable" file)
       (is (not (search "(sb-ext:save-lisp-and-die" text)) "~A calls save-lisp-and-die itself, so its image skips UIOP's hooks" file))))
+
+(defun %tree-lisp-files ()
+  "Every .lisp file in the tree outside a tests/, vendor/ or dist/ directory and outside .git.
+Test fixtures dump bare on purpose (the #107 fixture above is one), and vendor/ and dist/
+hold other people's sources and build output."
+  (remove-if (lambda (path)
+               (let ((dirs (rest (pathname-directory (enough-namestring path td-root)))))
+                 (intersection dirs '("tests" "vendor" "dist" ".git") :test #'string=)))
+             (directory (merge-pathnames "**/*.lisp" td-root))))
+
+(test no-file-in-the-tree-dumps-without-uiops-hooks
+  "Every file outside a tests/ directory that calls save-lisp-and-die must also call UIOP's
+dump hook and restore hook, so no binary the tree builds keeps its build machine's TEMP, user
+cache or ASDF translations (#107, #287). A file that dumps through ouranos-dump:dump-executable
+does not call save-lisp-and-die, so it passes; scripts/dump-image.lisp and the cons templates
+call both hooks around theirs. The text is searched, not read, so a dump written inside a
+string passed to a subprocess, as a cons.lisp :sh target does, is found too."
+  (let ((bare (loop for path in (%tree-lisp-files)
+                    for text = (uiop:read-file-string path)
+                    when (and (search "(sb-ext:save-lisp-and-die" text)
+                              (not (and (search "(uiop:call-image-dump-hook)" text)
+                                        (search "(uiop:call-image-restore-hook)" text))))
+                      collect (enough-namestring path td-root))))
+    (is (null bare) "these dump without UIOP's hooks; dump through ouranos-dump:dump-executable: ~{~A~^, ~}" bare)))
 
 (defun %template-forms (text)
   "The top-level forms of a cons template's build script TEXT, read with {{name}} replaced by a

@@ -50,7 +50,9 @@
    #:praxeon-error
    #:means-failure #:means-failure-means #:means-failure-cause
    #:deliberation-failure
+   #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
+   #:translation-truncated #:translation-truncated-text
    #:output-truncated-text #:output-truncated-tool-calls
    #:tool-choice-unsupported #:tool-choice-unsupported-provider
    #:tool-choice-unsupported-requested
@@ -154,8 +156,10 @@
    #:*default-structured-attempts*
    #:structured-result-rejected #:structured-result-rejected-tool
    #:structured-result-rejected-problems #:structured-result-rejected-attempt
+   #:structured-result-truncated
    #:structured-result-invalid #:structured-result-invalid-tool
    #:structured-result-invalid-problems #:structured-result-invalid-attempt
+   #:structured-result-invalid-arguments
    #:structured-result-not-called #:structured-result-not-called-tool
    #:tool-spec #:make-tool-spec #:tool-spec-validators
    #:tool-spec-name #:tool-spec-description #:tool-spec-schema #:tool-spec-cache

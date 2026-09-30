@@ -281,62 +281,89 @@ itself already finished, and its exit code is what the caller returns."
 ;;; build-appimage.sh and build-dmg.sh take it, and --icon here is ignored with a note.
 (defparameter *icon* (argv-value "--icon"))
 
-(when (and *icon* (not *patched-runtime-p*))
-  (let ((icon (probe-file *icon*)))
-    (unless icon
-      (error "build-desktop-app: no such icon file: ~A" *icon*))
-    (if (not (uiop:os-windows-p))
-        (format t "~&build-desktop-app: --icon applies on Windows only; on this OS build-appimage.sh or build-dmg.sh sets it.~%")
-        (let* ((patched (merge-pathnames (format nil "~A/.runtime/sbcl.exe" *out*) *root*))
-               (helper (merge-pathnames "scripts/windows-set-icon.ps1" *root*))
-               (core (namestring sb-ext:*core-pathname*))
-               (home (uiop:pathname-directory-pathname sb-ext:*core-pathname*))
-               (ready (handler-case
-                          (progn
-                            (ensure-directories-exist patched)
-                            (when (probe-file patched) (delete-file patched))
-                            (uiop:copy-file sb-ext:*runtime-pathname* patched)
-                            (uiop:run-program (list "powershell" "-NoProfile" "-ExecutionPolicy" "Bypass"
-                                                    "-File" (namestring helper)
-                                                    (namestring patched) (namestring icon))
-                                              :output t :error-output t)
-                            t)
-                        (error (e)
-                          (format t "~&build-desktop-app: could not set the icon on a copy of the runtime (~A).~%" e)
-                          nil))))
-          (cond
-            (ready
-             (format t "~&build-desktop-app: re-running the build under a runtime that carries ~A,~%" (file-namestring icon))
-             (format t "~&                   so the dumped image has it as its icon (#72).~%")
-             (finish-output)
-             (let ((code (nth-value
-                     2 (uiop:run-program
-                        (append
-                         (list (namestring patched) "--core" core
-                               "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
-                               "--script" (namestring (or *load-truename* *load-pathname*))
-                               "--system" *system* "--entry" *entry*
-                               "--name" *name* "--version" *version* "--out" *out*
-                               ;; Passed on so the re-run can put the same icon into the
-                               ;; launcher it compiles (#98). This block runs only when the
-                               ;; build is not already under the patched runtime, so the
-                               ;; re-run does not come back here.
-                               "--icon" (namestring icon))
-                         (%window-icon-args)
-                         (carry-args))
-                        :output t :error-output t :ignore-error-status t
-                        ;; The copy sits in <out>/.runtime, away from SBCL's own directory,
-                        ;; so it is told where its contribs are.
-                        :environment (append (list (format nil "OURANOS_PATCHED_RUNTIME=~A" (namestring patched))
-                                                   (format nil "SBCL_HOME=~A" (namestring home)))
-                                             (remove-if (lambda (e)
-                                                          (some (lambda (p) (uiop:string-prefix-p p e))
-                                                                '("OURANOS_PATCHED_RUNTIME=" "SBCL_HOME=")))
-                                                        (sb-ext:posix-environ)))))))
-               (%remove-patched-runtime patched)
-               (sb-ext:exit :code code)))
-            (t
-             (format t "~&build-desktop-app: continuing WITHOUT an icon -- the executable will show the default one.~%")))))))
+(when *icon*
+  (unless (probe-file *icon*)
+    (error "build-desktop-app: no such icon file: ~A" *icon*))
+  (unless (uiop:os-windows-p)
+    (format t "~&build-desktop-app: --icon applies on Windows only; on this OS build-appimage.sh or build-dmg.sh sets it.~%")))
+
+;;; --- Windows: the build runs in a child, and this process finishes the bundle (#98) ------
+;;;
+;;; A Windows bundle is <name>.exe (the launcher), sbcl-runtime.exe and sbcl.core, and the
+;;; launcher is compiled with sbcl.core's SHA-256 so it can refuse a core that was changed
+;;; after the build (#98, step 2). The core exists only once SAVE-LISP-AND-DIE has run, and that
+;;; ends the process that runs it, so the process that dumps cannot compile the launcher. On
+;;; Windows this process therefore runs the build again as a child, which loads the app and
+;;; dumps the core, and then hashes the core and compiles the launcher itself.
+;;;
+;;; The child runs under a copy of the runtime carrying --icon when one is given, because the
+;;; child copies the runtime it runs under into the bundle as sbcl-runtime.exe (#72).
+
+(defun %windows-child-runtime ()
+  "The runtime the Windows child runs under, and whether it is a copy this build made: a copy
+carrying --icon when one is given, otherwise this process's own runtime."
+  (if (null *icon*)
+      (values sb-ext:*runtime-pathname* nil)
+      (let ((patched (merge-pathnames (format nil "~A/.runtime/sbcl.exe" *out*) *root*))
+            (helper (merge-pathnames "scripts/windows-set-icon.ps1" *root*)))
+        (handler-case
+            (progn
+              (ensure-directories-exist patched)
+              (when (probe-file patched) (delete-file patched))
+              (uiop:copy-file sb-ext:*runtime-pathname* patched)
+              (uiop:run-program (list "powershell" "-NoProfile" "-ExecutionPolicy" "Bypass"
+                                      "-File" (namestring helper)
+                                      (namestring patched) (namestring (probe-file *icon*)))
+                                :output t :error-output t)
+              (values patched t))
+          (error (e)
+            (format t "~&build-desktop-app: could not set the icon on a copy of the runtime (~A); continuing WITHOUT an icon on the runtime.~%" e)
+            (values sb-ext:*runtime-pathname* nil))))))
+
+(defun %run-windows-child (runtime)
+  "Run this build again under RUNTIME, as the child that loads the app and dumps the core.
+Returns the child's exit code."
+  (let ((home (uiop:pathname-directory-pathname sb-ext:*core-pathname*)))
+    (format t "~&build-desktop-app: building in a child process, then compiling the launcher with the core's SHA-256 (#98)~%")
+    (finish-output)
+    (nth-value
+     2 (uiop:run-program
+        (append
+         (list (namestring runtime) "--core" (namestring sb-ext:*core-pathname*)
+               "--dynamic-space-size" (princ-to-string ouranos-heap:*wanted-heap-mb*)
+               "--script" (namestring (or *load-truename* *load-pathname*))
+               "--system" *system* "--entry" *entry*
+               "--name" *name* "--version" *version* "--out" *out*)
+         (%window-icon-args)
+         (carry-args))
+        :output t :error-output t :ignore-error-status t
+        ;; A copied runtime sits in <out>/.runtime, away from SBCL's own directory, so it is
+        ;; told where its contribs are. OURANOS_PATCHED_RUNTIME marks the child, which then
+        ;; does not come back here.
+        :environment (append (list (format nil "OURANOS_PATCHED_RUNTIME=~A" (namestring runtime))
+                                   (format nil "SBCL_HOME=~A" (namestring home)))
+                             (remove-if (lambda (e)
+                                          (some (lambda (p) (uiop:string-prefix-p p e))
+                                                '("OURANOS_PATCHED_RUNTIME=" "SBCL_HOME=")))
+                                        (sb-ext:posix-environ)))))))
+
+(defun %file-sha256 (path)
+  "PATH's SHA-256 as 64 lowercase hex digits, from `certutil -hashfile', which is in System32
+on every supported Windows. Not a Lisp library, because this runs before Quicklisp is loaded;
+not PowerShell's Get-FileHash, because Windows PowerShell started from a PowerShell 7 session
+inherits its module path and then does not find that cmdlet (measured while writing this).
+certutil prints the file's name, the hash, and a status line; older Windows separated the hash's
+bytes with spaces. Signals an error naming certutil's output when no line is a hash."
+  (let* ((out (uiop:run-program (list "certutil" "-hashfile" (uiop:native-namestring path) "SHA256")
+                                :output :string))
+         (hash (find-if (lambda (line)
+                          (and (= 64 (length line)) (every (lambda (c) (digit-char-p c 16)) line)))
+                        (mapcar (lambda (line) (remove-if (lambda (c) (member c '(#\Space #\Return))) line))
+                                (uiop:split-string out :separator '(#\Newline))))))
+    (unless hash
+      (error "build-desktop-app: certutil gave no SHA-256 for ~A:~%~A" path out))
+    (string-downcase hash)))
+
 
 
 ;;; --- the platform key, from the library that also serves the client (pre-publication issue 206) -------
@@ -450,6 +477,63 @@ empty string or by \"0\" is a guard that will be switched off by accident."
 ;;; (bootstrap.lisp does the same for bin/cons and explains the failure mode: a later
 ;;; in-image `(require :sb-cltl2)` fails with "System sb-cltl2 not found".) A Coalton app
 ;;; needs sb-cltl2 in particular, and the Coalton REPL compiles code at RUNTIME.
+;;; --- Windows: finish the bundle the child dumped (#98) ---------------------------------------
+;;;
+;;; The launcher (scripts/windows-launcher.c) is compiled with MSVC, found as build-libuv.lisp
+;;; finds it (scripts/msvc.lisp), after the child has dumped the core, so that it can carry the
+;;; core's SHA-256. See "Windows: the build runs in a child" above.
+(load (merge-pathnames "windows-launcher.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
+(defun %bundle-directory ()
+  "The bundle directory this build writes: <out>/<name>-<version>-<platform>/."
+  (merge-pathnames (format nil "~A/~A-~A-~A/" *out* *name* *version* *platform*) *root*))
+
+(defun %compile-windows-launcher (target heap-mb core-sha256)
+  "Compile scripts/windows-launcher.c to TARGET, starting the runtime with HEAP-MB megabytes
+after checking that sbcl.core has CORE-SHA256. Exits with code 3, naming the reason, if MSVC is
+missing or the compile fails."
+  (multiple-value-bind (ok output)
+      (ouranos-windows-launcher:compile-launcher
+       target heap-mb (merge-pathnames (format nil "~A/.launcher/" *out*) *root*) core-sha256)
+    (unless ok
+      (format t "~&build-desktop-app: could not compile the Windows launcher, scripts/windows-launcher.c:~%~A~%" output)
+      (format t "~&A Windows desktop app needs MSVC for its launcher, as a macOS one needs cc. The Build Tools with the C++ workload are enough:~%")
+      (format t "~&  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%")
+      (sb-ext:exit :code 3))))
+
+(defun %set-windows-icon (exe icon)
+  "Write ICON into EXE with scripts/windows-set-icon.ps1, as the child's runtime copy gets it."
+  (uiop:run-program (list "powershell" "-NoProfile" "-ExecutionPolicy" "Bypass"
+                          "-File" (namestring (merge-pathnames "scripts/windows-set-icon.ps1" *root*))
+                          (namestring exe) (namestring icon))
+                    :output t :error-output t))
+
+(defun %finish-windows-bundle (bundle)
+  "Compile the launcher into BUNDLE for the sbcl.core the child dumped there, with that core's
+SHA-256 and the child's heap, and write --icon into it. The icon goes in before any signing, which
+a later step does: a resource update rewrites the file and drops an Authenticode signature
+(measured on #98)."
+  (let ((launcher (merge-pathnames (format nil "~A.exe" *name*) bundle))
+        (core (merge-pathnames "sbcl.core" bundle))
+        (heap-mb ouranos-heap:*wanted-heap-mb*))
+    (unless (probe-file core)
+      (format t "~&build-desktop-app: the child finished but wrote no ~A~%" (human-path:human-path core))
+      (sb-ext:exit :code 3))
+    (let ((sha (%file-sha256 core)))
+      (%compile-windows-launcher launcher heap-mb sha)
+      (when *icon*
+        (%set-windows-icon launcher (probe-file *icon*)))
+      (format t "~&build-desktop-app: launcher -> ~A (heap ~D MB, core SHA-256 ~A)~%"
+              (human-path:human-path launcher) heap-mb sha))))
+
+(when (and (uiop:os-windows-p) (not *patched-runtime-p*))
+  (multiple-value-bind (runtime copied) (%windows-child-runtime)
+    (let ((code (%run-windows-child runtime)))
+      (when copied (%remove-patched-runtime runtime))
+      (unless (eql code 0) (sb-ext:exit :code code))
+      (%finish-windows-bundle (%bundle-directory))
+      (sb-ext:exit :code 0))))
+
 (dolist (contrib '(:sb-cltl2 :sb-bsd-sockets :sb-posix :sb-rotate-byte
                    :sb-md5 :sb-introspect :sb-concurrency))
   (ignore-errors (require contrib)))
@@ -461,8 +545,7 @@ empty string or by \"0\" is a guard that will be switched off by accident."
 (funcall (read-from-string "ql:quickload") *system*)
 
 ;;; --- the bundle ---------------------------------------------------------------
-(defparameter *bundle*
-  (merge-pathnames (format nil "~A/~A-~A-~A/" *out* *name* *version* *platform*) *root*))
+(defparameter *bundle* (%bundle-directory))
 (ensure-directories-exist *bundle*)
 
 ;;; The native webview launcher belongs BESIDE the image -- that is the first place
@@ -843,32 +926,6 @@ Exits with code 3, naming the compiler's output, if it does not compile."
         (format t "~&The Xcode Command Line Tools provide cc: xcode-select --install~%")
         (sb-ext:exit :code 3)))))
 
-;;; ON WINDOWS THE BUNDLE IS A LAUNCHER, THE RUNTIME AND THE CORE TOO (#98): <name>.exe (the
-;;; launcher, scripts/windows-launcher.c), sbcl-runtime.exe and sbcl.core. Authenticode
-;;; appends its signature to the end of the file, where a dumped image keeps its core, so a
-;;; signed dumped image does not start; a signed runtime with a separate core does. The
-;;; launcher is compiled with MSVC, found as build-libuv.lisp finds it (scripts/msvc.lisp).
-(load (merge-pathnames "windows-launcher.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
-
-(defun %compile-windows-launcher (target heap-mb)
-  "Compile scripts/windows-launcher.c to TARGET, starting the runtime with HEAP-MB megabytes.
-Exits with code 3, naming the reason, if MSVC is missing or the compile fails."
-  (multiple-value-bind (ok output)
-      (ouranos-windows-launcher:compile-launcher
-       target heap-mb (merge-pathnames (format nil "~A/.launcher/" *out*) *root*))
-    (unless ok
-      (format t "~&build-desktop-app: could not compile the Windows launcher, scripts/windows-launcher.c:~%~A~%" output)
-      (format t "~&A Windows desktop app needs MSVC for its launcher, as a macOS one needs cc. The Build Tools with the C++ workload are enough:~%")
-      (format t "~&  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%")
-      (sb-ext:exit :code 3))))
-
-(defun %set-windows-icon (exe icon)
-  "Write ICON into EXE with scripts/windows-set-icon.ps1, as the icon step does for the runtime."
-  (uiop:run-program (list "powershell" "-NoProfile" "-ExecutionPolicy" "Bypass"
-                          "-File" (namestring (merge-pathnames "scripts/windows-set-icon.ps1" *root*))
-                          (namestring exe) (namestring icon))
-                    :output t :error-output t))
-
 (cond
   ((uiop:os-macosx-p)
     (let ((launcher (merge-pathnames *name* *bundle*))
@@ -887,20 +944,14 @@ Exits with code 3, naming the reason, if MSVC is missing or the compile fails."
       (funcall (read-from-string "ouranos-dump:dump-core")
                core (fdefinition (read-from-string *entry*)))))
   ((uiop:os-windows-p)
-   (let ((launcher (merge-pathnames (format nil "~A.exe" *name*) *bundle*))
-         (runtime (merge-pathnames "sbcl-runtime.exe" *bundle*))
-         (core (merge-pathnames "sbcl.core" *bundle*))
-         (heap-mb (floor (sb-ext:dynamic-space-size) (* 1024 1024))))
-     ;; The runtime this build is running under: the copy that carries the icon when the
-     ;; re-run above happened, so Task Manager shows the app's icon for it too.
+   ;; This is the child (see "Windows: the build runs in a child"). It writes the runtime and
+   ;; the core; the parent then compiles <name>.exe with the core's SHA-256.
+   (let ((runtime (merge-pathnames "sbcl-runtime.exe" *bundle*))
+         (core (merge-pathnames "sbcl.core" *bundle*)))
+     ;; The runtime this build is running under: the copy that carries --icon when one was
+     ;; given, so Task Manager shows the app's icon for it too.
      (uiop:copy-file sb-ext:*runtime-pathname* runtime)
      (format t "~&build-desktop-app: runtime  -> ~A~%" (human-path:human-path runtime))
-     (%compile-windows-launcher launcher heap-mb)
-     ;; The icon goes in before any signing, which a later step does: a resource update
-     ;; rewrites the file and drops an Authenticode signature (measured on #98).
-     (when *icon*
-       (%set-windows-icon launcher (probe-file *icon*)))
-     (format t "~&build-desktop-app: launcher -> ~A (heap ~D MB)~%" (human-path:human-path launcher) heap-mb)
      (format t "~&build-desktop-app: dumping ~A -> ~A~%" *entry* (human-path:human-path core))
      (finish-output)
      (funcall (read-from-string "ouranos-dump:dump-core")

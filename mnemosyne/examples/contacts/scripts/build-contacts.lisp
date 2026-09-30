@@ -10,8 +10,9 @@
 (ql:quickload "contacts")
 
 (ensure-directories-exist "bin/")
-;; Add :compression t if this SBCL was built with core compression (smaller binary).
-(sb-ext:save-lisp-and-die
- "bin/contacts"
- :executable t
- :toplevel #'mnemosyne/examples/contacts:main)
+;; Through scripts/dump-image.lisp, not `save-lisp-and-die' directly, so the binary takes its
+;; temporary directory, fasl cache and ASDF configuration from the machine it runs on (#107,
+;; #287). Pass :compression t to DUMP-EXECUTABLE if this SBCL was built with core compression.
+(load (merge-pathnames "../../../../scripts/dump-image.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+(ouranos-dump:dump-executable "bin/contacts" 'mnemosyne/examples/contacts:main)

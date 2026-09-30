@@ -29,7 +29,18 @@
                      (deliberation-failure-detail c))))
   (:documentation "Signalled when the actor cannot decide on an action."))
 
-(define-condition output-truncated (deliberation-failure)
+(define-condition output-limit-reached (condition)
+  ((max-tokens :initarg :max-tokens :reader output-limit-reached-max-tokens))
+  (:documentation "A model's output stopped at the output limit (stop reason :MAX-TOKENS)
+before the model had finished (#326, #338). MAX-TOKENS is the limit the call ran with.
+
+A parent of every condition praxeon signals for a cut-off result: OUTPUT-TRUNCATED from
+RUN-TURN, TRANSLATION-TRUNCATED from PRAXEON/TRANSLATE:TRANSLATE and
+STRUCTURED-RESULT-TRUNCATED from PRAXEON/LLM:GENERATE-STRUCTURED. Each is signalled inside the
+restarts RETRY-WITH-MAX-TOKENS and ACCEPT-TRUNCATED, so one handler on this type can raise the
+limit, or accept the cut-off result, wherever it happens."))
+
+(define-condition output-truncated (deliberation-failure output-limit-reached)
   ((step-number :initarg :step :reader output-truncated-step)
    (max-tokens :initarg :max-tokens :reader output-truncated-max-tokens)
    (text :initarg :text :initform "" :reader output-truncated-text)
@@ -57,6 +68,17 @@ using.
 
 RUN-TURN signals it with ERROR, inside three restarts: RETRY-WITH-MAX-TOKENS, ACCEPT-TRUNCATED
 and ABANDON-TURN. The functions of the same names below invoke them."))
+
+(define-condition translation-truncated (deliberation-failure output-limit-reached)
+  ((text :initarg :text :initform "" :reader translation-truncated-text))
+  (:report
+   (lambda (c s)
+     (format s "The translation reached the output limit of ~D tokens before the model had finished, so it is shorter than the text it translates (#338).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS) or take the cut-off translation (ACCEPT-TRUNCATED). TRANSLATE's :max-tokens sets the limit for one call."
+             (output-limit-reached-max-tokens c))))
+  (:documentation "Signalled by PRAXEON/TRANSLATE:TRANSLATE when the model's translation stopped
+at the output limit (#338). TEXT is the cut-off translation. Signalled with ERROR inside the
+restarts RETRY-WITH-MAX-TOKENS and ACCEPT-TRUNCATED; with ACCEPT-TRUNCATED, TRANSLATE returns
+TEXT with a second value, :TRUNCATED."))
 
 (define-condition missing-provenance (praxeon-error)
   ((operation :initarg :operation :initform nil :reader missing-provenance-operation)
@@ -190,15 +212,17 @@ merged, and this names what did not (pre-publication issue 418)."))
 ;;; they are not the three above.
 
 (defun retry-with-max-tokens (max-tokens &optional condition)
-  "Invoke RETRY-WITH-MAX-TOKENS: ask the model again for the step that was cut off, with
-MAX-TOKENS (a positive integer) as the output limit for that step and for every later step of
-the turn. The retry is another step, so it counts against RUN-TURN's MAX-STEPS."
+  "Invoke RETRY-WITH-MAX-TOKENS: ask the model again with MAX-TOKENS (a positive integer) as the
+output limit. In RUN-TURN the limit holds for the step that was cut off and every later step of
+the turn, and the retry counts against MAX-STEPS. In TRANSLATE and GENERATE-STRUCTURED it holds
+for the rest of that call; a retry is not one of GENERATE-STRUCTURED's ATTEMPTS."
   (let ((r (find-restart 'retry-with-max-tokens condition)))
     (when r (invoke-restart r max-tokens))))
 
 (defun accept-truncated (&optional condition)
-  "Invoke ACCEPT-TRUNCATED: end the turn with the cut-off text as its answer. RUN-TURN returns
-the text with a second value, :TRUNCATED."
+  "Invoke ACCEPT-TRUNCATED: take the cut-off result. RUN-TURN ends the turn with the cut-off
+text as its answer, and TRANSLATE and GENERATE-STRUCTURED return the cut-off result; each
+returns it with a second value, :TRUNCATED."
   (let ((r (find-restart 'accept-truncated condition)))
     (when r (invoke-restart r))))
 
