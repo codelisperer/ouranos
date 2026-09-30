@@ -911,7 +911,22 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   ;; A streamed response is being written on this connection. IN-FLIGHT is already NIL by
   ;; then, so without this an open stream would look like an idle keep-alive connection
   ;; to a draining STOP, which closes those at once (#388).
-  (streaming nil))
+  (streaming nil)
+  ;; The peer's address, (HOST . PORT), asked of the socket on the connection's first request
+  ;; and kept (#430). See %PEER.
+  (peer nil))
+
+(defun %peer (conn state)
+  "The peer's address as (values HOST PORT), or NILs if the socket cannot say. Asked of the
+socket once per connection, on its first request, and kept in STATE: a connected socket's
+peer does not change, and asking on every request (a getpeername call and a string for the
+host) was 2% of the loop thread's time on #430's profile."
+  (let ((peer (conn-state-peer state)))
+    (unless peer
+      (setf peer (multiple-value-bind (host port) (ignore-errors (net:peer-address conn))
+                   (cons host port))
+            (conn-state-peer state) peer))
+    (values (car peer) (cdr peer))))
 
 (defun %dispatcher (state)
   "The dispatcher for a request on the connection whose state is STATE: its server's own,
@@ -1391,7 +1406,7 @@ accept work, or a seam somebody rebound badly. Without it that condition escapes
 callback guard and the request hangs -- the exact failure the boundary exists to prevent,
 one level up."
   (setf (conn-state-in-flight state) t)
-  (multiple-value-bind (host port) (ignore-errors (net:peer-address conn))
+  (multiple-value-bind (host port) (%peer conn state)
     (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
            (loop* (net:connection-loop conn))
            ;; K ROUTES ITSELF ONTO THE LOOP THREAD, so a dispatcher may call it from

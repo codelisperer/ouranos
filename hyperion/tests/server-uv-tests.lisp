@@ -325,6 +325,30 @@ impossible; now it is ours and a missing key is our bug."
       (is (string= "text/plain" (getf env :content-type)))
       (is (string= "127.0.0.1" (getf env :remote-addr))))))
 
+(test the-peer-address-is-asked-once-per-connection
+  "Two requests on one kept-alive connection see the same :REMOTE-ADDR and :REMOTE-PORT, and
+the socket is asked for them once, on the first request, not per request (#430). Counted by
+wrapping NET:PEER-ADDRESS for the length of the test."
+  (let ((seen '()) (calls 0) (lock (sb-thread:make-mutex)))
+    (sb-int:encapsulate 'aion/uv/net:peer-address 'count-peer-address
+                        (lambda (f &rest args)
+                          (sb-thread:with-mutex (lock) (incf calls))
+                          (apply f args)))
+    (unwind-protect
+         (with-server (port (lambda (env)
+                              (sb-thread:with-mutex (lock)
+                                (push (cons (getf env :remote-addr) (getf env :remote-port))
+                                      seen))
+                              (list 200 +ok+ '("ok"))))
+           (converse port (list (req "GET /1 HTTP/1.1" "Host: x") (req "GET /2 HTTP/1.1" "Host: x"))
+                     :responses 2))
+      (sb-int:unencapsulate 'aion/uv/net:peer-address 'count-peer-address))
+    (is (= 2 (length seen)))
+    (is (= 1 calls) "the peer address was asked ~D times for one connection" calls)
+    (is (equal (first seen) (second seen)))
+    (is (string= "127.0.0.1" (car (first seen))))
+    (is (typep (cdr (first seen)) '(integer 1 65535)))))
+
 (test query-string-distinguishes-absent-from-empty
   "`/x' has no query; `/x?' has an empty one. Collapsing the two loses a distinction a
 handler is entitled to see."

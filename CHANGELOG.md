@@ -92,9 +92,11 @@ its tag.
   and a body no longer joins them into a new vector first. The future and `:on-complete`
   report the total octet count. `write-bytes` also copies its input in one bulk copy instead
   of one octet at a time. hyperion/server-uv uses the list form for every response, chunk and
-  file head, and writes a list response body piece by piece instead of joining it first. On
-  macOS this cut the server-uv loop thread's time per `/tile` request in `hyperion/bench` from
-  about 61 µs to about 45 µs. (#430)
+  file head, and writes a list response body piece by piece instead of joining it first.
+  Together with faster header checks in hyperion/http1 and asking a connection's peer address
+  once instead of per request, this cut the server-uv loop thread's time per `/tile` request
+  in `hyperion/bench` on macOS from about 61 µs to about 39 µs, and `/tile` went from about
+  15,400 to about 22,800 requests/s. (#430)
 - **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
   Secure attribute per request.** (#300) `:auto` sets it when the request came over https: the
   env's `:url-scheme`, or `X-Forwarded-Proto` when it came through a proxy the app trusts,
