@@ -61,6 +61,13 @@ its tag.
 
 ### Fixed
 
+- **hyperion/server-uv sent the handler's body in responses to HEAD requests; it now sends the
+  status line and headers only, with the Content-Length a GET would get.** On a kept-alive
+  connection the extra octets were read as the start of the next response. A streamed body's
+  function is no longer called for HEAD, and a file body is not read. Hyperion's router already
+  stripped the body for routes it serves, so this affects Clack apps on `:server :uv` and
+  handlers that do not go through the router. (#449)
+
 - **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
   discovery, which asked vswhere for the newest install only, so on a machine with several Visual
   Studio installs the variable chose the toolchain for libuv and the Windows launcher but not for
