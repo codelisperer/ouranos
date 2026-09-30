@@ -2694,6 +2694,31 @@ words for it are still available."
     (is (= 1536 (llm:check-embedding-dimensions p 1536)))
     (signals cnd:embedding-dimension-mismatch (llm:check-embedding-dimensions p 768))))
 
+(test a-vector-as-text-reads-back-as-the-numbers-written
+  "#425: a store with no vector type keeps an embedding as pgvector's text form. It reads back
+as the same doubles, including numbers written with an exponent. A wrong width is refused when
+one is given, and text that is not a vector is refused rather than read, including text that
+would evaluate code if read with *READ-EVAL* on."
+  (let ((numbers #(0.1d0 -2.5d0 1.0d-7 3.0d12)))
+    (is (string= "[0.1,-2.5,1.0e-7,3.0e12]" (llm:vector-text numbers)))
+    (is (equalp numbers (llm:parse-vector-text (llm:vector-text numbers 4))))
+    (is (< (abs (- 0.1d0 (aref (llm:parse-vector-text (llm:vector-text (vector 0.1f0 0 1 2))) 0)))
+           1d-6)
+        "single floats and integers are written as doubles")
+    (signals cnd:deliberation-failure (llm:vector-text #(1d0 2d0) 4))
+    (signals cnd:deliberation-failure (llm:parse-vector-text "1,2,3"))
+    (signals cnd:deliberation-failure (llm:parse-vector-text "[1,#.(error \"read\"),3]"))
+    (signals cnd:deliberation-failure (llm:parse-vector-text "[1,x,3]"))))
+
+(test cosine-distance-is-what-pgvector-computes
+  "#425: one minus the cosine, so the same direction is 0, a right angle 1 and the opposite
+direction 2, whatever the lengths. A zero vector has no direction and is taken as 1."
+  (is (= 0d0 (llm:cosine-distance #(1d0 0d0) #(2d0 0d0))))
+  (is (= 1d0 (llm:cosine-distance #(1d0 0d0) #(0d0 3d0))))
+  (is (= 2d0 (llm:cosine-distance #(1d0 0d0) #(-1d0 0d0))))
+  (is (< (abs (- (- 1d0 (/ 1d0 (sqrt 2d0))) (llm:cosine-distance #(1d0 0d0) #(1d0 1d0)))) 1d-12))
+  (is (= 1d0 (llm:cosine-distance #(0d0 0d0) #(1d0 0d0)))))
+
 (test a-batch-is-paired-back-by-index-not-by-arrival
   "THE `index' FIELD EXISTS BECAUSE THE ARRAY ORDER IS NOT PROMISED.
 

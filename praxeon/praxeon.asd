@@ -80,7 +80,7 @@
 ;;; does IO, so it lives in the CL shell; the Actor stays provider-neutral (it's
 ;;; just a registered means with a JSON schema).
 (defsystem "praxeon/memory-db"
-  :description "Observational memory persisted through mnemosyne, with similarity recall over pgvector (#138)."
+  :description "Observational memory persisted through mnemosyne, with similarity recall on Postgres with pgvector or on SQLite (#138, #425)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -94,7 +94,7 @@
   :components ((:file "src/memory-db")))
 
 (defsystem "praxeon/memory-db/tests"
-  :description "Observational memory in a real Postgres with pgvector (#138)."
+  :description "Observational memory in a real Postgres with pgvector, and in SQLite (#138, #425)."
   ;; praxeon and mnemosyne are named directly by the suite (praxeon/memory, praxeon/llm,
   ;; mnemosyne/conn, ...), so they are declared here rather than reached through
   ;; praxeon/memory-db (#166).

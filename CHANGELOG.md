@@ -12,6 +12,16 @@ its tag.
 
 ## Unreleased
 
+### Added
+
+- **praxeon/memory-db: a store on SQLite** (#425). `make-db-memory-store` takes
+  `:dialect :sqlite` with a SQLite connection, so a desktop app can keep observations and
+  recall them by similarity with no Postgres. The embedding is stored as text and
+  `recall-similar` ranks the subject's current observations by cosine distance in Lisp; there
+  is no index and no extension. `:dialect` other than `:postgres` or `:sqlite` is refused.
+  `praxeon/llm` gains the pure functions both stores use for that: `vector-text`,
+  `parse-vector-text` and `cosine-distance`.
+
 ### Fixed
 
 - **`scripts/build-mbedtls.lisp` honours `OURANOS_MSVC_PATH`.** It had its own copy of the MSVC
