@@ -428,3 +428,36 @@ budgeted list -- so it needs its own assertion. A citable `recall' and an uncita
         (is-true source "a similarity-recalled item must carry its source too")
         (is (string= "conv-sim"
                      (mem:provenance-conversation (mem:observation-provenance source))))))))
+
+;;; --- the thread scope and a provenance's range (#317) --------------------------------------------
+
+(test a-thread-observation-round-trips-and-stays-out-of-the-subjects-facts
+  "The thread and the window's last turn are columns, read back as written. A recall of the
+subject's facts does not return a thread observation, and the reverse."
+  (with-store (store)
+    (mem:remember store "member-5" "Prefers mornings." :provenance (test-provenance))
+    (mem:remember store "member-5" "Asked about the refund here." :thread "conv-7"
+                  :provenance (mem:make-provenance "conv-7" 3 :through 9))
+    (is (equal '("Prefers mornings.")
+               (mapcar #'mem:observation-content (mem:observations-of store "member-5"))))
+    (let ((o (first (mem:observations-of store "member-5" :thread "conv-7"))))
+      (is (string= "Asked about the refund here." (mem:observation-content o)))
+      (is (string= "conv-7" (mem:observation-thread o)))
+      (is (= 3 (mem:provenance-turn (mem:observation-provenance o))))
+      (is (= 9 (mem:provenance-through (mem:observation-provenance o))))
+      (is (string= "conv-7" (mem:observation-thread
+                             (supersede* store o "Asked about the refund twice.")))
+          "a supersession stays in the thread"))
+    (is (= 2 (length (mem:observations-of store "member-5" :thread :all))))))
+
+(test ensure-schema-adds-the-thread-columns-to-a-table-made-before-them
+  "A table made before #317 has no thread or source_through column. ENSURE-SCHEMA adds them, and
+a thread observation can then be written. Control: before ENSURE-SCHEMA, the write fails."
+  (with-store (store)
+    (dolist (column '("thread" "source_through"))
+      (conn:exec (mdb::store-connection store)
+                 (format nil "ALTER TABLE ~A DROP COLUMN ~A" (mdb:store-table store) column)))
+    (signals error (mem:remember store "member-6" "x" :thread "conv-1" :provenance (test-provenance)))
+    (mdb:ensure-schema store)
+    (mem:remember store "member-6" "y" :thread "conv-1" :provenance (test-provenance))
+    (is (= 1 (length (mem:observations-of store "member-6" :thread "conv-1"))))))

@@ -39,7 +39,7 @@
 
 ;;; --- where an observation came from -----------------------------------------
 
-(defstruct (provenance (:constructor make-provenance (conversation turn &key at)))
+(defstruct (provenance (:constructor make-provenance (conversation turn &key at through)))
   "Which conversation, which turn, and when -- the traceable source of an observation.
 
 REQUIRED ON EVERY WRITE (#150). Observational memory is personal data held indefinitely, and
@@ -56,10 +56,15 @@ AT IS OPTIONAL AND NEVER INVENTED. It is when the SOURCE TURN happened, which is
 the store learned it: a distillation pass reads a window from an hour ago, so the
 observation's RECORDED-AT is the pass and AT is the conversation. Conflating them would make
 `what did it believe on Tuesday' answer with the pass's schedule instead of the member's.
-NIL means the source time was not recorded -- an absent measurement, not a zero one."
+NIL means the source time was not recorded -- an absent measurement, not a zero one.
+
+THROUGH IS THE LAST TURN of the window an observation came from, when it came from more than
+one turn (#317): an observer distils a window of messages, and the observation is sourced to
+all of them. NIL means the single turn TURN."
   (conversation "" :type string)
   (turn 0 :type integer)
-  (at nil :type (or null integer)))
+  (at nil :type (or null integer))
+  (through nil :type (or null integer)))
 
 ;;; --- what an observation is -------------------------------------------------
 
@@ -69,9 +74,17 @@ NIL means the source time was not recorded -- an absent measurement, not a zero 
 ID is stable and is what supersession refers to. KIND records WHY this was written, which
 the consuming app asked for specifically: an explicit correction is more reliable than
 anything an LLM judged to be salient, and a recall that has to choose between them should be
-able to tell them apart."
+able to tell them apart.
+
+THREAD IS THE SCOPE (#317). NIL is a fact about the SUBJECT, recalled in every conversation
+with them. A string is a thread's id, usually the conversation's: an observation of that
+thread, which stands in for its old messages in that thread's prompt and nowhere else. The two
+are kept apart on purpose. A thread observation becomes a subject fact only through a separate,
+deliberate write, because a wrong fact about a person is recalled in every conversation with
+them."
   (id "" :type string)
   (subject "" :type string)
+  (thread nil :type (or null string))
   (content "" :type string)
   (kind :observation :type keyword)   ; :correction :preference :fact :observation
   (value 1 :type real)
@@ -101,14 +114,17 @@ changing. The in-memory store below is the whole implementation today, and that 
 for the first slice: nothing here needs semantic retrieval to answer `what did this member
 tell us'."))
 
-(defgeneric remember (store subject content &key provenance kind value tokens valid-from)
+(defgeneric remember (store subject content &key provenance kind value tokens valid-from thread)
   (:documentation "Record CONTENT as an observation about SUBJECT. Returns the observation.
 
 A DIRECT WRITE, not a distillation. The consuming app's point is that the reliable
 observations are the ones where someone said something explicitly corrective, and putting an
 LLM salience judgement in front of those is strictly worse than recording them because they
 were corrections. The distillation pass is one caller of this, not the only one -- which is
-also why the first slice is useful before any LLM pass exists."))
+also why the first slice is useful before any LLM pass exists.
+
+THREAD, when given, makes this an observation of that thread rather than a fact about SUBJECT
+(see OBSERVATION)."))
 
 (defgeneric supersede (store observation content &key provenance kind value tokens valid-from)
   (:documentation "Replace OBSERVATION with a new one carrying CONTENT. Returns the new one.
@@ -116,7 +132,7 @@ also why the first slice is useful before any LLM pass exists."))
 The old observation stays, marked superseded, so a historical recall can still answer what
 was believed before. It is no longer current, so an ordinary recall will not return it."))
 
-(defgeneric recall (store subject &key budget kind as-of)
+(defgeneric recall (store subject &key budget kind as-of thread)
   (:documentation "The observations about SUBJECT worth putting in a prompt, budgeted.
 
 Returns ctx-items, oldest first, chosen by `praxeon/context:assemble' -- the same budgeted
@@ -124,9 +140,12 @@ selection the rest of context assembly uses, so memory competes for space on the
 as everything else rather than on terms of its own.
 
 AS-OF, when given, answers what the store believed at that time: observations recorded by
-then, and superseded only if they were superseded by then. Without it, current beliefs."))
+then, and superseded only if they were superseded by then. Without it, current beliefs.
 
-(defgeneric recall-similar (store subject embedding &key budget kind as-of limit)
+THREAD selects the scope: NIL, the default, recalls facts about SUBJECT; a thread's id recalls
+that thread's observations. The two are never mixed in one call."))
+
+(defgeneric recall-similar (store subject embedding &key budget kind as-of limit thread)
   (:documentation "The observations about SUBJECT nearest to EMBEDDING, budgeted.
 
 A SECOND GENERIC RATHER THAN A MODE ON `RECALL', and that is the whole point (#150). The
@@ -149,9 +168,12 @@ NOT EVERY STORE HAS A METHOD. A store that cannot rank by distance does not answ
 that absence is structural: the caller gets no applicable method rather than a store quietly
 falling back to recency and returning plausible rows."))
 
-(defgeneric observations-of (store subject &key as-of include-superseded)
+(defgeneric observations-of (store subject &key as-of include-superseded thread)
   (:documentation "The raw observations about SUBJECT. For tests, inspection, and the
-access right -- a member is entitled to see what is held about them."))
+access right -- a member is entitled to see what is held about them.
+
+THREAD selects the scope as in RECALL: NIL for facts about SUBJECT, a thread's id for that
+thread's observations, and :ALL for both, which is what the access right needs."))
 
 (defgeneric forget-subject (store subject)
   (:documentation "Erase everything held about SUBJECT. Returns how many were removed.
@@ -193,11 +215,12 @@ number feeds a budget comparison, and a caller that needs precision passes TOKEN
   (max 1 (ceiling (length content) 4)))
 
 (defmethod remember ((store in-memory-store) subject content
-                     &key provenance (kind :observation) (value 1) tokens valid-from)
+                     &key provenance (kind :observation) (value 1) tokens valid-from thread)
   (check-provenance provenance "remember" subject)
   (let* ((now (praxeon/context:now))
          (obs (%make-observation :id (%next-id store)
                                  :subject subject
+                                 :thread thread
                                  :content content
                                  :kind kind
                                  :value value
@@ -227,6 +250,7 @@ number feeds a budget comparison, and a caller that needs precision passes TOKEN
              :detail (format nil "~A was already superseded by ~A"
                              (observation-id held) (observation-superseded-by held))))
     (let ((new (remember store (observation-subject held) content
+                         :thread (observation-thread held)
                          :provenance provenance
                          :kind (or kind (observation-kind held))
                          :value (or value (observation-value held))
@@ -243,12 +267,18 @@ number feeds a budget comparison, and a caller that needs precision passes TOKEN
        (or (null (observation-superseded-at obs))
            (> (observation-superseded-at obs) as-of))))
 
+(defun %in-scope-p (observation thread)
+  "Whether OBSERVATION is in the scope THREAD names: NIL for subject facts, a thread's id for
+that thread, :ALL for both."
+  (or (eq thread :all) (equal (observation-thread observation) thread)))
+
 (defmethod observations-of ((store in-memory-store) subject
-                            &key as-of include-superseded)
+                            &key as-of include-superseded thread)
   (let ((all '()))
     (maphash (lambda (id obs)
                (declare (ignore id))
-               (when (string= (observation-subject obs) subject)
+               (when (and (string= (observation-subject obs) subject)
+                          (%in-scope-p obs thread))
                  (push obs all)))
              (store-observations store))
     (let ((filtered (cond
@@ -278,8 +308,8 @@ do I fix it' unanswerable."
    :tx-time (observation-recorded-at observation)
    :source observation))
 
-(defmethod recall ((store in-memory-store) subject &key (budget 1000) kind as-of)
-  (let* ((observations (observations-of store subject :as-of as-of))
+(defmethod recall ((store in-memory-store) subject &key (budget 1000) kind as-of thread)
+  (let* ((observations (observations-of store subject :as-of as-of :thread thread))
          (wanted (if kind
                      (remove-if-not (lambda (o) (eq (observation-kind o) kind)) observations)
                      observations))
@@ -303,6 +333,6 @@ do I fix it' unanswerable."
       t)))
 
 (defmethod forget-subject ((store in-memory-store) subject)
-  (let ((doomed (observations-of store subject :include-superseded t)))
+  (let ((doomed (observations-of store subject :include-superseded t :thread :all)))
     (dolist (o doomed) (forget store o))
     (length doomed)))
