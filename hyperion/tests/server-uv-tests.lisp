@@ -325,6 +325,30 @@ impossible; now it is ours and a missing key is our bug."
       (is (string= "text/plain" (getf env :content-type)))
       (is (string= "127.0.0.1" (getf env :remote-addr))))))
 
+(test the-peer-address-is-asked-once-per-connection
+  "Two requests on one kept-alive connection see the same :REMOTE-ADDR and :REMOTE-PORT, and
+the socket is asked for them once, on the first request, not per request (#430). Counted by
+wrapping NET:PEER-ADDRESS for the length of the test."
+  (let ((seen '()) (calls 0) (lock (sb-thread:make-mutex)))
+    (sb-int:encapsulate 'aion/uv/net:peer-address 'count-peer-address
+                        (lambda (f &rest args)
+                          (sb-thread:with-mutex (lock) (incf calls))
+                          (apply f args)))
+    (unwind-protect
+         (with-server (port (lambda (env)
+                              (sb-thread:with-mutex (lock)
+                                (push (cons (getf env :remote-addr) (getf env :remote-port))
+                                      seen))
+                              (list 200 +ok+ '("ok"))))
+           (converse port (list (req "GET /1 HTTP/1.1" "Host: x") (req "GET /2 HTTP/1.1" "Host: x"))
+                     :responses 2))
+      (sb-int:unencapsulate 'aion/uv/net:peer-address 'count-peer-address))
+    (is (= 2 (length seen)))
+    (is (= 1 calls) "the peer address was asked ~D times for one connection" calls)
+    (is (equal (first seen) (second seen)))
+    (is (string= "127.0.0.1" (car (first seen))))
+    (is (typep (cdr (first seen)) '(integer 1 65535)))))
+
 (test query-string-distinguishes-absent-from-empty
   "`/x' has no query; `/x?' has an empty one. Collapsing the two loses a distinction a
 handler is entitled to see."
@@ -398,6 +422,23 @@ accepting it would produce a wrong Content-Length rather than a stream."
   (with-server (port (const-app 200 +ok+ (list "a" (lambda (writer)
                                                      (declare (ignore writer)) nil))))
     (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x"))))))
+
+(test a-list-body-is-sent-piece-by-piece-under-one-length
+  "A list body's pieces go to the socket as they are, without being joined first (#430). The
+octets must still arrive in order, strings as UTF-8, with one Content-Length for the lot and
+an empty piece and a nested list handled like any other."
+  (let* ((accented (coerce (list #\h (code-char #xE9) #\l #\l #\o) 'string)) ; 6 octets
+         (octets (make-array 3 :element-type '(unsigned-byte 8) :initial-contents '(65 66 67)))
+         (expected (concatenate '(vector (unsigned-byte 8))
+                                (sb-ext:string-to-octets accented :external-format :utf-8)
+                                octets
+                                (sb-ext:string-to-octets "xyz" :external-format :utf-8))))
+    (with-server (port (const-app 200 +ok+ (list accented "" octets (list "x" (list "yz")))))
+      (let ((r (get* port "GET / HTTP/1.1" "Host: x")))
+        (is (= 200 (status-of r)))
+        (is (= 12 (length expected)))
+        (is (string= "12" (header-of r "Content-Length")))
+        (is (equalp expected (sb-ext:string-to-octets (body-of r) :external-format :latin-1)))))))
 
 (test a-header-we-refuse-to-send-becomes-500
   "A CR in a header value is response splitting. It is never sanitised and never sent: the

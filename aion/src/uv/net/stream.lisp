@@ -243,25 +243,48 @@ own `data` field -- SBCL's GC moves Lisp objects."
     (uv:register req op)
     req))
 
+(deftype %octets () '(simple-array (unsigned-byte 8) (*)))
+
+(defun %simple-octets (data)
+  "DATA as a simple octet vector: a string encoded UTF-8, a simple octet vector as it is, and
+any other octet sequence copied into one."
+  (typecase data
+    (string (sb-ext:string-to-octets data :external-format :utf-8))
+    (%octets data)
+    (t (coerce data '%octets))))
+
+(defun %copy-to-foreign (octets pointer offset)
+  "Copy OCTETS into foreign memory at POINTER + OFFSET in one bulk copy (#430). A byte-at-a-time
+loop through CFFI:MEM-AREF was a measurable share of the loop thread's time under load."
+  (declare (type %octets octets) (type (and fixnum unsigned-byte) offset))
+  (sb-kernel:copy-ub8-to-system-area octets 0 pointer offset (length octets)))
+
 (defun write-bytes (connection octets &key on-complete on-error)
   "Queue OCTETS (or a string, encoded UTF-8) for writing. Returns a FUTURE for the byte
 count; ON-COMPLETE / ON-ERROR run on the loop thread when it settles.
+
+OCTETS may also be a LIST of octet vectors and strings, written in order as ONE write: each
+piece is copied straight into the write's buffer, so a caller with a head and a body does not
+join them into a new vector first (#430). One write, not one per piece, because a small
+second write is the segment Nagle holds (ADR-0011).
 
 Returns as soon as the write is QUEUED, which is the point of the write queue -- and the
 reason WRITE-QUEUE-SIZE and SATURATED-P exist. A producer that ignores them can queue
 without bound."
   (%ensure-open connection :write-bytes)
-  (let* ((octets (if (stringp octets)
-                     (sb-ext:string-to-octets octets :external-format :utf-8)
-                     (coerce octets '(vector (unsigned-byte 8)))))
-         (size (length octets))
+  (let* ((pieces (if (listp octets)
+                     (mapcar #'%simple-octets octets)
+                     (list (%simple-octets octets))))
+         (size (loop for piece in pieces sum (length piece)))
          (buffer (cffi:foreign-alloc :unsigned-char :count (max size 1)))
          (op (%make-write-op :connection connection :future (uv:make-future)
                              :buffer buffer :operation :write-bytes :size size
                              :on-complete on-complete :on-error on-error))
          (req (%new-request uv-ffi:+uv-write+ op)))
-    (dotimes (i size)
-      (setf (cffi:mem-aref buffer :unsigned-char i) (aref octets i)))
+    (loop with offset = 0
+          for piece in pieces
+          do (%copy-to-foreign piece buffer offset)
+             (incf offset (length piece)))
     ;; libuv copies the uv_buf_t ARRAY into the request, so the array may be stack-bound
     ;; here -- but the bytes it points at must outlive the call, which is why the buffer
     ;; is owned by the op and freed in the callback.

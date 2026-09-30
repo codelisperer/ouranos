@@ -25,6 +25,14 @@
 ;;;;   GET /cpu     CPU seconds used so far: "process=<s> loop=<s>", read by compare.py before
 ;;;;                and after each load run. loop= is the :uv loop thread's own CPU time, and
 ;;;;                "-" on other backends, which have no single loop thread to measure.
+;;;;   GET /prof-start, GET /prof-stop
+;;;;                only when HYPERION_PROFILE names a file (#430): sample the :uv loop thread
+;;;;                with sb-sprof between the two, and write the flat report to that file and
+;;;;                the call graph to the same name with .graph added.
+;;;;                HYPERION_PROFILE_MODE is time (default) or alloc; HYPERION_PROFILE_THREADS=all
+;;;;                samples every thread instead of the loop's. Time mode, because on
+;;;;                macOS sb-sprof's cpu mode does not sample threads in proportion to their
+;;;;                CPU; the loop's idle time shows up as its wait for events.
 ;;;;   GET /quit    stop the server (the harness uses it; keeps runs scriptable)
 
 (require :asdf)
@@ -92,29 +100,66 @@
   (multiple-value-bind (sec nsec) (sb-unix:clock-gettime clock)
     (+ sec (/ nsec 1d9))))
 
-(defun loop-cpu-seconds ()
-  "The :uv loop thread's CPU seconds, or NIL on another backend. The clock is read ON the loop
-thread, because a thread CPU clock measures whichever thread reads it."
+(defun on-loop (fn)
+  "FN's value, computed on the :uv loop thread; NIL on another backend."
   (let ((uv (find-package "HYPERION/SERVER-UV")))
-    (when (and uv +thread-cputime-id+ *handler*
-               (funcall (find-symbol "SERVER-P" uv) *handler*))
+    (when (and uv *handler* (funcall (find-symbol "SERVER-P" uv) *handler*))
       (let ((loop (funcall (find-symbol "SERVER-LOOP" uv) *handler*))
             (done (sb-thread:make-semaphore))
             (value nil))
         (if (uiop:symbol-call :aion/uv :loop-thread-p loop)
-            (setf value (cpu-seconds +thread-cputime-id+))
+            (setf value (funcall fn))
             (progn
               (uiop:symbol-call :aion/uv :submit loop
                                 (lambda ()
-                                  (setf value (cpu-seconds +thread-cputime-id+))
-                                  (sb-thread:signal-semaphore done)))
+                                  (unwind-protect (setf value (funcall fn))
+                                    (sb-thread:signal-semaphore done))))
               (sb-thread:wait-on-semaphore done :timeout 5)))
         value))))
 
+(defvar *profile* (uiop:getenv "HYPERION_PROFILE"))
+
+(when *profile* (require :sb-sprof))
+
+(defun profile-start ()
+  (let ((thread (on-loop (lambda () sb-thread:*current-thread*)))
+        (mode (if (equal (uiop:getenv "HYPERION_PROFILE_MODE") "alloc") :alloc :time)))
+    (uiop:symbol-call :sb-sprof :reset)
+    (uiop:symbol-call :sb-sprof :start-profiling :mode mode :sample-interval 0.0005
+                      :max-samples 400000
+                      :threads (if (and thread (not (equal (uiop:getenv "HYPERION_PROFILE_THREADS")
+                                                            "all")))
+                                   (list thread)
+                                   :all))
+    (format nil "profiling ~(~A~)" mode)))
+
+(defun profile-stop ()
+  (uiop:symbol-call :sb-sprof :stop-profiling)
+  (with-open-file (out *profile* :direction :output :if-exists :supersede)
+    (uiop:symbol-call :sb-sprof :report :type :flat :max 400 :stream out))
+  (with-open-file (out (concatenate 'string *profile* ".graph") :direction :output
+                                                                :if-exists :supersede)
+    (uiop:symbol-call :sb-sprof :report :type :graph :max 400 :stream out))
+  (format nil "report written to ~A" *profile*))
+
+(defun loop-cpu-seconds ()
+  "The :uv loop thread's CPU seconds, or NIL on another backend. The clock is read ON the loop
+thread, because a thread CPU clock measures whichever thread reads it."
+  (when +thread-cputime-id+
+    (on-loop (lambda () (cpu-seconds +thread-cputime-id+)))))
+
+(defvar *gc-count* (list 0)
+  "The count of garbage collections since start, in its CAR, counted by an after-GC hook. SBCL's collector stops every
+thread while it runs, so its time is time every request waits (#430).")
+
+(push (lambda () (sb-ext:atomic-incf (car *gc-count*))) sb-ext:*after-gc-hooks*)
+
 (defun cpu-report ()
   (let ((loop (loop-cpu-seconds)))
-    (format nil "process=~,3F loop=~:[-~;~:*~,3F~]"
-            (cpu-seconds sb-unix:clock-process-cputime-id) loop)))
+    (format nil "process=~,3F loop=~:[-~;~:*~,3F~] gc=~,3F gcs=~D consed=~D"
+            (cpu-seconds sb-unix:clock-process-cputime-id) loop
+            (/ sb-ext:*gc-run-time* internal-time-units-per-second)
+            (car *gc-count*) (sb-ext:get-bytes-consed))))
 
 (defun app (env)
   (let ((path (getf env :path-info)))
@@ -131,13 +176,19 @@ thread, because a thread CPU clock measures whichever thread reads it."
       ((string= path "/board") (list 200 '(:content-type "text/html; charset=utf-8") (list *board*)))
       ((string= path "/ping")  (list 200 '(:content-type "text/plain") (list "ok")))
       ((string= path "/cpu")   (list 200 '(:content-type "text/plain") (list (cpu-report))))
+      ((and *profile* (string= path "/prof-start"))
+       (list 200 '(:content-type "text/plain") (list (profile-start))))
+      ((and *profile* (string= path "/prof-stop"))
+       (list 200 '(:content-type "text/plain") (list (profile-stop))))
       ((string= path "/quit")  (setf *stop* t)
                                (list 200 '(:content-type "text/plain") (list "bye")))
       (t (list 404 '(:content-type "text/plain") (list "not found"))))))
 
 (let* ((port (or (ignore-errors (parse-integer (second sb-ext:*posix-argv*))) 8099))
        (backend (srv:default-server))
-       (workers (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS"))))
+       ;; 0 or unset: no worker pool, handlers run where the backend runs them (inline on :uv).
+       (workers (let ((n (ignore-errors (parse-integer (uiop:getenv "HYPERION_WORKERS")))))
+                  (and n (plusp n) n)))
        (handler (srv:start #'app :port port :host "127.0.0.1" :server backend
                                  :workers workers :log nil)))
   (setf *handler* handler)

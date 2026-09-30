@@ -176,3 +176,45 @@ RUNS without taking the worker down with it."
            (is-true (sb-thread:wait-on-semaphore ran :timeout 5)
                     "the default reporter ran and the worker took the next job"))
       (pool:stop-pool pool))))
+
+(defun run-many (pool n)
+  "Submit N counting jobs to POOL as fast as it accepts them, retrying each refusal, and
+return how many ran. Gives up after ten seconds in all, so a pool that stops accepting fails
+the test instead of hanging it."
+  (let ((ran (list 0))
+        (deadline (+ (get-internal-real-time) (* 10 internal-time-units-per-second))))
+    (dotimes (i n)
+      (loop until (or (pool:try-submit pool (lambda () (sb-ext:atomic-incf (car ran))))
+                      (> (get-internal-real-time) deadline))))
+    (wait-until (lambda () (= n (car ran))) :timeout 10)
+    (car ran)))
+
+(test every-accepted-job-runs-when-submissions-race-the-workers
+  ;; The wake-up path under a steady stream of submissions (#430): a job must never sit in the
+  ;; queue while every worker waits. A queue limit of 0 keeps the pool at capacity, so jobs are
+  ;; accepted exactly as workers free, from both the waiting and the running side; a limit of
+  ;; 64 lets the queue fill and drain.
+  (with-pool (p :size 4 :queue-limit 0)
+    (is (= 20000 (run-many p 20000))))
+  (with-pool (p :size 4 :queue-limit 64)
+    (is (= 20000 (run-many p 20000)))))
+
+(test idle-workers-wake-for-every-burst
+  ;; A job submitted while every worker is asleep must wake one (#430). Each round waits until
+  ;; no job is queued or running and gives the workers a moment to reach their wait, then
+  ;; submits a burst of four and waits for all four. The test above cannot see a lost wake-up:
+  ;; there, one worker that never sleeps keeps draining the queue.
+  (with-pool (p :size 4 :queue-limit 8)
+    (let ((ran (list 0)) (stalled nil))
+      (dotimes (round 200)
+        (wait-until (lambda () (and (zerop (pool:pool-busy p)) (zerop (pool:pool-queued p)))))
+        (sleep 0.001)
+        (dotimes (i 4)
+          (unless (pool:try-submit p (lambda () (sb-ext:atomic-incf (car ran))))
+            (setf stalled round)))
+        (unless (wait-until (lambda () (= (car ran) (* 4 (1+ round)))) :timeout 2)
+          (setf stalled round)
+          (return)))
+      (is (null stalled) "round ~A: a job was refused, or not picked up by an idle worker"
+          stalled)
+      (is (= 800 (car ran))))))

@@ -317,7 +317,7 @@
   ;; DEPENDS ON hyperion/desktop, not on nothing: the suite resolves the launcher through
   ;; desktop:default-launcher rather than rebuilding that logic, so if resolution moves
   ;; the suite moves with it instead of quietly testing a path nobody uses.
-  :depends-on ("aion/fs" "hyperion/desktop" "fiveam")
+  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam")   ; view-tests.lisp compares with aion/platform (#416)
   :serial t
   :components ((:file "tests/view-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/view/tests :run-tests)))
@@ -613,5 +613,6 @@
                              (:file "static-tests")
                              (:file "logging-tests")
                              (:file "import-tests")
-                             (:file "markdown-tests"))))
+                             (:file "markdown-tests")
+                             (:file "html-attributes-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))

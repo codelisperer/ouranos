@@ -22,6 +22,8 @@
     instead (ADR-0009). SBCL-only.")
   (:export #:run-app #:request-close #:free-port #:wait-until-listening
            #:*launcher* #:default-launcher #:image-directory #:bundled-window-icon
+           ;; is this a shipped build, and where is it installed (#416)
+           #:shipped-image-p #:install-directory
            #:launcher-not-found #:*remote-backend*))
 
 (in-package #:hyperion/desktop)
@@ -75,6 +77,26 @@ since the consumer that breaks is a shipped bundle on a user's machine.
 Why not (uiop:argv0), and why sb-ext:*runtime-pathname* is the right question, are recorded
 at the implementation."
   (platform:executable-directory))
+
+(defun shipped-image-p ()
+  "True when this image is a shipped build of an app, and NIL in a developer's REPL (#416).
+
+A shipped build is one dumped file on Linux; on macOS, a launcher, the runtime `sbcl' and
+`sbcl.core' in `<name>.app/Contents/MacOS'; on Windows, `<name>.exe', `sbcl-runtime.exe' and
+`sbcl.core'. On macOS and Windows the core is a file of its own, so comparing
+SB-EXT:*CORE-PATHNAME* with SB-EXT:*RUNTIME-PATHNAME*, the test for a one-file image, answers
+NIL inside a real bundle. The rule is aion/platform:shipped-image-p, which hyperion/update uses
+too."
+  (platform:shipped-image-p))
+
+(defun install-directory ()
+  "Where this shipped build is, as an absolute directory pathname, or NIL when SHIPPED-IMAGE-P is
+false (#416): the `.app' on macOS, otherwise the directory the app's files are in.
+
+It is derived from the running image. hyperion/update:install-directory answers the updater's
+question instead, and on Windows it reads the installer's registry record first; the two agree
+for an installed app that has not been moved."
+  (platform:shipped-image-directory))
 
 (defun default-launcher ()
   "Resolve the native webview launcher: *LAUNCHER* if set, else `hyperion-view[.exe]`

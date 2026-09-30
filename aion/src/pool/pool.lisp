@@ -126,9 +126,13 @@ Caller must NOT hold the lock."
             (t (sb-thread:condition-wait (pool-wake pool) (pool-lock pool)))))))
 
 (defun %finish-job (pool)
+  "Count a job as finished. NO WAKE-UP: the only threads waiting on POOL-WAKE are idle workers
+waiting for a job, and a job finishing gives them none. This used to broadcast, which woke
+every idle worker after every job to find the queue empty and go back to waiting, each taking
+the pool's lock on the way. Under load that put the event loop's TRY-SUBMIT in a queue behind
+them (#430)."
   (sb-thread:with-mutex ((pool-lock pool))
-    (decf (pool-running pool))
-    (sb-thread:condition-broadcast (pool-wake pool))))
+    (decf (pool-running pool))))
 
 (defun %report-job-error (pool condition)
   "Tell someone that a job died -- and never let the telling kill the worker.

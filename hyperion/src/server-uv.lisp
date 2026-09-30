@@ -288,6 +288,15 @@ been produced yet -- the streaming shape is a function AS the body, not among th
     (function
      (error "hyperion/server-uv: a function inside a list body is not a stream. A streamed body is the function ITSELF: (status headers (lambda (writer) ...)). See pre-publication issue 117."))))
 
+(defun %body-pieces (body)
+  "A Ring response body as a list of octet vectors, for NET:WRITE-BYTES to write as one write.
+A list body gives one piece per element, without %BODY-OCTETS' join into a new vector, which
+the profile on #430 measured at 5% of the loop thread on a one-element list. Anything else is
+%BODY-OCTETS' single vector."
+  (if (consp body)
+      (loop for piece in body nconc (%body-pieces piece))
+      (list (%body-octets body))))
+
 (defun %empty-body-p (body)
   "Whether BODY would write no octets: NIL, an empty string or vector, or a list of those. A
 pathname or a function is never empty here, because it is not read to find out."
@@ -334,15 +343,17 @@ fault."
   (boundary:check-elements (%ring-headers-flat headers) 'string
                            :function encoder :argument 'headers))
 
-(defun %write-response (conn status headers body-octets keep-alive)
-  "Encode the head, refuse it if it is dangerous, and write head+body as one buffer."
-  (let ((encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
-                                      (length body-octets) keep-alive)))
+(defun %write-response (conn status headers body keep-alive)
+  "Encode the head, refuse it if it is dangerous, and write head and body in one write. BODY
+is an octet vector or a list of them (see %BODY-PIECES). Head and body go to NET:WRITE-BYTES
+as pieces, not joined into a new vector first (#430)."
+  (let* ((pieces (if (listp body) body (list body)))
+         (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
+                                       (loop for piece in pieces sum (length piece))
+                                       keep-alive)))
     (cond
       ((h1:encode-ok? encoded)
-       (net:write-bytes conn (concatenate '(vector (unsigned-byte 8))
-                                          (%latin1 (h1:encode-text encoded))
-                                          body-octets))
+       (net:write-bytes conn (cons (%latin1 (h1:encode-text encoded)) pieces))
        keep-alive)
       (t
        ;; The handler produced a header we will not put on the wire. That is a bug in the
@@ -429,9 +440,9 @@ vector passes through. NIL and empty are NIL, which callers read as `write nothi
 (defun %stream-emit (so octets)
   "Write one chunk: size line, the octets, CRLF. LOOP THREAD ONLY.
 
-Three writes rather than one concatenation would be three small segments on the wire, and
-the terminating one is exactly the write Nagle holds -- the 44 ms defect ADR-0011 measured.
-One buffer per chunk instead."
+Three writes would be three small segments on the wire, and the terminating one is exactly
+the write Nagle holds -- the 44 ms defect ADR-0011 measured. One write per chunk instead, of
+three pieces that NET:WRITE-BYTES copies into one buffer (#430)."
   (let ((header (h1:encode-chunk-header (length octets))))
     (unless (h1:encode-ok? header)
       ;; Unreachable: %CHUNK-OCTETS has already refused the empty chunk, which is the only
@@ -439,10 +450,7 @@ One buffer per chunk instead."
       ;; unframed write here desynchronises the connection instead of failing.
       (error 'stream-write-failed :reason (h1:encode-reason header)))
     (net:write-bytes (so-conn so)
-                     (concatenate '(vector (unsigned-byte 8))
-                                  (%latin1 (h1:encode-text header))
-                                  octets
-                                  +crlf-octets+)
+                     (list (%latin1 (h1:encode-text header)) octets +crlf-octets+)
                      :on-complete (lambda (&rest _) (declare (ignore _))
                                     (%stream-settle so))
                      :on-error (lambda (&rest _) (declare (ignore _))
@@ -715,9 +723,7 @@ the whole body was held in memory."
     (if (and (null chunk) (null head-octets))
         (%file-finish fo)
         (let* ((body (or chunk +no-octets+))
-               (buffer (if head-octets
-                           (concatenate '(vector (unsigned-byte 8)) head-octets body)
-                           body)))
+               (buffer (if head-octets (list head-octets body) body)))
           (incf (fo-written fo) (length body))
           (when *file-write-observer*
             (funcall *file-write-observer* (length body)))
@@ -905,7 +911,22 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   ;; A streamed response is being written on this connection. IN-FLIGHT is already NIL by
   ;; then, so without this an open stream would look like an idle keep-alive connection
   ;; to a draining STOP, which closes those at once (#388).
-  (streaming nil))
+  (streaming nil)
+  ;; The peer's address, (HOST . PORT), asked of the socket on the connection's first request
+  ;; and kept (#430). See %PEER.
+  (peer nil))
+
+(defun %peer (conn state)
+  "The peer's address as (values HOST PORT), or NILs if the socket cannot say. Asked of the
+socket once per connection, on its first request, and kept in STATE: a connected socket's
+peer does not change, and asking on every request (a getpeername call and a string for the
+host) was 2% of the loop thread's time on #430's profile."
+  (let ((peer (conn-state-peer state)))
+    (unless peer
+      (setf peer (multiple-value-bind (host port) (ignore-errors (net:peer-address conn))
+                   (cons host port))
+            (conn-state-peer state) peer))
+    (values (car peer) (cdr peer))))
 
 (defun %dispatcher (state)
   "The dispatcher for a request on the connection whose state is STATE: its server's own,
@@ -1352,7 +1373,7 @@ written into a closed socket."
                            (%write-file-response conn app state status headers body
                                                  keep-alive))
                           (t
-                           (%write-response conn status headers (%body-octets body)
+                           (%write-response conn status headers (%body-pieces body)
                                             keep-alive))))
                     (error (e)
                       ;; The RESPONSE was unusable -- a bad shape, a header we refuse to
@@ -1385,7 +1406,7 @@ accept work, or a seam somebody rebound badly. Without it that condition escapes
 callback guard and the request hangs -- the exact failure the boundary exists to prevent,
 one level up."
   (setf (conn-state-in-flight state) t)
-  (multiple-value-bind (host port) (ignore-errors (net:peer-address conn))
+  (multiple-value-bind (host port) (%peer conn state)
     (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
            (loop* (net:connection-loop conn))
            ;; K ROUTES ITSELF ONTO THE LOOP THREAD, so a dispatcher may call it from

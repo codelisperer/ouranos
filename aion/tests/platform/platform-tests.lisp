@@ -132,3 +132,90 @@ against one in pre-publication issue 335, because a dev image's honest answer is
     (when d
       (is-true (uiop:absolute-pathname-p d))
       (is-true (null (pathname-name d)) "a directory, not a file"))))
+
+;;; --- is this a shipped build, and where is it (#416) ---------------------------------------
+;;;
+;;; These two tests were hyperion/update's while the rule was private to it.
+
+(test a-shipped-build-is-one-file-or-a-macos-app-with-sbcl-core-beside-its-runtime
+  "#98: a macOS build is a launcher, the runtime `sbcl' and `sbcl.core' in a bundle's
+Contents/MacOS, so the runtime and core paths differ. Without the second rule the updater took
+it for a developer's REPL and found no install directory. Everything else with a core beside
+its runtime must still read as a REPL, or an update could be applied into SBCL's own
+installation: Windows' installer keeps sbcl.exe and sbcl.core in one directory."
+  (flet ((shipped (runtime core &key macos)
+           (plat:shipped-image-p :runtime runtime :core core :macos macos :windows nil)))
+    (is-true (shipped "/Applications/Foo.app/Contents/MacOS/foo"
+                      "/Applications/Foo.app/Contents/MacOS/foo")
+             "one dumped file, on any platform")
+    (is-true (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                      "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos t)
+             "the macOS .app")
+    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                       "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos nil)
+              "the same paths are not a shipped shape off macOS")
+    (is-false (shipped "C:/Program Files/Steel Bank Common Lisp/sbcl.exe"
+                       "C:/Program Files/Steel Bank Common Lisp/sbcl.core" :macos nil)
+              "Windows' SBCL installation")
+    (is-false (shipped "/opt/homebrew/Cellar/sbcl/2.6.8/libexec/bin/sbcl"
+                       "/opt/homebrew/Cellar/sbcl/2.6.8/lib/sbcl/sbcl.core" :macos t)
+              "Homebrew's SBCL")
+    (is-false (shipped "/opt/sbcl/bin/sbcl" "/opt/sbcl/bin/sbcl.core" :macos t)
+              "a hand-built SBCL on macOS with its core beside the runtime")
+    (is-false (shipped "/tmp/dist/foo-1.0.0-macos-arm64/sbcl"
+                       "/tmp/dist/foo-1.0.0-macos-arm64/sbcl.core" :macos t)
+              "the raw bundle directory the build writes, which is not shipped")
+    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                       "/Applications/Foo.app/Contents/MacOS/other.core" :macos t)
+              "a core under another name")
+    (is-false (shipped "/Applications/Foo.app/Contents/MacOS/sbcl"
+                       "/Applications/Bar.app/Contents/MacOS/sbcl.core" :macos t)
+              "sbcl.core in another bundle")
+    (is-false (shipped nil nil :macos t))))
+
+(test a-windows-build-is-sbcl-runtime-exe-with-sbcl-core-beside-it
+  "#98: a Windows build is <name>.exe (a launcher), sbcl-runtime.exe and sbcl.core in one
+directory, so the runtime and core paths differ. SBCL's own Windows installation also keeps a
+runtime and sbcl.core together, as sbcl.exe, and must still read as a REPL, or an update could
+be applied into SBCL's directory."
+  (flet ((shipped (runtime core &key (windows t))
+           (plat:shipped-image-p :runtime runtime :core core :macos nil :windows windows)))
+    (is-true (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
+                      "C:/Users/me/AppData/Local/Programs/Foo/sbcl.core")
+             "the installed Windows build")
+    (is-true (shipped "C:/Users/me/AppData/Local/Programs/Foo/SBCL-Runtime.EXE"
+                      "c:/users/me/appdata/local/programs/foo/sbcl.core")
+             "Windows paths compare without regard to case")
+    (is-false (shipped "C:/Program Files/Steel Bank Common Lisp/sbcl.exe"
+                       "C:/Program Files/Steel Bank Common Lisp/sbcl.core")
+              "SBCL's own installation")
+    (is-false (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
+                       "C:/Users/me/AppData/Local/Programs/Bar/sbcl.core")
+              "sbcl.core in another directory")
+    (is-false (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
+                       "C:/Users/me/AppData/Local/Programs/Foo/other.core")
+              "a core under another name")
+    (is-false (shipped "C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
+                       "D:/Users/me/AppData/Local/Programs/Foo/sbcl.core")
+              "the same directory names on another drive")
+    (is-false (shipped "/opt/foo/sbcl-runtime.exe" "/opt/foo/sbcl.core" :windows nil)
+              "the Windows shape is not a shipped build off Windows")))
+
+(test the-core-equals-runtime-rule-misreads-both-split-layouts
+  "#416's control: an app without the updater compared *CORE-PATHNAME* with *RUNTIME-PATHNAME*,
+the rule for a one-file image, and a real macOS or Windows bundle failed it. SHIPPED-IMAGE-P
+answers true for the same two pairs."
+  (let ((pairs '(("/Applications/Foo.app/Contents/MacOS/sbcl"
+                  "/Applications/Foo.app/Contents/MacOS/sbcl.core" :macos)
+                 ("C:/Users/me/AppData/Local/Programs/Foo/sbcl-runtime.exe"
+                  "C:/Users/me/AppData/Local/Programs/Foo/sbcl.core" :windows))))
+    (loop for (runtime core os) in pairs
+          do (is-false (equal runtime core) "the old rule says ~A is not shipped" os)
+             (is-true (plat:shipped-image-p :runtime runtime :core core
+                                            :macos (eq os :macos) :windows (eq os :windows))
+                      "SHIPPED-IMAGE-P says the ~A bundle is shipped" os))))
+
+(test a-development-image-is-not-shipped-and-has-no-shipped-directory
+  "This suite runs in a development SBCL, whose runtime and core are SBCL's own files."
+  (is-false (plat:shipped-image-p))
+  (is (null (plat:shipped-image-directory))))
