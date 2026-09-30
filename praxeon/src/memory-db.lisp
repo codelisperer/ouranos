@@ -32,6 +32,12 @@
 ;;;; distance operator does not serve a query written with another -- no error, correct
 ;;;; rows, and a sequential scan over the whole table. Choosing both in one file is how they
 ;;;; are kept in agreement.
+;;;;
+;;;; ON SQLITE (#425) there is no vector type. The embedding is stored as text in pgvector's
+;;;; form ([x,y,...], PRAXEON/LLM:VECTOR-TEXT), and RECALL-SIMILAR reads the subject's current
+;;;; observations with their embeddings and ranks them by cosine distance in Lisp. That is an
+;;;; exact scan over one subject's observations, which is what an index would narrow to on
+;;;; Postgres anyway at one user's scale. There is no index and no extension to check.
 
 (cl:defpackage #:praxeon/memory-db
   (:use #:cl)
@@ -47,7 +53,8 @@
                     (#:conn #:mnemosyne/conn)
                     (#:bt #:bordeaux-threads))
   (:documentation
-   "Observational memory persisted through mnemosyne, with similarity recall over pgvector.
+   "Observational memory persisted through mnemosyne, with similarity recall over pgvector,
+    or on SQLite over embeddings stored as text (#425).
 
     Implements praxeon/memory's store protocol, so a caller swaps it for the in-memory store
     without changing. Adds RECALL-SIMILAR, which the in-memory store does not answer.")
@@ -60,8 +67,9 @@
 (defvar *table* "praxeon_observations"
   "Default table name.")
 
-(defun %schema-fields (dimensions)
-  "The observation columns, with the embedding sized for the configured provider.
+(defun %schema-fields (dimensions dialect)
+  "The observation columns, with the embedding sized for the configured provider. On SQLite
+the embedding is text (#425).
 
 Underscores rather than hyphens: a field name becomes a SQL identifier unquoted, and
 `valid-from' is not one."
@@ -82,7 +90,9 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     (:source_conversation :string)
     (:source_turn  :integer)
     (:source_at    :integer)
-    (:embedding    :vector  :dimensions ,dimensions)))
+    ,(if (eq dialect :sqlite)
+         '(:embedding :text)
+         `(:embedding :vector :dimensions ,dimensions))))
 
 ;;; --- the store --------------------------------------------------------------
 
@@ -108,10 +118,14 @@ bound and hand it in; then no path through this store can resolve one."
   (check-type table string)
   (unless embedder
     (error "praxeon/memory-db: an embedder is required -- the column's width comes from it"))
+  (unless (member dialect '(:postgres :sqlite))
+    (error "praxeon/memory-db: :dialect is :postgres or :sqlite, not ~S" dialect))
   (let* ((dimensions (llm:embedding-dimensions embedder))
-         (name (intern (string-upcase table) '#:praxeon/memory-db))
+         ;; The dialect is in the name because the schema differs by dialect: a Postgres and a
+         ;; SQLite store over tables of the same name must not replace each other's schema.
+         (name (intern (format nil "~:@(~A~)-~A" table dialect) '#:praxeon/memory-db))
          (sch (schema:register-schema
-               (schema:make-schema name table (%schema-fields dimensions))))
+               (schema:make-schema name table (%schema-fields dimensions dialect))))
          (store (make-instance 'db-memory-store
                                :connection connection :dialect dialect :table table
                                :embedder embedder :dimensions dimensions
@@ -200,12 +214,16 @@ On Postgres the `vector' extension must already be installed; see CHECK-VECTOR-E
 selecting it would pull a megabyte of floats through every recall to be discarded.")
 
 (defun %vector-text (store vector &key (field :embedding))
-  "VECTOR in the text form pgvector accepts, through mnemosyne's own cast.
+  "VECTOR in the text form pgvector accepts, through mnemosyne's own cast. On SQLite, where
+the column is text and a cast would take any string, PRAXEON/LLM:VECTOR-TEXT does the width
+check instead (#425).
 
 THE QUERY VECTOR IS CAST LIKE A STORED ONE, on purpose. Casting is where a wrong width is
 refused, and a search argument of the wrong width is the same misconfiguration as a stored
 row of the wrong width -- it should not reach the database to be refused there in the
 language of columns."
+  (when (eq (store-dialect store) :sqlite)
+    (return-from %vector-text (llm:vector-text vector (store-dimensions store))))
   (let ((changeset (cs:cast (store-schema-name store) (list field vector) (list field))))
     (unless (cs:changeset-valid-p changeset)
       (error 'praxeon/conditions:deliberation-failure
@@ -246,7 +264,9 @@ language of columns."
                                         :recorded_at now
                                         :source_conversation (mem:provenance-conversation provenance)
                                         :source_turn (mem:provenance-turn provenance)
-                                        :embedding embedding)
+                                        :embedding (if (eq (store-dialect store) :sqlite)
+                                                       (%vector-text store embedding)
+                                                       embedding))
                                   (when at (list :source_at at)))
                                  (append
                                   '(:id :subject :content :kind :value :tokens
@@ -354,16 +374,45 @@ TWO STAGES, AND THE ORDER MATTERS. The database ranks by distance and takes LIMI
 because that is the part an index can serve; the budget is applied afterwards in the same
 assembly every other context source uses. Budgeting first would mean fetching everything to
 throw most of it away, and ranking in Lisp would mean the index served nothing."
-  (let ((rows (bt:with-lock-held ((store-lock store))
-                (q:fetch (store-connection store)
-                         (list :select +columns+
-                               :from (list (store-table store))
-                               :where (%where-current subject as-of nil)
-                               :order-by (list (list (list :<=> :embedding
-                                                           (%vector-text store embedding))))
-                               :limit limit)
-                         :dialect (store-dialect store)))))
+  (let ((rows (if (eq (store-dialect store) :sqlite)
+                  (%sqlite-nearest store subject embedding as-of limit)
+                  (bt:with-lock-held ((store-lock store))
+                    (q:fetch (store-connection store)
+                             (list :select +columns+
+                                   :from (list (store-table store))
+                                   :where (%where-current subject as-of nil)
+                                   :order-by (list (list (list :<=> :embedding
+                                                               (%vector-text store embedding))))
+                                   :limit limit)
+                             :dialect (store-dialect store))))))
     (%assemble (%rank-as-value (mapcar #'%row->observation rows)) budget kind)))
+
+(defun %sqlite-nearest (store subject embedding as-of limit)
+  "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations with their
+embeddings, the LIMIT nearest EMBEDDING by cosine distance, nearest first, ties by id. The
+query vector is checked for width as a stored one is. An observation with no embedding sorts
+after every other, as NULL does in Postgres's ascending ORDER BY. REMEMBER always writes one,
+so that case needs a row written some other way."
+  (let* ((query (llm:parse-vector-text (%vector-text store embedding)))
+         (rows (bt:with-lock-held ((store-lock store))
+                 (q:fetch (store-connection store)
+                          (list :select (append +columns+ '(:embedding))
+                                :from (list (store-table store))
+                                :where (%where-current subject as-of nil))
+                          :dialect :sqlite)))
+         (scored (mapcar (lambda (row)
+                           (let ((text (param:row-value row :embedding)))
+                             (cons (if text
+                                       (llm:cosine-distance query (llm:parse-vector-text text))
+                                       most-positive-double-float)
+                                   row)))
+                         rows))
+         (sorted (sort scored (lambda (a b)
+                                (or (< (car a) (car b))
+                                    (and (= (car a) (car b))
+                                         (string< (param:row-value (cdr a) :id)
+                                                  (param:row-value (cdr b) :id))))))))
+    (mapcar #'cdr (subseq sorted 0 (min limit (length sorted))))))
 
 (defmethod mem:forget ((store db-memory-store) observation)
   (bt:with-lock-held ((store-lock store))

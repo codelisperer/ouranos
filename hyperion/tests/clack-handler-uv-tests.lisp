@@ -606,6 +606,34 @@ with the fixture's; this one checks that the fixture's octets arrive intact in t
     (loop repeat 100 while (%listening-p port) do (sleep 0.05))
     (is-false (%listening-p port))))
 
+(test clack-stop-as-soon-as-the-port-listens-leaves-no-listener
+  "A CLACK:STOP that arrives while RUN is still starting the server still stops it (#444). The
+port listens before SUV:START returns, and a thread kill landing between that and RUN's
+UNWIND-PROTECT used to leave the server running. The window is widened here: SUV:START is
+wrapped to pause 0.3 s after it returns, and the thread is stopped as soon as the port
+listens, which lands the kill inside the pause. Any server that is left running is stopped
+at the end, so a failure does not leave a listener for later tests."
+  (let* ((port (%free-port))
+         (started (list nil))
+         (handler nil))
+    (sb-int:encapsulate 'srv:start 'slow-start
+                        (lambda (f &rest args)
+                          (let ((server (apply f args)))
+                            (setf (car started) server)
+                            (sleep 0.3)
+                            server)))
+    (unwind-protect
+         (progn
+           (setf handler (clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
+                                        :server :uv :port port :use-thread t :silent t))
+           (loop repeat 200 until (%listening-p port) do (sleep 0.005))
+           (is-true (%listening-p port))
+           (clack:stop handler)
+           (loop repeat 100 while (%listening-p port) do (sleep 0.05))
+           (is-false (%listening-p port) "the server started while CLACK:STOP arrived is still listening"))
+      (sb-int:unencapsulate 'srv:start 'slow-start)
+      (when (car started) (ignore-errors (srv:stop (car started)))))))
+
 (test the-path-is-percent-decoded-as-utf-8
   (is (equal "/foo/bar,baz" (uvh::%decode-path "/foo/bar%2cbaz")))
   (is (equal "/foo/bar%2cbaz" (uvh::%decode-path "/foo/bar%252cbaz")) "decoded once, not twice")

@@ -203,6 +203,16 @@ evaluates each part to build a failure report, so a bare variable is a compile-t
   ;; being mistaken for an incomplete read.
   (is-rejected 400 (concatenate 'string "GET / HTTP/1.1" (string +lf+) "Host: x" +crlf+ +crlf+)))
 
+(test a-bare-cr-or-lf-inside-a-header-line-is-refused
+  ;; The test above is refused by the request line's shape: the stray LF leaves it in four
+  ;; parts. A header line has no shape to break, so a bare CR or LF in a value is caught by
+  ;; LINE-CLEAN? alone, and until #430 no test reached it: with either character dropped from
+  ;; that check, every test still passed. Each character inside, first and last in a value.
+  (dolist (c (list +cr+ +lf+))
+    (dolist (value (list (format nil "a~Cb" c) (format nil "~Cab" c) (format nil "ab~C" c)))
+      (is-rejected 400 (req "GET / HTTP/1.1" "Host: x" (concatenate 'string "X-Thing: " value))
+                   (format nil "char ~D in the value ~S" (char-code c) value)))))
+
 (test obsolete-line-folding-is-refused
   ;; Obsolete since RFC 7230, and a reliable way to hide a header from one parser in a chain
   ;; but not another.

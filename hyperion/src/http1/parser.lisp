@@ -226,9 +226,9 @@ line terminator this parser must refuse."
 
   (declare line-clean? (String -> Boolean))
   (define (line-clean? s)
-    "No stray CR or LF survived the CRLF split, so the terminator really was CRLF."
-    (and (not (contains-char? s cr))
-         (not (contains-char? s lf))))
+    "No stray CR or LF survived the CRLF split, so the terminator really was CRLF. One pass
+for both characters: every line of every request goes through here (#430)."
+    (not (any-char? (fn (c) (or (== c cr) (== c lf))) s)))
 
   (declare token-char? (Char -> Boolean))
   (define (token-char? c)
