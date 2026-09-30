@@ -91,6 +91,98 @@
 (cffi:defcfun ("CloseHandle" %close-handle) :int32
   (h-object :pointer))
 
+;;; --- files ------------------------------------------------------------------
+;;;
+;;; CreateFileW, for a caller that needs what CL:OPEN does not offer: a share mode. SBCL opens
+;;; files so that other processes may read and write them too. A share mode of 0 makes the open
+;;; handle exclusive, so a second CreateFileW on the same file, from any process, fails with
+;;; ERROR_SHARING_VIOLATION until the handle is closed, and Windows closes it when the process
+;;; ends. hades/single-instance is built on that.
+;;;
+;;; The failure return is INVALID_HANDLE_VALUE, (HANDLE)-1, not NULL; AION/WINDOWS:WRAP-HANDLE
+;;; and HANDLE-VALID-P treat both as invalid. A NULL security-attributes pointer makes the
+;;; handle non-inheritable, so a child process does not keep the file open.
+
+(defconstant +generic-read+ #x80000000)
+(defconstant +generic-write+ #x40000000)
+(defconstant +open-always+ 4)
+(defconstant +file-attribute-normal+ #x80)
+(defconstant +error-sharing-violation+ 32)
+
+(cffi:defcfun ("CreateFileW" create-file-w) :pointer
+  (lp-file-name :pointer)
+  (dw-desired-access dword)
+  (dw-share-mode dword)
+  (lp-security-attributes :pointer)
+  (dw-creation-disposition dword)
+  (dw-flags-and-attributes dword)
+  (h-template-file :pointer))
+
+;;; --- Credential Manager (#357) --------------------------------------------------
+;;;
+;;; A generic credential: a blob of up to CRED_MAX_CREDENTIAL_BLOB_SIZE bytes stored under a
+;;; target name, protected per user by DPAPI. CredReadW allocates the CREDENTIALW it returns,
+;;; and the caller frees it with CredFree, which is why that is bound too.
+
+(defconstant +cred-type-generic+ 1)
+(defconstant +cred-persist-local-machine+ 2)  ; this user, this machine, across logons
+(defconstant +cred-max-credential-blob-size+ 2560)  ; 5 * 512 bytes
+(defconstant +error-not-found+ 1168)
+
+(cffi:defcstruct credential-w
+  (flags dword)
+  (type dword)
+  (target-name :pointer)
+  (comment :pointer)
+  (last-written (:struct filetime))
+  (credential-blob-size dword)
+  (credential-blob :pointer)
+  (persist dword)
+  (attribute-count dword)
+  (attributes :pointer)
+  (target-alias :pointer)
+  (user-name :pointer))
+
+(register-layout
+ :name "CREDENTIALW"
+ :type '(:struct credential-w)
+ ;; x64: two DWORDs, then pointers at 8 and 16, FILETIME at 24, the blob size at 32 and
+ ;; four bytes of padding so the blob pointer is aligned at 40; then two DWORDs at 48 and
+ ;; 52 and three pointers at 56, 64 and 72. 80 bytes. x86: every pointer is 4 bytes, so
+ ;; nothing pads and the struct is 52 bytes.
+ :size '(:x86 52 :x64 80)
+ :slots '((flags                :offset (:x86 0  :x64 0))
+          (type                 :offset (:x86 4  :x64 4))
+          (target-name          :offset (:x86 8  :x64 8))
+          (comment              :offset (:x86 12 :x64 16))
+          (last-written         :offset (:x86 16 :x64 24))
+          (credential-blob-size :offset (:x86 24 :x64 32))
+          (credential-blob      :offset (:x86 28 :x64 40))
+          (persist              :offset (:x86 32 :x64 48))
+          (attribute-count      :offset (:x86 36 :x64 52))
+          (attributes           :offset (:x86 40 :x64 56))
+          (target-alias         :offset (:x86 44 :x64 64))
+          (user-name            :offset (:x86 48 :x64 72)))
+ :source "MSDN CREDENTIALW (wincred.h)")
+
+(cffi:defcfun ("CredWriteW" cred-write-w) :int32
+  (credential :pointer)
+  (flags dword))
+
+(cffi:defcfun ("CredReadW" cred-read-w) :int32
+  (target-name :pointer)
+  (type dword)
+  (flags dword)
+  (credential :pointer))                ; PCREDENTIALW* -- Windows allocates
+
+(cffi:defcfun ("CredDeleteW" cred-delete-w) :int32
+  (target-name :pointer)
+  (type dword)
+  (flags dword))
+
+(cffi:defcfun ("CredFree" cred-free) :void
+  (buffer :pointer))
+
 ;;; --- the layout gate --------------------------------------------------------
 ;;;
 ;;; Run at LOAD, and deliberately fatal. ADR-0003 s4: "built in from the first commit". A

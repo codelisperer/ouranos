@@ -263,6 +263,34 @@ its tag.
   for instants after a file's last transition, so **a deployment image needs the tzdata
   package**; Windows has no zone directory, and there an app sets `TZDIR`. `parse-tzif`,
   `zone-offset-at` and `zone-local-to-universal` are pure, for use on any TZif bytes.
+- **hades/single-instance: a lock that keeps a second copy of a desktop app off the same data
+  directory.** `(hades/single-instance:with-single-instance ("app" :on-busy ...) ...)` runs its
+  body holding the lock, or calls `:on-busy` when another copy holds it;
+  `acquire-single-instance` returns a lock or `:busy`, and `release-single-instance` releases
+  it. The operating system releases the lock when the process ends, so a crash does not lock the
+  app out. It is scoped to the app's per-user data directory, or `:directory`. An app that wrote
+  its own lock for this, with `CreateFileW` share mode 0 or `flock`, can use this instead. It is
+  the first code in hades; an app depends on `hades/single-instance` alongside the frameworks.
+  (#305)
+- **aion/windows/ffi: `create-file-w`** and the constants `+generic-read+`, `+generic-write+`,
+  `+open-always+`, `+file-attribute-normal+` and `+error-sharing-violation+`. (#305)
+- **hades/credentials: a credential store over the operating system's own.**
+  `(store-credential service account secret)`, `(fetch-credential service account)` and
+  `(delete-credential service account)` keep a secret by name for the current user; `secret` goes
+  in and comes out as an `aion/secret`. A missing item signals `credential-not-found`. On Windows
+  the store is Credential Manager. On macOS it is the login Keychain, one generic-password item
+  per credential with the item's service and account set to `service` and `account`. Linux
+  signals `credential-store-unavailable` until its backend is written, and nothing is written to a
+  file instead. A value over 2560 bytes of UTF-8 signals `credential-too-large` on both Windows and
+  macOS. An app keeping an API key or password in a file or a setting can move it here. (#357)
+- **aion/windows/ffi: Credential Manager bindings**: `cred-write-w`, `cred-read-w`, `cred-delete-w`,
+  `cred-free`, the `credential-w` struct and its constants. (#357)
+- **aion/darwin: a macOS binding over CoreFoundation and Security.framework** (aion ADR-0004).
+  `make-cf-string`, `make-cf-data`, `make-cf-dictionary`, `cf-string-to-lisp`, `cf-data-octets`,
+  `cf-constant`, `with-cf` (releases what it binds on every exit), and `osstatus-error` with
+  `check-osstatus`. The raw `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and
+  `SecItemDelete` calls are in `aion/darwin/ffi`. macOS only; it uses cffi and the frameworks
+  every macOS ships, and adds no dependency. (#357)
 
 ### Fixed
 
@@ -289,6 +317,9 @@ its tag.
   `HTTP/1.1 429 Too Many Requests` rather than `HTTP/1.1 429 Unknown`, and the Woo fix above
   takes its lines from it. An empty reason phrase is allowed by HTTP/1.1, and no client acts on
   the phrase. Hyperion core now depends on `hyperion/http1`, which is Coalton only. (#372)
+- **aion/secret: `describe` no longer prints a secret's value.** It printed the structure's slot,
+  `%VALUE = "..."`, because `describe` does not go through `print-object`. An editor's describe
+  command reached it too. (#357)
 
 - **cons conform: the commit-msg hook refuses an AI assistant's identity, not a human whose
   name contains an assistant's name.** `Co-Authored-By: Claude Smith <claude.smith@example.com>`
