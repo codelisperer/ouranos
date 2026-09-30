@@ -27,10 +27,11 @@
 ;;;; not parse its own flags from the command line, so every argument reaches the program,
 ;;;; and the heap size in effect at the dump is kept.
 ;;;;
-;;;; DUMP-CORE is the macOS form (#98, #332): the core alone, with no runtime in front of it,
-;;;; so the .app can be signed. `:save-runtime-options' does nothing without `:executable t',
-;;;; so the heap and the end of runtime-option processing come from scripts/macos-launcher.c
-;;;; instead, which starts the runtime with them.
+;;;; DUMP-CORE is the macOS and Windows form (#98, #332): the core alone, with no runtime in
+;;;; front of it, so the runtime can be signed. `:save-runtime-options' does nothing without
+;;;; `:executable t' (measured again on Windows for #98), so the heap and the end of
+;;;; runtime-option processing come from the launcher instead, scripts/macos-launcher.c or
+;;;; scripts/windows-launcher.c, which starts the runtime with them.
 
 (require :asdf)
 

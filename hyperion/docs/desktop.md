@@ -187,6 +187,24 @@ with `scripts/build-desktop-app.lisp --window-icon <file>`, giving the format th
 `.exe`'s own icon in Explorer, and from `build-dmg.sh --icon`, which sets the `.app`'s icon in
 Finder.
 
+**What the bundle holds, by platform (#98).** On Linux the app is one dumped executable,
+`<name>`. On macOS and Windows it is three files, because an operating system's code signature
+cannot cover a dumped image, whose Lisp core sits where the signature goes:
+
+| Platform | Files | The one that is started |
+|---|---|---|
+| Linux | `<name>` | `<name>` |
+| macOS | `<name>`, `sbcl`, `sbcl.core` in `Contents/MacOS` | `<name>`, a launcher (`scripts/macos-launcher.c`) |
+| Windows | `<name>.exe`, `sbcl-runtime.exe`, `sbcl.core` | `<name>.exe`, a launcher (`scripts/windows-launcher.c`) |
+
+The launcher starts the runtime with the heap the build used and passes the app's own
+arguments on unchanged. Without it, the runtime would use its default heap and take an
+argument such as `--help` for itself. So building a desktop app needs a C compiler on macOS
+(`cc`, from the Xcode Command Line Tools) and on Windows (MSVC's `cl.exe`, from the Build Tools
+with the C++ workload). `--icon` goes into both `<name>.exe` and `sbcl-runtime.exe`. The
+runtime is not named `sbcl.exe`, so that `hyperion/update` can tell an installed app from an
+SBCL installation.
+
 **Honest cost (from ADR-0008):** this glue — updater self-replace, installers, native
 FFIs, CI matrix — is the ~90%; the webview is the easy ~10%. **OS code-signing +
 notarization** is an unavoidable tax, identical for Tauri/Electron.

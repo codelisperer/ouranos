@@ -425,7 +425,7 @@ rendering HTMX, so the updater is just another route and component — no bridge
 ```lisp
 (:div :id "update-banner"
       :hx-get "/_hyperion/update/status"
-      :hx-trigger "load, every 6h"        ; the check itself is the poll
+      :hx-trigger "load, every 360m"      ; the check itself is the poll; htmx has no h unit (#422)
       :hx-swap "outerHTML")
 ```
 

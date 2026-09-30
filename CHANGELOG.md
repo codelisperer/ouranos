@@ -38,6 +38,52 @@ its tag.
   thread, a dynamic binding the caller made around `eval-input` is not seen by the code being
   evaluated; set the global value instead. A second input that arrives while one is running
   gets an `:error` result at once. (#355)
+- **hyperion/update-ui: `*poll-interval*` defaults to `"360m"`, and a value htmx would misread
+  is refused.** The default was `"6h"`. The htmx this tree ships (1.9.12) reads only `ms`, `s`
+  and `m`, and reads anything else with `parseFloat`, so `"6h"` meant 6 milliseconds: every page
+  with the update banner asked `/_hyperion/update/status` for its status many times a second.
+  `update-mount` and `update-banner` now check the value each time they render the trigger
+  (`checked-poll-interval`). They signal `invalid-poll-interval` for anything that is not a
+  number followed by `ms`, `s` or `m`, such as `"6h"`, `"1d"` or a bare `"5000"`, and for
+  anything shorter than 1 second.
+
+  An app acts if it sets `*poll-interval*`: write hours as minutes (`"360m"`, not `"6h"`) and
+  give a unit, or the first page that renders the banner signals the error. An app that kept
+  the default needs no change; it stops flooding its status route. (#422)
+- **hyperion/server, hyperion/server-uv: `serve-forever` drains on SIGTERM instead of refusing
+  requests at once** (#388). A rolling deploy sends SIGTERM while the platform may still route
+  requests to the old instance. Until now every backend stopped accepting at once and cut off
+  requests in flight, and on Woo the process never exited at all. Now, on SIGTERM:
+  - for `:drain-seconds` (`HYPERION_DRAIN_SECONDS`, default 5) the server keeps accepting and
+    answering, and `:readiness-path`, when given, answers 503;
+  - on `:uv`, it then stops accepting and waits up to `:drain-timeout`
+    (`HYPERION_DRAIN_TIMEOUT_SECONDS`, default 20) for requests in flight to finish;
+  - whatever is left is closed.
+  Each phase is logged once. An app acts by keeping `drain-seconds + drain-timeout` below its
+  platform's termination grace period, and by pointing the platform's health check at
+  `:readiness-path` if it wants the instance taken out of rotation during the grace period.
+  SIGTERM now takes up to 25 seconds by default where it took about 2. Ctrl-C, SIGINT and
+  `request-shutdown` still stop at once. Hunchentoot gets the grace period and then stops as
+  before; Woo still does not see SIGTERM, and is still ended by SIGKILL. `hyperion/server-uv`
+  gains `begin-drain`, `draining-p` and `stop :drain-timeout`; a plain `stop` is unchanged. See
+  `hyperion/docs/signals-and-shutdown.md`, "Draining on SIGTERM".
+- **A Windows desktop app is now three files: `<name>.exe`, `sbcl-runtime.exe` and
+  `sbcl.core`, and building one needs MSVC.** `scripts/build-desktop-app.lisp` no longer dumps
+  one executable on Windows. `<name>.exe` is a launcher compiled from
+  `scripts/windows-launcher.c` with `cl.exe`. It starts `sbcl-runtime.exe`, a copy of the SBCL
+  runtime, with `sbcl.core` beside it, the heap the build used, and the app's own arguments
+  unchanged, and it exits with the app's exit code. This is the shape a code signature can
+  cover: Authenticode appends its signature where a dumped image keeps its core, so a signed
+  dumped image did not start (#98).
+
+  An app acts if its packaging copies only `<name>.exe` (the installers in `scripts/installers/`
+  copy the whole bundle and need no change), or if it signs, hashes or inspects that one file:
+  the runtime is `sbcl-runtime.exe` beside it, and Task Manager shows that process under that
+  name. A machine that builds a Windows desktop app needs the Visual Studio Build Tools with the
+  C++ workload, as a Mac needs `cc`; without them the build exits with code 3 and says so.
+  `--icon` goes into both executables. `hyperion/update` recognises the new shape as a shipped
+  build (`%shipped-image-p`). `verify-bundle-windows.ps1` treats `sbcl-runtime.exe` as a helper
+  and traces it as the launcher's child. Linux builds are unchanged. (#98)
 
 ### Added
 

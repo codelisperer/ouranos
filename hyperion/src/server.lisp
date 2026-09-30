@@ -836,15 +836,19 @@ on the way out. Waiting for the thread is what makes the socket closed when STOP
     (ignore-errors (sb-thread:terminate-thread thread))
     (ignore-errors (sb-thread:join-thread thread :timeout 10 :default nil))))
 
-(defun stop (handler)
+(defun stop (handler &key (drain-timeout 0))
   "Stop a server started by START -- either kind.
+
+DRAIN-TIMEOUT, in seconds, is passed to the native :uv server, which then stops accepting and
+waits that long for requests in flight to finish (#388). The Clack backends stop as they always
+have, whatever it says: they have no drain to wait for.
 
 Dispatches on the HANDLER, not on a remembered backend name, because the handler is what
 callers actually hold: SERVE-FOREVER keeps it in a session, apps keep it in a variable, and
 a STOP that also needed the name would be a second value to thread through every one of
 them."
   (cond
-    ((%uv-server-p handler) (%uv-call "STOP" handler))
+    ((%uv-server-p handler) (%uv-call "STOP" handler :drain-timeout drain-timeout))
     ((clack-server-p handler) (%stop-clack-server (clack-server-thread handler)) t)
     (t (clack:stop handler))))
 
@@ -898,7 +902,8 @@ returns. For flushing a log, closing a pool, removing a pid file.")
 ;;; nothing above this line changes -- which is the point of defining the API on the
 ;;; current server rather than waiting for the new one.
 (defun %install-posix-signal-handlers (request-stop)
-  "Route SIGTERM (and SIGINT, for a non-tty parent) to REQUEST-STOP. Returns a thunk that
+  "Route SIGTERM (and SIGINT, for a non-tty parent) to REQUEST-STOP, called with :SIGTERM or
+:SIGINT so SERVE-FOREVER can drain on the first and not the second (#388). Returns a thunk that
 restores the previous handlers.
 
 The handler does exactly one thing -- release a semaphore -- because it runs in a signal
@@ -914,26 +919,35 @@ SERVE-FOREVER handles separately. A supervisor-initiated stop on Windows is a co
 control event or a service STOP, which belongs with the `service` target kind (#37)."
   #+(and sbcl unix)
   (let ((previous '()))
-    (dolist (signum (list sb-unix:sigterm sb-unix:sigint))
-      (push (cons signum (sb-sys:enable-interrupt signum
-                                                  (lambda (&rest _)
-                                                    (declare (ignore _))
-                                                    (funcall request-stop))))
-            previous))
+    (loop for (signum reason) in (list (list sb-unix:sigterm :sigterm) (list sb-unix:sigint :sigint))
+          do (let ((reason reason))
+               (push (cons signum (sb-sys:enable-interrupt signum
+                                                           (lambda (&rest _)
+                                                             (declare (ignore _))
+                                                             (funcall request-stop reason))))
+                     previous)))
     (lambda ()
       (dolist (pair previous)
         (ignore-errors (sb-sys:enable-interrupt (car pair) (cdr pair))))))
   #-(and sbcl unix) (lambda () nil))
 
 (defvar *install-signal-handlers* #'%install-posix-signal-handlers
-  "How SERVE-FOREVER installs signal handling. Called with a REQUEST-STOP thunk; must
-return a thunk that restores what was there before. Rebind to swap the mechanism -- a
+  "How SERVE-FOREVER installs signal handling. Called with REQUEST-STOP, a function of one
+optional argument, the reason: :SIGTERM drains (#388), :SIGINT stops at once, and no argument
+is taken as :SIGTERM. Must return a thunk that restores what was there before. Rebind to swap the mechanism -- a
 uv_signal_t handler (pre-publication issue 117), or (constantly (lambda () nil)) to opt out entirely.")
 
 (defstruct (server-session (:constructor %make-server-session) (:copier nil))
   "A running foreground server: the Clack handler, and the flag that ends it."
   (handler nil)
-  (stopping nil))
+  (stopping nil)
+  ;; Why it is stopping: :SIGTERM, :SIGINT, or NIL for REQUEST-SHUTDOWN (#388). Only :SIGTERM
+  ;; drains.
+  (reason nil)
+  ;; How many stop signals have arrived. A second SIGTERM ends the drain's grace period early.
+  (signals 0)
+  ;; The grace period has begun: the readiness path answers 503 from now on.
+  (draining nil))
 
 (defun request-shutdown (session)
   "Ask the SERVE-FOREVER running SESSION to shut down. Returns T.
@@ -960,14 +974,57 @@ Safe from any thread, and safe from a signal handler."
 ;;; Kept as a distinct name because a signal handler is a distinct contract -- if this ever
 ;;; needs to do more than SETF, that extra work belongs here where the constraint is stated,
 ;;; not in REQUEST-SHUTDOWN where a caller would reasonably add a lock.
-(defun request-shutdown-from-signal (session)
-  "REQUEST-SHUTDOWN, from a signal context. Must remain lock-free and allocation-free."
+(defun request-shutdown-from-signal (session &optional (reason :sigterm))
+  "REQUEST-SHUTDOWN, from a signal context, for REASON (:SIGTERM or :SIGINT). Must remain
+lock-free and allocation-free: it sets three slots, one of them to a keyword constant."
+  (setf (server-session-reason session) reason)
+  (incf (server-session-signals session))
   (setf (server-session-stopping session) t)
   t)
 
+(defun %env-seconds (name default)
+  "The non-negative number of seconds in environment variable NAME, or DEFAULT when it is unset.
+A value that is not a non-negative number is an error, naming the variable, rather than a
+silent fallback."
+  (let ((raw (uiop:getenv name)))
+    (if (or (null raw) (zerop (length raw)))
+        default
+        (let ((n (ignore-errors (let ((*read-eval* nil)) (read-from-string raw)))))
+          (unless (and (realp n) (>= n 0))
+            (error "hyperion/server: ~A must be a non-negative number of seconds, not ~S" name raw))
+          n))))
+
+(defun %readiness-app (app session path)
+  "APP, except that once SESSION is draining a request for PATH is answered 503 (#388). A
+platform whose health check reads PATH then takes this instance out of rotation during the
+grace period, while it still answers everything else."
+  (if (null path)
+      app
+      (lambda (env)
+        (if (and (server-session-draining session) (equal path (getf env :path-info)))
+            (list 503 (list :content-type "text/plain; charset=utf-8" :retry-after "5")
+                  (list "draining"))
+            (funcall app env)))))
+
+(defun %drain-grace (session handler seconds)
+  "The first phase of a drain on SIGTERM (#388): keep serving for SECONDS, with the readiness
+path answering 503 and, on :uv, every response closing its connection. A second SIGTERM ends it
+early. Logged once."
+  (setf (server-session-draining session) t)
+  (when (%uv-server-p handler) (%uv-call "BEGIN-DRAIN" handler))
+  (log:info "hyperion/server: SIGTERM received; still serving during the drain grace period"
+            :seconds seconds)
+  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
+        while (and (< (get-internal-real-time) deadline)
+                   (< (server-session-signals session) 2))
+        do (sleep *shutdown-poll-interval*)))
+
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
                                (host "127.0.0.1") debug (log t) (security-headers t)
-                               workers name (banner :derive) (signals t) on-ready)
+                               workers name (banner :derive) (signals t) on-ready
+                               (drain-seconds (%env-seconds "HYPERION_DRAIN_SECONDS" 5))
+                               (drain-timeout (%env-seconds "HYPERION_DRAIN_TIMEOUT_SECONDS" 20))
+                               readiness-path)
   "Start APP and BLOCK until interrupted or until REQUEST-SHUTDOWN is called. Returns NIL.
 
 The production counterpart to START: same arguments, plus a banner and interrupt handling.
@@ -986,7 +1043,20 @@ skips signal installation, for an app that owns its own.
 Shutdown is guaranteed on every exit path: Ctrl-C, SIGTERM, REQUEST-SHUTDOWN, or an
 unhandled condition. The socket is released, *SHUTDOWN-HOOKS* run, and the previous signal
 handlers are restored -- that last one matters in a REPL, where leaving SIGINT pointing at
-a dead server breaks the next thing you run."
+a dead server breaks the next thing you run.
+
+SIGTERM DRAINS (#388), because it is how a platform ends an instance during a rolling deploy
+while its proxy may still send it requests for a few seconds:
+  1. For DRAIN-SECONDS (HYPERION_DRAIN_SECONDS, default 5) the server keeps accepting and
+     answering. READINESS-PATH, when given, answers 503 from the signal on, so a health check
+     there takes the instance out of rotation. On :uv every response closes its connection.
+     A second SIGTERM ends this phase early.
+  2. On :uv, it then stops accepting and waits up to DRAIN-TIMEOUT seconds
+     (HYPERION_DRAIN_TIMEOUT_SECONDS, default 20) for requests in flight to finish.
+  3. Whatever is still open is closed, and SERVE-FOREVER returns.
+Keep DRAIN-SECONDS + DRAIN-TIMEOUT below the platform's termination grace period (often 30 s),
+after which it sends SIGKILL. Ctrl-C, SIGINT and REQUEST-SHUTDOWN stop at once. Hunchentoot gets
+phase 1 and then stops as it always has; Woo does not see SIGTERM at all."
   (let* ((session (%make-server-session :handler nil))
          (restore-signals nil)
          handler)
@@ -1010,8 +1080,10 @@ a dead server breaks the next thing you run."
     (when signals
       (setf restore-signals
             (funcall *install-signal-handlers*
-                     (lambda () (request-shutdown-from-signal session)))))
-    (setf handler (start app :server server :port port :host host :debug debug :log log
+                     (lambda (&optional (reason :sigterm))
+                       (request-shutdown-from-signal session reason)))))
+    (setf handler (start (%readiness-app app session readiness-path)
+                         :server server :port port :host host :debug debug :log log
                              :security-headers security-headers :workers workers)
           (server-session-handler session) handler)
     ;; BANNER has THREE states, not two, so it cannot be a plain string-or-NIL: derive one
@@ -1049,10 +1121,15 @@ a dead server breaks the next thing you run."
              ;; whoever pressed the key.
              #+sbcl (sb-sys:interactive-interrupt ()
                       (format t "~&Interrupted.~%") (finish-output))))
-      (when restore-signals (ignore-errors (funcall restore-signals)))
-      ;; IGNORE-ERRORS: if the server is already dead, saying so must not replace the
-      ;; condition that killed it with a confusing secondary failure.
-      (ignore-errors (stop handler))
+      ;; SIGTERM drains; nothing else does (#388). Before the handlers are restored, so a
+      ;; second SIGTERM during the grace period is still ours and ends it early.
+      (let ((drain (and (eq :sigterm (server-session-reason session)) handler)))
+        (when (and drain (plusp drain-seconds))
+          (ignore-errors (%drain-grace session handler drain-seconds)))
+        (when restore-signals (ignore-errors (funcall restore-signals)))
+        ;; IGNORE-ERRORS: if the server is already dead, saying so must not replace the
+        ;; condition that killed it with a confusing secondary failure.
+        (ignore-errors (stop handler :drain-timeout (if drain drain-timeout 0))))
       (dolist (hook *shutdown-hooks*) (ignore-errors (funcall hook)))
       (format t "~&Stopped.~%")
       (finish-output))
