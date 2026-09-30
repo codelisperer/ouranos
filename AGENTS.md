@@ -93,6 +93,13 @@ define it.
   a consuming-app session by app when it is the maintainer's own (`app:soloflow`,
   `app:wordcrafter`, …). A **client's** app is never named anywhere in this repo — code,
   docs, commits, issues; say "a consuming app" and label `app:client`.
+- **Details from an app's own repository stay in that repository, even for the maintainer's
+  own apps.** Issue and pull-request text here states framework facts: what passed, what was
+  measured, what the framework did. Commit hashes, build commands, file paths, test output and
+  checksums from an app's repository go in that app's own issues. Editing a comment does not
+  remove what it said, because GitHub shows its edit history, so write the public text this
+  way the first time. The maintainer ruled this on 2026-09-30, about two build reports on
+  #332 that carried two apps' commit hashes, commands, paths and checksums.
 - **Private names are checked on every commit and every push.** `.githooks/commit-msg` checks
   the message, `.githooks/pre-commit` checks added lines and new file paths, and
   `.githooks/pre-push` checks every commit, branch name and tag about to leave the machine,
