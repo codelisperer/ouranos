@@ -161,6 +161,30 @@
                 :components ((:file "tls-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/tls/tests :run-tests)))
 
+(defsystem "aion/libgit"
+  :description "Local git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, and a diff between two revisions."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("cffi")
+  :serial t
+  :components ((:module "src/libgit"
+                :serial t
+                :components ((:file "packages")
+                             (:file "ffi")
+                             (:file "library")
+                             (:file "repository"))))
+  :in-order-to ((test-op (test-op "aion/libgit/tests"))))
+
+(defsystem "aion/libgit/tests"
+  :description "Tests for aion/libgit. Requires a built libgit2 (scripts/build-libgit2.lisp), and the git command, which checks what libgit2 wrote."
+  :depends-on ("aion/libgit" "aion/fs" "fiveam")
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "libgit-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/libgit/tests :run-tests)))
+
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam")

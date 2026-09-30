@@ -230,9 +230,9 @@ jobs:
         run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
 
       # From the committed libgit2.pin, with the same first-party toolchains and no cmake
-      # (#429). Nothing loads this library yet: aion/libgit comes in the next step. The step is
-      # here because it is the only proof that the pinned libgit2 builds on all three OSes, and
-      # build-libgit2.lisp fails unless the result exports every entry point aion/libgit will
+      # (#429). Needed before the verify step, which sets OURANOS_WITH_LIBGIT=1 and so loads
+      # aion/libgit and runs its suite. It is also the only proof that the pinned libgit2 builds
+      # on all three OSes, and build-libgit2.lisp fails unless the result exports every entry point aion/libgit will
       # bind, exports nothing but libgit2's API, and on Windows does not need the VC++ runtime.
       # Not cached, like mbedTLS: a rebuild from the pin every run is what makes a pass mean
       # the pinned source builds.
@@ -467,6 +467,7 @@ jobs:
         env:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
+          OURANOS_WITH_LIBGIT: "1"
         run: |
           set -o pipefail
           sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
@@ -582,6 +583,12 @@ jobs:
         id: build-the-pinned-mbedtls
         run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
 
+      # The release job loads aion/libgit with OURANOS_WITH_LIBGIT=1, the same as the matrix,
+      # so it needs the library too (#429).
+      - name: Build the pinned libgit2
+        id: build-the-pinned-libgit2
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
+
       # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (pre-publication issue 276). Without it
       # this job would run verify-tree over a tree missing five checks that the matrix leg
       # has -- 4436 against 4446 at one commit, with nothing in either output saying why.
@@ -626,6 +633,7 @@ jobs:
         env:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
+          OURANOS_WITH_LIBGIT: "1"
         run: |
           set -o pipefail
           sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
