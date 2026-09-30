@@ -175,10 +175,22 @@
            #:*not-found* #:*method-not-allowed*))
 
 ;;; --- HTTP sessions ------------------------------------------------------
+(cl:defpackage #:hyperion/proxy
+  (:use #:cl)
+  (:documentation
+   "The client's address and scheme behind a trusted proxy (#381). *TRUSTED-PROXY*, made with
+    MAKE-PROXY-TRUST, says which proxies the app trusts; CLIENT-ADDRESS and REQUEST-SCHEME read
+    forwarded headers only as far as that setting vouches for them. With no setting,
+    CLIENT-ADDRESS is :REMOTE-ADDR.")
+  (:export #:*trusted-proxy* #:make-proxy-trust #:proxy-trust #:proxy-trust-p
+           #:client-address #:request-scheme #:trusted-peer-p
+           #:parse-address #:parse-cidr #:cidr-contains-p))
+
 (cl:defpackage #:hyperion/session
   (:use #:cl)
   (:local-nicknames (#:bt #:bordeaux-threads)
                     (#:rnd #:aion/random)          ; session ids are a bearer credential (pre-publication issue 95)
+                    (#:proxy #:hyperion/proxy)      ; :SECURE :AUTO reads the request's scheme (#300)
                     (#:http #:hyperion/http))
   (:documentation
    "Cookie-based HTTP sessions: a session is an id + a thread-safe key/value bag
@@ -253,17 +265,6 @@
    ;; the injector (ADR-0019): a deftag on :form, plus the seam it reads
    #:*token-thunk* #:current-token #:token-field
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
-
-(cl:defpackage #:hyperion/proxy
-  (:use #:cl)
-  (:documentation
-   "The client's address and scheme behind a trusted proxy (#381). *TRUSTED-PROXY*, made with
-    MAKE-PROXY-TRUST, says which proxies the app trusts; CLIENT-ADDRESS and REQUEST-SCHEME read
-    forwarded headers only as far as that setting vouches for them. With no setting,
-    CLIENT-ADDRESS is :REMOTE-ADDR.")
-  (:export #:*trusted-proxy* #:make-proxy-trust #:proxy-trust #:proxy-trust-p
-           #:client-address #:request-scheme #:trusted-peer-p
-           #:parse-address #:parse-cidr #:cidr-contains-p))
 
 (cl:defpackage #:hyperion/ratelimit
   (:use #:cl)

@@ -528,6 +528,13 @@ finds it due, after the handler; there is no background thread (#121).")
 sweeps on its own schedule, with *SESSION-SWEEP-INTERVAL* set to NIL."
   (store-sweep store now))
 
+(defun %secure-flag-p (secure env)
+  "Whether the cookie for ENV's response gets the Secure attribute, under the SECURE option of
+WRAP-SESSION (#300)."
+  (cond ((eq secure :auto) (eq :https (proxy:request-scheme env)))
+        ((functionp secure) (and (funcall secure env) t))
+        (t (and secure t))))
+
 (defun wrap-session (app store &key (cookie-name *cookie-name*)
                                     (max-age *cookie-max-age*)
                                     (path "/") (http-only t)
@@ -549,9 +556,22 @@ owes -- on a mint, and on a ROTATE-SESSION performed anywhere inside the handler
 The cookie options are this middleware's, applied to both cases, so `:secure t' holds for
 a rotation as much as for a mint.
 
+SECURE IS DECIDED PER REQUEST WHEN IT NEEDS TO BE (#300). It is T or NIL for every response,
+or:
+  :AUTO     Secure when the request came over https: the env's :URL-SCHEME, or
+            X-Forwarded-Proto when the request came through a proxy the app trusts
+            (HYPERION/PROXY:*TRUSTED-PROXY*, the setting CLIENT-ADDRESS also reads). A client
+            cannot turn it on or off by sending the header itself.
+  FUNCTION  called with the env; Secure when it returns true.
+So one middleware serves a site that runs on plain http in development and behind a TLS
+proxy in production. Anything else signals an error when the middleware is built.
+
 EXPIRED SESSIONS ARE SWEPT FROM HERE (#121), at most once per *SESSION-SWEEP-INTERVAL*, after
 the handler of the request that finds a sweep due. Correctness does not depend on it:
 ENSURE-SESSION refuses an expired session whether or not a sweep has run."
+  (unless (or (member secure '(t nil :auto)) (functionp secure))
+    (error "hyperion/session: :secure must be T, NIL, :AUTO or a function of the env, not ~S"
+           secure))
   (let ((last-sweep nil)
         (sweep-lock (bt:make-lock "hyperion-session-sweep")))
   (lambda (env)
@@ -577,7 +597,8 @@ ENSURE-SESSION refuses an expired session whether or not a sweep has run."
              response
              (set-cookie-header (session-id session)
                                 :name cookie-name :max-age max-age :path path
-                                :http-only http-only :same-site same-site :secure secure))
+                                :http-only http-only :same-site same-site
+                                :secure (%secure-flag-p secure env)))
             response))))))
 
 ;;; ------------------------------------------------------------------------

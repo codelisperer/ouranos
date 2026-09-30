@@ -44,6 +44,14 @@ its tag.
 
 ### Added
 
+- **hyperion/session: `wrap-session :secure :auto`, or a function, decides the cookie's
+  Secure attribute per request.** (#300) `:auto` sets it when the request came over https: the
+  env's `:url-scheme`, or `X-Forwarded-Proto` when it came through a proxy the app trusts,
+  read through `hyperion/proxy:request-scheme` and the same `*trusted-proxy*` setting that
+  `client-address` reads (#381). A function of the env decides it too. `t` and `nil` are
+  unchanged. One middleware then serves a site that runs on plain http in development and
+  behind a TLS proxy in production, which SoloFlow's website does today by building the
+  middleware twice.
 - **hyperion/proxy: the client's address behind a trusted proxy, and one setting for it.**
   (#381) `hyperion/proxy:*trusted-proxy*`, made with `make-proxy-trust` (`:hops N`, or
   `:cidrs` with an optional platform `:header` such as `CF-Connecting-IP`), says which proxies
