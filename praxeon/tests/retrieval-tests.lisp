@@ -1431,3 +1431,108 @@ written as though it were whole."
       (%sync-handbook corpus)
       (signals cnd:deliberation-failure (rt:contextualize-pending corpus))
       (is (= 0 (%column-count store "context IS NOT NULL")) "nothing was stored"))))
+
+;;; --- reranking (#316, step 4) ---------------------------------------------------------------
+;;;
+;;; A stand-in reranker scores a document by how often it contains WORD, so a test can make it
+;;; disagree with the fused order on purpose. It records what it was sent.
+
+(defclass word-reranker (llm:reranker)
+  ((word :initarg :word :reader reranker-word)
+   (calls :initform '() :accessor reranker-calls)))
+
+(defmethod llm:rerank ((r word-reranker) query documents)
+  (push (list query documents) (reranker-calls r))
+  (stable-sort (loop for d in documents for i from 0
+                     collect (cons i (float (%count-of (reranker-word r) d) 1d0)))
+               #'> :key #'cdr))
+
+(defparameter +support+
+  (append +policy+ (list (sec "4" "Error TS-999 appears when a card expires."))))
+
+(test a-reranker-reorders-the-merged-candidates-before-the-limit-is-taken
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "support" :strategy :hybrid))
+          (embedder (make-instance 'word-embedder))
+          (reranker (make-instance 'word-reranker :word "expires")))
+      (rt:ingest corpus +support+ embedder)
+      (is (not (equal "4" (first (ids (rt:retrieve-hybrid corpus embedder "refund" :limit 1)))))
+          "control: without the reranker, the refund policy comes first")
+      (let ((r (rt:retrieve-hybrid corpus embedder "refund" :limit 1 :reranker reranker)))
+        (is (equal '("4") (ids r)) "the reranker's choice, then the limit")
+        (is (= 1d0 (rt:passage-score (first (rt:retrieval-result-passages r))))
+            "the score is the reranker's")
+        (is (rt:complete-p (rt:retrieval-result-completeness r))))
+      (destructuring-bind (query documents) (first (reranker-calls reranker))
+        (is (equal "refund" query))
+        (is (= 4 (length documents)) "every merged candidate, up to the rerank limit"))
+      (rt:retrieve-hybrid corpus embedder "refund" :limit 1 :reranker reranker :rerank-candidates 2)
+      (is (= 2 (length (second (first (reranker-calls reranker)))))
+          ":rerank-candidates caps what the reranker is sent"))))
+
+(test a-reranker-reads-each-candidate-s-context-and-text
+  (with-store (store)
+    (let ((corpus (%contextual store "handbook"))
+          (embedder (make-instance 'word-embedder))
+          (reranker (make-instance 'word-reranker :word "first business day")))
+      (rt:ingest corpus +handbook+ embedder)
+      (let ((r (rt:retrieve-hybrid corpus embedder "payout" :reranker reranker)))
+        (is (equal "2" (first (ids r))))
+        (is (equal "It is sent on the first business day of the month."
+                   (rt:passage-text (first (rt:retrieval-result-passages r))))
+            "the passage is still the chunk's own text"))
+      (is (find (format nil "This passage is from the document that begins: Payout rules.~%~%It is sent on the first business day of the month.")
+                (second (first (reranker-calls reranker))) :test #'equal)
+          "what the reranker read was the context, a blank line and the text"))))
+
+(test retrieve-passes-the-reranker-for-a-hybrid-corpus-and-not-a-whole-one
+  (with-store (store)
+    (let ((hybrid (rt:make-corpus store "hybrid" :strategy :hybrid))
+          (whole (rt:make-corpus store "whole" :strategy :whole))
+          (embedder (make-instance 'word-embedder))
+          (reranker (make-instance 'word-reranker :word "expires")))
+      (rt:ingest hybrid +support+ embedder)
+      (rt:ingest whole +support+ embedder)
+      (is (equal '("4") (ids (rt:retrieve hybrid embedder "refund" :limit 1 :reranker reranker))))
+      (is (not (equal '("4") (ids (rt:retrieve hybrid nil "refund card" :limit 1))))
+          "control: keyword search alone puts the refund policy first")
+      (is (equal '("4") (ids (rt:retrieve hybrid nil "refund card" :limit 1 :reranker reranker)))
+          "with no embedder, the keyword candidates are reranked")
+      (setf (reranker-calls reranker) '())
+      (is (= 4 (length (ids (rt:retrieve whole embedder "refund" :limit 1 :reranker reranker)))))
+      (is (null (reranker-calls reranker)) "a whole corpus is not reranked"))))
+
+(test the-search-means-passes-its-reranker-to-retrieve
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "support" :strategy :hybrid))
+           (embedder (make-instance 'word-embedder))
+           (reranker (make-instance 'word-reranker :word "expires"))
+           (agent (actor:make-agent)))
+      (rt:ingest corpus +support+ embedder)
+      (signals error (rt:register-corpus-search agent corpus embedder #'%render :reranker t))
+      (rt:register-corpus-search agent corpus embedder #'%render :limit 1 :reranker reranker)
+      (is (search "[§4]" (actor:act agent "search-documents" (%args "query" "refund"))))
+      (setf (reranker-calls reranker) '())
+      (actor:act agent "search-documents" (%args "query" "refund" "match" "words"))
+      (is (null (reranker-calls reranker)) "a search by words is not reranked"))))
+
+(test evaluate-retrieval-reports-the-reranked-configuration
+  (with-store (store)
+    (let ((corpus (rt:make-corpus store "support" :strategy :hybrid))
+          (embedder (make-instance 'word-embedder))
+          (reranker (make-instance 'word-reranker :word "expires")))
+      (rt:ingest corpus +support+ embedder)
+      (let* ((questions (list (rt:make-eval-question :query "refund card" :document-id "doc-1"
+                                                     :section-id "4")))
+             (report (rt:evaluate-retrieval corpus embedder questions :k 1 :locale "en"
+                                                                      :reranker reranker))
+             (by (lambda (s) (find s report :key (lambda (r) (getf r :strategy))))))
+        (is (equal '(:similar :keyword :hybrid :reranked)
+                   (mapcar (lambda (r) (getf r :strategy)) report))
+            "a reranker adds the :reranked configuration")
+        (is (= 0 (getf (funcall by :similar) :hits)))
+        (is (= 1 (getf (funcall by :reranked) :hits))))
+      (is (equal '(:similar :keyword :hybrid)
+                 (mapcar (lambda (r) (getf r :strategy))
+                         (rt:evaluate-retrieval corpus embedder '() :k 1)))
+          "control: without one, the three configurations of step 2"))))

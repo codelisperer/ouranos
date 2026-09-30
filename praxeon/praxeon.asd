@@ -63,6 +63,7 @@
                              (:file "memory")       ; observational memory (pre-publication issue 60)
                              (:file "llm")          ; provider protocol + Anthropic
                              (:file "embedding")    ; the embedding seam (#138, #150)
+                             (:file "rerank")       ; the rerank seam (#316)
                              (:file "structured")   ; forced tool calls (pre-publication issue 416)
                              (:file "distil")       ; window -> observations (pre-publication issue 452)
                              (:file "prompt")       ; what is SENT: trim + placement (pre-publication issue 402)

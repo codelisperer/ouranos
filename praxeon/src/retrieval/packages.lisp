@@ -129,7 +129,7 @@ argument.")
    ;; the agent-facing search
    #:retrieve #:register-corpus-search #:*search-description*
    ;; hybrid retrieval and its evaluation (#316)
-   #:retrieve-hybrid #:*hybrid-candidates* #:*rrf-k*
+   #:retrieve-hybrid #:*hybrid-candidates* #:*rrf-k* #:*rerank-candidates*
    #:eval-question #:make-eval-question #:eval-question-query #:eval-question-document-id
    #:eval-question-section-id #:evaluate-retrieval
    ;; a context for each chunk (#316)

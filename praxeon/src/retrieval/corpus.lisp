@@ -895,8 +895,9 @@ made from is the original stored now, :OLDER-ORIGINAL when the original has chan
 (defstruct (passage (:constructor %make-passage))
   "A retrieved chunk. DISTANCE is the cosine distance for a similarity result, NIL otherwise.
 SCORE is a keyword or hybrid result's score, higher meaning a better match, NIL otherwise: the
-BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE-HYBRID. The two
-are on different scales, so compare scores only within one result. CONTEXT is the context the
+BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE-HYBRID, or the
+reranker's score when a reranker ordered the result. They are on different scales, so compare
+scores only within one result. CONTEXT is the context the
 corpus's contextualizer wrote for the chunk, or NIL (#316). TEXT is always the chunk's own text,
 without the context."
   text provenance distance score context)

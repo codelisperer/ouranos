@@ -904,10 +904,35 @@ or `:expected-tokens`, so chunks get their context from the first sync. An app c
 corpus with `:backfill :explicit`, so that the backfill waits until the app calls
 `(start-backfill corpus)`; that is recorded in the database, so it holds for every process.
 
+**Reranking (#316).** A reranker reads the query and each candidate passage together and scores
+the passage, which orders candidates better than either search does, at the cost of one more
+call per query. `retrieve-hybrid` and `retrieve` take `:reranker`: the first 150 merged
+candidates (`:rerank-candidates`, `*rerank-candidates*`) are reordered by it before `:limit` is
+taken, and each passage's `passage-score` is then the reranker's. What the reranker reads for a
+passage is its context and text, as embedded. A `:whole` corpus is not reranked.
+
+```lisp
+(defparameter *reranker*            ; NIL when none is configured
+  (handler-case (praxeon/llm:make-reranker-from-env)
+    (praxeon/conditions:no-reranker () nil)))
+
+(praxeon/retrieval:retrieve *docs* *embedder* "error TS-999 on renewal" :reranker *reranker*)
+(praxeon/retrieval:register-corpus-search agent *docs* *embedder* render :reranker *reranker*)
+```
+
+The first backend is Voyage's rerank endpoint: `PRAXEON_RERANK_IMPL=voyage`, a key in
+`PRAXEON_RERANK_API_KEY` or `PRAXEON_VOYAGE_API_KEY`, and the model in `PRAXEON_RERANK_MODEL` or
+`PRAXEON_VOYAGE_RERANK_MODEL` (default `rerank-2.5`). A role's own
+`PRAXEON_<ROLE>_RERANK_<SETTING>` comes first, as for embeddings. There is no default reranker.
+Requests never ask Voyage to shorten a document, and are split to stay within 1,000 documents
+and the model's tokens per request.
+
 Whether contexts are worth their cost on an app's documents is a measurement, not a default.
 Build one corpus with a contextualizer and one without, sync the same sections into both, and
 compare `evaluate-retrieval` on each. praxeon writes no contexts unless the app gives a corpus a
-contextualizer.
+contextualizer. The same holds for a reranker: `evaluate-retrieval :reranker` adds a
+`:reranked` configuration beside `:similar`, `:keyword` and `:hybrid`, and no search is reranked
+unless the app passes one.
 
 **Let an agent search.** `register-corpus-search` gives an agent a means that searches one
 corpus:
