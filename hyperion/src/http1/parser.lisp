@@ -213,16 +213,52 @@ value gets normalised into something the next hop reads differently."
   (declare trim-ows (String -> String))
   (define (trim-ows s) (trim-end (trim-start s 0)))
 
+  ;; CRLF and CRLFCRLF are found by scanning for CR and checking what follows, with the same
+  ;; direct reads as the scans above. STR:SUBSTRING-INDEX goes through CL's generic SEARCH,
+  ;; which the #430 profile put at 7% of the server's loop thread.
+
+  (declare index-of-crlf-from (String * UFix * UFix -> (Optional UFix)))
+  (define (index-of-crlf-from s i n)
+    "The first index from I where S holds CR then LF, both below N. N must not exceed S's
+length."
+    (match (index-of-char-before s cr i n)
+      ((None) None)
+      ((Some j) (if (and (< (+ j 1) n) (== (str:ref-unchecked s (+ j 1)) lf))
+                    (Some j)
+                    (index-of-crlf-from s (+ j 1) n)))))
+
+  (declare index-of-crlf (String -> (Optional UFix)))
+  (define (index-of-crlf s)
+    "Where S first holds CRLF: what (STR:SUBSTRING-INDEX CRLF S) returns."
+    (index-of-crlf-from s 0 (str:length s)))
+
+  (declare index-of-crlfcrlf-from (String * UFix * UFix -> (Optional UFix)))
+  (define (index-of-crlfcrlf-from s i n)
+    (match (index-of-crlf-from s i n)
+      ((None) None)
+      ((Some j) (if (and (< (+ j 3) n)
+                         (and (== (str:ref-unchecked s (+ j 2)) cr)
+                              (== (str:ref-unchecked s (+ j 3)) lf)))
+                    (Some j)
+                    (index-of-crlfcrlf-from s (+ j 1) n)))))
+
+  (declare index-of-crlfcrlf (String -> (Optional UFix)))
+  (define (index-of-crlfcrlf s)
+    "Where S first holds CRLFCRLF: what (STR:SUBSTRING-INDEX CRLFCRLF S) returns."
+    (index-of-crlfcrlf-from s 0 (str:length s)))
+
+  (declare split-crlf-from (String * UFix * UFix -> (List String)))
+  (define (split-crlf-from s i n)
+    (match (index-of-crlf-from s i n)
+      ((None) (Cons (str:substring s i n) Nil))
+      ((Some j) (Cons (str:substring s i j) (split-crlf-from s (+ j 2) n)))))
+
   (declare split-crlf (String -> (List String)))
   (define (split-crlf s)
     "S split on CRLF. Only CRLF -- a bare LF is left inside a line, where LINE-CLEAN? finds
 it and rejects. Splitting on LF and tolerating a stray CR would silently accept exactly the
-line terminator this parser must refuse."
-    (match (str:substring-index crlf s)
-      ((None) (Cons s Nil))
-      ((Some i)
-       (Cons (str:substring s 0 i)
-             (split-crlf (str:substring s (+ i 2) (str:length s)))))))
+line terminator this parser must refuse. Walks S by index, copying each line once."
+    (split-crlf-from s 0 (str:length s)))
 
   (declare line-clean? (String -> Boolean))
   (define (line-clean? s)
@@ -331,7 +367,7 @@ terminator included (#375: the limit is the server's setting; MAX-HEAD-OCTETS is
 
 Total: every input is Incomplete, Complete or Rejected. It never signals, never blocks and
 never consumes more than it reports."
-    (match (str:substring-index crlfcrlf input)
+    (match (index-of-crlfcrlf input)
       ;; No terminator yet. Incomplete ONLY while still inside the cap -- past it, a peer
       ;; that never terminates the head must be refused rather than buffered forever.
       ((None)
@@ -541,7 +577,7 @@ last chunk; the trailer section follows it (PARSE-TRAILERS).
 
 The view need hold no more than MAX-CHUNK-LINE-OCTETS + 2; past that without a CRLF, the line
 is refused."
-    (match (str:substring-index crlf view)
+    (match (index-of-crlf view)
       ((None)
        (if (> (str:length view) max-chunk-line-octets)
            (Step-Rejected 400 "chunk-size line is too long")
@@ -581,7 +617,7 @@ are checked as header fields are, and at most LIMIT octets and MAX-HEADER-FIELDS
 accepted, as for the head; they are not returned (see CHUNKED BODIES)."
     (if (and (char-at? view 0 cr) (char-at? view 1 lf))
         (Step-Ok 0 2)
-        (match (str:substring-index crlfcrlf view)
+        (match (index-of-crlfcrlf view)
           ((None)
            (if (> (str:length view) limit)
                (Step-Rejected 431 "trailer section exceeds the maximum size")
