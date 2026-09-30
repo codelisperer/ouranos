@@ -99,7 +99,7 @@ Returns (values RUN-OUTPUT DUMP-CODE RUN-CODE DUMP-OUTPUT BUNDLE-DIRECTORY-NAME)
                                    (mapcan (lambda (f) (list "--eval" f)) forms))
                            :output dump-out :error-output dump-out :ignore-error-status t
                            :environment (if alias (%search-path-environment app) (sb-ext:posix-environ))))))
-      (uiop:delete-directory-tree (merge-pathnames "app/" tree) :validate t :if-does-not-exist :ignore)
+      (aion/fs:delete-tree (merge-pathnames "app/" tree) :if-does-not-exist :ignore)
       (when remove-carried
         (uiop:delete-file-if-exists (merge-pathnames (%app-library-name) bundle)))
       (let ((run-code
@@ -107,7 +107,7 @@ Returns (values RUN-OUTPUT DUMP-CODE RUN-CODE DUMP-OUTPUT BUNDLE-DIRECTORY-NAME)
                    (nth-value 2 (uiop:run-program (list (uiop:native-namestring image))
                                                   :output run-out :error-output run-out
                                                   :ignore-error-status t)))))
-        (uiop:delete-directory-tree tree :validate t :if-does-not-exist :ignore)
+        (aion/fs:delete-tree tree :if-does-not-exist :ignore)
         (values (get-output-stream-string run-out) dump-code run-code
                 (get-output-stream-string dump-out)
                 (car (last (pathname-directory bundle))))))))
