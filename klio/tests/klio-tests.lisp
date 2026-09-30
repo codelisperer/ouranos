@@ -802,3 +802,566 @@ property of the tree rather than of a handler."
              (document (k:tree-document tree "p")))
         (is-true (search "code-operator" (k:document-html document))
                  "the spans are in the tree, put there at load")))))
+
+;;; --- collections, for a site's theme (#353) ------------------------------------
+;;;
+;;; The shape the personal site's CV needs, with invented content: a directory of roles, each
+;;; with a start date and bullets carrying metric maps in `extra', rendered newest first.
+
+(defun %role (title start &key draft (metric 10))
+  (format nil "---~%title: \"~A\"~@[~%start: \"~A\"~]~@[~%draft: ~A~]~%bullets:~%  - text: \"Did a thing.\"~%    metrics:~%      - value: ~D~%        unit: percent~%---~%~%# ~A~%"
+          title start (and draft "true") metric title))
+
+(defparameter +role-extra+ '("start" "bullets"))
+
+(defun %titles (documents)
+  (mapcar (lambda (d) (k:document-field d "title")) documents))
+
+(test a-collection-is-the-readable-documents-under-a-directory-sorted-by-a-field
+  (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01" :metric 42))
+                         ("roles/c.md" . (%role "Gamma" nil))
+                         ("roles/d.md" . (%role "Delta" "2021-01-01" :draft t))
+                         ("roles/older/e.md" . (%role "Epsilon" "2010-01-01"))
+                         ("rolesish.md" . (%role "Not a role" "2030-01-01"))
+                         ("about.md" . +good+))
+    (let ((tree (k:load-tree dir :known-extra +role-extra+)))
+      (is (equal '("Beta" "Alpha" "Epsilon" "Gamma")
+                 (%titles (k:tree-collection tree "roles" :sort-by "start" :order :descending)))
+          "newest first; the one without a start last; the draft absent; a subdirectory
+included; a file whose name only begins with the collection's name is not a member")
+      (is (equal '("Epsilon" "Alpha" "Beta" "Gamma")
+                 (%titles (k:tree-collection tree "roles/" :sort-by "start")))
+          "ascending, and a trailing slash on the name changes nothing")
+      (let ((beta (first (k:tree-collection tree "roles" :sort-by "start" :order :descending))))
+        (is (= 42 (cdr (assoc "value" (first (cdr (assoc "metrics" (first (k:document-field beta "bullets"))
+                                                           :test #'string=)))
+                              :test #'string=)))
+            "the nested front matter comes through as data a theme can read a metric from"))
+      (k:with-dev-mode ()
+        (is (member "Delta" (%titles (k:tree-collection tree "roles")) :test #'equal)
+            "the control: in dev mode the draft is a member")))))
+
+(test a-collection-sorts-by-a-core-field-and-keeps-key-order-for-ties
+  (with-content-dir (dir ("notes/b.md" . (format nil "---~%title: \"Same\"~%date: 2024-01-01~%---~%x~%"))
+                         ("notes/a.md" . (format nil "---~%title: \"Same\"~%date: 2024-01-01~%---~%y~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"Early\"~%date: 2020-01-01~%---~%z~%")))
+    (let ((tree (k:load-tree dir)))
+      (is (equal '("notes/c" "notes/a" "notes/b")
+                 (mapcar #'k:document-key (k:tree-collection tree "notes" :sort-by "date")))
+          "a and b tie on date and stay in key order")
+      (is (equal '("notes/a" "notes/b" "notes/c")
+                 (mapcar #'k:document-key (k:tree-collection tree "notes")))
+          "unsorted is key order")
+      (is (typep (nth-value 1 (ignore-errors (k:tree-collection tree "notes" :order :sideways)))
+                 'type-error)))))
+
+(test a-document-is-found-by-its-slug-only-when-a-reader-may-see-it
+  (with-content-dir (dir ("skills.md" . (format nil "---~%title: \"Skills\"~%slug: \"toolbox\"~%---~%x~%"))
+                         ("secret.md" . +draft+))
+    (let* ((site (k:make-site dir)))
+      (k:boot site)
+      (is (equal "Skills" (k:document-field (k:document-by-slug site "toolbox") "title"))
+          "the front matter's slug, not the file name")
+      (is (null (k:document-by-slug site "skills")))
+      (is (null (k:document-by-slug site "secret")) "a draft is not found, so a link cannot reveal it")
+      (k:with-dev-mode ()
+        (is (not (null (k:document-by-slug site "secret"))) "the control: in dev mode it is")))))
+
+(test document-field-reads-core-fields-and-extra-keys
+  (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01")))
+    (let ((d (k:tree-document (k:load-tree dir :known-extra +role-extra+) "roles/a")))
+      (is (equal "Alpha" (k:document-field d "title")))
+      (is (equal "a" (k:document-field d "slug")) "the resolved slug")
+      (is (equal "2019-03-01" (k:document-field d "start")) "an extra key")
+      (is (null (k:document-field d "nope"))))))
+
+(test a-theme-reads-its-collection-from-the-requests-tree-even-when-a-reload-lands
+  "The collection half of ADR-0001's atomicity. The index theme below publishes a tree with a
+third role before it asks for the collection, which is what a reload landing mid-request does.
+It must still list the two roles of the tree the request started with."
+  (with-content-dir (dir ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01")))
+    (let* ((site (k:make-site dir :known-extra +role-extra+))
+           (seen nil)
+           (app (k:site-app site
+                            :index-theme
+                            (lambda (site documents)
+                              (declare (ignore documents))
+                              (with-open-file (out (merge-pathnames "roles/c.md" dir)
+                                                   :direction :output :if-exists :supersede)
+                                (write-string (%role "Gamma" "2024-01-01") out))
+                              (k:reload site)
+                              (setf seen (%titles (k:collection site "roles" :sort-by "start")))
+                              "ok"))))
+      (k:boot site)
+      (%get app "/")
+      (is (equal '("Alpha" "Beta") seen) "the request's tree, not the one published mid-request")
+      (is (= 3 (length (k:collection site "roles")))
+          "the control: outside a request, CURRENT-TREE is the newly published tree"))))
+
+;;; --- the static export (#353) ------------------------------------------------------------
+
+(defmacro with-export-dir ((dir) &body body)
+  "A fresh directory name, not created, deleted afterwards."
+  `(let ((,dir (uiop:ensure-directory-pathname
+                (uiop:tmpize-pathname (merge-pathnames "klio-export" (uiop:temporary-directory))))))
+     (ignore-errors (delete-file (string-right-trim "/" (namestring ,dir))))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (aion/fs:delete-tree ,dir :if-does-not-exist :ignore)))))
+
+(defun %file-text (dir relative)
+  (uiop:read-file-string (merge-pathnames relative dir) :external-format :utf-8))
+
+(test the-export-writes-every-readable-page-through-the-sites-themes
+  (with-content-dir (src ("one.md" . +good+) ("roles/two.md" . +also-good+) ("secret.md" . +draft+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((written (k:export-site site out
+                                      :page-theme (lambda (site d) (declare (ignore site))
+                                                    (format nil "PAGE ~A" (k:document-key d))))))
+          (is (equal '("404.html" "index.html" "one.html" "roles/two.html" "search.json")
+                     (sort (copy-list written) #'string<))
+              "no feeds without a base URL, and no tag pages without tags")
+          (is (equal "PAGE roles/two" (%file-text out "roles/two.html")) "the site's page theme")
+          (is (search "A post" (%file-text out "index.html")) "the index theme lists what a reader may see")
+          (is (not (search "Unfinished" (%file-text out "index.html"))))
+          (is (not (probe-file (merge-pathnames "secret.html" out))) "a draft is not exported"))))))
+
+(test the-directory-layout-writes-an-index-file-per-page
+  (with-content-dir (src ("roles/two.md" . +also-good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (k:export-site site out :layout :directory)
+        (is (probe-file (merge-pathnames "roles/two/index.html" out)))))))
+
+(test a-theme-that-fails-writes-nothing
+  (with-content-dir (src ("one.md" . +good+) ("two.md" . +also-good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (is (typep (nth-value 1 (ignore-errors
+                                 (k:export-site site out
+                                                :page-theme (lambda (site d) (declare (ignore site))
+                                                              (if (string= "two" (k:document-key d))
+                                                                  (error "a theme bug")
+                                                                  "fine")))))
+                   'simple-error))
+        (is (not (uiop:directory-exists-p out)) "not even the pages that rendered")))))
+
+(test an-export-refuses-a-directory-that-holds-files-unless-told-to-clean-it
+  (with-content-dir (src ("one.md" . +good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src))
+            (stale (merge-pathnames "deleted-post.html" out)))
+        (k:boot site)
+        (ensure-directories-exist stale)
+        (with-open-file (s stale :direction :output) (write-string "old" s))
+        (is (typep (nth-value 1 (ignore-errors (k:export-site site out))) 'k:export-refused))
+        (is (probe-file stale) "nothing was touched")
+        (k:export-site site out :clean t)
+        (is (not (probe-file stale)) "with :clean, an earlier export's page is gone")
+        (is (probe-file (merge-pathnames "one.html" out)))))))
+
+(test an-export-refuses-to-clean-the-content-directory-or-its-parent
+  ;; THE PARENT IS A DIRECTORY THIS TEST MADE. If the guard regressed, :CLEAN would delete the
+  ;; directory it was pointed at, so the test must never point it at anything it does not own,
+  ;; such as the system's temporary directory.
+  (with-export-dir (outer)
+    (let* ((content (merge-pathnames "content/" outer))
+           (file (merge-pathnames "one.md" content)))
+      (ensure-directories-exist file)
+      (with-open-file (s file :direction :output) (write-string +good+ s))
+      (let ((site (k:make-site content)))
+        (k:boot site)
+        (is (typep (nth-value 1 (ignore-errors (k:export-site site content :clean t)))
+                   'k:export-refused)
+            "the content directory itself")
+        (is (typep (nth-value 1 (ignore-errors (k:export-site site outer :clean t)))
+                   'k:export-refused)
+            "a directory that contains it")
+        (is (probe-file file) "the content is still there")))))
+
+(test an-export-needs-published-content
+  (with-content-dir (src ("one.md" . +good+))
+    (with-export-dir (out)
+      (is (typep (nth-value 1 (ignore-errors (k:export-site (k:make-site src) out)))
+                 'k:export-refused)))))
+
+(test an-exported-theme-reads-collections-from-the-exported-tree
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+)))
+        (k:boot site)
+        (k:export-site site out
+                       :index-theme (lambda (site documents)
+                                      (declare (ignore documents))
+                                      (format nil "~{~A~^,~}"
+                                              (%titles (k:collection site "roles" :sort-by "start"
+                                                                                  :order :descending)))))
+        (is (equal "Beta,Alpha" (%file-text out "index.html")))))))
+
+;;; --- a controlled vocabulary (#353) ------------------------------------------------------
+;;;
+;;; The personal site's shape, with invented labels: `groups', each with a `name' and a list
+;;; of `skills', in one file; references in a page's `skills' and in a bullet's `skills'.
+
+(defparameter +skills+
+  (format nil "---~%title: \"Skills\"~%groups:~%  - name: \"Languages\"~%    skills: [\"C#\", \"C++\", \"Common Lisp\"]~%  - name: \"Platforms\"~%    skills: [\".NET\", \"Serverless functions\"]~%---~%~%Skills.~%"))
+
+(defun %skilled-role (title page-skills bullet-skills)
+  (format nil "---~%title: \"~A\"~%skills: [~{\"~A\"~^, ~}]~%bullets:~%  - text: \"Did a thing.\"~%    skills: [~{\"~A\"~^, ~}]~%---~%~%x~%"
+          title page-skills bullet-skills))
+
+(defparameter +skills-vocabulary+
+  (k:make-vocabulary "skills" :source "skills" :entries '("groups" "skills")
+                              :references '(("skills") ("bullets" "skills"))))
+
+(defparameter +skills-extra+ '("groups" "skills" "bullets"))
+
+(defun %load-with-skills (dir)
+  (k:load-tree dir :known-extra +skills-extra+ :vocabularies (list +skills-vocabulary+)))
+
+(test references-to-known-labels-load-and-labels-match-exactly
+  (with-content-dir (dir ("skills.md" . +skills+)
+                         ("roles/a.md" . (%skilled-role "A" '("C#" ".NET") '("C++"))))
+    (multiple-value-bind (tree failures) (%load-with-skills dir)
+      (is (null failures))
+      (is (not (null tree)))
+      (is (equal '("C#" "C++" "Common Lisp" ".NET" "Serverless functions")
+                 (gethash "skills" (k:content-tree-vocabularies tree)))
+          "every group's skills, in the order the file lists them"))))
+
+(test an-unknown-label-is-a-load-failure-naming-both-files
+  (with-content-dir (dir ("skills.md" . +skills+)
+                         ("roles/a.md" . (%skilled-role "A" '("c#") '("C++")))
+                         ("roles/b.md" . (%skilled-role "B" '("C#") '("Cobol"))))
+    (multiple-value-bind (tree failures) (%load-with-skills dir)
+      (is (null tree) "nothing is published")
+      (is (equal '("roles/a" "roles/b") (sort (mapcar #'k:load-failure-file failures) #'string<))
+          "the referring files, one failure each: lowercase c# is not C#, and a bullet's
+reference is checked like the page's")
+      (let ((reason (k:load-failure-reason (find "roles/b" failures :key #'k:load-failure-file
+                                                                   :test #'string=))))
+        (is (search "\"Cobol\"" reason) "the label")
+        (is (search "bullets > skills" reason) "where it was")
+        (is (search "in skills" reason) "and the file that holds the list")))
+    (is (typep (nth-value 1 (ignore-errors
+                             (k:boot (k:make-site dir :known-extra +skills-extra+
+                                                      :vocabularies (list +skills-vocabulary+)))))
+               'k:content-load-failed)
+        "at boot the site refuses to start")))
+
+(test a-bad-reference-at-reload-keeps-the-last-good-tree
+  (with-content-dir (dir ("skills.md" . +skills+)
+                         ("roles/a.md" . (%skilled-role "A" '("C#") '())))
+    (let ((site (k:make-site dir :known-extra +skills-extra+ :vocabularies (list +skills-vocabulary+))))
+      (k:boot site)
+      (with-open-file (out (merge-pathnames "roles/a.md" dir) :direction :output :if-exists :supersede)
+        (write-string (%skilled-role "A edited" '("Fortran") '()) out))
+      (is (eq :refused (k:reload site)))
+      (is (equal "A" (k:document-field (k:tree-document (k:site-tree site) "roles/a") "title"))
+          "the edit that broke the reference is not served"))))
+
+(test a-missing-or-empty-vocabulary-source-is-a-failure
+  (with-content-dir (dir ("roles/a.md" . (%skilled-role "A" '("C#") '())))
+    (let ((failures (nth-value 1 (%load-with-skills dir))))
+      (is (find "skills" failures :key #'k:load-failure-file :test #'string=)
+          "no skills document at all")))
+  (with-content-dir (dir ("skills.md" . +good+))
+    (let ((failures (nth-value 1 (%load-with-skills dir))))
+      (is (search "finds no entries" (k:load-failure-reason (first failures)))
+          "a skills document with nothing at the declared path"))))
+
+(test a-theme-looks-up-vocabulary-entries-from-the-requests-tree
+  (with-content-dir (dir ("skills.md" . +skills+))
+    (let* ((site (k:make-site dir :known-extra +skills-extra+ :vocabularies (list +skills-vocabulary+)))
+           (seen nil)
+           (app (k:site-app site :index-theme
+                            (lambda (site documents)
+                              (declare (ignore documents))
+                              (setf seen (list (k:vocabulary-entry-p site "skills" ".NET")
+                                               (k:vocabulary-entry-p site "skills" "Cobol")
+                                               (length (k:vocabulary-entries site "skills"))))
+                              "ok"))))
+      (k:boot site)
+      (%get app "/")
+      (is (equal '(t nil 5) seen))
+      (is (null (k:vocabulary-entries site "tools")) "a vocabulary the site did not declare"))))
+
+(test make-vocabulary-refuses-a-malformed-declaration
+  (is (typep (nth-value 1 (ignore-errors (k:make-vocabulary "x" :source "" :entries '("a")))) 'error))
+  (is (typep (nth-value 1 (ignore-errors (k:make-vocabulary "x" :source "s" :entries "a"))) 'error))
+  (is (typep (nth-value 1 (ignore-errors (k:make-vocabulary "x" :source "s" :entries '("a")
+                                                               :references '("skills"))))
+             'error)
+      "a reference is a path, a list of keys, not a key"))
+
+;;; --- reloading on change, for development (#353) ----------------------------------------
+
+(defun %await (predicate &key (seconds 10))
+  "Call PREDICATE every 20 ms until it is true or SECONDS pass; return its last value."
+  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
+        for value = (funcall predicate)
+        until (or value (> (get-internal-real-time) deadline))
+        do (sleep 0.02)
+        finally (return value)))
+
+(defun %write-content (dir name text)
+  (with-open-file (out (merge-pathnames name dir) :direction :output :if-exists :supersede
+                                                  :if-does-not-exist :create)
+    (write-string text out)))
+
+(defun %served-title (site key)
+  (let ((d (k:tree-document (k:site-tree site) key)))
+    (and d (k:document-field d "title"))))
+
+(test the-watcher-reloads-an-edit-and-keeps-the-last-good-tree-on-a-bad-one
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (outcomes '())
+           (lock (sb-thread:make-mutex))
+           (watcher nil))
+      (k:boot site)
+      (unwind-protect
+           (progn
+             (setf watcher (k:watch-site site :interval 0.05
+                                              :on-reload (lambda (outcome failures)
+                                                           (declare (ignore failures))
+                                                           (sb-thread:with-mutex (lock)
+                                                             (push outcome outcomes)))))
+             (%write-content dir "one.md" (format nil "---~%title: \"Edited\"~%---~%~%x~%"))
+             (is (%await (lambda () (equal "Edited" (%served-title site "one"))))
+                 "an edited file is served after the next poll")
+             (%write-content dir "one.md" +bad+)
+             (is (%await (lambda () (sb-thread:with-mutex (lock) (eq :refused (first outcomes)))))
+                 "a malformed edit is refused")
+             (is (equal "Edited" (%served-title site "one")) "and the last good version is still served")
+             (%write-content dir "two.md" +also-good+)
+             (%write-content dir "one.md" (format nil "---~%title: \"Fixed\"~%---~%~%x~%"))
+             (is (%await (lambda () (equal "Fixed" (%served-title site "one"))))
+                 "fixing it publishes again, the watcher having kept running")
+             (is (equal "Another" (%served-title site "two")) "a new file is picked up"))
+        (when watcher (k:stop-watching watcher))))))
+
+(test a-same-length-edit-in-the-same-second-is-still-seen
+  ;; A write date can have one-second resolution, so the snapshot includes a hash of the text.
+  (with-content-dir (dir ("one.md" . (format nil "---~%title: \"Aaaa\"~%---~%~%x~%")))
+    (let ((before (k:content-snapshot dir)))
+      (%write-content dir "one.md" (format nil "---~%title: \"Bbbb\"~%---~%~%x~%"))
+      (is (not (equal before (k:content-snapshot dir)))))))
+
+(test stop-watching-ends-the-watcher
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (watcher (progn (k:boot site) (k:watch-site site :interval 0.05)))
+           (thread (klio::watcher-thread watcher)))
+      (is (sb-thread:thread-alive-p thread) "control: it is running")
+      (k:stop-watching watcher)
+      (is (not (sb-thread:thread-alive-p thread)))
+      (k:stop-watching watcher)
+      (is (= 0 (k:watcher-reloads watcher)) "and nothing changed, so nothing was reloaded"))))
+
+;;; --- dates, and scheduling through the handler (#359) -------------------------------------
+
+(test iso-dates-parse-to-universal-times-in-utc
+  (let ((midnight (encode-universal-time 0 0 0 1 1 2030 0)))
+    (is (= midnight (k:parse-iso-date "2030-01-01")) "a date is midnight UTC")
+    (is (= (+ midnight (* 9 3600)) (k:parse-iso-date "2030-01-01T09:00:00Z")))
+    (is (= (+ midnight (* 9 3600)) (k:parse-iso-date "2030-01-01 09:00")) "a space, no seconds, no zone")
+    (is (= (+ midnight (* 7 3600)) (k:parse-iso-date "2030-01-01T09:00:00+02:00"))
+        "09:00 at +02:00 is 07:00 UTC")
+    (dolist (bad '("2030-13-01" "2030-01-01T25:00" "01/01/2030" "2030-01-01T09:00:00+2" "soon" ""))
+      (is (typep (nth-value 1 (ignore-errors (k:parse-iso-date bad))) 'k:invalid-date)
+          "~S is refused" bad))))
+
+(test feed-dates-are-written-as-rss-and-atom-require
+  (let ((time (encode-universal-time 5 4 3 2 1 2030 0)))
+    (is (string= "Wed, 02 Jan 2030 03:04:05 GMT" (k:rfc-822-date time)))
+    (is (string= "2030-01-02T03:04:05Z" (k:rfc-3339-date time)))))
+
+(defparameter +scheduled+ (format nil "---~%title: \"Later\"~%publish-at: 2030-01-01~%---~%~%x~%"))
+
+(test a-scheduled-document-waits-for-its-time-through-the-handler
+  (with-content-dir (dir ("later.md" . +scheduled+) ("now.md" . +good+))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (let ((app (k:site-app site)))
+        (is (= 404 (%get app "/later")) "with no clock given, the request's own time is used")
+        (is (not (search "Later" (nth-value 1 (%get app "/")))) "and the index does not list it"))
+      (let ((app (k:site-app site :now (encode-universal-time 0 0 0 2 1 2030 0))))
+        (is (= 200 (%get app "/later")) "once its time has come, it is served")))))
+
+(test a-malformed-publish-at-fails-the-load-instead-of-publishing
+  (with-content-dir (dir ("later.md" . (format nil "---~%title: \"Later\"~%publish-at: next Tuesday~%---~%x~%")))
+    (multiple-value-bind (tree failures) (k:load-tree dir)
+      (is (null tree))
+      (is (search "publish-at" (k:load-failure-reason (first failures)))))))
+
+(test a-date-that-is-not-iso-is-a-warning-and-still-displays
+  (with-content-dir (dir ("p.md" . (format nil "---~%title: \"P\"~%date: \"Spring 2024\"~%---~%x~%")))
+    (let* ((tree (k:load-tree dir))
+           (d (k:tree-document tree "p")))
+      (is (equal "Spring 2024" (k:document-field d "date")))
+      (is (null (k:content-meta-timestamp (k:document-meta d))))
+      (is (find-if (lambda (w) (search "not an ISO 8601 date" w)) (k:content-tree-warnings tree))))))
+
+;;; --- feeds (#353) ---------------------------------------------------------------------------
+
+(defun %post (title date &key tags draft)
+  (format nil "---~%title: \"~A\"~@[~%date: ~A~]~@[~%tags: [~{\"~A\"~^, ~}]~]~@[~%draft: ~A~]~%---~%~%Body of ~A & more.~%"
+          title date tags (and draft "true") title))
+
+(defun %xml (text) (plump:parse text))
+
+(defun %xml-texts (root tag)
+  (mapcar #'plump:text (plump:get-elements-by-tag-name root tag)))
+
+(test the-rss-feed-is-rss-2-with-absolute-links-newest-first
+  (with-content-dir (dir ("posts/a.md" . (%post "Old & first" "2024-01-01"))
+                         ("posts/b.md" . (%post "New" "2025-06-01"))
+                         ("posts/c.md" . (%post "Undated" nil))
+                         ("posts/d.md" . (%post "Draft" "2025-07-01" :draft t))
+                         ("about.md" . (%post "About" "2025-08-01")))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (let ((app (k:site-app site :base-url "https://example.org/" :feed-collection "posts"
+                                  :feed-title "Example")))
+        (multiple-value-bind (status body headers) (%get app "/feed.xml")
+          (is (= 200 status))
+          (is (search "application/rss+xml" (getf headers :content-type)))
+          (let* ((root (%xml body))
+                 (rss (first (plump:get-elements-by-tag-name root "rss"))))
+            (is (equal "2.0" (plump:attribute rss "version")))
+            (is (= 1 (length (plump:get-elements-by-tag-name root "channel"))))
+            (is (equal '("Example" "New" "Old & first") (%xml-texts root "title"))
+                "the channel's title, then each item's, the ampersand unescaped by the parser")
+            ;; GUID rather than LINK: plump parses as HTML, where <link> is a void element and
+            ;; its text is lost. Each item's guid is its absolute link.
+            (is (equal '("https://example.org/posts/b" "https://example.org/posts/a")
+                       (%xml-texts root "guid"))
+                "absolute item links, newest first; the undated post, the draft and the page outside
+the collection are absent")
+            (is (equal '("Sun, 01 Jun 2025 00:00:00 GMT" "Mon, 01 Jan 2024 00:00:00 GMT")
+                       (%xml-texts root "pubDate")))))))))
+
+(test the-atom-feed-has-what-atom-requires
+  (with-content-dir (dir ("posts/a.md" . (%post "One" "2024-01-01")))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (multiple-value-bind (status body) (%get (k:site-app site :base-url "https://example.org")
+                                               "/atom.xml")
+        (is (= 200 status))
+        (let* ((root (%xml body))
+               (feed (first (plump:get-elements-by-tag-name root "feed")))
+               (entry (first (plump:get-elements-by-tag-name root "entry"))))
+          (is (equal "http://www.w3.org/2005/Atom" (plump:attribute feed "xmlns")))
+          (dolist (required '("id" "title" "updated"))
+            (is (plump:get-elements-by-tag-name entry required) "an entry has ~A" required))
+          (is (equal "https://example.org/posts/a"
+                     (plump:text (first (plump:get-elements-by-tag-name entry "id")))))
+          (is (equal "2024-01-01T00:00:00Z"
+                     (plump:text (first (plump:get-elements-by-tag-name entry "updated"))))))))))
+
+(test there-are-no-feeds-without-a-base-url
+  (with-content-dir (dir ("posts/a.md" . (%post "One" "2024-01-01")))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (is (= 404 (%get (k:site-app site) "/feed.xml")) "relative links would be unfollowable")
+      (is (= 404 (%get (k:site-app site) "/atom.xml"))))))
+
+;;; --- tags and pagination (#353) ------------------------------------------------------------
+
+(test tag-slugs-keep-c-sharp-and-c-plus-plus-apart
+  (is (equal "common-lisp" (k:tag-slug "Common Lisp")))
+  (is (equal "c-sharp" (k:tag-slug "C#")))
+  (is (equal "c-plus-plus" (k:tag-slug "C++")))
+  (is (equal "net" (k:tag-slug ".NET")))
+  (is (equal "c" (k:tag-slug "C"))))
+
+(defun %titles-listed (html titles)
+  (remove-if-not (lambda (title) (search title html)) titles))
+
+(test a-tag-has-a-page-and-listings-paginate-at-stable-urls
+  (with-content-dir (dir ("posts/a.md" . (%post "Alpha" "2024-01-01" :tags '("Lisp" "C#")))
+                         ("posts/b.md" . (%post "Beta" "2024-02-01" :tags '("Lisp")))
+                         ("posts/c.md" . (%post "Gamma" "2024-03-01" :tags '("Lisp")))
+                         ("posts/d.md" . (%post "Delta" "2024-04-01" :tags '("Lisp") :draft t)))
+    (let* ((site (k:make-site dir))
+           (pages '())
+           (app (k:site-app site :per-page 2
+                                 :index-theme (lambda (site documents) (declare (ignore site))
+                                                (push (list k:*page-number* k:*page-count*) pages)
+                                                (format nil "~{~A ~}" (mapcar (lambda (d) (k:document-field d "title")) documents))))))
+      (k:boot site)
+      (let ((titles '("Alpha" "Beta" "Gamma" "Delta")))
+        (is (equal '("Alpha" "Beta") (%titles-listed (nth-value 1 (%get app "/")) titles)) "page 1 is /")
+        (is (equal '("Gamma") (%titles-listed (nth-value 1 (%get app "/page/2/")) titles)) "page 2")
+        (is (equal '((2 2) (1 2)) pages) "the theme is told which page of how many")
+        (is (= 404 (%get app "/page/3/")) "past the end")
+        (is (= 404 (%get app "/page/1/")) "page 1 has one URL, /")
+        (is (= 404 (%get app "/page/2")) "and a listing URL ends in a slash")
+        (is (equal '("Alpha" "Beta") (%titles-listed (nth-value 1 (%get app "/tags/lisp/")) titles))
+            "a tag's page, paginated the same way; the draft is not counted")
+        (is (equal '("Gamma") (%titles-listed (nth-value 1 (%get app "/tags/lisp/page/2/")) titles)))
+        (is (equal '("Alpha") (%titles-listed (nth-value 1 (%get app "/tags/c-sharp/")) titles)))
+        (is (= 404 (%get app "/tags/cobol/")) "an unknown tag")
+        (let ((k:*site-options* (k:make-site-options)))
+          (is (equal "/tags/c-sharp/" (k:tag-url "C#")))
+          (is (equal "/tags/lisp/page/2/" (k:page-url 2 "Lisp")))
+          (is (equal "/page/3/" (k:page-url 3))))))))
+
+(test without-per-page-a-listing-is-one-page
+  (with-content-dir (dir ("a.md" . (%post "Alpha" nil)) ("b.md" . (%post "Beta" nil)))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (is (= 404 (%get (k:site-app site) "/page/2/"))))))
+
+;;; --- the search index (#353) ---------------------------------------------------------------
+
+(test the-search-index-is-json-of-readable-documents
+  (with-content-dir (dir ("posts/a.md" . (%post "Alpha" "2024-01-01" :tags '("Lisp")))
+                         ("posts/d.md" . (%post "Draft" nil :draft t)))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (multiple-value-bind (status body headers) (%get (k:site-app site) "/search.json")
+        (is (= 200 status))
+        (is (search "application/json" (getf headers :content-type)))
+        (let ((entries (coerce (com.inuoe.jzon:parse body) 'list)))
+          (is (= 1 (length entries)) "the draft is not in it")
+          (let ((e (first entries)))
+            (is (equal "/posts/a" (gethash "url" e)))
+            (is (equal "Alpha" (gethash "title" e)))
+            (is (equal '("Lisp") (coerce (gethash "tags" e) 'list)))
+            (is (search "Body of Alpha" (gethash "text" e)))))))))
+
+;;; --- the export writes the same pages (#353) ------------------------------------------------
+
+(test the-export-writes-tag-pages-listing-pages-feeds-and-the-index
+  (with-content-dir (src ("posts/a.md" . (%post "Alpha" "2024-01-01" :tags '("Lisp")))
+                         ("posts/b.md" . (%post "Beta" "2024-02-01" :tags '("Lisp")))
+                         ("posts/c.md" . (%post "Gamma" "2024-03-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((written (k:export-site site out :per-page 2 :base-url "https://example.org")))
+          (is (equal '("404.html" "atom.xml" "feed.xml" "index.html" "page/2/index.html"
+                       "posts/a.html" "posts/b.html" "posts/c.html" "search.json"
+                       "tags/lisp/index.html")
+                     (sort (copy-list written) #'string<))
+              "every path the handler answers, at the file a static host serves it from")
+          (is (search "https://example.org/posts/c" (%file-text out "feed.xml"))))))))
+
+(test a-scheduled-document-waits-when-no-caller-gives-a-clock
+  ;; The handler passes its request's time; this is every other caller, such as a theme or a
+  ;; REPL listing a tree with no :now (#359).
+  (with-content-dir (dir ("later.md" . +scheduled+) ("now.md" . +good+))
+    (let ((tree (k:load-tree dir)))
+      (is (equal '("now") (mapcar #'k:document-key (k:tree-readable-documents tree))))
+      (is (equal '("later" "now")
+                 (mapcar #'k:document-key
+                         (k:tree-readable-documents tree :now (encode-universal-time 0 0 0 2 1 2030 0))))
+          "the control: at a time after it, it is readable"))))

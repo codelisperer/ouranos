@@ -56,7 +56,9 @@ these holds a consistent snapshot for as long as it needs it."
   (index nil)
   (source nil)
   (loaded-at 0)
-  (warnings '() :type list))
+  (warnings '() :type list)
+  ;; vocabulary name -> its labels, read at load from the vocabulary's source document (#353)
+  (vocabularies (make-hash-table :test #'equal)))
 
 (defstruct (load-failure (:constructor %make-load-failure) (:copier nil))
   "One file that could not be loaded, and why. A REASON is the condition's report text: the
@@ -267,7 +269,20 @@ in hand and the last time before anyone can ask it a question."
                                   (concatenate 'string (document-body d) " " extra)
                                   (document-body d)))))))
 
-(defun load-tree (directory &key known-extra (index-extra t) (dev (dev-mode-p)))
+(defun %vocabulary-pass (vocabularies documents)
+  "Check DOCUMENTS against VOCABULARIES. Returns the LOAD-FAILUREs, and as a second value an
+alist of (vocabulary-name . labels)."
+  (let ((pairs (mapcar (lambda (d) (cons (document-key d) (document-meta d))) documents))
+        (failures '())
+        (labels '()))
+    (dolist (v vocabularies)
+      (multiple-value-bind (found vocabulary-labels) (%vocabulary-failures v pairs)
+        (dolist (f found)
+          (push (%make-load-failure :file (car f) :reason (cdr f)) failures))
+        (push (cons (vocabulary-name v) vocabulary-labels) labels)))
+    (values (nreverse failures) (nreverse labels))))
+
+(defun load-tree (directory &key known-extra (index-extra t) (dev (dev-mode-p)) vocabularies)
   "Load DIRECTORY into a candidate CONTENT-TREE. Returns (values TREE FAILURES).
 
 TREE is NIL when FAILURES is non-empty and DEV is false -- a candidate tree with a failure in
@@ -278,6 +293,9 @@ INDEX-EXTRA says how much of each document's structured front-matter is searchab
 every string leaf (the default), NIL for none, or a list of `extra' keys. The default is
 everything because of what the first real content tree measured -- see %EXTRA-TEXT above: a body-only index returned zero hits for words that were in the
 document, in front-matter, where this content keeps its prose.
+
+VOCABULARIES is a list made with MAKE-VOCABULARY. A reference to a label that is not in its
+vocabulary is a failure of the referring document, reported like any other.
 
 DEV is ADR-0001's documented exception: the bad file is skipped, its failure is still
 reported, and the rest is published. Someone editing wants to see the rest of the page they
@@ -300,6 +318,10 @@ live, and keeping them apart is what makes the swap atomic."
     ;; The tree-level pass. It runs over what LOADED, so in dev mode it validates what dev
     ;; mode would publish rather than what it skipped.
     (setf failures (append failures (%duplicate-slug-failures documents)))
+    (multiple-value-bind (vocabulary-failures vocabulary-labels)
+        (%vocabulary-pass vocabularies documents)
+      (setf failures (append failures vocabulary-failures)
+            vocabularies vocabulary-labels))
     (if (and failures (not dev))
         (values nil failures)
         (let ((tree (%make-content-tree
@@ -315,6 +337,8 @@ live, and keeping them apart is what makes the swap atomic."
                                                              (load-failure-reason f)))))))
           (dolist (d documents)
             (setf (gethash (document-key d) (content-tree-documents tree)) d))
+          (loop for (name . labels) in vocabularies
+                do (setf (gethash name (content-tree-vocabularies tree)) labels))
           (values tree failures)))))
 
 ;;; --- reading a published tree -----------------------------------------------
@@ -351,16 +375,19 @@ The TREE slot is the only mutable thing in this file, and it holds a whole immut
 That is the atomicity guarantee: one SETF publishes, one read consumes."
   (directory nil)
   (tree nil)
-  (known-extra '() :type list))
+  (known-extra '() :type list)
+  (vocabularies '() :type list))
 
-(defun make-site (directory &key known-extra)
+(defun make-site (directory &key known-extra vocabularies)
   "A site over DIRECTORY, with nothing published yet.
 
 KNOWN-EXTRA names the front-matter keys this site expects outside klio's typed core. A key
 outside both is reported as a warning naming the file and the key -- so a site declares its
 own vocabulary once, here, instead of every document's `organisation' being reported as a
-surprise on every load."
-  (%make-site :directory directory :known-extra known-extra))
+surprise on every load.
+
+VOCABULARIES is a list made with MAKE-VOCABULARY, checked on every load (#353)."
+  (%make-site :directory directory :known-extra known-extra :vocabularies vocabularies))
 
 (defun publish (site tree)
   "Make TREE the site's published content. One SETF; returns TREE."
@@ -373,7 +400,8 @@ Signals CONTENT-LOAD-FAILED with phase :BOOT if any file fails -- which is ADR-0
 boot, where `do not swap' has only one meaning because there is nothing to keep serving.
 Refusing to start is louder than starting without a page, and at boot someone is watching."
   (multiple-value-bind (tree failures)
-      (load-tree (site-directory site) :known-extra (site-known-extra site))
+      (load-tree (site-directory site) :known-extra (site-known-extra site)
+                 :vocabularies (site-vocabularies site))
     (when (and failures (null tree))
       (error 'content-load-failed :failures failures :phase :boot
                                   :source (site-directory site)))
@@ -395,7 +423,8 @@ handler at every site. THAT IS ALSO ITS HAZARD: a caller who ignores the outcome
 the silent partial deploy ADR-0001 exists to prevent, one level up. A deploy path should call
 RELOAD-OR-FAIL."
   (multiple-value-bind (tree failures)
-      (load-tree (site-directory site) :known-extra (site-known-extra site))
+      (load-tree (site-directory site) :known-extra (site-known-extra site)
+                 :vocabularies (site-vocabularies site))
     (cond ((and failures (null tree))
            (values :refused failures))
           (t

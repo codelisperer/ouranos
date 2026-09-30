@@ -49,7 +49,7 @@ test suite; `scripts/check-deps.lisp` prints it.
 | `fiveam` | test framework | all `*/tests` | **Test-only.** |
 | `flexi-streams` | in-memory octet streams | `hyperion/tests` | **Test-only.** Hands `body-string` a body without a socket (pre-publication issue 211). Already present transitively via clack; declared rather than assumed. |
 | `clingon` | CLI arg parsing | cons/cli, hyperion/cli | hyperion/cli is being retired (ADR-0007) → collapses to **cons only**. |
-| `com.inuoe.jzon` | JSON | hyperion, praxeon(+web,+web-search) | **One** JSON lib across the tree — no duplication. |
+| `com.inuoe.jzon` | JSON | hyperion, praxeon(+web,+web-search), klio | **One** JSON lib across the tree — no duplication. klio writes a site's search index with it (#353). |
 | `usocket` | sockets | aion/http-client (and its tests) | **Not a new load.** It is dexador's own transport, and clack's. `aion/http-client` names it to open a connection to an address it has already checked, for a URL a user supplied, and its tests run a small HTTP server with it (#295). |
 | `cl+ssl` | TLS over OpenSSL | aion/http-client (and its tests), **not on Windows** | **Not a new load** on Linux and macOS, where dexador already uses it for https. `aion/http-client` names it, under `(:feature (:not :windows) ...)`, to run TLS on the connection it opened to a checked address, with the URL's host name for SNI and verification (#295). On Windows dexador uses WinHTTP and nothing loads it, as the OpenSSL row below says; the pinned connection is refused there. |
 | `dexador` | HTTP client | **aion/http-client** (the shared client), hermes/blob | Wrapped once by `aion/http-client` (pre-publication issue 202) and reached through it by hermes and praxeon; `hermes/blob` still calls it directly for streaming. **Shared** — and now shared through one client rather than three call styles. |
@@ -67,7 +67,7 @@ test suite; `scripts/check-deps.lisp` prints it.
 | `bordeaux-threads` | portable threads | hyperion, praxeon | Session-store locks; the per-session spend ledger in `praxeon/ceiling` (pre-publication issue 172). **See watch #2** (we're SBCL-only). |
 | `3bmd` | Markdown → HTML | hyperion | `hyperion/markdown`. |
 | `3bmd-ext-code-blocks` | Markdown code blocks | hyperion | Pairs with `3bmd`. |
-| `plump` | HTML parsing | hyperion/import | The HTML→Spinneret importer — **aux system only** (core hyperion never pulls it). |
+| `plump` | HTML parsing | hyperion/import, `klio/tests` | The HTML→Spinneret importer — **aux system only** (core hyperion never pulls it). `klio/tests` parses the RSS and Atom feeds with it (#353); klio itself does not depend on it. |
 | `dbi` (CL-DBI) | DB-independent API | mnemosyne, praxeon/retrieval | The neutral SQL substrate — one API over SQLite + Postgres. `praxeon/retrieval` names it only to refuse a connection that is not Postgres (#138). |
 | `dbd-postgres` | PostgreSQL **wire** driver | mnemosyne | Via `cl-postgres` (pure Lisp, no libpq); XTDB 2 rides it later. |
 | `dbd-sqlite3` | SQLite driver | mnemosyne | Local-dev backend; via `cl-sqlite` (FFI to the system `libsqlite3`). |
