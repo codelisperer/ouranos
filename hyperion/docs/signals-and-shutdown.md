@@ -25,6 +25,7 @@ how to fill the last one.
 | `request-shutdown` (any thread) | **works** — sets a flag the wait loop polls |
 | An unhandled condition | **works** — `unwind-protect` releases the socket |
 | **`SIGTERM`** | **works on Hunchentoot and on the native server. Lost on Woo.** |
+| Requests in flight and arriving after `SIGTERM` | **drained on the native server**, which keeps serving for a grace period and then lets requests in flight finish; Hunchentoot gets the grace period only (#388, below) |
 
 **The defect is Woo's, not `serve-forever`'s, and not "a running server's".** That was the
 open question when this file was written and it is now settled by measurement (§*The probe*
@@ -34,6 +35,53 @@ transport.
 
 `SIGTERM` is how a container runtime, systemd, `kill`, and every process supervisor ask for a
 clean exit. So the practical rule is short: **a deployed app must not run on Woo.**
+
+## Draining on SIGTERM (#388)
+
+A rolling deploy sends the old instance SIGTERM while the platform's proxy may still send it
+requests for a few seconds. An instance that stops accepting at once refuses those, and a
+CDN in front reports them as errors (a consuming app saw 10 of 33 post-deploy checks fail with
+521 this way). So `serve-forever` drains on SIGTERM, in three phases, each logged once:
+
+1. **Grace period.** For `:drain-seconds` (`HYPERION_DRAIN_SECONDS`, default 5) the server
+   keeps accepting and answering. `:readiness-path`, when given, answers 503 from the signal
+   on, so a platform health check pointed at it takes the instance out of rotation. On `:uv`,
+   every response now closes its connection, so a client's next request opens a new one,
+   which the platform routes to a new instance. A second SIGTERM ends this phase early.
+2. **Stop accepting, let requests in flight finish.** On `:uv`, the listener closes, idle
+   connections close, and the server waits up to `:drain-timeout`
+   (`HYPERION_DRAIN_TIMEOUT_SECONDS`, default 20) for requests in flight and streamed
+   responses to finish.
+3. **Close the rest.** Whatever is still open is closed, and `serve-forever` returns.
+
+Ctrl-C, SIGINT and `request-shutdown` stop at once, without a grace period: they come from
+someone who wants the process stopped now, not from a platform rotating instances.
+
+**Choose the timings from the platform's termination grace period**, the time between SIGTERM
+and SIGKILL (30 seconds by default on Kubernetes and on ECS, for example). Keep
+`drain-seconds + drain-timeout` below it, or SIGKILL ends the drain. Make `drain-seconds` at
+least as long as the platform takes to stop routing to an instance after it is told to stop,
+and `drain-timeout` at least as long as the slowest request that should complete. A long-lived
+stream (server-sent events) is closed at the drain timeout.
+
+**By backend.** `:uv` does all three phases. Hunchentoot gets the grace period, then stops as
+it always has, which cuts off a request still in flight. Woo does not see SIGTERM at all (see
+below), so none of this applies to it, and a platform ends it with SIGKILL after its grace
+period.
+
+**Measured**, with `hyperion/bench/signals/drain.lisp` on macOS 26 (arm64): a `serve-forever`
+child with `:workers 4`, a 3-second request in flight, SIGTERM, and new connections at 0.2, 1
+and 2 seconds after it.
+
+| backend | before #388 | with the drain (defaults) |
+|---|---|---|
+| `:uv` | request in flight cut off; new connections refused; exits at 2.5 s | request in flight answered; new connections answered; exits at 5.2 s |
+| Hunchentoot | request in flight cut off; new connections refused; exits at 2.0 s | request in flight answered; new connections answered; exits at 5.2 s |
+| Woo | request in flight cut off; new connections refused; never exits | unchanged |
+
+With a 1-second grace period and a 4-second request, `:uv` still answers the request after the
+grace period ends and refuses a new connection at 2 s. Hunchentoot cuts the request off when
+its grace period ends.
 
 ## What was measured
 

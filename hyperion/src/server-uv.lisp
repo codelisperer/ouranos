@@ -57,7 +57,7 @@
 
     The handler runs behind *DISPATCH*: on the loop thread by default, on a worker pool
     with POOL-DISPATCH. A streaming app wants the pool -- the file header says why.")
-  (:export #:start #:stop #:pool-dispatch #:*busy-response*
+  (:export #:start #:stop #:begin-drain #:draining-p #:pool-dispatch #:*busy-response*
            #:stream-write-failed #:stream-write-failed-reason
            #:*stream-write-timeout-seconds*
            #:*file-chunk-bytes* #:*file-write-observer*
@@ -534,6 +534,7 @@ which is the whole point: a truncated chunked message is an error to every clien
 the only way left to say `this response is wrong' once its head is on the wire."
   (when (so-open so)
     (setf (so-open so) nil)
+    (setf (conn-state-streaming (so-state so)) nil)
     (let ((conn (so-conn so)) (state (so-state so)))
       (cond
         ((conn-state-done state) nil)
@@ -897,7 +898,14 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   (chunk-pos 0)
   (chunk-data nil)
   (chunk-size 0)
-  (chunk-overhead 0))
+  (chunk-overhead 0)
+  ;; The server's drain box, a cons whose CAR is true once BEGIN-DRAIN or a draining STOP has
+  ;; run (#388). Shared by every connection of one server, so draining is one SETF.
+  (drain (list nil))
+  ;; A streamed response is being written on this connection. IN-FLIGHT is already NIL by
+  ;; then, so without this an open stream would look like an idle keep-alive connection
+  ;; to a draining STOP, which closes those at once (#388).
+  (streaming nil))
 
 (defun %dispatcher (state)
   "The dispatcher for a request on the connection whose state is STATE: its server's own,
@@ -1192,7 +1200,10 @@ stops on IN-FLIGHT rather than on this value."
   (incf (conn-state-requests state))
   (setf (conn-state-continued state) nil)
   (let ((wanted (and (h1:head-keep-alive? head)
-                     (< (conn-state-requests state) *max-requests-per-connection*))))
+                     (< (conn-state-requests state) *max-requests-per-connection*)
+                     ;; While draining, every response closes its connection, so a client
+                     ;; opens its next one where the platform now routes it (#388).
+                     (not (car (conn-state-drain state))))))
     (%respond conn app state head body wanted)
     t))
 
@@ -1305,6 +1316,9 @@ other direction: a peer that disconnected while its handler ran must not have a 
 written into a closed socket."
   (when (conn-state-in-flight state)
     (setf (conn-state-in-flight state) nil)
+    ;; A request that arrived before a drain began is answered after it: its response still
+    ;; closes the connection, and says so (#388).
+    (when (car (conn-state-drain state)) (setf keep-alive nil))
     (unless (conn-state-done state)
       (let ((kept
               (if (typep result 'condition)
@@ -1352,7 +1366,7 @@ written into a closed socket."
         ;; owns the connection until %STREAM-FINISH ends it -- resuming would start the
         ;; next pipelined request underneath a response still being written, and closing
         ;; would truncate the one we just promised.
-        (cond ((eq kept :streaming))
+        (cond ((eq kept :streaming) (setf (conn-state-streaming state) t))
               (kept (%resume conn app state))
               (t (%close-after conn state)))))))
 
@@ -1400,7 +1414,12 @@ one level up."
   workers
   ;; The open connections, CONN -> CONN-STATE. Touched only on the loop thread: added at
   ;; accept, removed by %FINISH, walked by STOP (#262).
-  live)
+  live
+  ;; The drain box every connection's state shares; see CONN-STATE-DRAIN (#388).
+  (drain (list nil))
+  ;; The listener has been closed, by a draining STOP's second phase, so the third does not
+  ;; close it again.
+  (listener-closed nil))
 
 (defun start (app &key (host "127.0.0.1") (port 8080) workers)
   "Serve APP -- a Ring handler, (lambda (env) -> (status headers body)) -- on HOST:PORT.
@@ -1418,6 +1437,7 @@ Clack -- owning the socket is what makes it available at all."
   (check-type workers (or null (integer 1)))
   (let* ((loop (uv:make-loop))
          (live (make-hash-table :test 'eq))
+         (drain (list nil))
          ;; Set below, once the bind has succeeded. The connection callback reads it only
          ;; after the loop thread starts, which is after that.
          (workers-pool nil)
@@ -1426,7 +1446,8 @@ Clack -- owning the socket is what makes it available at all."
                     loop host port
                     :on-connection
                     (lambda (conn)
-                      (let ((state (%make-conn-state :live live :dispatch dispatch)))
+                      (let ((state (%make-conn-state :live live :dispatch dispatch
+                                                     :drain drain)))
                         (setf (gethash conn live) state)
                         (net:start-reading
                          conn
@@ -1454,7 +1475,7 @@ Clack -- owning the socket is what makes it available at all."
                (log:info "server-uv: listening" :host bound-host :port bound-port)
                (prog1 (%make-server :loop loop :thread thread :listener listener
                                     :host bound-host :port bound-port :live live
-                                    :workers workers-pool)
+                                    :workers workers-pool :drain drain)
                  (setf started t))))
         (when (and workers-pool (not started))
           (%stop-workers workers-pool))))))
@@ -1463,42 +1484,124 @@ Clack -- owning the socket is what makes it available at all."
   "How long STOP waits for the loop thread to close the listener and the open connections
 before it closes the loop regardless.")
 
-(defun stop (server)
+(defun begin-drain (server)
+  "Begin draining SERVER (#388): it keeps accepting and answering, and every response from now
+on closes its connection, so a client opens its next one wherever the platform routes it. A
+draining STOP calls it too. Idempotent; logged once."
+  (unless (car (server-drain server))
+    (setf (car (server-drain server)) t)
+    (log:info "server-uv: draining; still accepting, and every response now closes its connection"
+              :port (server-port server)))
+  server)
+
+(defun draining-p (server)
+  "Whether BEGIN-DRAIN, or a draining STOP, has run on SERVER."
+  (and (car (server-drain server)) t))
+
+(defun %busy-p (state)
+  "Whether the connection whose state is STATE is in the middle of something a draining STOP
+waits for: a request being handled, a streamed response being written, or part of a request
+already received."
+  (or (conn-state-in-flight state)
+      (conn-state-streaming state)
+      (plusp (fill-pointer (conn-state-buffer state)))))
+
+(defun %close-idle (server)
+  "Close every connection of SERVER that is not busy, and return how many are still open.
+LOOP THREAD ONLY. An idle keep-alive connection has nothing to wait for, and while draining no
+new request should start on it."
+  (let ((idle '()))
+    (maphash (lambda (conn state) (unless (%busy-p state) (push (cons conn state) idle)))
+             (server-live server))
+    (loop for (conn . state) in idle do (%finish conn state))
+    (hash-table-count (server-live server))))
+
+(defun %on-loop-value (server thunk what)
+  "THUNK's value, computed on SERVER's loop thread, or NIL if the loop is closing or does not
+answer within *STOP-WAIT-SECONDS*."
+  (let ((done (sb-thread:make-semaphore))
+        (value nil))
+    (when (%on-loop (server-loop server)
+                    (lambda () (unwind-protect (setf value (funcall thunk))
+                                 (sb-thread:signal-semaphore done)))
+                    what)
+      (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*))
+    value))
+
+(defun %drain (server timeout)
+  "The second phase of a draining STOP (#388): stop accepting, close idle connections, and wait
+up to TIMEOUT seconds for the busy ones to finish. Each finishes by closing, because the server
+is draining. Returns how many connections were still open when it stopped waiting."
+  (begin-drain server)
+  (let ((open (%on-loop-value server
+                              (lambda ()
+                                (net:close-listener (server-listener server))
+                                (setf (server-listener-closed server) t)
+                                (%close-idle server))
+                              "a draining stop's listener close")))
+    (log:info "server-uv: stopped accepting; waiting for requests in flight"
+              :open (or open 0) :timeout-seconds timeout)
+    (loop with deadline = (+ (get-internal-real-time) (* timeout internal-time-units-per-second))
+          while (and open (plusp open) (< (get-internal-real-time) deadline))
+          do (sleep 0.05)
+             (setf open (%on-loop-value server (lambda () (%close-idle server))
+                                        "a draining stop's idle check")))
+    (or open 0)))
+
+(defun stop (server &key (drain-timeout 0))
   "Stop SERVER and release its loop. Idempotent.
+
+With DRAIN-TIMEOUT, a number of seconds above zero, STOP drains first (#388): it stops
+accepting, closes idle connections, and waits up to DRAIN-TIMEOUT seconds for requests in
+flight and streamed responses to finish, each closing its connection as it does. Whatever is
+still open then is closed. With the default, 0, it closes everything at once, as it always has.
+SERVE-FOREVER passes a timeout on SIGTERM; a grace period before that, still accepting, is
+SERVE-FOREVER's (see hyperion/server).
 
 Connections still open are closed through %FINISH, on the loop thread, before the loop is
 closed (#262). CLOSE-LOOP would otherwise close their handles as bare pointers, which never
 runs a connection's own close and so never frees its read buffer."
-  (when (server-loop server)
-    ;; A loop already closed by another route leaves nothing to close the listener ON --
-    ;; and CLOSE-LOOP below is what frees it in that case. Refusing to stop because the
-    ;; loop is already gone would make STOP fail exactly when it has least to do.
-    (let* ((done (sb-thread:make-semaphore))
-           (queued (%on-loop (server-loop server)
-                             (lambda ()
-                               (unwind-protect
-                                    (progn
-                                      (net:close-listener (server-listener server))
-                                      (let ((open '()))
-                                        (maphash (lambda (conn state) (push (cons conn state) open))
-                                                 (server-live server))
-                                        (loop for (conn . state) in open
-                                              do (%finish conn state))))
-                                 (sb-thread:signal-semaphore done)))
-                             "the listener close and the open connections")))
-      ;; Waited for, not only queued: CLOSE-LOOP stops the loop thread first, and work still
-      ;; in its queue then never runs.
-      (when queued
-        (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)))
-    (uv:close-loop (server-loop server))
-    (setf (server-loop server) nil))
-  (when (server-workers server)
-    (%stop-workers (server-workers server))
-    (setf (server-workers server) nil))
-  server)
+  (let ((overdue nil))
+    (when (server-loop server)
+      (let ((left (when (and (realp drain-timeout) (plusp drain-timeout))
+                    (%drain server drain-timeout))))
+        (when (and left (plusp left))
+          (setf overdue t)
+          (log:warn "server-uv: closing connections still open at the drain timeout"
+                    :open left :timeout-seconds drain-timeout)))
+      ;; A loop already closed by another route leaves nothing to close the listener ON --
+      ;; and CLOSE-LOOP below is what frees it in that case. Refusing to stop because the
+      ;; loop is already gone would make STOP fail exactly when it has least to do.
+      (let* ((done (sb-thread:make-semaphore))
+             (queued (%on-loop (server-loop server)
+                               (lambda ()
+                                 (unwind-protect
+                                      (progn
+                                        (unless (server-listener-closed server)
+                                          (net:close-listener (server-listener server))
+                                          (setf (server-listener-closed server) t))
+                                        (let ((open '()))
+                                          (maphash (lambda (conn state) (push (cons conn state) open))
+                                                   (server-live server))
+                                          (loop for (conn . state) in open
+                                                do (%finish conn state))))
+                                   (sb-thread:signal-semaphore done)))
+                               "the listener close and the open connections")))
+        ;; Waited for, not only queued: CLOSE-LOOP stops the loop thread first, and work still
+        ;; in its queue then never runs.
+        (when queued
+          (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)))
+      (uv:close-loop (server-loop server))
+      (setf (server-loop server) nil))
+    (when (server-workers server)
+      (%stop-workers (server-workers server) (if overdue 0.1 *stop-wait-seconds*))
+      (setf (server-workers server) nil))
+    server))
 
-(defun %stop-workers (workers)
-  "Stop the worker pool START made for :WORKERS, waiting up to *STOP-WAIT-SECONDS*.
+(defun %stop-workers (workers &optional (wait *stop-wait-seconds*))
+  "Stop the worker pool START made for :WORKERS, waiting up to WAIT seconds, *STOP-WAIT-SECONDS*
+by default. A draining STOP whose timeout has passed waits only briefly: it has already waited
+for the handlers still running, and the drain timeout is the promise it keeps (#388).
 
 POOL:STOP-POOL joins every worker and has no timeout, and a handler that never returns, such
 as a server-sent-events body, would make STOP wait for it forever. So the pool is stopped on
@@ -1510,8 +1613,8 @@ a thread of its own, and STOP stops waiting for it after *STOP-WAIT-SECONDS* and
                                            (unwind-protect (pool:stop-pool workers)
                                              (sb-thread:signal-semaphore done)))
                                          :name "server-uv-stop-workers")))
-    (if (sb-thread:wait-on-semaphore done :timeout *stop-wait-seconds*)
+    (if (sb-thread:wait-on-semaphore done :timeout wait)
         (sb-thread:join-thread stopper :default nil)
         (log:warn "server-uv: worker threads still busy after stop"
                   :workers (pool:pool-workers workers) :busy (pool:pool-busy workers)
-                  :seconds *stop-wait-seconds*))))
+                  :seconds wait))))
