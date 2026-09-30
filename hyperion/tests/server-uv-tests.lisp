@@ -2050,6 +2050,11 @@ property is the response, not STOP's duration."
                         (return (values (parse-integer pid) (parse-integer port)))))
                      ((uiop:string-prefix-p "CHILD-ERROR" line) (return nil)))))))
 
+;; Unix only: Windows has no SIGTERM, and serve-forever installs no handler for it there (a
+;; supervisor stops a Windows process through a console control event or a service STOP). The
+;; drain itself is tested on every OS by the server-level tests above, and the choice of which
+;; stop drains by ONLY-SIGTERM-WAITS-THE-GRACE-PERIOD, which sends no signal.
+#-win32
 (test sigterm-drains-a-serve-forever-process
   "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 2.5 s long
 in flight when SIGTERM arrives: during the grace period the readiness path answers 503 and
