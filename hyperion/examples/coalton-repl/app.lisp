@@ -35,14 +35,8 @@
   (:export #:make-app #:start #:stop #:dev #:serve #:desktop #:main #:*port*))
 (cl:in-package #:hyperion/examples/coalton-repl)
 
-;; Spinneret validates attributes at COMPILE time against a table that is missing a few
-;; legal HTML5 ones -- `autocomplete` on <textarea> among them. Its complaint is a full
-;; WARNING, and ASDF escalates a WARNING to a build failure, so the app would not build
-;; under `asdf:load-system` (it did under `ql:quickload`, which does not escalate --
-;; docs/coalton-patterns.md 8a). `*unvalidated-attribute-prefixes*` is Spinneret's own
-;; escape hatch; extending it beats deleting correct markup to satisfy a library gap.
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (pushnew "autocomplete" spinneret:*unvalidated-attribute-prefixes* :test #'string=))
+;; `autocomplete` on the <textarea> below is valid HTML that Spinneret's attribute table
+;; lacks. hyperion/html exempts it for every app (#439), so this file no longer has to.
 
 ;;; --- session (one per process; a single-user desktop app) ------------------
 
@@ -343,7 +337,7 @@ never matched."
           ;; `autocomplete` IS valid on <textarea> (WHATWG lists it among the
           ;; autocomplete-supporting elements); Spinneret's attribute table just does
           ;; not know that, and warns at compile time. The warning is a full WARNING,
-          ;; which ASDF escalates to a build failure -- see the eval-time push above.
+          ;; which ASDF escalates to a build failure; hyperion/html exempts it (#439).
           (:textarea :id "in" :name "input" :rows 1 :autocomplete "off"
                      :spellcheck "false" :autofocus t
                      :placeholder "(+ 1 2)   —   Enter evaluates; an unclosed ( keeps typing"))

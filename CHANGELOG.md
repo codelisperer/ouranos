@@ -181,6 +181,12 @@ its tag.
   Studio installs the variable chose the toolchain for libuv and the Windows launcher but not for
   mbedTLS. It now uses `scripts/msvc.lisp`, as `build-libuv.lisp` and `build-desktop-app.lisp` do,
   and a path that is not an installation is refused before anything is downloaded. (#410)
+- **hyperion/html: `autocomplete` on `<textarea>` compiles without a WARNING.** It is valid HTML,
+  but Spinneret's attribute table does not list it there and signals a full WARNING while
+  compiling the template. That failed an ASDF build and, under `hyperion/dev`, the reload of the
+  whole file. Hyperion now exempts it, as it already exempts `hx-` and the other client-framework
+  prefixes (`*spinneret-missing-attributes*`), so an app that passed it through `:attrs`, or
+  pushed it onto `spinneret:*unvalidated-attribute-prefixes*` itself, can stop. (#439)
 
 ## v0.1.5 — 2026-09-30
 
