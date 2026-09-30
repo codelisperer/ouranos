@@ -92,6 +92,60 @@ instead of a case passing on the wrong file."
 
 (defun octets->string (octets) (sb-ext:octets-to-string octets :external-format :utf-8))
 
+(defun raw-request (port head-lines &optional (body #()))
+  "Send HEAD-LINES (strings, without their CRLFs) and the octets BODY to PORT on one connection
+that closes after the response, and return the response's body as a string, its status and its
+headers (lowercased names, repeated fields joined with \", \"), in that order, as DEX:GET does.
+
+For the cases dexador cannot send the same way on every OS. On Windows dexador uses WinHTTP,
+which refuses a 96,000-octet header value and a chunked body with no length (ERROR 87, \"The
+parameter is incorrect\"), and sends only the last of two fields with one name. Those were
+failures of the client, measured on the Windows CI leg of #384, not of the server. These bytes
+are what Clack's cases send, on every OS."
+  (let ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8))))
+    (unwind-protect
+         (let ((stream (usocket:socket-stream socket))
+               (crlf (coerce '(#\Return #\Newline) 'string)))
+           (write-sequence (sb-ext:string-to-octets
+                            (format nil "~{~A~A~}~A" (loop for l in (append head-lines (list "Connection: close"))
+                                                           append (list l crlf))
+                                    crlf)
+                            :external-format :latin-1)
+                           stream)
+           (write-sequence body stream)
+           (force-output stream)
+           (let* ((all (read-all stream))
+                  (text (sb-ext:octets-to-string all :external-format :latin-1))
+                  (end (search (concatenate 'string crlf crlf) text))
+                  (lines (uiop:split-string (subseq text 0 end) :separator (string #\Newline)))
+                  (headers (make-hash-table :test 'equal)))
+             (dolist (line (rest lines))
+               (let* ((line (string-right-trim '(#\Return) line))
+                      (c (position #\: line)))
+                 (when c
+                   (let ((name (string-downcase (subseq line 0 c)))
+                         (value (string-trim " " (subseq line (1+ c)))))
+                     (setf (gethash name headers)
+                           (let ((prior (gethash name headers)))
+                             (if prior (concatenate 'string prior ", " value) value)))))))
+             (values (octets->string (subseq all (+ end 4)))
+                     (parse-integer (first lines) :start 9 :end 12)
+                     headers)))
+      (usocket:socket-close socket))))
+
+(defun %chunked (octets size)
+  "OCTETS as a chunked body, in chunks of SIZE, with its last chunk and final CRLF."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (flet ((emit (string) (loop for b across (sb-ext:string-to-octets string :external-format :latin-1)
+                                do (vector-push-extend b out))))
+      (loop for start from 0 below (length octets) by size
+            for end = (min (length octets) (+ start size))
+            do (emit (format nil "~X~C~C" (- end start) #\Return #\Newline))
+               (loop for i from start below end do (vector-push-extend (aref octets i) out))
+               (emit (format nil "~C~C" #\Return #\Newline)))
+      (emit (format nil "0~C~C~C~C" #\Return #\Newline #\Return #\Newline)))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
 (defparameter +big-chunk+
   (with-output-to-string (s) (dotimes (i 12000) (write-string "abcdefgh" s)))
   "The 96,000-character string several request cases send.")
@@ -355,32 +409,40 @@ so this compares the exact joined value."
 
 (test request-big-post-chunked
   "Clack suite, request-tests: \"big POST (chunked)\". The body is sent with
-Transfer-Encoding: chunked, which server-uv decodes since #374."
+Transfer-Encoding: chunked, which server-uv decodes since #374. Deviates from Clack's case in
+its client: the request is written over a raw socket, in 1,024-octet chunks, because WinHTTP,
+dexador's client on Windows, refuses to send a chunked body with no length (see RAW-REQUEST)."
   (testing-app (port (lambda (env)
                        `(200 (:content-type "text/plain; charset=utf-8"
                               :client-content-length ,(getf env :content-length)
                               :client-content-type ,(getf env :content-type))
                              (,(octets->string (read-all (getf env :raw-body)))))))
     (multiple-value-bind (body status headers)
-        (dex:post (localhost port)
-                  :headers '((:content-type . "application/octet-stream") (:content-length . nil))
-                  :content +big-chunk+)
+        (raw-request port (list "POST / HTTP/1.1" "Host: 127.0.0.1"
+                                "Content-Type: application/octet-stream"
+                                "Transfer-Encoding: chunked")
+                     (%chunked (sb-ext:string-to-octets +big-chunk+) 1024))
       (is (eql 200 status))
       (is (null (get-header headers :client-content-length)))
       (is (eql (length +big-chunk+) (length body))))))
 
 (test request-multi-headers
-  "Clack suite, request-tests: \"multi headers (request)\". Deviates from Clack's case only in
-being stricter: Clack matches the regex ^bar,\\s*baz$; this compares the exact joined value."
+  "Clack suite, request-tests: \"multi headers (request)\". Deviates from Clack's case in being
+stricter: Clack matches the regex ^bar,\\s*baz$; this compares the exact joined value. And in
+its client: the two Foo fields are written over a raw socket, because WinHTTP, dexador's client
+on Windows, sends only the last of them (see RAW-REQUEST)."
   (testing-app (port (lambda (env)
                        `(200 (:content-type "text/plain; charset=utf-8")
                              (,(gethash "foo" (getf env :headers))))))
-    (is (equal "bar, baz" (dex:get (localhost port) :headers '(("Foo" . "bar") ("Foo" . "baz")))))))
+    (is (equal "bar, baz" (raw-request port (list "GET / HTTP/1.1" "Host: 127.0.0.1"
+                                                  "Foo: bar" "Foo: baz"))))))
 
 (test request-a-big-header-value
   "Clack suite, request-tests: \"a big header value > 128 bytes\". Its header value is 96,000
 octets, over server-uv's default *MAX-HEAD-OCTETS* of 65,536 (#375), so the case raises the
-setting to 200,000 while it runs; the next test checks the default still refuses it."
+setting to 200,000 while it runs; the next test checks the default still refuses it. Deviates
+from Clack's case in its client: the request is written over a raw socket, because WinHTTP,
+dexador's client on Windows, refuses a header value this long (see RAW-REQUEST)."
   (let ((saved srv:*max-head-octets*))
     (setf srv:*max-head-octets* 200000)
     (unwind-protect
@@ -388,19 +450,20 @@ setting to 200,000 while it runs; the next test checks the default still refuses
                               `(200 (:content-type "text/plain; charset=utf-8")
                                     (,(gethash "x-foo" (getf env :headers))))))
            (multiple-value-bind (body status)
-               (handler-bind ((dex:http-request-failed #'dex:ignore-and-continue))
-                 (dex:get (localhost port) :headers `(("X-Foo" . ,+big-chunk+))))
+               (raw-request port (list "GET / HTTP/1.1" "Host: 127.0.0.1"
+                                       (concatenate 'string "X-Foo: " +big-chunk+)))
              (is (eql 200 status))
              (is (equal +big-chunk+ body))))
       (setf srv:*max-head-octets* saved))))
 
 (test at-the-default-head-limit-a-big-header-value-is-431
   "Not a Clack case: the other half of the one above. At the default *MAX-HEAD-OCTETS* the same
-request is refused with 431, which is the decision on #375."
+request is refused with 431, which is the decision on #375. Written over a raw socket for the
+reason the case above is."
   (is (= 65536 srv:*max-head-octets*))
   (testing-app (port (lambda (env) (declare (ignore env)) '(200 () ("never"))))
-    (is (eql 431 (%status-of (lambda () (dex:get (localhost port)
-                                                 :headers `(("X-Foo" . ,+big-chunk+)))))))))
+    (is (eql 431 (nth-value 1 (raw-request port (list "GET / HTTP/1.1" "Host: 127.0.0.1"
+                                                      (concatenate 'string "X-Foo: " +big-chunk+))))))))
 
 (test request-input-seekable
   "Clack suite, request-tests: \"request -> input seekable\"."
