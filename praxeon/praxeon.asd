@@ -120,6 +120,39 @@
   :components ((:module "tests" :components ((:file "results-db-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/results-db/tests '#:run-tests)))
 
+;;; A Claude Code tool (#452): `report', which reads a user's session transcripts and prints how
+;;; much of what their sessions read came from large tool outputs, and `hook', a PostToolUse
+;;; hook that replaces a large search output with a checked summary. An aux system: it reads a
+;;; user's files and runs a second model, which praxeon's core does not do. Built as an
+;;; executable by praxeon/scripts/build-claude-code.lisp.
+(defsystem "praxeon/claude-code"
+  :description "A Claude Code report on tool-output tokens, and a PostToolUse hook that summarises large search outputs (#452)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; ironclad for the archive's SHA-256 names; praxeon already loads it (signed grants).
+  :depends-on ("praxeon" "com.inuoe.jzon" "ironclad"
+               "aion/dynamic"   ; the provider backend's call thread carries the caller's bindings
+               "aion/log"       ; turned off at hook start, so nothing logs to the hook's stdout
+               (:feature :unix (:require "sb-posix")))  ; the archive's 0700 directory and 0600 files
+  :components ((:module "src/claude-code"
+                :serial t
+                :components ((:file "packages")
+                             (:file "rules")
+                             (:file "transcript")
+                             (:file "report")
+                             (:file "hook")
+                             (:file "main"))))
+  :in-order-to ((test-op (test-op "praxeon/claude-code/tests"))))
+
+(defsystem "praxeon/claude-code/tests"
+  :description "praxeon/claude-code's rules, summary check, hook and report, with no model call (#452)."
+  :depends-on ("praxeon/claude-code" "praxeon" "com.inuoe.jzon" "fiveam" "aion/log"
+               "aion/fs"      ; the tests' temporary directories are removed with delete-tree (#347)
+               (:feature :unix (:require "sb-posix")))  ; chmod for the stand-in programs
+  :components ((:module "tests" :components ((:file "claude-code-tests"))))
+  :perform (test-op (o c) (symbol-call :praxeon/claude-code/tests '#:run-tests)))
+
 ;;; Document retrieval over an app's corpora (#138). An aux system for the reason
 ;;; praxeon/memory-db is one: it stores externally, so it reaches praxeon as an injected seam
 ;;; rather than giving praxeon's core a datastore. Postgres with pgvector only.

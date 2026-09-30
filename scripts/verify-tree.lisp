@@ -195,6 +195,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     :praxeon/results-db/tests
     ;; Document retrieval (#138), registered in the commit that adds it, for the reason above.
     :praxeon/retrieval/tests
+    ;; The Claude Code report and hook (#452), registered in the commit that adds it. No check
+    ;; in it calls a model, so it runs on every leg with nothing configured.
+    :praxeon/claude-code/tests
     ;; The gate's own checkers, tested against trees built to break them (#163). Here
     ;; rather than in the +CHECKERS+ block because that block must not move the check
     ;; count, and a fix for "nothing attests these work" that produces no number would be
