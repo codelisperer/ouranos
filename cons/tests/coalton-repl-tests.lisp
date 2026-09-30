@@ -125,3 +125,83 @@ reader is actually asking about."
          (name (repl:session-package-name s)))
     (is-true (repl:input-complete-p "(a-symbol-only-this-test-mentions)" s))
     (is-true (find-symbol "A-SYMBOL-ONLY-THIS-TEST-MENTIONS" name))))
+
+;;; --- forms that end the process, and stopping an evaluation (#355) -----------
+;;;
+;;; The maintainer typed (exit) into the desktop REPL and it sat "evaluating". The engine now
+;;; returns :EXIT-REQUESTED for the ordinary ways of leaving, without evaluating anything, and
+;;; a front end decides what that means. A long evaluation can be stopped by a time limit or
+;;; by CANCEL-EVALUATION, and the session keeps working.
+
+(defun %loop-forever ()
+  "An input that never finishes on its own."
+  "(lisp (-> Integer) () (cl:loop (cl:sleep 0.02)))")
+
+(test exit-and-quit-are-requests-not-evaluations
+  (let ((s (repl:make-session "COALTON-REPL-TESTS-EXIT")))
+    (dolist (in '("(exit)" "(quit)" "(exit 3)"
+                  "(lisp (-> Integer) () (sb-ext:exit))"
+                  "(lisp (-> Integer) () (sb-ext:exit :abort cl:t))"
+                  "(lisp (-> Integer) () (uiop:quit 0))"
+                  "(lisp (-> Integer) () (cl:funcall 'sb-ext:exit))"))
+      (let ((r (%ev s in)))
+        (is (eq :exit-requested (repl:result-kind r))
+            "~S should be an exit request, got ~S: ~A" in (repl:result-kind r)
+            (repl:result-message r))))))
+
+(test an-exit-request-evaluates-nothing-else-in-the-input
+  (let ((s (repl:make-session "COALTON-REPL-TESTS-EXIT-NOTHING")))
+    (is (eq :exit-requested (repl:result-kind (%ev s "(define before-exit 1) (exit)"))))
+    (is (eq :error (repl:result-kind (%ev s "before-exit")))
+        "the definition in the same input must not have run")
+    ;; The control: the same definition alone does define it.
+    (is (eq :definition (repl:result-kind (%ev s "(define before-exit 1)"))))
+    (is (string= "1" (repl:result-value (%ev s "before-exit"))))))
+
+(test a-name-that-only-contains-exit-is-evaluated
+  (let ((s (repl:make-session "COALTON-REPL-TESTS-EXIT-NAMES")))
+    (is (eq :definition (repl:result-kind (%ev s "(define (exit-code n) (+ n 1))"))))
+    (is (string= "8" (repl:result-value (%ev s "(exit-code 7)"))))
+    (is-false (repl:process-ending-p (list '(cl:list :exit 'cl-user::exit-status))
+                                     (find-package "COALTON-REPL-TESTS-EXIT-NAMES")))))
+
+(defun %seconds-since (start)
+  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+
+(test the-time-limit-stops-an-evaluation-and-the-session-goes-on
+  (let* ((s (repl:make-session "COALTON-REPL-TESTS-LIMIT"))
+         (start (get-internal-real-time))
+         (r (repl:eval-input s (%loop-forever) :time-limit 1)))
+    (is (eq :error (repl:result-kind r)))
+    (is (search "time limit" (repl:result-message r)) "message: ~A" (repl:result-message r))
+    (is (< (%seconds-since start) 5) "stopped after ~,1F s" (%seconds-since start))
+    (is (string= "42" (repl:result-value (%ev s "(* 6 7)"))) "the session evaluates again")))
+
+(test ignore-errors-in-the-users-code-does-not-swallow-the-stop
+  (let ((r (repl:eval-input (repl:make-session "COALTON-REPL-TESTS-IGNORE")
+                            "(lisp (-> Integer) () (cl:loop (cl:ignore-errors (cl:sleep 0.02))))"
+                            :time-limit 1)))
+    (is (eq :error (repl:result-kind r)))
+    (is (search "time limit" (repl:result-message r)) "message: ~A" (repl:result-message r))))
+
+(test a-running-evaluation-can-be-cancelled
+  (let* ((s (repl:make-session "COALTON-REPL-TESTS-CANCEL"))
+         (result nil)
+         (thread (sb-thread:make-thread (lambda () (setf result (%ev s (%loop-forever)))))))
+    (unwind-protect
+         (progn
+           (sleep 1)
+           (let ((busy (%ev s "(+ 1 1)")))
+             (is (eq :error (repl:result-kind busy)))
+             (is (search "still running" (repl:result-message busy))
+                 "a second input while one runs is refused: ~A" (repl:result-message busy)))
+           (is-true (repl:cancel-evaluation s))
+           (sb-thread:join-thread thread :default nil :timeout 10)
+           (is (and result (eq :error (repl:result-kind result))))
+           (is (and result (search "cancelled" (repl:result-message result)))
+               "result: ~A" (and result (repl:result-message result)))
+           (is (string= "42" (repl:result-value (%ev s "(* 6 7)"))) "the session evaluates again")
+           (is-false (repl:cancel-evaluation s) "nothing is running to cancel"))
+      (when (sb-thread:thread-alive-p thread)
+        (repl:cancel-evaluation s)
+        (sb-thread:join-thread thread :default nil :timeout 10)))))

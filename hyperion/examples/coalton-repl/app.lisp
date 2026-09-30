@@ -50,6 +50,16 @@
   "The REPL session backing this app. One global session is right for a single-user
 desktop app; a multi-user server would key a session per HTTP session.")
 
+(defparameter *eval-time-limit* 30
+  "Seconds an evaluation may run before it is stopped with an error result (#355). The stop
+button on the page cancels one sooner.")
+
+(defvar *on-exit-request* nil
+  "What to do when the user asks to leave with (exit) or (quit): a function of no arguments,
+or NIL to refuse. DESKTOP sets it to close the window, which ends the app. SERVE and DEV
+leave it NIL: a REPL served over the network is used from a browser, and one user's (exit)
+must not stop the server for everyone (#355).")
+
 ;;; --- styling + client behavior ---------------------------------------------
 
 (defparameter *examples*
@@ -105,6 +115,13 @@ desktop app; a multi-user server would key a session per HTTP session.")
    '(.ex :display "inline-block" :margin ".15rem .3rem .15rem 0" :padding ".1rem .45rem"
          :background "#161b22" :border "1px solid #30363d" :border-radius "5px" :cursor "pointer")
    '(".ex:hover" :border-color "#58a6ff")
+   '(.stop :margin-left ".6rem" :padding "0 .45rem" :background "#161b22" :color "#ff7b72"
+           :border "1px solid #30363d" :border-radius "5px" :font "inherit" :cursor "pointer")
+   '(.bye :margin ".15rem 0 0 1.4rem" :color "#8b949e")
+   ;; Shown when the backend stops answering (#355): the page is a separate process from the
+   ;; server, so without this it would keep showing "evaluating" over a server that is gone.
+   '("#lost" :flex "none" :padding ".6rem 1.25rem" :background "#3d1f1f" :color "#ffb4ab"
+             :border-bottom "1px solid #5c2b2b")
    ;; `flex-start`, not `center`: the λ stays on the FIRST line of a multi-line form
    ;; instead of drifting to the vertical middle of a box that is several lines tall.
    '(form :flex "none" :display "flex" :align-items "flex-start" :gap ".5rem"
@@ -175,12 +192,32 @@ desktop app; a multi-user server would key a session per HTTP session.")
                   (let ((line (el entry "div" "in" nil)))
                     (el line "span" "prompt" "λ")
                     (el line "code" nil text))
-                  (el entry "div" "working" "evaluating")
+                  (let ((working (el entry "div" "working" "evaluating")))
+                    ;; Stops the evaluation (#355): the server interrupts it and answers
+                    ;; the pending /eval with an error entry, which replaces this one.
+                    (let ((stop (el working "button" "stop" "stop")))
+                      (setf (@ stop type) "button")
+                      (chain stop (add-event-listener
+                                   "click"
+                                   (lambda ()
+                                     (chain window (fetch "/cancel" (create "method" "POST"))))))))
                   (setf pending entry)))
               (clear-pending ()
                 (when pending
                   (chain pending (remove))
-                  (setf pending nil))))
+                  (setf pending nil)))
+              ;; The backend did not answer: the request timed out, or the connection failed
+              ;; because the server has gone (#355). Say so at the top of the page and stop
+              ;; accepting input, rather than leaving "evaluating" on screen.
+              (lost (why)
+                (unless (chain document (get-element-by-id "lost"))
+                  (let ((banner (chain document (create-element "div"))))
+                    (setf (@ banner id) "lost")
+                    (setf (@ banner text-content)
+                          (+ "The REPL's backend " why
+                             ". Close this window and start the REPL again."))
+                    (chain document body (insert-before banner tr))))
+                (when ta (setf (@ ta disabled) true))))
            (when ta
              (chain ta
                     (add-event-listener
@@ -220,7 +257,13 @@ desktop app; a multi-user server would key a session per HTTP session.")
                            ;; `reset` restores the VALUE, not the inline height autogrow
                            ;; set -- without this the box stays as tall as the form sent.
                            (setf (@ ta style height) "auto")
-                           (chain ta (focus)))))))
+                           (chain ta (focus)))))
+               (chain f (add-event-listener
+                         "htmx:sendError"
+                         (lambda () (lost "is not answering; it may have stopped"))))
+               (chain f (add-event-listener
+                         "htmx:timeout"
+                         (lambda () (lost "did not answer in time"))))))
            (chain document
                   (add-event-listener
                    "click"
@@ -233,22 +276,38 @@ desktop app; a multi-user server would key a session per HTTP session.")
 
 ;;; --- rendering (Spinneret) -------------------------------------------------
 
+(defparameter *exit-refused*
+  "This REPL is served over the network, so (exit) and (quit) are refused: they would stop the server for everyone using it. Close the browser tab instead."
+  "The answer to (exit) when *ON-EXIT-REQUEST* is NIL (#355).")
+
 (defun %entry (r)
   "Render one evaluation RESULT as a transcript entry -- the HTMX swap payload, shared by
-the page's initial render and the /eval fragment."
-  (spin:with-html-string
-    (:div :class "entry"
-      (:div :class "in" (:span :class "prompt" "λ") (:code (repl:result-input r)))
-      (ecase (repl:result-kind r)
-        (:value
-         (:div :class "out"
-           (:code :class "val" (repl:result-value r))
-           (when (repl:result-type r)
-             (:span :class "ty" " : " (repl:result-type r)))))
-        (:definition
-         (:div :class "def" "defined " (:code (repl:result-message r))))
-        (:error
-         (:pre :class "err" (repl:result-message r)))))))
+the page's initial render and the /eval fragment.
+
+An :EXIT-REQUESTED result is turned into :CLOSING or an :ERROR here, before the HTML, because
+Spinneret reads a keyword-headed form whose name has a hyphen as a custom HTML element: an
+`(:exit-requested ...)' clause inside WITH-HTML-STRING compiled to an <exit-requested> tag and
+never matched."
+  (multiple-value-bind (kind message)
+      (let ((kind (repl:result-kind r)))
+        (cond ((not (eq kind :exit-requested)) (values kind (repl:result-message r)))
+              (*on-exit-request* (values :closing nil))
+              (t (values :error *exit-refused*))))
+    (spin:with-html-string
+      (:div :class "entry"
+        (:div :class "in" (:span :class "prompt" "λ") (:code (repl:result-input r)))
+        (ecase kind
+          (:value
+           (:div :class "out"
+             (:code :class "val" (repl:result-value r))
+             (when (repl:result-type r)
+               (:span :class "ty" " : " (repl:result-type r)))))
+          (:definition
+           (:div :class "def" "defined " (:code message)))
+          (:error
+           (:pre :class "err" message))
+          (:closing
+           (:div :class "bye" "Closing the REPL.")))))))
 
 (defun %page ()
   (spin:with-html-string
@@ -273,7 +332,11 @@ the page's initial render and the /eval fragment."
             (:p "Try one of these, then edit and re-enter:")
             (dolist (ex *examples*)
               (:code :class "ex" ex))))
+        ;; hx-request's timeout is longer than the server's own time limit, which answers
+        ;; first with an error entry. Past it, the backend is taken to have stopped
+        ;; answering, and the page says so (#355).
         (:form :id "form" :hx-post "/eval" :hx-target "#transcript" :hx-swap "beforeend"
+               :hx-request (format nil "{\"timeout\": ~D}" (* 1000 (+ *eval-time-limit* 15)))
           (:span :class "prompt" "λ")
           ;; A textarea, one row tall until it needs more: an unbalanced form keeps typing
           ;; on the next line, so a definition can be entered the way it is written.
@@ -291,9 +354,21 @@ the page's initial render and the /eval fragment."
 ;;; --- the Clack app ---------------------------------------------------------
 
 (defun %handle-eval (env)
-  (let ((input (or (http:form-param (http:body-string env) "input") "")))
-    (list 200 '(:content-type "text/html; charset=utf-8")
-          (list (%entry (repl:eval-input *session* input))))))
+  (let* ((input (or (http:form-param (http:body-string env) "input") ""))
+         (result (repl:eval-input *session* input :time-limit *eval-time-limit*))
+         (response (list 200 '(:content-type "text/html; charset=utf-8")
+                         (list (%entry result)))))
+    ;; (exit) in the desktop app closes the window, and DESKTOP then stops the server and
+    ;; returns (#355). The response is built first; the window may close before it arrives.
+    (when (and (eq (repl:result-kind result) :exit-requested) *on-exit-request*)
+      (funcall *on-exit-request*))
+    response))
+
+(defun %handle-cancel (env)
+  "Stop the running evaluation, if any; its /eval request then answers with an error entry."
+  (declare (ignore env))
+  (repl:cancel-evaluation *session*)
+  (list 204 '() '()))
 
 (defun %handle-home ()
   (lambda (env)
@@ -311,7 +386,8 @@ which is what keeps poller traffic out of the developer's own REPL output."
   (router:router
    (assets:mount)
    (router:route :get "/" (%handle-home) :name :home)
-   (router:route :post "/eval" #'%handle-eval :name :eval)))
+   (router:route :post "/eval" #'%handle-eval :name :eval)
+   (router:route :post "/cancel" #'%handle-cancel :name :cancel)))
 
 (defun make-app ()
   "The route table above as a Clack handler, wrapped in this app's output style."
@@ -368,8 +444,21 @@ assets/make-icon.ps1, which is the editable source for them."
 
 (defun desktop (&key (title "Coalton REPL") (icon (%icon)))
   "Run the REPL as a NATIVE DESKTOP WINDOW (the M1 capstone): an in-process Hyperion
-server + an out-of-process OS webview (hyperion/desktop:run-app). Blocks until closed."
-  (desk:run-app (make-app) :title title :width 920 :height 660 :shell :webview :icon icon))
+server + an out-of-process OS webview (hyperion/desktop:run-app). Blocks until closed.
+
+(exit) and (quit) close it (#355). Two handler threads, so the stop button's request is
+answered while an evaluation holds the other one; Hunchentoot already has a thread per
+connection and is not asked."
+  ;; SETF, not LET: the handlers run on the server's threads, which do not see a binding
+  ;; made on this one.
+  (let ((server (srv:default-server))
+        (previous *on-exit-request*))
+    (setf *on-exit-request* #'desk:request-close)
+    (unwind-protect
+         (desk:run-app (make-app) :title title :width 920 :height 660 :shell :webview :icon icon
+                                  :server server
+                                  :workers (unless (eq server :hunchentoot) 2))
+      (setf *on-exit-request* previous))))
 
 (defun main ()
   "Native-binary entry: open the REPL desktop window, then quit when it closes."

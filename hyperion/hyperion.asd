@@ -540,6 +540,15 @@
                 :serial t
                 :components ((:file "app")))))
 
+(defsystem "hyperion/examples/coalton-repl/tests"
+  :description "The Coalton REPL example's answers to (exit), a long evaluation and a cancel (#355)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/examples/coalton-repl" "hyperion" "cons/coalton-repl" "quri" "fiveam")
+  :components ((:module "examples/coalton-repl"
+                :components ((:file "tests"))))
+  :perform (test-op (op c) (uiop:symbol-call :hyperion/examples/coalton-repl/tests :run-tests)))
+
 ;;; INTERIM; project tooling moves to `cons` (see docs/adr/0007). Retire this system
 ;;; once `cons build|serve` reach parity -- Hyperion is a library, not a CLI.
 ;;; The `hyperion` command-line tool (cargo-for-Lisp). A separate system so the
@@ -594,6 +603,7 @@
                              ;; AFTER csrf-tests (its suite and %QUIETLY) and server-tests
                              ;; (%SRV-OK-APP).
                              (:file "same-origin-tests")
+                             (:file "desktop-window-tests")
                              (:file "ratelimit-tests")
                              (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")
