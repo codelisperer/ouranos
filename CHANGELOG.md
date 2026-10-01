@@ -88,8 +88,10 @@ its tag.
   - Stop a subject's observers before `forget-subject`, with `stop-observer` on the
     `running-observer` of each of its threads; a window being distilled during the erasure can
     be written after it.
-  - A skipped window retried after later windows is written to the thread, and nothing from it
-    is promoted.
+  - A skipped window is retried only while no later window has been written to the thread, and
+    then it is distilled and promoted as if it had never been skipped. Once an observation from a
+    later window is in the thread, the skipped window is closed: it is never retried, and
+    `observer-skipped` shows it as `(from through tries :closed)`.
   - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
     the name of one.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also

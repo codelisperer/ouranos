@@ -4868,28 +4868,100 @@ once each time."
     (obs:await-observer observer :timeout 10)
     (is (null (obs:running-observer store "member-1" "conv-7")) "released when it ends")))
 
-(test a-retried-skipped-window-promotes-nothing
-  "Window 1 fails and is skipped; window 2 says Lisbon, which is promoted. When window 1 is
-retried it says Porto. Window 2 came before it, so the retry is written to the thread and
-nothing from it is promoted beside Lisbon."
+;;; A skipped window is retried, distilled and promoted as if it had never been skipped, only
+;;; while no later window has been written to the thread; after that it is closed (#462's fifth
+;;; review).
+
+(defparameter +allergy+ "Is allergic to penicillin.")
+
+(defclass promotion-outage-store (mem:in-memory-store)
+  ((failures :initarg :failures :accessor promotion-failures))
+  (:documentation "Fails its first FAILURES writes of a fact about the subject, as a store that is
+down for a while during promotion."))
+
+(defmethod mem:remember :before ((store promotion-outage-store) subject content
+                                 &key provenance kind value tokens valid-from thread)
+  (declare (ignore subject content provenance kind value tokens valid-from))
+  (when (and (null thread) (plusp (promotion-failures store)))
+    (decf (promotion-failures store))
+    (error "the store is down")))
+
+(defun %allergy-observer (store provider &rest keys)
+  (apply #'obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+         :max-attempts 2 :promote (constantly t) keys))
+
+(test a-skipped-window-with-nothing-after-it-is-retried-and-promoted
+  "The only window is skipped. Retried at the next turn, by the same observer or a new one, it is
+distilled and promoted as any window is; the same when it was skipped because promotion failed."
+  ;; An outage at the provider; the same observer retries at the next turn.
   (let* ((store (mem:make-in-memory-store))
-         ;; Two attempts at window 1 both fail; a window given up on is retried by later runs
-         ;; while fewer than MAX-ATTEMPTS runs have tried it.
-         (provider (make-instance 'failing-scripted :failures 2
-                                                    :script (list (%call-with (%ob "Lives in Lisbon." "fact"))
-                                                                  (%call-with (%ob "Lives in Porto." "fact")))))
-         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
-                                                                         :max-attempts 2 :promote (constantly t)
-                                                                         :promote-accept (constantly t))))
-    (obs:observe-turn observer (%history 12))
+         (observer (%allergy-observer store (make-instance 'failing-scripted :failures 2
+                                                                            :script (list (%call-with (%ob +allergy+ "fact")))))))
+    (obs:observe-turn observer (%history 6))
     (obs:await-observer observer :timeout 10)
     (is (equal '((1 6 1)) (obs:observer-skipped observer)))
-    (is (equal '("Lives in Lisbon.") (%facts store)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (null (obs:observer-skipped observer)))
+    (is (equal (list +allergy+) (%thread-contents store)))
+    (is (equal (list +allergy+) (%facts store)) "promoted, by the same observer"))
+  ;; The same outage; a new observer retries it.
+  (let ((store (mem:make-in-memory-store)))
+    (let ((first (%allergy-observer store (make-instance 'failing-scripted :failures 2 :script nil))))
+      (obs:observe-turn first (%history 6))
+      (obs:await-observer first :timeout 10))
+    (let ((second (%allergy-observer store (%provider-returning (%call-with (%ob +allergy+ "fact"))))))
+      (obs:observe-turn second (%history 6))
+      (obs:await-observer second :timeout 10)
+      (is (equal (list +allergy+) (%facts store)) "promoted, by a new observer")))
+  ;; Promotion failed on both attempts; the store is back at the next turn.
+  (let* ((store (make-instance 'promotion-outage-store :failures 2))
+         (reply (%call-with (%ob +allergy+ "fact")))
+         (observer (%allergy-observer store (%provider-returning reply reply reply))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (is (null (%facts store)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal (list +allergy+) (%thread-contents store)) "the thread observation is not written twice")
+    (is (equal (list +allergy+) (%facts store)) "promoted once the store is back")))
+
+(defun %closed-run (promote-accept)
+  "Window 1 (Porto) is skipped; window 2 says Lisbon. At the next turn window 3 corrects Lisbon to
+Faro. Returns the store and the observer."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (%allergy-observer store (make-instance 'failing-scripted :failures 2
+                                                                            :script (list (%call-with (%ob "Lives in Lisbon." "fact"))))
+                                      :accept (constantly t) :promote-accept promote-accept)))
     (obs:observe-turn observer (%history 12))
     (obs:await-observer observer :timeout 10)
-    (is (null (obs:observer-skipped observer)) "the retry wrote the window")
-    (is (member "Lives in Porto." (%thread-contents store) :test #'string=))
-    (is (equal '("Lives in Lisbon.") (%facts store)))))
+    ;; Only window 3's answer: a closed window 1 makes no model call.
+    (setf (scripted-script (obs::observer-provider observer))
+          (list (funcall (%corrects "Lives in Lisbon." "Lives in Faro.") store "conv-7")))
+    (obs:observe-turn observer (%history 18))
+    (obs:await-observer observer :timeout 10)
+    (values store observer)))
+
+(test a-skipped-window-with-a-later-window-written-is-closed-not-retried
+  "Window 1 is skipped and window 2 written. At the next turn window 1 is closed rather than
+retried, so the thread never holds the older Porto beside Lisbon or its correction, and after
+Faro the thread and the subject each hold one current statement of where the member lives."
+  (dolist (case (list (list (constantly nil) '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
+    (destructuring-bind (promote-accept facts) case
+      (multiple-value-bind (store observer) (%closed-run promote-accept)
+        (is (equal '((1 6 1 :closed)) (obs:observer-skipped observer)))
+        (is (equal '("Lives in Faro.") (%thread-contents store)) "one current observation in the thread")
+        (is (equal facts (%facts store)) "one current fact about the subject")))))
+
+(test a-closed-window-is-not-retried-on-a-later-turn
+  "A closed window starts no run, and a new observer reads it from the store as closed."
+  (multiple-value-bind (store observer) (%closed-run (constantly nil))
+    (is (null (obs:observe-turn observer (%history 18))) "nothing is due")
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+      (is (= 18 mark))
+      (is (equal '((1 6 1 :closed)) skipped)))
+    (is (null (obs:observe-turn (%allergy-observer store (%provider-returning)) (%history 18))))))
 
 (test a-restatement-of-an-old-value-does-not-revert-its-correction
   "The subject's Porto was corrected to Lisbon. Another conversation says Porto, correcting
