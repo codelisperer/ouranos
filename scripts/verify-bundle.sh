@@ -100,6 +100,13 @@ fi
 
 BUNDLE_ABS=$(cd "$BUNDLE" && pwd)
 
+# A library whose licence is not permissive travels with its source: libgit2's pinned tarball
+# under SOURCES/ and its licence under LICENSES/ (ADR-0013's amendment of 2026-10-01, #429).
+# On this machine, which built the bundle and has SBCL; the clean room only runs the app.
+sbcl --script "$(cd "$(dirname "$0")" && pwd)/check-bundle-sources.lisp" "$BUNDLE_ABS" || {
+  echo "verify-bundle: FAILED -- the bundle lacks a source or licence a carried library requires" >&2
+  exit 1; }
+
 # The app binary: the one executable that is neither the launcher nor a shared library.
 BIN=$(find "$BUNDLE_ABS" -maxdepth 1 -type f -perm -u+x \
         ! -name 'hyperion-view*' ! -name '*.so' ! -name '*.so.*' \

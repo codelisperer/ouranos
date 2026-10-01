@@ -95,6 +95,15 @@ its tag.
   stylesheet is served by `hyperion/assets` as `:calendar`: link `(hyperion/assets:url
   :calendar)`. `hyperion/assets` gains `first-party-p` to tell the tree's own files from the
   vendored ones. See `hyperion/docs/calendar.md`.
+- **Desktop bundles carry libgit2 when the app loads `aion/libgit`, with its source and its
+  licence** (#429). `scripts/build-desktop-app.lisp` wakes and carries libgit2 as it does libuv and
+  mbedTLS. libgit2 is GPLv2 with a linking exception, so the bundle also carries the pinned
+  source tarball under `SOURCES/` and `COPYING` under `LICENSES/`, as ADR-0013's amendment of
+  2026-10-01 records. The bundler refuses to build a bundle whose tarball's sha256 is not the
+  one `libgit2.pin` records. `scripts/check-bundle-sources.lisp BUNDLE` checks a built bundle, and
+  the three verify-bundle scripts run it. In a bundle, `aion/libgit` no longer looks in the source
+  tree's `vendor/libgit2`, as `aion/uv` and `aion/tls` already did not (#472). The bundler now
+  also finds licence files named `COPYING*`, and those beside the library in `lib/`.
 
 ### Fixed
 

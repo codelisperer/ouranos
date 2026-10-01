@@ -169,7 +169,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  :depends-on ("cffi")
+  :depends-on ("cffi"
+               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
   :serial t
   :components ((:module "src/libgit"
                 :serial t
@@ -181,7 +182,8 @@
 
 (defsystem "aion/libgit/tests"
   :description "Tests for aion/libgit. Requires a built libgit2 (scripts/build-libgit2.lisp), and the git command, which checks what libgit2 wrote."
-  :depends-on ("aion/libgit" "aion/fs" "fiveam" (:feature :unix (:require :sb-posix)))
+  :depends-on ("aion/libgit" "aion/fs" "fiveam" (:feature :unix (:require :sb-posix))
+               "aion/platform")   ; the tests bind *search-source-tree* (#429, #472)
   :serial t
   :components ((:module "tests"
                 :serial t

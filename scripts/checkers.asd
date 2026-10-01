@@ -48,5 +48,6 @@ that hides which scripts it is about.")
   :components ((:module "tests"
                 :serial t
                 :components ((:file "checkers") (:file "dump-image") (:file "carry-natives")
-                             (:file "windows-launcher") (:file "lazy-natives"))))
+                             (:file "windows-launcher") (:file "lazy-natives")
+                             (:file "bundle-sources"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))

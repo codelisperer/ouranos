@@ -184,6 +184,12 @@ jobs:
       - name: Build the pinned mbedTLS
         run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
 
+      # And libgit2, which the bundler wakes when the app loads aion/libgit (#429). A bundle
+      # that carries it also carries its pinned source tarball, which this step keeps under
+      # vendor/libgit2/src/ (ADR-0013's amendment of 2026-10-01).
+      - name: Build the pinned libgit2
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
+
       - name: Dump the app image
         shell: bash
         run: |

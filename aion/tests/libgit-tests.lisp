@@ -380,3 +380,64 @@ from the copy that predates the git add."
     (git-cli dir "add" "b.txt")
     (git:commit repo "b, staged by git" :author "Aion Test" :email "aion@example.invalid")
     (is (equal '("a.txt" "b.txt") (lines (git-cli dir "ls-tree" "-r" "--name-only" "HEAD"))))))
+
+;;; --- a desktop bundle does not search the source tree (#429 step 3, #472) -------------
+
+(defun %vendored-libgit-candidates (candidates)
+  "The entries of CANDIDATES in the source tree's vendor/libgit2."
+  (remove-if-not (lambda (c) (search "vendor/libgit2/lib/" (substitute #\/ #\\ c))) candidates))
+
+(test a-bundle-does-not-search-the-source-tree-for-libgit2
+  "A desktop app's image has AION/PLATFORM:*SEARCH-SOURCE-TREE* NIL, so libgit2's search leaves
+out vendor/libgit2, which exists only where the app was built."
+  (let ((tree (let ((aion/platform:*search-source-tree* t))
+                (%vendored-libgit-candidates (git::%candidates)))))
+    (if (null tree)
+        (skip "aion's source directory is unknown here, so there is no vendored path to leave out")
+        (progn
+          (is-true tree "control: by default the source tree is searched")
+          (let ((aion/platform:*search-source-tree* nil))
+            (is (null (%vendored-libgit-candidates (git::%candidates)))
+                "in a bundle it is not: ~S" (git::%candidates)))))))
+
+(defun %libgit2-loaded-in-a-fresh-image (search-source-tree)
+  "Start a fresh image that loads aion/libgit, sets AION/PLATFORM:*SEARCH-SOURCE-TREE* to
+SEARCH-SOURCE-TREE, and loads libgit2 with AION_LIBGIT_LIBRARY empty. Returns the path it
+loaded, or :FAILED. A fresh image, because this one already has libgit2 loaded."
+  (let ((out (uiop:run-program
+              (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                    "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                    "--eval" "(require :asdf)"
+                    "--eval" (format nil "(load ~S)"
+                                     (uiop:native-namestring
+                                      (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+                    "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :aion/libgit))"
+                    "--eval" "(setf (uiop:getenv \"AION_LIBGIT_LIBRARY\") \"\")"
+                    "--eval" (format nil "(setf aion/platform:*search-source-tree* ~:[nil~;t~])"
+                                     search-source-tree)
+                    "--eval" "(format t \"~&LOADED ~A~%\" (handler-case (aion/libgit:load-libgit2) (error () :failed)))")
+              :input nil :output :string :error-output nil :ignore-error-status t)))
+    (let ((line (find-if (lambda (l) (uiop:string-prefix-p "LOADED " l))
+                         (uiop:split-string out :separator '(#\Newline #\Return)))))
+      (if (null line)
+          (list :no-answer out)
+          (let ((value (subseq line 7)))
+            (if (string-equal value "FAILED") :failed value))))))
+
+(test a-bundle-without-its-libgit2-does-not-load-the-source-trees
+  "With no copy beside the image and a vendor/libgit2 copy present, a bundle's image fails to
+load libgit2, or loads one that is not the tree's. CONTROL: any other image loads the tree's."
+  (let ((tree (remove-if-not #'probe-file
+                             (let ((aion/platform:*search-source-tree* t))
+                               (%vendored-libgit-candidates (git::%candidates))))))
+    (if (null tree)
+        (skip "no built libgit2 in vendor/ here, so nothing to leave out")
+        (let ((bundle (%libgit2-loaded-in-a-fresh-image nil))
+              (other (%libgit2-loaded-in-a-fresh-image t)))
+          (flet ((from-tree-p (path)
+                   (and (stringp path)
+                        (search "vendor/libgit2/lib/" (substitute #\/ #\\ path)))))
+            (is (and (not (consp bundle)) (not (from-tree-p bundle)))
+                "a bundle's image must not load the source tree's libgit2: ~S" bundle)
+            (is (from-tree-p other)
+                "control: any other image loads the vendored copy: ~S" other))))))
