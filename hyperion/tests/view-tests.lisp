@@ -136,6 +136,123 @@ resolution moves, this suite must move with it or say so."
 ;;; These need no launcher binary: they check which file run-app would pass as --icon, using
 ;;; directories and files made here.
 
+;;; --- where the window goes (#485) -------------------------------------------------
+;;;
+;;; On Windows the window used to open at the CW_USEDEFAULT cascade point, often partly below
+;;; the work area. hyperion-view now centres it in the work area and shrinks it to fit
+;;; (window-placement.h). --placement prints that arithmetic for given numbers without opening
+;;; a window, so it is checked here on every OS. The numbers are work area left, top, right and
+;;; bottom; client width and height in logical pixels; DPI; and what the frame adds.
+
+(defun %placement (&rest numbers)
+  "What `hyperion-view --placement NUMBERS' prints, as a list of four integers, or the exit
+code when it did not exit 0."
+  (multiple-value-bind (code out)
+      (apply #'run-launcher "--placement" (mapcar #'princ-to-string numbers))
+    (if (eql code 0)
+        (mapcar #'parse-integer
+                (uiop:split-string (string-trim '(#\Newline #\Return #\Space) out)))
+        code)))
+
+(test a-window-that-fits-is-centred-in-the-work-area
+  (with-launcher
+    ;; The display in #485: 2560x1600 at 150% (DPI 144), work area 1528 high, and a 1280x860
+    ;; window, which is 1920x1290 at that DPI and 1936x1346 with its frame.
+    (is (equal '(312 91 1936 1346) (%placement 0 0 2560 1528 1280 860 144 16 56))
+        "the display from #485")
+    ;; 100% scaling, a taskbar at the top: the work area starts at y 40.
+    (is (equal '(352 140 1216 839) (%placement 0 40 1920 1080 1200 800 96 16 39)))
+    ;; A second monitor to the left of the first: its work area has negative coordinates.
+    (is (equal '(-1568 100 1216 839) (%placement -1920 0 0 1040 1200 800 96 16 39)))))
+
+(test a-window-larger-than-the-work-area-is-shrunk-to-fit-it
+  (with-launcher
+    ;; Too tall at 150%: 1200 logical is 1800 physical, 1856 with the frame, in 1528.
+    (is (equal '(312 0 1936 1528) (%placement 0 0 2560 1528 1280 1200 144 16 56)))
+    ;; Too wide and too tall on a small screen.
+    (is (equal '(0 0 1366 728) (%placement 0 0 1366 728 1920 1080 96 16 39)))))
+
+(test placement-refuses-what-is-not-nine-integers
+  (with-launcher
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16)) "eight numbers")
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16 56 7)) "ten numbers")
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 "x" 16 56)) "a word in place of a number")
+    (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--placement"
+                             "0" "0" "2560" "1528" "1280" "860" "144" "16" "56"))
+        "a URL before it: --placement is a mode of its own, not an option of a window")))
+
+(test report-placement-refuses-what-is-not-two-positive-integers
+  ;; Each of these is refused before webview_create, so no window is made on any OS. atoi read
+  ;; "1280px" as 1280 and went on to create a window (review of train 21).
+  (with-launcher
+    (flet ((code (&rest args) (nth-value 0 (apply #'run-launcher "--report-placement" args))))
+      (is (eql 2 (code "1280px" "860")) "a number with a suffix")
+      (is (eql 2 (code "1280" "x")) "a word")
+      (is (eql 2 (code "0" "860")) "zero")
+      (is (eql 2 (code "-1280" "860")) "a negative number")
+      (is (eql 2 (code "99999999999999999999" "860")) "a number past INT_MAX")
+      (is (eql 2 (code "1280")) "one number")
+      (is (eql 2 (code "1280" "860" "1")) "three numbers"))))
+
+;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
+;;;
+;;; --placement checks the arithmetic, but returns before a window exists. --report-placement
+;;; creates the window, sizes and places it as a launch does, and prints what Windows reports.
+;;; It is started hidden: Windows applies the starting process's hidden show state to the new
+;;; process's first ShowWindow, so the window webview.h shows is not displayed. Even so it is a
+;;; real window, so it runs only where the CI environment variable is set, on a runner, and not
+;;; on a developer's machine.
+
+(defun %report-placement (width height)
+  "Run `hyperion-view --report-placement WIDTH HEIGHT' hidden, through PowerShell's Start-Process
+-WindowStyle Hidden. Returns (values EXIT-CODE OUTPUT)."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (merge-pathnames (format nil "hyperion-view-report-~36R/" (random (expt 2 40)))
+                                (uiop:temporary-directory))))
+         (out (merge-pathnames "out.txt" dir)))
+    (ensure-directories-exist dir)
+    (unwind-protect
+         (let ((code (nth-value
+                      2 (uiop:run-program
+                         (list "pwsh" "-NoProfile" "-NonInteractive" "-Command"
+                               (format nil "$p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D' -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
+                                       (uiop:native-namestring (launcher)) width height
+                                       (uiop:native-namestring out)))
+                         :output nil :error-output nil :ignore-error-status t))))
+           (values code (if (probe-file out) (uiop:read-file-string out) "")))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(test the-window-is-placed-in-the-work-area-on-a-real-window
+  "On a CI Windows runner, a real window is placed where --placement says, inside the work area,
+and Windows reports that rectangle."
+  #-win32 (skip "The placement calls are Windows only")
+  #+win32
+  (with-launcher
+    (if (null (uiop:getenvp "CI"))
+        (skip "Runs only on CI (CI is not set here): it creates a window")
+        (multiple-value-bind (code out) (%report-placement 1280 860)
+          (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
+          (let ((line (find-if (lambda (l) (uiop:string-prefix-p "work " l))
+                               (uiop:split-string out :separator '(#\Newline #\Return)))))
+            (is-true line "it printed a report: ~S" out)
+            (when line
+              (let* ((n (mapcar #'parse-integer
+                                (remove-if-not (lambda (tok) (and (plusp (length tok))
+                                                                  (or (digit-char-p (char tok 0))
+                                                                      (char= (char tok 0) #\-))))
+                                               (uiop:split-string line :separator '(#\Space)))))
+                     (work (subseq n 0 4)) (dpi (nth 4 n)) (frame (subseq n 5 7))
+                     (placement (subseq n 7 11)) (window (subseq n 11 15)))
+                (is (equal placement (apply #'%placement (append work (list 1280 860 dpi) frame)))
+                    "the real calls computed what --placement computes for the same numbers: ~S" line)
+                (destructuring-bind (x y w h) placement
+                  (is (equal window (list x y (+ x w) (+ y h)))
+                      "Windows reports the window at the placement: ~S" line))
+                (destructuring-bind (wl wt wr wb) work
+                  (destructuring-bind (l tp r b) window
+                    (is (and (<= wl l) (<= wt tp) (<= r wr) (<= b wb))
+                        "and inside the work area: ~S" line))))))))))
+
 (defun %fresh-dir ()
   (let ((dir (uiop:ensure-directory-pathname
               (merge-pathnames (format nil "hyperion-icon-~36R/" (random (expt 2 40) (make-random-state t)))

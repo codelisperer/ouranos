@@ -14,12 +14,15 @@
 // SBCL image post-processed), and on macOS is outranked by a bundle's CFBundleIconFile
 // once the app is bundled (#72). Format per platform: .ico on Windows, anything GdkPixbuf
 // reads (.png) on Linux, anything NSImage reads on macOS.
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 #include "webview.h"
+#include "window-placement.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -266,6 +269,73 @@ static void set_window_icon(webview_t w, const char *path) {
 //
 // It is printed here, before webview_create, because everything after that point needs a
 // window server. A --help that requires a display is not a --help.
+// Put the window in the work area of the monitor it opened on: centred, and shrunk to fit
+// when it is larger (window-placement.h, #485). Windows only. On macOS webview_set_size
+// already centres the window ([NSWindow center]); on Linux the window manager places it.
+//
+// With REPORT, it also prints one line there: the work area, the DPI, what the frame adds, the
+// placement computed, and the window's rectangle as Windows reports it after SetWindowPos --
+// for --report-placement, which is how a test sees the real calls (review of train 20). A
+// step that fails is reported as "placement-failed STEP" and nothing is moved.
+static bool place_window(webview_t w, int width, int height, std::FILE *report = nullptr) {
+#if defined(_WIN32)
+  auto failed = [report](const char *step) {
+    if (report != nullptr) std::fprintf(report, "placement-failed %s\n", step);
+    return false;
+  };
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd == nullptr) return failed("webview_get_window");
+  MONITORINFO info;
+  info.cbSize = sizeof info;
+  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info))
+    return failed("GetMonitorInfoW");
+  RECT outer, client;
+  if (!GetWindowRect(hwnd, &outer) || !GetClientRect(hwnd, &client))
+    return failed("GetWindowRect");
+  // What the frame adds, measured on the window webview_set_size has just sized, rather than
+  // recomputed: it already reflects the window's style and DPI.
+  long frame_width = (outer.right - outer.left) - (client.right - client.left);
+  long frame_height = (outer.bottom - outer.top) - (client.bottom - client.top);
+  long dpi = static_cast<long>(GetDpiForWindow(hwnd));
+  window_placement p = place_in_work_area(info.rcWork.left, info.rcWork.top,
+                                          info.rcWork.right, info.rcWork.bottom, width, height,
+                                          dpi, frame_width, frame_height);
+  if (!SetWindowPos(hwnd, nullptr, p.x, p.y, p.width, p.height, SWP_NOZORDER | SWP_NOACTIVATE))
+    return failed("SetWindowPos");
+  if (report != nullptr) {
+    RECT placed;
+    if (!GetWindowRect(hwnd, &placed)) return failed("GetWindowRect after SetWindowPos");
+    std::fprintf(report,
+                 "work %ld %ld %ld %ld dpi %ld frame %ld %ld placement %ld %ld %ld %ld "
+                 "window %ld %ld %ld %ld\n",
+                 static_cast<long>(info.rcWork.left), static_cast<long>(info.rcWork.top),
+                 static_cast<long>(info.rcWork.right), static_cast<long>(info.rcWork.bottom), dpi,
+                 frame_width, frame_height, p.x, p.y, p.width, p.height,
+                 static_cast<long>(placed.left), static_cast<long>(placed.top),
+                 static_cast<long>(placed.right), static_cast<long>(placed.bottom));
+  }
+  return true;
+#else
+  (void)w;
+  (void)width;
+  (void)height;
+  if (report != nullptr) std::fprintf(report, "placement-unsupported\n");
+  return false;
+#endif
+}
+
+// TEXT as a positive int, in *OUT. False unless all of TEXT is a decimal number from 1 to
+// INT_MAX: std::atoi reads "1280px" as 1280 and "x" as 0, and says nothing about either.
+static bool parse_positive_int(const char *text, int *out) {
+  errno = 0;
+  char *end = nullptr;
+  long value = std::strtol(text, &end, 10);
+  if (end == text || *end != '\0' || errno == ERANGE || value <= 0 || value > INT_MAX)
+    return false;
+  *out = static_cast<int>(value);
+  return true;
+}
+
 static void print_usage(std::FILE *out) {
   std::fprintf(out,
                "usage: hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]\n"
@@ -277,6 +347,14 @@ static void print_usage(std::FILE *out) {
                "  --icon   path to a window icon    (optional, may appear anywhere)\n"
                "\n"
                "  --help, -h   print this and exit\n"
+               "  --placement WL WT WR WB CW CH DPI FW FH\n"
+               "               print, as X Y WIDTH HEIGHT, where a window with a client area of\n"
+               "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
+               "               put in the work area WL,WT-WR,WB; then exit (#485)\n"
+               "  --report-placement WIDTH HEIGHT\n"
+               "               Windows: create the window, size and place it as a launch does,\n"
+               "               print the work area, DPI, frame, placement and the window's\n"
+               "               rectangle, then exit without running it. Start it hidden.\n"
                "\n"
                "Hyperion's native webview launcher. hyperion/desktop:run-app starts a\n"
                "server on localhost and launches this pointed at it.\n");
@@ -346,6 +424,64 @@ int main(int argc, char **argv) {
     if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
       print_usage(stdout);
       return 0;
+    } else if (std::strcmp(argv[i], "--report-placement") == 0) {
+      // The real calls, on a real window, which --placement cannot reach: it returns before
+      // webview_create. The window is shown by webview.h when it is created; a caller that
+      // starts this with a hidden show state (STARTF_USESHOWWINDOW, SW_HIDE) keeps it hidden,
+      // because Windows applies that to a process's first ShowWindow. Exactly WIDTH and
+      // HEIGHT, and nothing else, for the reason given for --placement below.
+      if (i != 1 || argc != 4) {
+        std::fprintf(stderr,
+                     "hyperion-view: --report-placement takes WIDTH and HEIGHT and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      int rw = 0;
+      int rh = 0;
+      if (!parse_positive_int(argv[2], &rw) || !parse_positive_int(argv[3], &rh)) {
+        std::fprintf(stderr,
+                     "hyperion-view: --report-placement: WIDTH and HEIGHT must be positive integers\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      webview_t rv = webview_create(0, nullptr);
+      if (rv == nullptr) {
+        // No window was created (no display, or no WebView2), so there is nothing to place.
+        std::printf("placement-failed webview_create\n");
+        std::fflush(stdout);
+        return 1;
+      }
+      webview_set_size(rv, rw, rh, WEBVIEW_HINT_NONE);
+      bool ok = place_window(rv, rw, rh, stdout);
+      std::fflush(stdout);
+      webview_destroy(rv);
+      return ok ? 0 : 1;
+    } else if (std::strcmp(argv[i], "--placement") == 0) {
+      // The placement arithmetic on its own, with no window: for the tests, which check it on
+      // every OS, and for anyone asking why a window opened where it did. It is a mode of its
+      // own, so it must be the only option and have exactly nine values: anything before it or
+      // after them would otherwise be ignored without a word, as surplus arguments never are.
+      if (i != 1 || argc != 11) {
+        std::fprintf(stderr,
+                     "hyperion-view: --placement takes exactly 9 integers and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      long v[9];
+      for (int k = 0; k < 9; k++) {
+        char *end = nullptr;
+        v[k] = std::strtol(argv[i + 1 + k], &end, 10);
+        if (end == argv[i + 1 + k] || *end != '\0') {
+          std::fprintf(stderr, "hyperion-view: --placement: not an integer: %s\n\n",
+                       argv[i + 1 + k]);
+          print_usage(stderr);
+          return 2;
+        }
+      }
+      window_placement p =
+          place_in_work_area(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+      std::printf("%ld %ld %ld %ld\n", p.x, p.y, p.width, p.height);
+      return 0;
     } else if (std::strcmp(argv[i], "--icon") == 0) {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "hyperion-view: --icon needs a path\n\n");
@@ -378,6 +514,7 @@ int main(int argc, char **argv) {
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
   webview_set_size(w, width, height, WEBVIEW_HINT_NONE);
+  place_window(w, width, height);
   set_window_icon(w, icon);
   // After webview_create (NSApp exists), before webview_run ([NSApp run]).
   install_main_menu(title);
