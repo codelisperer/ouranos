@@ -214,19 +214,57 @@ that skips this deadlocks against any out-of-process server that calls back into
       (error 'apartment-error :detail "the apartment thread did not start"))
     (setf *apartment* apartment)))
 
+(defun %stop-apartment (apartment timeout)
+  "Stop APARTMENT and wait up to TIMEOUT seconds (NIL: for ever) for its thread to finish.
+Returns true when the thread finished. The wakeup event is closed only then: a thread still
+running, in a long call inside a work item for example, goes on waiting on it."
+  (let ((finished t))
+    (when (and apartment (not (eq (apartment-state apartment) :stopped)))
+      (setf (apartment-state apartment) :stopping)
+      (%set-event (w:handle-pointer (apartment-event apartment)))
+      ;; With :DEFAULT given, JOIN-THREAD returns the reason it gave up as a second value,
+      ;; :TIMEOUT among them, rather than signalling.
+      (let ((reason (nth-value 1 (ignore-errors
+                                  (sb-thread:join-thread (apartment-thread apartment)
+                                                         :default nil :timeout timeout)))))
+        (setf finished (not (or (eq reason :timeout)
+                                (sb-thread:thread-alive-p (apartment-thread apartment))))))
+      (when finished
+        ;; CHECKED, via the foundation's handle. A failing CloseHandle here means the handle
+        ;; was already invalid, which is a bug upstream of this line and exactly the kind
+        ;; that otherwise surfaces much later as a leak.
+        (w:close-handle (apartment-event apartment))
+        (setf (apartment-event apartment) nil)))
+    (when (eq apartment *apartment*) (setf *apartment* nil))
+    finished))
+
 (defun stop-apartment (&optional (apartment *apartment*))
   "Stop the apartment and wait for its thread to finish. Idempotent."
-  (when (and apartment (not (eq (apartment-state apartment) :stopped)))
-    (setf (apartment-state apartment) :stopping)
-    (%set-event (w:handle-pointer (apartment-event apartment)))
-    (ignore-errors (sb-thread:join-thread (apartment-thread apartment) :default nil))
-    ;; CHECKED, via the foundation's handle. A failing CloseHandle here means the handle was
-    ;; already invalid, which is a bug upstream of this line and exactly the kind that
-    ;; otherwise surfaces much later as a leak.
-    (w:close-handle (apartment-event apartment))
-    (setf (apartment-event apartment) nil))
-  (when (eq apartment *apartment*) (setf *apartment* nil))
+  (%stop-apartment apartment nil)
   t)
+
+;;; --- at exit (#484) -------------------------------------------------------------
+;;;
+;;; The STA thread waits in MsgWaitForMultipleObjects, a foreign call SBCL cannot interrupt, so
+;;; when the process exits SBCL waits the whole of SB-EXT:*EXIT-TIMEOUT* for it: 61 s measured
+;;; in an app with the default of 60, and 6.6 s against 1.2 s without an apartment with the
+;;; timeout set to 5. A hook on SB-EXT:*EXIT-HOOKS* that stops the apartment lets the process
+;;; end without that wait, and no app has to register one of its own.
+
+(defparameter *exit-stop-timeout* 10
+  "Seconds the exit hook waits for the apartment thread to finish. A thread busy in a long COM
+call may not finish in time; the hook then returns, and SBCL's own wait applies as before.")
+
+(defun %stop-apartment-at-exit ()
+  "SB-EXT:*EXIT-HOOKS* entry: stop the process-wide apartment, waiting at most
+*EXIT-STOP-TIMEOUT* seconds. Does nothing when the apartment thread is the one exiting, since
+a thread cannot wait for itself."
+  (let ((apartment *apartment*))
+    (when (and apartment
+               (not (eq sb-thread:*current-thread* (apartment-thread apartment))))
+      (%stop-apartment apartment *exit-stop-timeout*))))
+
+(pushnew '%stop-apartment-at-exit sb-ext:*exit-hooks*)
 
 (defun call-in-apartment (thunk)
   "Run THUNK on the STA thread and return its values here.
