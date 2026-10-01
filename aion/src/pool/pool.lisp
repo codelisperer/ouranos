@@ -152,15 +152,19 @@ like it. The guarantee the number buys: NO JOB IS ACCEPTED UNLESS A WORKER IS FR
 QUEUE HAS ROOM FOR IT."
   (+ (pool-size pool) (pool-limit pool)))
 
-(defvar *%after-empty-look* nil
+(sb-ext:defglobal *%after-empty-look* nil
   "NIL, or a function a worker calls after it finds the queue empty and before it counts
 itself idle. FOR TESTS ONLY: it lets a test hold a worker at the one point where a job
 submitted next would be missed without the worker's second look at the queue.")
 
-(defvar *%after-reserve* nil
+(sb-ext:defglobal *%after-reserve* nil
   "NIL, or a function TRY-SUBMIT calls after it has reserved a place and before it enqueues.
 FOR TESTS ONLY: it lets a test hold a submitter at the one point where a pool that stops would
-lose the job if its workers exited with a place still reserved.")
+lose the job if its workers exited with a place still reserved.
+
+Both hooks are global variables, not special ones, so reading one is a plain load: TRY-SUBMIT
+reads *%AFTER-RESERVE* on every job, and a special variable's value would first be looked up
+in the thread's own bindings.")
 
 (defun %wake-all (pool)
   "Wake every worker, so each can see the pool is stopping and drained."
@@ -191,7 +195,11 @@ worker's %WORKER-STATE."
         (when found
           (sb-ext:atomic-incf (pool-running pool))
           (return job)))
-      (when (and (pool-stopping pool) (zerop (pool-outstanding pool)))
+      ;; STOPPING before OUTSTANDING, with a barrier between, pairing with TRY-SUBMIT's
+      ;; barrier between its reservation and its read of STOPPING: a submitter that did not
+      ;; see STOPPING made its reservation visible to a worker that does.
+      (when (and (pool-stopping pool)
+                 (progn (sb-thread:barrier (:memory)) (zerop (pool-outstanding pool))))
         (return nil))
       (when *%after-empty-look* (funcall *%after-empty-look*))
       ;; Become findable BEFORE the second look, so a submitter that enqueues after the look
@@ -216,6 +224,10 @@ worker's %WORKER-STATE."
 worker so each sees there is nothing left and exits."
   (sb-ext:atomic-decf (pool-running pool))
   (let ((before (sb-ext:atomic-decf (pool-outstanding pool))))
+    ;; A full barrier between the decrement and the read of STOPPING. On arm64 an atomic
+    ;; read-modify-write does not keep a later load from being satisfied before its store is
+    ;; visible, and then this job could finish unseen by a STOP-POOL that reads it as running.
+    (sb-thread:barrier (:memory))
     (when (and (= before 1) (pool-stopping pool))
       (%wake-all pool))))
 
@@ -290,10 +302,13 @@ left, and then enqueue a job no worker would ever take. Reserved first, the job 
 OUTSTANDING before STOPPING is read, and a worker does not exit while OUTSTANDING is above
 zero."
   (let ((before (sb-ext:atomic-incf (pool-outstanding pool))))
+    ;; The reservation must be visible before STOPPING is read; see %NEXT-JOB's exit check.
+    (sb-thread:barrier (:memory))
     (cond ((or (>= before (pool-capacity pool)) (pool-stopping pool))
            ;; ATOMIC-DECF returns the value before, so 1 means this was the last place
            ;; outstanding; a stopping pool's waiting workers then need to see that.
-           (when (and (= 1 (sb-ext:atomic-decf (pool-outstanding pool)))
+           (when (and (= 1 (prog1 (sb-ext:atomic-decf (pool-outstanding pool))
+                               (sb-thread:barrier (:memory))))
                       (pool-stopping pool))
              (%wake-all pool))
            nil)
