@@ -138,8 +138,10 @@ Anything testing this binding has to be written this way."
 
 (defun %exit-seconds (&key keep-hook)
   "Start a child image that loads aion/windows/com, starts the apartment and exits, and return
-the seconds from its last line of output to the end of the process. Unless KEEP-HOOK, the
-child first removes the exit hook #484 added, which is the code before #484."
+(values SECONDS EXIT-CODE): the seconds from its last line of output to the end of the process,
+and its exit status, so that a child the hook made end quickly by crashing does not pass for one
+that exited cleanly. Unless KEEP-HOOK, the child first removes the exit hook #484 added, which is
+the code before #484."
   (let ((process (uiop:launch-program
                   (list (uiop:native-namestring sb-ext:*runtime-pathname*)
                         "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
@@ -160,15 +162,19 @@ child first removes the exit hook #484 added, which is the code before #484."
          (progn
            (loop for line = (read-line (uiop:process-info-output process) nil)
                  until (or (null line) (search "EXITING" line)))
-           (let ((start (get-internal-real-time)))
-             (uiop:wait-process process)
-             (/ (- (get-internal-real-time) start) internal-time-units-per-second 1.0)))
+           (let* ((start (get-internal-real-time))
+                  (code (uiop:wait-process process)))
+             (values (/ (- (get-internal-real-time) start) internal-time-units-per-second 1.0)
+                     code)))
       (when (uiop:process-alive-p process) (uiop:terminate-process process :urgent t)))))
 
 (test a-process-that-started-an-apartment-exits-without-waiting-for-it
   "The exit hook stops the apartment before SBCL waits for its threads. The control is the same
 child with the hook removed: it waits out the 5 s *EXIT-TIMEOUT*."
-  (let ((with-hook (%exit-seconds :keep-hook t))
-        (without (%exit-seconds)))
-    (is (< with-hook 3) "with the exit hook, exit took ~,1F s" with-hook)
-    (is (>= without 4.5) "control: without the hook, exit took ~,1F s" without)))
+  (multiple-value-bind (with-hook with-code) (%exit-seconds :keep-hook t)
+    (multiple-value-bind (without without-code) (%exit-seconds)
+      (is (eql 0 with-code) "with the exit hook, the child exited with status ~A" with-code)
+      (is (< with-hook 3) "with the exit hook, exit took ~,1F s" with-hook)
+      (is (eql 0 without-code) "control: without the hook, the child exited with status ~A"
+          without-code)
+      (is (>= without 4.5) "control: without the hook, exit took ~,1F s" without))))
