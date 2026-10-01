@@ -49,6 +49,11 @@ its tag.
   them, or point `AION_UV_LIBRARY` or `AION_TLS_LIBRARY` at a copy.
   `scripts/verify-bundle-windows.ps1`'s control now compares long paths, and prints every copy
   of a removed DLL that was loaded. (#472)
+- **aion/pool: `pool-queued` is exact only when the pool is quiet** (#466). It is now
+  `outstanding - running`, two counts read without a lock, so while jobs are being submitted and
+  taken it is a reading of two changing numbers. An app that reads it to decide something while
+  the pool is busy, rather than to report it, should not rely on it being exact. In the tree, only
+  `aion/pool`'s own tests read it, and only once the pool is quiet.
 
 ### Added
 
@@ -95,6 +100,14 @@ its tag.
   stylesheet is served by `hyperion/assets` as `:calendar`: link `(hyperion/assets:url
   :calendar)`. `hyperion/assets` gains `first-party-p` to tell the tree's own files from the
   vendored ones. See `hyperion/docs/calendar.md`.
+- **aion/pool: submitting a job takes no pool mutex, so several server-uv loops no longer wait
+  on each other** (#466). `try-submit` reserves a place with an atomic count and puts the job on
+  `sb-concurrency`'s lock-free queue, and each worker sleeps on its own semaphore, which a
+  submitter signals only when it claims that worker from the stack of idle ones. The pool's
+  behaviour is unchanged: the queue limit and the 503 when it is full, the worker count,
+  draining on `stop-pool`, and reporting a job that signals. On macOS in `hyperion/bench` with
+  4 loops and 8 workers, `/tile` went from about 96,800 to about 110,700 requests/s, against
+  about 111,100 with handlers run on the loops. See "An app may have to act" for `pool-queued`.
 
 ### Fixed
 
