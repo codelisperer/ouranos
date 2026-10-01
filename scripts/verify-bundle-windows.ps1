@@ -80,6 +80,13 @@
 .PARAMETER AppArgs
   Arguments passed to the app.
 
+.PARAMETER RequireLoaded
+  File names of DLLs the app must load from the bundle, e.g. libuv.dll. A name that the bundle
+  does not carry, or that no process loaded from the bundle on this run, fails the check. The
+  desktop-release dry runs pass libuv.dll, so a bundle whose app is not running on :uv, or
+  runs on a libuv from elsewhere, does not pass (#472). Check 3 then proves the copy loaded was
+  the carried one.
+
 .EXAMPLE
   .\scripts\verify-bundle-windows.ps1 dist\coalton-repl-0.1.0-windows-x86-64
 .EXAMPLE
@@ -89,7 +96,8 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$Bundle,
   [int]$Seconds = 20,
-  [string]$AppArgs = ''
+  [string]$AppArgs = '',
+  [string[]]$RequireLoaded = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -521,6 +529,17 @@ foreach ($d in ($webview2.Keys | Sort-Object)) { Good "WebView2 runtime: $(Split
 foreach ($f in $carriedFiles) {
   if (-not ($loadedCarried | Where-Object { $_ -ieq $f.FullName })) {
     Note "$($f.Name) is carried but was not loaded on this run (another code path, or other -AppArgs, may need it)"
+  }
+}
+# Libraries the caller requires to be loaded from the bundle (-RequireLoaded).
+foreach ($name in $RequireLoaded) {
+  $carried = @($carriedFiles | Where-Object { $_.Name -ieq $name })
+  if (-not $carried) {
+    Fail "$name is required to be loaded from the bundle, and the bundle does not carry it"
+  } elseif (-not ($loadedCarried | Where-Object { (Split-Path -Leaf $_) -ieq $name })) {
+    Fail "$name is required to be loaded from the bundle, and no process loaded the carried copy on this run"
+  } else {
+    Good "$name was loaded from the bundle, as required"
   }
 }
 

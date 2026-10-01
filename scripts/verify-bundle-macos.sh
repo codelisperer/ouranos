@@ -1,8 +1,18 @@
 #!/usr/bin/env sh
 # verify-bundle-macos.sh --- prove a macOS bundle carries what it claims (#78).
 #
+#     scripts/verify-bundle-macos.sh [--seconds N] [--require-carried NAME]... <bundle-dir|App.app> [-- app args...]
 #     scripts/verify-bundle-macos.sh dist/uv-probe-0.0.0-macos-arm64 [-- app args...]
 #     scripts/verify-bundle-macos.sh "dist/UV Probe.app"
+#
+# --seconds N: an app that opens a window does not exit on its own. With this, an app still
+# running after N seconds counts as started; it and the processes it started are then stopped.
+# Without it, check 2 waits for the app to exit and requires exit status 0, as before.
+#
+# --require-carried NAME: the bundle must carry a dylib whose name starts with NAME, and check 2
+# must see the loader open it from the bundle. "Never loaded on this run" is a FAIL for it, not
+# a note. The desktop-release dry runs pass libuv, so a bundle whose app is not on :uv, or that
+# loads a libuv from elsewhere, does not pass (#472).
 #
 # The macOS counterpart to verify-bundle.sh, and deliberately NOT a port of it. That script
 # gets its authority from a container: no toolchain, no repo, no copy of the library. macOS
@@ -28,8 +38,26 @@
 set -eu
 
 usage() {
-  echo "usage: scripts/verify-bundle-macos.sh <bundle-dir|App.app> [-- app args...]" >&2
+  echo "usage: scripts/verify-bundle-macos.sh [--seconds N] [--require-carried NAME]... <bundle-dir|App.app> [-- app args...]" >&2
   exit 2
+}
+
+SECONDS_TO_RUN=""
+REQUIRED=""
+while :; do
+  case "${1:-}" in
+    --seconds) [ $# -ge 2 ] || usage; SECONDS_TO_RUN="$2"; shift 2 ;;
+    --require-carried) [ $# -ge 2 ] || usage; REQUIRED="$REQUIRED $2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+# True when the dylib $1 is one --require-carried named, by the start of its name.
+is_required() {
+  for n in $REQUIRED; do
+    case "$1" in "$n"*) return 0 ;; esac
+  done
+  return 1
 }
 
 [ $# -ge 1 ] || usage
@@ -69,6 +97,16 @@ echo
 
 FAILED=0
 
+# --require-carried: each named library must be in the bundle before anything runs.
+for name in $REQUIRED; do
+  if echo "$CARRIED" | grep -q "^$name"; then
+    echo "verify-bundle-macos: required = $name ($(echo "$CARRIED" | grep "^$name" | tr '\n' ' '))"
+  else
+    echo "  FAIL -- $name is required to be carried, and the bundle carries no $name*"
+    FAILED=1
+  fi
+done
+
 # --- check 1: no build-machine paths survive in the load commands ----------------------
 # The bug ADR-0014 exists for. A path under /opt/homebrew, /usr/local or the source tree is
 # a machine-specific dependency that will not exist on a user's Mac.
@@ -91,7 +129,30 @@ done
 echo
 echo "--- check 2: the bundle runs, loading ITS OWN libraries ---"
 LOG=$(mktemp)
-if DYLD_PRINT_LIBRARIES=1 "$DIR/$BIN" "$@" >"$LOG" 2>&1; then
+if [ -n "$SECONDS_TO_RUN" ]; then
+  # The app opens a window and keeps running. Started means still running after N seconds;
+  # it is then stopped with the processes it started (hyperion-view, the webview's own).
+  DYLD_PRINT_LIBRARIES=1 "$DIR/$BIN" "$@" >"$LOG" 2>&1 &
+  APP_PID=$!
+  i=0
+  while [ "$i" -lt "$SECONDS_TO_RUN" ] && kill -0 "$APP_PID" 2>/dev/null; do
+    sleep 1; i=$((i + 1))
+  done
+  if kill -0 "$APP_PID" 2>/dev/null; then
+    echo "  ok -- still running after $SECONDS_TO_RUN s, so it started; stopping it"
+    pkill -TERM -P "$APP_PID" 2>/dev/null || true
+    kill -TERM "$APP_PID" 2>/dev/null || true
+    sleep 2
+    pkill -KILL -P "$APP_PID" 2>/dev/null || true
+    kill -KILL "$APP_PID" 2>/dev/null || true
+    wait "$APP_PID" 2>/dev/null || true
+  else
+    STATUS=0; wait "$APP_PID" || STATUS=$?
+    echo "  FAIL -- the app exited within $SECONDS_TO_RUN s (status $STATUS), so it did not start:"
+    head -10 "$LOG" | sed 's/^/         /'
+    FAILED=1
+  fi
+elif DYLD_PRINT_LIBRARIES=1 "$DIR/$BIN" "$@" >"$LOG" 2>&1; then
   echo "  ok -- exited 0"
 else
   echo "  FAIL -- the bundle did not run:"
@@ -137,7 +198,12 @@ for lib in $CARRIED; do
     grep "$lib" "$LOG" | grep dyld | head -2 | sed 's/^/         /'
     FAILED=1
   else
-    echo "  note -- $lib was never loaded on this run (may need different app arguments)"
+    if is_required "$lib"; then
+      echo "  FAIL -- $lib is required (--require-carried) and was never loaded on this run"
+      FAILED=1
+    else
+      echo "  note -- $lib was never loaded on this run (may need different app arguments)"
+    fi
   fi
 done
 

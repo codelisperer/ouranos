@@ -533,11 +533,13 @@
   :description "Example: a typed Coalton REPL in a native desktop window (no Electron/Tauri)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  ;; Hunchentoot, and for this app it is load-bearing rather than a preference: Woo binds
-  ;; libev at LOAD time, so a desktop bundle built against it dies before `main` on any
-  ;; machine without libev (pre-publication issue 139, ADR-0011). Pure CL is what makes the artifact shippable.
+  ;; Not Woo: Woo binds libev at LOAD time, so a desktop bundle built against it died before
+  ;; `main` on any machine without libev (pre-publication issue 139, ADR-0011). The desktop
+  ;; window runs on :uv (#472, ADR-0017), whose libuv the bundle carries and the
+  ;; desktop-release dry runs check is the one loaded. The web modes (`start', `serve') keep
+  ;; Hunchentoot, which is pure CL.
   :depends-on ("hyperion" "hyperion/desktop" "hyperion/assets" "cons/coalton-repl"
-               "spinneret" "lass" "clack-handler-hunchentoot")
+               "spinneret" "lass" "clack-handler-hunchentoot" "hyperion/server-uv")
   :serial t
   :components ((:module "examples/coalton-repl"
                 :serial t

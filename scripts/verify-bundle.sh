@@ -1,7 +1,12 @@
 #!/usr/bin/env sh
 # verify-bundle.sh --- run a dumped bundle on a machine that has never seen this repo.
 #
-#     scripts/verify-bundle.sh dist/uv-probe-0.0.0-linux-x86-64 [-- app args...]
+#     scripts/verify-bundle.sh [--require-carried NAME]... dist/uv-probe-0.0.0-linux-x86-64 [-- app args...]
+#
+# --require-carried NAME fails the check unless the bundle carries a library whose file name
+# starts with NAME (libuv for libuv.so.1), and adds a control run without that one library,
+# which must fail too: the app needs that library, and the copy it used was the bundle's. The
+# desktop-release dry runs pass libuv, so a bundle whose app is not on :uv does not pass (#472).
 #
 # WHY THIS EXISTS: a native-dependency bug is INVISIBLE on the machine that built the
 # artifact, because that machine has every library the build needed. That is not a
@@ -36,10 +41,16 @@ set -eu
 IMAGE="${OURANOS_CLEANROOM_IMAGE:-ubuntu:26.04}"
 
 usage() {
-  echo "usage: scripts/verify-bundle.sh <bundle-dir|app.AppImage> [-- app args...]" >&2
+  echo "usage: scripts/verify-bundle.sh [--require-carried NAME]... <bundle-dir|app.AppImage> [-- app args...]" >&2
   exit 2
 }
 
+REQUIRED=""
+while [ "${1:-}" = "--require-carried" ]; do
+  [ $# -ge 2 ] || usage
+  REQUIRED="$REQUIRED $2"
+  shift 2
+done
 [ $# -ge 1 ] || usage
 BUNDLE="$1"
 shift
@@ -97,6 +108,15 @@ else
   echo "verify-bundle: carried    = (nothing -- this bundle claims no native dependencies)"
 fi
 
+# --require-carried: each named library must be in the bundle before anything runs.
+for name in $REQUIRED; do
+  if ! echo "$CARRIED" | grep -q "^$name"; then
+    echo "verify-bundle: FAILED -- $name is required to be carried, and the bundle carries no $name*" >&2
+    exit 1
+  fi
+  echo "verify-bundle: required   = $name ($(echo "$CARRIED" | grep "^$name" | tr '\n' ' '))"
+done
+
 run_in_clean_room() {
   # $1 = host directory to mount; the rest are app arguments.
   dir="$1"; shift
@@ -151,6 +171,25 @@ if run_in_clean_room "$CONTROL" "$@"; then
 else
   echo "verify-bundle: run 2 failed as required -- run 1 used the carried library."
 fi
+
+# --- run 3: each required library on its own (--require-carried) --------------------
+# Run 2 removes every carried library at once, so it shows the app needs one of them. This
+# shows it needs each required one, and that the copy it used in run 1 was the bundle's.
+for name in $REQUIRED; do
+  echo
+  echo "--- run 3: the same bundle without $name only (must fail) ---"
+  ONE=$(mktemp -d)
+  cp -a "$BUNDLE_ABS/." "$ONE/"
+  for so in $(echo "$CARRIED" | grep "^$name"); do rm -f "$ONE/$so"; done
+  if run_in_clean_room "$ONE" "$@"; then
+    rm -rf "$ONE"
+    echo "verify-bundle: run 3 PASSED without $name, AND THAT IS THE FAILURE: the app does not" >&2
+    echo "verify-bundle: need it, or found another copy in the clean room." >&2
+    exit 1
+  fi
+  rm -rf "$ONE"
+  echo "verify-bundle: run 3 failed as required -- run 1 used the carried $name."
+done
 
 echo
 echo "verify-bundle: PASS -- $BIN runs on a machine that has never seen this repo,"

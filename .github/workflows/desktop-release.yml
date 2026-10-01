@@ -232,9 +232,12 @@ jobs:
       #
       # macOS and Windows need their own clean room -- a runner with nothing installed, or a
       # fresh VM. The DESIGN they share is ADR-0013; this script is only the Linux half.
+      #
+      # --require-carried libuv: the app runs its window on :uv (#472), so the bundle must
+      # carry libuv, and a run without it alone must fail -- the libuv it used was the bundle's.
       - name: Verify the bundle on a clean machine (Linux)
         if: runner.os == 'Linux'
-        run: ./scripts/verify-bundle.sh "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+        run: ./scripts/verify-bundle.sh --require-carried libuv "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
 
       # The Windows check (#78). Windows has no container to run the bundle in, so this runs
       # the app with PATH limited to the bundle, System32 and the Windows directory, records
@@ -253,7 +256,7 @@ jobs:
         shell: bash
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-bundle-windows.ps1 \
-            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}"
+            "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}" -RequireLoaded libuv.dll
 
       # The installer is BOTH the human download and the update payload (ADR-0010), so it
       # is built here beside the bundle rather than in a later job -- it needs the bundle's
@@ -286,6 +289,18 @@ jobs:
             --display-name "Coalton REPL" \
             --icon hyperion/examples/coalton-repl/assets/lambda.png
           test -f "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}.app.tar.gz"
+
+      # The macOS check (#78, #472), on the signed .app that is shipped. It runs the app with
+      # DYLD_PRINT_LIBRARIES and checks WHICH file the loader opened for each carried dylib:
+      # a dlopen'd libuv falls back to the system if the bundle's is missing, so deleting it
+      # proves nothing on macOS, and the path is the claim. --require-carried libuv makes a
+      # libuv that is not carried, or not loaded from the bundle, a failure; the window app
+      # does not exit, so --seconds 20 counts it as started if it is still running then.
+      # build-dmg.sh has already required `codesign --verify --deep --strict` to pass on the
+      # .app, which covers the carried libuv: it is signed with the bundle.
+      - name: Verify the .app loads the libraries it carries (macOS)
+        if: runner.os == 'macOS'
+        run: ./scripts/verify-bundle-macos.sh --seconds 20 --require-carried libuv "dist/Coalton REPL.app"
 
       - uses: actions/upload-artifact@v7
         with:
