@@ -34,7 +34,6 @@ its tag.
   Windows is a desktop app that never exits and shows nothing. An app acts if its dumped image
   relies on SBCL's debugger, for a REPL of its own for example: pass `:debugger t` to
   `dump-executable` or `dump-core`, or call `sb-ext:enable-debugger` where it needs it. (#495)
-
 - **A desktop app no longer loads libuv or mbedTLS from the source tree it was built from.**
   `aion/uv` and `aion/tls` searched `vendor/libuv` and `vendor/mbedtls` of the tree, found
   through ASDF at run time, after the copy beside the image. In a desktop bundle that tree is the
