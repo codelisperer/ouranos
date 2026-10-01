@@ -294,9 +294,11 @@ the second case."
         (multiple-value-bind (exited code output) (%run-with-input-open kind off)
           (is-true exited "the default image exits within ~D s after an unhandled error"
                    +exit-bound-seconds+)
-          (is (and (integerp code) (/= 0 code)) "with a non-zero code: ~S" code)
+          (is (eql 1 code) "with code 1: ~S" code)
           (is (search "dump-signals: an unhandled error" output)
-              "having printed the error: ~A" output))
+              "having printed the error: ~A" output)
+          ;; SBCL's own heading for the backtrace DISABLE-DEBUGGER prints (review of #500).
+          (is (search "Backtrace for:" output) "and a backtrace: ~A" output))
         (is-false (%run-with-input-open kind on)
                   "control: with :DEBUGGER T it waits at the debugger past ~D s"
                   +exit-bound-seconds+)))))
