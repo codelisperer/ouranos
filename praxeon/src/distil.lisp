@@ -49,6 +49,11 @@ a reason rather than presenting an unreviewable one."
   (subject "" :type string)
   (proposals '() :type list))
 
+(defun make-distillation (subject proposals)
+  "A DISTILLATION of PROPOSALS about SUBJECT, for a caller that filters another one's proposals,
+as the observer's support check does."
+  (%make-distillation :subject subject :proposals proposals))
+
 (defun distillation-replacements (distillation)
   "The proposals in DISTILLATION that claim to replace an existing observation."
   (remove-if-not #'proposal-replaces (distillation-proposals distillation)))
@@ -109,16 +114,27 @@ here would look like validation and not be any. The per-observation checks are i
 
 (defun parse-date (string)
   "The universal time at midnight UTC of STRING, a date written YYYY-MM-DD, or NIL when STRING
-is not one."
+is not one. An impossible date is not one: 2026-02-30 is refused rather than read as March 2,
+and a year before 1900, which ENCODE-UNIVERSAL-TIME would read as a two-digit year, is refused
+too. The date is decoded again and must come back as written."
   (and (stringp string) (= (length string) 10)
        (char= (char string 4) #\-) (char= (char string 7) #\-)
        (every #'digit-char-p (remove #\- string))
-       (ignore-errors
-        (encode-universal-time 0 0 0
-                               (parse-integer string :start 8 :end 10)
-                               (parse-integer string :start 5 :end 7)
-                               (parse-integer string :start 0 :end 4)
-                               0))))
+       (let ((year (parse-integer string :start 0 :end 4))
+             (month (parse-integer string :start 5 :end 7))
+             (day (parse-integer string :start 8 :end 10)))
+         (and (>= year 1900) (<= 1 month 12) (<= 1 day 31)
+              (let ((time (ignore-errors (encode-universal-time 0 0 0 day month year 0))))
+                (and time
+                     (multiple-value-bind (s m h d mo y) (decode-universal-time time 0)
+                       (declare (ignore s m h))
+                       (and (= d day) (= mo month) (= y year)))
+                     time))))))
+
+(defun %date-given-p (value)
+  "Whether VALUE, an applies_from field as parsed, says a date at all: NIL, JSON null and an
+empty string say none."
+  (and value (stringp value) (plusp (length value))))
 
 (defun %items (arguments)
   "The observations array from ARGUMENTS as a list, or NIL when it is absent or not a sequence."
@@ -160,10 +176,9 @@ does not say which one."
                              (not (and (stringp because) (plusp (length because)))))
                     (push (format nil "observation ~D claims to replace ~A with no `because'" i replaces)
                           problems))
-                  (let ((date (gethash "applies_from" item)))
-                    (when (and date (not (parse-date date)))
-                      (push (format nil "observation ~D has applies_from ~S, which is not a date written YYYY-MM-DD" i date)
-                            problems)))))))
+                  ;; A date that cannot be read is NOT a problem here: refusing it would lose
+                  ;; the whole window for one field. DISTIL drops that one proposal instead.
+                  ))))
     (when problems
       (format nil "~{~A~^; ~}" (nreverse problems)))))
 
@@ -207,12 +222,23 @@ reading next to `+kinds+': the two have to agree about what a kind means.")
 
 ;;; --- the pass ---------------------------------------------------------------
 
+(defun %date-string (time)
+  (multiple-value-bind (s m h d mo y) (decode-universal-time time 0)
+    (declare (ignore s m h))
+    (format nil "~4,'0D-~2,'0D-~2,'0D" y mo d)))
+
 (defun distil (provider subject window &key known (system *system-prompt*)
-                                            max-tokens attempts)
+                                            max-tokens attempts today)
   "Extract observations about SUBJECT from WINDOW. Returns a DISTILLATION, or NIL.
 
 WINDOW is the messages to read. KNOWN is the observations already held, offered so the model
-can propose a replacement; without it every result is a new observation.
+can propose a replacement; without it every result is a new observation. TODAY, a universal
+time, is the date the model is told the window was written on, so that \"from next Monday\" or
+\"since March\" can become an APPLIES-FROM date; without it the model is told no date and
+should give none.
+
+A PROPOSAL WHOSE APPLIES-FROM CANNOT BE READ IS DROPPED, alone (#317's review): the rest of the
+window is kept. A null or empty APPLIES-FROM is no date, and the proposal is kept without one.
 
 RETURNS TWO VALUES: the distillation and NIL, or NIL and the condition that stopped it.
 
@@ -233,7 +259,10 @@ This function is the caller that skips, so the HANDLER-CASE belongs here and not
 `generate-structured'. Handlers are searched innermost outward: one established within that
 function's extent would preempt every caller's."
   (let* ((block (%known-block known))
-         (messages (append (when block (list (llm:msg "user" block)))
+         (dated (when today
+                  (format nil "Today is ~A. Write any applies_from date against that." (%date-string today))))
+         (preface (format nil "~@[~A~%~%~]~@[~A~]" dated block))
+         (messages (append (when (plusp (length preface)) (list (llm:msg "user" preface)))
                            window)))
     (handler-case
         (let ((arguments (apply #'llm:generate-structured
@@ -246,6 +275,9 @@ function's extent would preempt every caller's."
                    :proposals (loop for item in (%items arguments)
                                     for replaces = (gethash "replaces" item)
                                     for because = (gethash "because" item)
+                                    for date = (gethash "applies_from" item)
+                                    ;; One unreadable date loses its own proposal, not the window.
+                                    unless (and (%date-given-p date) (not (parse-date date)))
                                     collect (%make-proposal
                                              :content (gethash "content" item)
                                              :kind (%kind (gethash "kind" item))
@@ -259,7 +291,7 @@ function's extent would preempt every caller's."
                                                                   (plusp (length because)))
                                                          replaces)
                                              :because (when (stringp because) because)
-                                             :applies-from (parse-date (gethash "applies_from" item)))))
+                                             :applies-from (and (%date-given-p date) (parse-date date)))))
                   nil))
       ((or llm:structured-result-invalid
            llm:structured-result-not-called) (c)

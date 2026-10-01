@@ -83,6 +83,7 @@
 
 (defpackage #:praxeon/memory
   (:use #:cl)
+  (:local-nicknames (#:bt #:bordeaux-threads))
   (:documentation
    "Observational memory: what an agent has learned about someone, across sessions.
 
@@ -197,7 +198,7 @@
     `remember' adds a bad fact; a wrong `supersede' also removes a good one, which is the
     half nobody sees.")
   (:export #:distil #:apply-distillation
-           #:distillation #:distillation-subject #:distillation-proposals
+           #:distillation #:make-distillation #:distillation-subject #:distillation-proposals
            #:distillation-replacements
            #:proposal #:proposal-content #:proposal-kind #:proposal-replaces
            #:proposal-because #:proposal-applies-from #:parse-date
@@ -230,15 +231,18 @@
                     (#:mem #:praxeon/memory)
                     (#:distil #:praxeon/distil)
                     (#:prompt #:praxeon/prompt)
+                    (#:jzon #:com.inuoe.jzon)
+                    (#:log #:aion/log)
                     (#:bt #:bordeaux-threads))
   (:documentation
    "Running distil automatically over a thread (#317). An observer keeps a thread's observed
     mark, and once the messages past it pass a step it distils them off the request path into
     the thread's observations, then moves the mark. Supersession needs the app's ACCEPT, and a
     thread observation becomes a fact about the subject only through the app's PROMOTE.")
-  (:export #:observer #:make-observer #:observe-turn #:await-observer #:observer-busy-p
-           #:observer-mark #:observer-failures #:observer-last-error #:observer-thread
-           #:observer-subject #:unobserved #:supported-proposals #:*step-tokens*))
+  (:export #:observer #:make-observer #:observe-turn #:await-observer #:stop-observer
+           #:observer-busy-p #:observer-stuck-p #:observer-mark #:observer-skipped
+           #:observer-failures #:observer-last-error #:observer-thread #:observer-subject
+           #:unobserved #:stored-mark #:supported-proposals #:window-not-distilled #:*step-tokens*))
 
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)

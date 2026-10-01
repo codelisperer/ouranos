@@ -168,32 +168,48 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                                                          "SELECT current_database() AS db"))
                                       :db))))
 
-(defparameter +added-columns+ '(("thread" . "TEXT") ("source_through" . "BIGINT"))
-  "Columns added after a table may already exist, with their SQL types: the thread scope and
-the window's last turn (#317). ENSURE-SCHEMA adds each one a table lacks.")
+(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer))
+  "Columns added after a table may already exist, with their schema field types: the thread scope
+and the window's last turn (#317). ENSURE-SCHEMA adds each one a table lacks.")
 
-(defun %existing-columns (store)
-  "The lowercased names of the columns STORE's table has."
-  (let ((c (store-connection store)))
-    (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
-            (if (eq (store-dialect store) :sqlite)
-                (conn:query c (format nil "PRAGMA table_info(~A)" (store-table store)))
-                (conn:query c "SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?"
-                            (string-downcase (store-table store)))))))
+(defun %add-column-sql (store name type)
+  "The ALTER TABLE statement adding column NAME of field TYPE to STORE's table, in mnemosyne's
+own types for the dialect, so a migrated column matches what a new table gets (on SQLite an
+:integer is INTEGER; mnemosyne's introspection reports anything else as drift). On Postgres it
+says ADD COLUMN IF NOT EXISTS, which needs no catalogue query and cannot race another process
+starting at the same moment."
+  (let ((sql (ddl:ddl (list :alter-table (intern (string-upcase (store-table store)) :keyword)
+                            (list :add-column name type))
+                      :dialect (string-downcase (symbol-name (store-dialect store))))))
+    (if (eq (store-dialect store) :postgres)
+        (let ((at (search "ADD COLUMN " sql)))
+          (concatenate 'string (subseq sql 0 (+ at 11)) "IF NOT EXISTS " (subseq sql (+ at 11))))
+        sql)))
+
+(defun %sqlite-columns (store)
+  "The lowercased names of the columns STORE's SQLite table has."
+  (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
+          (conn:query (store-connection store) (format nil "PRAGMA table_info(~A)" (store-table store)))))
 
 (defun ensure-schema (store)
   "Create the table and its index if they are not there, and add the columns +ADDED-COLUMNS+
 names to a table made before them. Returns STORE. On Postgres the `vector' extension must
-already be installed; see CHECK-VECTOR-EXTENSION."
+already be installed; see CHECK-VECTOR-EXTENSION.
+
+EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
+and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
+migration, before it reads from a table made before #317."
   (when (eq (store-dialect store) :postgres)
     (check-vector-extension (store-connection store)))
   (dolist (statement (store-ddl store))
     (conn:exec (store-connection store) statement))
-  (let ((have (%existing-columns store)))
+  (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
     (loop for (name . type) in +added-columns+
-          unless (member name have :test #'string=)
-            do (conn:exec (store-connection store)
-                          (format nil "ALTER TABLE ~A ADD COLUMN ~A ~A" (store-table store) name type))))
+          unless (member (string-downcase (symbol-name name)) have :test #'string=)
+            ;; Postgres answers an existing column with a notice, which the driver signals as
+            ;; a warning; it is the expected case on every start after the first.
+            do (handler-bind ((warning #'muffle-warning))
+                 (conn:exec (store-connection store) (%add-column-sql store name type)))))
   store)
 
 ;;; --- rows <-> observations ---------------------------------------------------
@@ -410,7 +426,12 @@ of its own -- which is why this is ctx:assemble and not a LIMIT."
 TWO STAGES, AND THE ORDER MATTERS. The database ranks by distance and takes LIMIT rows,
 because that is the part an index can serve; the budget is applied afterwards in the same
 assembly every other context source uses. Budgeting first would mean fetching everything to
-throw most of it away, and ranking in Lisp would mean the index served nothing."
+throw most of it away, and ranking in Lisp would mean the index served nothing.
+
+ONE SCOPE: THREAD :ALL is refused, as RECALL refuses it, since a recall builds a prompt (#317)."
+  (when (eq thread :all)
+    (error 'praxeon/conditions:praxeon-error
+           :detail "recall-similar takes one scope: NIL for the subject's facts, or a thread's id; :all is for observations-of"))
   (let ((rows (if (eq (store-dialect store) :sqlite)
                   (%sqlite-nearest store subject embedding as-of limit thread)
                   (bt:with-lock-held ((store-lock store))

@@ -60,7 +60,8 @@ NIL means the source time was not recorded -- an absent measurement, not a zero 
 
 THROUGH IS THE LAST TURN of the window an observation came from, when it came from more than
 one turn (#317): an observer distils a window of messages, and the observation is sourced to
-all of them. NIL means the single turn TURN."
+all of them. NIL means the single turn TURN. An observer's TURN and THROUGH are message
+positions in the thread, counted from 1, not exchanges."
   (conversation "" :type string)
   (turn 0 :type integer)
   (at nil :type (or null integer))
@@ -185,12 +186,55 @@ history cannot be made to forget is one a consuming app cannot use for personal 
 (defgeneric forget (store observation)
   (:documentation "Erase one observation. Returns true when it was there."))
 
+;;; RECALL NEVER MIXES THE SCOPES (#317). :ALL is for OBSERVATIONS-OF, the access right; a
+;;; recall builds a prompt, and one that mixed two conversations' observations with the subject's
+;;; facts would put another conversation into this one. A :BEFORE method on the base class, so
+;;; every store refuses it for RECALL, including one written outside this tree.
+(defmethod recall :before ((store memory-store) subject &key thread &allow-other-keys)
+  (declare (ignore subject))
+  (when (eq thread :all)
+    (error 'praxeon/conditions:praxeon-error
+           :detail "recall takes one scope: NIL for the subject's facts, or a thread's id; :all is for observations-of")))
+
+;;; RECALL-SIMILAR's refusal is in each store's own method, not here: a method on the base class
+;;; would make RECALL-SIMILAR applicable to every store, and a store that cannot rank by distance
+;;; must have none (see RECALL-SIMILAR).
+
 ;;; --- the in-memory store ----------------------------------------------------
 
 (defclass in-memory-store (memory-store)
   ((observations :initform (make-hash-table :test #'equal) :reader store-observations)
-   (counter :initform 0 :accessor store-counter))
-  (:documentation "Observations in a hash-table, keyed by id. No persistence."))
+   (counter :initform 0 :accessor store-counter)
+   (lock :initform (bt:make-recursive-lock "praxeon-memory") :reader store-lock))
+  (:documentation "Observations in a hash-table, keyed by id. No persistence.
+
+SAFE TO SHARE BETWEEN THREADS (#317). An observer writes from a thread of its own while the app
+reads and writes from its own, and a plain hash table written from two threads at once loses
+entries or corrupts itself (measured on #462's review: 870 of 6,000 writes kept, and a table
+whose every later read failed). Every operation below holds the store's lock for its whole
+extent, including SUPERSEDE's check that the observation is not already superseded; the lock is
+recursive because SUPERSEDE calls REMEMBER."))
+
+;;; Every generic's in-memory method runs under the store's lock. :AROUND methods, so the rule
+;;; is written once for each operation rather than repeated inside each body.
+(defmethod remember :around ((store in-memory-store) subject content &key &allow-other-keys)
+  (declare (ignore subject content))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod supersede :around ((store in-memory-store) observation content &key &allow-other-keys)
+  (declare (ignore observation content))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod observations-of :around ((store in-memory-store) subject &key &allow-other-keys)
+  (declare (ignore subject))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod recall :around ((store in-memory-store) subject &key &allow-other-keys)
+  (declare (ignore subject))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod forget :around ((store in-memory-store) observation)
+  (declare (ignore observation))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod forget-subject :around ((store in-memory-store) subject)
+  (declare (ignore subject))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
 
 (defun make-in-memory-store () (make-instance 'in-memory-store))
 

@@ -14,6 +14,20 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
+  `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
+  outside this tree that does not accept `:thread` is refused when it is added, at load time.
+  `:thread` NIL, the default, means facts about the subject, which is what every observation has
+  been so far, so a call that does not pass it behaves as before. Such a store must also keep a
+  superseding observation in its predecessor's thread in `supersede`, or an accepted correction
+  of a thread observation becomes a fact about the subject, and must erase thread observations
+  in `forget-subject`. `recall` and `recall-similar` refuse `:thread :all`.
+- **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
+  `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
+  subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
+  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
+  columns in its own migration before it reads. Existing rows become facts about their subject,
+  as they were.
 - **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
   by default.**
   `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
@@ -27,6 +41,35 @@ its tag.
 
 ### Added
 
+- **praxeon/observe: running `distil` automatically over a conversation, off the request
+  path, into observations of that conversation** (#317, step A). `make-observer` takes a
+  provider, a store, a subject and a thread, and `observe-turn` is called with the thread's
+  history after each turn and returns at once. When the messages past its mark reach `:step`
+  estimated tokens (6,000 by default), it distils them on a thread of its own, one step-sized
+  window at a time, writes each into the thread's scope with a provenance naming the
+  conversation and the messages' range, and moves the mark past it.
+  - The mark moves only past a window that was written, or given up on after `:max-attempts`
+    failures (3 by default). A provider error, a store error part-way through the writes, or a
+    failed support check is retried, and a retry does not store an observation twice. A window
+    given up on is recorded in `observer-skipped`. Every failure is counted in
+    `observer-failures`, with the last in `observer-last-error`.
+  - A new observer takes its mark from the store, so a restart does not distil the thread again.
+  - A proposed replacement is applied only when `:accept` allows it. A thread observation also
+    becomes a fact about the subject only when `:promote` allows it, and by default nothing
+    does; a promoted fact is not stored twice, and a correction of one supersedes the subject's
+    fact only when `:promote-accept` allows it too.
+  - `:verify`, a provider, drops proposals the window does not support, judging their content,
+    kind, date and any claim to replace an earlier observation.
+  - `stop-observer` stops it at shutdown, `observer-stuck-p` reports a call running past
+    `:window-timeout`, `observe-turn :flush t` distils the last messages below a step, and each
+    window writes one `aion/log` line of counts.
+  - `praxeon/memory` has a thread scope: an observation's `thread` is NIL for a fact about its
+    subject and a thread's id for an observation of that thread, and `observations-of :thread
+    :all` reads both. The in-memory store is now safe to share between threads.
+  - A provenance can name a range of turns with `:through`.
+  - `distil`'s tool takes an optional `applies_from` date, which becomes the observation's
+    `valid-from`; `distil` takes `:today` to tell the model the date; a date that cannot be read
+    drops only its own proposal. `apply-distillation` takes `:thread`.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
@@ -67,14 +110,6 @@ its tag.
 
 ### An app may have to act
 
-- **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
-  `:thread`, and an app's own memory store must accept it** (#317). A store written outside this
-  tree implements those generics, and a method that does not accept `:thread` now fails to
-  compile against them. `:thread` NIL, the default, means facts about the subject, which is what
-  every observation has been so far, so a call that does not pass it behaves as before.
-- **praxeon/memory-db: `ensure-schema` adds two columns to an existing table**, `thread` and
-  `source_through` (#317). A table made before them gets them the next time `ensure-schema`
-  runs; existing rows are facts about their subject, as before.
 - **hyperion/dev: `serve` on loopback refuses a request whose Host is not `127.0.0.1:PORT` or
   `localhost:PORT`, and a cross-site POST.** It now starts its server with
   `:request-guard :same-origin`, the guard `run-app` has had since #302, because a development
@@ -141,21 +176,6 @@ its tag.
 
 ### Added
 
-- **praxeon/observe: running `distil` automatically over a conversation, off the request
-  path, into observations of that conversation** (#317, step A). `make-observer` takes a
-  provider, a store, a subject and a thread, and `observe-turn` is called with the thread's
-  history after each turn and returns at once. When the messages past its mark reach `:step`
-  estimated tokens (6,000 by default), it distils them on a thread of its own, writes the
-  result into the thread's scope with a provenance naming the conversation and the messages'
-  range, and moves the mark. A proposed replacement is applied only when `:accept` allows it; a
-  thread observation also becomes a fact about the subject only when `:promote` allows it, and
-  by default nothing does. `:verify`, a provider, drops proposals the window does not support.
-  A window that cannot be distilled is skipped and counted in `observer-failures`.
-  - `praxeon/memory` has a thread scope: an observation's `thread` is NIL for a fact about its
-    subject and a thread's id for an observation of that thread, and `:thread :all` reads both.
-  - A provenance can name a range of turns with `:through`.
-  - `distil`'s tool takes an optional `applies_from` date, which becomes the observation's
-    `valid-from`; `apply-distillation` takes `:thread`.
 - **hyperion/server: `start` and `serve-forever` take `:request-guard`.** `:same-origin` puts
   `hyperion/csrf:wrap-same-origin` in front of the app, accepting `127.0.0.1:PORT` and
   `localhost:PORT` on loopback; `(:same-origin ORIGIN ...)` names the origins. The default,
