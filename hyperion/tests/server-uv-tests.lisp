@@ -2414,6 +2414,91 @@ checks the port the server was asked for, and 0 is not the port a request arrive
   (is (not (search "server-uv-worker" (or (%dev-serve-handler-thread :workers nil) "")))
       "control: with :workers nil it ran on the loop thread"))
 
+;;; --- a desktop app on :uv (#472) ---------------------------------------------------------
+;;;
+;;; hyperion/desktop:run-app gives :uv a worker pool unless told otherwise, because on the loop
+;;; thread a handler that waits holds up every other request. These go through RUN-APP itself:
+;;; ON-READY runs once the server listens and before any shell starts, sends its requests, and
+;;; leaves RUN-APP with THROW, whose unwind stops the server. The launcher must exist for
+;;; RUN-APP's up-front check, and is never started.
+
+(defparameter +slow-seconds+ 1.5
+  "How long the slow handler in the tests below waits before it answers.")
+
+(defun %desktop-uv-fast-seconds (&rest run-app-args)
+  "Start a desktop app on :uv through RUN-APP with RUN-APP-ARGS. While a request to /slow is
+waiting in its handler, time a request to /fast, and return the seconds it took.
+
+/fast is sent only once the /slow handler has signalled that it is running, not after a fixed
+pause: after a pause, a loaded machine could let /fast reach the single loop first, and the
+:workers nil control would then pass or fail by chance (review of train 19, #479). The slow
+client is joined with AION/TEST-THREADS:JOIN, which signals if it failed or never finished."
+  (let* ((entered (sb-thread:make-semaphore :name "desktop-uv-slow-entered"))
+         (app (lambda (env)
+                (when (equal (getf env :path-info) "/slow")
+                  (sb-thread:signal-semaphore entered)
+                  (sleep +slow-seconds+))
+                (list 200 +ok+ (list "x")))))
+    (catch 'run-app-done
+      (apply #'hyperion/desktop:run-app app
+             :server :uv :shell :webview :launcher sb-ext:*runtime-pathname*
+             :on-ready
+             (lambda (url)
+               (let* ((port (parse-integer url :start (1+ (position #\: url :from-end t))
+                                               :junk-allowed t))
+                      (host (format nil "Host: 127.0.0.1:~D" port))
+                      (slow (sb-thread:make-thread
+                             (lambda () (get* port "GET /slow HTTP/1.1" host))
+                             :name "desktop-uv-slow-client")))
+                 (unless (sb-thread:wait-on-semaphore entered :timeout 10)
+                   (error "/slow did not reach its handler within 10 s"))
+                 (let ((start (get-internal-real-time)))
+                   (get* port "GET /fast HTTP/1.1" host)
+                   (let ((took (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                     (aion/test-threads:join slow)
+                     (throw 'run-app-done (float took))))))
+             run-app-args))))
+
+(defun %desktop-uv-thread-names (&rest run-app-args)
+  "Start a desktop app on :uv through RUN-APP with RUN-APP-ARGS, and return the names of the
+server's loop and worker threads while it runs, sorted."
+  (catch 'run-app-done
+    (apply #'hyperion/desktop:run-app (const-app 200 +ok+ '("x"))
+           :server :uv :shell :webview :launcher sb-ext:*runtime-pathname*
+           :on-ready
+           (lambda (url)
+             (declare (ignore url))
+             (throw 'run-app-done
+               (sort (loop for th in (sb-thread:list-all-threads)
+                           for name = (or (sb-thread:thread-name th) "")
+                           when (or (search "aion/uv loop" name)
+                                    (search "server-uv-worker" name))
+                             collect name)
+                     #'string<)))
+           run-app-args)))
+
+(test a-desktop-app-on-uv-runs-one-loop-and-two-workers-by-default
+  (let ((names (%desktop-uv-thread-names)))
+    (is (equal '("aion/uv loop" "server-uv-worker-0" "server-uv-worker-1") names)
+        "run-app's defaults on :uv: ~S" names))
+  (let ((names (%desktop-uv-thread-names :workers 3)))
+    (is (= 3 (count-if (lambda (n) (search "server-uv-worker" n)) names))
+        ":workers 3 given to run-app reached the server: ~S" names))
+  #-win32
+  (let ((names (%desktop-uv-thread-names :loops 2)))
+    (is (equal '("aion/uv loop 0" "aion/uv loop 1")
+               (remove-if-not (lambda (n) (search "aion/uv loop" n)) names))
+        ":loops 2 given to run-app reached the server: ~S" names)))
+
+(test a-desktop-app-on-uv-answers-while-a-slow-handler-waits
+  (let ((took (%desktop-uv-fast-seconds)))
+    (is (< took 0.75)
+        "with run-app's default workers, /fast took ~,2F s behind a ~A s handler" took +slow-seconds+))
+  (let ((took (%desktop-uv-fast-seconds :workers nil)))
+    (is (>= took 1.0)
+        "control: with :workers nil, /fast waited for the slow handler, took ~,2F s" took)))
+
 ;;; --- several loops (#463) -----------------------------------------------------------------
 ;;;
 ;;; A server of several loops, with workers because it refuses the inline dispatcher. The
@@ -2614,3 +2699,131 @@ notice that says so is logged once, not on every start."
                (srv:stop server))))
       (sb-int:unencapsulate 'srv::%note-one-loop 'count-notices))
     (is (= 1 logged) "the notice was logged ~D times for two servers" logged)))
+
+;;; --- the CPU count in a container (#475) -------------------------------------
+;;;
+;;; The cgroup files are read from *CGROUP-ROOT* and *SELF-CGROUP-FILE*, so these tests build a
+;;; fixture tree under a fresh temporary directory and point both at it. START consults the
+;;; tree on every Unix host; Windows always runs one loop and never reads it.
+
+(defun %write-text (file text)
+  (ensure-directories-exist file)
+  (with-open-file (out file :direction :output :if-exists :supersede)
+    (write-string text out)))
+
+(defmacro %with-cgroup-tree ((root self-file) (self-line &rest cpu-max) &body forms)
+  "A fixture cgroup v2 tree: ROOT is its mount, SELF-FILE names the process's cgroup with
+SELF-LINE, and each (DIRECTORY TEXT) in CPU-MAX writes TEXT to DIRECTORY/cpu.max under ROOT
+(\"\" for ROOT itself). Deleted afterwards."
+  (let ((stamp (gensym "STAMP")) (base (gensym "BASE")))
+    `(let* ((,stamp (uiop:tmpize-pathname
+                     (merge-pathnames "uv-cgroup" (uiop:temporary-directory))))
+            (,base (uiop:ensure-directory-pathname ,stamp))
+            (,root (merge-pathnames "fs/" ,base))
+            (,self-file (merge-pathnames "proc-self-cgroup" ,base)))
+       (ignore-errors (delete-file ,stamp))
+       (ensure-directories-exist ,root)
+       (unwind-protect
+            (progn
+              (%write-text ,self-file ,self-line)
+              (loop for (dir text) in (list ,@(mapcar (lambda (e) `(list ,@e)) cpu-max))
+                    do (%write-text (merge-pathnames "cpu.max" (merge-pathnames dir ,root)) text))
+              ,@forms)
+         (uiop:delete-directory-tree ,base :validate t :if-does-not-exist :ignore)))))
+
+(test cpu-max-gives-its-quota-over-its-period-rounded-up
+  "The three lines #475 names, and lines that set no quota."
+  (is (null (srv::%parse-cpu-max (format nil "max 100000~%"))))
+  (is (eql 1 (srv::%parse-cpu-max (format nil "100000 100000~%"))))
+  (is (eql 2 (srv::%parse-cpu-max (format nil "150000 100000~%"))))
+  (is (eql 1 (srv::%parse-cpu-max "50000 100000")) "half a CPU still gets one")
+  (is (null (srv::%parse-cpu-max "")))
+  (is (null (srv::%parse-cpu-max "100000"))))
+
+(test the-tightest-cpu-quota-on-the-cgroup-or-an-ancestor-applies
+  "A process in /a/b. With 1.5 CPUs on /a/b and 1 on /a, the limit is 1. CONTROL: the same tree
+with no quota on /a gives /a/b's 2. With no quota anywhere, or no cgroup v2 line at all, there
+is no limit."
+  (%with-cgroup-tree (root self) ((format nil "0::/a/b~%")
+                                  ("a/b/" (format nil "150000 100000~%"))
+                                  ("a/" (format nil "100000 100000~%"))
+                                  ("" (format nil "max 100000~%")))
+    (is (eql 1 (srv::%cgroup-cpu-limit :root root :self-file self))))
+  (%with-cgroup-tree (root self) ((format nil "0::/a/b~%")
+                                  ("a/b/" (format nil "150000 100000~%"))
+                                  ("a/" (format nil "max 100000~%")))
+    (is (eql 2 (srv::%cgroup-cpu-limit :root root :self-file self))))
+  (%with-cgroup-tree (root self) ((format nil "0::/~%")
+                                  ("" (format nil "max 100000~%")))
+    (is (null (srv::%cgroup-cpu-limit :root root :self-file self))))
+  (%with-cgroup-tree (root self) ((format nil "12:cpu,cpuacct:/a~%")
+                                  ("a/" (format nil "100000 100000~%")))
+    (is (null (srv::%cgroup-cpu-limit :root root :self-file self))
+        "a cgroup v1 line is not read as v2")))
+
+(test the-cpu-count-is-the-smallest-and-names-its-source
+  (is (equal '(1 :cgroup)
+             (multiple-value-list
+              (srv::%smallest-cpu-count '((:sysconf . 8) (:affinity . 8) (:cgroup . 1))))))
+  (is (equal '(2 :affinity)
+             (multiple-value-list
+              (srv::%smallest-cpu-count '((:sysconf . 8) (:affinity . 2) (:cgroup . nil))))))
+  (is (equal '(4 :sysconf)
+             (multiple-value-list
+              (srv::%smallest-cpu-count '((:sysconf . 4) (:affinity . 4) (:cgroup . nil)))))
+      "a tie keeps sysconf"))
+
+#-win32
+(test auto-loops-follow-a-one-cpu-container-and-start-logs-where-from
+  "With a cgroup quota of one CPU, :LOOPS :AUTO with workers is one loop, and the listening log
+line says :LOOPS-FROM cgroup. CONTROL: the same tree without the quota gives what sysconf and
+the affinity mask give (at most 4), and does not say cgroup."
+  (let ((srv:*default-loops* :auto))
+    (%with-cgroup-tree (root self) ((format nil "0::/~%")
+                                    ("" (format nil "100000 100000~%")))
+      (let ((srv::*cgroup-root* root) (srv::*self-cgroup-file* self)
+            (out (make-string-output-stream)))
+        (is (equal '(1 :cgroup) (multiple-value-list (srv::%default-loop-count 2))))
+        (unwind-protect
+             (progn
+               (aion/log:setup :env :prod :level :info :stream out)
+               (let ((server (srv:start (const-app 200 +ok+ '("ok")) :port 0 :workers 2)))
+                 (unwind-protect (is (= 1 (length (srv:server-loops server))))
+                   (srv:stop server))))
+          (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+        (let ((log (get-output-stream-string out)))
+          (is (search "\"loops-from\":\"cgroup\"" log) "no loops-from cgroup in ~S" log))))
+    (%with-cgroup-tree (root self) ((format nil "0::/~%")
+                                    ("" (format nil "max 100000~%")))
+      (let ((srv::*cgroup-root* root) (srv::*self-cgroup-file* self))
+        (multiple-value-bind (n source) (srv::%default-loop-count 2)
+          ;; What this host gives without any quota, so the control holds on a one-CPU host
+          ;; too, where the count is 1 with or without the cgroup.
+          (is (= n (min 4 (srv::%smallest-cpu-count
+                           (list (cons :sysconf (srv::%online-cores))
+                                 (cons :affinity (srv::%affinity-count))))))
+              "~D loops; sysconf ~D, affinity ~D" n (srv::%online-cores) (srv::%affinity-count))
+          (is (not (eq :cgroup source))))))))
+
+#+linux
+(defun %cpus-allowed-list-count ()
+  "The CPUs in this process's Cpus_allowed_list in /proc/self/status, such as 0-3,8,10-11."
+  (with-open-file (in "/proc/self/status")
+    (loop for line = (read-line in nil) while line
+          when (uiop:string-prefix-p "Cpus_allowed_list:" line)
+            return (loop for range in (uiop:split-string
+                                       (string-trim '(#\Space #\Tab) (subseq line 18))
+                                       :separator ",")
+                         for dash = (position #\- range)
+                         sum (if dash
+                                 (1+ (- (parse-integer range :start (1+ dash))
+                                        (parse-integer range :end dash)))
+                                 1)))))
+
+#+linux
+(test the-affinity-count-agrees-with-the-kernels-cpus-allowed-list
+  "The CPUs in this process's affinity mask, read through sched_getaffinity, are the CPUs the
+kernel lists as allowed in /proc/self/status, a second reading of the same mask. Not nproc,
+which current coreutils also limits by the cgroup quota and by OMP_ variables."
+  (is (eql (%cpus-allowed-list-count) (srv::%affinity-count)))
+  (is (<= (srv::%affinity-count) (srv::%online-cores))))

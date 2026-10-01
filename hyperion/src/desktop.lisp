@@ -272,10 +272,10 @@ because an unprotected local server is otherwise invisible."
                :origin origin)
      app)))
 
-(defun %start-embedded (app port server &optional (request-guard :same-origin) workers)
+(defun %start-embedded (app port server &optional (request-guard :same-origin) workers loops)
   "Start APP on a free (or given) loopback port, behind REQUEST-GUARD (see %GUARD); wait
 until it listens. Returns (values URL HANDLER). Signals if the server never comes up.
-WORKERS is passed to HYPERION/SERVER:START.
+WORKERS and LOOPS are passed to HYPERION/SERVER:START.
 
 The guard is applied here rather than by the caller because the origin it checks against
 includes the port, and the port is not known until this function picks it."
@@ -283,11 +283,27 @@ includes the port, and the port is not known until this function picks it."
          (origin (format nil "http://127.0.0.1:~D" p))
          (handler (hyperion/server:start (%guard app origin request-guard)
                                          :port p :host "127.0.0.1" :server server
-                                         :workers workers)))
+                                         :workers workers :loops loops)))
     (unless (wait-until-listening p)
       (ignore-errors (hyperion/server:stop handler))
       (error "hyperion/desktop: server did not start listening on 127.0.0.1:~D" p))
     (values (format nil "~A/" origin) handler)))
+
+(defun %app-workers (server workers workers-p)
+  "The :WORKERS RUN-APP starts its embedded server with (#472): WORKERS when given, even NIL;
+otherwise 2 on the native :uv backend, which without workers runs every handler on its loop
+thread, and NIL on the others, which keeps their own default."
+  (cond (workers-p workers)
+        ((eq server :uv) 2)
+        (t nil)))
+
+(defun %app-loops (server loops loops-p)
+  "The :LOOPS RUN-APP starts its embedded server with (#472): LOOPS when given, even NIL;
+otherwise 1 on the native :uv backend, and NIL on the others, which run one event loop
+anyway and would warn about being given a count."
+  (cond (loops-p loops)
+        ((eq server :uv) 1)
+        (t nil)))
 
 (defun run-app (app &key (title "App") (width 1200) (height 800)
                          (backend :embedded)
@@ -296,7 +312,7 @@ includes the port, and the port is not known until this function picks it."
                          (shell :webview)
                          (request-guard :same-origin)
                          (launcher (default-launcher))
-                         icon workers
+                         icon (workers nil workers-p) (loops nil loops-p)
                          on-ready on-close)
   "Run a Hyperion APP as a native desktop window, blocking until the window closes.
 See hyperion/docs/desktop.md.
@@ -320,8 +336,17 @@ ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon 
   built with --window-icon carries its own copy, and that copy is used instead
   (BUNDLED-WINDOW-ICON), because ICON is usually a path on the machine that built the app.
 WORKERS -- the number of threads that run the embedded server's handlers, passed to
-  HYPERION/SERVER:START (NIL, the default, keeps the server's own). An app whose page makes a
-  second request while a slow one runs, such as a cancel button, needs at least 2 on Woo.
+  HYPERION/SERVER:START. It defaults to 2 when SERVER is :uv (#472): without workers, :uv runs
+  every handler on its loop thread, so a handler that waits -- a model call, a slow query, a
+  large file -- holds up every other request, including the page's polling and streams.
+  Pass :WORKERS NIL to get that inline dispatch anyway. On other servers it defaults to NIL,
+  which keeps the server's own. An app whose page makes a second request while a slow one
+  runs, such as a cancel button, needs at least 2 on Woo.
+LOOPS -- the number of event loops the embedded server runs, passed to HYPERION/SERVER:START.
+  It defaults to 1 when SERVER is :uv (#472). With workers, :uv's own default runs one loop per
+  core, up to 4, on macOS and Linux, and a window used by one person never needs more than one.
+  Pass :LOOPS NIL for :uv's own default. Windows runs one loop whatever is asked. On other
+  servers it defaults to NIL.
 ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits.
 
 The window and the server end together. REQUEST-CLOSE, from any thread, closes the window,
@@ -329,14 +354,16 @@ and RUN-APP then stops the server and returns. If RUN-APP is left any other way,
 process exiting from another thread, it stops the launcher on the way out (#355)."
   ;; Fail before booting anything if the native half was never built on this machine.
   (when (eq shell :webview) (%check-launcher launcher))
+  (setf workers (%app-workers server workers workers-p)
+        loops (%app-loops server loops loops-p))
   (multiple-value-bind (url handler)
       (cond
-        ((eq backend :embedded) (%start-embedded app port server request-guard workers))
+        ((eq backend :embedded) (%start-embedded app port server request-guard workers loops))
         ((and (consp backend) (eq (first backend) :remote))
          (values (second backend) nil))
         ((and (consp backend) (eq (first backend) :hybrid))
          (setf *remote-backend* (second backend))
-         (%start-embedded app port server request-guard workers))
+         (%start-embedded app port server request-guard workers loops))
         (t (error "hyperion/desktop: unrecognized :backend ~S" backend)))
     (unwind-protect
          (progn
