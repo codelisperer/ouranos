@@ -18,7 +18,8 @@
 ;;;; was, and the window is tried again after a pause that doubles each time, up to MAX-ATTEMPTS
 ;;;; times. A retry does not store an observation twice: what an earlier attempt already wrote,
 ;;;; with the same content and the same message range, is not written again, and its promotion
-;;;; is run again. A window still failing is given up on: it goes into OBSERVER-SKIPPED, so the
+;;;; is run again. The match is on exact content, so a retry whose answer words an observation
+;;;; differently stores both wordings. A window still failing is given up on: it goes into OBSERVER-SKIPPED, so the
 ;;;; prompt can keep those messages raw (#317, step C) rather than lose them, the mark moves past
 ;;;; it, and each later run tries it again in the same way, until MAX-ATTEMPTS runs have given up
 ;;;; on it. A skipped window still due starts a run by itself, so a new observer retries it even
@@ -29,6 +30,14 @@
 ;;;; observer per request, or restarts, neither distils the thread again from the start nor
 ;;;; passes a window that was given up on or written only part-way. They are not worked out from
 ;;;; the thread's observations, which would count observations the app wrote itself.
+;;;;
+;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS. OBSERVE-TURN starts nothing while
+;;;; another observer of the same store, subject and thread is running, a run first takes the
+;;;; store's progress when it is further on than its own, and the stored mark is never lowered.
+;;;; Observers of one thread in two processes at once are not coordinated.
+;;;;
+;;;; ERASURE. `forget-subject' while a window is being distilled can be followed by that
+;;;; window's writes. Stop the subject's observers (STOP-OBSERVER) before erasing it.
 ;;;;
 ;;;; WHAT IT WRITES, AND WHAT IT DOES NOT.
 ;;;;
@@ -53,7 +62,9 @@
 ;;;; a skipped window is (FROM THROUGH TRIES) in the same numbering.
 ;;;;
 ;;;; A THREAD OBSERVER SHARES ITS STORE WITH THE APP. `praxeon/memory''s in-memory store locks
-;;;; every operation for that reason, and the SQL store holds a lock around each statement.
+;;;; every operation for that reason. The SQL store holds its lock around each write and around
+;;;; a supersession's check and writes, and computes embeddings before taking it, so a request's
+;;;; read does not wait for the embedding model.
 
 (in-package #:praxeon/observe)
 
@@ -84,6 +95,27 @@ window, Mastra's step.")
    (stopping :initform nil :accessor observer-stopping)
    (lock :initform (bt:make-lock "praxeon-observer") :reader observer-lock))
   (:documentation "Distils one thread's messages into the thread's observations, a window at a time."))
+
+(defvar *running* (make-hash-table :test #'equal)
+  "(STORE SUBJECT THREAD) -> the observer running on that thread in this process.")
+
+(defvar *running-lock* (bt:make-lock "praxeon-observers"))
+
+(defun %claim (observer)
+  "Make OBSERVER the one running on its store, subject and thread in this process. NIL when
+another observer of the same thread is running."
+  (let ((key (list (observer-store observer) (observer-subject observer) (observer-thread observer))))
+    (bt:with-lock-held (*running-lock*)
+      (let ((other (gethash key *running*)))
+        (if (and other (not (eq other observer)) (observer-busy-p other))
+            nil
+            (setf (gethash key *running*) observer))))))
+
+(defun %release (observer)
+  (let ((key (list (observer-store observer) (observer-subject observer) (observer-thread observer))))
+    (bt:with-lock-held (*running-lock*)
+      (when (eq (gethash key *running*) observer)
+        (remhash key *running*)))))
 
 (defun stored-mark (store subject thread)
   "The mark an observer of THREAD about SUBJECT resumes from: what STORE records of its progress
@@ -117,6 +149,14 @@ it is what STORE records (STORED-MARK), and the skipped windows always come from
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":max-attempts must be a positive integer, not ~S" max-attempts)))
   (unless (and (realp retry-delay) (not (minusp retry-delay)))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":retry-delay must be a number of seconds, not ~S" retry-delay)))
+  ;; BOTH PROGRESS GENERICS, checked here: a store with only the reader would be accepted and
+  ;; then fail on every save.
+  (loop for (generic . arguments) in (list (list #'mem:thread-progress store subject thread)
+                                           (list #'mem:record-thread-progress store subject thread 0 '()))
+        unless (compute-applicable-methods generic arguments)
+          do (error 'praxeon/conditions:praxeon-error
+                    :detail (format nil "~A has no method for ~A, which the observer keeps its progress with"
+                                    (type-of store) (sb-mop:generic-function-name generic))))
   (multiple-value-bind (stored skipped) (mem:thread-progress store subject thread)
     (make-instance 'observer :provider provider :store store :subject subject :thread thread
                              :step step :accept accept :promote promote :promote-accept promote-accept
@@ -176,9 +216,12 @@ taken here, so messages the app adds later are the next call's."
                                            :seconds (- (get-universal-time) (observer-started observer)))
          nil)
         ((observer-busy-p observer) nil)
-        ((or (let ((window (unobserved observer snapshot)))
+        ((and (or (let ((window (unobserved observer snapshot)))
                (and window (or flush (>= (prompt:messages-tokens window) (observer-step observer)))))
-             (%retry-due-p observer snapshot))
+                  (%retry-due-p observer snapshot))
+              ;; ONE RUNNING OBSERVER PER THREAD in this process, so an observer made per
+              ;; request does not distil a window another one is distilling (#462's third review).
+              (%claim observer))
          (setf (observer-started observer) (get-universal-time)
                (observer-stopping observer) nil)
          ;; THREAD-LIFETIME: continues the turn's unit of work, on its own thread so the turn
@@ -217,14 +260,27 @@ the thread distils it."
 time, until what is left is below a step (or, with FLUSH, nothing is left), or the observer is
 stopped. An error here is recorded and logged, never raised: an error no handler takes in this
 thread would end the process."
-  (handler-case
-      (progn (%retry-skipped observer history today)
-             (%run-windows observer history flush today))
-    (error (e)
-      (incf (observer-failures observer))
-      (setf (observer-last-error observer) e)
-      (log:error "memory observer stopped" :thread (observer-thread observer)
-                                           :condition (string-downcase (princ-to-string (type-of e)))))))
+  (unwind-protect
+       (handler-case
+           (progn (%adopt-stored-progress observer)
+                  (%retry-skipped observer history today)
+                  (%run-windows observer history flush today))
+         (error (e)
+           (incf (observer-failures observer))
+           (setf (observer-last-error observer) e)
+           (log:error "memory observer stopped" :thread (observer-thread observer)
+                                                :condition (string-downcase (princ-to-string (type-of e))))))
+    (%release observer)))
+
+(defun %adopt-stored-progress (observer)
+  "Take the store's progress when it is further on than OBSERVER's own: another observer of the
+thread, made before this one ran, may have moved it."
+  (multiple-value-bind (stored skipped)
+      (mem:thread-progress (observer-store observer) (observer-subject observer) (observer-thread observer))
+    (bt:with-lock-held ((observer-lock observer))
+      (when (and stored (> stored (observer-mark observer)))
+        (setf (observer-mark observer) stored
+              (observer-skipped observer) skipped)))))
 
 (defun %run-windows (observer history flush today)
   (loop
@@ -267,8 +323,14 @@ the next window's save carries the same state again."
   (multiple-value-bind (mark skipped)
       (bt:with-lock-held ((observer-lock observer))
         (values (observer-mark observer) (copy-tree (observer-skipped observer))))
-    (handler-case (mem:record-thread-progress (observer-store observer) (observer-subject observer)
-                                              (observer-thread observer) mark skipped)
+    (handler-case (if (> (or (mem:thread-progress (observer-store observer) (observer-subject observer)
+                                                  (observer-thread observer))
+                             0)
+                         mark)
+                      ;; THE STORED MARK IS NEVER LOWERED: what is there is further on.
+                      (%adopt-stored-progress observer)
+                      (mem:record-thread-progress (observer-store observer) (observer-subject observer)
+                                                  (observer-thread observer) mark skipped))
       (error (e)
         (incf (observer-failures observer))
         (setf (observer-last-error observer) e)
@@ -364,27 +426,54 @@ was written. Never raises: this runs on a thread of its own."
   "SUBJECT's current fact whose content is CONTENT, whoever wrote it."
   (find content (mem:observations-of store subject) :key #'mem:observation-content :test #'string=))
 
+(defun %lineage-contents (observation thread-observations)
+  "OBSERVATION's content and the content of every thread observation it descends from through
+SUPERSEDES, nearest first. THREAD-OBSERVATIONS includes superseded ones."
+  (loop for o = observation then (and (mem:observation-supersedes o)
+                                      (find (mem:observation-supersedes o) thread-observations
+                                            :key #'mem:observation-id :test #'string=))
+        while o
+        collect (mem:observation-content o)))
+
+(defun %current-successor (fact facts)
+  "The current fact FACT was superseded into, following SUPERSEDED-BY through FACTS; FACT itself
+when it is current; NIL when the chain ends in an observation no longer stored."
+  (loop for f = fact then (find (mem:observation-superseded-by f) facts
+                                :key #'mem:observation-id :test #'string=)
+        while f
+        when (mem:observation-current-p f) return f))
+
 (defun %maybe-promote (observer observation provenance)
   "Record OBSERVATION, a thread observation, as a fact about the subject when PROMOTE says so.
 
 Not twice: when the subject already holds a current fact with its content, nothing is done.
-When OBSERVATION corrects a thread observation whose content the subject holds as a current
-fact, from this conversation, another, or the app, that fact is superseded only when
-PROMOTE-ACCEPT also says so; otherwise nothing is promoted."
+
+NEVER BESIDE A FACT IT REPLACES (#462's reviews). The subject facts OBSERVATION is about are
+those whose content is OBSERVATION's own or that of any thread observation it descends from
+through a chain of corrections, superseded facts included, whoever wrote them. When there are
+any, OBSERVATION replaces their current successor only when PROMOTE-ACCEPT says so, and
+otherwise nothing is promoted. So a chain Porto, Lisbon, Faro, a correction of a fact the app
+or another conversation has already corrected, and an old fact observed again all end with one
+current fact. A thread fact that contradicts a subject fact with no such link between them is
+promoted beside it; telling those apart is PROMOTE's judgement."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer)))
     (when (and (funcall (observer-promote observer) observation)
                (not (%current-fact store subject (mem:observation-content observation))))
-      (let* ((replaced-id (mem:observation-supersedes observation))
-             (replaced (and replaced-id
-                            (find replaced-id (mem:observations-of store subject :thread (observer-thread observer)
-                                                                                 :include-superseded t)
-                                  :key #'mem:observation-id :test #'string=)))
-             (old-fact (and replaced (%current-fact store subject (mem:observation-content replaced)))))
+      (let* ((contents (%lineage-contents observation
+                                          (mem:observations-of store subject :thread (observer-thread observer)
+                                                                             :include-superseded t)))
+             (facts (mem:observations-of store subject :include-superseded t))
+             (heads (remove-duplicates
+                     (remove nil (mapcar (lambda (f) (%current-successor f facts))
+                                         (remove-if-not (lambda (f) (member (mem:observation-content f) contents
+                                                                            :test #'string=))
+                                                        facts)))))
+             (head (first heads)))
         (cond
-          (old-fact
-           (when (funcall (observer-promote-accept observer) observation old-fact)
-             (mem:supersede store old-fact (mem:observation-content observation)
+          (head
+           (when (funcall (observer-promote-accept observer) observation head)
+             (mem:supersede store head (mem:observation-content observation)
                             :provenance provenance :kind (mem:observation-kind observation)
                             :valid-from (mem:observation-valid-from observation))))
           (t (mem:remember store subject (mem:observation-content observation)

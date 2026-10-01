@@ -162,6 +162,8 @@ On SQLite the table is in a fresh database file, deleted afterwards."
                   ,@body)
              (ignore-errors
               (conn:exec connection (format nil "DROP TABLE IF EXISTS ~A" table)))
+             (ignore-errors
+              (conn:exec connection (format nil "DROP TABLE IF EXISTS ~A_progress" table)))
              (conn:disconnect connection)))))))
 
 ;;; --- the tests --------------------------------------------------------------
@@ -576,3 +578,71 @@ observation, from a copy that does not know about the first, is refused and writ
       (signals cnd:praxeon-error (mem:supersede store stale "Lives in Faro." :provenance (test-provenance 3)))
       (is (equal '("Lives in Lisbon.")
                  (mapcar #'mem:observation-content (mem:observations-of store "member-13")))))))
+
+;;; --- after #462's third review ------------------------------------------------------------
+
+(defclass slow-embedder (basis-embedder) ()
+  (:documentation "Takes 0.6 s to embed a text beginning \"Slowly\", as a remote embedding model
+would."))
+
+(defmethod llm:embed :before ((p slow-embedder) text)
+  (when (and (>= (length text) 6) (string= "Slowly" text :end2 6))
+    (sleep 0.6)))
+
+(test supersede-embeds-before-it-takes-the-stores-lock
+  "A supersession whose embedding takes 0.6 s does not hold the store's lock meanwhile, so a
+read made during it returns at once rather than waiting for the model."
+  (with-store (store (make-instance 'slow-embedder))
+    (let* ((porto (mem:remember store "member-14" "Lives in Porto." :provenance (test-provenance)))
+           (worker (bt:make-thread (lambda ()
+                                     (mem:supersede store porto "Slowly moved to Lisbon."
+                                                    :provenance (test-provenance 2)))
+                                   :name "supersede-test")))
+      (sleep 0.15)
+      (let ((began (get-internal-real-time)))
+        (mem:observations-of store "member-14")
+        (let ((waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))
+          (is (< waited 0.3) "the read waited ~,3F s" waited)))
+      (bt:join-thread worker)
+      (is (equal '("Slowly moved to Lisbon.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-14")))))))
+
+(test forget-subject-works-without-the-progress-table
+  "An installation that added the two columns in its own migration but not the progress table,
+which it needs only for praxeon/observe, can still erase a subject."
+  (with-store (store)
+    (mem:remember store "member-15" "Lives in Porto." :provenance (test-provenance))
+    (conn:exec (mdb::store-connection store) (format nil "DROP TABLE ~A_progress" (mdb:store-table store)))
+    (is (= 1 (mem:forget-subject store "member-15")))
+    (is (null (mem:observations-of store "member-15")))))
+
+(defvar *superseded-meanwhile* nil
+  "The id of an observation INTERRUPTED-STORE marks superseded after its next REMEMBER.")
+
+(defclass interrupted-store (mdb:db-memory-store) ()
+  (:documentation "Marks *SUPERSEDED-MEANWHILE* superseded after a REMEMBER, as another process
+superseding the same observation between SUPERSEDE's check and its update would."))
+
+(defmethod mem:remember :after ((store interrupted-store) subject content
+                                &key provenance kind value tokens valid-from thread)
+  (declare (ignore subject content provenance kind value tokens valid-from thread))
+  (when *superseded-meanwhile*
+    (conn:exec (mdb::store-connection store)
+               (format nil "UPDATE ~A SET superseded_by = 'obs-elsewhere' WHERE id = '~A'"
+                       (mdb:store-table store) *superseded-meanwhile*))))
+
+(test supersede-refuses-what-another-process-superseded-after-its-check
+  "SUPERSEDE's UPDATE changes the row only while it is still current and must change one, so a
+supersession that passed its check, and lost the row to another process before its update, is
+refused and its replacement rolled back."
+  (with-store (store)
+    (let ((porto (mem:remember store "member-16" "Lives in Porto." :provenance (test-provenance))))
+      (change-class store 'interrupted-store)
+      (let ((*superseded-meanwhile* (mem:observation-id porto)))
+        (signals cnd:praxeon-error
+          (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2))))
+      (change-class store 'mdb:db-memory-store)
+      (is (equal '("Lives in Porto.")
+                 (mapcar #'mem:observation-content
+                         (mem:observations-of store "member-16" :include-superseded t)))
+          "the replacement was rolled back"))))
