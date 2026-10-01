@@ -7,6 +7,8 @@
 # starts with NAME (libuv for libuv.so.1), and adds a control run without that one library,
 # which must fail too: the app needs that library, and the copy it used was the bundle's. The
 # desktop-release dry runs pass libuv, so a bundle whose app is not on :uv does not pass (#472).
+# It applies to a bundle directory only; with an .AppImage it is refused (exit 2), because the
+# control run deletes a file and an AppImage's files cannot be deleted.
 #
 # WHY THIS EXISTS: a native-dependency bug is INVISIBLE on the machine that built the
 # artifact, because that machine has every library the build needed. That is not a
@@ -68,6 +70,13 @@ if [ -f "$BUNDLE" ]; then
     *.AppImage) ;;
     *) echo "verify-bundle: $BUNDLE is a file but not an .AppImage" >&2; exit 2 ;;
   esac
+  # --require-carried needs a control run with a library deleted, and a file cannot be deleted
+  # from inside an AppImage. Refuse it rather than pass without checking it.
+  if [ -n "$REQUIRED" ]; then
+    echo "verify-bundle: --require-carried applies to a bundle directory, not an .AppImage;" >&2
+    echo "verify-bundle: run it on the directory the AppImage was made from" >&2
+    exit 2
+  fi
   APPIMAGE_ABS=$(cd "$(dirname "$BUNDLE")" && pwd)/$(basename "$BUNDLE")
   echo "verify-bundle: $(basename "$BUNDLE")"
   echo "verify-bundle: clean room = $IMAGE"

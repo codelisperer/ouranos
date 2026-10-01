@@ -46,7 +46,14 @@ SECONDS_TO_RUN=""
 REQUIRED=""
 while :; do
   case "${1:-}" in
-    --seconds) [ $# -ge 2 ] || usage; SECONDS_TO_RUN="$2"; shift 2 ;;
+    --seconds)
+      [ $# -ge 2 ] || usage
+      # A positive whole number. Zero, a negative number, a word or nothing would end the wait
+      # at once, and the app, just started and still running, would be counted as started.
+      case "$2" in
+        ""|*[!0-9]*|0*) echo "verify-bundle-macos: --seconds takes a positive whole number, not '$2'" >&2; exit 2 ;;
+      esac
+      SECONDS_TO_RUN="$2"; shift 2 ;;
     --require-carried) [ $# -ge 2 ] || usage; REQUIRED="$REQUIRED $2"; shift 2 ;;
     *) break ;;
   esac
