@@ -260,9 +260,12 @@
                "aion/uv/net"                                          ; and its connection class (#262)
                "aion/fs"                                              ; and the dev:serve test's temp root (#432)
                "hyperion/desktop"                                     ; and run-app's :uv default (#472)
+               "cons"                                                 ; and the web template it scaffolds (#472)
                "fiveam" "aion/test-threads" (:require "sb-bsd-sockets"))
   :serial t
-  :components ((:file "tests/server-uv-tests"))
+  ;; server-uv-template-child.lisp is not a component: the template test loads it in a fresh sbcl.
+  :components ((:file "tests/server-uv-tests")
+               (:file "tests/server-uv-template-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/server-uv/tests :run-tests)))
 
 (defsystem "hyperion/assets"

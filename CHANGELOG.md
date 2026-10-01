@@ -34,6 +34,15 @@ its tag.
   Windows is a desktop app that never exits and shows nothing. An app acts if its dumped image
   relies on SBCL's debugger, for a REPL of its own for example: pass `:debugger t` to
   `dump-executable` or `dump-core`, or call `sb-ext:enable-debugger` where it needs it. (#495)
+- **`cons init --template web` scaffolds an app on `hyperion/server-uv` instead of
+  `clack-handler-hunchentoot`.** The generated `.asd` depends on `hyperion/server-uv`, and the
+  generated `start` passes `:workers 2` to `hyperion/server:start` when the server is `:uv`, so a
+  slow handler does not hold up other requests. A project generated this way needs a built libuv:
+  run `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree, or install libuv on the
+  system. A `bin/<name>` dumped by `cons bin` looks for libuv beside itself, then in the tree
+  that built it, then on the system, so on another machine put libuv and its licence beside it.
+  Projects generated before this are unchanged. To keep Hunchentoot in a new project, replace
+  `hyperion/server-uv` with `clack-handler-hunchentoot` in its `.asd`. (#472)
 
 ### Added
 

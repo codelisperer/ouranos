@@ -192,7 +192,7 @@ BODY, and remove the directory however BODY exits."
              (cons/init:template-dependencies (cons/init:find-template :cli))))
   (is (equal '("cons/env" "praxeon")
              (cons/init:template-dependencies (cons/init:find-template :agent))))
-  (is (equal '("cons/env" "hyperion" "spinneret" "clack-handler-hunchentoot")
+  (is (equal '("cons/env" "hyperion" "spinneret" "hyperion/server-uv")
              (cons/init:template-dependencies (cons/init:find-template :web))))
   (is (null (cons/init:template-dependencies (cons/init:find-template :lib)))))
 
@@ -212,11 +212,14 @@ BODY, and remove the directory however BODY exits."
 (test the-web-template-declares-an-http-backend
   ;; Not folded into the test above, because this one is load-bearing rather than
   ;; descriptive: hyperion declares no HTTP server (pre-publication issue 139), so a scaffolded web app that
-  ;; names no Clack handler COMPILES and then dies at SRV:START with NO-SERVER-BACKEND --
-  ;; a failure `cons template check` cannot see, since building is not starting.
+  ;; names no server COMPILES and then dies at SRV:START with NO-SERVER-BACKEND -- a failure
+  ;; `cons template check` cannot see, since building is not starting. Since #472 it is
+  ;; hyperion/server-uv; hyperion/server-uv/tests scaffolds the template and serves a request
+  ;; from it, which is the check that it starts.
   (let ((deps (cons/init:template-dependencies (cons/init:find-template :web))))
-    (is-true (find-if (lambda (d) (search "clack-handler-" d)) deps)
-             "the web template must name a Clack handler; hyperion supplies none")))
+    (is-true (find-if (lambda (d) (or (string= d "hyperion/server-uv") (search "clack-handler-" d)))
+                      deps)
+             "the web template must name a server (hyperion/server-uv or a Clack handler); hyperion supplies none")))
 
 (test the-project-name-reaches-every-generated-file
   ;; The substitution pass is the one thing every template depends on, and a missed marker
