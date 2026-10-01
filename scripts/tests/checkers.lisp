@@ -76,9 +76,10 @@ call made it."
 
 (defun %call-with-run-directory (thunk)
   "Call THUNK with a run directory of its own, and delete that directory afterwards, however
-THUNK ends -- a failed check, a signalled error or a non-local exit. Fixtures are never deleted
-one by one (see %FRESH-TREE), so this is the one place they are removed. Before #476 nothing
-removed them, and one Windows machine had 2,952 of them, 190 MB, in its temporary directory."
+THUNK ends -- a failed check, a signalled error or a non-local exit. This removes whatever
+fixtures remain. Most tests leave theirs (see %FRESH-TREE), and a few in dump-image,
+carry-natives and windows-launcher delete their own. Before #476 nothing removed the rest, and
+one Windows machine had 2,952 of them, 190 MB, in its temporary directory."
   (let ((*run-directory* nil))
     (unwind-protect (funcall thunk)
       (when *run-directory*
@@ -115,9 +116,9 @@ not. The name carries a random suffix so two runs cannot collide even if one lef
 directory behind.
 
 It is made inside this run's directory (%RUN-DIRECTORY), which RUN-TESTS deletes when the
-suite ends, however it ends (#476). No test deletes its own fixture or relies on one having
-been deleted. A test run on its own with FIVEAM:RUN, outside RUN-TESTS, leaves its run
-directory behind."
+suite ends, however it ends (#476). A test may delete its own fixture when it is done, and a
+few do, but no test relies on a fixture having been deleted, because every fixture is new. A
+test run on its own with FIVEAM:RUN, outside RUN-TESTS, leaves its run directory behind."
   (%new-directory (%run-directory) "tree-"))
 
 (defun %install-checker (tree name)
