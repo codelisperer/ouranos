@@ -224,3 +224,85 @@ commented-out call left before main, and one whose dump hook is only in a string
       (is (not (equal stringed text)) "the control must have changed the template")
       (is-false (nth-value 0 (%template-hook-order stringed))
                 "a dump hook that is only a string must fail"))))
+
+
+;;; --- an unhandled error ends a dumped image (#495) --------------------------------------
+;;;
+;;; DUMP-EXECUTABLE and DUMP-CORE turn SBCL's debugger off in the image they dump, so an
+;;; unhandled error exits with code 1 instead of waiting at the debugger's prompt. The images
+;;; here are dumped from a process whose debugger is ON -- no --script, no --non-interactive --
+;;; so the dump functions are the only thing that can turn it off. Each image's entry signals,
+;;; and it runs with its standard input open, as a desktop app's runtime does. The control is
+;;; the same dump with :DEBUGGER T, which keeps the debugger and does not exit.
+
+(defparameter +exit-bound-seconds+ 15
+  "How long a dumped image whose entry signals may run before it counts as waiting.")
+
+(defun %dump-signalling-image (tree kind debugger)
+  "Dump an image into TREE whose entry signals an error, through DUMP-EXECUTABLE (KIND
+:EXECUTABLE) or DUMP-CORE (KIND :CORE), with DEBUGGER, from a process whose own debugger is on.
+Returns its path, or NIL when the dump wrote nothing."
+  (let* ((probe (merge-pathnames "signals.lisp" tree))
+         (image (merge-pathnames (format nil "~(~A~)-~:[off~;on~]~A" kind debugger
+                                         (if (and (eq kind :executable) (uiop:os-windows-p)) ".exe"
+                                             (if (eq kind :core) ".core" "")))
+                                 tree)))
+    (%write probe (%lines "(defpackage #:dump-signals (:use #:cl))"
+                          "(in-package #:dump-signals)"
+                          "(defun main () (error \"dump-signals: an unhandled error\"))"))
+    (uiop:run-program
+     (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--no-userinit" "--no-sysinit"
+           "--eval" "(require :asdf)"
+           "--eval" (format nil "(load ~S)" (uiop:native-namestring probe))
+           "--eval" (format nil "(load ~S)" (uiop:native-namestring (merge-pathnames "dump-image.lisp" *scripts*)))
+           "--eval" (format nil "(ouranos-dump:~A ~S 'dump-signals::main :debugger ~:[nil~;t~])"
+                            (if (eq kind :core) "dump-core" "dump-executable")
+                            (uiop:native-namestring image) debugger))
+     :input nil :output nil :error-output nil :ignore-error-status t)
+    (and (probe-file image) image)))
+
+(defun %run-with-input-open (kind image)
+  "Run IMAGE, an executable or a core, with its standard input a pipe that stays open. Returns
+(values EXITED-P EXIT-CODE OUTPUT) after it exits or +EXIT-BOUND-SECONDS+ pass, stopping it in
+the second case."
+  (let* ((argv (if (eq kind :core)
+                   (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                         "--core" (uiop:native-namestring image) "--noinform" "--end-runtime-options")
+                   (list (uiop:native-namestring image))))
+         (process (uiop:launch-program argv :input :stream :output :stream :error-output :output))
+         (start (get-internal-real-time)))
+    (loop while (and (uiop:process-alive-p process)
+                     (< (- (get-internal-real-time) start)
+                        (* +exit-bound-seconds+ internal-time-units-per-second)))
+          do (sleep 0.2))
+    (let ((exited (not (uiop:process-alive-p process))))
+      (unless exited (uiop:terminate-process process :urgent t))
+      (let ((code (uiop:wait-process process))
+            (output (with-output-to-string (o)
+                      (loop for line = (ignore-errors (read-line (uiop:process-info-output process) nil))
+                            while line do (write-line line o)))))
+        (ignore-errors (close (uiop:process-info-input process)))
+        (values exited code output)))))
+
+(defun %check-unhandled-error-exits (kind)
+  (let ((tree (%fresh-tree)))
+    (let ((off (%dump-signalling-image tree kind nil))
+          (on (%dump-signalling-image tree kind t)))
+      (is-true (and off on) "both images were dumped")
+      (when (and off on)
+        (multiple-value-bind (exited code output) (%run-with-input-open kind off)
+          (is-true exited "the default image exits within ~D s after an unhandled error"
+                   +exit-bound-seconds+)
+          (is (and (integerp code) (/= 0 code)) "with a non-zero code: ~S" code)
+          (is (search "dump-signals: an unhandled error" output)
+              "having printed the error: ~A" output))
+        (is-false (%run-with-input-open kind on)
+                  "control: with :DEBUGGER T it waits at the debugger past ~D s"
+                  +exit-bound-seconds+)))))
+
+(test an-unhandled-error-ends-an-executable-from-dump-executable
+  (%check-unhandled-error-exits :executable))
+
+(test an-unhandled-error-ends-a-core-from-dump-core
+  (%check-unhandled-error-exits :core))

@@ -41,7 +41,28 @@
 
 (in-package #:ouranos-dump)
 
-(defun dump-executable (path entry &key compression)
+(defun %toplevel (entry debugger)
+  "The dumped image's toplevel: unless DEBUGGER, turn SBCL's debugger off; then run UIOP's
+restore hook and ENTRY.
+
+THE DEBUGGER IS OFF UNLESS ASKED FOR (#495). With it off, an unhandled error prints its message
+and a backtrace to standard error and exits with code 1. With it on, the error waits for input
+at the debugger's prompt, and a desktop app on Windows, whose runtime is given the launcher's
+standard input and no window, would wait there for ever. Every image this file dumped already
+had the debugger off, but only because the dumping process ran with --script or
+--non-interactive, which turn it off, and the dumped core keeps that setting. This makes it a
+property of the dump instead of the command line. It is turned off before the restore hook, so
+an error there, a library that cannot be reopened for instance, is covered too.
+
+An image that runs SBCL's own REPL, or otherwise wants the debugger, passes :DEBUGGER T to
+DUMP-EXECUTABLE or DUMP-CORE, or turns it back on with SB-EXT:ENABLE-DEBUGGER where it needs it,
+as bin/cons does for its REPL targets."
+  (lambda ()
+    (unless debugger (sb-ext:disable-debugger))
+    (uiop:call-image-restore-hook)
+    (funcall entry)))
+
+(defun dump-executable (path entry &key compression debugger)
   "Dump this image to PATH as an executable that calls ENTRY, a function designator, when it
 starts. Does not return: `save-lisp-and-die' ends this process.
 
@@ -50,25 +71,23 @@ executable takes its temporary directory, its fasl cache and ASDF's configuratio
 environment it runs in rather than the one it was dumped in.
 
 COMPRESSION, when true, is passed to `save-lisp-and-die' as :COMPRESSION, for an SBCL built
-with core compression; it is not passed at all otherwise (#287)."
+with core compression; it is not passed at all otherwise (#287).
+
+DEBUGGER, false by default, keeps SBCL's debugger in the image; see %TOPLEVEL (#495)."
   (uiop:call-image-dump-hook)
   (apply #'sb-ext:save-lisp-and-die
          path
-         :toplevel (lambda ()
-                     (uiop:call-image-restore-hook)
-                     (funcall entry))
+         :toplevel (%toplevel entry debugger)
          :executable t
          :save-runtime-options t
          (and compression (list :compression compression))))
 
-(defun dump-core (path entry)
+(defun dump-core (path entry &key debugger)
   "Dump this image to PATH as a core with no runtime in it, which calls ENTRY when it starts.
-Does not return. The same hooks as DUMP-EXECUTABLE. The heap and the command line are the
-launcher's to set: see this file's header."
+Does not return. The same hooks as DUMP-EXECUTABLE, and the same DEBUGGER argument. The heap and
+the command line are the launcher's to set: see this file's header."
   (uiop:call-image-dump-hook)
   (sb-ext:save-lisp-and-die
    path
-   :toplevel (lambda ()
-               (uiop:call-image-restore-hook)
-               (funcall entry))
+   :toplevel (%toplevel entry debugger)
    :executable nil))

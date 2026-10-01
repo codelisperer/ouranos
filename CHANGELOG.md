@@ -12,6 +12,19 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **An image dumped by `scripts/dump-image.lisp` exits on an unhandled error, whatever command
+  line dumped it.** `ouranos-dump:dump-executable` and `ouranos-dump:dump-core` now turn SBCL's
+  debugger off in the image, so an unhandled error prints its message and a backtrace to
+  standard error and exits with code 1. Images dumped by `bootstrap.lisp` and
+  `scripts/build-desktop-app.lisp` already behaved this way, because they are dumped from
+  processes started with `--script`, which turns the debugger off, and the core keeps that; an
+  image dumped from an interactive session did not, and waited at the debugger's prompt, which on
+  Windows is a desktop app that never exits and shows nothing. An app acts if its dumped image
+  relies on SBCL's debugger, for a REPL of its own for example: pass `:debugger t` to
+  `dump-executable` or `dump-core`, or call `sb-ext:enable-debugger` where it needs it. (#495)
+
 ### Fixed
 
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
