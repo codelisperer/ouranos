@@ -480,10 +480,14 @@ stylesheet change clears the error while the file still has never loaded -- the 
 
 (defun %hold-port (port seconds)
   "Listen on 127.0.0.1:PORT for SECONDS in a thread of its own, then close. Returns once
-listening."
+listening.
+
+SO_REUSEADDR is set on Unix and not on Windows. On macOS a port that another listener has just
+closed cannot be bound again without it: the CI leg failed with EADDRINUSE here. On Windows it
+would let this socket take a port that is still being listened on."
   (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
         (ready (sb-thread:make-semaphore)))
-    (setf (sb-bsd-sockets:sockopt-reuse-address s) nil)
+    (setf (sb-bsd-sockets:sockopt-reuse-address s) #-win32 t #+win32 nil)
     (sb-bsd-sockets:socket-bind s #(127 0 0 1) port)
     (sb-bsd-sockets:socket-listen s 5)
     (sb-thread:make-thread (lambda ()
