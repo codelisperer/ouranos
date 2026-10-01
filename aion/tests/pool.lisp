@@ -218,3 +218,126 @@ the test instead of hanging it."
       (is (null stalled) "round ~A: a job was refused, or not picked up by an idle worker"
           stalled)
       (is (= 800 (car ran))))))
+
+;;; --- every job, exactly once, with no lock on the submit path (#466) ------------------
+
+(defun %join-all (threads seconds)
+  "Join THREADS, giving up after SECONDS in total; return their values, or :TIMEOUT for each
+thread that had not finished, so a lost wake-up fails a test instead of hanging the run."
+  (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (mapcar (lambda (th)
+              (sb-thread:join-thread
+               th :default :timeout
+                  :timeout (max 0 (/ (- deadline (get-internal-real-time))
+                                     internal-time-units-per-second))))
+            threads)))
+
+(test every-job-runs-exactly-once-when-four-threads-submit-at-once
+  "Four threads submit 20,000 jobs each, at once, retrying when refused. Each job counts its
+own run in its own slot, so a job lost shows as a 0 and a job run twice as a 2. After the pool
+drains, every slot is exactly 1."
+  (let* ((per-thread 20000) (threads 4) (n (* per-thread threads))
+         (runs (make-array n :element-type 'sb-ext:word :initial-element 0))
+         (p (pool:make-pool :size 8 :queue-limit 64)))
+    (unwind-protect
+         (let ((done (%join-all
+                      (loop for k below threads
+                            collect (let ((k k))
+                                      (sb-thread:make-thread
+                                       (lambda ()
+                                         (loop for i from (* k per-thread) below (* (1+ k) per-thread)
+                                               do (let ((i i))
+                                                    (loop until (pool:try-submit
+                                                                 p (lambda () (sb-ext:atomic-incf (aref runs i))))
+                                                          do (sb-thread:thread-yield))))
+                                         :submitted)
+                                       :name "pool stress submitter")))
+                      60)))
+           (is (every (lambda (d) (eq d :submitted)) done) "submitters: ~S" done))
+      (pool:stop-pool p))
+    (is (= 0 (count 0 runs)) "~D jobs never ran" (count 0 runs))
+    (is (= 0 (count-if (lambda (x) (> x 1)) runs)) "~D jobs ran more than once"
+        (count-if (lambda (x) (> x 1)) runs))
+    (is (= n (reduce #'+ runs)))))
+
+(test a-job-accepted-while-the-pool-stops-still-runs
+  "Submitters race STOP-POOL. Every job TRY-SUBMIT accepted runs exactly once, and every job it
+refused never runs: shutdown drains what was accepted, even in the moment STOPPING is set."
+  (dotimes (round 20)
+    (let* ((per-thread 2000) (threads 4) (n (* per-thread threads))
+           (runs (make-array n :element-type 'sb-ext:word :initial-element 0))
+           (accepted (make-array n :element-type 'bit :initial-element 0))
+           (p (pool:make-pool :size 4 :queue-limit 32))
+           (submitters
+             (loop for k below threads
+                   collect (let ((k k))
+                             (sb-thread:make-thread
+                              (lambda ()
+                                (loop for i from (* k per-thread) below (* (1+ k) per-thread)
+                                      do (let ((i i))
+                                           (when (pool:try-submit
+                                                  p (lambda () (sb-ext:atomic-incf (aref runs i))))
+                                             (setf (aref accepted i) 1))))
+                                :submitted)
+                              :name "pool stop-race submitter")))))
+      (sleep 0.0005)
+      (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) :stopped)
+                                            :name "pool stop-race stopper")))
+        (let ((done (%join-all (cons stopper submitters) 30)))
+          (is (every (lambda (d) (member d '(:stopped :submitted))) done) "round ~D: ~S" round done)))
+      (let ((lost (loop for i below n count (and (= 1 (aref accepted i)) (/= 1 (aref runs i)))))
+            (ghost (loop for i below n count (and (= 0 (aref accepted i)) (/= 0 (aref runs i))))))
+        (is (= 0 lost) "round ~D: ~D accepted jobs did not run exactly once" round lost)
+        (is (= 0 ghost) "round ~D: ~D refused jobs ran" round ghost)))))
+
+(test a-job-submitted-as-a-worker-goes-idle-is-not-missed
+  "A worker finds the queue empty; before it counts itself idle, a job is submitted. The
+submitter sees no idle worker and does not signal, so the job is found only by the worker's
+second look at the queue. The hook holds the worker at exactly that point."
+  (let* ((at-the-point (sb-thread:make-semaphore))
+         (go-on (sb-thread:make-semaphore))
+         (armed (list t))
+         (ran (sb-thread:make-semaphore)))
+    (setf aion/pool::*%after-empty-look*
+          (lambda ()
+            (when (sb-ext:compare-and-swap (car armed) t nil)
+              (sb-thread:signal-semaphore at-the-point)
+              (sb-thread:wait-on-semaphore go-on :timeout 10))))
+    (unwind-protect
+         (with-pool (p :size 1 :queue-limit 4)
+           (is (sb-thread:wait-on-semaphore at-the-point :timeout 10)
+               "the worker never reached the point between its two looks")
+           (is (pool:try-submit p (lambda () (sb-thread:signal-semaphore ran))))
+           (sb-thread:signal-semaphore go-on)
+           (is (sb-thread:wait-on-semaphore ran :timeout 5)
+               "the job submitted between the worker's two looks never ran"))
+      (setf aion/pool::*%after-empty-look* nil))))
+
+(test a-place-reserved-when-the-pool-stops-is-not-lost
+  "A submitter has reserved a place but not yet enqueued its job when STOP-POOL runs. The
+workers must not exit while a place is reserved, so the job runs and STOP-POOL returns after
+it. The hook holds the submitter at exactly that point."
+  (let* ((at-the-point (sb-thread:make-semaphore))
+         (go-on (sb-thread:make-semaphore))
+         (armed (list t))
+         (ran (list 0))
+         (p (pool:make-pool :size 2 :queue-limit 4)))
+    (setf aion/pool::*%after-reserve*
+          (lambda ()
+            (when (sb-ext:compare-and-swap (car armed) t nil)
+              (sb-thread:signal-semaphore at-the-point)
+              (sb-thread:wait-on-semaphore go-on :timeout 10))))
+    (unwind-protect
+         (let ((submitter (sb-thread:make-thread
+                           (lambda () (pool:try-submit p (lambda () (sb-ext:atomic-incf (car ran)))))
+                           :name "pool reserve submitter")))
+           (is (sb-thread:wait-on-semaphore at-the-point :timeout 10))
+           (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) :stopped)
+                                                 :name "pool reserve stopper")))
+             ;; Give a broken pool's workers time to see STOPPING and an empty queue, and exit.
+             (sleep 0.2)
+             (sb-thread:signal-semaphore go-on)
+             (is (equal '(t :stopped) (%join-all (list submitter stopper) 10)))
+             (is (= 1 (car ran)) "the job whose place was reserved ran ~D times" (car ran))))
+      (setf aion/pool::*%after-reserve* nil)
+      (pool:stop-pool p))))

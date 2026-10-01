@@ -95,6 +95,15 @@ its tag.
   stylesheet is served by `hyperion/assets` as `:calendar`: link `(hyperion/assets:url
   :calendar)`. `hyperion/assets` gains `first-party-p` to tell the tree's own files from the
   vendored ones. See `hyperion/docs/calendar.md`.
+- **aion/pool: submitting a job takes no lock, so several server-uv loops no longer wait on
+  each other** (#466). `try-submit` reserves a place with an atomic count and puts the job on
+  `sb-concurrency`'s lock-free queue, and each worker sleeps on its own semaphore, which a
+  submitter signals only when it claims that worker from the stack of idle ones. The pool's
+  behaviour is unchanged: the queue limit and the 503 when it is full, the worker count,
+  draining on `stop-pool`, and reporting a job that signals. On macOS in `hyperion/bench` with
+  4 loops and 8 workers, `/tile` went from about 96,800 to about 110,700 requests/s, against
+  about 111,100 with handlers run on the loops. `pool-queued` is now exact only when the pool
+  is quiet, being a reading of two counters that change while jobs move.
 
 ### Fixed
 

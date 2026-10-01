@@ -125,7 +125,7 @@ rule survives intact.
 ### SBCL contrib (free — ships with SBCL)
 | Dep | Role | Used by |
 |---|---|---|
-| `sb-concurrency` | thread-safe mailbox | praxeon/web (SSE channel) |
+| `sb-concurrency` | thread-safe mailbox; a lock-free queue | praxeon/web (SSE channel); `aion/pool`, whose submit path takes no lock, so several server-uv loops do not wait on each other (#466) |
 | `sb-bsd-sockets` | port probing / socket checks | `hyperion/desktop` (localhost lifecycle) |
 | `sb-posix` | `mkdir` — atomic create-or-fail; `chmod`, `link`, `rename`, `stat`, `umask` | `cons` (`cons/tempdir`), `hyperion/update` (the Linux AppImage strategy and the private staging directory, #251), `praxeon/claude-code` (`umask` and `chmod` for the hook's private archive, #452) and `praxeon/claude-code/tests` (`chmod` for the stand-in programs) — **Unix only** in all of them: `(:feature :unix …)` |
 
