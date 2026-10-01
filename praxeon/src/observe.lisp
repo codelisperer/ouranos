@@ -23,9 +23,14 @@
 ;;;; OBSERVER-SKIPPED, so the prompt can keep those messages raw (#317, step C) rather than lose
 ;;;; them, the mark moves past it, and each later run tries it again in the same way, until
 ;;;; MAX-ATTEMPTS runs have given up on it. A skipped window still due starts a run by itself, so
-;;;; a new observer retries it even when no new message has arrived. A RETRIED SKIPPED WINDOW IS
-;;;; WRITTEN TO THE THREAD BUT NOTHING FROM IT IS PROMOTED: later windows were distilled and
-;;;; promoted before it, and its older statements could stand beside their corrections.
+;;;; a new observer retries it even when no new message has arrived.
+;;;;
+;;;; A SKIPPED WINDOW IS RETRIED ONLY WHILE NO LATER WINDOW HAS BEEN WRITTEN TO THE THREAD (#462's
+;;;; fifth review). Until then a retry distils and promotes it exactly as if it had never been
+;;;; skipped. Once an observation from a later window is in the thread, the skipped window is
+;;;; closed: marked :CLOSED in OBSERVER-SKIPPED, never retried, and its messages stay raw in the
+;;;; prompt (#317, step C). So nothing older is written over or beside anything newer, and a
+;;;; window with nothing after it keeps its facts.
 ;;;;
 ;;;; THE MARK AND THE SKIPPED WINDOWS ARE KEPT IN THE STORE (`praxeon/memory:thread-progress'),
 ;;;; written after each window, and a new observer starts from them. So an app that makes an
@@ -223,9 +228,15 @@ STEP estimated tokens, and always at least one."
           until (>= tokens step))
     end))
 
+(defun %open-p (entry)
+  "Whether a skipped window ENTRY may still be retried: not closed because a later window was
+written."
+  (not (eq (fourth entry) :closed)))
+
 (defun %retry-due-p (observer history)
   "Whether a skipped window of HISTORY is due another try."
-  (some (lambda (s) (and (< (third s) (observer-max-attempts observer))
+  (some (lambda (s) (and (%open-p s)
+                         (< (third s) (observer-max-attempts observer))
                          (<= (second s) (length history))))
         (observer-skipped observer)))
 
@@ -335,23 +346,45 @@ thread, made before this one ran, may have moved it."
         (when (eq outcome :stopped) (return))
         (%save-progress observer)))))
 
+(defun %later-window-written-p (observer through)
+  "Whether the thread holds an observation, current or superseded, from a window after message
+THROUGH."
+  (let ((thread (observer-thread observer)))
+    (some (lambda (o)
+            (let ((p (mem:observation-provenance o)))
+              (and (string= (mem:provenance-conversation p) thread)
+                   (> (mem:provenance-turn p) through))))
+          (mem:observations-of (observer-store observer) (observer-subject observer)
+                               :thread thread :include-superseded t))))
+
 (defun %retry-skipped (observer history today)
-  "Try once more each skipped window of HISTORY that fewer than MAX-ATTEMPTS runs have tried. A
-window written now leaves OBSERVER-SKIPPED; one that fails again counts the try."
+  "Try once more each open skipped window of HISTORY that fewer than MAX-ATTEMPTS runs have tried,
+distilled and promoted as any window is. One with a later window written after it is closed
+instead, and not tried. A window written now leaves OBSERVER-SKIPPED; one that fails again
+counts the try."
   (dolist (entry (copy-list (observer-skipped observer)))
-    (destructuring-bind (from through tries) entry
-      (when (and (< tries (observer-max-attempts observer)) (<= through (length history))
+    (destructuring-bind (from through tries &optional status) entry
+      (declare (ignore status))
+      (when (and (%open-p entry) (< tries (observer-max-attempts observer)) (<= through (length history))
                  (not (observer-stopping observer)))
-        (let ((outcome (%observe-window observer (subseq history (1- from) through) (1- from) through today
-                                        :promote nil)))
-          (unless (eq outcome :stopped)
-            (bt:with-lock-held ((observer-lock observer))
-              (setf (observer-skipped observer)
-                    (if (eq outcome :written)
-                        (remove entry (observer-skipped observer) :test #'equal)
-                        (substitute (list from through (1+ tries)) entry (observer-skipped observer)
-                                    :test #'equal))))
-            (%save-progress observer)))))))
+        (if (%later-window-written-p observer through)
+            (progn
+              (bt:with-lock-held ((observer-lock observer))
+                (setf (observer-skipped observer)
+                      (substitute (list from through tries :closed) entry (observer-skipped observer)
+                                  :test #'equal)))
+              (log:info "memory observer window closed" :thread (observer-thread observer)
+                                                        :from from :through through)
+              (%save-progress observer))
+            (let ((outcome (%observe-window observer (subseq history (1- from) through) (1- from) through today)))
+              (unless (eq outcome :stopped)
+                (bt:with-lock-held ((observer-lock observer))
+                  (setf (observer-skipped observer)
+                        (if (eq outcome :written)
+                            (remove entry (observer-skipped observer) :test #'equal)
+                            (substitute (list from through (1+ tries)) entry (observer-skipped observer)
+                                        :test #'equal))))
+                (%save-progress observer))))))))
 
 (defun %save-progress (observer)
   "Record OBSERVER's mark and skipped windows in its store. A failure is counted and logged, and
@@ -379,7 +412,7 @@ the next window's save carries the same state again."
     (loop while (and (< (get-internal-real-time) until) (not (observer-stopping observer)))
           do (sleep 0.05))))
 
-(defun %observe-window (observer window start end today &key (promote t))
+(defun %observe-window (observer window start end today)
   "Distil WINDOW, the messages from position START (from 0) to END, and write what it yields,
 trying up to OBSERVER-MAX-ATTEMPTS times with a pause before each retry. Returns :WRITTEN,
 :SKIPPED when every attempt failed, or :STOPPED when the observer was stopped before the window
@@ -392,7 +425,7 @@ was written. Never raises: this runs on a thread of its own."
                (setf outcome :stopped)
                (return))
              (handler-case
-                 (progn (setf written (%distil-and-write observer window start end today :promote promote))
+                 (progn (setf written (%distil-and-write observer window start end today))
                         (setf outcome :written)
                         (return))
                (error (e)
@@ -417,10 +450,8 @@ was written. Never raises: this runs on a thread of its own."
                           (eql (mem:provenance-through p) end))))
                  (mem:observations-of store subject :thread thread)))
 
-(defun %distil-and-write (observer window start end today &key (promote t))
-  "One attempt at a window. Returns how many observations it wrote, or signals. With PROMOTE
-NIL nothing from the window is promoted: a retried skipped window, which later windows came
-before."
+(defun %distil-and-write (observer window start end today)
+  "One attempt at a window. Returns how many observations it wrote, or signals."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer))
          (thread (observer-thread observer))
@@ -456,7 +487,7 @@ before."
         ;; writes, so an attempt that failed during promotion is finished by the next one.
         ;; %MAYBE-PROMOTE leaves alone a fact the subject already holds, so running it again
         ;; changes nothing that was done.
-        (dolist (o (and promote (%window-observations store subject thread start end)))
+        (dolist (o (%window-observations store subject thread start end))
           (%maybe-promote observer o provenance))
         (length written)))))
 

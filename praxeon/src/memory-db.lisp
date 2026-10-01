@@ -586,12 +586,19 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                              (format nil "SELECT 1 AS present WHERE to_regclass('~A') IS NOT NULL" table))))))
 
 (defun %skipped->text (skipped)
-  (format nil "~{~{~D-~D-~D~}~^,~}" skipped))
+  "SKIPPED as \"FROM-THROUGH-TRIES\" entries joined by commas, with \"-closed\" after a closed one."
+  (format nil "~{~A~^,~}"
+          (mapcar (lambda (e) (format nil "~D-~D-~D~:[~;-closed~]" (first e) (second e) (third e)
+                                      (eq (fourth e) :closed)))
+                  skipped)))
 
 (defun %text->skipped (text)
   (when (and text (plusp (length text)))
     (loop for entry in (uiop:split-string text :separator ",")
-          collect (mapcar #'parse-integer (uiop:split-string entry :separator "-")))))
+          collect (destructuring-bind (from through tries &optional status)
+                      (uiop:split-string entry :separator "-")
+                    (append (mapcar #'parse-integer (list from through tries))
+                            (when (equal status "closed") (list :closed)))))))
 
 (defmethod mem:thread-progress ((store db-memory-store) subject thread)
   (let ((row (bt:with-recursive-lock-held ((store-lock store))

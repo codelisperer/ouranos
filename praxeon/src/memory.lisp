@@ -190,7 +190,8 @@ history cannot be made to forget is one a consuming app cannot use for personal 
   (:documentation "How far the observer of THREAD about SUBJECT has got (#317). Returns two
 values: MARK, how many of the thread's messages it has finished with, distilled or given up on;
 and SKIPPED, the windows it gave up on, each a list (FROM THROUGH TRIES) of message positions
-counted from 1 and how many runs have tried it. Both NIL when nothing is recorded.
+counted from 1 and how many runs have tried it, with :CLOSED after TRIES when a later window
+was written and it will not be tried again. Both NIL when nothing is recorded.
 
 KEPT IN THE STORE, NOT WORKED OUT FROM THE OBSERVATIONS (#462's second review). The largest
 message an observation cites passes a window whose writes failed part-way, forgets a window that
