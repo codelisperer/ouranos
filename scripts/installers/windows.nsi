@@ -280,10 +280,18 @@ Section "Install"
 
   ; The staged launcher checks the staged core, the check it makes at every start, and exits
   ; without starting the app (OURANOS_LAUNCHER_CHECK_ONLY, scripts/windows-launcher.c). Only a
-  ; bundle with the launcher's layout has a pair to check; a one-file image has no sbcl.core.
-  ; nsExec runs it with no console window.
-  IfFileExists "$INSTDIR.new\sbcl.core" 0 staged_checked
-  IfFileExists "$INSTDIR.new\sbcl-runtime.exe" 0 staged_checked
+  ; bundle with the launcher's layout has a pair to check; a one-file image has neither file.
+  ; Exactly one of the two is neither layout: it would be swapped in and fail at launch, so it
+  ; is refused (review of train 20). nsExec runs the launcher with no console window.
+  IfFileExists "$INSTDIR.new\sbcl.core" staged_has_core staged_no_core
+  staged_no_core:
+    IfFileExists "$INSTDIR.new\sbcl-runtime.exe" staged_half staged_checked
+  staged_has_core:
+    IfFileExists "$INSTDIR.new\sbcl-runtime.exe" staged_pair staged_half
+  staged_half:
+    RMDir /r "$INSTDIR.new"
+    !insertmacro FailInstall "${APPNAME} could not be updated: the downloaded files are incomplete, with one of sbcl.core and sbcl-runtime.exe and not the other."
+  staged_pair:
     System::Call 'kernel32::SetEnvironmentVariable(t "OURANOS_LAUNCHER_CHECK_ONLY", t "1")'
     nsExec::Exec '"$INSTDIR.new\${EXENAME}"'
     Pop $R3

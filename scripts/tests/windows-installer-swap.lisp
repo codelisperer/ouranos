@@ -466,3 +466,142 @@ and a large 0.0.2, with their cores' hashes. Skips when a tool is missing; alway
 (test an-inno-update-installs-the-whole-new-version-or-none-of-it
   #-win32 (skip "The Windows installers are built and run on Windows only")
   #+win32 (%swap-scenarios :inno))
+
+
+;;; --- a bundle with one of sbcl.core and sbcl-runtime.exe (review of train 20) ------------
+;;;
+;;; The launcher's layout has both files and a one-file image has neither. A bundle with exactly
+;;; one of them used to skip the staged check, as if it were a one-file image, and be swapped
+;;; in, to fail at launch. Both installers now refuse it while it is staged, and
+;;; build-installer.ps1 refuses to build an installer from it. The installers are therefore
+;;; compiled here directly, with the defines build-installer.ps1 passes.
+
+(defun %swap-tool-path (format)
+  "The full path build-installer.ps1 -Check reports for FORMAT's packager, or NIL."
+  (let* ((out (ignore-errors
+               (uiop:run-program (list "pwsh" "-NoProfile" "-NonInteractive" "-File"
+                                       (uiop:native-namestring
+                                        (merge-pathnames "build-installer.ps1" *scripts*))
+                                       "-Check")
+                                 :output :string :error-output :string :ignore-error-status t)))
+         (label (ecase format (:nsis "makensis (nsis):") (:inno "ISCC (inno):")))
+         (line (and out (find-if (lambda (l) (search label l))
+                                 (uiop:split-string out :separator '(#\Newline #\Return))))))
+    (and line (string-trim " " (subseq line (+ (search label line) (length label)))))))
+
+(defun %swap-half-bundle (bundle tree missing)
+  "A copy of BUNDLE in TREE without the file MISSING. Returns its directory."
+  (let ((copy (merge-pathnames (format nil "half-without-~A/" (pathname-name missing)) tree)))
+    (ensure-directories-exist copy)
+    (dolist (f (uiop:directory-files bundle))
+      (unless (equalp (file-namestring f) missing)
+        (uiop:copy-file f (merge-pathnames (file-namestring f) copy))))
+    copy))
+
+(defun %swap-installer-direct (bundle format out)
+  "Compile FORMAT's installer for BUNDLE to OUT with the packager directly, with the defines
+build-installer.ps1 passes, and no WebView2 bootstrapper. Returns OUT, or NIL."
+  (let* ((tool (%swap-tool-path format))
+         (src (string-right-trim "\\" (uiop:native-namestring bundle)))
+         (exe (format nil "~A.exe" +swap-app+))
+         (argv (ecase format
+                 (:nsis (list tool "/NOCD" (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
+                              "/DVIVERSION=0.0.3.0" (format nil "/DSRCDIR=~A" src)
+                              (format nil "/DOUTFILE=~A" (uiop:native-namestring out))
+                              (format nil "/DEXENAME=~A" exe)
+                              (uiop:native-namestring (merge-pathnames "installers/windows.nsi" *scripts*))))
+                 (:inno (list tool (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
+                              (format nil "/DSRCDIR=~A" src)
+                              (format nil "/DOUTDIR=~A" (string-right-trim "\\" (uiop:native-namestring
+                                                                                  (uiop:pathname-directory-pathname out))))
+                              (format nil "/DOUTBASE=~A" (pathname-name out))
+                              (format nil "/DEXENAME=~A" exe)
+                              (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*)))))))
+    (when tool
+      (%swap-run argv :wait t)
+      (and (probe-file out) out))))
+
+(defun %swap-half-bundles-are-refused (format)
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (progn
+           (load (merge-pathnames "windows-launcher.lisp" *scripts*))
+           (cond
+             ((not (ignore-errors (uiop:symbol-call :ouranos-msvc :find-msvc))) (skip "No MSVC here"))
+             ((not (%swap-tool-path format))
+              (skip "build-installer.ps1 -Check finds no ~A" (if (eq format :nsis) "makensis" "ISCC")))
+             (t
+              (let* ((runtime (%swap-runtime tree))
+                     (dir (merge-pathnames "app/" tree)))
+                (multiple-value-bind (b1 v1-sha) (%swap-bundle tree "0.0.1" 65536 runtime)
+                  (let ((b3 (%swap-bundle tree "0.0.3" 65536 runtime))
+                        (v1 (and b1 (%swap-installer b1 format))))
+                    (is-true (and v1 b3) "version 1's installer and version 3's bundle were built")
+                    (when (and v1 b3)
+                      (%with-temp-in ((merge-pathnames "temp/" tree))
+                        (is (eql 0 (%swap-run (%swap-install-argv v1 format dir) :wait t))
+                            "version 1 installs")
+                        (dolist (missing '("sbcl.core" "sbcl-runtime.exe"))
+                          (let* ((half (%swap-half-bundle b3 tree missing))
+                                 (installer (%swap-installer-direct
+                                             half format
+                                             (merge-pathnames (format nil "half-~(~A~)-~A.exe" format
+                                                                      (pathname-name missing))
+                                                              tree))))
+                            (is-true installer "an installer was compiled from the bundle without ~A" missing)
+                            (when installer
+                              (let ((code (%swap-run (%swap-install-argv installer format dir) :wait t)))
+                                (is (eql 2 code) "the bundle without ~A is refused with code 2: ~S"
+                                    missing code))
+                              (is (equal v1-sha (%swap-installed dir))
+                                  "and version 1 is still installed after the bundle without ~A" missing)
+                              (is (eql 0 (%swap-launcher-check dir)) "as a pair the launcher accepts")
+                              (is-false (uiop:directory-exists-p (%swap-sibling dir ".new"))
+                                        "with nothing staged left over"))))))))))))
+      (%with-temp-in ((merge-pathnames "temp/" tree))
+        (%swap-uninstall (merge-pathnames "app/" tree) format))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test an-nsis-update-refuses-a-bundle-with-one-of-the-core-and-the-runtime
+  #-win32 (skip "The Windows installers are built and run on Windows only")
+  #+win32 (%swap-half-bundles-are-refused :nsis))
+
+(test an-inno-update-refuses-a-bundle-with-one-of-the-core-and-the-runtime
+  #-win32 (skip "The Windows installers are built and run on Windows only")
+  #+win32 (%swap-half-bundles-are-refused :inno))
+
+(test build-installer-refuses-a-bundle-with-one-of-the-core-and-the-runtime
+  #-win32 (skip "build-installer.ps1 is run on Windows only")
+  #+win32
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (progn
+           (load (merge-pathnames "windows-launcher.lisp" *scripts*))
+           (if (not (ignore-errors (uiop:symbol-call :ouranos-msvc :find-msvc)))
+               (skip "No MSVC here")
+               (let* ((runtime (%swap-runtime tree))
+                      (bundle (%swap-bundle tree "0.0.4" 65536 runtime)))
+                 (dolist (missing '("sbcl.core" "sbcl-runtime.exe"))
+                   (let* ((half (%swap-half-bundle bundle tree missing))
+                          ;; build-installer.ps1 reads the app and version from the directory name.
+                          (named (merge-pathnames
+                                  (format nil "~A-0.0.4-windows-x86-64/" +swap-app+)
+                                  (merge-pathnames (format nil "named-~A/" (pathname-name missing)) tree))))
+                     (ensure-directories-exist named)
+                     (dolist (f (uiop:directory-files half))
+                       (uiop:copy-file f (merge-pathnames (file-namestring f) named)))
+                     (multiple-value-bind (out err code)
+                         (uiop:run-program (list "pwsh" "-NoProfile" "-NonInteractive" "-File"
+                                                 (uiop:native-namestring
+                                                  (merge-pathnames "build-installer.ps1" *scripts*))
+                                                 (uiop:native-namestring named) "-NoWebView2"
+                                                 "-Out" (uiop:native-namestring
+                                                         (merge-pathnames "refused.exe" tree)))
+                                           :output :string :error-output :string :ignore-error-status t)
+                       (let ((text (concatenate 'string out err)))
+                         (is (not (eql 0 code)) "build-installer.ps1 refuses the bundle without ~A: exit ~A"
+                             missing code)
+                         (is (search "it is incomplete" text) "and says why: ~A" text)
+                         (is-false (probe-file (merge-pathnames "refused.exe" tree))
+                                   "and writes no installer"))))))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))

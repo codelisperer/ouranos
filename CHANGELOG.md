@@ -212,7 +212,10 @@ its tag.
   fails without changing anything and exits 2, the NSIS installer and the Inno one alike. An
   app acts too if its packaging puts its
   own files into the install directory after the installer runs, or keeps anything in
-  `<install>.old` or `<install>.new`: both names are now the installers'. (#98)
+  `<install>.old` or `<install>.new`: both names are now the installers'. A bundle with
+  `sbcl.core` and no `sbcl-runtime.exe`, or the other way round, is refused by
+  `scripts/build-installer.ps1` and by both installers, which used to install it to fail at
+  launch. (#98)
 
 ### Added
 

@@ -260,14 +260,21 @@ end;
 
 { The staged launcher checks the staged core and exits without starting the app
   (OURANOS_LAUNCHER_CHECK_ONLY, scripts/windows-launcher.c). Only a bundle with the launcher's
-  layout has a pair to check; a one-file image has no sbcl.core. }
+  layout has a pair to check; a one-file image has neither file. Exactly one of the two is
+  neither layout: it would be swapped in and fail at launch, so it is refused (review of train
+  20). }
 procedure CheckStaged;
 var
   Staged: String;
   Code: Integer;
+  HasCore, HasRuntime: Boolean;
 begin
   Staged := AppDir + '.new';
-  if FileExists(Staged + '\sbcl.core') and FileExists(Staged + '\sbcl-runtime.exe') then
+  HasCore := FileExists(Staged + '\sbcl.core');
+  HasRuntime := FileExists(Staged + '\sbcl-runtime.exe');
+  if HasCore <> HasRuntime then
+    FailInstall('{#APPNAME} could not be updated: the downloaded files are incomplete, with one of sbcl.core and sbcl-runtime.exe and not the other.');
+  if HasCore and HasRuntime then
   begin
     SetEnvironmentVariable('OURANOS_LAUNCHER_CHECK_ONLY', '1');
     if not Exec(Staged + '\{#EXENAME}', '', ExtractFileDir(AppDir), SW_HIDE,
