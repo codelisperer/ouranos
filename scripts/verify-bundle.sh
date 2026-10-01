@@ -80,6 +80,22 @@ if [ -f "$BUNDLE" ]; then
   APPIMAGE_ABS=$(cd "$(dirname "$BUNDLE")" && pwd)/$(basename "$BUNDLE")
   echo "verify-bundle: $(basename "$BUNDLE")"
   echo "verify-bundle: clean room = $IMAGE"
+  # The AppImage is what a user receives, so its own copy of the bundle is checked for the
+  # sources and licences a carried library requires, not only the directory it was made from.
+  # build-appimage.sh puts the bundle under usr/bin/. --appimage-extract unpacks the file
+  # system into squashfs-root/ and exits without starting the app.
+  EXTRACT=$(mktemp -d)
+  trap 'rm -rf "$EXTRACT"' EXIT
+  ( cd "$EXTRACT" && "$APPIMAGE_ABS" --appimage-extract >/dev/null ) || {
+    echo "verify-bundle: FAILED -- could not extract $(basename "$BUNDLE") to check its sources" >&2
+    exit 1; }
+  sbcl --script "$(cd "$(dirname "$0")" && pwd)/check-bundle-sources.lisp" \
+       "$EXTRACT/squashfs-root/usr/bin" || {
+    echo "verify-bundle: FAILED -- the AppImage lacks a source or licence a carried library requires" >&2
+    exit 1; }
+  # The check passes for a bundle that carries none of those libraries, so name what it saw.
+  echo "verify-bundle: AppImage SOURCES/  = $(ls "$EXTRACT/squashfs-root/usr/bin/SOURCES" 2>/dev/null | tr '\n' ' ')"
+  echo "verify-bundle: AppImage LICENSES/ = $(ls "$EXTRACT/squashfs-root/usr/bin/LICENSES" 2>/dev/null | tr '\n' ' ')"
   echo
   echo "--- run 1: the AppImage as downloaded (must pass) ---"
   # APPIMAGE_EXTRACT_AND_RUN because a container has no FUSE; /tmp because extraction

@@ -97,7 +97,7 @@ Returns the copy's pathname."
          (to (merge-pathnames (concatenate 'string "SOURCES/" name) bundle)))
     (unless (probe-file from)
       (error 'source-refused
-             :reason (format nil "~A is missing; it is the source this bundle must carry with ~A. Run scripts/build-~A.lisp."
+             :reason (format nil "~A is missing; it is the source this bundle must carry with ~A. Run scripts/build-~A.lisp --force, which fetches it again even when the library is already built."
                              (uiop:native-namestring from) (getf entry :package) (getf entry :package))))
     (let ((got (sha256-of from)))
       (unless (string-equal got want)
