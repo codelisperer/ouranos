@@ -36,6 +36,7 @@
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
 (load (merge-pathnames "carry-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; an app's own libraries (#78)
+(load (merge-pathnames "lazy-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; the tree's own libraries (#481)
 
 ;;; --- argv -------------------------------------------------------------------
 (defun argv-value (name &optional default)
@@ -578,17 +579,10 @@ a later step does: a resource update rewrites the file and drops an Authenticode
 ;;; Everything loaded is REPORTED either way, carried or not, with the reason. "Did we bundle
 ;;; everything?" should be answerable by reading this log, not by shipping and waiting.
 
-(defparameter *lazy-natives*
-  '(("AION/UV/FFI" "LOAD-LIBUV" "UNLOAD-LIBUV" "*LIBUV-PATH*" "*LIBRARY-NAMES*"))
-  "Foreign libraries this tree loads LAZILY, and the pair of functions that wake and release
-each one. Lazy loading is deliberate (ADR-0011: binding at load time is what made a missing
-library unloadable rather than merely unavailable), but it means nothing is open yet when we
-come to look -- so the bundler asks each one to resolve itself, using the tree's OWN search
-order rather than CFFI's, which is the only way we learn the vendored path instead of
-whatever the build machine happens to have installed.
-
-Named as strings and resolved at run time: this script must keep working for an app that
-does not load aion/uv at all.")
+(defparameter *lazy-natives* ouranos-lazy-natives:*lazy-natives*
+  "The tree's lazily loaded libraries, from scripts/lazy-natives.lisp, which says what each
+entry holds and why the names are strings. Named as strings and resolved at run time: this
+script must keep working for an app that loads none of them.")
 
 (defun %fn (package name)
   (let* ((p (find-package package))
@@ -616,7 +610,7 @@ THE DISTINCTION THE OLD CODE COULD NOT MAKE, and this one does: a waker whose PA
 ABSENT is an app that does not use the library at all, and that is silence, not a warning. A
 waker whose package IS present and whose library will not resolve is a bundle that must not
 be built. Those are two different right answers and they shared a code path."
-  (loop for (package loader nil) in *lazy-natives*
+  (loop for (package loader nil nil nil build-script) in *lazy-natives*
         for fn = (%fn package loader)
         if fn
           do (handler-case (funcall fn)
@@ -628,7 +622,7 @@ be built. Those are two different right answers and they shared a code path."
                    (format t "time -- and the bundle cannot carry what will not resolve here.~%")
                    (format t "Shipping it would produce an artifact that works on every build~%")
                    (format t "machine and fails on every user's (ADR-0011, #72, #78).~%~%")
-                   (format t "Build the library first:  sbcl --script scripts/build-libuv.lisp~%")
+                   (format t "Build the library first:  sbcl --script scripts/~A~%" build-script)
                    (finish-output))
                  (sb-ext:exit :code 3)))
         else
@@ -638,19 +632,26 @@ be built. Those are two different right answers and they shared a code path."
 (defun release-lazy-natives ()
   "Close what WAKE-LAZY-NATIVES opened, before the dump. SBCL records open shared objects and
 reopens them at image startup; a handle left open here points at the BUILD machine's path,
-which is precisely the path the shipped app does not have."
-  (loop for (package nil unloader) in *lazy-natives*
-        for fn = (%fn package unloader)
-        when fn do (ignore-errors (funcall fn))))
+which is precisely the path the shipped app does not have. So an unloader that fails stops
+the build (OURANOS-LAZY-NATIVES:RELEASE-ALL says why it is no longer ignored)."
+  (handler-case (ouranos-lazy-natives:release-all *lazy-natives*)
+    (ouranos-lazy-natives:release-failed (e)
+      (let ((*standard-output* *error-output*))
+        (format t "~&build-desktop-app: ~A~%~%" e)
+        (format t "The library may still be open, and an image dumped now would reopen this~%")
+        (format t "machine's copy when it starts on the user's machine (ADR-0013). Not dumping.~%")
+        (finish-output))
+      (sb-ext:exit :code 3))))
 
 (defparameter *vendor* (merge-pathnames "vendor/" *root*))
 
 (defun %resolved-library-path (path)
   "PATH as the file it actually names, or NIL when it cannot be shown to name one here.
 
-*LIBUV-PATH* holds the CANDIDATE STRING the tree's own search order accepted, and a bare
-soname is one of those candidates -- aion/uv hands it to the OS loader, which searches its
-own paths and never reports where it landed. A bare name is therefore not a path to
+Each module's path variable (aion/uv's *LIBUV-PATH*, aion/tls's *PATH*) holds the CANDIDATE
+STRING the tree's own search order accepted, and a bare soname is one of those candidates --
+the module hands it to the OS loader, which searches its own paths and never reports where it
+landed. A bare name is therefore not a path to
 resolve: TRUENAME merges it against the current directory and either errors (which is what
 it did, taking the refusal below with it) or, worse, names a file that has nothing to do
 with the library that got loaded."
@@ -720,7 +721,7 @@ Only *LAZY-NATIVES* entries are subject, and that is what makes the check safe: 
 libcrypto are legitimate system dependencies that are never carried, and they are not lazy
 natives, so they never reach this pass."
   (loop with vendor = (or (ignore-errors (truename *vendor*)) *vendor*)
-        for (package loader nil path-var) in *lazy-natives*
+        for (package loader nil path-var nil build-script) in *lazy-natives*
         for present = (and (find-package package) (%fn package loader))
         for path = (and present path-var (%var package path-var))
         for resolved = (and path (%resolved-library-path path))
@@ -746,7 +747,7 @@ natives, so they never reach this pass."
                (format t "that happen to have their own copy. It works on this build machine~%")
                (format t "and fails on every user's (ADR-0011, #72, #78).~%~%")
                (format t "Build the vendored library first:~%")
-               (format t "  sbcl --script scripts/build-libuv.lisp~%")
+               (format t "  sbcl --script scripts/~A~%" build-script)
                (format t "~%Then rebuild. The tree's search prefers vendor/ over the system copy,~%")
                (format t "so no other change is needed.~%"))
              (sb-ext:exit :code 3)))))
