@@ -22,6 +22,13 @@ its tag.
   `*exit-stop-timeout*` (10 s) for its thread. An app that registered its own exit hook calling
   `stop-apartment` as a workaround can remove it; leaving it does no harm, because stopping a
   stopped apartment does nothing. (#484)
+- **Desktop bundles carry mbedTLS when the app loads `aion/tls`** (#481). Before,
+  `scripts/build-desktop-app.lisp` woke and carried only libuv, so a desktop app that used
+  `aion/tls` shipped without the library and signalled `aion/tls:mbedtls-not-found` on the
+  user's machine. The bundler now loads it from `vendor/mbedtls/lib/`, copies it beside the
+  executable with its LICENSE under `LICENSES/`, and closes it before the dump. If the library
+  is not built, the build stops and names `scripts/build-mbedtls.lisp`. The list of libraries
+  the bundler carries is now `scripts/lazy-natives.lisp`.
 
 ## v0.1.7 — 2026-09-30
 
