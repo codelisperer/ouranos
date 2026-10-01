@@ -494,6 +494,18 @@ static bool restore_placement(webview_t w, const char *path, std::FILE *report, 
 }
 #endif
 
+// HYPERION_VIEW_NO_WINDOW=1 stops hyperion-view just before it would create a window, with exit
+// code 3 and a line on stderr. The view tests set it for every run they make on a developer's
+// machine, so a test that reaches webview_create by mistake fails there instead of opening a
+// window on someone's screen; only the CI-only real-window tests clear it (#521). The modes that
+// never create a window (--help, --placement, --saved-placement, and every refusal) ignore it.
+static bool window_forbidden() {
+  const char *value = std::getenv("HYPERION_VIEW_NO_WINDOW");
+  if (value == nullptr || std::strcmp(value, "1") != 0) return false;
+  std::fprintf(stderr, "hyperion-view: HYPERION_VIEW_NO_WINDOW=1 is set, so no window is created\n");
+  return true;
+}
+
 // TEXT as a long, in *OUT. False unless all of TEXT is a decimal number that fits.
 static bool parse_long(const char *text, long *out) {
   errno = 0;
@@ -531,6 +543,10 @@ static void print_usage(std::FILE *out) {
                "           a monitor, and keep PATH up to date (optional, may appear anywhere)\n"
                "\n"
                "  --help, -h   print this and exit\n"
+               "\n"
+               "  With HYPERION_VIEW_NO_WINDOW=1 in the environment, it exits 3 instead of\n"
+               "  creating a window.\n"
+               "\n"
                "  --placement WL WT WR WB CW CH DPI FW FH\n"
                "               print, as X Y WIDTH HEIGHT, where a window with a client area of\n"
                "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
@@ -633,6 +649,7 @@ int main(int argc, char **argv) {
         print_usage(stderr);
         return 2;
       }
+      if (window_forbidden()) return 3;
       webview_t rv = webview_create(0, nullptr);
       if (rv == nullptr) {
         // No window was created (no display, or no WebView2), so there is nothing to place.
@@ -744,6 +761,7 @@ int main(int argc, char **argv) {
   // the application name once, early.
   set_app_name(title);
 
+  if (window_forbidden()) return 3;
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
   webview_set_size(w, width, height, WEBVIEW_HINT_NONE);
