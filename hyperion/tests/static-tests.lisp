@@ -10,18 +10,12 @@
 (def-suite static :description "Static file responses: types, safety, caching." :in hyperion)
 (in-suite static)
 
-(defvar *static-test-seq* 0
-  "Counter making each temp root unique. Not tmpize-pathname: that CREATES a file, and we
-need a directory of that name.")
-
 (defmacro with-static-root ((root &rest files) &body body)
   "Bind ROOT to a fresh temp directory containing FILES -- each (relative-name contents)."
   (let ((dir (gensym)) (name (gensym)) (contents (gensym)))
-    `(let ((,dir (uiop:ensure-directory-pathname
-                  (merge-pathnames (format nil "hyperion-static-test-~D-~D/"
-                                           (get-universal-time) (incf *static-test-seq*))
-                                   (uiop:temporary-directory)))))
-       (ensure-directories-exist ,dir)
+    ;; Not the time and a counter: two processes started in the same second share those, and
+    ;; would share the directory (#515).
+    `(let ((,dir (aion/fs:make-temporary-directory "hyperion-static-test")))
        (unwind-protect
             (let ((,root ,dir))
               ,@(loop for (n c) in files
