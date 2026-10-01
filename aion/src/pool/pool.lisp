@@ -128,6 +128,7 @@ A WARN rather than an ERROR level: the pool is fine, the job is not."
   (idle nil)                      ; a lock-free stack of %WORKER-STATEs, see above
   (wakes nil)                     ; every worker's %WORKER-STATE
   (limit 0 :type unsigned-byte)
+  (%capacity 0 :type fixnum)      ; SIZE + LIMIT, computed once in MAKE-POOL; see POOL-CAPACITY
   (on-error #'%log-job-error)
   (stopping nil))
 
@@ -152,7 +153,7 @@ CAPACITY IS SIZE + LIMIT, not the limit alone, and that is what keeps a queue-li
 useful setting rather than \"accept nothing ever\", which is a footgun that reads exactly
 like it. The guarantee the number buys: NO JOB IS ACCEPTED UNLESS A WORKER IS FREE OR THE
 QUEUE HAS ROOM FOR IT."
-  (+ (pool-size pool) (pool-limit pool)))
+  (pool-%capacity pool))
 
 (sb-ext:defglobal *%after-empty-look* nil
   "NIL, or a function a worker calls after it finds the queue empty and before it counts
@@ -167,6 +168,20 @@ lose the job if its workers exited with a place still reserved.
 Both hooks are global variables, not special ones, so reading one is a plain load: TRY-SUBMIT
 reads *%AFTER-RESERVE* on every job, and a special variable's value would first be looked up
 in the thread's own bindings.")
+
+(sb-ext:defglobal *%after-push* nil
+  "NIL, or a function of the worker's %WORKER-STATE that a worker calls after it has pushed
+itself onto IDLE and before its second look. FOR TESTS ONLY, like the hooks above.")
+
+(sb-ext:defglobal *%after-second-look-found* nil
+  "NIL, or a function of the worker's %WORKER-STATE that a worker calls when its second look
+has found a job, before it takes itself back off IDLE. FOR TESTS ONLY: a submitter that claims
+this worker in that moment has its wake-up passed on, which is what a test holds open here.")
+
+(sb-ext:defglobal *%on-refusal* nil
+  "NIL, or a function TRY-SUBMIT calls when it refuses a full pool, before it returns NIL. FOR
+TESTS ONLY: a refusal holds no place in the pool, and a test holds a refused submitter here to
+show that another submitter is still accepted when a place frees.")
 
 (defun %wake-all (pool)
   "Wake every worker, so each can see the pool is stopping and drained."
@@ -197,23 +212,45 @@ worker's %WORKER-STATE."
         (when found
           (sb-ext:atomic-incf (pool-running pool))
           (return job)))
-      ;; STOPPING before OUTSTANDING, with a barrier between, pairing with TRY-SUBMIT's
-      ;; barrier between its reservation and its read of STOPPING: a submitter that did not
-      ;; see STOPPING made its reservation visible to a worker that does.
+      ;; A STOPPING POOL'S WORKER LEAVES once nothing is queued or reserved: OUTSTANDING is
+      ;; no more than RUNNING, the jobs other workers are inside. Those jobs do not need this
+      ;; worker, and counting them would keep it waiting on a job that called STOP-POOL
+      ;; itself, which then never returns (#512's review). OUTSTANDING is read before RUNNING:
+      ;; a job that finishes between the two reads lowers OUTSTANDING after RUNNING was read
+      ;; higher, and only ever makes this worker stay, never leave early.
+      ;;
+      ;; STOPPING before OUTSTANDING, with a barrier between, pairs with the ordering of
+      ;; TRY-SUBMIT's reservation before its read of STOPPING: a submitter that did not see
+      ;; STOPPING made its reservation visible to a worker that does. The barrier between
+      ;; OUTSTANDING and RUNNING keeps the two loads in that order, which arm64 does not do on
+      ;; its own. These two and STOP-POOL's are the barriers the design needs. The others
+      ;; follow an atomic read-modify-write, which already orders later accesses on arm64
+      ;; (LDADDAL, and a successful CASAL) and on x86-64 (a LOCK-prefixed instruction), so
+      ;; they are kept only as statements of intent; #512's review checked this.
       (when (and (pool-stopping pool)
-                 (progn (sb-thread:barrier (:memory)) (zerop (pool-outstanding pool))))
+                 (progn (sb-thread:barrier (:memory))
+                        (let ((outstanding (pool-outstanding pool)))
+                          (sb-thread:barrier (:memory))
+                          (<= outstanding (pool-running pool)))))
         (return nil))
       (when *%after-empty-look* (funcall *%after-empty-look*))
       ;; Become findable BEFORE the second look, so a submitter that enqueues after the look
       ;; finds this worker on IDLE and wakes it.
       (setf (%worker-state-state w) :idle)
       (%push-idle pool w)
+      (when *%after-push* (funcall *%after-push* w))
       (sb-thread:barrier (:memory))
       (multiple-value-bind (job found) (sb-concurrency:dequeue queue)
         (cond (found
-               ;; Take this worker back. If a submitter claimed it first, its signal is on the
-               ;; semaphore already and only makes the next wait return at once.
-               (sb-ext:compare-and-swap (%worker-state-state w) :idle :busy)
+               (when *%after-second-look-found* (funcall *%after-second-look-found* w))
+               ;; Take this worker back. If a submitter claimed it first, that submitter
+               ;; enqueued a job of its own and woke this worker for it, and this worker is
+               ;; about to run another. So pass the wake-up on to the next idle worker, or the
+               ;; submitter's job waits behind this one while an idle worker sleeps (#512's
+               ;; review). The signal left on this worker's semaphore only makes its next wait
+               ;; return at once.
+               (unless (eq :idle (sb-ext:compare-and-swap (%worker-state-state w) :idle :busy))
+                 (%wake-one pool))
                (setf (%worker-state-state w) :busy)
                (sb-ext:atomic-incf (pool-running pool))
                (return job))
@@ -222,16 +259,14 @@ worker's %WORKER-STATE."
                (setf (%worker-state-state w) :busy)))))))
 
 (defun %finish-job (pool)
-  "Count a job as finished. When the pool is stopping and this was the last job, wake every
-worker so each sees there is nothing left and exits."
+  "Count a job as finished. When the pool is stopping, wake every worker, so each can see
+whether anything is left and exit if not. RUNNING is lowered before OUTSTANDING, so a worker
+that reads the two between the decrements sees OUTSTANDING the higher and stays."
   (sb-ext:atomic-decf (pool-running pool))
-  (let ((before (sb-ext:atomic-decf (pool-outstanding pool))))
-    ;; A full barrier between the decrement and the read of STOPPING. On arm64 an atomic
-    ;; read-modify-write does not keep a later load from being satisfied before its store is
-    ;; visible, and then this job could finish unseen by a STOP-POOL that reads it as running.
-    (sb-thread:barrier (:memory))
-    (when (and (= before 1) (pool-stopping pool))
-      (%wake-all pool))))
+  (sb-ext:atomic-decf (pool-outstanding pool))
+  (sb-thread:barrier (:memory))
+  (when (pool-stopping pool)
+    (%wake-all pool)))
 
 (defun %report-job-error (pool condition)
   "Tell someone that a job died -- and never let the telling kill the worker.
@@ -275,7 +310,8 @@ interpolates the payload that caused it. See %REPORT-JOB-ERROR for why a default
 nothing was the wrong answer, and why a reporter that signals still cannot kill a worker."
   (check-type size (integer 1))
   (check-type queue-limit (integer 0))
-  (let ((pool (%make-pool :name name :limit queue-limit :size size :on-error on-error)))
+  (let ((pool (%make-pool :name name :limit queue-limit :size size :on-error on-error
+                          :%capacity (+ size queue-limit))))
     (setf (pool-wakes pool) (loop repeat size collect (%make-worker-state)))
     (setf (pool-threads pool)
           (loop for i below size
@@ -296,43 +332,63 @@ is at its limit or the pool is stopping.
 
 NEVER BLOCKS, AND TAKES NO POOL MUTEX (#466). Waking an idle worker signals that worker's own
 semaphore, whose lock only the claiming submitter and that worker share. The caller may be an
-event loop's own thread, where
-waiting would stall every other connection; see the file header. A NIL is a decision the
+event loop's own thread, where waiting would stall every other connection; see the file
+header. A NIL is a decision the
 caller has to make, and for a server that decision is 503.
 
 THE PLACE IS RESERVED BEFORE THE STOPPING CHECK. A submitter that checked STOPPING first
 could pass the check, lose the processor while STOP-POOL ran and every worker found nothing
 left, and then enqueue a job no worker would ever take. Reserved first, the job counts in
 OUTSTANDING before STOPPING is read, and a worker does not exit while OUTSTANDING is above
-zero."
-  (let ((before (sb-ext:atomic-incf (pool-outstanding pool))))
-    ;; The reservation must be visible before STOPPING is read; see %NEXT-JOB's exit check.
-    (sb-thread:barrier (:memory))
-    (cond ((or (>= before (pool-capacity pool)) (pool-stopping pool))
-           ;; ATOMIC-DECF returns the value before, so 1 means this was the last place
-           ;; outstanding; a stopping pool's waiting workers then need to see that.
-           (when (and (= 1 (prog1 (sb-ext:atomic-decf (pool-outstanding pool))
-                               (sb-thread:barrier (:memory))))
-                      (pool-stopping pool))
-             (%wake-all pool))
-           nil)
-          (t
-           (when *%after-reserve* (funcall *%after-reserve*))
-           (sb-concurrency:enqueue thunk (pool-queue pool))
-           (sb-thread:barrier (:memory))
-           (%wake-one pool)
-           t))))
+RUNNING, which a reserved job that is not yet queued always makes it.
+
+A FULL POOL REFUSES WITHOUT TAKING A PLACE, so a refusal never makes another submitter see the
+pool fuller than it is."
+  ;; RESERVE WITHOUT EVER PASSING THE CAPACITY. An increment that was taken back after it saw
+  ;; a full pool counted, until it was taken back, against a submitter that came in between,
+  ;; which was refused while a place was free (#512's review). The compare-and-swap raises
+  ;; OUTSTANDING only from a value below the capacity, so a refusal holds no place at all.
+  (let ((capacity (pool-%capacity pool)))
+    (declare (fixnum capacity))
+    (loop
+      (let ((current (pool-outstanding pool)))
+        (when (>= current capacity)
+          (when *%on-refusal* (funcall *%on-refusal*))
+          (return-from try-submit nil))
+        (when (eql current (sb-ext:compare-and-swap (pool-outstanding pool) current (1+ current)))
+          (return)))))
+  ;; The reservation is visible before STOPPING is read; see %NEXT-JOB's exit check. The
+  ;; compare-and-swap above already orders it on arm64 and x86-64; the barrier says so here.
+  (sb-thread:barrier (:memory))
+  (cond ((pool-stopping pool)
+         ;; Give the place back, and wake every worker so each sees it is gone.
+         (sb-ext:atomic-decf (pool-outstanding pool))
+         (sb-thread:barrier (:memory))
+         (%wake-all pool)
+         nil)
+        (t
+         (when *%after-reserve* (funcall *%after-reserve*))
+         (sb-concurrency:enqueue thunk (pool-queue pool))
+         (sb-thread:barrier (:memory))
+         (%wake-one pool)
+         t)))
 
 (defun stop-pool (pool)
   "Stop accepting work, let the queue drain, and join every worker. Idempotent.
 
 DRAINS RATHER THAN ABANDONS: a job already queued was accepted, and a pool that accepted
-work and then dropped it on shutdown would make graceful shutdown a lie. A worker exits only
-once nothing is outstanding, so a job reserved in the moment STOPPING was set still runs."
+work and then dropped it on shutdown would make graceful shutdown a lie. A worker exits once
+nothing is queued or reserved, so a job reserved in the moment STOPPING was set still runs.
+
+CALLED FROM ONE OF THE POOL'S OWN JOBS, it returns, as it always has: it does not join the
+worker it runs on, which exits once that job is done, and the other workers do not wait for
+that job, which only its own worker needs."
   (setf (pool-stopping pool) t)
+  ;; Required: the store of STOPPING must be visible before the workers are woken to read it.
   (sb-thread:barrier (:memory))
   (%wake-all pool)
   (dolist (thread (pool-threads pool))
-    (ignore-errors (sb-thread:join-thread thread :default nil)))
+    (unless (eq thread sb-thread:*current-thread*)
+      (ignore-errors (sb-thread:join-thread thread :default nil))))
   (setf (pool-threads pool) nil)
   pool)

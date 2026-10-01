@@ -266,7 +266,9 @@ refused never runs: shutdown drains what was accepted, even in the moment STOPPI
   (dotimes (round 20)
     (let* ((per-thread 2000) (threads 4) (n (* per-thread threads))
            (runs (make-array n :element-type 'sb-ext:word :initial-element 0))
-           (accepted (make-array n :element-type 'bit :initial-element 0))
+           ;; Words, not bits: four threads write it at once, and two writes to bits of one
+           ;; word can lose one (#512's review measured it about once in 6,000 rounds).
+           (accepted (make-array n :element-type 'sb-ext:word :initial-element 0))
            (p (pool:make-pool :size 4 :queue-limit 32))
            (submitters
              (loop for k below threads
@@ -344,3 +346,99 @@ it. The hook holds the submitter at exactly that point."
              (is (= 1 (car ran)) "the job whose place was reserved ran ~D times" (car ran))))
       (setf aion/pool::*%after-reserve* nil)
       (pool:stop-pool p))))
+
+;;; --- the three races #512's review forced (comment 5940402609) ------------------------
+
+(defstruct (%gate (:constructor %make-gate ()))
+  (arrive (sb-thread:make-semaphore)) (release (sb-thread:make-semaphore)) (armed (list t)))
+
+(defun %hold (gate)
+  "Hold the calling thread once: signal that it arrived, then wait to be released."
+  (when (sb-ext:compare-and-swap (car (%gate-armed gate)) t nil)
+    (sb-thread:signal-semaphore (%gate-arrive gate))
+    (sb-thread:wait-on-semaphore (%gate-release gate) :timeout 20)))
+
+(defun %arrived-p (gate) (sb-thread:wait-on-semaphore (%gate-arrive gate) :timeout 10))
+(defun %release (gate) (sb-thread:signal-semaphore (%gate-release gate)))
+(defun %thread-named-p (name) (equal name (sb-thread:thread-name sb-thread:*current-thread*)))
+(defun %seconds () (/ (get-internal-real-time) internal-time-units-per-second))
+
+(test a-wake-up-meant-for-a-worker-that-took-another-job-is-passed-on
+  "Workers A and B. A's second look takes job X while B's finds nothing and B waits. Job Y's
+submitter claims A, still marked idle in the moment before A takes itself back, and wakes it.
+A runs X, so the wake-up must reach B, or Y waits behind X while B sleeps. X here waits for Y
+to start, as a job that waits on another would; Y must start at once, not when X gives up."
+  (let ((empty-a (%make-gate)) (empty-b (%make-gate))
+        (pushed-b (%make-gate)) (found-a (%make-gate))
+        (y-started (list nil)) (x-saw (list :unset)))
+    (setf aion/pool::*%after-empty-look*
+          (lambda () (cond ((%thread-named-p "lw-0") (%hold empty-a))
+                           ((%thread-named-p "lw-1") (%hold empty-b))))
+          aion/pool::*%after-push*
+          (lambda (w) (declare (ignore w)) (when (%thread-named-p "lw-1") (%hold pushed-b)))
+          aion/pool::*%after-second-look-found*
+          (lambda (w) (declare (ignore w)) (when (%thread-named-p "lw-0") (%hold found-a))))
+    (unwind-protect
+         (with-pool (p :size 2 :queue-limit 4 :name "lw")
+           (is (and (%arrived-p empty-a) (%arrived-p empty-b)) "both workers at their first look")
+           (is (pool:try-submit p (lambda ()
+                                    (let ((deadline (+ (%seconds) 3)))
+                                      (loop until (or (car y-started) (> (%seconds) deadline))
+                                            do (sleep 0.001))
+                                      (setf (car x-saw)
+                                            (if (car y-started) :y-started :gave-up))))))
+           (%release empty-b)
+           (is (%arrived-p pushed-b) "B pushed itself")
+           (%release empty-a)
+           (is (%arrived-p found-a) "A's second look took X")
+           (%release pushed-b)
+           (sleep 0.3)                         ; B looks, finds nothing, and waits
+           (let ((submitted (%seconds)))
+             (is (pool:try-submit p (lambda () (setf (car y-started) (%seconds)))))
+             (%release found-a)
+             (is (wait-until (lambda () (car y-started)) :timeout 2)
+                 "Y did not start within 2 s: it waited behind X while B slept")
+             (when (car y-started)
+               (is (< (- (car y-started) submitted) 1)))
+             (is (wait-until (lambda () (not (eq :unset (car x-saw)))) :timeout 5))
+             (is (eq :y-started (car x-saw)))))
+      (setf aion/pool::*%after-empty-look* nil
+            aion/pool::*%after-push* nil
+            aion/pool::*%after-second-look-found* nil))))
+
+(test a-refused-submitter-holds-no-place
+  "Capacity 1, taken by a running job. A submitter is refused, and held just after its refusal.
+The job finishes, so the place is free; another submitter must be accepted, not refused by a
+place the held refusal still counted."
+  (let ((refused (%make-gate)) (blocker (sb-thread:make-semaphore)) (ran (list nil)))
+    (setf aion/pool::*%on-refusal* (lambda () (%hold refused)))
+    (unwind-protect
+         (with-pool (p :size 1 :queue-limit 0)
+           (is (pool:try-submit p (lambda () (sb-thread:wait-on-semaphore blocker :timeout 10))))
+           (is-true (wait-until (lambda () (= 1 (pool:pool-busy p)))))
+           (let ((refusal (sb-thread:make-thread (lambda () (pool:try-submit p (lambda () nil)))
+                                                 :name "pool held refusal")))
+             (is (%arrived-p refused) "the refused submitter reached its refusal")
+             (sb-thread:signal-semaphore blocker)
+             (is-true (wait-until (lambda () (zerop (pool:pool-busy p)))))
+             (setf aion/pool::*%on-refusal* nil)
+             (is (pool:try-submit p (lambda () (setf (car ran) t)))
+                 "refused while the pool had a free place")
+             (%release refused)
+             (is (null (aion/test-threads:join refusal)))
+             (is-true (wait-until (lambda () (car ran))))))
+      (setf aion/pool::*%on-refusal* nil))))
+
+(test stop-pool-called-from-one-of-its-own-jobs-returns
+  "As on main, for 1, 2 and 4 workers: the job that calls STOP-POOL does not wait for itself,
+and the other workers do not wait for it either."
+  (dolist (size '(1 2 4))
+    (let* ((p (pool:make-pool :size size :queue-limit 4))
+           (returned (sb-thread:make-semaphore)))
+      (is (pool:try-submit p (lambda () (pool:stop-pool p) (sb-thread:signal-semaphore returned))))
+      ;; Stopped again only when the job's call returned: if it hangs, a second STOP-POOL
+      ;; would hang this test run with it, where a failed check reports it. The result is
+      ;; kept in a variable because IS returns true whether or not its check passed.
+      (let ((ok (sb-thread:wait-on-semaphore returned :timeout 10)))
+        (is-true ok "~D workers: STOP-POOL called from a job did not return" size)
+        (when ok (pool:stop-pool p))))))

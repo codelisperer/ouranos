@@ -100,8 +100,6 @@ its tag.
   stylesheet is served by `hyperion/assets` as `:calendar`: link `(hyperion/assets:url
   :calendar)`. `hyperion/assets` gains `first-party-p` to tell the tree's own files from the
   vendored ones. See `hyperion/docs/calendar.md`.
-- **aion/pool: submitting a job takes no lock, so several server-uv loops no longer wait on
-  each other** (#466). `try-submit` reserves a place with an atomic count and puts the job on
 - **aion/pool: submitting a job takes no pool mutex, so several server-uv loops no longer wait
   on each other** (#466). `try-submit` reserves a place with an atomic count and puts the job on
   `sb-concurrency`'s lock-free queue, and each worker sleeps on its own semaphore, which a
