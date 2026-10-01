@@ -12,6 +12,19 @@ its tag.
 
 ## Unreleased
 
+### An app may have to act
+
+- **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
+  by default.**
+  `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
+  a handler that waits (a model call, a slow query, a large file) held up every other request,
+  including the page's polling and server-to-client streams. Hunchentoot hid this with a thread
+  per connection. An app acts if it runs `run-app` with `:server :uv` (or `HYPERION_SERVER=uv`)
+  and relies on inline dispatch: pass `:workers nil`. `run-app` also takes `:loops` now, which
+  defaults to 1 on `:uv`: with workers, `:uv`'s own default is one loop per core, up to 4, on
+  macOS and Linux, and one person's window does not need more than one. Pass `:loops nil` for
+  that default. Other backends keep `start`'s defaults for both. (#472)
+
 ### Added
 
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
@@ -30,6 +43,17 @@ its tag.
   not 1.9, was built without threads or with experimental SHA-256, or whose functions resolve
   to another libgit2 already loaded in the process. Fetching and pushing are not in this step. The gate
   runs its suite when `OURANOS_WITH_LIBGIT=1`, which CI sets.
+
+### Fixed
+
+- **hyperion/server-uv: `:loops :auto` in a CPU-limited container on Linux follows the
+  container's limit, not the host's cores** (#475). The count is now the smallest of the online
+  CPUs, the CPUs in the process's affinity mask (`sched_getaffinity`), and the cgroup v2
+  `cpu.max` quota over its period, rounded up, taking the tightest quota on the process's cgroup
+  and its ancestors. A 1-vCPU container now runs one loop where it ran four. An app that set
+  `HYPERION_LOOPS=1` to work around this no longer needs to. The "server-uv: listening" log
+  line carries `:loops-from`: `sysconf`, `affinity` or `cgroup` for `:auto`, and otherwise
+  `start-argument`, `setting`, `inline` or `platform`. macOS and Windows are unchanged.
 
 ## v0.1.7 — 2026-09-30
 
@@ -61,16 +85,6 @@ its tag.
   does, deadlocks there, so development behaved differently from a production entry point that
   passes `:workers`. An app acts if it develops on `:uv` (`HYPERION_SERVER=uv`) and relies on
   inline dispatch: pass `:workers nil`. Other backends keep `start`'s default. (#432)
-- **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
-  by default.**
-  `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
-  a handler that waits (a model call, a slow query, a large file) held up every other request,
-  including the page's polling and server-to-client streams. Hunchentoot hid this with a thread
-  per connection. An app acts if it runs `run-app` with `:server :uv` (or `HYPERION_SERVER=uv`)
-  and relies on inline dispatch: pass `:workers nil`. `run-app` also takes `:loops` now, which
-  defaults to 1 on `:uv`: with workers, `:uv`'s own default is one loop per core, up to 4, on
-  macOS and Linux, and one person's window does not need more than one. Pass `:loops nil` for
-  that default. Other backends keep `start`'s defaults for both. (#472)
 - **A Windows desktop app refuses to start a `sbcl.core` that is not the one it was built
   with.** `<name>.exe`, the launcher, is compiled with the SHA-256 of the core built beside it
   and checks it before starting `sbcl-runtime.exe`. On a mismatch it exits with code 126 and says
