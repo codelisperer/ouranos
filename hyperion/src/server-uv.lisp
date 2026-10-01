@@ -1560,13 +1560,32 @@ one level up."
   "How many loops a server runs when START is not given :LOOPS: a positive integer, or :AUTO.
 
 :AUTO is one loop when handlers run inline (no :WORKERS and the inline *DISPATCH*), because
-several loops would run several handlers at once; otherwise the machine's online cores, at
-most 4. Measured on #463 with 8 workers on /tile: on a 4-core Linux host, 1 loop served
+several loops would run several handlers at once; otherwise the CPUs this process may use, at
+most 4. On Linux that count follows a container's CPU set and cgroup v2 quota (#475; see
+%CPU-COUNT), and START logs where it came from as :LOOPS-FROM. Measured on #463 with 8 workers on /tile: on a 4-core Linux host, 1 loop served
 31,724 requests/s, 2 served 97,236 and 4 served 112,364 to 119,501; on a 10-core Mac, 1 loop
 41,732, 2 loops 64,244 and 4 loops 82,335, with 6 and 8 no better because the load generators
 and the kernel had the machine by then. The Linux host could not measure more loops than its 4
 cores. So 4 is the most any measurement supports, and one loop per core is what a loop needs to
 be worth its thread.")
+
+;;; HOW MANY CPUS THIS PROCESS MAY USE (#475). sysconf reports the machine's online CPUs, and
+;;; inside a container on Linux that is the host's, not the container's. A container is limited
+;;; in one of two ways, and each has its own place to read it:
+;;;   a CPU set     the process's affinity mask, from sched_getaffinity;
+;;;   a CPU quota   cgroup v2's cpu.max, "QUOTA PERIOD" or "max PERIOD", which is what
+;;;                 docker run --cpus and most platforms' vCPU limits set. The limit that
+;;;                 applies is the tightest one on the process's cgroup or any ancestor of it.
+;;; The count is the smallest of the three. A file that is missing or unreadable, and every
+;;; platform without them, leaves the sysconf count, as before #475. The cgroup files are read
+;;; on every Unix, not only Linux: they do not exist on macOS, so nothing changes there, and the
+;;; tests can point *CGROUP-ROOT* at a fixture on any Unix host.
+
+(defparameter *cgroup-root* #p"/sys/fs/cgroup/"
+  "Where cgroup v2 is mounted. A parameter so a test can point it at a fixture tree.")
+
+(defparameter *self-cgroup-file* #p"/proc/self/cgroup"
+  "The file naming this process's cgroup. A parameter for the same reason as *CGROUP-ROOT*.")
 
 (defun %online-cores ()
   "The number of online CPUs, from sysconf(_SC_NPROCESSORS_ONLN), or 1 where it is not known."
@@ -1576,14 +1595,97 @@ be worth its thread.")
                (and n (plusp n) n)))
         1)))
 
+(defun %affinity-count ()
+  "The number of CPUs in this process's affinity mask, or NIL where it is not known. Linux only:
+other platforms have no sched_getaffinity.
+
+The mask starts at 1024 CPUs, glibc's cpu_set_t, and doubles while the call fails, up to 65536
+CPUs. The kernel's mask is sized for the CPU ids the kernel can have, not for the ones online,
+so a fixed 1024-CPU buffer fails (EINVAL) on a host with ids past 1023, and the count would
+then fall back to sysconf's on the hosts most likely to run in a cpuset. For this process's own
+mask, a buffer too small is the only way the call fails, so a failure is retried rather than
+its errno read."
+  #+linux
+  (loop for bytes = 128 then (* 2 bytes)
+        while (<= bytes 8192)
+        do (cffi:with-foreign-object (mask :uint8 bytes)
+             (dotimes (i bytes) (setf (cffi:mem-aref mask :uint8 i) 0))
+             (let ((status (ignore-errors
+                            (cffi:foreign-funcall "sched_getaffinity" :int 0 :size bytes
+                                                                      :pointer mask :int))))
+               (when (eql status 0)
+                 (let ((n (loop for i below bytes
+                                sum (logcount (cffi:mem-aref mask :uint8 i)))))
+                   (return (and (plusp n) n)))))))
+  #-linux nil)
+
+(defun %parse-cpu-max (text)
+  "The CPUs a cgroup v2 cpu.max line allows, as QUOTA over PERIOD rounded up and at least 1, or
+NIL when it sets no quota (\"max PERIOD\") or is not a cpu.max line."
+  (let* ((fields (remove "" (uiop:split-string (string-trim '(#\Space #\Tab #\Newline) text)
+                                               :separator '(#\Space #\Tab))
+                         :test #'string=))
+         (quota (and (= 2 (length fields))
+                     (ignore-errors (parse-integer (first fields)))))
+         (period (and quota (ignore-errors (parse-integer (second fields))))))
+    (and quota period (plusp quota) (plusp period)
+         (max 1 (ceiling quota period)))))
+
+(defun %self-cgroup-path (self-file)
+  "This process's cgroup v2 path from SELF-FILE (the \"0::/path\" line), or NIL."
+  (with-open-file (in self-file :if-does-not-exist nil)
+    (when in
+      (loop for line = (read-line in nil) while line
+            when (uiop:string-prefix-p "0::" line)
+              return (subseq line 3)))))
+
+(defun %cgroup-cpu-limit (&key (root *cgroup-root*) (self-file *self-cgroup-file*))
+  "The tightest CPU quota on this process's cgroup and its ancestors, as a whole number of CPUs,
+or NIL when none sets one or the files are not there. ROOT is where cgroup v2 is mounted and
+SELF-FILE names the process's cgroup under it."
+  (let ((path (ignore-errors (%self-cgroup-path self-file))))
+    (when path
+      (let ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'string=))
+            (limits '()))
+        ;; The cgroup itself, then each ancestor, then the root.
+        (loop for n from (length parts) downto 0
+              do (let* ((dir (merge-pathnames
+                               (format nil "~{~A/~}" (subseq parts 0 n))
+                               (uiop:ensure-directory-pathname root)))
+                        (text (ignore-errors
+                               (uiop:read-file-string (merge-pathnames "cpu.max" dir))))
+                        (limit (and text (%parse-cpu-max text))))
+                   (when limit (push limit limits))))
+        (and limits (reduce #'min limits))))))
+
+(defun %smallest-cpu-count (counts)
+  "From COUNTS, an alist of (SOURCE . COUNT-OR-NIL) with the sysconf count first, the smallest
+count and its source, as two values. A tie keeps the earlier source."
+  (let ((best (first counts)))
+    (dolist (entry (rest counts))
+      (when (and (cdr entry) (< (cdr entry) (cdr best)))
+        (setf best entry)))
+    (values (cdr best) (car best))))
+
+(defun %cpu-count ()
+  "The CPUs this process may use, and where that count came from (:SYSCONF, :AFFINITY or
+:CGROUP), as two values. See the section above."
+  (%smallest-cpu-count
+   (list (cons :sysconf (%online-cores))
+         (cons :affinity (%affinity-count))
+         (cons :cgroup #-win32 (ignore-errors (%cgroup-cpu-limit)) #+win32 nil))))
+
 (defun %default-loop-count (workers)
-  "The loop count *DEFAULT-LOOPS* gives a server with WORKERS; see there. :AUTO is one loop on
-Windows, which runs one whatever is asked (see the section header)."
+  "The loop count *DEFAULT-LOOPS* gives a server with WORKERS, and where it came from, as two
+values; see there. :AUTO is one loop on Windows, which runs one whatever is asked (see the
+section header). The second value is :SETTING for an integer *DEFAULT-LOOPS*, :INLINE for the
+one loop inline handlers get, :PLATFORM on Windows, and otherwise the source %CPU-COUNT gives."
   (let ((setting *default-loops*))
-    (cond ((integerp setting) setting)
-          #+win32 (t 1)
-          ((and (null workers) (eq *dispatch* *inline-dispatch*)) 1)
-          (t (min 4 (%online-cores))))))
+    (cond ((integerp setting) (values setting :setting))
+          #+win32 (t (values 1 :platform))
+          ((and (null workers) (eq *dispatch* *inline-dispatch*)) (values 1 :inline))
+          (t (multiple-value-bind (cpus source) (%cpu-count)
+               (values (min 4 cpus) source))))))
 
 (defvar *one-loop-noted* nil
   "True once this process has logged that a request for several loops runs one here.")
@@ -1678,7 +1780,10 @@ TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
 Clack -- owning the socket is what makes it available at all."
   (check-type workers (or null (integer 1)))
-  (let* ((requested (or loops (%default-loop-count workers)))
+  (let* ((loops-from (if loops :start-argument nil))
+         (requested (or loops (multiple-value-bind (n source) (%default-loop-count workers)
+                                (setf loops-from source)
+                                n)))
          (scheme (progn (check-type requested (integer 1))
                         (%resolve-scheme (or scheme *default-scheme*) requested)))
          (loops (if (eq scheme :single) 1 requested))
@@ -1779,7 +1884,8 @@ Clack -- owning the socket is what makes it available at all."
                                                               "aion/uv loop"
                                                               (format nil "aion/uv loop ~D" i)))))
                (log:info "server-uv: listening" :host bound-host :port bound-port
-                                                :loops loops :scheme scheme)
+                                                :loops loops :loops-from loops-from
+                                                :scheme scheme)
                (prog1 (%make-server :shards shards :host bound-host :port bound-port
                                     :scheme scheme :workers workers-pool :drain drain
                                     :handoffs handoffs)
