@@ -14,6 +14,8 @@
 // SBCL image post-processed), and on macOS is outranked by a bundle's CFBundleIconFile
 // once the app is bundled (#72). Format per platform: .ico on Windows, anything GdkPixbuf
 // reads (.png) on Linux, anything NSImage reads on macOS.
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -322,6 +324,18 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
 #endif
 }
 
+// TEXT as a positive int, in *OUT. False unless all of TEXT is a decimal number from 1 to
+// INT_MAX: std::atoi reads "1280px" as 1280 and "x" as 0, and says nothing about either.
+static bool parse_positive_int(const char *text, int *out) {
+  errno = 0;
+  char *end = nullptr;
+  long value = std::strtol(text, &end, 10);
+  if (end == text || *end != '\0' || errno == ERANGE || value <= 0 || value > INT_MAX)
+    return false;
+  *out = static_cast<int>(value);
+  return true;
+}
+
 static void print_usage(std::FILE *out) {
   std::fprintf(out,
                "usage: hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]\n"
@@ -422,14 +436,21 @@ int main(int argc, char **argv) {
         print_usage(stderr);
         return 2;
       }
-      int rw = std::atoi(argv[2]);
-      int rh = std::atoi(argv[3]);
-      if (rw <= 0 || rh <= 0) {
-        std::fprintf(stderr, "hyperion-view: --report-placement: WIDTH and HEIGHT must be positive\n\n");
+      int rw = 0;
+      int rh = 0;
+      if (!parse_positive_int(argv[2], &rw) || !parse_positive_int(argv[3], &rh)) {
+        std::fprintf(stderr,
+                     "hyperion-view: --report-placement: WIDTH and HEIGHT must be positive integers\n\n");
         print_usage(stderr);
         return 2;
       }
       webview_t rv = webview_create(0, nullptr);
+      if (rv == nullptr) {
+        // No window was created (no display, or no WebView2), so there is nothing to place.
+        std::printf("placement-failed webview_create\n");
+        std::fflush(stdout);
+        return 1;
+      }
       webview_set_size(rv, rw, rh, WEBVIEW_HINT_NONE);
       bool ok = place_window(rv, rw, rh, stdout);
       std::fflush(stdout);

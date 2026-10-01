@@ -181,6 +181,19 @@ code when it did not exit 0."
                              "0" "0" "2560" "1528" "1280" "860" "144" "16" "56"))
         "a URL before it: --placement is a mode of its own, not an option of a window")))
 
+(test report-placement-refuses-what-is-not-two-positive-integers
+  ;; Each of these is refused before webview_create, so no window is made on any OS. atoi read
+  ;; "1280px" as 1280 and went on to create a window (review of train 21).
+  (with-launcher
+    (flet ((code (&rest args) (nth-value 0 (apply #'run-launcher "--report-placement" args))))
+      (is (eql 2 (code "1280px" "860")) "a number with a suffix")
+      (is (eql 2 (code "1280" "x")) "a word")
+      (is (eql 2 (code "0" "860")) "zero")
+      (is (eql 2 (code "-1280" "860")) "a negative number")
+      (is (eql 2 (code "99999999999999999999" "860")) "a number past INT_MAX")
+      (is (eql 2 (code "1280")) "one number")
+      (is (eql 2 (code "1280" "860" "1")) "three numbers"))))
+
 ;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
 ;;;
 ;;; --placement checks the arithmetic, but returns before a window exists. --report-placement
