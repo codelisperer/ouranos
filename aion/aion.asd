@@ -178,7 +178,7 @@
 
 (defsystem "aion/libgit/tests"
   :description "Tests for aion/libgit. Requires a built libgit2 (scripts/build-libgit2.lisp), and the git command, which checks what libgit2 wrote."
-  :depends-on ("aion/libgit" "aion/fs" "fiveam")
+  :depends-on ("aion/libgit" "aion/fs" "fiveam" (:feature :unix (:require :sb-posix)))
   :serial t
   :components ((:module "tests"
                 :serial t

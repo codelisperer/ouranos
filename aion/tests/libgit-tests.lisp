@@ -246,3 +246,137 @@ twenty and passes git fsck."
              (is (string= "20" (git-cli dir "rev-list" "--count" "HEAD")))
              (finishes (git-cli dir "fsck" "--strict" "--no-dangling"))))
       (dolist (dir dirs) (fs:delete-tree dir :if-does-not-exist :ignore)))))
+
+;;; --- review of #470 on train 19 (#479) -------------------------------------------------
+
+(test the-functions-bound-are-the-functions-the-build-requires
+  "build-libgit2.lisp refuses a library that does not export a function in *REQUIRED-SYMBOLS*,
+and the load refuses one whose bound functions resolve elsewhere. Both lists must be the
+functions ffi.lisp binds."
+  (let* ((text (uiop:read-file-string
+                (merge-pathnames "scripts/build-libgit2.lisp"
+                                 (uiop:pathname-parent-directory-pathname
+                                  (asdf:system-source-directory :aion)))))
+         (start (search "(defparameter *required-symbols*" text))
+         (end (search "\"Every entry point" text :start2 start))
+         (required (let ((names '()) (i start))
+                     (loop for q = (position #\" text :start i :end end)
+                           while q
+                           do (let ((close (position #\" text :start (1+ q))))
+                                (push (subseq text (1+ q) close) names)
+                                (setf i (1+ close))))
+                     names)))
+    (is (= 53 (length git::*entry-points*)))
+    (is (null (set-exclusive-or required git::*entry-points* :test #'string=))
+        "differ: ~S" (set-exclusive-or required git::*entry-points* :test #'string=))))
+
+(test a-build-with-experimental-sha256-is-refused
+  "That build's git_oid is 33 bytes and this binding allocates 20. CONTROL: the same version
+and threads without the SHA-256 bit is accepted, and the loaded library does not have it."
+  (is (search "SHA-256" (or (git::%build-mismatch '(1 9 7) (logior 1 2048)) "")))
+  (is (null (git::%build-mismatch '(1 9 7) 1)))
+  (git:ensure-loaded)
+  (is (zerop (logand (git::%features) 2048))))
+
+(defun %child-load-report (&key preload)
+  "Load aion/libgit in a child image and print what LOAD-LIBGIT2 did. With PRELOAD, the child
+first loads that file as a foreign library, as another part of an app could."
+  (let ((out (make-string-output-stream)))
+    (uiop:run-program
+     (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+           "--eval" "(require :asdf)"
+           "--eval" "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
+           "--eval" "(asdf:load-system :aion/libgit)"
+           "--eval" (if preload
+                        (format nil "(cffi:load-foreign-library ~S)" (uiop:native-namestring preload))
+                        "t")
+           "--eval" "(handler-case (format t \"~&LOADED ~A~%\" (aion/libgit:load-libgit2)) (aion/libgit:libgit2-mismatch (e) (format t \"~&MISMATCH ~A~%\" (aion/libgit:libgit2-mismatch-reason e))))")
+     :output out :error-output out :ignore-error-status t)
+    (get-output-stream-string out)))
+
+(test another-libgit2-loaded-first-is-refused
+  "On SBCL a foreign call resolves across the process, so a libgit2 another part of the app
+loaded first would receive every call while LIBGIT2-PATH named ours. A copy of our own
+library under another name stands in for it, so its version and features pass every other
+check. CONTROL: without the copy loaded first, the load succeeds."
+  (let ((copy (merge-pathnames (format nil "other-~A" (file-namestring (git:libgit2-path)))
+                               (fresh-directory))))
+    (ensure-directories-exist copy)
+    (unwind-protect
+         (progn
+           (uiop:copy-file (git:libgit2-path) copy)
+           (let ((refused (%child-load-report :preload copy)))
+             (is (search "MISMATCH" refused) "~A" refused)
+             (is (search "resolves to another library" refused) "~A" refused))
+           (let ((plain (%child-load-report)))
+             (is (search "LOADED" plain) "~A" plain)))
+      (fs:delete-tree (uiop:pathname-directory-pathname copy) :if-does-not-exist :ignore))))
+
+#-win32
+(test history-of-a-path-includes-a-change-of-mode-alone
+  "chmod +x changes no bytes and is a change git log -- PATH lists."
+  (with-new-repository (repo dir)
+    (let* ((c1 (commit-file repo dir "run.sh" (format nil "echo hi~%") "add"))
+           (file (merge-pathnames "run.sh" dir)))
+      (sb-posix:chmod (uiop:native-namestring file) #o755)
+      (git:stage repo '("run.sh"))
+      (let ((c2 (git:commit repo "make it executable" :author "Aion Test" :email "aion@example.invalid")))
+        (is (equal (list c2 c1) (mapcar #'git:commit-info-id (git:history repo :path "run.sh"))))
+        (is (equal (lines (git-cli dir "log" "--format=%H" "--" "run.sh"))
+                   (mapcar #'git:commit-info-id (git:history repo :path "run.sh"))))))))
+
+(defun git-commit-cli (dir message)
+  (git-cli dir "-c" "user.name=Aion Test" "-c" "user.email=aion@example.invalid"
+           "commit" "-q" "-m" message))
+
+(test history-of-a-path-leaves-out-a-branch-a-merge-discarded
+  "A side branch changes a.txt, and the merge keeps the main line's a.txt (git merge -s ours).
+git log -- a.txt does not list the side commit, because the merge is TREESAME to its first
+parent and the walk follows that parent only. CONTROL: a merge that takes the side's a.txt
+lists it."
+  (dolist (strategy '("ours" "theirs"))
+    (with-new-repository (repo dir)
+      (commit-file repo dir "a.txt" (format nil "one~%") "base")
+      (let ((main (git-cli dir "symbolic-ref" "--short" "HEAD")))
+        (git-cli dir "checkout" "-q" "-b" "side")
+        (let ((side (commit-file repo dir "a.txt" (format nil "side~%") "side change")))
+          (git-cli dir "checkout" "-q" main)
+          (commit-file repo dir "b.txt" (format nil "b~%") "main change")
+          (if (string= strategy "ours")
+              (git-cli dir "-c" "user.name=Aion Test" "-c" "user.email=aion@example.invalid"
+                       "merge" "-q" "-s" "ours" "-m" "merge" "side")
+              (progn
+                (git-cli dir "-c" "user.name=Aion Test" "-c" "user.email=aion@example.invalid"
+                         "merge" "-q" "--no-commit" "-s" "ours" "side")
+                (git-cli dir "checkout" "side" "--" "a.txt")
+                (git-commit-cli dir "merge")))
+          (let ((ours (mapcar #'git:commit-info-id (git:history repo :path "a.txt"))))
+            (is (equal (lines (git-cli dir "log" "--format=%H" "--" "a.txt")) ours)
+                "~A: git and aion/libgit disagree" strategy)
+            (if (string= strategy "ours")
+                (is (not (member side ours :test #'string=)) "the discarded side commit is listed")
+                (is (member side ours :test #'string=) "the kept side commit is missing"))))))))
+
+(test diff-text-shows-a-rename-as-git-diff-does
+  "git diff detects renames by default, and git_diff_tree_to_tree alone does not."
+  (with-new-repository (repo dir)
+    (let* ((c1 (commit-file repo dir "old.txt" (format nil "one~%two~%three~%") "add"))
+           (c2 (progn (rename-file (merge-pathnames "old.txt" dir) (merge-pathnames "new.txt" dir))
+                      (git:stage repo '("old.txt" "new.txt"))
+                      (git:commit repo "rename" :author "Aion Test" :email "aion@example.invalid")))
+           (ours (git:diff-text repo c1 c2)))
+      (is (search "rename from old.txt" ours) "~A" ours)
+      (is (string= (format nil "~A~%" (git-cli dir "-c" "diff.renames=true" "diff" "--no-color" c1 c2))
+                   ours)))))
+
+(test commit-includes-what-another-process-staged
+  "git add run by another process after this repository last read its index: COMMIT must see
+it. libgit2 keeps the index in memory, so without re-reading it, the commit would be made
+from the copy that predates the git add."
+  (with-new-repository (repo dir)
+    (commit-file repo dir "a.txt" (format nil "a~%") "first")
+    (write-file dir "b.txt" (format nil "b~%"))
+    (git-cli dir "add" "b.txt")
+    (git:commit repo "b, staged by git" :author "Aion Test" :email "aion@example.invalid")
+    (is (equal '("a.txt" "b.txt") (lines (git-cli dir "ls-tree" "-r" "--name-only" "HEAD"))))))

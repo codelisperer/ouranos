@@ -143,13 +143,18 @@ exits. FORM is usually (OPEN-REPOSITORY dir) or (INIT-REPOSITORY dir)."
 (defun stage (repository paths)
   "Stage each path in PATHS, which are relative to the working directory and use /. A path
 whose file exists is added as it is now; a path whose file is gone is removed from the
-index. The index is written once, after every path."
+index. The index is written once, after every path.
+
+STAGE and COMMIT first re-read the index file if it changed on disk since libgit2 last read
+it. libgit2 keeps a repository's index in memory, so without this, a git checkout or git add
+run by another process would be overwritten by the copy from before it."
   (%with-repository-pointer (repo repository)
     (cffi:with-foreign-object (out :pointer)
       (%check "git_repository_index" (%repository-index out repo))
       (let ((index (cffi:mem-ref out :pointer)))
         (unwind-protect
              (progn
+               (%check "git_index_read" (%index-read index 0))
                (dolist (path paths)
                  (if (probe-file (merge-pathnames path (repository-workdir repository)))
                      (%check "git_index_add_bypath" (%index-add-bypath index path))
@@ -188,6 +193,7 @@ has none, as git commit -m stores it."
              (progn
                (%check "git_repository_index" (%repository-index out repo))
                (setf index (cffi:mem-ref out :pointer))
+               (%check "git_index_read" (%index-read index 0))
                (%check "git_index_write_tree" (%index-write-tree tree-id index))
                (%check "git_tree_lookup" (%tree-lookup out repo tree-id))
                (setf tree (cffi:mem-ref out :pointer))
@@ -241,8 +247,9 @@ git_revparse_single accepts: an id, a branch, HEAD, HEAD~2 and so on."
          (unwind-protect (progn ,@body)
            (%tree-free ,var))))))
 
-(defun %entry-id (commit path)
-  "The id of PATH in COMMIT's tree as hex, or NIL when COMMIT has no PATH."
+(defun %entry (commit path)
+  "PATH's entry in COMMIT's tree as (MODE . ID-HEX), or NIL when COMMIT has no PATH. The mode
+is part of it because git counts a change of mode alone, such as chmod +x, as a change."
   (%with-tree (tree commit)
     (cffi:with-foreign-object (out :pointer)
       (let ((code (%tree-entry-bypath out tree path)))
@@ -250,7 +257,8 @@ git_revparse_single accepts: an id, a branch, HEAD, HEAD~2 and so on."
             nil
             (let ((entry (progn (%check "git_tree_entry_bypath" code)
                                 (cffi:mem-ref out :pointer))))
-              (unwind-protect (%oid-hex (%tree-entry-id entry))
+              (unwind-protect (cons (%tree-entry-filemode entry)
+                                    (%oid-hex (%tree-entry-id entry)))
                 (%tree-entry-free entry))))))))
 
 (defun %parent-list (commit)
@@ -260,13 +268,58 @@ git_revparse_single accepts: an id, a branch, HEAD, HEAD~2 and so on."
                   (%check "git_commit_parent" (%commit-parent out commit n))
                   (cffi:mem-ref out :pointer))))
 
-(defun %touches-p (commit parents path)
-  "Whether COMMIT changed PATH: its entry differs from every parent's, git log's rule for a
-path. A root commit touches PATH when it has one."
-  (let ((mine (%entry-id commit path)))
-    (if (null parents)
-        (and mine t)
-        (notany (lambda (p) (equal mine (%entry-id p path))) parents))))
+(defun %oid-octets (oid)
+  "The git_oid at the pointer OID, copied into a Lisp octet vector."
+  (let ((v (make-array +oid-size+ :element-type '(unsigned-byte 8))))
+    (dotimes (i +oid-size+ v) (setf (aref v i) (cffi:mem-aref oid :uint8 i)))))
+
+(defun %lookup-commit (repo octets)
+  "The git_commit whose id is the octet vector OCTETS, which the caller frees."
+  (cffi:with-foreign-objects ((oid :uint8 +oid-size+) (out :pointer))
+    (dotimes (i +oid-size+) (setf (cffi:mem-aref oid :uint8 i) (aref octets i)))
+    (%check "git_commit_lookup" (%commit-lookup out repo oid))
+    (cffi:mem-ref out :pointer)))
+
+(defun %path-history (repo start path limit)
+  "The commits git log START -- PATH lists, newest first, as COMMIT-INFO structures, at most
+LIMIT of them. START is a git_commit, which the caller frees.
+
+GIT'S RULE FOR A PATH, with its default history simplification (git help log, \"History
+Simplification\"). A commit whose PATH entry, mode and id, equals one of its parents' is
+TREESAME to that parent: it is not listed, and the walk follows that parent only, so the other
+side of a merge that kept one side's version of PATH is not walked at all. A commit that
+differs from every parent is listed, and the walk follows all of them. A root commit is listed
+when it has PATH. Commits come out by committer time, newest first, as git log's default order
+does."
+  (let ((frontier (list (cons (%commit-time start) (%oid-octets (%commit-id start)))))
+        (seen (make-hash-table :test #'equalp))
+        (found '())
+        (count 0))
+    (setf (gethash (cdar frontier) seen) t)
+    (loop while (and frontier (or (null limit) (< count limit)))
+          do (let* ((next (reduce (lambda (a b) (if (> (car b) (car a)) b a)) frontier))
+                    (commit (progn (setf frontier (remove next frontier :count 1 :test #'eq))
+                                   (%lookup-commit repo (cdr next))))
+                    (parents '()))
+               (unwind-protect
+                    (let* ((mine (progn (setf parents (%parent-list commit))
+                                        (%entry commit path)))
+                           (same (find-if (lambda (p) (equal mine (%entry p path))) parents))
+                           (follow (if same (list same) parents)))
+                      (when (if parents (null same) mine)
+                        (push (%commit-info commit parents) found)
+                        (incf count))
+                      (dolist (p follow)
+                        (let ((id (%oid-octets (%commit-id p))))
+                          (unless (gethash id seen)
+                            (setf (gethash id seen) t)
+                            ;; Appended, so that among commits with one time the one met
+                            ;; first comes out first.
+                            (setf frontier (append frontier
+                                                   (list (cons (%commit-time p) id))))))))
+                 (mapc #'%commit-free parents)
+                 (%commit-free commit))))
+    (nreverse found)))
 
 (defun %commit-info (commit parents)
   (let* ((author (%commit-author commit))
@@ -291,13 +344,19 @@ names nothing."
       (%oid-hex (%commit-id commit)))))
 
 (defun history (repository &key path (start "HEAD") limit)
-  "The commits reachable from START, newest first, as COMMIT-INFO structures. With PATH,
-only the commits that changed PATH. With LIMIT, at most that many. A repository whose HEAD
-is unborn has no history, so this returns NIL for it when START is HEAD."
+  "The commits reachable from START, newest first, as COMMIT-INFO structures, as git log START
+lists them. With PATH, the commits git log START -- PATH lists, including a change of mode
+alone and following git's default history simplification at merges (see %PATH-HISTORY). With
+LIMIT, at most that many. A repository whose HEAD is unborn has no history, so this returns
+NIL for it when START is HEAD."
   (%with-repository-pointer (repo repository)
     (cffi:with-foreign-objects ((out :pointer) (oid :uint8 +oid-size+))
       (when (and (string= start "HEAD") (not (%head-id repo oid)))
         (return-from history nil))
+      (when path
+        (return-from history
+          (%with-commit (start-commit repo start)
+            (%path-history repo start-commit path limit))))
       (%check "git_revwalk_new" (%revwalk-new out repo))
       (let ((walk (cffi:mem-ref out :pointer))
             (found '()) (count 0))
@@ -318,9 +377,8 @@ is unborn has no history, so this returns NIL for it when START is HEAD."
                    (unwind-protect
                         (progn
                           (setf parents (%parent-list commit))
-                          (when (or (null path) (%touches-p commit parents path))
-                            (push (%commit-info commit parents) found)
-                            (incf count)))
+                          (push (%commit-info commit parents) found)
+                          (incf count))
                      (mapc #'%commit-free parents)
                      (%commit-free commit)))))
           (%revwalk-free walk))
@@ -357,6 +415,15 @@ no PATH. Signals GIT-ERROR when REVISION names nothing, or PATH is a directory."
     (let ((diff (cffi:mem-ref out :pointer)))
       (unwind-protect
            (progn
+             ;; Rename detection, which git diff does by default and git_diff_tree_to_tree
+             ;; does not. Asked for explicitly: left to diff.renames in the repository's
+             ;; config, a repository that turns it off would get delete-plus-add here.
+             (cffi:with-foreign-object (options '(:struct git-diff-find-options))
+               (%check "git_diff_find_options_init"
+                       (%diff-find-options-init options +diff-find-options-version+))
+               (setf (cffi:foreign-slot-value options '(:struct git-diff-find-options) 'flags)
+                     +diff-find-renames+)
+               (%check "git_diff_find_similar" (%diff-find-similar diff options)))
              (setf (cffi:foreign-slot-value buf '(:struct git-buf) 'ptr) (cffi:null-pointer)
                    (cffi:foreign-slot-value buf '(:struct git-buf) 'reserved) 0
                    (cffi:foreign-slot-value buf '(:struct git-buf) 'size) 0)
@@ -374,7 +441,7 @@ no PATH. Signals GIT-ERROR when REVISION names nothing, or PATH is a directory."
 
 (defun diff-text (repository from to)
   "The patch from revision FROM to revision TO, as git diff FROM TO prints it without
-colour. FROM may be NIL, meaning an empty tree, so the patch adds everything TO has. Bytes
+colour, with renames detected as git diff detects them by default. FROM may be NIL, meaning an empty tree, so the patch adds everything TO has. Bytes
 that are not UTF-8 appear as U+FFFD."
   (%with-repository-pointer (repo repository)
     (%with-commit (new repo to)

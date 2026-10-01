@@ -7,11 +7,18 @@
 ;;;;   3. vendor/libgit2/lib/...  -- what scripts/build-libgit2.lisp produced.
 ;;;;   4. the bare soname          -- left to the OS loader.
 ;;;;
-;;;; After loading, the library must report version 1.9 (FFI.LISP's struct layouts are
-;;;; 1.9's) and threads on (a repository per thread is how this code uses it). A library
-;;;; that fails either is refused with LIBGIT2-MISMATCH, naming the file. A libgit2 built
-;;;; with experimental SHA-256, whose object ids are a different size, is named
-;;;; libgit2-experimental by libgit2's own build, so none of the names below can find one.
+;;;; After loading, a library is refused with LIBGIT2-MISMATCH, naming the file, unless:
+;;;;   - every function FFI.LISP binds resolves to this library. On SBCL a foreign call is
+;;;;     looked up across the whole process, not in one library, so if something loaded
+;;;;     another libgit2 first, the calls would run that copy while LIBGIT2-PATH named this
+;;;;     one. Each name is looked up in this library's own handle and compared with the
+;;;;     address the process-wide lookup gives.
+;;;;   - it reports version 1.9, because FFI.LISP's struct layouts are 1.9's;
+;;;;   - it was built with threads, because a repository per thread is how this code uses it;
+;;;;   - it was built without experimental SHA-256. That build's git_oid is a type byte and 32
+;;;;     bytes, and this code allocates 20, so libgit2 would write past every id buffer.
+;;;;     libgit2's own build names such a library libgit2-experimental, which none of the
+;;;;     names below finds, but AION_LIBGIT_LIBRARY can name one, so its feature bit is checked.
 ;;;;
 ;;;; LOADING NEVER HAPPENS AT LOAD TIME, as in aion/uv (ADR-0011's lesson). The first call
 ;;;; that needs the library loads it.
@@ -83,13 +90,55 @@ aion/uv and aion/tls."
     (%version major minor rev)
     (list (cffi:mem-ref major :int) (cffi:mem-ref minor :int) (cffi:mem-ref rev :int))))
 
-(defun %build-mismatch (version)
-  "NIL if a library reporting VERSION, with the features it reports, is one this code can
-use, else a sentence saying why not."
+(defun %build-mismatch (version features)
+  "NIL if a library reporting VERSION, a list (major minor revision), and FEATURES, the
+git_libgit2_features bits, is one this code can use, else a sentence saying why not."
   (cond ((not (and (= (first version) 1) (= (second version) 9)))
          (format nil "it is libgit2 ~{~D~^.~}, and this code is written against 1.9" version))
-        ((zerop (logand (%features) +feature-threads+))
-         "it was built without threads, so it is not safe to use from two threads")))
+        ((zerop (logand features +feature-threads+))
+         "it was built without threads, so it is not safe to use from two threads")
+        ((plusp (logand features +feature-sha256+))
+         "it was built with experimental SHA-256, whose object ids are 33 bytes, and this code allocates 20")))
+
+(defun %sb-alien (name)
+  "The SB-ALIEN internal NAME, looked up when called and never written as a symbol, for the
+reason aion/tls's %SB-ALIEN gives: a Windows SBCL has no SB-ALIEN::DLSYM, and reading the
+symbol fails there."
+  (or (find-symbol name "SB-ALIEN")
+      (error "aion/libgit: this SBCL has no SB-ALIEN::~A, which the library check needs" name)))
+
+(defun %address-in-library (path name)
+  "The address of NAME in the shared library loaded from PATH itself, as an integer, or NIL.
+Asks that library's handle (dlsym, or GetProcAddress on Windows), as aion/tls's
+%LIBRARY-DEFINES-P does, because CFFI:FOREIGN-SYMBOL-POINTER on SBCL searches every loaded
+library."
+  (let* ((truename (ignore-errors (truename path)))
+         (namestring-of (%sb-alien "SHARED-OBJECT-NAMESTRING"))
+         (object (find-if (lambda (o)
+                            (let ((file (ignore-errors (truename (funcall namestring-of o)))))
+                              (if truename
+                                  (equal file truename)
+                                  (equal (funcall namestring-of o) path))))
+                          (symbol-value (%sb-alien "*SHARED-OBJECTS*"))))
+         (raw (and object (funcall (%sb-alien "SHARED-OBJECT-HANDLE") object)))
+         (handle (if (integerp raw) (sb-sys:int-sap raw) raw))
+         (address (and handle
+                       #+windows (cffi:foreign-funcall "GetProcAddress" :pointer handle
+                                                       :string name :pointer)
+                       #-windows (funcall (%sb-alien "DLSYM") handle name))))
+    (and address (not (zerop (sb-sys:sap-int address))) (sb-sys:sap-int address))))
+
+(defun %foreign-resolution-mismatch (path)
+  "NIL if every function FFI.LISP binds resolves, process-wide, to the library loaded from
+PATH, else a sentence naming the first that does not."
+  (dolist (name (sort (copy-list *entry-points*) #'string<))
+    (let ((own (%address-in-library path name))
+          (process (let ((p (cffi:foreign-symbol-pointer name)))
+                     (and p (cffi:pointer-address p)))))
+      (cond ((null own)
+             (return (format nil "it does not define ~A" name)))
+            ((not (eql own process))
+             (return (format nil "~A resolves to another library already loaded in this process, so calls would not reach this one" name)))))))
 
 (defun load-libgit2 ()
   "Load our libgit2, trying each candidate in turn, check it, and initialise it. Returns the
@@ -114,8 +163,11 @@ another library, call UNLOAD-LIBGIT2 first, with no repository still open."
                 (handler-bind ((error (lambda (e)
                                         (declare (ignore e))
                                         (ignore-errors (cffi:close-foreign-library library)))))
+                  (let ((reason (%foreign-resolution-mismatch candidate)))
+                    (when reason
+                      (error 'libgit2-mismatch :path candidate :reason reason)))
                   (setf version (%read-version))
-                  (let ((reason (%build-mismatch version)))
+                  (let ((reason (%build-mismatch version (%features))))
                     (when reason
                       (error 'libgit2-mismatch :path candidate :reason reason)))
                   (let ((status (%init)))

@@ -17,14 +17,18 @@ its tag.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
-  `commit` commits the index with HEAD as its parent and returns the new commit id. `history`
-  lists commits newest first, optionally only those that changed one path. `read-at-revision`
-  returns a file's octets as they were at a revision, and `diff-text` returns the patch between
-  two revisions as `git diff` prints it. A failed libgit2 call signals `git-error`, which
+  `commit` commits the index with HEAD as its parent and returns the new commit id. Both re-read
+  the index first if another process, such as `git add` or `git checkout`, changed it. `history`
+  lists commits newest first as `git log` does; with `:path`, the commits `git log -- PATH`
+  lists, including a change of mode alone and with git's default simplification at merges.
+  `read-at-revision` returns a file's octets as they were at a revision, and `diff-text`
+  returns the patch between two revisions as `git diff` prints it, renames included. A failed libgit2 call signals `git-error`, which
   carries libgit2's code, class and message. The library is libgit2 1.9.7, pinned in
   `libgit2.pin` and built by `scripts/build-libgit2.lisp` with a C compiler alone; it is
   GPLv2 with the linking exception. `aion/libgit` loads it from `AION_LIBGIT_LIBRARY`, beside
-  the image, or `vendor/libgit2/lib/`. Fetching and pushing are not in this step. The gate
+  the image, or `vendor/libgit2/lib/`, and refuses with `libgit2-mismatch` a library that is
+  not 1.9, was built without threads or with experimental SHA-256, or whose functions resolve
+  to another libgit2 already loaded in the process. Fetching and pushing are not in this step. The gate
   runs its suite when `OURANOS_WITH_LIBGIT=1`, which CI sets.
 
 ## v0.1.7 — 2026-09-30

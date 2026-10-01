@@ -73,19 +73,22 @@
     "git_error_last"
     "git_repository_init" "git_repository_open" "git_repository_free" "git_repository_workdir"
     "git_repository_index"
-    "git_index_add_bypath" "git_index_remove_bypath" "git_index_write" "git_index_write_tree"
+    "git_index_add_bypath" "git_index_remove_bypath" "git_index_read" "git_index_write"
+    "git_index_write_tree"
     "git_index_free"
     "git_signature_new" "git_signature_free" "git_reference_name_to_id"
     "git_commit_create" "git_commit_lookup" "git_commit_free" "git_commit_id"
-    "git_commit_message" "git_commit_author" "git_commit_tree" "git_commit_parentcount"
+    "git_commit_message" "git_commit_author" "git_commit_time" "git_commit_tree"
+    "git_commit_parentcount"
     "git_commit_parent"
     "git_tree_lookup" "git_tree_free" "git_tree_entry_bypath" "git_tree_entry_id"
-    "git_tree_entry_free"
+    "git_tree_entry_filemode" "git_tree_entry_free"
     "git_blob_lookup" "git_blob_rawcontent" "git_blob_rawsize" "git_blob_free"
     "git_revparse_single" "git_object_peel" "git_object_free"
     "git_revwalk_new" "git_revwalk_sorting" "git_revwalk_push" "git_revwalk_next"
     "git_revwalk_free"
-    "git_diff_tree_to_tree" "git_diff_to_buf" "git_diff_free" "git_buf_dispose")
+    "git_diff_tree_to_tree" "git_diff_to_buf" "git_diff_free" "git_diff_find_options_init"
+    "git_diff_find_similar" "git_buf_dispose")
   "Every entry point aion/libgit binds (aion/src/libgit/ffi.lisp), and only those. VERIFY-BUILT
 refuses a library missing any of them.")
 
