@@ -216,8 +216,12 @@ its tag.
   `sbcl.core` and no `sbcl-runtime.exe`, or the other way round, is refused by
   `scripts/build-installer.ps1` and by both installers, which used to install it to fail at
   launch. An uninstaller that cannot be copied (Inno) or written (NSIS) into `<install>.new`
-  stops the update before the swap, with exit 2. A silent update that installed the new version
-  but could not start the app exits 3, and the new version stays installed. (#98)
+  stops the update before the swap, with exit 2. Both installers' exit codes are now: 0, the new
+  version is installed and, on a silent run, the app was started; 2, the update failed and the
+  installed version is unchanged (or, if the previous version could not be put back, the checked
+  new copy is kept in `<install>.new` for the next run to finish); 3, the new version is
+  installed but the app could not be started. An app or script that runs an installer itself
+  and treats any non-zero code as "not updated" acts on 3. (#98)
 
 ### Added
 

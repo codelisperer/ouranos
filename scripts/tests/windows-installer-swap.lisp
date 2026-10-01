@@ -540,12 +540,12 @@ the first rename having happened."
         (uiop:copy-file f (merge-pathnames (file-namestring f) copy))))
     copy))
 
-(defun %swap-installer-direct (bundle format out)
+(defun %swap-installer-direct (bundle format out &key (exe (format nil "~A.exe" +swap-app+)))
   "Compile FORMAT's installer for BUNDLE to OUT with the packager directly, with the defines
-build-installer.ps1 passes, and no WebView2 bootstrapper. Returns OUT, or NIL."
+build-installer.ps1 passes, and no WebView2 bootstrapper. EXE is the program it starts after a
+silent install. Returns OUT, or NIL."
   (let* ((tool (%swap-tool-path format))
          (src (string-right-trim "\\" (uiop:native-namestring bundle)))
-         (exe (format nil "~A.exe" +swap-app+))
          (argv (ecase format
                  (:nsis (list tool "/NOCD" (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
                               "/DVIVERSION=0.0.3.0" (format nil "/DSRCDIR=~A" src)
@@ -647,3 +647,101 @@ build-installer.ps1 passes, and no WebView2 bootstrapper. Returns OUT, or NIL."
                          (is-false (probe-file (merge-pathnames "refused.exe" tree))
                                    "and writes no installer"))))))))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+
+;;; --- an uninstaller that cannot be placed, and an app that cannot be started (review of train 21)
+;;;
+;;; Each installer puts its uninstaller into <install>.new before the swap. A directory made with
+;;; the uninstaller's name, as soon as the installer creates <install>.new, makes that fail: the
+;;; update must stop before the swap with exit 2. And a silent update that installed the new
+;;; version but could not start the app must exit 3 and keep the new version. A bundle with
+;;; neither sbcl.core nor sbcl-runtime.exe skips the staged check, so an installer compiled from
+;;; one with a program name the bundle does not have swaps in, then has nothing to start.
+
+(defun %swap-squat-in-staged (dir name)
+  "Start a thread that makes a directory NAME inside DIR.new as soon as DIR.new exists. Returns
+a function that stops the thread and returns true when the directory was made."
+  (let* ((staged (%swap-sibling dir ".new"))
+         (squat (uiop:ensure-directory-pathname (merge-pathnames name staged)))
+         (stop nil) (made nil)
+         (thread (sb-thread:make-thread
+                  (lambda ()
+                    (loop until (or stop made)
+                          do (if (and (uiop:directory-exists-p staged)
+                                      (ignore-errors (ensure-directories-exist squat)))
+                                 (setf made (and (uiop:directory-exists-p squat) t))
+                                 (sleep 0.001))))
+                  :name "squat in the staged copy")))
+    (lambda ()
+      (setf stop t)
+      (sb-thread:join-thread thread :default nil)
+      made)))
+
+(defun %swap-failure-paths (format)
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (progn
+           (load (merge-pathnames "windows-launcher.lisp" *scripts*))
+           (cond
+             ((not (ignore-errors (uiop:symbol-call :ouranos-msvc :find-msvc))) (skip "No MSVC here"))
+             ((not (%swap-tool-path format))
+              (skip "build-installer.ps1 -Check finds no ~A" (if (eq format :nsis) "makensis" "ISCC")))
+             (t
+              (let* ((runtime (%swap-runtime tree))
+                     (dir (merge-pathnames "app/" tree))
+                     (new (%swap-sibling dir ".new"))
+                     (old (%swap-sibling dir ".old")))
+                (multiple-value-bind (b1 v1-sha) (%swap-bundle tree "0.0.1" 65536 runtime)
+                  ;; Version 2's core is large so that its extraction lasts long enough for the
+                  ;; squat below to land before the uninstaller is written; NSIS writes a small
+                  ;; bundle and swaps it in within milliseconds.
+                  (let ((b2 (%swap-bundle tree "0.0.2" +swap-big-core-bytes+ runtime))
+                        (v1 (and b1 (%swap-installer b1 format))))
+                    (is-true (and v1 b2) "version 1's installer and version 2's bundle were built")
+                    (when (and v1 b2)
+                      (%with-temp-in ((merge-pathnames "temp/" tree))
+                        (is (eql 0 (%swap-run (%swap-install-argv v1 format dir) :wait t))
+                            "version 1 installs")
+                        (%swap-wait-gone old)
+
+                        ;; The uninstaller cannot be placed in the staged copy.
+                        (let* ((v2 (%swap-installer b2 format))
+                               (stop (%swap-squat-in-staged
+                                      dir (ecase format (:nsis "uninstall.exe") (:inno "unins000.exe"))))
+                               (code (and v2 (%swap-run (%swap-install-argv v2 format dir) :wait t)))
+                               (made (funcall stop)))
+                          (is-true v2 "version 2's installer was built")
+                          (is-true made "a directory with the uninstaller's name was made in the staged copy")
+                          (is (eql 2 code) "an update whose uninstaller cannot be placed exits 2: ~S" code))
+                        (is (equal v1-sha (%swap-installed dir)) "and version 1 is still installed")
+                        (is (eql 0 (%swap-launcher-check dir)) "as a pair the launcher accepts")
+                        (is-false (uiop:directory-exists-p new) "with nothing staged left over")
+
+                        ;; The app cannot be started after the swap.
+                        (let* ((one-file (merge-pathnames "one-file/" tree))
+                               (marker (merge-pathnames "one-file.txt" one-file)))
+                          (ensure-directories-exist one-file)
+                          (with-open-file (out marker :direction :output :if-exists :supersede)
+                            (write-line "a bundle with no sbcl.core and no sbcl-runtime.exe" out))
+                          (let ((installer (%swap-installer-direct
+                                            one-file format
+                                            (merge-pathnames (format nil "no-app-~(~A~).exe" format) tree)
+                                            :exe "not-in-the-bundle.exe")))
+                            (is-true installer "an installer naming a program the bundle lacks was compiled")
+                            (when installer
+                              (let ((code (%swap-run (%swap-install-argv installer format dir) :wait t)))
+                                (is (eql 3 code) "an update that cannot start the app exits 3: ~S" code))
+                              (is-true (probe-file (merge-pathnames "one-file.txt" dir))
+                                       "and the new version is installed"))
+                              (is-false (uiop:directory-exists-p new) "with nothing staged left over")))))))))))
+      (%with-temp-in ((merge-pathnames "temp/" tree))
+        (%swap-uninstall (merge-pathnames "app/" tree) format))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test an-nsis-update-fails-before-the-swap-without-its-uninstaller-and-exits-3-when-the-app-cannot-start
+  #-win32 (skip "The Windows installers are built and run on Windows only")
+  #+win32 (%swap-failure-paths :nsis))
+
+(test an-inno-update-fails-before-the-swap-without-its-uninstaller-and-exits-3-when-the-app-cannot-start
+  #-win32 (skip "The Windows installers are built and run on Windows only")
+  #+win32 (%swap-failure-paths :inno))

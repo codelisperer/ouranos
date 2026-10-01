@@ -275,11 +275,17 @@ Section "Install"
 !else
   !define SHORTCUT_ICON "$INSTDIR\${EXENAME}"
 !endif
+  ClearErrors
   WriteUninstaller "$INSTDIR.new\uninstall.exe"
   SetOutPath "$TEMP"
   ; Swapped in without its uninstaller, the version would be installed with an uninstall entry
-  ; naming a file that is not there, so the update stops here instead (review of train 21).
+  ; naming a file that is not there, so the update stops here instead (review of train 21). The
+  ; error flag is checked, and so is that uninstall.exe is a file: IfFileExists also matches a
+  ; directory of that name, which the swap test makes to stop WriteUninstaller.
+  IfErrors uninstaller_missing
+  IfFileExists "$INSTDIR.new\uninstall.exe\*.*" uninstaller_missing
   IfFileExists "$INSTDIR.new\uninstall.exe" uninstaller_written
+  uninstaller_missing:
     RMDir /r "$INSTDIR.new"
     !insertmacro FailInstall "${APPNAME} could not be updated: its uninstaller could not be written with the new files."
   uninstaller_written:

@@ -377,6 +377,18 @@ entry naming a file that is not there. After the swap, a silent run starts the a
 the installer exits 3. The new version is installed by then, so nothing is put back, and the
 exit code is what tells a caller that the app is not running (review of train 21).
 
+Both installers end a silent run with one of three exit codes:
+
+| code | meaning |
+|---|---|
+| 0 | The new version is installed, and on a silent run the app was started. |
+| 2 | The update failed and the installed version is unchanged, or, if the previous version could not be put back, the checked new copy is kept in `<install>.new` for the next run to move into place. |
+| 3 | The new version is installed, but the app could not be started afterwards. |
+
+`scripts/tests/windows-installer-swap.lisp` forces each failure: a file held open in the install
+directory or in `<install>.new` (exit 2), a directory with the uninstaller's name made in
+`<install>.new` (exit 2), and an installer whose program is not in its bundle (exit 3).
+
 Inno needed two more things. A `[Run]` entry without `postinstall` runs before
 `CurStepChanged(ssPostInstall)`, where the swap happens, so the silent relaunch there started a
 file that was still in `<install>.new`. It failed, and Setup exited 0 anyway, because
