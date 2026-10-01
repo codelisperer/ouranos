@@ -3,22 +3,32 @@
 ;;;; `praxeon/distil' turns a window of a transcript into observations, and nothing called it.
 ;;;; An OBSERVER is what calls it. It is told a thread's history after each turn, and it keeps
 ;;;; the thread's OBSERVED MARK, the first message not yet distilled. When the messages past the
-;;;; mark reach STEP estimated tokens, it distils them on a thread of its own, one STEP-sized
-;;;; window at a time, writes the result into the thread's scope, and moves the mark. The call
-;;;; that tells it about the turn returns at once, so a member's request never waits for a
-;;;; distillation (#317's first acceptance item).
+;;;; mark reach STEP estimated tokens, it distils them on a thread of its own, one window at a
+;;;; time, writes the result into the thread's scope, and moves the mark. The call that tells it
+;;;; about the turn returns at once, so a member's request never waits for a distillation
+;;;; (#317's first acceptance item).
 ;;;;
-;;;; THE MARK MOVES ONLY PAST A WINDOW THAT WAS WRITTEN, OR ONE GIVEN UP ON (#462's review). A
-;;;; provider error, a store error part-way through the writes, or a failed support check leaves
-;;;; the mark where it was, and the window is tried again, up to MAX-ATTEMPTS times. A retry does
-;;;; not store an observation twice: what an earlier attempt already wrote, with the same
-;;;; content and the same message range, is not written again. A window still failing after
-;;;; MAX-ATTEMPTS is given up on: its range goes into OBSERVER-SKIPPED, so the prompt keeps those
-;;;; messages raw (#317, step C) rather than losing them, and the mark moves past it.
+;;;; A WINDOW IS WHOLE EXCHANGES (`praxeon/prompt:exchanges'): a user message and everything
+;;;; that answers it, up to STEP estimated tokens and at least one exchange. Cutting by tokens
+;;;; alone could end a window on a tool call and start the next with its result, and a window
+;;;; holding half of that pair is a malformed request (#462's second review).
 ;;;;
-;;;; THE MARK SURVIVES A RESTART. A new observer takes it from the store: the last message the
-;;;; thread's observations cite (their provenance's THROUGH). So an app that makes an observer
-;;;; per request, or restarts, does not distil the thread again from the start.
+;;;; THE MARK MOVES ONLY PAST A WINDOW THAT WAS WRITTEN, OR ONE GIVEN UP ON. A provider error, a
+;;;; store error part-way through the writes, or a failed support check leaves the mark where it
+;;;; was, and the window is tried again after a pause that doubles each time, up to MAX-ATTEMPTS
+;;;; times. A retry does not store an observation twice: what an earlier attempt already wrote,
+;;;; with the same content and the same message range, is not written again, and its promotion
+;;;; is run again. A window still failing is given up on: it goes into OBSERVER-SKIPPED, so the
+;;;; prompt can keep those messages raw (#317, step C) rather than lose them, the mark moves past
+;;;; it, and each later run tries it again in the same way, until MAX-ATTEMPTS runs have given up
+;;;; on it. A skipped window still due starts a run by itself, so a new observer retries it even
+;;;; when no new message has arrived.
+;;;;
+;;;; THE MARK AND THE SKIPPED WINDOWS ARE KEPT IN THE STORE (`praxeon/memory:thread-progress'),
+;;;; written after each window, and a new observer starts from them. So an app that makes an
+;;;; observer per request, or restarts, neither distils the thread again from the start nor
+;;;; passes a window that was given up on or written only part-way. They are not worked out from
+;;;; the thread's observations, which would count observations the app wrote itself.
 ;;;;
 ;;;; WHAT IT WRITES, AND WHAT IT DOES NOT.
 ;;;;
@@ -27,18 +37,20 @@
 ;;;;     the app's ACCEPT says so, as `apply-distillation' already requires.
 ;;;;   - A thread observation also becomes a fact about the subject only when the app's PROMOTE
 ;;;;     says so, and by default nothing is promoted, because a wrong fact about a person is then
-;;;;     recalled in every conversation with them. A promoted fact is not stored twice. When a
-;;;;     thread observation that was promoted is later corrected in the thread, the subject's
-;;;;     fact is superseded by the correction only when PROMOTE-ACCEPT also says so; otherwise the
-;;;;     correction is not promoted, so the subject never holds a fact and its correction as two
-;;;;     current beliefs.
+;;;;     recalled in every conversation with them. A fact the subject already holds is not stored
+;;;;     again. When a promoted thread observation corrects one whose content the subject holds
+;;;;     as a current fact, whoever wrote that fact (this conversation, another one, or the app),
+;;;;     the fact is superseded only when PROMOTE-ACCEPT also says so; otherwise the correction
+;;;;     is not promoted, so the subject never holds a fact and its correction as two current
+;;;;     beliefs.
 ;;;;   - With a VERIFY provider, each window's proposals are checked against the window first:
 ;;;;     the content, the kind, the date and, above all, a claim to replace an earlier
 ;;;;     observation. The ones it does not support are dropped. It is a model call per window,
 ;;;;     so it is a setting, off by default; #317's benchmark measures what it buys.
 ;;;;
 ;;;; TURN NUMBERS ARE THE THREAD'S MESSAGE POSITIONS, counted from 1. An observation's provenance
-;;;; names the conversation, the first message of its window as TURN, and the last as THROUGH.
+;;;; names the conversation, the first message of its window as TURN, and the last as THROUGH;
+;;;; a skipped window is (FROM THROUGH TRIES) in the same numbering.
 ;;;;
 ;;;; A THREAD OBSERVER SHARES ITS STORE WITH THE APP. `praxeon/memory''s in-memory store locks
 ;;;; every operation for that reason, and the SQL store holds a lock around each statement.
@@ -61,53 +73,57 @@ window, Mastra's step.")
    (verify :initarg :verify :reader observer-verify)
    (distil-options :initarg :distil-options :reader observer-distil-options)
    (max-attempts :initarg :max-attempts :reader observer-max-attempts)
+   (retry-delay :initarg :retry-delay :reader observer-retry-delay)
    (window-timeout :initarg :window-timeout :reader observer-window-timeout)
    (mark :initarg :mark :accessor observer-mark)
-   (skipped :initform '() :accessor observer-skipped)
+   (skipped :initarg :skipped :accessor observer-skipped)
    (failures :initform 0 :accessor observer-failures)
    (last-error :initform nil :accessor observer-last-error)
    (worker :initform nil :accessor observer-worker)
    (started :initform nil :accessor observer-started)
    (stopping :initform nil :accessor observer-stopping)
    (lock :initform (bt:make-lock "praxeon-observer") :reader observer-lock))
-  (:documentation "Distils one thread's messages into the thread's observations, a step at a time."))
+  (:documentation "Distils one thread's messages into the thread's observations, a window at a time."))
 
 (defun stored-mark (store subject thread)
-  "The last message THREAD's observations about SUBJECT cite, superseded ones included: the mark
-an observer resumes from. 0 when the thread has none."
-  (reduce #'max (mem:observations-of store subject :thread thread :include-superseded t)
-          :key (lambda (o) (let ((p (mem:observation-provenance o)))
-                             (or (mem:provenance-through p) (mem:provenance-turn p))))
-          :initial-value 0))
+  "The mark an observer of THREAD about SUBJECT resumes from: what STORE records of its progress
+(`praxeon/memory:thread-progress'), or 0 when nothing is recorded."
+  (or (mem:thread-progress store subject thread) 0))
 
 (defun make-observer (provider store subject thread
                       &key (step *step-tokens*) (accept (constantly nil)) (promote (constantly nil))
                            (promote-accept (constantly nil)) verify distil-options
-                           (max-attempts 3) (window-timeout 300) mark)
+                           (max-attempts 3) (retry-delay 2) (window-timeout 300) mark)
   "An observer of THREAD (a string, usually the conversation's id) about SUBJECT, distilling
 with PROVIDER into STORE, a PRAXEON/MEMORY:MEMORY-STORE.
 
 STEP is the estimated tokens of unobserved messages that start a distillation, and the most one
-window holds. ACCEPT is `apply-distillation''s: called with a proposal and the thread
-observation it claims to replace, true to replace it. PROMOTE is called with each new thread
-observation, true to also record it as a fact about SUBJECT. PROMOTE-ACCEPT is called with a
-promoted correction and the subject's fact it would replace, true to supersede that fact.
-VERIFY, a provider or NIL, checks each window's proposals against the window first.
+window holds unless a single exchange is larger. ACCEPT is `apply-distillation''s: called with a
+proposal and the thread observation it claims to replace, true to replace it. PROMOTE is called
+with each new thread observation, true to also record it as a fact about SUBJECT. PROMOTE-ACCEPT
+is called with a promoted correction and the subject's fact it would replace, true to supersede
+that fact. VERIFY, a provider or NIL, checks each window's proposals against the window first.
 DISTIL-OPTIONS is a plist passed to `distil', such as (:max-tokens 2048).
 
-MAX-ATTEMPTS is how many times a window that fails is tried before it is given up on.
-WINDOW-TIMEOUT is how many seconds a window may take before OBSERVER-STUCK-P says so. MARK, when
-given, is where to start; by default it is taken from the store (STORED-MARK)."
+MAX-ATTEMPTS is how many times a window that fails is tried before it is given up on, and how
+many later runs try a window given up on. RETRY-DELAY is the seconds before the second attempt;
+each later one waits twice as long as the one before. WINDOW-TIMEOUT is how many seconds a
+window may take before OBSERVER-STUCK-P says so. MARK, when given, is where to start; by default
+it is what STORE records (STORED-MARK), and the skipped windows always come from there."
   (check-type thread string)
   (unless (and (integerp step) (plusp step))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":step must be a positive integer, not ~S" step)))
   (unless (and (integerp max-attempts) (plusp max-attempts))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":max-attempts must be a positive integer, not ~S" max-attempts)))
-  (make-instance 'observer :provider provider :store store :subject subject :thread thread
-                           :step step :accept accept :promote promote :promote-accept promote-accept
-                           :verify verify :distil-options distil-options
-                           :max-attempts max-attempts :window-timeout window-timeout
-                           :mark (or mark (stored-mark store subject thread))))
+  (unless (and (realp retry-delay) (not (minusp retry-delay)))
+    (error 'praxeon/conditions:praxeon-error :detail (format nil ":retry-delay must be a number of seconds, not ~S" retry-delay)))
+  (multiple-value-bind (stored skipped) (mem:thread-progress store subject thread)
+    (make-instance 'observer :provider provider :store store :subject subject :thread thread
+                             :step step :accept accept :promote promote :promote-accept promote-accept
+                             :verify verify :distil-options distil-options
+                             :max-attempts max-attempts :retry-delay retry-delay
+                             :window-timeout window-timeout
+                             :mark (or mark stored 0) :skipped skipped)))
 
 (defun unobserved (observer history)
   "The messages of HISTORY past OBSERVER's mark."
@@ -127,13 +143,20 @@ the log."
        (> (- (get-universal-time) (observer-started observer)) (observer-window-timeout observer))))
 
 (defun %window-end (history start step)
-  "The end (exclusive) of the window from START in HISTORY: messages until they reach STEP
-estimated tokens, and always at least one."
+  "The end (exclusive) of the window from START in HISTORY: whole exchanges until they reach
+STEP estimated tokens, and always at least one."
   (let ((tokens 0) (end start))
-    (loop for m in (nthcdr start history)
-          do (incf tokens (prompt:message-tokens m)) (incf end)
+    (loop for exchange in (prompt:exchanges (nthcdr start history))
+          do (incf tokens (prompt:messages-tokens exchange))
+             (incf end (length exchange))
           until (>= tokens step))
     end))
+
+(defun %retry-due-p (observer history)
+  "Whether a skipped window of HISTORY is due another try."
+  (some (lambda (s) (and (< (third s) (observer-max-attempts observer))
+                         (<= (second s) (length history))))
+        (observer-skipped observer)))
 
 (defun observe-turn (observer history &key flush)
   "Tell OBSERVER the thread's HISTORY, a list of praxeon/llm messages, after a turn. Returns at
@@ -141,9 +164,11 @@ once: T when it started a distillation, NIL otherwise.
 
 It starts one when no distillation is running and the messages past the mark reach
 OBSERVER-STEP estimated tokens, or, with FLUSH, when there is any message past the mark: FLUSH
-is for the end of a conversation, whose last messages would otherwise never reach a step. The
-history is copied here, so messages the app adds later are the next call's."
-  (let ((snapshot (copy-list history)))
+is for the end of a conversation, whose last messages would otherwise never reach a step. A run
+also tries again each skipped window still due. The history is copied here, and today's date
+taken here, so messages the app adds later are the next call's."
+  (let ((snapshot (copy-list history))
+        (today (get-universal-time)))
     (bt:with-lock-held ((observer-lock observer))
       (cond
         ((observer-stuck-p observer)
@@ -151,8 +176,9 @@ history is copied here, so messages the app adds later are the next call's."
                                            :seconds (- (get-universal-time) (observer-started observer)))
          nil)
         ((observer-busy-p observer) nil)
-        ((let ((window (unobserved observer snapshot)))
-           (and window (or flush (>= (prompt:messages-tokens window) (observer-step observer)))))
+        ((or (let ((window (unobserved observer snapshot)))
+               (and window (or flush (>= (prompt:messages-tokens window) (observer-step observer)))))
+             (%retry-due-p observer snapshot))
          (setf (observer-started observer) (get-universal-time)
                (observer-stopping observer) nil)
          ;; THREAD-LIFETIME: continues the turn's unit of work, on its own thread so the turn
@@ -160,7 +186,7 @@ history is copied here, so messages the app adds later are the next call's."
          ;; dynamic bindings (#158), so it carries them. AWAIT-OBSERVER and STOP-OBSERVER join it.
          (setf (observer-worker observer)
                (bt:make-thread
-                (aion/dynamic:inheriting (lambda () (%run observer snapshot flush)))
+                (aion/dynamic:inheriting (lambda () (%run observer snapshot flush today)))
                 :name "praxeon-observer"))
          t)
         (t nil)))))
@@ -174,8 +200,10 @@ running afterwards."
     (not (observer-busy-p observer))))
 
 (defun stop-observer (observer &key (timeout 30))
-  "Stop OBSERVER at shutdown: it finishes the window it is on and starts no other. Waits at most
-TIMEOUT seconds, then ends its thread. Returns T when it stopped in time."
+  "Stop OBSERVER at shutdown: it finishes the attempt it is on, waits for no retry, and starts no
+other window. Waits at most TIMEOUT seconds, then ends its thread. Returns T when it stopped in
+time. A window it stopped during is neither written nor given up on, so the next observer of
+the thread distils it."
   (setf (observer-stopping observer) t)
   (or (await-observer observer :timeout timeout)
       (let ((w (observer-worker observer)))
@@ -184,56 +212,114 @@ TIMEOUT seconds, then ends its thread. Returns T when it stopped in time."
 
 ;;; --- the windows ------------------------------------------------------------------------
 
-(defun %run (observer history flush)
-  "Distil HISTORY past the mark, one step-sized window at a time, until what is left is below a
-step (or, with FLUSH, nothing is left), or the observer is stopped. An error here is recorded
-and logged, never raised: an error no handler takes in this thread would end the process."
-  (handler-case (%run-windows observer history flush)
+(defun %run (observer history flush today)
+  "Try again the skipped windows still due, then distil HISTORY past the mark, one window at a
+time, until what is left is below a step (or, with FLUSH, nothing is left), or the observer is
+stopped. An error here is recorded and logged, never raised: an error no handler takes in this
+thread would end the process."
+  (handler-case
+      (progn (%retry-skipped observer history today)
+             (%run-windows observer history flush today))
     (error (e)
       (incf (observer-failures observer))
       (setf (observer-last-error observer) e)
       (log:error "memory observer stopped" :thread (observer-thread observer)
                                            :condition (string-downcase (princ-to-string (type-of e)))))))
 
-(defun %run-windows (observer history flush)
+(defun %run-windows (observer history flush today)
   (loop
     (let* ((start (observer-mark observer))
            (left (nthcdr start history)))
       (when (or (null left) (observer-stopping observer)
                 (and (not flush) (< (prompt:messages-tokens left) (observer-step observer))))
         (return))
-      (let ((end (%window-end history start (observer-step observer))))
-        (setf (observer-started observer) (get-universal-time))
-        (%observe-window observer (subseq history start end) start end)))))
+      (let* ((end (%window-end history start (observer-step observer)))
+             (outcome (%observe-window observer (subseq history start end) start end today)))
+        (bt:with-lock-held ((observer-lock observer))
+          (case outcome
+            (:skipped (setf (observer-skipped observer)
+                            (append (observer-skipped observer) (list (list (1+ start) end 1))))
+                      (setf (observer-mark observer) (max (observer-mark observer) end)))
+            (:written (setf (observer-mark observer) (max (observer-mark observer) end)))))
+        (when (eq outcome :stopped) (return))
+        (%save-progress observer)))))
 
-(defun %observe-window (observer window start end)
+(defun %retry-skipped (observer history today)
+  "Try once more each skipped window of HISTORY that fewer than MAX-ATTEMPTS runs have tried. A
+window written now leaves OBSERVER-SKIPPED; one that fails again counts the try."
+  (dolist (entry (copy-list (observer-skipped observer)))
+    (destructuring-bind (from through tries) entry
+      (when (and (< tries (observer-max-attempts observer)) (<= through (length history))
+                 (not (observer-stopping observer)))
+        (let ((outcome (%observe-window observer (subseq history (1- from) through) (1- from) through today)))
+          (unless (eq outcome :stopped)
+            (bt:with-lock-held ((observer-lock observer))
+              (setf (observer-skipped observer)
+                    (if (eq outcome :written)
+                        (remove entry (observer-skipped observer) :test #'equal)
+                        (substitute (list from through (1+ tries)) entry (observer-skipped observer)
+                                    :test #'equal))))
+            (%save-progress observer)))))))
+
+(defun %save-progress (observer)
+  "Record OBSERVER's mark and skipped windows in its store. A failure is counted and logged, and
+the next window's save carries the same state again."
+  (multiple-value-bind (mark skipped)
+      (bt:with-lock-held ((observer-lock observer))
+        (values (observer-mark observer) (copy-tree (observer-skipped observer))))
+    (handler-case (mem:record-thread-progress (observer-store observer) (observer-subject observer)
+                                              (observer-thread observer) mark skipped)
+      (error (e)
+        (incf (observer-failures observer))
+        (setf (observer-last-error observer) e)
+        (log:warn "memory observer progress not saved" :thread (observer-thread observer)
+                                                       :condition (string-downcase (princ-to-string (type-of e))))))))
+
+(defun %pause (observer seconds)
+  "Wait SECONDS, or less if OBSERVER is being stopped."
+  (let ((until (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (loop while (and (< (get-internal-real-time) until) (not (observer-stopping observer)))
+          do (sleep 0.05))))
+
+(defun %observe-window (observer window start end today)
   "Distil WINDOW, the messages from position START (from 0) to END, and write what it yields,
-trying up to OBSERVER-MAX-ATTEMPTS times. Moves the mark to END when it is written or given up
-on. Never raises: this runs on a thread of its own."
-  (let ((began (get-internal-real-time)) (written 0) (outcome :written))
+trying up to OBSERVER-MAX-ATTEMPTS times with a pause before each retry. Returns :WRITTEN,
+:SKIPPED when every attempt failed, or :STOPPED when the observer was stopped before the window
+was written. Never raises: this runs on a thread of its own."
+  (let ((began (get-internal-real-time)) (written 0) (outcome :skipped))
     (loop for attempt from 1 to (observer-max-attempts observer)
-          do (handler-case
-                 (progn (setf written (%distil-and-write observer window start end))
+          do (when (> attempt 1)
+               (%pause observer (* (observer-retry-delay observer) (expt 2 (- attempt 2)))))
+             (when (observer-stopping observer)
+               (setf outcome :stopped)
+               (return))
+             (handler-case
+                 (progn (setf written (%distil-and-write observer window start end today))
                         (setf outcome :written)
                         (return))
                (error (e)
                  (incf (observer-failures observer))
-                 (setf (observer-last-error observer) e
-                       outcome :skipped))))
-    (bt:with-lock-held ((observer-lock observer))
-      (when (eq outcome :skipped)
-        (push (cons start end) (observer-skipped observer)))
-      (setf (observer-mark observer) (max (observer-mark observer) end)))
+                 (setf (observer-last-error observer) e))))
     (log:info "memory observer window" :thread (observer-thread observer)
                                        :from (1+ start) :through end :outcome outcome :written written
                                        :failures (observer-failures observer)
                                        :ms (round (* 1000 (- (get-internal-real-time) began))
-                                                  internal-time-units-per-second))))
+                                                  internal-time-units-per-second))
+    outcome))
 
 (define-condition window-not-distilled (praxeon/conditions:praxeon-error) ()
   (:documentation "distil could not read the model's answer for a window; carries its reason."))
 
-(defun %distil-and-write (observer window start end)
+(defun %window-observations (store subject thread start end)
+  "The current observations of THREAD written from the window START (from 0) to END."
+  (remove-if-not (lambda (o)
+                   (let ((p (mem:observation-provenance o)))
+                     (and (string= (mem:provenance-conversation p) thread)
+                          (= (mem:provenance-turn p) (1+ start))
+                          (eql (mem:provenance-through p) end))))
+                 (mem:observations-of store subject :thread thread)))
+
+(defun %distil-and-write (observer window start end today)
   "One attempt at a window. Returns how many observations it wrote, or signals."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer))
@@ -242,7 +328,7 @@ on. Never raises: this runs on a thread of its own."
          (provenance (mem:make-provenance thread (1+ start) :through end)))
     (multiple-value-bind (distillation condition)
         (apply #'distil:distil (observer-provider observer) subject window
-               :known known :today (get-universal-time) (observer-distil-options observer))
+               :known known :today today (observer-distil-options observer))
       (unless distillation
         (error 'window-not-distilled
                :detail (format nil "the model's answer could not be read: ~A" condition)))
@@ -250,10 +336,12 @@ on. Never raises: this runs on a thread of its own."
                           (supported-proposals (observer-verify observer) window distillation :known known)
                           distillation))
              ;; WHAT AN EARLIER ATTEMPT AT THIS WINDOW ALREADY WROTE is not written again: an
-             ;; observation of this thread with the same content and the same message range.
+             ;; observation of this thread with the same content and the same message range,
+             ;; superseded or not.
              (done (remove-if-not (lambda (o)
                                     (let ((p (mem:observation-provenance o)))
-                                      (and (= (mem:provenance-turn p) (1+ start))
+                                      (and (string= (mem:provenance-conversation p) thread)
+                                           (= (mem:provenance-turn p) (1+ start))
                                            (eql (mem:provenance-through p) end))))
                                   (mem:observations-of store subject :thread thread :include-superseded t)))
              (fresh (distil:make-distillation
@@ -264,43 +352,41 @@ on. Never raises: this runs on a thread of its own."
              (written (distil:apply-distillation store fresh :provenance provenance
                                                              :accept (observer-accept observer)
                                                              :thread thread)))
-        (dolist (o written) (%maybe-promote observer o provenance))
+        ;; PROMOTION RUNS OVER EVERY CURRENT OBSERVATION OF THE WINDOW, not only this attempt's
+        ;; writes, so an attempt that failed during promotion is finished by the next one.
+        ;; %MAYBE-PROMOTE leaves alone a fact the subject already holds, so running it again
+        ;; changes nothing that was done.
+        (dolist (o (%window-observations store subject thread start end))
+          (%maybe-promote observer o provenance))
         (length written)))))
 
-(defun %promoted-fact (store subject thread-observation)
-  "The current fact about SUBJECT promoted from THREAD-OBSERVATION: one with its content and its
-provenance's conversation and range, which promotion copies."
-  (let ((p (mem:observation-provenance thread-observation)))
-    (find-if (lambda (f)
-               (let ((q (mem:observation-provenance f)))
-                 (and (string= (mem:observation-content f) (mem:observation-content thread-observation))
-                      (string= (mem:provenance-conversation q) (mem:provenance-conversation p))
-                      (= (mem:provenance-turn q) (mem:provenance-turn p))
-                      (eql (mem:provenance-through q) (mem:provenance-through p)))))
-             (mem:observations-of store subject))))
+(defun %current-fact (store subject content)
+  "SUBJECT's current fact whose content is CONTENT, whoever wrote it."
+  (find content (mem:observations-of store subject) :key #'mem:observation-content :test #'string=))
 
 (defun %maybe-promote (observer observation provenance)
-  "Record OBSERVATION, a new thread observation, as a fact about the subject when PROMOTE says so.
-Not twice: an identical current fact already there is left alone. When OBSERVATION corrects a
-thread observation that was promoted, the subject's fact is superseded only when PROMOTE-ACCEPT
-also says so; otherwise nothing is promoted."
+  "Record OBSERVATION, a thread observation, as a fact about the subject when PROMOTE says so.
+
+Not twice: when the subject already holds a current fact with its content, nothing is done.
+When OBSERVATION corrects a thread observation whose content the subject holds as a current
+fact, from this conversation, another, or the app, that fact is superseded only when
+PROMOTE-ACCEPT also says so; otherwise nothing is promoted."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer)))
-    (when (funcall (observer-promote observer) observation)
+    (when (and (funcall (observer-promote observer) observation)
+               (not (%current-fact store subject (mem:observation-content observation))))
       (let* ((replaced-id (mem:observation-supersedes observation))
              (replaced (and replaced-id
                             (find replaced-id (mem:observations-of store subject :thread (observer-thread observer)
                                                                                  :include-superseded t)
                                   :key #'mem:observation-id :test #'string=)))
-             (old-fact (and replaced (%promoted-fact store subject replaced))))
+             (old-fact (and replaced (%current-fact store subject (mem:observation-content replaced)))))
         (cond
           (old-fact
            (when (funcall (observer-promote-accept observer) observation old-fact)
              (mem:supersede store old-fact (mem:observation-content observation)
                             :provenance provenance :kind (mem:observation-kind observation)
                             :valid-from (mem:observation-valid-from observation))))
-          ((find (mem:observation-content observation) (mem:observations-of store subject)
-                 :key #'mem:observation-content :test #'string=))
           (t (mem:remember store subject (mem:observation-content observation)
                            :provenance provenance
                            :kind (mem:observation-kind observation)
@@ -330,7 +416,7 @@ also says so; otherwise nothing is promoted."
                        (find (distil:proposal-replaces p) known :key #'mem:observation-id :test #'equal))))
     (format nil "~D. [~(~A~)] ~A~@[ (applies from ~A)~]~@[ (replaces the earlier observation: ~A)~]"
             index (distil:proposal-kind p) (distil:proposal-content p)
-            (and (distil:proposal-applies-from p) (distil::%date-string (distil:proposal-applies-from p)))
+            (and (distil:proposal-applies-from p) (distil:date-string (distil:proposal-applies-from p)))
             (and replaced (mem:observation-content replaced)))))
 
 (defun supported-proposals (provider window distillation &key known)

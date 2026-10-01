@@ -119,7 +119,9 @@ and a year before 1900, which ENCODE-UNIVERSAL-TIME would read as a two-digit ye
 too. The date is decoded again and must come back as written."
   (and (stringp string) (= (length string) 10)
        (char= (char string 4) #\-) (char= (char string 7) #\-)
-       (every #'digit-char-p (remove #\- string))
+       ;; Each digit position checked by itself: "2026-1--02" has seven digits and the two
+       ;; dashes in place, and its month field "1-" is not a number (#462's second review).
+       (loop for i in '(0 1 2 3 5 6 8 9) always (digit-char-p (char string i)))
        (let ((year (parse-integer string :start 0 :end 4))
              (month (parse-integer string :start 5 :end 7))
              (day (parse-integer string :start 8 :end 10)))
@@ -222,7 +224,8 @@ reading next to `+kinds+': the two have to agree about what a kind means.")
 
 ;;; --- the pass ---------------------------------------------------------------
 
-(defun %date-string (time)
+(defun date-string (time)
+  "TIME, a universal time, as the date YYYY-MM-DD in UTC."
   (multiple-value-bind (s m h d mo y) (decode-universal-time time 0)
     (declare (ignore s m h))
     (format nil "~4,'0D-~2,'0D-~2,'0D" y mo d)))
@@ -260,7 +263,7 @@ This function is the caller that skips, so the HANDLER-CASE belongs here and not
 function's extent would preempt every caller's."
   (let* ((block (%known-block known))
          (dated (when today
-                  (format nil "Today is ~A. Write any applies_from date against that." (%date-string today))))
+                  (format nil "Today is ~A. Write any applies_from date against that." (date-string today))))
          (preface (format nil "~@[~A~%~%~]~@[~A~]" dated block))
          (messages (append (when (plusp (length preface)) (list (llm:msg "user" preface)))
                            window)))

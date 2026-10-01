@@ -99,6 +99,25 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
          '(:embedding :text)
          `(:embedding :vector :dimensions ,dimensions))))
 
+;;; THE OBSERVER'S PROGRESS ON EACH THREAD (#317), one row per subject and thread, in a table of
+;;; its own beside the observations: see PRAXEON/MEMORY:THREAD-PROGRESS for why it is recorded
+;;; rather than worked out from them. SKIPPED is the windows given up on, "FROM-THROUGH-TRIES"
+;;; joined by commas.
+(defparameter +progress-fields+
+  '((:id         :string  :primary t)
+    (:subject    :string  :required t)
+    (:thread     :string  :required t)
+    (:observed   :integer :required t)
+    (:skipped    :text)
+    (:updated_at :integer)))
+
+(defun %progress-table (table) (format nil "~A_progress" table))
+
+(defun %progress-id (subject thread)
+  "One key for a subject and a thread. The subject's length comes first, so no pair of strings
+gives another pair's key."
+  (format nil "~D:~A~A" (length subject) subject thread))
+
 ;;; --- the store --------------------------------------------------------------
 
 (defclass db-memory-store (mem:memory-store)
@@ -109,7 +128,10 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
    (dimensions :initarg :dimensions :reader store-dimensions)
    (schema :initarg :schema :reader store-schema)
    (schema-name :initarg :schema-name :reader store-schema-name)
-   (lock :initform (bt:make-lock "praxeon-memory-db") :reader store-lock))
+   (progress-schema :initarg :progress-schema :reader store-progress-schema)
+   ;; Recursive because SUPERSEDE holds it around REMEMBER, so the check that the observation
+   ;; is still current and the writes that replace it are one step.
+   (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock))
   (:documentation "Observations in a mnemosyne-backed table, embedded on write."))
 
 (defun make-db-memory-store (connection &key embedder (table *table*) (dialect :postgres)
@@ -131,10 +153,13 @@ bound and hand it in; then no path through this store can resolve one."
          (name (intern (format nil "~:@(~A~)-~A" table dialect) '#:praxeon/memory-db))
          (sch (schema:register-schema
                (schema:make-schema name table (%schema-fields dimensions dialect))))
+         (progress (schema:register-schema
+                    (schema:make-schema (intern (format nil "~:@(~A~)-PROGRESS-~A" table dialect) '#:praxeon/memory-db)
+                                        (%progress-table table) +progress-fields+)))
          (store (make-instance 'db-memory-store
                                :connection connection :dialect dialect :table table
                                :embedder embedder :dimensions dimensions
-                               :schema sch :schema-name name)))
+                               :schema sch :schema-name name :progress-schema progress)))
     (when ensure (ensure-schema store))
     store))
 
@@ -145,7 +170,8 @@ bound and hand it in; then no path through this store can resolve one."
      ;; No CREATE EXTENSION here (#138). The extension is a deployment fact, and on a managed
      ;; Postgres the application's role usually cannot create it. ENSURE-SCHEMA checks that it
      ;; is present instead; see CHECK-VECTOR-EXTENSION.
-     (list (schema:schema-ddl (store-schema store) :dialect (store-dialect store)))
+     (list (schema:schema-ddl (store-schema store) :dialect (store-dialect store))
+           (schema:schema-ddl (store-progress-schema store) :dialect (store-dialect store)))
      ;; THE INDEX IS BUILT FOR THE OPERATOR THIS STORE QUERIES WITH. `<=>' is cosine, so
      ;; vector_cosine_ops. An index built for a different operator is not an error and not
      ;; slow-and-obvious -- it is correct rows and a sequential scan (pre-publication issue 258).
@@ -192,8 +218,8 @@ starting at the same moment."
           (conn:query (store-connection store) (format nil "PRAGMA table_info(~A)" (store-table store)))))
 
 (defun ensure-schema (store)
-  "Create the table and its index if they are not there, and add the columns +ADDED-COLUMNS+
-names to a table made before them. Returns STORE. On Postgres the `vector' extension must
+  "Create the table, its index and the observer's progress table (#317) if they are not there,
+and add the columns +ADDED-COLUMNS+ names to a table made before them. Returns STORE. On Postgres the `vector' extension must
 already be installed; see CHECK-VECTOR-EXTENSION.
 
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
@@ -209,7 +235,15 @@ migration, before it reads from a table made before #317."
             ;; Postgres answers an existing column with a notice, which the driver signals as
             ;; a warning; it is the expected case on every start after the first.
             do (handler-bind ((warning #'muffle-warning))
-                 (conn:exec (store-connection store) (%add-column-sql store name type)))))
+                 (handler-case (conn:exec (store-connection store) (%add-column-sql store name type))
+                   ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
+                   ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
+                   ;; failure is accepted only when the column is there afterwards.
+                   (error (e)
+                     (unless (and (eq (store-dialect store) :sqlite)
+                                  (member (string-downcase (symbol-name name)) (%sqlite-columns store)
+                                          :test #'string=))
+                       (error e)))))))
   store)
 
 ;;; --- rows <-> observations ---------------------------------------------------
@@ -288,7 +322,7 @@ language of columns."
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))
                        :valid-from (or valid-from now) :recorded-at now
                        :thread thread :provenance provenance)))
-    (bt:with-lock-held ((store-lock store))
+    (bt:with-recursive-lock-held ((store-lock store))
       ;; AN UNRECORDED SOURCE TIME IS OMITTED, NOT CAST. `cast' refuses NIL for an integer
       ;; field -- correctly, because NIL is not an integer -- and the tempting fixes are
       ;; both wrong: coercing it to 0 invents a time, and widening the column's type to
@@ -327,28 +361,45 @@ language of columns."
 (defmethod mem:supersede ((store db-memory-store) observation content
                           &key provenance kind value tokens valid-from)
   (mem:check-provenance provenance "supersede" (mem:observation-subject observation))
-  (let ((replacement (mem:remember store (mem:observation-subject observation) content
-                                   :thread (mem:observation-thread observation)
-                                   :provenance provenance
-                                   :kind (or kind (mem:observation-kind observation))
-                                   :value (or value (mem:observation-value observation))
-                                   :tokens tokens :valid-from valid-from)))
-    (bt:with-lock-held ((store-lock store))
-      (q:run (store-connection store)
-             (list :update (store-table store)
-                   :set (list :superseded_by (mem:observation-id replacement)
-                              :superseded_at (mem:observation-recorded-at replacement))
-                   :where (list := :id (mem:observation-id observation)))
-             :dialect (store-dialect store))
-      (q:run (store-connection store)
-             (list :update (store-table store)
-                   :set (list :supersedes (mem:observation-id observation))
-                   :where (list := :id (mem:observation-id replacement)))
-             :dialect (store-dialect store)))
-    (setf (mem:observation-superseded-by observation) (mem:observation-id replacement)
-          (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
-          (mem:observation-supersedes replacement) (mem:observation-id observation))
-    replacement))
+  ;; THE CHECK AND THE WRITES ARE ONE STEP (#462's second review). Under the store's lock no
+  ;; other thread of this process can supersede OBSERVATION between the check and the update,
+  ;; and in one transaction a failure part-way through, or a thread ended by STOP-OBSERVER,
+  ;; leaves neither the replacement nor a half-made link behind.
+  (bt:with-recursive-lock-held ((store-lock store))
+    (conn:with-transaction ((store-connection store))
+      (let ((row (first (q:fetch (store-connection store)
+                                 (list :select '(:superseded_by)
+                                       :from (list (store-table store))
+                                       :where (list := :id (mem:observation-id observation)))
+                                 :dialect (store-dialect store)))))
+        (unless row
+          (error 'praxeon/conditions:praxeon-error
+                 :detail (format nil "cannot supersede ~A: it is not in this store" (mem:observation-id observation))))
+        (when (param:row-value row :superseded_by)
+          (error 'praxeon/conditions:praxeon-error
+                 :detail (format nil "~A was already superseded by ~A" (mem:observation-id observation)
+                                 (param:row-value row :superseded_by)))))
+      (let ((replacement (mem:remember store (mem:observation-subject observation) content
+                                       :thread (mem:observation-thread observation)
+                                       :provenance provenance
+                                       :kind (or kind (mem:observation-kind observation))
+                                       :value (or value (mem:observation-value observation))
+                                       :tokens tokens :valid-from valid-from)))
+        (q:run (store-connection store)
+               (list :update (store-table store)
+                     :set (list :superseded_by (mem:observation-id replacement)
+                                :superseded_at (mem:observation-recorded-at replacement))
+                     :where (list := :id (mem:observation-id observation)))
+               :dialect (store-dialect store))
+        (q:run (store-connection store)
+               (list :update (store-table store)
+                     :set (list :supersedes (mem:observation-id observation))
+                     :where (list := :id (mem:observation-id replacement)))
+               :dialect (store-dialect store))
+        (setf (mem:observation-superseded-by observation) (mem:observation-id replacement)
+              (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
+              (mem:observation-supersedes replacement) (mem:observation-id observation))
+        replacement))))
 
 (defun %where-current (subject as-of include-superseded &optional thread)
   "The WHERE clause for a subject's observations in the scope THREAD names: NIL for facts about
@@ -371,7 +422,7 @@ which is the whole point of keeping the old one."
     (if (rest clauses) (cons :and (nreverse clauses)) (first clauses))))
 
 (defmethod mem:observations-of ((store db-memory-store) subject &key as-of include-superseded thread)
-  (bt:with-lock-held ((store-lock store))
+  (bt:with-recursive-lock-held ((store-lock store))
     (mapcar #'%row->observation
             (q:fetch (store-connection store)
                      (list :select +columns+
@@ -434,7 +485,7 @@ ONE SCOPE: THREAD :ALL is refused, as RECALL refuses it, since a recall builds a
            :detail "recall-similar takes one scope: NIL for the subject's facts, or a thread's id; :all is for observations-of"))
   (let ((rows (if (eq (store-dialect store) :sqlite)
                   (%sqlite-nearest store subject embedding as-of limit thread)
-                  (bt:with-lock-held ((store-lock store))
+                  (bt:with-recursive-lock-held ((store-lock store))
                     (q:fetch (store-connection store)
                              (list :select +columns+
                                    :from (list (store-table store))
@@ -452,7 +503,7 @@ query vector is checked for width as a stored one is. An observation with no emb
 after every other, as NULL does in Postgres's ascending ORDER BY. REMEMBER always writes one,
 so that case needs a row written some other way."
   (let* ((query (llm:parse-vector-text (%vector-text store embedding)))
-         (rows (bt:with-lock-held ((store-lock store))
+         (rows (bt:with-recursive-lock-held ((store-lock store))
                  (q:fetch (store-connection store)
                           (list :select (append +columns+ '(:embedding))
                                 :from (list (store-table store))
@@ -473,7 +524,7 @@ so that case needs a row written some other way."
     (mapcar #'cdr (subseq sorted 0 (min limit (length sorted))))))
 
 (defmethod mem:forget ((store db-memory-store) observation)
-  (bt:with-lock-held ((store-lock store))
+  (bt:with-recursive-lock-held ((store-lock store))
     ;; Unlink the forward pointer first, or a surviving predecessor claims to be superseded
     ;; by something no longer there and can never be current again. Same rule as the
     ;; in-memory store; stated here because the storage does not enforce it.
@@ -494,9 +545,44 @@ so that case needs a row written some other way."
 
 (defmethod mem:forget-subject ((store db-memory-store) subject)
   "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150)."
-  (bt:with-lock-held ((store-lock store))
+  (bt:with-recursive-lock-held ((store-lock store))
     (let ((n (q:run (store-connection store)
                     (list :delete-from (store-table store)
                           :where (list := :subject subject))
                     :dialect (store-dialect store))))
+      (q:run (store-connection store)
+             (list :delete-from (%progress-table (store-table store))
+                   :where (list := :subject subject))
+             :dialect (store-dialect store))
       (if (integerp n) n 0))))
+
+(defun %skipped->text (skipped)
+  (format nil "~{~{~D-~D-~D~}~^,~}" skipped))
+
+(defun %text->skipped (text)
+  (when (and text (plusp (length text)))
+    (loop for entry in (uiop:split-string text :separator ",")
+          collect (mapcar #'parse-integer (uiop:split-string entry :separator "-")))))
+
+(defmethod mem:thread-progress ((store db-memory-store) subject thread)
+  (let ((row (bt:with-recursive-lock-held ((store-lock store))
+               (first (q:fetch (store-connection store)
+                               (list :select '(:observed :skipped)
+                                     :from (list (%progress-table (store-table store)))
+                                     :where (list := :id (%progress-id subject thread)))
+                               :dialect (store-dialect store))))))
+    (if row
+        (values (param:row-value row :observed) (%text->skipped (param:row-value row :skipped)))
+        (values nil nil))))
+
+(defmethod mem:record-thread-progress ((store db-memory-store) subject thread mark skipped)
+  (let ((text (%skipped->text skipped)))
+    (bt:with-recursive-lock-held ((store-lock store))
+      (q:run (store-connection store)
+             (list :insert-into (%progress-table (store-table store))
+                   :values (list (list :id (%progress-id subject thread) :subject subject :thread thread
+                                       :observed mark :skipped text :updated_at (get-universal-time)))
+                   :on-conflict '(:id)
+                   :do-update (list :observed mark :skipped text :updated_at (get-universal-time)))
+             :dialect (store-dialect store))))
+  mark)
