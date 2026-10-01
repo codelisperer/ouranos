@@ -292,6 +292,20 @@ a probe for vendor/mbedtls/, for the reason WITH-UV-P gives."
   (let ((v (uiop:getenv "OURANOS_WITH_TLS")))
     (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
 
+(defparameter +libgit-systems+ '(:aion/libgit)
+  "Opt-in systems that need scripts/build-libgit2.lisp to have run (#429). Loaded only when
+OURANOS_WITH_LIBGIT=1, for the reasons WITH-UV-P gives for libuv.")
+
+(defparameter +libgit-test-systems+ '(:aion/libgit/tests)
+  "Their suites: real repositories over the libgit2 this tree builds, each checked with the git
+command.")
+
+(defun with-libgit-p ()
+  "Should this run include the libgit2 systems? OURANOS_WITH_LIBGIT=1 says yes. An opt-in, not
+a probe for vendor/libgit2/, for the reason WITH-UV-P gives."
+  (let ((v (uiop:getenv "OURANOS_WITH_LIBGIT")))
+    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
+
 (defun with-uv-p ()
   "Should this run include the libuv systems? OURANOS_WITH_UV=1 says yes.
 
@@ -336,6 +350,7 @@ that the pinned libuv builds at all."
 (defparameter +optional-axes+
   '(("uv" with-uv-p report-uv-declined)
     ("tls" with-tls-p report-tls-declined)
+    ("libgit" with-libgit-p report-libgit-declined)
     ("view" view-covered-p report-view-uncovered))
   "(name predicate-symbol disclosure-symbol) for each axis this run may not cover.
 
@@ -446,6 +461,14 @@ the section reports and why."
   (format t "          OURANOS_WITH_TLS is unset. Set it to 1 to include them (needs scripts/build-mbedtls.lisp to have run).~%")
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
 
+(defun report-libgit-declined (name)
+  "The libgit axis is off. One cause only: the caller did not ask for it."
+  (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
+  (dolist (s +libgit-systems+)
+    (format t "          ~(~a~)~%" s))
+  (format t "          OURANOS_WITH_LIBGIT is unset. Set it to 1 to include them (needs scripts/build-libgit2.lisp to have run).~%")
+  (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
+
 (defun report-uv-declined (name)
   "The uv axis is off. One cause only: the caller did not ask for it."
   (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
@@ -488,12 +511,14 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
   (append +systems+
           (when (with-uv-p) +uv-systems+)
           (when (with-tls-p) +tls-systems+)
+          (when (with-libgit-p) +libgit-systems+)
           (platform-required-systems)))
 
 (defun all-test-systems ()
   (append +test-systems+
           (when (with-uv-p) +uv-test-systems+)
           (when (with-tls-p) +tls-test-systems+)
+          (when (with-libgit-p) +libgit-test-systems+)
           (platform-required-test-systems)))
 
 ;;; --- the child image --------------------------------------------------------
