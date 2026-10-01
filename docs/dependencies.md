@@ -91,7 +91,7 @@ excuse one here. `fiveam` is in both and for different reasons.
 | `praxeon` | agent | In-tree. |
 | `hyperion` | web | In-tree. |
 | `spinneret` | web | HTML as s-expressions, in the generated page. |
-| `clack-handler-hunchentoot` | web | The Clack adapter the generated server starts. Pure CL on every platform, which is why the templates use it rather than `clack-handler-woo`. |
+| `hyperion/server-uv` | web | In-tree. The native HTTP server the generated app starts, on libuv (#472, ADR-0017). It needs a built libuv: `scripts/build-libuv.lisp`, or a system copy. Before #472 the template used `clack-handler-hunchentoot`. |
 
 **This table is checked, not maintained by hand.** `cons/tests/init-tests.lisp` scaffolds
 each template into a temporary directory, reads the `.asd` the generator actually wrote, and

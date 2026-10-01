@@ -2,7 +2,10 @@
 ;;;;
 ;;;; Run OUT-OF-IMAGE (save-lisp-and-die exits the process); `cons bin` does this
 ;;;; via a :sh subprocess sbcl -- see cons.lisp. The resulting binary runs
-;;;; {{name}}:main and needs no SBCL/Quicklisp installed to run.
+;;;; {{name}}:main and needs no SBCL/Quicklisp installed to run. It serves on libuv, which it
+;;;; looks for beside itself, then in the Ouranos tree that built it, then on the system. On
+;;;; a machine without the tree, put libuv (and its LICENSE) beside bin/{{name}} or install
+;;;; libuv there.
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 ;; Discovery comes from the ASDF source-registry drop-in written by the repo-root
