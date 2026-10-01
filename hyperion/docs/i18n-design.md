@@ -64,6 +64,15 @@ canonical caller form before porting many pages, since it shapes every call site
 **[lean]** Bind `*locale*` at the request boundary (symmetry with output-style) and
 offer `(t* …)` reading it, while keeping an explicit-locale form for tests/purity.
 
+**The current translation SOURCE is implemented this way (#491); the locale still is not.**
+`*translation-source*` is bound per request by `wrap-translation-source` (a source, or a
+function of the request's environment returning one) and locally by
+`with-translation-source`. It is registered with `aion/dynamic`, so a thread the request
+spawns through `aion/dynamic:inheriting` sees it. `translate-current` and
+`translate-plural-current` take the locale explicitly and use the bound source, and signal
+`no-translation-source` when none is bound rather than rendering markers. A component takes
+`:source` defaulting to `*translation-source*`.
+
 ## 4. Interpolation (variables in strings)
 
 Not needed for the landing page (static copy), but auth/emails will need it.
@@ -129,6 +138,8 @@ the construction.
 ## 7. Missing-key & fallback
 
 - **[now]** locale → default-locale → visible `"[section/key]"` marker.
+- **[now]** `translation-exists-p` (#490) says whether a key has text by the same lookup,
+  so a component that wants its own fallback never compares a result with the marker.
 - **Alternatives:** signal a condition in dev (loud), log-and-mark in prod; or a
   build-time **key-parity check** (fail CI if a locale is missing keys another has).
   **[lean]** keep the visible marker at runtime *and* add a parity check as a
