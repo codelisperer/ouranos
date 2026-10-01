@@ -441,17 +441,18 @@ assets/make-icon.ps1, which is the editable source for them."
 server + an out-of-process OS webview (hyperion/desktop:run-app). Blocks until closed.
 
 (exit) and (quit) close it (#355). Two handler threads, so the stop button's request is
-answered while an evaluation holds the other one; Hunchentoot already has a thread per
-connection and is not asked."
+answered while an evaluation holds the other one.
+
+It runs on :uv, the server desktop apps target (ADR-0017), and is the app the desktop-release
+dry runs build, so a carried libuv serves requests from a real bundle on every OS there (#472).
+The web modes above keep the default server."
   ;; SETF, not LET: the handlers run on the server's threads, which do not see a binding
   ;; made on this one.
-  (let ((server (srv:default-server))
-        (previous *on-exit-request*))
+  (let ((previous *on-exit-request*))
     (setf *on-exit-request* #'desk:request-close)
     (unwind-protect
          (desk:run-app (make-app) :title title :width 920 :height 660 :shell :webview :icon icon
-                                  :server server
-                                  :workers (unless (eq server :hunchentoot) 2))
+                                  :server :uv :workers 2)
       (setf *on-exit-request* previous))))
 
 (defun main ()
