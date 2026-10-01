@@ -242,7 +242,8 @@
   (:export #:observer #:make-observer #:observe-turn #:await-observer #:stop-observer
            #:observer-busy-p #:observer-stuck-p #:observer-mark #:observer-skipped
            #:observer-failures #:observer-last-error #:observer-thread #:observer-subject
-           #:unobserved #:stored-mark #:supported-proposals #:window-not-distilled #:*step-tokens*))
+           #:unobserved #:stored-mark #:running-observer #:supported-proposals #:window-not-distilled
+           #:*step-tokens*))
 
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)

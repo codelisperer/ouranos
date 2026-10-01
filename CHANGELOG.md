@@ -79,20 +79,32 @@ its tag.
     nor passes a window that was given up on or that the process ended part-way through.
     Observations the app wrote into the thread itself do not move the mark.
   - One observer of a thread runs at a time in a process: `observe-turn` starts nothing while
-    another observer of the same store, subject and thread is running, so an app may make an
-    observer per request. The stored mark is never lowered. Observers of one thread in two
-    processes at once are not coordinated.
-  - Stop a subject's observers with `stop-observer` before `forget-subject`; a window being
-    distilled during the erasure can be written after it.
+    another observer of the same store, subject and thread holds the thread, even when both are
+    called at the same moment, so an app may make an observer per request. `running-observer`
+    names the observer holding a thread. A refused call is logged and does nothing else; a
+    refused `:flush` is not queued, so flush again once `running-observer` returns NIL. The
+    stored mark is never lowered. Observers of one thread in two processes at once are not
+    coordinated.
+  - Stop a subject's observers before `forget-subject`, with `stop-observer` on the
+    `running-observer` of each of its threads; a window being distilled during the erasure can
+    be written after it.
+  - A skipped window retried after later windows is written to the thread, and nothing from it
+    is promoted.
+  - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
+    the name of one.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
     does. A fact the subject already holds is not stored again. A promoted observation is
     matched to the subject facts it descends from: those whose content is its own or that of any
     thread observation it corrects, through any chain of corrections, superseded facts included,
-    whoever wrote them. When there are any, it replaces their current successor only when
-    `:promote-accept` allows it, and otherwise nothing is promoted, so the subject never holds a
-    fact and its correction as two current facts. A thread fact that contradicts a subject fact
-    with no such link is promoted beside it; `:promote` has to judge that case.
+    whoever wrote them. When there are any and the observation corrects a thread observation, it
+    replaces their current successor only when `:promote-accept` allows it; when it corrects
+    nothing it restates an old value and is not promoted. Otherwise nothing is promoted, so the
+    subject never holds a fact and its correction as two current facts. The chain is followed
+    within one thread: a correction refused in one conversation can still reach the subject when
+    another conversation states the corrected value with nothing to link it. A thread fact that
+    contradicts a subject fact with no such link is promoted beside it; `:promote` has to judge
+    that case.
   - `:verify`, a provider, drops proposals the window does not support, judging their content,
     kind, date and any claim to replace an earlier observation.
   - `stop-observer` stops it at shutdown, `observer-stuck-p` reports a call running past

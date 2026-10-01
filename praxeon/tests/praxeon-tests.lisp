@@ -4582,9 +4582,9 @@ superseded. Never both as current facts."
                                        :promote (constantly t))))
              (obs:observe-turn o (%history 6))
              (obs:await-observer o :timeout 10))))
-    (is (equal '("Lives in Porto.") (%correction-run #'by-app nil)))
+    (is (equal '("Lives in Porto.") (%correction-run #'by-app (constantly nil))))
     (is (equal '("Lives in Lisbon.") (%correction-run #'by-app (constantly t))))
-    (is (equal '("Lives in Porto.") (%correction-run #'by-conv-7 nil)))
+    (is (equal '("Lives in Porto.") (%correction-run #'by-conv-7 (constantly nil))))
     (is (equal '("Lives in Lisbon.") (%correction-run #'by-conv-7 (constantly t))))))
 
 (defclass outage-scripted (scripted)
@@ -4748,7 +4748,7 @@ the first promoted fact and nothing beside it; with it, the last."
 thread then corrects its Porto to Faro. The thread's correction descends from a fact whose
 current successor is Lisbon: without PROMOTE-ACCEPT Lisbon stays alone, with it Faro replaces
 it."
-  (dolist (case (list (list nil '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
+  (dolist (case (list (list (constantly nil) '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
     (destructuring-bind (promote-accept expected) case
       (let ((store (mem:make-in-memory-store)))
         (remember* store "member-1" "Lives in Porto.")
@@ -4759,7 +4759,8 @@ it."
           (setf (scripted-script (obs::observer-provider observer))
                 (list (funcall (%corrects "Lives in Porto." "Lives in Faro.") store "conv-8")))
           (obs:observe-turn observer (%history 12))
-          (obs:await-observer observer :timeout 10))
+          (obs:await-observer observer :timeout 10)
+          (is (= 0 (obs:observer-failures observer)) "every window distilled, none skipped"))
         (is (equal expected (%facts store)))))))
 
 (test an-old-fact-observed-again-does-not-come-back-beside-its-correction
@@ -4823,3 +4824,101 @@ the observer is made, not on every save."
   (signals cnd:praxeon-error
     (obs:make-observer (%provider-returning) (make-instance 'reader-only-store) "member-1" "conv-7"))
   (finishes (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7")))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's fourth review: simultaneous calls, retried windows, restatements, and the
+;;; function arguments.
+;;; --------------------------------------------------------------------------
+
+(test two-observers-called-at-the-same-moment-run-once
+  "Two observers of one thread are told the same turn at the same moment, 40 times. The claim
+itself holds the thread, so one runs and the other starts nothing, and the window is written
+once each time."
+  (let ((both 0) (written '()))
+    (dotimes (trial 40)
+      (let* ((store (mem:make-in-memory-store))
+             (observers (loop repeat 2
+                              collect (obs:make-observer
+                                       (make-instance 'slow-scripted :delay 0.05
+                                                                     :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                       store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+             (go (list nil))
+             (callers (loop for o in observers
+                            collect (let ((o o))
+                                      (bt:make-thread (lambda ()
+                                                        (loop until (car go))
+                                                        (obs:observe-turn o (%history 6)))
+                                                      :name "observe-turn-test")))))
+        (setf (car go) t)
+        (let ((started (mapcar #'bt:join-thread callers)))
+          (when (every #'identity started) (incf both)))
+        (dolist (o observers) (obs:await-observer o :timeout 10))
+        (push (length (%thread-contents store)) written)))
+    (is (= 0 both) "both started in ~D of 40 trials" both)
+    (is (every (lambda (n) (= n 1)) written) "the window was written once each time: ~S" written)))
+
+(test running-observer-names-the-observer-running-on-a-thread
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'slow-scripted :delay 0.3
+                                                                    :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (is (null (obs:running-observer store "member-1" "conv-7")))
+    (obs:observe-turn observer (%history 6))
+    (is (eq observer (obs:running-observer store "member-1" "conv-7")))
+    (obs:await-observer observer :timeout 10)
+    (is (null (obs:running-observer store "member-1" "conv-7")) "released when it ends")))
+
+(test a-retried-skipped-window-promotes-nothing
+  "Window 1 fails and is skipped; window 2 says Lisbon, which is promoted. When window 1 is
+retried it says Porto. Window 2 came before it, so the retry is written to the thread and
+nothing from it is promoted beside Lisbon."
+  (let* ((store (mem:make-in-memory-store))
+         ;; Two attempts at window 1 both fail; a window given up on is retried by later runs
+         ;; while fewer than MAX-ATTEMPTS runs have tried it.
+         (provider (make-instance 'failing-scripted :failures 2
+                                                    :script (list (%call-with (%ob "Lives in Lisbon." "fact"))
+                                                                  (%call-with (%ob "Lives in Porto." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                         :max-attempts 2 :promote (constantly t)
+                                                                         :promote-accept (constantly t))))
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (is (equal '("Lives in Lisbon.") (%facts store)))
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    (is (null (obs:observer-skipped observer)) "the retry wrote the window")
+    (is (member "Lives in Porto." (%thread-contents store) :test #'string=))
+    (is (equal '("Lives in Lisbon.") (%facts store)))))
+
+(test a-restatement-of-an-old-value-does-not-revert-its-correction
+  "The subject's Porto was corrected to Lisbon. Another conversation says Porto, correcting
+nothing. Even with PROMOTE-ACCEPT T it is not a correction, so it does not replace Lisbon."
+  (let ((store (mem:make-in-memory-store)))
+    (let ((porto (remember* store "member-1" "Lives in Porto.")))
+      (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2)))
+    (%observe-windows store "conv-8" (list (%says "Lives in Porto.")) :promote-accept (constantly t))
+    (is (equal '("Lives in Lisbon.") (%facts store)))))
+
+(test make-observer-refuses-an-argument-that-is-not-a-function
+  (dolist (key '(:accept :promote :promote-accept))
+    (signals cnd:praxeon-error
+      (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7" key nil)))
+  (finishes (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7"
+                               :promote 'identity)))
+
+(test a-thread-that-cannot-be-started-gives-the-claim-back
+  "When the worker thread cannot be made, OBSERVE-TURN signals and the thread is not left taken,
+so a later observer of it can run."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (start (fdefinition 'obs::%start-worker)))
+    (unwind-protect
+         (progn (setf (fdefinition 'obs::%start-worker)
+                      (lambda (&rest arguments) (declare (ignore arguments)) (error "no thread can be made")))
+                (signals error (obs:observe-turn observer (%history 6))))
+      (setf (fdefinition 'obs::%start-worker) start))
+    (is (null (obs:running-observer store "member-1" "conv-7")))
+    (is-true (obs:observe-turn observer (%history 6)) "the thread is free for the next call")
+    (obs:await-observer observer :timeout 10)))

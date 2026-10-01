@@ -19,11 +19,13 @@
 ;;;; times. A retry does not store an observation twice: what an earlier attempt already wrote,
 ;;;; with the same content and the same message range, is not written again, and its promotion
 ;;;; is run again. The match is on exact content, so a retry whose answer words an observation
-;;;; differently stores both wordings. A window still failing is given up on: it goes into OBSERVER-SKIPPED, so the
-;;;; prompt can keep those messages raw (#317, step C) rather than lose them, the mark moves past
-;;;; it, and each later run tries it again in the same way, until MAX-ATTEMPTS runs have given up
-;;;; on it. A skipped window still due starts a run by itself, so a new observer retries it even
-;;;; when no new message has arrived.
+;;;; differently stores both wordings. A window still failing is given up on: it goes into
+;;;; OBSERVER-SKIPPED, so the prompt can keep those messages raw (#317, step C) rather than lose
+;;;; them, the mark moves past it, and each later run tries it again in the same way, until
+;;;; MAX-ATTEMPTS runs have given up on it. A skipped window still due starts a run by itself, so
+;;;; a new observer retries it even when no new message has arrived. A RETRIED SKIPPED WINDOW IS
+;;;; WRITTEN TO THE THREAD BUT NOTHING FROM IT IS PROMOTED: later windows were distilled and
+;;;; promoted before it, and its older statements could stand beside their corrections.
 ;;;;
 ;;;; THE MARK AND THE SKIPPED WINDOWS ARE KEPT IN THE STORE (`praxeon/memory:thread-progress'),
 ;;;; written after each window, and a new observer starts from them. So an app that makes an
@@ -32,12 +34,17 @@
 ;;;; the thread's observations, which would count observations the app wrote itself.
 ;;;;
 ;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS. OBSERVE-TURN starts nothing while
-;;;; another observer of the same store, subject and thread is running, a run first takes the
-;;;; store's progress when it is further on than its own, and the stored mark is never lowered.
-;;;; Observers of one thread in two processes at once are not coordinated.
+;;;; another observer of the same store, subject and thread holds the thread, a run first takes
+;;;; the store's progress when it is further on than its own, and the stored mark is never
+;;;; lowered. RUNNING-OBSERVER names the observer holding a thread. A refused call logs that
+;;;; another observer is running (a warning when that one is stuck) and does nothing else: a
+;;;; refused :FLUSH is not queued, so an app that makes an observer per request flushes again
+;;;; once RUNNING-OBSERVER is NIL. Observers of one thread in two processes at once are not
+;;;; coordinated.
 ;;;;
 ;;;; ERASURE. `forget-subject' while a window is being distilled can be followed by that
-;;;; window's writes. Stop the subject's observers (STOP-OBSERVER) before erasing it.
+;;;; window's writes. Stop the subject's observers before erasing it: STOP-OBSERVER on
+;;;; RUNNING-OBSERVER of each of the subject's threads.
 ;;;;
 ;;;; WHAT IT WRITES, AND WHAT IT DOES NOT.
 ;;;;
@@ -102,14 +109,30 @@ window, Mastra's step.")
 (defvar *running-lock* (bt:make-lock "praxeon-observers"))
 
 (defun %claim (observer)
-  "Make OBSERVER the one running on its store, subject and thread in this process. NIL when
-another observer of the same thread is running."
+  "Make OBSERVER the one running on its store, subject and thread in this process, until
+%RELEASE. NIL when another observer of the same thread holds it.
+
+THE CLAIM ITSELF HOLDS THE THREAD, not the other observer's worker being alive (#462's fourth
+review): the worker is made after the claim, so two OBSERVE-TURN calls arriving together would
+otherwise both find no live worker and both run."
   (let ((key (list (observer-store observer) (observer-subject observer) (observer-thread observer))))
     (bt:with-lock-held (*running-lock*)
       (let ((other (gethash key *running*)))
-        (if (and other (not (eq other observer)) (observer-busy-p other))
-            nil
-            (setf (gethash key *running*) observer))))))
+        (cond ((or (null other) (eq other observer))
+               (setf (gethash key *running*) observer))
+              (t (if (observer-stuck-p other)
+                     (log:warn "memory observer not started: the thread's running observer is stuck"
+                               :thread (observer-thread observer))
+                     (log:debug "memory observer not started: another observer of the thread is running"
+                                :thread (observer-thread observer)))
+                 nil))))))
+
+(defun running-observer (store subject thread)
+  "The observer running on THREAD about SUBJECT in STORE in this process, or NIL. An app that
+makes an observer per request uses it to stop the running one (STOP-OBSERVER), for instance
+before `praxeon/memory:forget-subject'."
+  (bt:with-lock-held (*running-lock*)
+    (values (gethash (list store subject thread) *running*))))
 
 (defun %release (observer)
   (let ((key (list (observer-store observer) (observer-subject observer) (observer-thread observer))))
@@ -141,12 +164,20 @@ MAX-ATTEMPTS is how many times a window that fails is tried before it is given u
 many later runs try a window given up on. RETRY-DELAY is the seconds before the second attempt;
 each later one waits twice as long as the one before. WINDOW-TIMEOUT is how many seconds a
 window may take before OBSERVER-STUCK-P says so. MARK, when given, is where to start; by default
-it is what STORE records (STORED-MARK), and the skipped windows always come from there."
+it is what STORE records (STORED-MARK), and the skipped windows always come from there. Either
+way, a run takes the store's progress instead when that is further on.
+
+ACCEPT, PROMOTE and PROMOTE-ACCEPT must be functions, or names of functions: NIL is refused here
+rather than failing every window later."
   (check-type thread string)
   (unless (and (integerp step) (plusp step))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":step must be a positive integer, not ~S" step)))
   (unless (and (integerp max-attempts) (plusp max-attempts))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":max-attempts must be a positive integer, not ~S" max-attempts)))
+  (loop for (name value) on (list :accept accept :promote promote :promote-accept promote-accept) by #'cddr
+        unless (or (functionp value) (and value (symbolp value) (fboundp value)))
+          do (error 'praxeon/conditions:praxeon-error
+                    :detail (format nil "~S must be a function, not ~S" name value)))
   (unless (and (realp retry-delay) (not (minusp retry-delay)))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":retry-delay must be a number of seconds, not ~S" retry-delay)))
   ;; BOTH PROGRESS GENERICS, checked here: a store with only the reader would be accepted and
@@ -224,15 +255,19 @@ taken here, so messages the app adds later are the next call's."
               (%claim observer))
          (setf (observer-started observer) (get-universal-time)
                (observer-stopping observer) nil)
-         ;; THREAD-LIFETIME: continues the turn's unit of work, on its own thread so the turn
-         ;; does not wait. It runs a praxeon model call, which reads praxeon's registered
-         ;; dynamic bindings (#158), so it carries them. AWAIT-OBSERVER and STOP-OBSERVER join it.
+         ;; A thread that cannot be made gives the claim back, or the thread would stay taken.
          (setf (observer-worker observer)
-               (bt:make-thread
-                (aion/dynamic:inheriting (lambda () (%run observer snapshot flush today)))
-                :name "praxeon-observer"))
+               (handler-bind ((error (lambda (e) (declare (ignore e)) (%release observer))))
+                 (%start-worker observer snapshot flush today)))
          t)
         (t nil)))))
+
+(defun %start-worker (observer history flush today)
+  ;; THREAD-LIFETIME: continues the turn's unit of work, on its own thread so the turn does not
+  ;; wait. It runs a praxeon model call, which reads praxeon's registered dynamic bindings
+  ;; (#158), so it carries them. AWAIT-OBSERVER and STOP-OBSERVER join it.
+  (bt:make-thread (aion/dynamic:inheriting (lambda () (%run observer history flush today)))
+                  :name "praxeon-observer"))
 
 (defun await-observer (observer &key (timeout 300))
   "Join OBSERVER's running distillation, waiting at most TIMEOUT seconds. Returns T when none is
@@ -307,7 +342,8 @@ window written now leaves OBSERVER-SKIPPED; one that fails again counts the try.
     (destructuring-bind (from through tries) entry
       (when (and (< tries (observer-max-attempts observer)) (<= through (length history))
                  (not (observer-stopping observer)))
-        (let ((outcome (%observe-window observer (subseq history (1- from) through) (1- from) through today)))
+        (let ((outcome (%observe-window observer (subseq history (1- from) through) (1- from) through today
+                                        :promote nil)))
           (unless (eq outcome :stopped)
             (bt:with-lock-held ((observer-lock observer))
               (setf (observer-skipped observer)
@@ -343,7 +379,7 @@ the next window's save carries the same state again."
     (loop while (and (< (get-internal-real-time) until) (not (observer-stopping observer)))
           do (sleep 0.05))))
 
-(defun %observe-window (observer window start end today)
+(defun %observe-window (observer window start end today &key (promote t))
   "Distil WINDOW, the messages from position START (from 0) to END, and write what it yields,
 trying up to OBSERVER-MAX-ATTEMPTS times with a pause before each retry. Returns :WRITTEN,
 :SKIPPED when every attempt failed, or :STOPPED when the observer was stopped before the window
@@ -356,7 +392,7 @@ was written. Never raises: this runs on a thread of its own."
                (setf outcome :stopped)
                (return))
              (handler-case
-                 (progn (setf written (%distil-and-write observer window start end today))
+                 (progn (setf written (%distil-and-write observer window start end today :promote promote))
                         (setf outcome :written)
                         (return))
                (error (e)
@@ -381,8 +417,10 @@ was written. Never raises: this runs on a thread of its own."
                           (eql (mem:provenance-through p) end))))
                  (mem:observations-of store subject :thread thread)))
 
-(defun %distil-and-write (observer window start end today)
-  "One attempt at a window. Returns how many observations it wrote, or signals."
+(defun %distil-and-write (observer window start end today &key (promote t))
+  "One attempt at a window. Returns how many observations it wrote, or signals. With PROMOTE
+NIL nothing from the window is promoted: a retried skipped window, which later windows came
+before."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer))
          (thread (observer-thread observer))
@@ -418,7 +456,7 @@ was written. Never raises: this runs on a thread of its own."
         ;; writes, so an attempt that failed during promotion is finished by the next one.
         ;; %MAYBE-PROMOTE leaves alone a fact the subject already holds, so running it again
         ;; changes nothing that was done.
-        (dolist (o (%window-observations store subject thread start end))
+        (dolist (o (and promote (%window-observations store subject thread start end)))
           (%maybe-promote observer o provenance))
         (length written)))))
 
@@ -429,19 +467,24 @@ was written. Never raises: this runs on a thread of its own."
 (defun %lineage-contents (observation thread-observations)
   "OBSERVATION's content and the content of every thread observation it descends from through
 SUPERSEDES, nearest first. THREAD-OBSERVATIONS includes superseded ones."
-  (loop for o = observation then (and (mem:observation-supersedes o)
-                                      (find (mem:observation-supersedes o) thread-observations
-                                            :key #'mem:observation-id :test #'string=))
-        while o
-        collect (mem:observation-content o)))
+  (let ((seen '()))
+    (loop for o = observation then (and (mem:observation-supersedes o)
+                                        (find (mem:observation-supersedes o) thread-observations
+                                              :key #'mem:observation-id :test #'string=))
+          while (and o (not (member (mem:observation-id o) seen :test #'string=)))
+          do (push (mem:observation-id o) seen)
+          collect (mem:observation-content o))))
 
 (defun %current-successor (fact facts)
   "The current fact FACT was superseded into, following SUPERSEDED-BY through FACTS; FACT itself
 when it is current; NIL when the chain ends in an observation no longer stored."
-  (loop for f = fact then (find (mem:observation-superseded-by f) facts
-                                :key #'mem:observation-id :test #'string=)
-        while f
-        when (mem:observation-current-p f) return f))
+  ;; A cycle written into the stored links ends the walk rather than looping.
+  (let ((seen '()))
+    (loop for f = fact then (find (mem:observation-superseded-by f) facts
+                                  :key #'mem:observation-id :test #'string=)
+          while (and f (not (member (mem:observation-id f) seen :test #'string=)))
+          do (push (mem:observation-id f) seen)
+          when (mem:observation-current-p f) return f)))
 
 (defun %maybe-promote (observer observation provenance)
   "Record OBSERVATION, a thread observation, as a fact about the subject when PROMOTE says so.
@@ -455,7 +498,14 @@ any, OBSERVATION replaces their current successor only when PROMOTE-ACCEPT says 
 otherwise nothing is promoted. So a chain Porto, Lisbon, Faro, a correction of a fact the app
 or another conversation has already corrected, and an old fact observed again all end with one
 current fact. A thread fact that contradicts a subject fact with no such link between them is
-promoted beside it; telling those apart is PROMOTE's judgement."
+promoted beside it; telling those apart is PROMOTE's judgement.
+
+ONLY A CORRECTION REACHES PROMOTE-ACCEPT: an observation that replaces a thread observation. One
+that replaces nothing but matches a superseded subject fact restates an old value, and is not
+promoted. The chain is followed within this observer's thread only, so a correction refused
+here can still reach the subject when another conversation states the corrected value plainly
+with nothing to link it. When the chain reaches several current subject facts, which needs an
+unlinked contradiction first, only the first is replaced."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer)))
     (when (and (funcall (observer-promote observer) observation)
@@ -471,6 +521,11 @@ promoted beside it; telling those apart is PROMOTE's judgement."
                                                         facts)))))
              (head (first heads)))
         (cond
+          ;; ONLY A CORRECTION REACHES PROMOTE-ACCEPT (#462's fourth review). An observation that
+          ;; replaces nothing in the thread but matches a superseded subject fact is a
+          ;; restatement of an old value, and it does not replace the current one.
+          ((and head (null (mem:observation-supersedes observation)))
+           nil)
           (head
            (when (funcall (observer-promote-accept observer) observation head)
              (mem:supersede store head (mem:observation-content observation)

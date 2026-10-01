@@ -379,44 +379,44 @@ the lock (#462's third review: 997 ms behind a 1 s embedder).")
   ;; by the UPDATE itself, which only changes a row that is still current and must change one.
   ;; The embedding is computed first, outside the lock.
   (let ((*embedded* (%embed-before-lock store content)))
-  (bt:with-recursive-lock-held ((store-lock store))
-    (conn:with-transaction ((store-connection store))
-      (let ((row (first (q:fetch (store-connection store)
-                                 (list :select '(:superseded_by)
-                                       :from (list (store-table store))
-                                       :where (list := :id (mem:observation-id observation)))
-                                 :dialect (store-dialect store)))))
-        (unless row
-          (error 'praxeon/conditions:praxeon-error
-                 :detail (format nil "cannot supersede ~A: it is not in this store" (mem:observation-id observation))))
-        (when (param:row-value row :superseded_by)
-          (error 'praxeon/conditions:praxeon-error
-                 :detail (format nil "~A was already superseded by ~A" (mem:observation-id observation)
-                                 (param:row-value row :superseded_by)))))
-      (let ((replacement (mem:remember store (mem:observation-subject observation) content
-                                       :thread (mem:observation-thread observation)
-                                       :provenance provenance
-                                       :kind (or kind (mem:observation-kind observation))
-                                       :value (or value (mem:observation-value observation))
-                                       :tokens tokens :valid-from valid-from)))
-        (unless (eql 1 (q:run (store-connection store)
-                              (list :update (store-table store)
-                                    :set (list :superseded_by (mem:observation-id replacement)
-                                               :superseded_at (mem:observation-recorded-at replacement))
-                                    :where (list :and (list := :id (mem:observation-id observation))
-                                                 (list :is-null :superseded_by)))
-                              :dialect (store-dialect store)))
-          (error 'praxeon/conditions:praxeon-error
-                 :detail (format nil "~A was superseded by another process meanwhile" (mem:observation-id observation))))
-        (q:run (store-connection store)
-               (list :update (store-table store)
-                     :set (list :supersedes (mem:observation-id observation))
-                     :where (list := :id (mem:observation-id replacement)))
-               :dialect (store-dialect store))
-        (setf (mem:observation-superseded-by observation) (mem:observation-id replacement)
-              (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
-              (mem:observation-supersedes replacement) (mem:observation-id observation))
-        replacement)))))
+    (bt:with-recursive-lock-held ((store-lock store))
+      (conn:with-transaction ((store-connection store))
+        (let ((row (first (q:fetch (store-connection store)
+                                   (list :select '(:superseded_by)
+                                         :from (list (store-table store))
+                                         :where (list := :id (mem:observation-id observation)))
+                                   :dialect (store-dialect store)))))
+          (unless row
+            (error 'praxeon/conditions:praxeon-error
+                   :detail (format nil "cannot supersede ~A: it is not in this store" (mem:observation-id observation))))
+          (when (param:row-value row :superseded_by)
+            (error 'praxeon/conditions:praxeon-error
+                   :detail (format nil "~A was already superseded by ~A" (mem:observation-id observation)
+                                   (param:row-value row :superseded_by)))))
+        (let ((replacement (mem:remember store (mem:observation-subject observation) content
+                                         :thread (mem:observation-thread observation)
+                                         :provenance provenance
+                                         :kind (or kind (mem:observation-kind observation))
+                                         :value (or value (mem:observation-value observation))
+                                         :tokens tokens :valid-from valid-from)))
+          (unless (eql 1 (q:run (store-connection store)
+                                (list :update (store-table store)
+                                      :set (list :superseded_by (mem:observation-id replacement)
+                                                 :superseded_at (mem:observation-recorded-at replacement))
+                                      :where (list :and (list := :id (mem:observation-id observation))
+                                                   (list :is-null :superseded_by)))
+                                :dialect (store-dialect store)))
+            (error 'praxeon/conditions:praxeon-error
+                   :detail (format nil "~A was superseded by another process meanwhile" (mem:observation-id observation))))
+          (q:run (store-connection store)
+                 (list :update (store-table store)
+                       :set (list :supersedes (mem:observation-id observation))
+                       :where (list := :id (mem:observation-id replacement)))
+                 :dialect (store-dialect store))
+          (setf (mem:observation-superseded-by observation) (mem:observation-id replacement)
+                (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
+                (mem:observation-supersedes replacement) (mem:observation-id observation))
+          replacement)))))
 
 (defun %where-current (subject as-of include-superseded &optional thread)
   "The WHERE clause for a subject's observations in the scope THREAD names: NIL for facts about
@@ -578,12 +578,12 @@ so that case needs a row written some other way."
       (if (integerp n) n 0))))
 
 (defun %table-exists-p (store table)
-  "Whether TABLE exists in STORE's database."
+  "Whether TABLE exists in STORE's database, found the way an unquoted name in a statement is: on
+Postgres through the search path (TO_REGCLASS), on SQLite without regard to case."
   (not (null (conn:query (store-connection store)
                          (if (eq (store-dialect store) :sqlite)
-                             (format nil "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '~A'" table)
-                             ;; Postgres folds an unquoted name to lower case, as this store's DDL writes it.
-                             (format nil "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '~(~A~)'" table))))))
+                             (format nil "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '~A' COLLATE NOCASE" table)
+                             (format nil "SELECT 1 AS present WHERE to_regclass('~A') IS NOT NULL" table))))))
 
 (defun %skipped->text (skipped)
   (format nil "~{~{~D-~D-~D~}~^,~}" skipped))
