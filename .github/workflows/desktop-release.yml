@@ -178,6 +178,12 @@ jobs:
       - name: Build the pinned libuv
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 
+      # The same for mbedTLS, which the bundler wakes when the app loads aion/tls (#481).
+      # Without it, an app that loads aion/tls stops the build with "Build the library first";
+      # with it, the bundle carries the library. Unconditional for the reason given above.
+      - name: Build the pinned mbedTLS
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
+
       - name: Dump the app image
         shell: bash
         run: |

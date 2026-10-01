@@ -24,6 +24,16 @@ its tag.
   defaults to 1 on `:uv`: with workers, `:uv`'s own default is one loop per core, up to 4, on
   macOS and Linux, and one person's window does not need more than one. Pass `:loops nil` for
   that default. Other backends keep `start`'s defaults for both. (#472)
+- **An image dumped by `scripts/dump-image.lisp` exits on an unhandled error, whatever command
+  line dumped it.** `ouranos-dump:dump-executable` and `ouranos-dump:dump-core` now turn SBCL's
+  debugger off in the image, so an unhandled error prints its message and a backtrace to
+  standard error and exits with code 1. Images dumped by `bootstrap.lisp` and
+  `scripts/build-desktop-app.lisp` already behaved this way, because they are dumped from
+  processes started with `--script`, which turns the debugger off, and the core keeps that; an
+  image dumped from an interactive session did not, and waited at the debugger's prompt, which on
+  Windows is a desktop app that never exits and shows nothing. An app acts if its dumped image
+  relies on SBCL's debugger, for a REPL of its own for example: pass `:debugger t` to
+  `dump-executable` or `dump-core`, or call `sb-ext:enable-debugger` where it needs it. (#495)
 
 ### Added
 
@@ -62,6 +72,22 @@ its tag.
   `HYPERION_LOOPS=1` to work around this no longer needs to. The "server-uv: listening" log
   line carries `:loops-from`: `sysconf`, `affinity` or `cgroup` for `:auto`, and otherwise
   `start-argument`, `setting`, `inline` or `platform`. macOS and Windows are unchanged.
+- **hyperion/dev: a restart waits for its port, and no longer blames a sibling application.**
+  When `reload!` restarted the server, the new server's port check ran 0.1 s after the old one
+  was stopped, and failed if the old listener had not let go yet, with a message that sent the
+  developer looking for another application on the port. The restart now retries the builder
+  while it signals `hyperion/server:port-in-use`, for up to `hyperion/dev::*restart-port-wait*`
+  (5 s). If the port still answers after that, it signals
+  `hyperion/dev::restart-port-still-answering`, whose message says that this dev server's
+  previous server, or code the reload ran, still holds the port, and gives any error from
+  stopping the old server, which used to be discarded. (#492)
+- **Desktop bundles carry mbedTLS when the app loads `aion/tls`** (#481). Before,
+  `scripts/build-desktop-app.lisp` woke and carried only libuv, so a desktop app that used
+  `aion/tls` shipped without the library and signalled `aion/tls:mbedtls-not-found` on the
+  user's machine. The bundler now loads it from `vendor/mbedtls/lib/`, copies it beside the
+  executable with its LICENSE under `LICENSES/`, and closes it before the dump. If the library
+  is not built, the build stops and names `scripts/build-mbedtls.lisp`. The list of libraries
+  the bundler carries is now `scripts/lazy-natives.lisp`.
 
 ## v0.1.7 — 2026-09-30
 
