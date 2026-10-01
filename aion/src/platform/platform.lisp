@@ -171,3 +171,24 @@ prefers the Windows registry, which survives the files being moved by the instal
   (when (shipped-image-p)
     (let ((dir (executable-directory)))
       (and dir (or (macos-app-bundle dir) dir)))))
+
+;;; --- where a native-library loader may look (#472) ------------------------------------
+
+(defvar *search-source-tree* t
+  "Whether a native-library loader may look in the source tree this image was built from:
+vendor/libuv for aion/uv, vendor/mbedtls for aion/tls. True by default, so a REPL, bin/cons
+and the tools dumped from the tree (active-search, contacts, elise, praxeon-claude-code) find the
+libraries scripts/build-*.lisp built there, as they always have.
+
+scripts/build-desktop-app.lisp sets it to NIL in a desktop app's image before the dump, so a
+bundle never consults the tree it was built from. That tree exists on the machine that built the
+bundle, and on a CI runner that built it moments before, and nowhere a user has: a bundle missing
+a library it carries would load the tree's copy there and fail only for users. On such a runner
+the desktop-release check that removes the carried libuv.dll found the app still serving, from
+the runner's vendor/libuv (#472). With it NIL, a loader still tries the AION_*_LIBRARY override,
+the copy beside the image and the operating system's own search, in that order. So it does not
+guarantee that the carried copy is the one loaded: an override, or a system installation of the
+library, can still be found (review of #499).
+
+Not SHIPPED-IMAGE-P: that is true of every dumped one-file executable, bin/cons and the tools
+included, and they need the tree.")

@@ -927,6 +927,12 @@ Exits with code 3, naming the compiler's output, if it does not compile."
         (format t "~&The Xcode Command Line Tools provide cc: xcode-select --install~%")
         (sb-ext:exit :code 3)))))
 
+;;; A desktop app never consults the source tree this build ran in, which exists here and on
+;;; the CI runner that built it and nowhere else (aion/platform:*search-source-tree*, #472). Its
+;;; loaders still honour AION_*_LIBRARY and the operating system's own search. Set in the image
+;;; just before it is dumped, so the dumped image keeps it.
+(setf aion/platform:*search-source-tree* nil)
+
 (cond
   ((uiop:os-macosx-p)
     (let ((launcher (merge-pathnames *name* *bundle*))

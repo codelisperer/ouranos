@@ -22,4 +22,6 @@
            #:*verified-platforms* #:verified-platform-p
            #:executable-directory #:macos-app-bundle
            ;; is this a shipped build, and where is it (#416)
-           #:shipped-image-p #:shipped-image-directory))
+           #:shipped-image-p #:shipped-image-directory
+           ;; whether a native-library loader may search the source tree (#472)
+           #:*search-source-tree*))

@@ -35,6 +35,22 @@ its tag.
   relies on SBCL's debugger, for a REPL of its own for example: pass `:debugger t` to
   `dump-executable` or `dump-core`, or call `sb-ext:enable-debugger` where it needs it. (#495)
 
+- **A desktop app no longer loads libuv or mbedTLS from the source tree it was built from.**
+  `aion/uv` and `aion/tls` searched `vendor/libuv` and `vendor/mbedtls` of the tree, found
+  through ASDF at run time, after the copy beside the image. In a desktop bundle that tree is the
+  build machine's, so a bundle missing its carried library still loaded on the machine or CI
+  runner that built it, and failed only on a user's machine: the desktop-release check that
+  removes the carried `libuv.dll` saw the app serving, on the runner's
+  `vendor\libuv\lib\libuv.dll` (#472). `scripts/build-desktop-app.lisp` now sets
+  `aion/platform:*search-source-tree*` to NIL in the app's image, and then the loaders try only
+  `AION_UV_LIBRARY` or `AION_TLS_LIBRARY`, the copy beside the image, and the operating system's
+  own search. Everything else, `bin/cons` and the tools dumped from the tree included, keeps
+  searching the tree as before. An app acts if its bundle worked only on the build machine:
+  carry the library, which `build-desktop-app.lisp` does for libuv and mbedTLS when the app loads
+  them, or point `AION_UV_LIBRARY` or `AION_TLS_LIBRARY` at a copy.
+  `scripts/verify-bundle-windows.ps1`'s control now compares long paths, and prints every copy
+  of a removed DLL that was loaded. (#472)
+
 ### Added
 
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
