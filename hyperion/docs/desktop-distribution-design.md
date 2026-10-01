@@ -363,13 +363,25 @@ A directory cannot be renamed while a process has its current directory inside i
 in it open, whatever the sharing mode; a program running from it does not prevent it
 (measured on Windows 11, #98). The app is started in its install directory, and the installer
 inherited the app's current directory until `launch-installer` started it in its staging
-directory. So each installer moves its own current directory out first, and retries the first
-rename for 20 seconds while the app exits. If it never succeeds, nothing has changed: the
-staged copy is deleted and the installer fails (NSIS exits 2), to be tried at the next update.
+directory. So each installer moves its own current directory out first, to the install
+directory's parent, and retries the first rename for 20 seconds while the app exits. If it never
+succeeds, nothing has changed: the staged copy is deleted and the installer exits 2, to be tried
+at the next update. The second rename is retried for 20 seconds as well, because a file open in
+`<install>.new` stops it too, which an antivirus scanner reading the new files can do; giving up
+on it moves `<install>.old` back.
+
+Inno needed two more things. A `[Run]` entry without `postinstall` runs before
+`CurStepChanged(ssPostInstall)`, where the swap happens, so the silent relaunch there started a
+file that was still in `<install>.new`. It failed, and Setup exited 0 anyway, because
+`/SUPPRESSMSGBOXES` answers the error with OK. The relaunch is therefore started from code after
+the swap. Setup also exits 0 after an exception in `CurStepChanged`, so a failed swap sets the
+exit code to 2 through `GetCustomSetupExitCode`, and restores the uninstall entry's
+`DisplayVersion`, which Setup has already rewritten by then.
+
 `scripts/tests/windows-installer-swap.lisp` runs both installers through a first install, an
 update stopped part-way through the copy with the finished update as its control, a
 directory held for 4 seconds, a file held open throughout, and a swap stopped between its
-renames.
+renames, and checks after every silent install that the app was started.
 
 **Windows — `inno`: the same handoff, different flags, and one property that had to be
 measured.** Inno Setup is supported alongside NSIS because it signs the installer *and the

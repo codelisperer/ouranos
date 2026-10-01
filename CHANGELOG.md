@@ -209,7 +209,8 @@ its tag.
   renames. `hyperion/update`'s `launch-installer` starts the installer in its staging directory.
   An app acts if something it starts keeps the install directory as its current directory, or a
   file there open, after the app exits: the installer waits 20 seconds for the directory, then
-  fails without changing anything (NSIS exit code 2). An app acts too if its packaging puts its
+  fails without changing anything and exits 2, the NSIS installer and the Inno one alike. An
+  app acts too if its packaging puts its
   own files into the install directory after the installer runs, or keeps anything in
   `<install>.old` or `<install>.new`: both names are now the installers'. (#98)
 
