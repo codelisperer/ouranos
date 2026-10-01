@@ -2427,10 +2427,18 @@ checks the port the server was asked for, and 0 is not the port a request arrive
 
 (defun %desktop-uv-fast-seconds (&rest run-app-args)
   "Start a desktop app on :uv through RUN-APP with RUN-APP-ARGS. While a request to /slow is
-waiting in its handler, time a request to /fast, and return the seconds it took."
-  (let ((app (lambda (env)
-               (when (equal (getf env :path-info) "/slow") (sleep +slow-seconds+))
-               (list 200 +ok+ (list "x")))))
+waiting in its handler, time a request to /fast, and return the seconds it took.
+
+/fast is sent only once the /slow handler has signalled that it is running, not after a fixed
+pause: after a pause, a loaded machine could let /fast reach the single loop first, and the
+:workers nil control would then pass or fail by chance (review of train 19, #479). The slow
+client is joined with AION/TEST-THREADS:JOIN, which signals if it failed or never finished."
+  (let* ((entered (sb-thread:make-semaphore :name "desktop-uv-slow-entered"))
+         (app (lambda (env)
+                (when (equal (getf env :path-info) "/slow")
+                  (sb-thread:signal-semaphore entered)
+                  (sleep +slow-seconds+))
+                (list 200 +ok+ (list "x")))))
     (catch 'run-app-done
       (apply #'hyperion/desktop:run-app app
              :server :uv :shell :webview :launcher sb-ext:*runtime-pathname*
@@ -2442,12 +2450,13 @@ waiting in its handler, time a request to /fast, and return the seconds it took.
                       (slow (sb-thread:make-thread
                              (lambda () (get* port "GET /slow HTTP/1.1" host))
                              :name "desktop-uv-slow-client")))
-                 (sleep 0.3)            ; the slow request is in its handler
+                 (unless (sb-thread:wait-on-semaphore entered :timeout 10)
+                   (error "/slow did not reach its handler within 10 s"))
                  (let ((start (get-internal-real-time)))
                    (get* port "GET /fast HTTP/1.1" host)
                    (let ((took (/ (- (get-internal-real-time) start)
                                   internal-time-units-per-second)))
-                     (sb-thread:join-thread slow :default nil)
+                     (aion/test-threads:join slow)
                      (throw 'run-app-done (float took))))))
              run-app-args))))
 
