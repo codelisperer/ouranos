@@ -4994,3 +4994,108 @@ so a later observer of it can run."
     (is (null (obs:running-observer store "member-1" "conv-7")))
     (is-true (obs:observe-turn observer (%history 6)) "the thread is free for the next call")
     (obs:await-observer observer :timeout 10)))
+
+;;; --------------------------------------------------------------------------
+;;; After Copilot's review of #462: two observers taking turns on one thread, applies_from
+;;; values that are not strings, an exhausted skipped window with a later window written, and
+;;; a progress write that fails.
+;;; --------------------------------------------------------------------------
+
+(defun %skip-first-window (store)
+  "Leave window 1-6 of conv-7 skipped and open in STORE's progress, (1 6 1)."
+  (let ((o (obs:make-observer (make-instance 'failing-scripted :failures 2 :script nil)
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)))
+    (obs:observe-turn o (%history 6))
+    (obs:await-observer o :timeout 10)
+    (assert (equal '((1 6 1)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test two-observers-taking-turns-distil-a-skipped-window-once
+  "A and B are made while window 1-6 is skipped, so both hold (1 6 1) at the same mark. B
+retries it and writes it. A then runs: it takes the store's progress, which is at the same mark
+but newer, so it does not distil the window again in other words."
+  (let ((store (mem:make-in-memory-store)))
+    (%skip-first-window store)
+    (let* ((a-provider (%provider-returning (%call-with (%ob "The member has a dog." "fact"))))
+           (a (obs:make-observer a-provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                     :max-attempts 2))
+           (b (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                 store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)))
+      (obs:observe-turn b (%history 6))
+      (obs:await-observer b :timeout 10)
+      (obs:observe-turn a (%history 6))
+      (obs:await-observer a :timeout 10)
+      (is (equal '("Has a dog.") (%thread-contents store)) "the window is distilled once")
+      (is (= 1 (length (scripted-script a-provider))) "A made no model call")
+      (is (null (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))
+          "A did not write its stale entry back"))))
+
+(test an-applies-from-that-is-not-a-string-drops-its-proposal
+  "Absent, JSON null and an empty string mean no date. A number or an object is malformed, and
+drops its own proposal, as an unreadable string does."
+  (let ((number (%ob "Starts a new job." "fact"))
+        (object (%ob "Moves house." "fact"))
+        (empty (%ob "Has a dog." "fact"))
+        (none (%ob "Likes tea." "fact")))
+    (setf (gethash "applies_from" number) 20260101
+          (gethash "applies_from" object) (%args "date" "2026-01-01")
+          (gethash "applies_from" empty) "")
+    (let ((d (dst:distil (%provider-returning (%call-with number object empty none)) "member-1" +window+)))
+      (is (equal '("Has a dog." "Likes tea.")
+                 (mapcar #'dst:proposal-content (dst:distillation-proposals d)))))))
+
+(test an-exhausted-skipped-window-is-closed-when-a-later-window-is-written
+  "Window 1-6 fails its only attempt and is skipped with no tries left; window 7-12 is written in
+the same run. The skipped window is closed then, not left open with nothing to close it."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'failing-scripted :failures 1
+                                                                       :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1 :closed)) (obs:observer-skipped observer)))
+    (is (equal '((1 6 1 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7"))))))
+
+(defclass progress-fails-once-store (mem:in-memory-store)
+  ((failed :initform nil :accessor progress-failed))
+  (:documentation "Fails its first RECORD-THREAD-PROGRESS, as a store error on the progress write."))
+
+(defmethod mem:record-thread-progress :before ((store progress-fails-once-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (unless (progress-failed store)
+    (setf (progress-failed store) t)
+    (error "the progress write failed")))
+
+(test a-progress-write-that-fails-is-made-at-the-next-turn
+  "The only window is written but its progress write fails. The next OBSERVE-TURN, with no new
+message, writes the progress, so a new observer does not distil the window again."
+  (let* ((store (make-instance 'progress-fails-once-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (null (mem:thread-progress store "member-1" "conv-7")) "precondition: the write failed")
+    (is-true (obs:observe-turn observer (%history 6)) "an unsaved progress starts a run by itself")
+    (obs:await-observer observer :timeout 10)
+    (is (eql 6 (mem:thread-progress store "member-1" "conv-7")))
+    (let ((second (obs:make-observer (%provider-returning (%call-with (%ob "The member has a dog." "fact")))
+                                     store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (is (null (obs:observe-turn second (%history 6))))
+      (obs:await-observer second :timeout 10))
+    (is (equal '("Has a dog.") (%thread-contents store)) "nothing written twice")))
+
+(test an-exhausted-skipped-window-from-an-earlier-run-is-closed
+  "The store records window 1-6 as skipped with its tries spent, and holds an observation from
+window 7-12, as an earlier run or another process left them. A new observer's next turn closes
+the window; a window with no later one written starts no run."
+  (let ((store (mem:make-in-memory-store)))
+    (mem:record-thread-progress store "member-1" "conv-7" 12 '((1 6 1)))
+    (let ((idle (obs:make-observer (%provider-returning) store "member-1" "conv-7"
+                                   :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
+      (is (null (obs:observe-turn idle (%history 12))) "no later window yet: nothing to do"))
+    (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                  :provenance (mem:make-provenance "conv-7" 7 :through 12))
+    (let ((observer (obs:make-observer (%provider-returning) store "member-1" "conv-7"
+                                       :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
+      (is-true (obs:observe-turn observer (%history 12)))
+      (obs:await-observer observer :timeout 10)
+      (is (equal '((1 6 1 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))))))

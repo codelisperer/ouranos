@@ -133,10 +133,16 @@ too. The date is decoded again and must come back as written."
                        (and (= d day) (= mo month) (= y year)))
                      time))))))
 
-(defun %date-given-p (value)
-  "Whether VALUE, an applies_from field as parsed, says a date at all: NIL, JSON null and an
-empty string say none."
-  (and value (stringp value) (plusp (length value))))
+(defun %no-date-p (value)
+  "Whether VALUE, an applies_from field as parsed, says no date: absent (NIL), JSON null (the
+symbol NULL, as jzon parses it) or an empty string. Anything else claims a date."
+  (or (null value) (eq value 'null) (and (stringp value) (zerop (length value)))))
+
+(defun %date-readable-p (value)
+  "Whether VALUE, an applies_from field that claims a date, is one PARSE-DATE reads. A number or
+an object is not: the per-item schema is not checked recursively, so either can arrive here
+(Copilot's review of #462)."
+  (and (stringp value) (parse-date value) t))
 
 (defun %items (arguments)
   "The observations array from ARGUMENTS as a list, or NIL when it is absent or not a sequence."
@@ -280,7 +286,7 @@ function's extent would preempt every caller's."
                                     for because = (gethash "because" item)
                                     for date = (gethash "applies_from" item)
                                     ;; One unreadable date loses its own proposal, not the window.
-                                    unless (and (%date-given-p date) (not (parse-date date)))
+                                    unless (and (not (%no-date-p date)) (not (%date-readable-p date)))
                                     collect (%make-proposal
                                              :content (gethash "content" item)
                                              :kind (%kind (gethash "kind" item))
@@ -294,7 +300,7 @@ function's extent would preempt every caller's."
                                                                   (plusp (length because)))
                                                          replaces)
                                              :because (when (stringp because) because)
-                                             :applies-from (and (%date-given-p date) (parse-date date)))))
+                                             :applies-from (and (not (%no-date-p date)) (parse-date date)))))
                   nil))
       ((or llm:structured-result-invalid
            llm:structured-result-not-called) (c)
