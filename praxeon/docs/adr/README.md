@@ -27,3 +27,5 @@ web-framework decisions in [`hyperion/docs/adr/`](../../../hyperion/docs/adr/).
 |---|---|---|
 | [0001](0001-two-budgets-context-and-history.md) | Two budgets: what `assemble` is for, and what conversation history gets instead | Accepted |
 | [0002](0002-data-access-through-means.md) | An agent reaches data through parameterised means, not generated SQL | Accepted |
+| [0003](0003-personas-workflows-collaboration.md) | Praxeon provides personas, workflows and agent collaboration as framework protocols, in that order | Proposed |
+| [0004](0004-persona-protocol.md) | A persona is a versioned definition that an agent is built from, with the app's rules composed in front | Proposed |
