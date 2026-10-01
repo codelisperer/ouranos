@@ -203,6 +203,68 @@ describes, or NIL. TRANSLATE-PLURAL and TRANSLATION-EXISTS-P with :COUNT both us
 (defmethod supported-locales ((source dictionary)) (dictionary-supported source))
 (defmethod default-locale ((source dictionary)) (dictionary-default source))
 
+;;; --- the current translation source (#491) ------------------------------------
+;;; A component that renders translated text (a pager, a calendar's month names) needs a
+;;; source. Passed at every call, it threads through every caller; invented per component, an
+;;; app binds several variables and a thread the request spawns sees none of them. So there is
+;;; one, bound per request by WRAP-TRANSLATION-SOURCE or locally by WITH-TRANSLATION-SOURCE,
+;;; and a component takes :SOURCE defaulting to it.
+
+(defvar *translation-source* nil
+  "The translation source for the current request, or NIL outside one. Bound per request by
+WRAP-TRANSLATION-SOURCE and locally by WITH-TRANSLATION-SOURCE. Registered with aion/dynamic,
+so a thread the request spawns through AION/DYNAMIC:INHERITING sees it too (#158).")
+
+(aion/dynamic:register-inheritable '*translation-source*)
+
+(define-condition no-translation-source (error)
+  ((key :initarg :key :initform nil :reader no-translation-source-key))
+  (:report (lambda (c stream)
+             ;; One line: a FORMAT ~<newline> continuation breaks on a CRLF checkout (AGENTS.md).
+             (format stream "No translation source is bound~@[ to translate ~S~]. Bind hyperion/i18n:*translation-source* for the request with WRAP-TRANSLATION-SOURCE, or around the code with WITH-TRANSLATION-SOURCE, or pass the source explicitly."
+                     (no-translation-source-key c))))
+  (:documentation "TRANSLATE-CURRENT or TRANSLATE-PLURAL-CURRENT was called with no
+*TRANSLATION-SOURCE* bound. Signalled rather than rendering \"[section/key]\" markers, because
+every key would be missing and the page would not say why."))
+
+(defmacro with-translation-source ((source) &body body)
+  "Run BODY with *TRANSLATION-SOURCE* bound to SOURCE."
+  `(let ((*translation-source* ,source))
+     ,@body))
+
+(defun %current-source (key)
+  (or *translation-source* (error 'no-translation-source :key key)))
+
+(defun translate-current (locale key &rest args)
+  "TRANSLATE with the current *TRANSLATION-SOURCE*. Signals NO-TRANSLATION-SOURCE when none
+is bound."
+  (apply #'translate (%current-source key) locale key args))
+
+(defun translate-plural-current (locale key count &rest args)
+  "TRANSLATE-PLURAL with the current *TRANSLATION-SOURCE*. Signals NO-TRANSLATION-SOURCE when
+none is bound."
+  (apply #'translate-plural (%current-source key) locale key count args))
+
+(defun wrap-translation-source (app source)
+  "APP wrapped so that each request runs with *TRANSLATION-SOURCE* bound. SOURCE is a
+translation source, or a function of the request's environment that returns one, for an app
+whose source differs per request (per tenant, say).
+
+  (hyperion/server:start (wrap-translation-source app (make-json-source #p\"i18n/\")))
+
+A STREAMING BODY (a function as the response's third element) runs after APP has returned,
+so it is called with the same source bound again: a streamed page renders the same text as
+an ordinary one."
+  (lambda (env)
+    (let* ((resolved (if (functionp source) (funcall source env) source))
+           (response (with-translation-source (resolved) (funcall app env))))
+      (if (and (consp response) (functionp (third response)))
+          (destructuring-bind (status headers body) response
+            (list status headers
+                  (lambda (writer)
+                    (with-translation-source (resolved) (funcall body writer)))))
+          response))))
+
 (defun locale-supported-p (source locale)
   "True when SOURCE provides LOCALE (a keyword or code string)."
   (and (member (%to-locale locale) (supported-locales source)) t))

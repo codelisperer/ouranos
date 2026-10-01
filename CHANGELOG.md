@@ -51,6 +51,14 @@ its tag.
   with the marker, which reads a translation whose text looks like a marker as missing. It is
   a generic function on the translation-source protocol: an app's own source, such as a
   DB-backed one, should implement it beside its `translate` method.
+- **hyperion/i18n: a current translation source for the request** (#491).
+  `*translation-source*` is bound per request by the middleware `wrap-translation-source`,
+  given a source or a function of the request's environment that returns one, and locally by
+  `with-translation-source`. It is registered with `aion/dynamic`, so a thread the request
+  spawns through `aion/dynamic:inheriting` sees it. `translate-current` and
+  `translate-plural-current` call `translate` and `translate-plural` with it, and signal
+  `no-translation-source` when none is bound. A streaming response body sees the same source
+  as its handler. A component that defined its own source variable can use this one instead.
 
 ### Fixed
 

@@ -568,6 +568,7 @@
   :description "Test suite for Hyperion."
   :depends-on ("aion/fs" "hyperion" "hyperion/import" "aion/log"   ; suite, csrf and logging tests call log:
                "fiveam" "aion/test-threads" "hyperion/test-ports"
+               "aion/dynamic"      ; i18n-tests spawn a thread through aion/dynamic:inheriting (#491)
                "sb-bsd-sockets"    ; server-tests: a free port, and "is it listening?"
                ;; TEST-ONLY: an in-memory octet input stream, to hand BODY-STRING a body
                ;; without a socket (pre-publication issue 211). Already present transitively via clack --

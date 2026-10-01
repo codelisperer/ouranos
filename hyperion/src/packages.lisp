@@ -435,6 +435,10 @@
    ;; translation source
    #:translate #:translate-plural #:plural-key #:supported-locales #:default-locale
    #:translation-exists-p
+   ;; the current source (#491)
+   #:*translation-source* #:with-translation-source #:wrap-translation-source
+   #:translate-current #:translate-plural-current
+   #:no-translation-source #:no-translation-source-key
    #:make-json-source #:load-dictionary #:make-dictionary
    #:dictionary #:dictionary-p #:interpolate #:locale-supported-p #:*default-locale*
    ;; locale store

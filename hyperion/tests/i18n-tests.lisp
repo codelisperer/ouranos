@@ -192,3 +192,66 @@ that do not need them, and that is a rendering detail these tests must not depen
   (let ((html (i18n:language-switcher :current :ar :locales '(:en :ar))))
     (is (%attr-p html "dir" "rtl"))
     (is (search "العربية" html))))
+
+;;; --- the current translation source (#491) ------------------------------------
+
+(test translate-current-uses-the-bound-source
+  (i18n:with-translation-source ((%dict))
+    (is (string= "Привет" (i18n:translate-current :ru :home/hi)))
+    (is (string= "Hi Bob!" (i18n:translate-current :en :home/greet :name "Bob")))))
+
+(test translate-current-with-nothing-bound-signals
+  "Unbound, it signals NO-TRANSLATION-SOURCE naming the key, rather than rendering markers.
+CONTROL: bound, the same call returns the text."
+  (let ((i18n:*translation-source* nil))
+    (let ((c (handler-case (progn (i18n:translate-current :en :home/hi) nil)
+               (i18n:no-translation-source (c) c))))
+      (is (typep c 'i18n:no-translation-source))
+      (is (eq :home/hi (and c (i18n:no-translation-source-key c)))))
+    (signals i18n:no-translation-source (i18n:translate-plural-current :en :home/hi 2)))
+  (i18n:with-translation-source ((%dict))
+    (is (string= "Hello" (i18n:translate-current :en :home/hi)))))
+
+(test the-current-source-crosses-into-a-thread-the-request-spawns
+  "Through AION/DYNAMIC:INHERITING, as hyperion's request context does (#158). CONTROL: a thread
+spawned without it does not see the binding, so the first check could tell the difference."
+  (i18n:with-translation-source ((%dict))
+    ;; An error in the thread is returned as text: left unhandled it would end the test run.
+    (flet ((in-thread (fn)
+             (sb-thread:join-thread
+              (sb-thread:make-thread (lambda () (handler-case (funcall fn)
+                                                  (error (e) (princ-to-string e)))))
+              :default :timeout)))
+      (is (string= "Hello"
+                   (in-thread (aion/dynamic:inheriting
+                               (lambda () (i18n:translate-current :en :home/hi))))))
+      (is (null (in-thread (lambda () i18n:*translation-source*)))))))
+
+(test wrap-translation-source-binds-it-per-request
+  "A source given directly; a source chosen per request by a function of the environment; and
+a streaming body, which runs after the handler has returned. CONTROL: the same streaming body
+called outside the middleware signals."
+  (let* ((handler (lambda (env)
+                    (declare (ignore env))
+                    (list 200 '() (list (i18n:translate-current :ru :home/hi)))))
+         (direct (i18n:wrap-translation-source handler (%dict))))
+    (is (equal '("Привет") (third (funcall direct '(:path-info "/"))))))
+  (let* ((other (i18n:make-dictionary (%ht "ru" (%ht "home" (%ht "hi" "Здравствуйте"))) :default :ru))
+         (per-request (i18n:wrap-translation-source
+                       (lambda (env)
+                         (declare (ignore env))
+                         (list 200 '() (list (i18n:translate-current :ru :home/hi))))
+                       (lambda (env) (if (equal "/a" (getf env :path-info)) (%dict) other)))))
+    (is (equal '("Привет") (third (funcall per-request '(:path-info "/a")))))
+    (is (equal '("Здравствуйте") (third (funcall per-request '(:path-info "/b"))))))
+  (let* ((streaming (lambda (env)
+                      (declare (ignore env))
+                      (list 200 '()
+                            (lambda (writer) (funcall writer (i18n:translate-current :en :home/hi))))))
+         (response (funcall (i18n:wrap-translation-source streaming (%dict)) '(:path-info "/")))
+         (written '()))
+    (funcall (third response) (lambda (s) (push s written)))
+    (is (equal '("Hello") written))
+    (let ((i18n:*translation-source* nil))
+      (signals i18n:no-translation-source
+        (funcall (third (funcall streaming '(:path-info "/"))) (lambda (s) (push s written)))))))
