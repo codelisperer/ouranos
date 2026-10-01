@@ -311,12 +311,23 @@ language of columns."
 
 (defun %now () (get-universal-time))
 
+(defvar *embedded* nil
+  "(CONTENT . EMBEDDING), computed before the store's lock was taken, for the REMEMBER that
+SUPERSEDE calls under it. The embedding model is a network call, and a request's read waits for
+the lock (#462's third review: 997 ms behind a 1 s embedder).")
+
+(defun %embed-before-lock (store content)
+  "CONTENT's embedding, as *EMBEDDED* holds it."
+  (cons content (first (llm:embed-documents (store-embedder store) (list content)))))
+
 (defmethod mem:remember ((store db-memory-store) subject content
                          &key provenance (kind :observation) (value 1) tokens valid-from thread)
   (mem:check-provenance provenance "remember" subject)
   (let* ((id (format nil "obs-~36R-~36R" (get-universal-time) (random (expt 2 32))))
          (now (%now))
-         (embedding (first (llm:embed-documents (store-embedder store) (list content))))
+         (embedding (if (and *embedded* (string= (car *embedded*) content))
+                        (cdr *embedded*)
+                        (first (llm:embed-documents (store-embedder store) (list content)))))
          (observation (mem::%make-observation
                        :id id :subject subject :content content :kind kind :value value
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))
@@ -364,7 +375,10 @@ language of columns."
   ;; THE CHECK AND THE WRITES ARE ONE STEP (#462's second review). Under the store's lock no
   ;; other thread of this process can supersede OBSERVATION between the check and the update,
   ;; and in one transaction a failure part-way through, or a thread ended by STOP-OBSERVER,
-  ;; leaves neither the replacement nor a half-made link behind.
+  ;; leaves neither the replacement nor a half-made link behind. Another process is held off
+  ;; by the UPDATE itself, which only changes a row that is still current and must change one.
+  ;; The embedding is computed first, outside the lock.
+  (let ((*embedded* (%embed-before-lock store content)))
   (bt:with-recursive-lock-held ((store-lock store))
     (conn:with-transaction ((store-connection store))
       (let ((row (first (q:fetch (store-connection store)
@@ -385,12 +399,15 @@ language of columns."
                                        :kind (or kind (mem:observation-kind observation))
                                        :value (or value (mem:observation-value observation))
                                        :tokens tokens :valid-from valid-from)))
-        (q:run (store-connection store)
-               (list :update (store-table store)
-                     :set (list :superseded_by (mem:observation-id replacement)
-                                :superseded_at (mem:observation-recorded-at replacement))
-                     :where (list := :id (mem:observation-id observation)))
-               :dialect (store-dialect store))
+        (unless (eql 1 (q:run (store-connection store)
+                              (list :update (store-table store)
+                                    :set (list :superseded_by (mem:observation-id replacement)
+                                               :superseded_at (mem:observation-recorded-at replacement))
+                                    :where (list :and (list := :id (mem:observation-id observation))
+                                                 (list :is-null :superseded_by)))
+                              :dialect (store-dialect store)))
+          (error 'praxeon/conditions:praxeon-error
+                 :detail (format nil "~A was superseded by another process meanwhile" (mem:observation-id observation))))
         (q:run (store-connection store)
                (list :update (store-table store)
                      :set (list :supersedes (mem:observation-id observation))
@@ -399,7 +416,7 @@ language of columns."
         (setf (mem:observation-superseded-by observation) (mem:observation-id replacement)
               (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
               (mem:observation-supersedes replacement) (mem:observation-id observation))
-        replacement))))
+        replacement)))))
 
 (defun %where-current (subject as-of include-superseded &optional thread)
   "The WHERE clause for a subject's observations in the scope THREAD names: NIL for facts about
@@ -550,11 +567,23 @@ so that case needs a row written some other way."
                     (list :delete-from (store-table store)
                           :where (list := :subject subject))
                     :dialect (store-dialect store))))
-      (q:run (store-connection store)
-             (list :delete-from (%progress-table (store-table store))
-                   :where (list := :subject subject))
-             :dialect (store-dialect store))
+      ;; THE PROGRESS TABLE MAY NOT EXIST: an app with its own migrations needs it only to use
+      ;; praxeon/observe. It is looked for first rather than a failed delete caught, because on
+      ;; Postgres a failed statement would abort a transaction the app wrapped around this call.
+      (when (%table-exists-p store (%progress-table (store-table store)))
+        (q:run (store-connection store)
+               (list :delete-from (%progress-table (store-table store))
+                     :where (list := :subject subject))
+               :dialect (store-dialect store)))
       (if (integerp n) n 0))))
+
+(defun %table-exists-p (store table)
+  "Whether TABLE exists in STORE's database."
+  (not (null (conn:query (store-connection store)
+                         (if (eq (store-dialect store) :sqlite)
+                             (format nil "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '~A'" table)
+                             ;; Postgres folds an unquoted name to lower case, as this store's DDL writes it.
+                             (format nil "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '~(~A~)'" table))))))
 
 (defun %skipped->text (skipped)
   (format nil "~{~{~D-~D-~D~}~^,~}" skipped))

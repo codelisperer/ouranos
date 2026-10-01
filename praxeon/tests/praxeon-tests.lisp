@@ -4696,3 +4696,130 @@ it rather than signalling, so only that proposal is dropped."
     (setf (gethash "applies_from" bad) "2026-1--02")
     (let ((d (dst:distil (%provider-returning (%call-with bad good)) "member-1" +window+)))
       (is (equal '("Has a dog.") (mapcar #'dst:proposal-content (dst:distillation-proposals d)))))))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's third review: chains of corrections, one running observer per thread, and a
+;;; store with only one of the progress generics.
+;;; --------------------------------------------------------------------------
+
+(defun %observe-windows (store thread replies &rest keys)
+  "Run an observer of THREAD over successive six-message windows, one per entry of REPLIES:
+each a function of STORE and THREAD returning the window's completion, so it can name ids
+written earlier. Promotes everything and accepts every thread supersession; KEYS go to
+MAKE-OBSERVER."
+  (let ((observer (apply #'obs:make-observer (make-instance 'scripted :script nil) store "member-1" thread
+                         :step (%step-for 6) :retry-delay 0 :accept (constantly t) :promote (constantly t)
+                         keys)))
+    (loop for reply in replies
+          for n from 6 by 6
+          do (setf (scripted-script (obs::observer-provider observer)) (list (funcall reply store thread)))
+             (obs:observe-turn observer (%history n))
+             (obs:await-observer observer :timeout 10))
+    observer))
+
+(defun %says (content)
+  (lambda (store thread) (declare (ignore store thread)) (%call-with (%ob content "fact"))))
+
+(defun %corrects (old new)
+  "A reply correcting the thread's current observation OLD to NEW."
+  (lambda (store thread)
+    (let ((o (find old (mem:observations-of store "member-1" :thread thread)
+                   :key #'mem:observation-content :test #'string=)))
+      (%call-with (%ob new "correction" :replaces (mem:observation-id o) :because "moved")))))
+
+(defun %facts (store)
+  (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1")) #'string<))
+
+(test a-chain-of-corrections-leaves-one-current-fact
+  "Porto, then Lisbon, then Faro in one conversation. Without PROMOTE-ACCEPT the subject keeps
+the first promoted fact and nothing beside it; with it, the last."
+  (let ((store (mem:make-in-memory-store)))
+    (%observe-windows store "conv-7" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Lisbon.")
+                                           (%corrects "Lives in Lisbon." "Lives in Faro.")))
+    (is (equal '("Lives in Porto.") (%facts store))))
+  (let ((store (mem:make-in-memory-store)))
+    (%observe-windows store "conv-7" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Lisbon.")
+                                           (%corrects "Lives in Lisbon." "Lives in Faro."))
+                      :promote-accept (constantly t))
+    (is (equal '("Lives in Faro.") (%facts store)))))
+
+(test a-correction-of-a-fact-the-app-already-corrected-replaces-the-apps-correction
+  "The subject fact Porto, which the thread also observed, is corrected by the app to Lisbon; the
+thread then corrects its Porto to Faro. The thread's correction descends from a fact whose
+current successor is Lisbon: without PROMOTE-ACCEPT Lisbon stays alone, with it Faro replaces
+it."
+  (dolist (case (list (list nil '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
+    (destructuring-bind (promote-accept expected) case
+      (let ((store (mem:make-in-memory-store)))
+        (remember* store "member-1" "Lives in Porto.")
+        (let ((observer (%observe-windows store "conv-8" (list (%says "Lives in Porto."))
+                                          :promote-accept promote-accept)))
+          (mem:supersede store (first (mem:observations-of store "member-1")) "Lives in Lisbon."
+                         :provenance (test-provenance 2))
+          (setf (scripted-script (obs::observer-provider observer))
+                (list (funcall (%corrects "Lives in Porto." "Lives in Faro.") store "conv-8")))
+          (obs:observe-turn observer (%history 12))
+          (obs:await-observer observer :timeout 10))
+        (is (equal expected (%facts store)))))))
+
+(test an-old-fact-observed-again-does-not-come-back-beside-its-correction
+  "The subject's Porto was corrected to Lisbon. A conversation later observes Porto, with no
+link to either. It descends from a fact whose current successor is Lisbon, so it is not
+promoted beside it."
+  (let ((store (mem:make-in-memory-store)))
+    (let ((porto (remember* store "member-1" "Lives in Porto.")))
+      (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2)))
+    (%observe-windows store "conv-9" (list (%says "Lives in Porto.")))
+    (is (equal '("Lives in Lisbon.") (%facts store)))))
+
+(test two-conversations-correcting-one-fact-leave-one-current-fact
+  "conv-7 promotes Porto and corrects it to Lisbon; conv-8, which also observed Porto, corrects
+its own copy to Faro. With PROMOTE-ACCEPT the subject ends with Faro alone."
+  (let ((store (mem:make-in-memory-store)))
+    (%observe-windows store "conv-7" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Lisbon."))
+                      :promote-accept (constantly t))
+    (%observe-windows store "conv-8" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Faro."))
+                      :promote-accept (constantly t))
+    (is (equal '("Lives in Faro.") (%facts store)))))
+
+(test one-observer-of-a-thread-runs-at-a-time
+  "An observer made while another of the same thread is distilling starts nothing, as an app
+making an observer per request would. The window is distilled once."
+  (let* ((store (mem:make-in-memory-store))
+         (reply (%call-with (%ob "Has a dog." "fact")))
+         (first (obs:make-observer (make-instance 'slow-scripted :delay 0.5 :script (list reply))
+                                   store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (second (obs:make-observer (%provider-returning (%call-with (%ob "The member has a dog." "fact")))
+                                    store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (is-true (obs:observe-turn first (%history 6)))
+    (is (null (obs:observe-turn second (%history 6))) "the second starts nothing while the first runs")
+    (obs:await-observer first :timeout 10)
+    (is (equal '("Has a dog.") (%thread-contents store)))
+    (is (= 6 (obs:stored-mark store "member-1" "conv-7")))))
+
+(test the-stored-mark-is-never-lowered
+  "An observer made with a mark behind the store's takes the store's progress when it runs, so it
+neither distils those windows again nor writes the lower mark back."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :mark 0)))
+    (mem:record-thread-progress store "member-1" "conv-7" 12 '())
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    (is (null (%thread-contents store)) "nothing distilled again")
+    (is (= 12 (obs:stored-mark store "member-1" "conv-7")))))
+
+(defclass reader-only-store (mem:memory-store) ()
+  (:documentation "A store with THREAD-PROGRESS and no RECORD-THREAD-PROGRESS, standing in for an
+app's store that implements only the reader."))
+
+(defmethod mem:thread-progress ((store reader-only-store) subject thread)
+  (declare (ignore subject thread))
+  (values nil nil))
+
+(test a-store-without-both-progress-generics-is-refused
+  "MAKE-OBSERVER checks both progress generics, so a store with only the reader is refused when
+the observer is made, not on every save."
+  (signals cnd:praxeon-error
+    (obs:make-observer (%provider-returning) (make-instance 'reader-only-store) "member-1" "conv-7"))
+  (finishes (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7")))

@@ -27,21 +27,24 @@ its tag.
 - **praxeon/memory: an app's own memory store implements `thread-progress` and
   `record-thread-progress` before `praxeon/observe` can use it** (#317). They keep an observer's
   progress on a thread (how many messages it has finished with, and the windows it gave up on),
-  and `forget-subject` must erase it with the subject's observations. A store without them is
+  and `forget-subject` must erase it with the subject's observations. A store without both is
   refused when `make-observer` is called.
 - **praxeon/memory-db: `supersede` refuses an observation that is already superseded**, as the
-  in-memory store always has. It checks and writes under the store's lock in one transaction, so
-  two supersessions of one observation no longer leave two current replacements. An app that
-  superseded the same observation twice now gets a `praxeon-error` on the second call.
+  in-memory store always has. It checks and writes under the store's lock in one transaction, and
+  its UPDATE changes the row only while it is still current, so two supersessions of one
+  observation, in one process or two, no longer leave two current replacements. An app that
+  superseded the same observation twice now gets a `praxeon-error` on the second call. The
+  embedding is computed before the lock is taken, so a read does not wait for the model.
 - **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
   `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
   not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
   columns in its own migration before it reads. Existing rows become facts about their subject,
   as they were. `ensure-schema` also creates a second table, the observations table's name with
-  `_progress` appended (`id`, `subject`, `thread`, `observed`, `skipped`, `updated_at`), which
-  `thread-progress` reads; an app with its own migrations creates it too before using
-  `praxeon/observe`.
+  `_progress` appended: `id` (TEXT, the primary key, which `record-thread-progress` upserts on),
+  `subject` and `thread` (TEXT, not null), `observed` (BIGINT on Postgres, INTEGER on SQLite, not
+  null), `skipped` (TEXT) and `updated_at` (BIGINT or INTEGER). An app with its own migrations
+  creates it before using `praxeon/observe`; `forget-subject` works without it.
 - **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
   by default.**
   `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
@@ -75,12 +78,21 @@ its tag.
     window, and a new observer starts from them. So a restart neither distils the thread again
     nor passes a window that was given up on or that the process ended part-way through.
     Observations the app wrote into the thread itself do not move the mark.
+  - One observer of a thread runs at a time in a process: `observe-turn` starts nothing while
+    another observer of the same store, subject and thread is running, so an app may make an
+    observer per request. The stored mark is never lowered. Observers of one thread in two
+    processes at once are not coordinated.
+  - Stop a subject's observers with `stop-observer` before `forget-subject`; a window being
+    distilled during the erasure can be written after it.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
-    does. A fact the subject already holds is not stored again. When a promoted observation
-    corrects one whose content the subject holds as a current fact, whether that fact came from
-    this conversation, another one or the app, the fact is superseded only when
-    `:promote-accept` allows it too; otherwise the correction is not promoted.
+    does. A fact the subject already holds is not stored again. A promoted observation is
+    matched to the subject facts it descends from: those whose content is its own or that of any
+    thread observation it corrects, through any chain of corrections, superseded facts included,
+    whoever wrote them. When there are any, it replaces their current successor only when
+    `:promote-accept` allows it, and otherwise nothing is promoted, so the subject never holds a
+    fact and its correction as two current facts. A thread fact that contradicts a subject fact
+    with no such link is promoted beside it; `:promote` has to judge that case.
   - `:verify`, a provider, drops proposals the window does not support, judging their content,
     kind, date and any claim to replace an earlier observation.
   - `stop-observer` stops it at shutdown, `observer-stuck-p` reports a call running past
