@@ -142,13 +142,18 @@ skipped."
         when path return path))
 
 (defun %run-bundle (executable)
-  "Run EXECUTABLE without AION_TLS_LIBRARY, and return its output."
+  "Run EXECUTABLE without AION_TLS_LIBRARY, and return its output and exit code.
+
+WITH NO STDIN. A dumped executable keeps SBCL's debugger, so on Windows a child that signals
+an unhandled error waits in the debugger for input, and with stdin open it waits until
+something kills it. With no stdin it exits at once, and the exit code shows it."
   (let ((out (make-string-output-stream)))
-    (uiop:run-program (list (uiop:native-namestring executable))
-                      :output out :error-output out :ignore-error-status t
-                      :environment (remove-if (lambda (e) (uiop:string-prefix-p "AION_TLS_LIBRARY=" e))
-                                              (sb-ext:posix-environ)))
-    (get-output-stream-string out)))
+    (let ((code (nth-value 2 (uiop:run-program
+                              (list (uiop:native-namestring executable))
+                              :input nil :output out :error-output out :ignore-error-status t
+                              :environment (remove-if (lambda (e) (uiop:string-prefix-p "AION_TLS_LIBRARY=" e))
+                                                      (sb-ext:posix-environ))))))
+      (values (get-output-stream-string out) code))))
 
 (test a-bundle-of-an-aion-tls-app-loads-mbedtls-from-the-bundle
   (if (null (%built-mbedtls))
@@ -176,7 +181,7 @@ skipped."
                               (uiop:native-namestring (merge-pathnames "build-desktop-app.lisp" *scripts*))
                               "--system" "tlsprobe" "--entry" "tlsprobe:main" "--name" "tlsprobe"
                               "--version" "0.0.1" "--out" (uiop:native-namestring dist))
-                        :output build-out :error-output build-out :ignore-error-status t
+                        :input nil :output build-out :error-output build-out :ignore-error-status t
                         :environment
                         (cons (format nil "CL_SOURCE_REGISTRY=~A//~A~A//"
                                       (uiop:native-namestring td-root)
@@ -204,12 +209,14 @@ skipped."
                                                   (truename (string-trim '(#\Return) (subseq line 7)))))))
                             (and file (uiop:pathname-equal (uiop:pathname-directory-pathname file)
                                                            (truename bundle))))))
-                   (let ((run (%run-bundle executable)))
+                   (multiple-value-bind (run code) (%run-bundle executable)
+                     (is (eql 0 code) "the app exited with ~A:~%~A" code run)
                      (is (search "KEY OK" run) "the app did not make a key:~%~A" run)
                      (is (loaded-from-bundle-p run) "not loaded from the bundle:~%~A" run))
                    ;; The control.
                    (delete-file carried)
-                   (let ((run (%run-bundle executable)))
+                   (multiple-value-bind (run code) (%run-bundle executable)
+                     (is (eql 0 code) "the app exited with ~A:~%~A" code run)
                      (is (not (loaded-from-bundle-p run))
                          "still loaded from the bundle with the copy deleted:~%~A" run))))
             (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
