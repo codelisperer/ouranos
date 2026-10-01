@@ -49,6 +49,15 @@ its tag.
   them, or point `AION_UV_LIBRARY` or `AION_TLS_LIBRARY` at a copy.
   `scripts/verify-bundle-windows.ps1`'s control now compares long paths, and prints every copy
   of a removed DLL that was loaded. (#472)
+- **`cons init --template web` scaffolds an app on `hyperion/server-uv` instead of
+  `clack-handler-hunchentoot`.** The generated `.asd` depends on `hyperion/server-uv`, and the
+  generated `start` passes `:workers 2` to `hyperion/server:start` when the server is `:uv`, so a
+  slow handler does not hold up other requests. A project generated this way needs a built libuv:
+  run `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree, or install libuv on the
+  system. A `bin/<name>` dumped by `cons bin` looks for libuv beside itself, then in the tree
+  that built it, then on the system, so on another machine put libuv and its licence beside it.
+  Projects generated before this are unchanged. To keep Hunchentoot in a new project, replace
+  `hyperion/server-uv` with `clack-handler-hunchentoot` in its `.asd`. (#472)
 - **aion/pool: `pool-queued` is exact only when the pool is quiet** (#466). It is now
   `outstanding - running`, two counts read without a lock, so while jobs are being submitted and
   taken it is a reading of two changing numbers. An app that reads it to decide something while
@@ -111,17 +120,6 @@ its tag.
 
 ### Fixed
 
-- **hyperion-view on Windows opens the window centred in the work area of its monitor, and
-  shrinks it to fit when it is larger.** It used to set only the size, so the window opened at
-  Windows' cascade point, and on a 2560x1600 display at 150% scaling a 1280x860 window (1346
-  physical pixels high with its frame, in a 1528-pixel work area) often opened partly below the
-  work area. The size an app passes to `run-app` is unchanged; only a window that would not fit
-  is made smaller. `hyperion-view --placement` prints the arithmetic for given numbers, and
-  `hyperion-view --report-placement WIDTH HEIGHT` creates the window, places it, prints the
-  rectangle Windows reports and exits; start it hidden. Rebuild
-  `hyperion-view` (`hyperion/hyperion-view/build.ps1`) to get it. macOS already centred the
-  window; Linux leaves placement to the window manager. (#485)
-
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that
@@ -154,6 +152,16 @@ its tag.
   executable with its LICENSE under `LICENSES/`, and closes it before the dump. If the library
   is not built, the build stops and names `scripts/build-mbedtls.lisp`. The list of libraries
   the bundler carries is now `scripts/lazy-natives.lisp`.
+- **hyperion-view on Windows opens the window centred in the work area of its monitor, and
+  shrinks it to fit when it is larger.** It used to set only the size, so the window opened at
+  Windows' cascade point, and on a 2560x1600 display at 150% scaling a 1280x860 window (1346
+  physical pixels high with its frame, in a 1528-pixel work area) often opened partly below the
+  work area. The size an app passes to `run-app` is unchanged; only a window that would not fit
+  is made smaller. `hyperion-view --placement` prints the arithmetic for given numbers, and
+  `hyperion-view --report-placement WIDTH HEIGHT` creates the window, places it, prints the
+  rectangle Windows reports and exits; start it hidden. Rebuild
+  `hyperion-view` (`hyperion/hyperion-view/build.ps1`) to get it. macOS already centred the
+  window; Linux leaves placement to the window manager. (#485)
 
 ## v0.1.7 — 2026-09-30
 
