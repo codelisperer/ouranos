@@ -381,15 +381,18 @@ int main(int argc, char **argv) {
       return 0;
     } else if (std::strcmp(argv[i], "--placement") == 0) {
       // The placement arithmetic on its own, with no window: for the tests, which check it on
-      // every OS, and for anyone asking why a window opened where it did.
+      // every OS, and for anyone asking why a window opened where it did. It is a mode of its
+      // own, so it must be the only option and have exactly nine values: anything before it or
+      // after them would otherwise be ignored without a word, as surplus arguments never are.
+      if (i != 1 || argc != 11) {
+        std::fprintf(stderr,
+                     "hyperion-view: --placement takes exactly 9 integers and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
       long v[9];
       for (int k = 0; k < 9; k++) {
         char *end = nullptr;
-        if (i + 1 + k >= argc) {
-          std::fprintf(stderr, "hyperion-view: --placement needs 9 integers\n\n");
-          print_usage(stderr);
-          return 2;
-        }
         v[k] = std::strtol(argv[i + 1 + k], &end, 10);
         if (end == argv[i + 1 + k] || *end != '\0') {
           std::fprintf(stderr, "hyperion-view: --placement: not an integer: %s\n\n",

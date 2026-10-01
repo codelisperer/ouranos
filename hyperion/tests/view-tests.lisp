@@ -175,7 +175,11 @@ code when it did not exit 0."
 (test placement-refuses-what-is-not-nine-integers
   (with-launcher
     (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16)) "eight numbers")
-    (is (eql 2 (%placement 0 0 2560 1528 1280 860 "x" 16 56)) "a word in place of a number")))
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16 56 7)) "ten numbers")
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 "x" 16 56)) "a word in place of a number")
+    (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--placement"
+                             "0" "0" "2560" "1528" "1280" "860" "144" "16" "56"))
+        "a URL before it: --placement is a mode of its own, not an option of a window")))
 
 (defun %fresh-dir ()
   (let ((dir (uiop:ensure-directory-pathname
