@@ -102,6 +102,8 @@ its tag.
   vendored ones. See `hyperion/docs/calendar.md`.
 - **aion/pool: submitting a job takes no lock, so several server-uv loops no longer wait on
   each other** (#466). `try-submit` reserves a place with an atomic count and puts the job on
+- **aion/pool: submitting a job takes no pool mutex, so several server-uv loops no longer wait
+  on each other** (#466). `try-submit` reserves a place with an atomic count and puts the job on
   `sb-concurrency`'s lock-free queue, and each worker sleeps on its own semaphore, which a
   submitter signals only when it claims that worker from the stack of idle ones. The pool's
   behaviour is unchanged: the queue limit and the 503 when it is full, the worker count,

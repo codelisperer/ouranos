@@ -78,11 +78,13 @@ A WARN rather than an ERROR level: the pool is fine, the job is not."
 
 ;;; --- the queue and its counts (#466) --------------------------------------------------
 ;;;
-;;; NO LOCK ON THE SUBMIT PATH. Every request a server-uv loop dispatches comes through
-;;; TRY-SUBMIT, and with several loops they all used to serialise on one mutex, which each job
-;;; then took twice more (taken by a worker, finished). #466 measured four loops at about 87,000
-;;; requests/s through the pool against about 101,000 with handlers run on the loops, and the
-;;; profile put the contended waits on that lock.
+;;; NO POOL MUTEX ON THE SUBMIT PATH. Waking a worker still signals that worker's own semaphore,
+;;; which has a lock inside it, but only the one submitter that claimed the worker, the worker
+;;; itself, and STOP-POOL ever take that lock; see below. Every request a server-uv loop
+;;; dispatches comes through TRY-SUBMIT, and with several loops they all used to serialise on
+;;; one mutex, which each job then took twice more (taken by a worker, finished). #466 measured
+;;; four loops at about 87,000 requests/s through the pool against about 101,000 with handlers
+;;; run on the loops, and the profile put the contended waits on that lock.
 ;;;
 ;;; So the queue is SB-CONCURRENCY's lock-free FIFO, and the counts are atomic words:
 ;;;   OUTSTANDING  jobs accepted and not yet finished, queued or running. TRY-SUBMIT reserves
@@ -292,7 +294,9 @@ nothing was the wrong answer, and why a reporter that signals still cannot kill 
   "Queue THUNK, returning T. Return NIL -- immediately, without blocking -- when the queue
 is at its limit or the pool is stopping.
 
-NEVER BLOCKS, AND TAKES NO LOCK (#466). The caller may be an event loop's own thread, where
+NEVER BLOCKS, AND TAKES NO POOL MUTEX (#466). Waking an idle worker signals that worker's own
+semaphore, whose lock only the claiming submitter and that worker share. The caller may be an
+event loop's own thread, where
 waiting would stall every other connection; see the file header. A NIL is a decision the
 caller has to make, and for a server that decision is 503.
 

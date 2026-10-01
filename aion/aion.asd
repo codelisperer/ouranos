@@ -524,7 +524,8 @@
 
 (defsystem "aion/pool/tests"
   :description "Tests for aion/pool: FIFO order, the bound, refusal, and shutdown drain."
-  :depends-on ("aion/pool" "fiveam")
+  ;; aion/test-threads for JOIN-ALL, which gives up after one deadline and names the thread.
+  :depends-on ("aion/pool" "fiveam" "aion/test-threads")
   :serial t
   :components ((:module "tests"
                 :serial t

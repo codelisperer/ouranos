@@ -221,16 +221,17 @@ the test instead of hanging it."
 
 ;;; --- every job, exactly once, with no lock on the submit path (#466) ------------------
 
-(defun %join-all (threads seconds)
-  "Join THREADS, giving up after SECONDS in total; return their values, or :TIMEOUT for each
-thread that had not finished, so a lost wake-up fails a test instead of hanging the run."
-  (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
-    (mapcar (lambda (th)
-              (sb-thread:join-thread
-               th :default :timeout
-                  :timeout (max 0 (/ (- deadline (get-internal-real-time))
-                                     internal-time-units-per-second))))
-            threads)))
+(defun %submit-range (pool runs from below deadline)
+  "Submit one job for each index from FROM below BELOW, each counting its run in RUNS,
+retrying while POOL refuses. Return :SUBMITTED, or :GAVE-UP once DEADLINE, an internal real
+time, has passed, so a submitter facing a stalled or stopped pool does not retry forever."
+  (loop for i from from below below
+        do (let ((i i))
+             (loop until (pool:try-submit pool (lambda () (sb-ext:atomic-incf (aref runs i))))
+                   do (when (> (get-internal-real-time) deadline)
+                        (return-from %submit-range :gave-up))
+                      (sb-thread:thread-yield))))
+  :submitted)
 
 (test every-job-runs-exactly-once-when-four-threads-submit-at-once
   "Four threads submit 20,000 jobs each, at once, retrying when refused. Each job counts its
@@ -238,21 +239,20 @@ own run in its own slot, so a job lost shows as a 0 and a job run twice as a 2. 
 drains, every slot is exactly 1."
   (let* ((per-thread 20000) (threads 4) (n (* per-thread threads))
          (runs (make-array n :element-type 'sb-ext:word :initial-element 0))
-         (p (pool:make-pool :size 8 :queue-limit 64)))
+         (p (pool:make-pool :size 8 :queue-limit 64))
+         ;; One deadline for every submitter's retries: past it a submitter gives up instead
+         ;; of retrying forever against a pool that has stalled or stopped.
+         (deadline (+ (get-internal-real-time) (* 60 internal-time-units-per-second))))
     (unwind-protect
-         (let ((done (%join-all
+         (let ((done (aion/test-threads:join-all
                       (loop for k below threads
                             collect (let ((k k))
                                       (sb-thread:make-thread
                                        (lambda ()
-                                         (loop for i from (* k per-thread) below (* (1+ k) per-thread)
-                                               do (let ((i i))
-                                                    (loop until (pool:try-submit
-                                                                 p (lambda () (sb-ext:atomic-incf (aref runs i))))
-                                                          do (sb-thread:thread-yield))))
-                                         :submitted)
+                                         (%submit-range p runs (* k per-thread)
+                                                        (* (1+ k) per-thread) deadline))
                                        :name "pool stress submitter")))
-                      60)))
+                      :timeout 90)))
            (is (every (lambda (d) (eq d :submitted)) done) "submitters: ~S" done))
       (pool:stop-pool p))
     (is (= 0 (count 0 runs)) "~D jobs never ran" (count 0 runs))
@@ -283,8 +283,9 @@ refused never runs: shutdown drains what was accepted, even in the moment STOPPI
       (sleep 0.0005)
       (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) :stopped)
                                             :name "pool stop-race stopper")))
-        (let ((done (%join-all (cons stopper submitters) 30)))
-          (is (every (lambda (d) (member d '(:stopped :submitted))) done) "round ~D: ~S" round done)))
+        (let ((done (aion/test-threads:join-all (cons stopper submitters) :timeout 30)))
+          (is (every (lambda (d) (member d '(:stopped :submitted))) done)
+              "round ~D: ~S" round done)))
       (let ((lost (loop for i below n count (and (= 1 (aref accepted i)) (/= 1 (aref runs i)))))
             (ghost (loop for i below n count (and (= 0 (aref accepted i)) (/= 0 (aref runs i))))))
         (is (= 0 lost) "round ~D: ~D accepted jobs did not run exactly once" round lost)
@@ -329,7 +330,8 @@ it. The hook holds the submitter at exactly that point."
               (sb-thread:wait-on-semaphore go-on :timeout 10))))
     (unwind-protect
          (let ((submitter (sb-thread:make-thread
-                           (lambda () (pool:try-submit p (lambda () (sb-ext:atomic-incf (car ran)))))
+                           (lambda ()
+                             (pool:try-submit p (lambda () (sb-ext:atomic-incf (car ran)))))
                            :name "pool reserve submitter")))
            (is (sb-thread:wait-on-semaphore at-the-point :timeout 10))
            (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) :stopped)
@@ -337,7 +339,8 @@ it. The hook holds the submitter at exactly that point."
              ;; Give a broken pool's workers time to see STOPPING and an empty queue, and exit.
              (sleep 0.2)
              (sb-thread:signal-semaphore go-on)
-             (is (equal '(t :stopped) (%join-all (list submitter stopper) 10)))
+             (is (equal '(t :stopped)
+                        (aion/test-threads:join-all (list submitter stopper) :timeout 10)))
              (is (= 1 (car ran)) "the job whose place was reserved ran ~D times" (car ran))))
       (setf aion/pool::*%after-reserve* nil)
       (pool:stop-pool p))))
