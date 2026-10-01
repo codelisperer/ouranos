@@ -51,7 +51,9 @@ its tag.
   Windows' cascade point, and on a 2560x1600 display at 150% scaling a 1280x860 window (1346
   physical pixels high with its frame, in a 1528-pixel work area) often opened partly below the
   work area. The size an app passes to `run-app` is unchanged; only a window that would not fit
-  is made smaller. `hyperion-view --placement` prints the arithmetic for given numbers. Rebuild
+  is made smaller. `hyperion-view --placement` prints the arithmetic for given numbers, and
+  `hyperion-view --report-placement WIDTH HEIGHT` creates the window, places it, prints the
+  rectangle Windows reports and exits; start it hidden. Rebuild
   `hyperion-view` (`hyperion/hyperion-view/build.ps1`) to get it. macOS already centred the
   window; Linux leaves placement to the window manager. (#485)
 

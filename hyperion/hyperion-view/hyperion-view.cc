@@ -270,28 +270,55 @@ static void set_window_icon(webview_t w, const char *path) {
 // Put the window in the work area of the monitor it opened on: centred, and shrunk to fit
 // when it is larger (window-placement.h, #485). Windows only. On macOS webview_set_size
 // already centres the window ([NSWindow center]); on Linux the window manager places it.
-static void place_window(webview_t w, int width, int height) {
+//
+// With REPORT, it also prints one line there: the work area, the DPI, what the frame adds, the
+// placement computed, and the window's rectangle as Windows reports it after SetWindowPos --
+// for --report-placement, which is how a test sees the real calls (review of train 20). A
+// step that fails is reported as "placement-failed STEP" and nothing is moved.
+static bool place_window(webview_t w, int width, int height, std::FILE *report = nullptr) {
 #if defined(_WIN32)
+  auto failed = [report](const char *step) {
+    if (report != nullptr) std::fprintf(report, "placement-failed %s\n", step);
+    return false;
+  };
   HWND hwnd = static_cast<HWND>(webview_get_window(w));
-  if (hwnd == nullptr) return;
+  if (hwnd == nullptr) return failed("webview_get_window");
   MONITORINFO info;
   info.cbSize = sizeof info;
-  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info)) return;
+  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info))
+    return failed("GetMonitorInfoW");
   RECT outer, client;
-  if (!GetWindowRect(hwnd, &outer) || !GetClientRect(hwnd, &client)) return;
+  if (!GetWindowRect(hwnd, &outer) || !GetClientRect(hwnd, &client))
+    return failed("GetWindowRect");
   // What the frame adds, measured on the window webview_set_size has just sized, rather than
   // recomputed: it already reflects the window's style and DPI.
   long frame_width = (outer.right - outer.left) - (client.right - client.left);
   long frame_height = (outer.bottom - outer.top) - (client.bottom - client.top);
+  long dpi = static_cast<long>(GetDpiForWindow(hwnd));
   window_placement p = place_in_work_area(info.rcWork.left, info.rcWork.top,
                                           info.rcWork.right, info.rcWork.bottom, width, height,
-                                          static_cast<long>(GetDpiForWindow(hwnd)), frame_width,
-                                          frame_height);
-  SetWindowPos(hwnd, nullptr, p.x, p.y, p.width, p.height, SWP_NOZORDER | SWP_NOACTIVATE);
+                                          dpi, frame_width, frame_height);
+  if (!SetWindowPos(hwnd, nullptr, p.x, p.y, p.width, p.height, SWP_NOZORDER | SWP_NOACTIVATE))
+    return failed("SetWindowPos");
+  if (report != nullptr) {
+    RECT placed;
+    if (!GetWindowRect(hwnd, &placed)) return failed("GetWindowRect after SetWindowPos");
+    std::fprintf(report,
+                 "work %ld %ld %ld %ld dpi %ld frame %ld %ld placement %ld %ld %ld %ld "
+                 "window %ld %ld %ld %ld\n",
+                 static_cast<long>(info.rcWork.left), static_cast<long>(info.rcWork.top),
+                 static_cast<long>(info.rcWork.right), static_cast<long>(info.rcWork.bottom), dpi,
+                 frame_width, frame_height, p.x, p.y, p.width, p.height,
+                 static_cast<long>(placed.left), static_cast<long>(placed.top),
+                 static_cast<long>(placed.right), static_cast<long>(placed.bottom));
+  }
+  return true;
 #else
   (void)w;
   (void)width;
   (void)height;
+  if (report != nullptr) std::fprintf(report, "placement-unsupported\n");
+  return false;
 #endif
 }
 
@@ -310,6 +337,10 @@ static void print_usage(std::FILE *out) {
                "               print, as X Y WIDTH HEIGHT, where a window with a client area of\n"
                "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
                "               put in the work area WL,WT-WR,WB; then exit (#485)\n"
+               "  --report-placement WIDTH HEIGHT\n"
+               "               Windows: create the window, size and place it as a launch does,\n"
+               "               print the work area, DPI, frame, placement and the window's\n"
+               "               rectangle, then exit without running it. Start it hidden.\n"
                "\n"
                "Hyperion's native webview launcher. hyperion/desktop:run-app starts a\n"
                "server on localhost and launches this pointed at it.\n");
@@ -379,6 +410,31 @@ int main(int argc, char **argv) {
     if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
       print_usage(stdout);
       return 0;
+    } else if (std::strcmp(argv[i], "--report-placement") == 0) {
+      // The real calls, on a real window, which --placement cannot reach: it returns before
+      // webview_create. The window is shown by webview.h when it is created; a caller that
+      // starts this with a hidden show state (STARTF_USESHOWWINDOW, SW_HIDE) keeps it hidden,
+      // because Windows applies that to a process's first ShowWindow. Exactly WIDTH and
+      // HEIGHT, and nothing else, for the reason given for --placement below.
+      if (i != 1 || argc != 4) {
+        std::fprintf(stderr,
+                     "hyperion-view: --report-placement takes WIDTH and HEIGHT and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      int rw = std::atoi(argv[2]);
+      int rh = std::atoi(argv[3]);
+      if (rw <= 0 || rh <= 0) {
+        std::fprintf(stderr, "hyperion-view: --report-placement: WIDTH and HEIGHT must be positive\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      webview_t rv = webview_create(0, nullptr);
+      webview_set_size(rv, rw, rh, WEBVIEW_HINT_NONE);
+      bool ok = place_window(rv, rw, rh, stdout);
+      std::fflush(stdout);
+      webview_destroy(rv);
+      return ok ? 0 : 1;
     } else if (std::strcmp(argv[i], "--placement") == 0) {
       // The placement arithmetic on its own, with no window: for the tests, which check it on
       // every OS, and for anyone asking why a window opened where it did. It is a mode of its

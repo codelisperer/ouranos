@@ -181,6 +181,65 @@ code when it did not exit 0."
                              "0" "0" "2560" "1528" "1280" "860" "144" "16" "56"))
         "a URL before it: --placement is a mode of its own, not an option of a window")))
 
+;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
+;;;
+;;; --placement checks the arithmetic, but returns before a window exists. --report-placement
+;;; creates the window, sizes and places it as a launch does, and prints what Windows reports.
+;;; It is started hidden: Windows applies the starting process's hidden show state to the new
+;;; process's first ShowWindow, so the window webview.h shows is not displayed. Even so it is a
+;;; real window, so it runs only where the CI environment variable is set, on a runner, and not
+;;; on a developer's machine.
+
+(defun %report-placement (width height)
+  "Run `hyperion-view --report-placement WIDTH HEIGHT' hidden, through PowerShell's Start-Process
+-WindowStyle Hidden. Returns (values EXIT-CODE OUTPUT)."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (merge-pathnames (format nil "hyperion-view-report-~36R/" (random (expt 2 40)))
+                                (uiop:temporary-directory))))
+         (out (merge-pathnames "out.txt" dir)))
+    (ensure-directories-exist dir)
+    (unwind-protect
+         (let ((code (nth-value
+                      2 (uiop:run-program
+                         (list "pwsh" "-NoProfile" "-NonInteractive" "-Command"
+                               (format nil "$p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D' -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
+                                       (uiop:native-namestring (launcher)) width height
+                                       (uiop:native-namestring out)))
+                         :output nil :error-output nil :ignore-error-status t))))
+           (values code (if (probe-file out) (uiop:read-file-string out) "")))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(test the-window-is-placed-in-the-work-area-on-a-real-window
+  "On a CI Windows runner, a real window is placed where --placement says, inside the work area,
+and Windows reports that rectangle."
+  #-win32 (skip "The placement calls are Windows only")
+  #+win32
+  (with-launcher
+    (if (null (uiop:getenvp "CI"))
+        (skip "Runs only on CI (CI is not set here): it creates a window")
+        (multiple-value-bind (code out) (%report-placement 1280 860)
+          (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
+          (let ((line (find-if (lambda (l) (uiop:string-prefix-p "work " l))
+                               (uiop:split-string out :separator '(#\Newline #\Return)))))
+            (is-true line "it printed a report: ~S" out)
+            (when line
+              (let* ((n (mapcar #'parse-integer
+                                (remove-if-not (lambda (tok) (and (plusp (length tok))
+                                                                  (or (digit-char-p (char tok 0))
+                                                                      (char= (char tok 0) #\-))))
+                                               (uiop:split-string line :separator '(#\Space)))))
+                     (work (subseq n 0 4)) (dpi (nth 4 n)) (frame (subseq n 5 7))
+                     (placement (subseq n 7 11)) (window (subseq n 11 15)))
+                (is (equal placement (apply #'%placement (append work (list 1280 860 dpi) frame)))
+                    "the real calls computed what --placement computes for the same numbers: ~S" line)
+                (destructuring-bind (x y w h) placement
+                  (is (equal window (list x y (+ x w) (+ y h)))
+                      "Windows reports the window at the placement: ~S" line))
+                (destructuring-bind (wl wt wr wb) work
+                  (destructuring-bind (l tp r b) window
+                    (is (and (<= wl l) (<= wt tp) (<= r wr) (<= b wb))
+                        "and inside the work area: ~S" line))))))))))
+
 (defun %fresh-dir ()
   (let ((dir (uiop:ensure-directory-pathname
               (merge-pathnames (format nil "hyperion-icon-~36R/" (random (expt 2 40) (make-random-state t)))
