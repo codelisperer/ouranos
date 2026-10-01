@@ -192,7 +192,9 @@ code when it did not exit 0."
       (is (eql 2 (code "-1280" "860")) "a negative number")
       (is (eql 2 (code "99999999999999999999" "860")) "a number past INT_MAX")
       (is (eql 2 (code "1280")) "one number")
-      (is (eql 2 (code "1280" "860" "1")) "three numbers"))))
+      ;; A third value is a placement file (#485, part 2), so it would make a window; four are
+      ;; refused before one is made.
+      (is (eql 2 (code "1280" "860" "placement" "extra")) "four values"))))
 
 ;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
 ;;;
@@ -203,9 +205,9 @@ code when it did not exit 0."
 ;;; real window, so it runs only where the CI environment variable is set, on a runner, and not
 ;;; on a developer's machine.
 
-(defun %report-placement (width height)
-  "Run `hyperion-view --report-placement WIDTH HEIGHT' hidden, through PowerShell's Start-Process
--WindowStyle Hidden. Returns (values EXIT-CODE OUTPUT)."
+(defun %report-placement (width height &optional placement-file)
+  "Run `hyperion-view --report-placement WIDTH HEIGHT [PLACEMENT-FILE]' hidden, through
+PowerShell's Start-Process -WindowStyle Hidden. Returns (values EXIT-CODE OUTPUT)."
   (let* ((dir (uiop:ensure-directory-pathname
                (merge-pathnames (format nil "hyperion-view-report-~36R/" (random (expt 2 40)))
                                 (uiop:temporary-directory))))
@@ -215,8 +217,9 @@ code when it did not exit 0."
          (let ((code (nth-value
                       2 (uiop:run-program
                          (list "pwsh" "-NoProfile" "-NonInteractive" "-Command"
-                               (format nil "$p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D' -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
+                               (format nil "$p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D'~@[,'~A'~] -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
                                        (uiop:native-namestring (launcher)) width height
+                                       (and placement-file (uiop:native-namestring placement-file))
                                        (uiop:native-namestring out)))
                          :output nil :error-output nil :ignore-error-status t))))
            (values code (if (probe-file out) (uiop:read-file-string out) "")))
@@ -321,6 +324,145 @@ image is not a shipped build and has no installation."
   (is (null (desktop:install-directory)))
   (is (eq (desktop:shipped-image-p) (aion/platform:shipped-image-p)))
   (is (equal (desktop:install-directory) (aion/platform:shipped-image-directory))))
+
+;;; --- the last placement, saved and restored (#485, part 2) -------------------------------
+;;;
+;;; --saved-placement prints the restore decision for a placement file and a work area, with no
+;;; window, so the format and the rule are checked here on every OS. The restore and the save on
+;;; a real window are checked on CI only, through --report-placement with a placement file.
+
+(defun %write-placement (dir name text)
+  "Write TEXT, exactly, to NAME in DIR; return the path."
+  (let ((path (merge-pathnames name dir)))
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string text out))
+    path))
+
+(defun %saved-placement (path &rest work)
+  "What `hyperion-view --saved-placement PATH WL WT WR WB' prints, trimmed, or the exit code
+when it did not exit 0."
+  (multiple-value-bind (code out)
+      (apply #'run-launcher "--saved-placement" (uiop:native-namestring path)
+             (mapcar #'princ-to-string work))
+    (if (eql code 0) (string-trim '(#\Newline #\Return #\Space) out) code)))
+
+(test a-saved-placement-is-used-only-when-it-is-well-formed-and-fits
+  (with-launcher
+    (let ((dir (%fresh-dir)))
+      (unwind-protect
+           (flet ((decide (text &rest work)
+                    (apply #'%saved-placement (%write-placement dir "placement" text) work)))
+             (is (equal "use 100 50 1380 910 0"
+                        (decide (format nil "hyperion-view-placement 1 100 50 1380 910 0~%")
+                                0 0 2560 1528))
+                 "a placement inside the work area is used")
+             (is (equal "use 100 50 1380 910 1"
+                        (decide "hyperion-view-placement 1 100 50 1380 910 1" 0 0 2560 1528))
+                 "with its maximised state, and without a newline")
+             (is (equal "use 100 50 1380 910 0"
+                        (decide (format nil "hyperion-view-placement 1 100 50 1380 910 0~C~C"
+                                        #\Return #\Newline)
+                                0 0 2560 1528))
+                 "and with a CRLF")
+             (is (equal "use -1800 100 -600 900 0"
+                        (decide "hyperion-view-placement 1 -1800 100 -600 900 0" -1920 0 0 1040))
+                 "on a monitor to the left, with negative coordinates")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 50 1380 910 0" 1920 0 3840 1040))
+                 "not on a monitor that is no longer there")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 2000 50 2700 910 0" 0 0 2560 1528))
+                 "not partly outside the work area")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 50 250 150 0" 0 0 2560 1528))
+                 "not smaller than 200 by 150")
+             (dolist (text '("junk"
+                             "hyperion-view-placement 2 100 50 1380 910 0"
+                             "hyperion-view-placement 1 100 50 1380 910 2"
+                             "hyperion-view-placement 1 100 50 1380 910"
+                             "hyperion-view-placement 1 100 50 1380 910 0 extra"
+                             "hyperion-view-placement 1 100 50 1380px 910 0"))
+               (is (equal "ignore malformed" (decide text 0 0 2560 1528))
+                   "not a malformed line: ~S" text))
+             (is (equal "ignore unreadable"
+                        (%saved-placement (merge-pathnames "absent" dir) 0 0 2560 1528))
+                 "not a file that is not there")
+             (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560"))
+                 "three numbers are refused"))
+        (aion/fs:delete-tree dir)))))
+
+(test run-app-passes-a-placement-file-and-creates-its-directory
+  (is (null (hyperion/desktop::%placement-arguments nil)) "no file, no arguments")
+  (let* ((dir (%fresh-dir))
+         (file (merge-pathnames "data/sub/window-placement" dir)))
+    (unwind-protect
+         (progn
+           (is (equal (list "--placement-file" (uiop:native-namestring file))
+                      (hyperion/desktop::%placement-arguments file)))
+           (is-true (uiop:directory-exists-p (merge-pathnames "data/sub/" dir))
+                    "and the file's directory now exists"))
+      (aion/fs:delete-tree dir))))
+
+(defun %report-numbers (line)
+  "The integers in LINE, in order."
+  (mapcar #'parse-integer
+          (remove-if-not (lambda (tok) (and (plusp (length tok))
+                                            (or (digit-char-p (char tok 0))
+                                                (and (char= (char tok 0) #\-) (> (length tok) 1)))))
+                         (uiop:split-string line :separator '(#\Space)))))
+
+(defun %report-line (out prefix)
+  (find-if (lambda (l) (uiop:string-prefix-p prefix l))
+           (uiop:split-string out :separator '(#\Newline #\Return))))
+
+(test a-real-window-is-restored-from-its-placement-file-and-saves-it
+  "On a CI Windows runner, a window opens at a saved placement that fits, writes it back, and
+opens centred when the saved placement is on no monitor."
+  #-win32 (skip "The placement calls are Windows only")
+  #+win32
+  (with-launcher
+    (if (null (uiop:getenvp "CI"))
+        (skip "Runs only on CI (CI is not set here): it creates a window")
+        (let ((dir (%fresh-dir)))
+          (unwind-protect
+               (let* ((work (multiple-value-bind (code out) (%report-placement 1280 860)
+                              (declare (ignore code))
+                              (let ((line (%report-line out "work ")))
+                                (and line (subseq (%report-numbers line) 0 4)))))
+                      (file (merge-pathnames "window-placement" dir)))
+                 (is-true work "the work area was reported")
+                 (when work
+                   (destructuring-bind (wl wt wr wb) work
+                     (declare (ignore wr wb))
+                     (let* ((saved (list (+ wl 40) (+ wt 30) (+ wl 940) (+ wt 630)))
+                            (text (format nil "hyperion-view-placement 1 ~{~D~^ ~} 0~%" saved)))
+                       ;; A placement that fits is restored, and saved back unchanged.
+                       (%write-placement dir "window-placement" text)
+                       (multiple-value-bind (code out) (%report-placement 1280 860 file)
+                         (is (eql 0 code) "--report-placement with a file exited ~S: ~A" code out)
+                         (let ((line (%report-line out "restored ")))
+                           (is-true line "the saved placement was restored: ~S" out)
+                           (when line
+                             (is (equal (append saved (list 0) saved) (%report-numbers line))
+                                 "and Windows reports the window at it: ~S" line)))
+                         (is-true (%report-line out "saved") "and it was saved: ~S" out))
+                       (is (equal text (uiop:read-file-string file))
+                           "the file holds the same placement")
+                       ;; A placement on no monitor is ignored; the window is centred, and that is saved.
+                       (%write-placement dir "window-placement"
+                                         (format nil "hyperion-view-placement 1 -100000 -100000 -99000 -99300 0~%"))
+                       (multiple-value-bind (code out) (%report-placement 1280 860 file)
+                         (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
+                         (is-true (%report-line out "restore-ignored off-screen")
+                                  "a placement on no monitor is ignored: ~S" out)
+                         (let ((line (%report-line out "work ")))
+                           (is-true line "and the window is placed as without a file: ~S" out)
+                           (when line
+                             (let ((window (subseq (%report-numbers line) 11 15)))
+                               (is (equal (format nil "hyperion-view-placement 1 ~{~D~^ ~} 0~%" window)
+                                          (uiop:read-file-string file))
+                                   "and that placement is saved: ~S" line)))))))))
+            (aion/fs:delete-tree dir))))))
 
 (defun run-tests ()
   (let ((results (run 'view)))
