@@ -5165,16 +5165,18 @@ writes the window. Returns the store, A and A's provider."
       (%turn a mark)
       (assert (obs::observer-unsaved a))
       (%turn b mark)
-      (%turn a mark)
-      (values store a a-provider))))
+      (let ((failures (obs:observer-failures a)))
+        (%turn a mark)
+        (values store a a-provider (- (obs:observer-failures a) failures))))))
 
 (test an-unsaved-observer-does-not-overwrite-newer-progress-at-an-equal-mark
   "The sixth review's case, with the window open at mark 6 and, after a later window, at mark
 12: A's next turn merges, sees B wrote the window, writes nothing over B's progress and does not
 distil the window again."
   (dolist (mark '(6 12))
-    (multiple-value-bind (store a a-provider) (%unsaved-a-then-b mark)
+    (multiple-value-bind (store a a-provider new-failures) (%unsaved-a-then-b mark)
       (declare (ignore a))
+      (is (= 0 new-failures) "at mark ~D, A's last run had no failure" mark)
       (is (equal '("Has a dog.") (%thread-contents store)) "at mark ~D, one observation" mark)
       (is (= 1 (length (scripted-script a-provider))) "at mark ~D, A did not distil again" mark)
       (multiple-value-bind (stored skipped) (mem:thread-progress store "member-1" "conv-7")
@@ -5196,9 +5198,10 @@ merges, finds the tries spent, and makes no model call."
       (%turn a 6)
       (%turn b 6)
       (%turn b 6)
-      (let ((a-before (funcall calls a-provider)))
+      (let ((a-before (funcall calls a-provider)) (failures (obs:observer-failures a)))
         (%turn a 6)
-        (is (= a-before (funcall calls a-provider)) "A's second turn made no model call"))
+        (is (= a-before (funcall calls a-provider)) "A's second turn made no model call")
+        (is (= failures (obs:observer-failures a)) "and had no failure"))
       (is (equal '((1 6 3)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))
           "three tries recorded, no more"))))
 
@@ -5244,4 +5247,113 @@ read fails, OBSERVE-TURN logs it and returns NIL rather than signalling into the
                                        :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
       (setf (thread-read-failures store) 1)
       (is (null (handler-case (obs:observe-turn observer (%history 6))
-                  (error (e) (format nil "signalled: ~A" e))))))))
+                  (error (e) (format nil "signalled: ~A" e)))))
+      (is (= 0 (thread-read-failures store)) "the read was made, and failed"))))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's seventh review: two observers that cut the same messages differently.
+;;; --------------------------------------------------------------------------
+
+(defun %random-record (random-state)
+  "A progress record as an observer leaves it: messages 1 to a mark cut into windows of random
+size, each skipped with probability 1/3, some of those closed."
+  (let ((mark (random 30 random-state)) (from 1) (skipped '()))
+    (loop while (<= from mark)
+          do (let ((through (min mark (+ from (random 6 random-state)))))
+               (when (zerop (random 3 random-state))
+                 (push (append (list from through (1+ (random 3 random-state)))
+                               (when (zerop (random 2 random-state)) (list :closed)))
+                       skipped))
+               (setf from (1+ through))))
+    (values mark (nreverse skipped))))
+
+(defun %distilled-p (n mark skipped)
+  "Whether the record (MARK SKIPPED) says message N was distilled."
+  (and (<= n mark) (notany (lambda (e) (<= (first e) n (second e))) skipped)))
+
+(test progress-merges-commute-repeat-and-lose-no-message
+  "2,000 random pairs of records: the merge gives one result in either order, merging it again
+with either record changes nothing, and every message it counts as distilled one of the two
+records distilled."
+  (let ((rs (sb-ext:seed-random-state 462)) (bad '()))
+    (dotimes (i 2000)
+      (multiple-value-bind (ma sa) (%random-record rs)
+        (multiple-value-bind (mb sb) (%random-record rs)
+          (multiple-value-bind (m1 s1) (obs::%merge-progress ma sa mb sb)
+            (multiple-value-bind (m2 s2) (obs::%merge-progress mb sb ma sa)
+              (multiple-value-bind (m3 s3) (obs::%merge-progress m1 s1 ma sa)
+                (multiple-value-bind (m4 s4) (obs::%merge-progress m1 s1 mb sb)
+                  (unless (and (= m1 m2 m3 m4) (equal s1 s2) (equal s1 s3) (equal s1 s4)
+                               (loop for n from 1 to m1
+                                     never (and (%distilled-p n m1 s1)
+                                                (not (%distilled-p n ma sa))
+                                                (not (%distilled-p n mb sb)))))
+                    (push (list ma sa mb sb m1 s1) bad)))))))))
+    (is (null bad) "~D of 2000 failed; the first: ~S" (length bad) (first bad))))
+
+(test two-observers-with-different-steps-lose-no-message
+  "The seventh review's case. A, with a step of 4 messages, skips 1-4 and writes 5-8 while its
+progress writes fail. B, with a step of 6, skips 1-6. A's next turn merges the two records. The
+merged record still holds a skipped window covering 1-4, which neither observer distilled."
+  (multiple-value-bind (mark skipped) (obs::%merge-progress 8 '((1 4 2 :closed)) 6 '((1 6 1)))
+    (is (= 8 mark))
+    (is (loop for n from 1 to 4 always (some (lambda (e) (<= (first e) n (second e))) skipped))
+        "messages 1-4 are covered by a skipped window: ~S" skipped)))
+
+(defclass coin-provider (scripted)
+  ((random-state :initarg :random-state :reader coin-random-state)
+   (failure-rate :initarg :failure-rate :accessor coin-failure-rate)
+   (count :initform 0 :accessor coin-count))
+  (:documentation "Answers every call with one new fact, or fails at FAILURE-RATE."))
+
+(defmethod llm:complete :before ((p coin-provider) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (when (< (random 1.0 (coin-random-state p)) (coin-failure-rate p))
+    (error 'cnd:deliberation-failure :detail "429 Too Many Requests"))
+  (setf (scripted-script p) (list (%call-with (%ob (format nil "Fact ~D." (incf (coin-count p))) "fact")))))
+
+(defclass coin-store (mem:in-memory-store)
+  ((random-state :initarg :random-state :reader coin-store-random-state)
+   (failure-rate :initarg :failure-rate :accessor coin-store-failure-rate))
+  (:documentation "Fails progress writes at FAILURE-RATE."))
+
+(defmethod mem:record-thread-progress :before ((store coin-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (when (< (random 1.0 (coin-store-random-state store)) (coin-store-failure-rate store))
+    (error "the progress write failed")))
+
+(defun %uncovered (store)
+  "The messages up to the stored mark that no observation's range and no skipped window covers."
+  (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+    (let ((ranges (mapcar (lambda (o) (let ((p (mem:observation-provenance o)))
+                                        (cons (mem:provenance-turn p) (or (mem:provenance-through p)
+                                                                          (mem:provenance-turn p)))))
+                          (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t))))
+      (loop for n from 1 to (or mark 0)
+            unless (or (some (lambda (r) (<= (car r) n (cdr r))) ranges)
+                       (some (lambda (e) (<= (first e) n (second e))) skipped))
+              collect n))))
+
+(test observers-with-mixed-steps-under-failures-lose-no-message
+  "60 trials. Three observers of one thread, with steps of 4, 6 and 8 messages, take 24 random
+turns on a growing history while half of the model calls and 30% of the progress writes fail. After a
+last turn each with nothing failing, every message up to the stored mark is covered by an
+observation's range or by a skipped window."
+  (let ((rs (sb-ext:seed-random-state 4627)) (lost '()))
+    (dotimes (trial 60)
+      (let* ((store (make-instance 'coin-store :random-state rs :failure-rate 0.3))
+             (observers (loop for n in '(4 6 8)
+                              collect (obs:make-observer
+                                       (make-instance 'coin-provider :script nil :random-state rs :failure-rate 0.5)
+                                       store "member-1" "conv-7" :step (%step-for n) :retry-delay 0
+                                                                 :max-attempts 2))))
+        (loop for turn from 1 to 24
+              do (%turn (nth (random 3 rs) observers) (* 2 turn)))
+        (setf (coin-store-failure-rate store) 0)
+        (dolist (o observers)
+          (setf (coin-failure-rate (obs::observer-provider o)) 0)
+          (obs:observe-turn o (%history 48) :flush t)
+          (obs:await-observer o :timeout 10))
+        (let ((u (%uncovered store)))
+          (when u (push (list trial u) lost)))))
+    (is (null lost) "~D of 60 trials lost messages: ~S" (length lost) lost)))

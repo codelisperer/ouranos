@@ -81,15 +81,18 @@ its tag.
     that fails is made again at the next `observe-turn`, even one with no new message; until it
     is made, a stop, a restart or a new observer distils that window again. Progress is merged
     with the store's, never written over it: a run starts by merging, and each save merges again,
-    so the stored mark is never lowered and newer progress at an equal mark is kept. A run whose
-    first read of the store's progress fails ends there.
+    so, through one store object in one process, the stored mark is never lowered and newer
+    progress at an equal mark is kept. Where two observers cut the same messages into different
+    windows, the merge keeps both records' overlapping skipped windows, which can cover messages
+    twice but never leaves one uncovered. A run whose first read of the store's progress fails
+    ends there.
   - One observer of a thread runs at a time in a process: `observe-turn` starts nothing while
-    another observer of the same store, subject and thread holds the thread, even when both are
-    called at the same moment, so an app may make an observer per request. `running-observer`
-    names the observer holding a thread. A refused call is logged and does nothing else; a
-    refused `:flush` is not queued, so flush again once `running-observer` returns NIL. The
-    stored mark is never lowered. Observers of one thread in two processes at once are not
-    coordinated.
+    another observer of the same store object, subject and thread holds the thread, even when
+    both are called at the same moment, so an app may make an observer per request.
+    `running-observer` names the observer holding a thread. A refused call is logged and does
+    nothing else; a refused `:flush` is not queued, so flush again once `running-observer`
+    returns NIL. Observers of one thread through two store objects over one database, or in two
+    processes, are not coordinated.
   - Stop a subject's observers before `forget-subject`, with `stop-observer` on the
     `running-observer` of each of its threads; a window being distilled during the erasure can
     be written after it.
