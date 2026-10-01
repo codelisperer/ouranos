@@ -235,21 +235,14 @@ BUNDLE-DIRECTORY CORE-SHA256), or NIL when the launcher did not compile."
 
 (defun %swap-kill-tree (process installer)
   "Stop PROCESS and the processes it started, children first: Inno's Setup runs its work in a
-child, a copy of INSTALLER named <name>.tmp in a directory is-*.tmp under %TEMP%. A stopped
-Setup cannot delete that directory, so it is deleted here. Returns (values KILLED RESULTS):
-KILLED is true when every process was terminated."
+child, a copy of INSTALLER named <name>.tmp. What a stopped Setup leaves in its temporary
+directory is inside the fixture (%WITH-TEMP-IN). Returns (values KILLED RESULTS): KILLED is
+true when every process was terminated."
+  (declare (ignore installer))
   (let* ((pid (uiop:process-info-pid process))
          (results (loop for target in (append (%swap-children pid) (list pid))
-                        collect (cons target (%swap-terminate target))))
-         (child (format nil "~A.tmp" (pathname-name installer))))
+                        collect (cons target (%swap-terminate target)))))
     (ignore-errors (uiop:wait-process process))
-    (dolist (dir (uiop:subdirectories (uiop:temporary-directory)))
-      (when (and (uiop:string-prefix-p "is-" (car (last (pathname-directory dir))))
-                 (probe-file (merge-pathnames child dir)))
-        (loop repeat 20
-              while (uiop:directory-exists-p dir)
-              do (ignore-errors (aion/fs:delete-tree dir :if-does-not-exist :ignore))
-                 (sleep 0.1))))
     (values (every (lambda (r) (eq :terminated (cdr r))) results) results)))
 
 (defun %swap-image-at (pid)
@@ -312,17 +305,31 @@ the copy in progress. The listing opens no file, which could itself stop the ins
                                             (file-length s)))))
                  (and size (plusp size) (< size big-core-bytes))))))))
 
+(defparameter +swap-stop-deadline-seconds+ 120
+  "How long %SWAP-STOP-MID-COPY waits for the copy to start before it stops the installer and
+reports :TIMED-OUT. An install of the fixture takes about two seconds.")
+
 (defun %swap-stop-mid-copy (installer format dir big-core-bytes)
   "Start INSTALLER into DIR and stop it, with its children, while it is writing a staged file.
-Returns a plist: :OUTCOME is :STOPPED, or :FINISHED if it ended before any copy was seen in
-progress; then what shows whether the kill happened -- the image at the pid killed,
+Returns a plist: :OUTCOME is :STOPPED, :FINISHED if it ended before any copy was seen in
+progress, or :TIMED-OUT if neither happened within +SWAP-STOP-DEADLINE-SECONDS+, in which case
+it was stopped; then what shows whether the kill happened -- the image at the pid killed,
 taskkill's exit code and output, and every installer process still running afterwards."
   (let* ((staged (%swap-sibling dir ".new"))
          (process (%swap-run (%swap-install-argv installer format dir)))
          (pid (uiop:process-info-pid process))
-         (image (progn (sleep 0.05) (%swap-image-at pid))))
+         (image (progn (sleep 0.05) (%swap-image-at pid)))
+         (deadline (+ (get-internal-real-time)
+                      (* +swap-stop-deadline-seconds+ internal-time-units-per-second))))
     (loop
-      (cond ((%swap-copying-p staged big-core-bytes)
+      (cond ((> (get-internal-real-time) deadline)
+             ;; Neither a copy in progress nor an end: stop it rather than wait for ever.
+             (multiple-value-bind (killed output) (%swap-kill-tree process installer)
+               (return (list :outcome :timed-out :pid pid :image image :killed killed
+                             :taskkill-output output
+                             :staged (mapcar #'file-namestring
+                                             (ignore-errors (uiop:directory-files staged)))))))
+            ((%swap-copying-p staged big-core-bytes)
              (let ((staged-files (mapcar #'file-namestring (ignore-errors (uiop:directory-files staged)))))
                (multiple-value-bind (killed output) (%swap-kill-tree process installer)
                  (return (list :outcome :stopped :pid pid :image image :staged-at-kill staged-files
@@ -333,37 +340,26 @@ taskkill's exit code and output, and every installer process still running after
              (return (list :outcome :finished :pid pid :image image))))
       (sleep 0.005))))
 
-(defun %swap-setup-temp-directories ()
-  "The directories Inno's Setup and uninstaller leave in %TEMP%: is-*.tmp."
-  (remove-if-not (lambda (dir) (uiop:string-prefix-p "is-" (car (last (pathname-directory dir)))))
-                 (uiop:subdirectories (uiop:temporary-directory))))
-
-(defun %swap-remove-new-setup-directories (before)
-  "Delete the is-*.tmp directories in %TEMP% that are not in BEFORE and hold nothing but what
-Inno leaves there -- _isetup, _unins*.tmp, and a copy of the fixture's Setup. Inno's uninstaller
-leaves its directory behind, and so does a Setup that was stopped, so without this every run
-would add some. Only directories made during this test, and only ones that look like Inno's,
-are touched: %TEMP% holds other programs' is-*.tmp directories too."
-  (loop repeat 50
-        for fresh = (set-difference (%swap-setup-temp-directories) before :test #'equal)
-        while fresh
-        do (dolist (dir fresh)
-             (when (every (lambda (name)
-                            (or (equalp name "_isetup") (uiop:string-prefix-p "_unins" name)
-                                (search +swap-app+ name)))
-                          (append (mapcar (lambda (d) (car (last (pathname-directory d))))
-                                          (uiop:subdirectories dir))
-                                  (mapcar #'file-namestring (uiop:directory-files dir))))
-               (ignore-errors (aion/fs:delete-tree dir :if-does-not-exist :ignore))))
-           (sleep 0.1)))
+(defmacro %with-temp-in ((dir) &body body)
+  "Run BODY with TEMP and TMP set to DIR, and set them back afterwards. The installers and
+uninstallers run in BODY inherit them, so the is-*.tmp directories Inno's Setup and uninstaller
+make, and leave behind when stopped, are inside DIR and are deleted with the fixture. Cleaning
+them out of %TEMP% instead could not tell them from another program's (review of #477)."
+  (let ((temp (gensym "TEMP")) (tmp (gensym "TMP")))
+    `(let ((,temp (uiop:getenv "TEMP")) (,tmp (uiop:getenv "TMP")))
+       (ensure-directories-exist ,dir)
+       (unwind-protect
+            (progn (setf (uiop:getenv "TEMP") (uiop:native-namestring ,dir)
+                         (uiop:getenv "TMP") (uiop:native-namestring ,dir))
+                   ,@body)
+         (setf (uiop:getenv "TEMP") ,temp
+               (uiop:getenv "TMP") ,tmp)))))
 
 (defmacro %with-swap-fixture ((format tree v1 v1-sha v2 v2-sha) &body body)
   "Bind TREE to a fresh directory and V1/V2 to FORMAT's installers for a small version 0.0.1
 and a large 0.0.2, with their cores' hashes. Skips when a tool is missing; always cleans up."
-  (let ((runtime (gensym "RUNTIME")) (b1 (gensym "B1")) (b2 (gensym "B2"))
-        (setup-dirs (gensym "SETUP-DIRS")))
-    `(let ((,tree (%fresh-tree))
-           (,setup-dirs (%swap-setup-temp-directories)))
+  (let ((runtime (gensym "RUNTIME")) (b1 (gensym "B1")) (b2 (gensym "B2")))
+    `(let ((,tree (%fresh-tree)))
        (unwind-protect
             (progn
               (load (merge-pathnames "windows-launcher.lisp" *scripts*))
@@ -380,9 +376,10 @@ and a large 0.0.2, with their cores' hashes. Skips when a tool is missing; alway
                              (,v2 (and ,b2 (%swap-installer ,b2 ,format))))
                          (is-true (and ,v1 ,v2) "both installers were built")
                          (when (and ,v1 ,v2)
-                           ,@body))))))))
-         (%swap-uninstall (merge-pathnames "app/" ,tree) ,format)
-         (%swap-remove-new-setup-directories ,setup-dirs)
+                           (%with-temp-in ((merge-pathnames "temp/" ,tree))
+                             ,@body)))))))))
+         (%with-temp-in ((merge-pathnames "temp/" ,tree))
+           (%swap-uninstall (merge-pathnames "app/" ,tree) ,format))
          (aion/fs:delete-tree ,tree :if-does-not-exist :ignore)))))
 
 (defun %swap-scenarios (format)

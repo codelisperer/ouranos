@@ -200,7 +200,10 @@ FunctionEnd
 ; giving up deletes the staged copy and fails. The second is retried for 20 seconds too,
 ; because a file open in $INSTDIR.new stops it -- an antivirus scanner reading the files just
 ; written, for one (measured with a process reading them, #98) -- and giving up on it undoes
-; the first.
+; the first. That undo is retried for 20 seconds as well, and $INSTDIR.new is deleted only once
+; $INSTDIR is back. If it never comes back, $INSTDIR.new is kept: it is a complete, checked copy,
+; and with $INSTDIR.old beside it and no $INSTDIR, the next run's RepairSwap moves it into place.
+; Deleting it then could leave part of it, which RepairSwap would take for the whole.
 Function SwapIn
   StrCpy $R1 0
   swap_retry:
@@ -230,7 +233,20 @@ Function SwapIn
     Sleep 500
     Goto swap_second_retry
   swap_second_giveup:
+    ; A first install has no $INSTDIR.old to put back, and nothing is lost by deleting the copy.
+    IfFileExists "$INSTDIR.old\*.*" 0 swap_drop_staged
+    StrCpy $R1 0
+  swap_undo_retry:
+    ClearErrors
     Rename "$INSTDIR.old" "$INSTDIR"
+    IfErrors 0 swap_drop_staged
+    IntOp $R1 $R1 + 1
+    IntCmp $R1 40 swap_undo_giveup
+    Sleep 500
+    Goto swap_undo_retry
+  swap_undo_giveup:
+    !insertmacro FailInstall "${APPNAME} could not be updated, and its previous version could not be put back. Run this installer again to finish the update."
+  swap_drop_staged:
     RMDir /r "$INSTDIR.new"
     !insertmacro FailInstall "${APPNAME} could not be updated: its new files could not be moved into place."
   swap_done:

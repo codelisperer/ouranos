@@ -242,14 +242,20 @@ begin
     Result := 0;
 end;
 
-{ Give up: delete the staged copy, leaving AppDir as it was, and end Setup with an error. }
-procedure FailInstall(Message: String);
+{ Give up, and end Setup with an error, leaving whatever is in AppDir.new where it is. }
+procedure FailKeepingStaged(Message: String);
 begin
-  DelTree(AppDir + '.new', True, True, True);
   if PreviousDisplayVersion <> '' then
     RegWriteStringValue(HKCU, UNINSTALL_KEY, 'DisplayVersion', PreviousDisplayVersion);
   InstallFailed := True;
   RaiseException(Message);
+end;
+
+{ Give up: delete the staged copy, leaving AppDir as it was, and end Setup with an error. }
+procedure FailInstall(Message: String);
+begin
+  DelTree(AppDir + '.new', True, True, True);
+  FailKeepingStaged(Message);
 end;
 
 { The staged launcher checks the staged core and exits without starting the app
@@ -278,7 +284,11 @@ end;
   The first rename is retried for 20 seconds while the app finishes exiting: until it succeeds
   nothing has changed. The second is retried for 20 seconds too, because a file open in
   AppDir.new stops it -- an antivirus scanner reading the files just written, for one (measured
-  with a process reading them, #98) -- and giving up on it undoes the first. }
+  with a process reading them, #98) -- and giving up on it undoes the first. That undo is retried
+  for 20 seconds as well, and AppDir.new is deleted only once AppDir is back. If it never comes
+  back, AppDir.new is kept: it is a complete, checked copy, and with AppDir.old beside it and no
+  AppDir, the next run's RepairSwap moves it into place. Deleting it then could leave part of it,
+  which RepairSwap would take for the whole. }
 procedure SwapIn;
 var
   Tries: Integer;
@@ -310,7 +320,19 @@ begin
   end;
   if not Moved then
   begin
-    RenameFile(AppDir + '.old', AppDir);
+    if DirExists(AppDir + '.old') then
+    begin
+      Tries := 0;
+      Moved := RenameFile(AppDir + '.old', AppDir);
+      while (not Moved) and (Tries < 40) do
+      begin
+        Tries := Tries + 1;
+        Sleep(500);
+        Moved := RenameFile(AppDir + '.old', AppDir);
+      end;
+      if not Moved then
+        FailKeepingStaged('{#APPNAME} could not be updated, and its previous version could not be put back. Run this installer again to finish the update.');
+    end;
     FailInstall('{#APPNAME} could not be updated: its new files could not be moved into place.');
   end;
 end;
