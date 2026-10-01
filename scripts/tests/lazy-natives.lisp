@@ -185,7 +185,11 @@ skipped."
                               (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
                                          (sb-ext:posix-environ)))))))
           (is (eql 0 code) "the build failed:~%~A" (get-output-stream-string build-out)))
-        (let* ((bundle (first (uiop:subdirectories dist)))
+        ;; By its name: on Windows dist/ also holds .launcher/ and .runtime/, which the build
+        ;; uses for the launcher it compiles and the runtime it copies.
+        (let* ((bundle (find-if (lambda (d) (uiop:string-prefix-p
+                                             "tlsprobe-" (car (last (pathname-directory d)))))
+                                (uiop:subdirectories dist)))
                (executable (and bundle (merge-pathnames (if (uiop:os-windows-p) "tlsprobe.exe" "tlsprobe")
                                                         bundle)))
                (carried (and bundle (merge-pathnames (file-namestring (%built-mbedtls)) bundle))))
