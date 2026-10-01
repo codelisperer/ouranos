@@ -59,6 +59,7 @@ its tag.
   not 1.9, was built without threads or with experimental SHA-256, or whose functions resolve
   to another libgit2 already loaded in the process. Fetching and pushing are not in this step. The gate
   runs its suite when `OURANOS_WITH_LIBGIT=1`, which CI sets.
+
 ### Fixed
 
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
@@ -961,6 +962,7 @@ Changes since `v0.1.3`. The tag is on `b68ccd4`.
   `Origin: http://127.0.0.1` without the default port. Origins are compared after
   `normalise-origin`, which drops `:80` for http and `:443` for https, and the Host check accepts
   the host with or without the default port. (#302 review)
+
 
 ## v0.1.3 — 2026-09-27
 
