@@ -632,10 +632,16 @@ be built. Those are two different right answers and they shared a code path."
 (defun release-lazy-natives ()
   "Close what WAKE-LAZY-NATIVES opened, before the dump. SBCL records open shared objects and
 reopens them at image startup; a handle left open here points at the BUILD machine's path,
-which is precisely the path the shipped app does not have."
-  (loop for (package nil unloader) in *lazy-natives*
-        for fn = (%fn package unloader)
-        when fn do (ignore-errors (funcall fn))))
+which is precisely the path the shipped app does not have. So an unloader that fails stops
+the build (OURANOS-LAZY-NATIVES:RELEASE-ALL says why it is no longer ignored)."
+  (handler-case (ouranos-lazy-natives:release-all *lazy-natives*)
+    (ouranos-lazy-natives:release-failed (e)
+      (let ((*standard-output* *error-output*))
+        (format t "~&build-desktop-app: ~A~%~%" e)
+        (format t "The library may still be open, and an image dumped now would reopen this~%")
+        (format t "machine's copy when it starts on the user's machine (ADR-0013). Not dumping.~%")
+        (finish-output))
+      (sb-ext:exit :code 3))))
 
 (defparameter *vendor* (merge-pathnames "vendor/" *root*))
 

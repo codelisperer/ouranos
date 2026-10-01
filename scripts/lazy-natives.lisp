@@ -15,7 +15,8 @@
   (:use #:cl)
   (:export #:*lazy-natives* #:entry-package #:entry-loader #:entry-unloader
            #:entry-path-variable #:entry-names-variable #:entry-build-script
-           #:entry-system))
+           #:entry-system
+           #:release-all #:release-failed #:release-failed-package #:release-failed-cause))
 
 (in-package #:ouranos-lazy-natives)
 
@@ -44,3 +45,28 @@ it, and the test that checks this list loads it.")
 (defun entry-names-variable (entry) (fifth entry))
 (defun entry-build-script (entry) (sixth entry))
 (defun entry-system (entry) (seventh entry))
+
+(define-condition release-failed (error)
+  ((package :initarg :package :reader release-failed-package)
+   (cause :initarg :cause :reader release-failed-cause))
+  (:report (lambda (c stream)
+             (format stream "~A's unloader failed: ~A" (release-failed-package c)
+                     (release-failed-cause c))))
+  (:documentation "An unloader signalled, so its library may still be open."))
+
+(defun release-all (&optional (entries *lazy-natives*))
+  "Call the unloader of every entry in ENTRIES whose package is in this image, and signal
+RELEASE-FAILED, naming the package, at the first that signals.
+
+Not IGNORE-ERRORS, which the bundler used before #481's review. SBCL records the shared objects
+an image has open and reopens them when the image starts, before main. A library whose unload
+failed may still be open, and an image dumped then reopens the build machine's path on the
+user's machine and stops there. The unloaders let their errors through for that reason, and so
+must this."
+  (dolist (entry entries)
+    (let* ((p (find-package (entry-package entry)))
+           (s (and p (find-symbol (entry-unloader entry) p))))
+      (when (and s (fboundp s))
+        (handler-case (funcall s)
+          (error (e)
+            (error 'release-failed :package (entry-package entry) :cause e)))))))
