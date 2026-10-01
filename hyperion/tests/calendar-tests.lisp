@@ -57,6 +57,12 @@ no weekday names, so those fall back to English."
   (is (not (cal:date-valid-p "2027-3-14")))
   (is (not (cal:date-valid-p "1899-12-31")))
   (is (not (cal:date-valid-p nil)))
+  ;; A digit followed by junk is not a number (review of #498).
+  (is (not (cal:date-valid-p "2027-1x-14")))
+  (is (not (cal:date-valid-p "2027-03-1a")))
+  (is (not (cal:date-valid-p "20x7-03-14")))
+  (is (not (cal:date-valid-p "2027-+3-14")))
+  (is (not (cal:month-valid-p "2027-1x")))
   (is (cal:month-valid-p "2027-12"))
   (is (not (cal:month-valid-p "2027-13")))
   (signals error (cal:add-days "2027-02-30" 1))
@@ -199,3 +205,76 @@ HREF-FOR-DAY is given."
     (is (search "Thu 11" html))
     (is (search "Wed 17" html))
     (is (search "href=\"/day/2027-03-17\"" html))))
+
+;;; --- accessibility and the strip's width (review of #498) -------------------------
+
+(defun %attr-count (attribute value html)
+  "How many times ATTRIBUTE has VALUE in HTML, quoted or not."
+  (+ (%count (format nil "~A=~A" attribute value) html)
+     (%count (format nil "~A=\"~A\"" attribute value) html)))
+
+(test today-is-marked-for-assistive-technology
+  "aria-current=\"date\" on today's cell and no other, in the grid and in the strip."
+  (let ((grid (%html (lambda () (cal:month-grid :en "2027-03" :today "2027-03-14"))))
+        (strip (%html (lambda () (cal:days-strip :en :start "2027-03-11" :today "2027-03-12")))))
+    (is (= 1 (%attr-count "aria-current" "date" grid)))
+    (is (= 1 (%attr-count "aria-current" "date" strip)))))
+
+(test each-day-carries-its-full-date-for-a-screen-reader
+  "The grid shows a day as a column and a number, so each cell carries its full date: as
+hidden text without day links, as the link's label with them. The weekday headers and the
+bare numbers are hidden from screen readers, so nothing is read twice."
+  (let ((plain (%html (lambda () (cal:month-grid :en "2027-03" :today "2027-03-14"))))
+        (linked (%html (lambda () (cal:month-grid :en "2027-03" :today "2027-03-14"
+                                                  :href-for-day (lambda (d) (format nil "/d/~A" d)))))))
+    (is (= 35 (%with-class "cal-sr" plain)))
+    (is (search "Sun 14 March 2027" plain))
+    (is (search "aria-label=\"Sun 14 March 2027\"" linked))
+    (is (= 0 (%with-class "cal-sr" linked)) "the link's label is the date; no second copy")
+    (is (= 42 (%attr-count "aria-hidden" "true" plain)) "7 headers and 35 day numbers")))
+
+(test the-strip-has-one-column-per-day
+  "DAYS-STRIP gives the stylesheet its COUNT, so three days are three columns."
+  (let ((html (%html (lambda () (cal:days-strip :en :start "2027-03-11" :count 3 :today "2027-03-12")))))
+    (is (= 3 (%with-class "cal-strip__day" html)))
+    (is (search "--cal-strip-count: 3" html))))
+
+(defun %css-variables ()
+  "The --cal-NAME: #hex; custom properties in calendar.css, as an alist."
+  (let ((text (uiop:read-file-string
+               (asdf:system-relative-pathname "hyperion" "assets/components/calendar.css")))
+        (found '()))
+    (loop with start = 0
+          for pos = (search "--cal-" text :start2 start)
+          while pos
+          do (let* ((colon (position #\: text :start pos))
+                    (semi (position #\; text :start pos))
+                    (value (and colon semi (< colon semi)
+                                (string-trim " " (subseq text (1+ colon) semi)))))
+               (when (and value (plusp (length value)) (char= #\# (char value 0)))
+                 (push (cons (subseq text (+ pos 6) colon) value) found))
+               (setf start (1+ pos))))
+    found))
+
+(defun %luminance (hex)
+  (flet ((channel (i)
+           (let ((c (/ (parse-integer hex :start i :end (+ i 2) :radix 16) 255d0)))
+             (if (<= c 0.03928d0) (/ c 12.92d0) (expt (/ (+ c 0.055d0) 1.055d0) 2.4d0)))))
+    (+ (* 0.2126d0 (channel 1)) (* 0.7152d0 (channel 3)) (* 0.0722d0 (channel 5)))))
+
+(defun %contrast (a b)
+  (let ((la (%luminance a)) (lb (%luminance b)))
+    (/ (+ (max la lb) 0.05d0) (+ (min la lb) 0.05d0))))
+
+(test the-default-text-colours-meet-4.5-to-1
+  "Every text colour the stylesheet declares, against every background it declares and
+white, by WCAG's contrast formula, read from the shipped file (review of #498)."
+  (let ((vars (%css-variables)))
+    (dolist (fg '("text" "muted" "faint"))
+      (dolist (bg '("head-bg" "outside-bg" "weekend-bg" "today-bg"))
+        (let ((f (cdr (assoc fg vars :test #'string=)))
+              (b (cdr (assoc bg vars :test #'string=))))
+          (is (and f b (>= (%contrast f b) 4.5d0))
+              "--cal-~A ~A on --cal-~A ~A: ~,2F" fg f bg b (and f b (%contrast f b)))))
+      (let ((f (cdr (assoc fg vars :test #'string=))))
+        (is (and f (>= (%contrast f "#ffffff") 4.5d0)) "--cal-~A ~A on white" fg f)))))

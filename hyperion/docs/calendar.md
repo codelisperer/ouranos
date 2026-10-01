@@ -118,9 +118,21 @@ whose text happens to look like hyperion/i18n's `"[section/key]"` marker is used
 | `cal-strip` | The strip: 7 columns, one column on narrow screens. |
 | `cal-strip__day`, `cal-strip__day--today`, `cal-strip__day--weekend` | A day in the strip. |
 | `cal-strip__name` | The weekday name and day number at the top of a strip cell. |
+| `cal-sr` | Text for screen readers only: each day's full date. |
 
 Colors are custom properties (`--cal-accent`, `--cal-today-bg`, `--cal-weekend-bg` and others)
 declared on `.cal` and `.cal-strip`.
+
+The default text colours are at least 4.5:1 against every default background, which
+`hyperion/calendar/tests` checks from the file. `days-strip` sets `--cal-strip-count` to its
+`count`, so the strip has one column per day.
+
+## Accessibility
+
+- Today's cell has `aria-current="date"`, in the grid and the strip.
+- Each day carries its full date, such as "Sun 14 March 2027". It is the day link's
+  `aria-label` when there is one, and otherwise hidden text with the class `cal-sr`. The weekday
+  headers and the bare day numbers are hidden from screen readers, so nothing is read twice.
 
 ## The stylesheet
 

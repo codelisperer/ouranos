@@ -97,11 +97,15 @@ with {month} and {year} interpolated."
 (defun %parse-date (string)
   "The universal time at noon UTC on the date STRING (YYYY-MM-DD) names, or NIL when it
 is not a real date between 1900 and 9999."
+  ;; Every position but the two hyphens must be a digit. PARSE-INTEGER with :JUNK-ALLOWED
+  ;; would read the "1" of "2027-1x-14" and accept it as January.
   (when (and (stringp string) (= (length string) 10)
-             (char= (char string 4) #\-) (char= (char string 7) #\-))
-    (let ((y (parse-integer string :start 0 :end 4 :junk-allowed t))
-          (m (parse-integer string :start 5 :end 7 :junk-allowed t))
-          (d (parse-integer string :start 8 :end 10 :junk-allowed t)))
+             (char= (char string 4) #\-) (char= (char string 7) #\-)
+             (loop for i below 10
+                   always (or (= i 4) (= i 7) (digit-char-p (char string i)))))
+    (let ((y (parse-integer string :start 0 :end 4))
+          (m (parse-integer string :start 5 :end 7))
+          (d (parse-integer string :start 8 :end 10)))
       (when (and y m d (<= 1900 y 9999) (<= 1 m 12) (<= 1 d (days-in-month y m)))
         (encode-universal-time 0 0 12 d m y 0)))))
 
@@ -172,6 +176,13 @@ or before the 1st to the Sunday on or after the last day. 28, 35 or 42 dates."
 ;;; should write with SPINNERET:WITH-HTML, and whatever it returns is discarded.
 ;;; Class strings are built outside the markup forms, so the walker sees plain values.
 
+(defun %date-label (locale date source)
+  "DATE in full for a screen reader, such as \"Mon 1 March 2027\": the weekday, the day, and
+the month title in LOCALE's order."
+  (format nil "~A ~D ~A" (weekday-name locale (weekday date) :source source)
+          (parse-integer date :start 8)
+          (month-title locale (month-of date) :source source)))
+
 (defun %day-class (base date &key month today)
   "BASE plus the modifier classes that apply to DATE."
   (format nil "~A~{ ~A~}" base
@@ -209,15 +220,20 @@ marked cal-day--outside, Saturdays and Sundays cal-day--weekend. Returns NIL."
                 :aria-label (%text locale :calendar/next-month source) "›")))
         (:div :class "cal-grid"
           (loop for n from 1 to 7
+                ;; Hidden from screen readers: each cell carries its weekday in its label.
                 do (:div :class (if (>= n 6) "cal-grid__head cal-grid__head--weekend"
                                     "cal-grid__head")
+                         :aria-hidden "true"
                      (weekday-name locale n :source source)))
           (dolist (date (month-dates month))
             (:div :class (%day-class "cal-day" date :month month :today today)
+                  :aria-current (and (equal date today) "date")
               (when href-for-day
                 (:a :class "cal-day__open" :href (funcall href-for-day date)
-                    :aria-label date))
-              (:span :class "cal-day__num" (parse-integer date :start 8))
+                    :aria-label (%date-label locale date source)))
+              (:span :class "cal-day__num" :aria-hidden "true" (parse-integer date :start 8))
+              (unless href-for-day
+                (:span :class "cal-sr" (%date-label locale date source)))
               (:div :class "cal-day__body"
                 (when render-day
                   (progn (funcall render-day date) nil))))))))
@@ -238,7 +254,7 @@ and without it a plain block. Returns NIL."
          (start (or start today))
          (dates (loop for i below count collect (add-days start i))))
     (spin:with-html
-      (:div :class "cal-strip"
+      (:div :class "cal-strip" :style (format nil "--cal-strip-count: ~D" count)
         (dolist (date dates)
           (let ((class (%day-class "cal-strip__day" date :today today))
                 (label (format nil "~A ~D"
@@ -246,11 +262,14 @@ and without it a plain block. Returns NIL."
                                (parse-integer date :start 8))))
             (if href-for-day
                 (:a :class class :href (funcall href-for-day date)
-                  (:span :class "cal-strip__name" label)
+                    :aria-current (and (equal date today) "date")
+                  (:span :class "cal-strip__name" :aria-hidden "true" label)
+                  (:span :class "cal-sr" (%date-label locale date source))
                   (when render-day
                     (progn (funcall render-day date) nil)))
-                (:div :class class
-                  (:span :class "cal-strip__name" label)
+                (:div :class class :aria-current (and (equal date today) "date")
+                  (:span :class "cal-strip__name" :aria-hidden "true" label)
+                  (:span :class "cal-sr" (%date-label locale date source))
                   (when render-day
                     (progn (funcall render-day date) nil))))))))
     nil))

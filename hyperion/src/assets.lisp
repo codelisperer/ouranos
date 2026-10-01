@@ -111,7 +111,8 @@ assets/vendor/ASSETS.pin, and the tree's own component stylesheets.")
   (string= "tree" (asset-version asset)))
 
 (defun assets ()
-  "The vendored assets, as a list."
+  "Every asset, as a list: the vendored ones and the tree's own component stylesheets. Only
+the vendored ones have a line in ASSETS.pin; FIRST-PARTY-P tells them apart."
   (copy-list *assets*))
 
 (defun asset (key)
