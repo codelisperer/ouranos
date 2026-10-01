@@ -46,6 +46,14 @@ its tag.
 
 ### Fixed
 
+- **aion/windows/com: a process that has started the STA apartment exits without waiting a
+  minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
+  waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that
+  had used COM looked hung for a minute after its window closed. `aion/windows/com` now puts
+  `%stop-apartment-at-exit` on `sb-ext:*exit-hooks*`, which stops the apartment, waiting at most
+  `*exit-stop-timeout*` (10 s) for its thread. An app that registered its own exit hook calling
+  `stop-apartment` as a workaround can remove it; leaving it does no harm, because stopping a
+  stopped apartment does nothing. (#484)
 - **hyperion/server-uv: `:loops :auto` in a CPU-limited container on Linux follows the
   container's limit, not the host's cores** (#475). The count is now the smallest of the online
   CPUs, the CPUs in the process's affinity mask (`sched_getaffinity`), and the cgroup v2
