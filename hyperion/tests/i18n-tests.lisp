@@ -196,9 +196,17 @@ that do not need them, and that is a rendering detail these tests must not depen
 ;;; --- the current translation source (#491) ------------------------------------
 
 (test translate-current-uses-the-bound-source
+  "TRANSLATE-CURRENT and TRANSLATE-PLURAL-CURRENT with a source bound: the count picks the
+plural form and is interpolated, and further arguments are passed on."
   (i18n:with-translation-source ((%dict))
     (is (string= "Привет" (i18n:translate-current :ru :home/hi)))
-    (is (string= "Hi Bob!" (i18n:translate-current :en :home/greet :name "Bob")))))
+    (is (string= "Hi Bob!" (i18n:translate-current :en :home/greet :name "Bob"))))
+  (i18n:with-translation-source ((i18n:make-dictionary
+                                  (%ht "en" (%ht "trial" (%ht "days-left.one" "{count} day left for {name}"
+                                                              "days-left.other" "{count} days left for {name}")))
+                                  :default :en))
+    (is (string= "1 day left for Ann" (i18n:translate-plural-current :en :trial/days-left 1 :name "Ann")))
+    (is (string= "5 days left for Ann" (i18n:translate-plural-current :en :trial/days-left 5 :name "Ann")))))
 
 (test translate-current-with-nothing-bound-signals
   "Unbound, it signals NO-TRANSLATION-SOURCE naming the key, rather than rendering markers.
@@ -218,10 +226,12 @@ spawned without it does not see the binding, so the first check could tell the d
   (i18n:with-translation-source ((%dict))
     ;; An error in the thread is returned as text: left unhandled it would end the test run.
     (flet ((in-thread (fn)
-             (sb-thread:join-thread
+             ;; AION/TEST-THREADS:JOIN gives up after its deadline and names the thread, so a
+             ;; stuck thread fails this test instead of hanging the run.
+             (aion/test-threads:join
               (sb-thread:make-thread (lambda () (handler-case (funcall fn)
-                                                  (error (e) (princ-to-string e)))))
-              :default :timeout)))
+                                                  (error (e) (princ-to-string e))))
+                                     :name "i18n current-source test"))))
       (is (string= "Hello"
                    (in-thread (aion/dynamic:inheriting
                                (lambda () (i18n:translate-current :en :home/hi))))))
