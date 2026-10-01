@@ -442,3 +442,83 @@ and the other workers do not wait for it either."
       (let ((ok (sb-thread:wait-on-semaphore returned :timeout 10)))
         (is-true ok "~D workers: STOP-POOL called from a job did not return" size)
         (when ok (pool:stop-pool p))))))
+
+;;; --- #520: stopping and submitting at once, and STOP-POOL called by several jobs ------
+
+(test a-submitter-paused-anywhere-while-the-pool-stops-loses-no-accepted-job
+  "A submitter submits until the pool refuses it after STOP-POOL was called. In each of 500
+trials it is paused for up to 2 ms, by an interrupt that lands at whatever point it has
+reached, just as STOP-POOL starts. Every job TRY-SUBMIT accepted must have run once STOP-POOL
+and the submitter have returned. A pool that read STOPPING before reserving a place loses a job
+when the pause falls between the read and the reservation (#520).
+
+The queue limit is large so that the submitter is rarely refused and spends its time on the
+path that reserves a place. On macOS, that pool lost a job in 119 of 1,000 trials at this
+limit, and in 3 of 300 at a limit of 8."
+  (let ((trials 500) (lost-trials 0) (stuck-trials 0))
+    (dotimes (trial trials)
+      (let* ((p (pool:make-pool :size 2 :queue-limit 4096))
+             (accepted (list 0)) (ran (list 0)) (stop-called (list nil))
+             (submitter
+               (sb-thread:make-thread
+                (lambda ()
+                  (loop
+                    (if (pool:try-submit p (lambda () (sb-ext:atomic-incf (car ran))))
+                        (sb-ext:atomic-incf (car accepted))
+                        (if (car stop-called) (return :done) (sb-thread:thread-yield)))))
+                :name "pool paused submitter")))
+        (sleep (random 0.0005))
+        (ignore-errors
+         (sb-thread:interrupt-thread submitter (lambda () (sleep (random 0.002)))))
+        (setf (car stop-called) t)
+        (pool:stop-pool p)
+        (if (eq :done (ignore-errors (aion/test-threads:join submitter :timeout 10)))
+            (unless (= (car accepted) (car ran)) (incf lost-trials))
+            (incf stuck-trials))))
+    (is (= 0 lost-trials) "~D of ~D trials lost an accepted job" lost-trials trials)
+    (is (= 0 stuck-trials) "~D of ~D trials' submitters did not finish" stuck-trials trials)))
+
+(test two-jobs-calling-stop-pool-at-once-both-return
+  "For 2 and 4 workers, two jobs that are running at the same time both call STOP-POOL. Each
+call skips the other's worker, so both return; before #520 each joined the other's worker and
+neither returned."
+  (dolist (size '(2 4))
+    (let* ((p (pool:make-pool :size size :queue-limit 4))
+           (arrived (sb-thread:make-semaphore)) (both (sb-thread:make-semaphore))
+           (returned (sb-thread:make-semaphore)))
+      (dotimes (i 2)
+        (is (pool:try-submit p (lambda ()
+                                 (sb-thread:signal-semaphore arrived)
+                                 (sb-thread:wait-on-semaphore both :timeout 10)
+                                 (pool:stop-pool p)
+                                 (sb-thread:signal-semaphore returned)))))
+      (is-true (and (sb-thread:wait-on-semaphore arrived :timeout 10)
+                    (sb-thread:wait-on-semaphore arrived :timeout 10))
+               "~D workers: both jobs started" size)
+      (sb-thread:signal-semaphore both 2)
+      ;; As in the test above it, stopped again only when both calls returned, so a deadlock
+      ;; fails this check instead of hanging the run.
+      (let ((ok (and (sb-thread:wait-on-semaphore returned :timeout 10)
+                     (sb-thread:wait-on-semaphore returned :timeout 10))))
+        (is-true ok "~D workers: two jobs calling STOP-POOL at once did not both return" size)
+        (when ok (pool:stop-pool p))))))
+
+(test stop-pool-from-outside-waits-for-a-worker-whose-job-stopped-the-pool
+  "One worker. Its job calls STOP-POOL with three jobs queued behind it, which the worker runs
+before it exits. A later STOP-POOL from outside the pool must return only after those three
+have run; before #520 it returned at once, and they started afterwards."
+  (let* ((p (pool:make-pool :size 1 :queue-limit 4))
+         (go-on (sb-thread:make-semaphore)) (job-stopped (sb-thread:make-semaphore))
+         (ran (list 0)))
+    (is (pool:try-submit p (lambda ()
+                             (sb-thread:wait-on-semaphore go-on :timeout 10)
+                             (pool:stop-pool p)
+                             (sb-thread:signal-semaphore job-stopped))))
+    (dotimes (i 3)
+      (is (pool:try-submit p (lambda () (sleep 0.05) (sb-ext:atomic-incf (car ran))))))
+    (sb-thread:signal-semaphore go-on)
+    (is-true (sb-thread:wait-on-semaphore job-stopped :timeout 10))
+    (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) (car ran))
+                                          :name "pool outside stopper")))
+      (is (eql 3 (aion/test-threads:join stopper :timeout 10))
+          "STOP-POOL from outside returned before the queued jobs had run"))))
