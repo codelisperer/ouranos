@@ -43,17 +43,21 @@
 ;;;; THAT FAILS leaves the observer unsaved, and the next OBSERVE-TURN starts a run to make it,
 ;;;; even with no new message. Until it is made the store is behind: after a stop, a restart or
 ;;;; with a new observer, the window it covers is distilled again, and a model that words its
-;;;; answer differently leaves both wordings.
+;;;; answer differently leaves both wordings. The same can happen with long-lived observers: one
+;;;; whose write failed, followed by another observer's turn before the first writes it, lets
+;;;; the second distil the window again.
 ;;;;
-;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS. OBSERVE-TURN starts nothing while
-;;;; another observer of the same store, subject and thread holds the thread. Progress is merged,
-;;;; never replaced (%MERGE-PROGRESS): a run starts by merging its own with the store's, and each
-;;;; save merges again before writing, so the stored mark is never lowered and newer progress at
-;;;; an equal mark is never overwritten; a run whose first read of the store fails ends there. RUNNING-OBSERVER names the observer holding a thread. A refused call logs that
-;;;; another observer is running (a warning when that one is stuck) and does nothing else: a
-;;;; refused :FLUSH is not queued, so an app that makes an observer per request flushes again
-;;;; once RUNNING-OBSERVER is NIL. Observers of one thread in two processes at once are not
-;;;; coordinated.
+;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS, FOR ONE STORE OBJECT. OBSERVE-TURN
+;;;; starts nothing while another observer of the same store object, subject and thread holds
+;;;; the thread. Progress is merged, never replaced (%MERGE-PROGRESS): a run starts by merging
+;;;; its own with the store's, and each save merges again before writing, so, through one store
+;;;; object in one process, the stored mark is never lowered and newer progress at an equal mark
+;;;; is never overwritten. A run whose first read of the store fails ends there.
+;;;; RUNNING-OBSERVER names the observer holding a thread. A refused call logs that another
+;;;; observer is running (a warning when that one is stuck) and does nothing else: a refused
+;;;; :FLUSH is not queued, so an app that makes an observer per request flushes again once
+;;;; RUNNING-OBSERVER is NIL. Observers of one thread through two store objects over one
+;;;; database, or in two processes, are not coordinated.
 ;;;;
 ;;;; ERASURE. `forget-subject' while a window is being distilled can be followed by that
 ;;;; window's writes. Stop the subject's observers before erasing it: STOP-OBSERVER on
@@ -274,8 +278,8 @@ is for the end of a conversation, whose last messages would otherwise never reac
 also tries again each skipped window still due. Two runs start with no new message: one that
 writes progress a failed write left unsaved, and one that closes an exhausted skipped window
 once a later window is in the thread. Deciding the second reads the thread; a failed read is
-logged and starts nothing, so a store failure does not fail the caller. The history is copied here, and today's date
-taken here, so messages the app adds later are the next call's."
+logged and starts nothing, so a store failure does not fail the caller. The history is copied
+here, and today's date taken here, so messages the app adds later are the next call's."
   (let ((snapshot (copy-list history))
         (today (get-universal-time)))
     (bt:with-lock-held ((observer-lock observer))
@@ -348,27 +352,45 @@ thread would end the process."
                                                 :condition (string-downcase (princ-to-string (type-of e))))))
     (%release observer)))
 
+(defun %same-window-p (x y) (and (= (first x) (first y)) (= (second x) (second y))))
+
+(defun %overlap-p (x y) (and (<= (first x) (second y)) (<= (first y) (second x))))
+
 (defun %merge-progress (mark-a skipped-a mark-b skipped-b)
   "Two records of one thread's progress, merged. Returns the merged mark and skipped windows.
 
-The mark is the larger. A skipped window up to the smaller mark is kept only when both records
-hold it, because a record that reached its end without it wrote it; then :CLOSED beats open and
-more tries beat fewer. A skipped window past the smaller mark comes from the record that reached
-it. The result is the same whichever record is A, and merging it again with either changes
-nothing, so it can be applied on adoption and on save alike (#462's sixth review)."
+The mark is the larger. Past the smaller mark, skipped windows come from the record that reached
+it. Up to the smaller mark:
+  - a window both records hold is kept once, :CLOSED beating open and more tries beating fewer;
+  - a window only one record holds is dropped when the other record holds no skipped window
+    overlapping it, because a record that reached its end without anything skipped there
+    distilled those messages;
+  - it is kept when the other record holds an overlapping skipped window, as when two observers
+    cut the same messages with a different :STEP or flush. Keeping both can mean those messages
+    are covered twice; dropping either would leave some of them undistilled and uncovered
+    (#462's seventh review).
+The result is the same whichever record is A, and merging it again with either changes nothing,
+so it is applied on adoption and on save alike."
   (let* ((low (min mark-a mark-b))
          (high-skipped (cond ((> mark-a mark-b) skipped-a)
                              ((> mark-b mark-a) skipped-b)
                              (t '())))
-         (both (loop for a in skipped-a
-                     for b = (find-if (lambda (e) (and (= (first e) (first a)) (= (second e) (second a))))
-                                      skipped-b)
-                     when (and b (<= (second a) low))
-                       collect (append (list (first a) (second a) (max (third a) (third b)))
-                                       (unless (and (%open-p a) (%open-p b)) (list :closed)))))
-         (beyond (remove-if (lambda (e) (<= (second e) low)) high-skipped)))
+         (kept '()))
+    (flet ((keep (entry) (unless (find-if (lambda (k) (%same-window-p k entry)) kept) (push entry kept))))
+      (loop for (this other) in (list (list skipped-a skipped-b) (list skipped-b skipped-a))
+            do (dolist (e this)
+                 (when (<= (second e) low)
+                   (let ((same (find-if (lambda (o) (%same-window-p o e)) other)))
+                     (cond
+                       (same (keep (append (list (first e) (second e) (max (third e) (third same)))
+                                           (unless (and (%open-p e) (%open-p same)) (list :closed)))))
+                       ((some (lambda (o) (and (<= (second o) low) (%overlap-p o e))) other)
+                        (keep e)))))))
+      (dolist (e high-skipped)
+        (when (> (second e) low) (keep e))))
     (values (max mark-a mark-b)
-            (sort (append both beyond) #'< :key #'first))))
+            (sort kept (lambda (x y) (or (< (first x) (first y))
+                                         (and (= (first x) (first y)) (< (second x) (second y)))))))))
 
 (defun %note-unsaved (observer e)
   (setf (observer-unsaved observer) t)

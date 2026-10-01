@@ -102,7 +102,7 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
 ;;; THE OBSERVER'S PROGRESS ON EACH THREAD (#317), one row per subject and thread, in a table of
 ;;; its own beside the observations: see PRAXEON/MEMORY:THREAD-PROGRESS for why it is recorded
 ;;; rather than worked out from them. SKIPPED is the windows given up on, "FROM-THROUGH-TRIES"
-;;; joined by commas.
+;;; joined by commas, with "-closed" after a closed one.
 (defparameter +progress-fields+
   '((:id         :string  :primary t)
     (:subject    :string  :required t)
