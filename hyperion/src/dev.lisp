@@ -265,27 +265,33 @@ own previous listener or code the reload had just run."))
   "Stop D's server and start a new one with D's builder; return the new handler.
 
 The builder's START preflights the port by connecting to it, and a listener that has not been
-released yet answers that. So while the builder signals PORT-IN-USE, it is retried every
-100 ms for up to *RESTART-PORT-WAIT* seconds; after that, RESTART-PORT-STILL-ANSWERING is
-signalled, with any error from the stop. An error stopping the old server is no longer
-discarded: it is the most likely reason the port is still held (#492)."
-  (let ((stop-error nil)
-        (deadline (+ (get-internal-real-time)
-                     (round (* *restart-port-wait* internal-time-units-per-second)))))
+released yet answers that. So while the builder signals PORT-IN-USE from that preflight, it is
+retried every 100 ms for up to *RESTART-PORT-WAIT* seconds, counted from when the stop has
+returned, since a stop can itself take seconds; after that, RESTART-PORT-STILL-ANSWERING is
+signalled, with any error from the stop. A PORT-IN-USE with a CAUSE is the backend's own bind
+failing, not the preflight, and is passed on at once rather than retried or renamed (review of
+#494).
+
+An error stopping the old server is no longer discarded: it is the most likely reason the port
+is still held (#492). The handle is cleared only after a stop that succeeded, so that after a
+failed one UNWATCH, or the next restart, can still try to stop that server."
+  (let ((stop-error nil))
     (when (dev-handler d)
-      (handler-case (srv:stop (dev-handler d))
-        (error (e) (setf stop-error (princ-to-string e))))
-      ;; Stopped, whatever the start below does: a failed restart must not leave a handler
-      ;; that the next one stops a second time.
-      (setf (dev-handler d) nil))
-    (loop
-      (handler-case (return (funcall (dev-builder d)))
-        (srv:port-in-use (e)
-          (when (> (get-internal-real-time) deadline)
-            (error 'restart-port-still-answering
-                   :host (srv:port-in-use-host e) :port (srv:port-in-use-port e)
-                   :seconds *restart-port-wait* :stop-error stop-error))
-          (sleep 0.1))))))
+      (handler-case (progn (srv:stop (dev-handler d))
+                           (setf (dev-handler d) nil))
+        (error (e) (setf stop-error (princ-to-string e)))))
+    (let ((deadline (+ (get-internal-real-time)
+                       (round (* *restart-port-wait* internal-time-units-per-second)))))
+      (loop
+        (handler-case (return (funcall (dev-builder d)))
+          (srv:port-in-use (e)
+            (when (srv:port-in-use-cause e)
+              (error e))
+            (when (> (get-internal-real-time) deadline)
+              (error 'restart-port-still-answering
+                     :host (srv:port-in-use-host e) :port (srv:port-in-use-port e)
+                     :seconds *restart-port-wait* :stop-error stop-error))
+            (sleep 0.1)))))))
 
 (defun reload! (&optional (d *dev*))
   "Recompile changed watched files; on success rebuild the server via the builder

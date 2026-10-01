@@ -479,8 +479,13 @@ stylesheet change clears the error while the file still has never loaded -- the 
 ;;; with a plain listener at the moment of the restart, as a listener that has not let go would.
 
 (defun %hold-port (port seconds)
-  "Listen on 127.0.0.1:PORT for SECONDS in a thread of its own, then close. Returns once
-listening.
+  "Listen on 127.0.0.1:PORT for SECONDS in a thread of its own, accepting and closing every
+connection as a server would, then close; the socket is closed however the thread ends. Returns
+the thread once it is listening, for the caller to join.
+
+It accepts because a listener that never does fills its backlog with the preflight's connections,
+after which connecting fails, the preflight finds nothing answering, and the restart's bind fails
+instead: a different path from the one under test (measured on Windows, review of #494).
 
 SO_REUSEADDR is set on Unix and not on Windows. On macOS a port that another listener has just
 closed cannot be bound again without it: the CI leg failed with EADDRINUSE here. On Windows it
@@ -490,12 +495,22 @@ would let this socket take a port that is still being listened on."
     (setf (sb-bsd-sockets:sockopt-reuse-address s) #-win32 t #+win32 nil)
     (sb-bsd-sockets:socket-bind s #(127 0 0 1) port)
     (sb-bsd-sockets:socket-listen s 5)
-    (sb-thread:make-thread (lambda ()
-                             (sb-thread:signal-semaphore ready)
-                             (sleep seconds)
-                             (sb-bsd-sockets:socket-close s))
-                           :name "dev-492-port-holder")
-    (sb-thread:wait-on-semaphore ready)))
+    (setf (sb-bsd-sockets:non-blocking-mode s) t)
+    (prog1 (sb-thread:make-thread
+            (lambda ()
+              (unwind-protect
+                   (let ((until (+ (get-internal-real-time)
+                                   (round (* seconds internal-time-units-per-second)))))
+                     (sb-thread:signal-semaphore ready)
+                     (loop while (< (get-internal-real-time) until)
+                           do (let ((c (ignore-errors (sb-bsd-sockets:socket-accept s))))
+                                (if c
+                                    (ignore-errors (sb-bsd-sockets:socket-close c))
+                                    (sleep 0.02))))
+                     :released)
+                (sb-bsd-sockets:socket-close s)))
+            :name "dev-492-port-holder")
+      (sb-thread:wait-on-semaphore ready))))
 
 (defun %restart-with-port-held (hold-seconds)
   "Serve on a fixed port through a dev handle, change a watched file, and reload while the port
@@ -504,10 +519,11 @@ LAST-ERROR SECONDS-TAKEN ANSWERING-AFTER)."
   (let* ((root (%fresh-dev-root))
          (port (ports:candidate-port))
          (calls 0)
+         (holder nil)
          (builder (lambda ()
                     (when (= (incf calls) 2)
                       ;; The previous server has just been stopped: hold its port, once.
-                      (%hold-port port hold-seconds))
+                      (setf holder (%hold-port port hold-seconds)))
                     (srv:start (lambda (env) (declare (ignore env)) '(200 () ("x")))
                                :port port :server :hunchentoot :log nil)))
          (d (hyperion/dev::make-dev :builder builder :paths (list root))))
@@ -522,6 +538,9 @@ LAST-ERROR SECONDS-TAKEN ANSWERING-AFTER)."
              (values result (hyperion/dev::dev-last-error d) took
                      (and (eq result :reloaded) (srv:port-answering-p "127.0.0.1" port)))))
       (ignore-errors (when (hyperion/dev::dev-handler d) (srv:stop (hyperion/dev::dev-handler d))))
+      ;; Joined with a deadline, so a holder that went wrong fails the test by name, and its
+      ;; listener is closed before the next test (review of #494).
+      (when holder (aion/test-threads:join holder :timeout (+ hold-seconds 10)))
       (ignore-errors (aion/fs:delete-tree root)))))
 
 (test a-restart-waits-for-the-port-its-previous-server-held
@@ -541,5 +560,4 @@ server, not a sibling application."
       (is (and err (search "previous server has not released the port" err))
           "the error says the previous server still holds the port: ~A" err)
       (is (and err (null (search "sibling" err)))
-          "and does not send the developer looking for a sibling application: ~A" err)))
-  (sleep 3))
+          "and does not send the developer looking for a sibling application: ~A" err))))
