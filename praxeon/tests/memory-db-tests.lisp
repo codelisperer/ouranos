@@ -22,7 +22,10 @@
                     (#:be #:mnemosyne/backend)
                     (#:mig #:mnemosyne/migrate)
                     (#:param #:mnemosyne/param)
-                    (#:q #:mnemosyne/query))
+                    (#:q #:mnemosyne/query)
+                    (#:obs #:praxeon/observe)
+                    (#:distil #:praxeon/distil)
+                    (#:ctx #:praxeon/context))
   (:export #:run-tests))
 
 (in-package #:praxeon/memory-db/tests)
@@ -451,13 +454,94 @@ subject's facts does not return a thread observation, and the reverse."
     (is (= 2 (length (mem:observations-of store "member-5" :thread :all))))))
 
 (test ensure-schema-adds-the-thread-columns-to-a-table-made-before-them
-  "A table made before #317 has no thread or source_through column. ENSURE-SCHEMA adds them, and
-a thread observation can then be written. Control: before ENSURE-SCHEMA, the write fails."
+  "A table made before #317 has no thread or source_through column. Every read fails on it, not
+only a thread's, because a read of the subject's facts filters on THREAD IS NULL; that is why
+the CHANGELOG says to run ENSURE-SCHEMA before reading. ENSURE-SCHEMA adds the columns, and the
+row written before them reads back as a fact about its subject. Running it again changes
+nothing."
   (with-store (store)
+    (mem:remember store "member-6" "Written before the upgrade." :provenance (test-provenance))
     (dolist (column '("thread" "source_through"))
       (conn:exec (mdb::store-connection store)
                  (format nil "ALTER TABLE ~A DROP COLUMN ~A" (mdb:store-table store) column)))
-    (signals error (mem:remember store "member-6" "x" :thread "conv-1" :provenance (test-provenance)))
+    (signals error (mem:observations-of store "member-6") "a plain read fails before the upgrade")
     (mdb:ensure-schema store)
+    (mdb:ensure-schema store)
+    (is (equal '("Written before the upgrade.")
+               (mapcar #'mem:observation-content (mem:observations-of store "member-6")))
+        "the old row is a fact about its subject")
     (mem:remember store "member-6" "y" :thread "conv-1" :provenance (test-provenance))
     (is (= 1 (length (mem:observations-of store "member-6" :thread "conv-1"))))))
+
+;;; --- the observer and distil's thread scope on the SQL store (#317) --------------------------
+
+(defclass scripted-provider (llm:provider)
+  ((replies :initarg :replies :accessor scripted-replies)))
+
+(defmethod llm:complete ((p scripted-provider) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (or (pop (scripted-replies p)) (llm:make-completion :text "" :stop-reason :end)))
+
+(defmethod llm:supports-tool-choice-p ((p scripted-provider)) t)
+
+(defun %observations-call (&rest contents)
+  "A completion whose record_observations call proposes CONTENTS, each a fact."
+  (llm:make-completion
+   :stop-reason :tool-use
+   :tool-calls (list (llm:make-tool-call
+                      :id "c1" :name "record_observations"
+                      :arguments (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "observations" h)
+                                         (coerce (loop for c in contents
+                                                       collect (let ((o (make-hash-table :test #'equal)))
+                                                                 (setf (gethash "content" o) c (gethash "kind" o) "fact")
+                                                                 o))
+                                                 'vector))
+                                   h)))))
+
+(defun %chat (n)
+  (loop for i from 1 to n
+        collect (llm:msg (if (oddp i) "user" "assistant")
+                         (format nil "message ~D: ~{~A~^ ~}" i (make-list 60 :initial-element "word")))))
+
+(test the-observer-writes-a-threads-observations-to-the-sql-store
+  "The observer against the SQL store: the window's observations land in the thread's scope with
+their message range, the mark moves, and a new observer resumes from the stored mark."
+  (with-store (store)
+    (let* ((step (praxeon/prompt:messages-tokens (%chat 6)))
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Has a dog." "Lives in Lisbon.")))
+                                        store "member-8" "conv-9" :step step)))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20))
+      (let ((written (mem:observations-of store "member-8" :thread "conv-9")))
+        (is (equal '("Has a dog." "Lives in Lisbon.")
+                   (sort (mapcar #'mem:observation-content written) #'string<)))
+        (is (= 6 (mem:provenance-through (mem:observation-provenance (first written))))))
+      (is (null (mem:observations-of store "member-8")) "nothing in the subject's facts")
+      (is (= 6 (obs:observer-mark (obs:make-observer (make-instance 'scripted-provider :replies nil)
+                                                     store "member-8" "conv-9" :step step)))
+          "a new observer resumes from the mark the store holds"))))
+
+(test apply-distillation-writes-into-a-thread-on-the-sql-store
+  (with-store (store)
+    (let ((d (distil:distil (make-instance 'scripted-provider :replies (list (%observations-call "Prefers mornings.")))
+                            "member-9" (%chat 1))))
+      (distil:apply-distillation store d :provenance (test-provenance) :thread "conv-3")
+      (is (equal '("Prefers mornings.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-9" :thread "conv-3"))))
+      (is (null (mem:observations-of store "member-9"))))))
+
+(test recall-similar-keeps-to-one-scope
+  "Similarity recall over a thread returns only that thread's observations, and over the subject
+only the subject's facts. :ALL is refused, since a recall builds a prompt."
+  (with-store (store)
+    (mem:remember store "member-10" "the member prefers mornings" :provenance (test-provenance))
+    (mem:remember store "member-10" "the member's budget is tight" :thread "conv-4" :provenance (test-provenance))
+    (let ((query (llm:embed (make-instance 'basis-embedder) "the member prefers mornings")))
+      (is (equal '("the member prefers mornings")
+                 (mapcar #'ctx:ctx-item-content (mem:recall-similar store "member-10" query :limit 5))))
+      (is (equal '("the member's budget is tight")
+                 (mapcar #'ctx:ctx-item-content (mem:recall-similar store "member-10" query :limit 5 :thread "conv-4"))))
+      (signals cnd:praxeon-error (mem:recall-similar store "member-10" query :thread :all))
+      (signals cnd:praxeon-error (mem:recall store "member-10" :thread :all)))))
