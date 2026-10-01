@@ -14,6 +14,15 @@ its tag.
 
 ### Fixed
 
+- **hyperion/dev: a restart waits for its port, and no longer blames a sibling application.**
+  When `reload!` restarted the server, the new server's port check ran 0.1 s after the old one
+  was stopped, and failed if the old listener had not let go yet, with a message that sent the
+  developer looking for another application on the port. The restart now retries the builder
+  while it signals `hyperion/server:port-in-use`, for up to `hyperion/dev::*restart-port-wait*`
+  (5 s). If the port still answers after that, it signals
+  `hyperion/dev::restart-port-still-answering`, whose message says that this dev server's
+  previous server, or code the reload ran, still holds the port, and gives any error from
+  stopping the old server, which used to be discarded. (#492)
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that

@@ -235,6 +235,58 @@ the new one."
         (format nil "~A did not reload, so the running code is the version from before this change. Fix the problem below and save again; the file is retried on every save until it compiles.~%~%~A"
                 name text))))
 
+(defvar *restart-port-wait* 5
+  "Seconds a restart keeps retrying the builder while its port still answers (#492).")
+
+(define-condition restart-port-still-answering (error)
+  ((host :initarg :host :reader restart-port-still-answering-host)
+   (port :initarg :port :reader restart-port-still-answering-port)
+   (seconds :initarg :seconds :reader restart-port-still-answering-seconds)
+   (stop-error :initarg :stop-error :initform nil
+               :reader restart-port-still-answering-stop-error))
+  (:report
+   (lambda (c s)
+     (format s "hyperion/dev: the restart stopped this dev server's previous server, and ~A:~D was still answering ~D s later, so the new one was not started."
+             (restart-port-still-answering-host c) (restart-port-still-answering-port c)
+             (restart-port-still-answering-seconds c))
+     (format s " Either the previous server has not released the port yet, or code this reload ran started another server on it.")
+     (if (restart-port-still-answering-stop-error c)
+         (format s " Stopping the previous server signalled: ~A" (restart-port-still-answering-stop-error c))
+         (format s " Stopping the previous server signalled nothing."))
+     (format s " Save again to retry, or restart the dev server.")))
+  (:documentation
+   "Signalled by RELOAD! when the restarted server cannot start because its port still
+answers after the previous server was stopped and *RESTART-PORT-WAIT* seconds have passed
+(#492). Before, the restart reported HYPERION/SERVER:PORT-IN-USE, whose message sends the
+developer looking for a sibling application, when what held the port was this dev server's
+own previous listener or code the reload had just run."))
+
+(defun %stop-then-start (d)
+  "Stop D's server and start a new one with D's builder; return the new handler.
+
+The builder's START preflights the port by connecting to it, and a listener that has not been
+released yet answers that. So while the builder signals PORT-IN-USE, it is retried every
+100 ms for up to *RESTART-PORT-WAIT* seconds; after that, RESTART-PORT-STILL-ANSWERING is
+signalled, with any error from the stop. An error stopping the old server is no longer
+discarded: it is the most likely reason the port is still held (#492)."
+  (let ((stop-error nil)
+        (deadline (+ (get-internal-real-time)
+                     (round (* *restart-port-wait* internal-time-units-per-second)))))
+    (when (dev-handler d)
+      (handler-case (srv:stop (dev-handler d))
+        (error (e) (setf stop-error (princ-to-string e))))
+      ;; Stopped, whatever the start below does: a failed restart must not leave a handler
+      ;; that the next one stops a second time.
+      (setf (dev-handler d) nil))
+    (loop
+      (handler-case (return (funcall (dev-builder d)))
+        (srv:port-in-use (e)
+          (when (> (get-internal-real-time) deadline)
+            (error 'restart-port-still-answering
+                   :host (srv:port-in-use-host e) :port (srv:port-in-use-port e)
+                   :seconds *restart-port-wait* :stop-error stop-error))
+          (sleep 0.1))))))
+
 (defun reload! (&optional (d *dev*))
   "Recompile changed watched files; on success rebuild the server via the builder
 (reusing persistent state) and refresh :dev tabs. On failure keep the running
@@ -282,9 +334,7 @@ refreshed, so the other change shows, and the overlay stays."
              (cond
                ((and err (null assets)) :error)
                (t
-                (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
-                (sleep 0.1)
-                (handler-case (setf (dev-handler d) (funcall (dev-builder d)))
+                (handler-case (setf (dev-handler d) (%stop-then-start d))
                   (error (e)
                     (setf (dev-last-error d) (princ-to-string e))
                     (format *error-output* "~&[dev] restart failed: ~A~%" e)
