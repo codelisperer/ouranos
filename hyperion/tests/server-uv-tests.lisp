@@ -2614,3 +2614,111 @@ notice that says so is logged once, not on every start."
                (srv:stop server))))
       (sb-int:unencapsulate 'srv::%note-one-loop 'count-notices))
     (is (= 1 logged) "the notice was logged ~D times for two servers" logged)))
+
+;;; --- the CPU count in a container (#475) -------------------------------------
+;;;
+;;; The cgroup files are read from *CGROUP-ROOT* and *SELF-CGROUP-FILE*, so these tests build a
+;;; fixture tree under a fresh temporary directory and point both at it. START consults the
+;;; tree on every Unix host; Windows always runs one loop and never reads it.
+
+(defun %write-text (file text)
+  (ensure-directories-exist file)
+  (with-open-file (out file :direction :output :if-exists :supersede)
+    (write-string text out)))
+
+(defmacro %with-cgroup-tree ((root self-file) (self-line &rest cpu-max) &body forms)
+  "A fixture cgroup v2 tree: ROOT is its mount, SELF-FILE names the process's cgroup with
+SELF-LINE, and each (DIRECTORY TEXT) in CPU-MAX writes TEXT to DIRECTORY/cpu.max under ROOT
+(\"\" for ROOT itself). Deleted afterwards."
+  (let ((stamp (gensym "STAMP")) (base (gensym "BASE")))
+    `(let* ((,stamp (uiop:tmpize-pathname
+                     (merge-pathnames "uv-cgroup" (uiop:temporary-directory))))
+            (,base (uiop:ensure-directory-pathname ,stamp))
+            (,root (merge-pathnames "fs/" ,base))
+            (,self-file (merge-pathnames "proc-self-cgroup" ,base)))
+       (ignore-errors (delete-file ,stamp))
+       (ensure-directories-exist ,root)
+       (unwind-protect
+            (progn
+              (%write-text ,self-file ,self-line)
+              (loop for (dir text) in (list ,@(mapcar (lambda (e) `(list ,@e)) cpu-max))
+                    do (%write-text (merge-pathnames "cpu.max" (merge-pathnames dir ,root)) text))
+              ,@forms)
+         (uiop:delete-directory-tree ,base :validate t :if-does-not-exist :ignore)))))
+
+(test cpu-max-gives-its-quota-over-its-period-rounded-up
+  "The three lines #475 names, and lines that set no quota."
+  (is (null (srv::%parse-cpu-max (format nil "max 100000~%"))))
+  (is (eql 1 (srv::%parse-cpu-max (format nil "100000 100000~%"))))
+  (is (eql 2 (srv::%parse-cpu-max (format nil "150000 100000~%"))))
+  (is (eql 1 (srv::%parse-cpu-max "50000 100000")) "half a CPU still gets one")
+  (is (null (srv::%parse-cpu-max "")))
+  (is (null (srv::%parse-cpu-max "100000"))))
+
+(test the-tightest-cpu-quota-on-the-cgroup-or-an-ancestor-applies
+  "A process in /a/b. With 1.5 CPUs on /a/b and 1 on /a, the limit is 1. CONTROL: the same tree
+with no quota on /a gives /a/b's 2. With no quota anywhere, or no cgroup v2 line at all, there
+is no limit."
+  (%with-cgroup-tree (root self) ((format nil "0::/a/b~%")
+                                  ("a/b/" (format nil "150000 100000~%"))
+                                  ("a/" (format nil "100000 100000~%"))
+                                  ("" (format nil "max 100000~%")))
+    (is (eql 1 (srv::%cgroup-cpu-limit :root root :self-file self))))
+  (%with-cgroup-tree (root self) ((format nil "0::/a/b~%")
+                                  ("a/b/" (format nil "150000 100000~%"))
+                                  ("a/" (format nil "max 100000~%")))
+    (is (eql 2 (srv::%cgroup-cpu-limit :root root :self-file self))))
+  (%with-cgroup-tree (root self) ((format nil "0::/~%")
+                                  ("" (format nil "max 100000~%")))
+    (is (null (srv::%cgroup-cpu-limit :root root :self-file self))))
+  (%with-cgroup-tree (root self) ((format nil "12:cpu,cpuacct:/a~%")
+                                  ("a/" (format nil "100000 100000~%")))
+    (is (null (srv::%cgroup-cpu-limit :root root :self-file self))
+        "a cgroup v1 line is not read as v2")))
+
+(test the-cpu-count-is-the-smallest-and-names-its-source
+  (is (equal '(1 :cgroup)
+             (multiple-value-list
+              (srv::%smallest-cpu-count '((:sysconf . 8) (:affinity . 8) (:cgroup . 1))))))
+  (is (equal '(2 :affinity)
+             (multiple-value-list
+              (srv::%smallest-cpu-count '((:sysconf . 8) (:affinity . 2) (:cgroup . nil))))))
+  (is (equal '(4 :sysconf)
+             (multiple-value-list
+              (srv::%smallest-cpu-count '((:sysconf . 4) (:affinity . 4) (:cgroup . nil)))))
+      "a tie keeps sysconf"))
+
+#-win32
+(test auto-loops-follow-a-one-cpu-container-and-start-logs-where-from
+  "With a cgroup quota of one CPU, :LOOPS :AUTO with workers is one loop, and the listening log
+line says :LOOPS-FROM cgroup. CONTROL: the same tree without the quota gives the host's count
+(at most 4), which is more than one on every CI runner, and does not say cgroup."
+  (let ((srv:*default-loops* :auto))
+    (%with-cgroup-tree (root self) ((format nil "0::/~%")
+                                    ("" (format nil "100000 100000~%")))
+      (let ((srv::*cgroup-root* root) (srv::*self-cgroup-file* self)
+            (out (make-string-output-stream)))
+        (is (equal '(1 :cgroup) (multiple-value-list (srv::%default-loop-count 2))))
+        (unwind-protect
+             (progn
+               (aion/log:setup :env :prod :level :info :stream out)
+               (let ((server (srv:start (const-app 200 +ok+ '("ok")) :port 0 :workers 2)))
+                 (unwind-protect (is (= 1 (length (srv:server-loops server))))
+                   (srv:stop server))))
+          (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+        (let ((log (get-output-stream-string out)))
+          (is (search "\"loops-from\":\"cgroup\"" log) "no loops-from cgroup in ~S" log))))
+    (%with-cgroup-tree (root self) ((format nil "0::/~%")
+                                    ("" (format nil "max 100000~%")))
+      (let ((srv::*cgroup-root* root) (srv::*self-cgroup-file* self))
+        (multiple-value-bind (n source) (srv::%default-loop-count 2)
+          (is (< 1 n) "~D loops on a host with ~D CPUs" n (srv::%online-cores))
+          (is (not (eq :cgroup source))))))))
+
+#+linux
+(test the-affinity-count-agrees-with-nproc
+  "The CPUs in this process's affinity mask, read through sched_getaffinity, are the count nproc
+prints, which reads the same mask by its own code."
+  (let ((nproc (parse-integer (uiop:run-program '("nproc") :output :string) :junk-allowed t)))
+    (is (eql nproc (srv::%affinity-count)))
+    (is (<= (srv::%affinity-count) (srv::%online-cores)))))

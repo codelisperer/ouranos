@@ -12,6 +12,17 @@ its tag.
 
 ## Unreleased
 
+### Fixed
+
+- **hyperion/server-uv: `:loops :auto` in a CPU-limited container on Linux follows the
+  container's limit, not the host's cores** (#475). The count is now the smallest of the online
+  CPUs, the CPUs in the process's affinity mask (`sched_getaffinity`), and the cgroup v2
+  `cpu.max` quota over its period, rounded up, taking the tightest quota on the process's cgroup
+  and its ancestors. A 1-vCPU container now runs one loop where it ran four. An app that set
+  `HYPERION_LOOPS=1` to work around this no longer needs to. The "server-uv: listening" log
+  line carries `:loops-from`: `sysconf`, `affinity` or `cgroup` for `:auto`, and otherwise
+  `start-argument`, `setting`, `inline` or `platform`. macOS and Windows are unchanged.
+
 ## v0.1.7 — 2026-09-30
 
 ### An app may have to act
