@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include "webview.h"
+#include "window-placement.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -266,6 +267,34 @@ static void set_window_icon(webview_t w, const char *path) {
 //
 // It is printed here, before webview_create, because everything after that point needs a
 // window server. A --help that requires a display is not a --help.
+// Put the window in the work area of the monitor it opened on: centred, and shrunk to fit
+// when it is larger (window-placement.h, #485). Windows only. On macOS webview_set_size
+// already centres the window ([NSWindow center]); on Linux the window manager places it.
+static void place_window(webview_t w, int width, int height) {
+#if defined(_WIN32)
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd == nullptr) return;
+  MONITORINFO info;
+  info.cbSize = sizeof info;
+  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info)) return;
+  RECT outer, client;
+  if (!GetWindowRect(hwnd, &outer) || !GetClientRect(hwnd, &client)) return;
+  // What the frame adds, measured on the window webview_set_size has just sized, rather than
+  // recomputed: it already reflects the window's style and DPI.
+  long frame_width = (outer.right - outer.left) - (client.right - client.left);
+  long frame_height = (outer.bottom - outer.top) - (client.bottom - client.top);
+  window_placement p = place_in_work_area(info.rcWork.left, info.rcWork.top,
+                                          info.rcWork.right, info.rcWork.bottom, width, height,
+                                          static_cast<long>(GetDpiForWindow(hwnd)), frame_width,
+                                          frame_height);
+  SetWindowPos(hwnd, nullptr, p.x, p.y, p.width, p.height, SWP_NOZORDER | SWP_NOACTIVATE);
+#else
+  (void)w;
+  (void)width;
+  (void)height;
+#endif
+}
+
 static void print_usage(std::FILE *out) {
   std::fprintf(out,
                "usage: hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]\n"
@@ -277,6 +306,10 @@ static void print_usage(std::FILE *out) {
                "  --icon   path to a window icon    (optional, may appear anywhere)\n"
                "\n"
                "  --help, -h   print this and exit\n"
+               "  --placement WL WT WR WB CW CH DPI FW FH\n"
+               "               print, as X Y WIDTH HEIGHT, where a window with a client area of\n"
+               "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
+               "               put in the work area WL,WT-WR,WB; then exit (#485)\n"
                "\n"
                "Hyperion's native webview launcher. hyperion/desktop:run-app starts a\n"
                "server on localhost and launches this pointed at it.\n");
@@ -346,6 +379,29 @@ int main(int argc, char **argv) {
     if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
       print_usage(stdout);
       return 0;
+    } else if (std::strcmp(argv[i], "--placement") == 0) {
+      // The placement arithmetic on its own, with no window: for the tests, which check it on
+      // every OS, and for anyone asking why a window opened where it did.
+      long v[9];
+      for (int k = 0; k < 9; k++) {
+        char *end = nullptr;
+        if (i + 1 + k >= argc) {
+          std::fprintf(stderr, "hyperion-view: --placement needs 9 integers\n\n");
+          print_usage(stderr);
+          return 2;
+        }
+        v[k] = std::strtol(argv[i + 1 + k], &end, 10);
+        if (end == argv[i + 1 + k] || *end != '\0') {
+          std::fprintf(stderr, "hyperion-view: --placement: not an integer: %s\n\n",
+                       argv[i + 1 + k]);
+          print_usage(stderr);
+          return 2;
+        }
+      }
+      window_placement p =
+          place_in_work_area(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+      std::printf("%ld %ld %ld %ld\n", p.x, p.y, p.width, p.height);
+      return 0;
     } else if (std::strcmp(argv[i], "--icon") == 0) {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "hyperion-view: --icon needs a path\n\n");
@@ -378,6 +434,7 @@ int main(int argc, char **argv) {
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
   webview_set_size(w, width, height, WEBVIEW_HINT_NONE);
+  place_window(w, width, height);
   set_window_icon(w, icon);
   // After webview_create (NSApp exists), before webview_run ([NSApp run]).
   install_main_menu(title);

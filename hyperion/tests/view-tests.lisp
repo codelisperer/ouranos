@@ -136,6 +136,47 @@ resolution moves, this suite must move with it or say so."
 ;;; These need no launcher binary: they check which file run-app would pass as --icon, using
 ;;; directories and files made here.
 
+;;; --- where the window goes (#485) -------------------------------------------------
+;;;
+;;; On Windows the window used to open at the CW_USEDEFAULT cascade point, often partly below
+;;; the work area. hyperion-view now centres it in the work area and shrinks it to fit
+;;; (window-placement.h). --placement prints that arithmetic for given numbers without opening
+;;; a window, so it is checked here on every OS. The numbers are work area left, top, right and
+;;; bottom; client width and height in logical pixels; DPI; and what the frame adds.
+
+(defun %placement (&rest numbers)
+  "What `hyperion-view --placement NUMBERS' prints, as a list of four integers, or the exit
+code when it did not exit 0."
+  (multiple-value-bind (code out)
+      (apply #'run-launcher "--placement" (mapcar #'princ-to-string numbers))
+    (if (eql code 0)
+        (mapcar #'parse-integer
+                (uiop:split-string (string-trim '(#\Newline #\Return #\Space) out)))
+        code)))
+
+(test a-window-that-fits-is-centred-in-the-work-area
+  (with-launcher
+    ;; The display in #485: 2560x1600 at 150% (DPI 144), work area 1528 high, and a 1280x860
+    ;; window, which is 1920x1290 at that DPI and 1936x1346 with its frame.
+    (is (equal '(312 91 1936 1346) (%placement 0 0 2560 1528 1280 860 144 16 56))
+        "the display from #485")
+    ;; 100% scaling, a taskbar at the top: the work area starts at y 40.
+    (is (equal '(352 140 1216 839) (%placement 0 40 1920 1080 1200 800 96 16 39)))
+    ;; A second monitor to the left of the first: its work area has negative coordinates.
+    (is (equal '(-1568 100 1216 839) (%placement -1920 0 0 1040 1200 800 96 16 39)))))
+
+(test a-window-larger-than-the-work-area-is-shrunk-to-fit-it
+  (with-launcher
+    ;; Too tall at 150%: 1200 logical is 1800 physical, 1856 with the frame, in 1528.
+    (is (equal '(312 0 1936 1528) (%placement 0 0 2560 1528 1280 1200 144 16 56)))
+    ;; Too wide and too tall on a small screen.
+    (is (equal '(0 0 1366 728) (%placement 0 0 1366 728 1920 1080 96 16 39)))))
+
+(test placement-refuses-what-is-not-nine-integers
+  (with-launcher
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16)) "eight numbers")
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 "x" 16 56)) "a word in place of a number")))
+
 (defun %fresh-dir ()
   (let ((dir (uiop:ensure-directory-pathname
               (merge-pathnames (format nil "hyperion-icon-~36R/" (random (expt 2 40) (make-random-state t)))
