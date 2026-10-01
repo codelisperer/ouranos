@@ -5026,6 +5026,7 @@ but newer, so it does not distil the window again in other words."
       (obs:await-observer a :timeout 10)
       (is (equal '("Has a dog.") (%thread-contents store)) "the window is distilled once")
       (is (= 1 (length (scripted-script a-provider))) "A made no model call")
+      (is (= 0 (obs:observer-failures a)) "and A's run had no failure")
       (is (null (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))
           "A did not write its stale entry back"))))
 
@@ -5099,3 +5100,148 @@ the window; a window with no later one written starts no run."
       (is-true (obs:observe-turn observer (%history 12)))
       (obs:await-observer observer :timeout 10)
       (is (equal '((1 6 1 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))))))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's sixth review: progress merged on save and on adoption, a failed reconciling
+;;; read, a retried window closing earlier ones, and a failed read on the request thread.
+;;; --------------------------------------------------------------------------
+
+(defclass flaky-reads-store (mem:in-memory-store)
+  ((progress-write-failures :initform 0 :accessor progress-write-failures)
+   (progress-read-failures :initform 0 :accessor progress-read-failures)
+   (thread-read-failures :initform 0 :accessor thread-read-failures))
+  (:documentation "Fails the next N progress writes, progress reads or thread reads, as each
+counter says."))
+
+(defmethod mem:record-thread-progress :before ((store flaky-reads-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (when (plusp (progress-write-failures store))
+    (decf (progress-write-failures store))
+    (error "the progress write failed")))
+
+(defmethod mem:thread-progress :before ((store flaky-reads-store) subject thread)
+  (declare (ignore subject thread))
+  (when (plusp (progress-read-failures store))
+    (decf (progress-read-failures store))
+    (error "the progress read failed")))
+
+(defmethod mem:observations-of :before ((store flaky-reads-store) subject &key as-of include-superseded thread)
+  (declare (ignore subject as-of include-superseded))
+  (when (and thread (plusp (thread-read-failures store)))
+    (decf (thread-read-failures store))
+    (error "the thread read failed")))
+
+(defun %turn (observer n)
+  (obs:observe-turn observer (%history n))
+  (obs:await-observer observer :timeout 10))
+
+(test progress-merges-commute
+  "The merge gives the same result whichever record comes first, and merging the result again
+changes nothing."
+  (dolist (case '((6 ((1 6 2)) 6 ())
+                  (6 ((1 6 1)) 6 ((1 6 2 :closed)))
+                  (6 ((1 6 2)) 12 ((7 12 1)))
+                  (12 ((1 6 1) (7 12 1)) 12 ((1 6 3)))
+                  (0 () 6 ((1 6 1)))))
+    (destructuring-bind (ma sa mb sb) case
+      (multiple-value-bind (m1 s1) (obs::%merge-progress ma sa mb sb)
+        (multiple-value-bind (m2 s2) (obs::%merge-progress mb sb ma sa)
+          (is (and (= m1 m2) (equal s1 s2)) "~S: ~S ~S against ~S ~S" case m1 s1 m2 s2)
+          (multiple-value-bind (m3 s3) (obs::%merge-progress m1 s1 ma sa)
+            (is (and (= m1 m3) (equal s1 s3)) "merging again changes nothing: ~S" case)))))))
+
+(defun %unsaved-a-then-b (mark)
+  "A and B hold window 1-6 open at MARK. A's retry fails and so does its progress write; B then
+writes the window. Returns the store, A and A's provider."
+  (let ((store (make-instance 'flaky-reads-store)))
+    (mem:record-thread-progress store "member-1" "conv-7" mark '((1 6 1)))
+    (let* ((a-provider (make-instance 'failing-scripted :failures 3
+                                                        :script (list (%call-with (%ob "The member has a dog." "fact")))))
+           (a (obs:make-observer a-provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                     :max-attempts 3))
+           (b (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                 store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 3)))
+      (setf (progress-write-failures store) 1)
+      (%turn a mark)
+      (assert (obs::observer-unsaved a))
+      (%turn b mark)
+      (%turn a mark)
+      (values store a a-provider))))
+
+(test an-unsaved-observer-does-not-overwrite-newer-progress-at-an-equal-mark
+  "The sixth review's case, with the window open at mark 6 and, after a later window, at mark
+12: A's next turn merges, sees B wrote the window, writes nothing over B's progress and does not
+distil the window again."
+  (dolist (mark '(6 12))
+    (multiple-value-bind (store a a-provider) (%unsaved-a-then-b mark)
+      (declare (ignore a))
+      (is (equal '("Has a dog.") (%thread-contents store)) "at mark ~D, one observation" mark)
+      (is (= 1 (length (scripted-script a-provider))) "at mark ~D, A did not distil again" mark)
+      (multiple-value-bind (stored skipped) (mem:thread-progress store "member-1" "conv-7")
+        (is (and (= mark stored) (null skipped)) "at mark ~D, B's progress stands: ~S ~S" mark stored skipped)))))
+
+(test tries-never-exceed-max-attempts-when-observers-take-turns
+  "A's write of its first try fails; B then spends the window's remaining tries. A's next turn
+merges, finds the tries spent, and makes no model call."
+  (let* ((store (make-instance 'flaky-reads-store))
+         (calls (lambda (p) (- 100 (failing-count p))))
+         (a-provider (make-instance 'failing-scripted :failures 100 :script nil))
+         (b-provider (make-instance 'failing-scripted :failures 100 :script nil)))
+    (mem:record-thread-progress store "member-1" "conv-7" 6 '((1 6 1)))
+    (let ((a (obs:make-observer a-provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                     :max-attempts 3))
+          (b (obs:make-observer b-provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                     :max-attempts 3)))
+      (setf (progress-write-failures store) 1)
+      (%turn a 6)
+      (%turn b 6)
+      (%turn b 6)
+      (let ((a-before (funcall calls a-provider)))
+        (%turn a 6)
+        (is (= a-before (funcall calls a-provider)) "A's second turn made no model call"))
+      (is (equal '((1 6 3)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))
+          "three tries recorded, no more"))))
+
+(test a-failed-reconciling-read-ends-the-run
+  "A is unsaved at mark 6; B has written up to 12. A's next run cannot read the store's
+progress. It ends there, rather than continuing from its own lower mark and distilling 7-12
+again; its next turn reads the store and finds nothing to do."
+  (let ((store (make-instance 'flaky-reads-store)))
+    (mem:record-thread-progress store "member-1" "conv-7" 6 '())
+    (let ((a (obs:make-observer (%provider-returning (%call-with (%ob "Lives in Lisbon." "fact")))
+                                store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+          (b (obs:make-observer (%provider-returning (%call-with (%ob "Lives in Porto." "fact")))
+                                store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (setf (obs::observer-unsaved a) t)
+      (%turn b 12)
+      (setf (progress-read-failures store) 1)
+      (%turn a 12)
+      (is (equal '("Lives in Porto.") (%thread-contents store)) "A did not distil 7-12 again")
+      (is (= 1 (obs:observer-failures a)) "the failed read is counted")
+      (%turn a 12)
+      (is (equal '("Lives in Porto.") (%thread-contents store)))
+      (is (= 12 (obs:observer-mark a)) "A took the store's mark"))))
+
+(test a-retried-window-written-closes-the-open-windows-before-it
+  "Windows 1-6 and 7-12 are both skipped and open. A run retries 1-6, which fails again, then
+retries 7-12, which is written: 1-6 is closed at once, as when any window is written."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'failing-scripted :failures 2
+                                                                       :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                :max-attempts 2)))
+    (mem:record-thread-progress store "member-1" "conv-7" 12 '((1 6 1) (7 12 1)))
+    (%turn observer 12)
+    (is (equal '((1 6 2 :closed)) (obs:observer-skipped observer)))
+    (is (equal '((1 6 2 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test a-failed-thread-read-does-not-fail-the-apps-request
+  "Deciding whether an exhausted window is due reads the thread on the request thread. When that
+read fails, OBSERVE-TURN logs it and returns NIL rather than signalling into the app."
+  (let ((store (make-instance 'flaky-reads-store)))
+    (mem:record-thread-progress store "member-1" "conv-7" 6 '((1 6 1)))
+    (let ((observer (obs:make-observer (%provider-returning) store "member-1" "conv-7"
+                                       :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
+      (setf (thread-read-failures store) 1)
+      (is (null (handler-case (obs:observe-turn observer (%history 6))
+                  (error (e) (format nil "signalled: ~A" e))))))))

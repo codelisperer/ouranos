@@ -78,8 +78,11 @@ its tag.
     window, and a new observer starts from them. So a restart neither distils the thread again
     nor passes a window that was given up on or that the process ended part-way through.
     Observations the app wrote into the thread itself do not move the mark. A progress write
-    that fails is made again at the next `observe-turn`, even one with no new message, and a run
-    first takes the store's progress when it is at least as far on as the observer's own.
+    that fails is made again at the next `observe-turn`, even one with no new message; until it
+    is made, a stop, a restart or a new observer distils that window again. Progress is merged
+    with the store's, never written over it: a run starts by merging, and each save merges again,
+    so the stored mark is never lowered and newer progress at an equal mark is kept. A run whose
+    first read of the store's progress fails ends there.
   - One observer of a thread runs at a time in a process: `observe-turn` starts nothing while
     another observer of the same store, subject and thread holds the thread, even when both are
     called at the same moment, so an app may make an observer per request. `running-observer`
@@ -93,8 +96,10 @@ its tag.
   - A skipped window is retried only while no later window has been written to the thread, and
     then it is distilled and promoted as if it had never been skipped. Once an observation from a
     later window is in the thread, the skipped window is closed: it is never retried, and
-    `observer-skipped` shows it as `(from through tries :closed)`. A window is closed when a
-    later window is written in the same run, and also when its tries are already spent.
+    `observer-skipped` shows it as `(from through tries :closed)`. Writing a window, in a run or
+    in a retry, closes every open skipped window before it at once, whatever its tries; a window
+    whose tries are spent is not closed by that alone, but by the next run once a later window is
+    in the thread.
   - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
     the name of one.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
@@ -122,8 +127,9 @@ its tag.
   - `distil`'s tool takes an optional `applies_from` date, which becomes the observation's
     `valid-from`; `distil` takes `:today` to tell the model the date (the observer passes the
     time `observe-turn` was called, in UTC); a date that cannot be read drops only its own
-    proposal, and so does an `applies_from` that is a number or an object rather than a string,
-    JSON null or an empty string. `apply-distillation` takes `:thread`.
+    proposal, and so does an `applies_from` that is a number, an array, an object or `true`.
+    JSON null, `false` (which jzon reads as NIL) and an empty string mean no date.
+    `apply-distillation` takes `:thread`.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
