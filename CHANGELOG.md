@@ -35,7 +35,9 @@ its tag.
   inside a monitor's work area; otherwise it opens centred. The default, NIL, keeps no file.
   `hyperion-view --saved-placement PATH WL WT WR WB` prints whether a saved placement would be
   used. Rebuild `hyperion-view` to get it: an older build refuses `--placement-file` and exits 2.
-  macOS and Linux accept the option and ignore it. (#485)
+  macOS and Linux accept the option and ignore it. With `HYPERION_VIEW_NO_WINDOW=1` in its
+  environment, hyperion-view exits 3 instead of creating a window, on every OS; the view tests
+  set it, so a test that reaches a window by mistake fails instead of opening one. (#485)
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.

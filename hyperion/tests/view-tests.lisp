@@ -52,16 +52,25 @@ resolution moves, this suite must move with it or say so."
      (and p (probe-file p)))))
 
 (defun run-launcher (&rest args)
-  "Run the launcher with ARGS under a timeout. Returns (values exit stdout stderr)."
+  "Run the launcher with ARGS under a timeout. Returns (values exit stdout stderr).
+
+It runs with HYPERION_VIEW_NO_WINDOW=1, so a call that would create a window exits 3 instead
+(#521). None of these calls is meant to create one, and on a developer's machine a test that
+did would open a window on their screen. The real-window tests use %REPORT-PLACEMENT, which
+clears the variable and runs only on CI."
   (let ((out (make-string-output-stream))
-        (err (make-string-output-stream)))
-    (handler-case
-        (let ((code (nth-value
-                     2 (uiop:run-program (cons (uiop:native-namestring (launcher)) args)
-                                         :output out :error-output err
-                                         :ignore-error-status t))))
-          (values code (get-output-stream-string out) (get-output-stream-string err)))
-      (error (e) (values :error (get-output-stream-string out) (princ-to-string e))))))
+        (err (make-string-output-stream))
+        (previous (uiop:getenv "HYPERION_VIEW_NO_WINDOW")))
+    (setf (uiop:getenv "HYPERION_VIEW_NO_WINDOW") "1")
+    (unwind-protect
+         (handler-case
+             (let ((code (nth-value
+                          2 (uiop:run-program (cons (uiop:native-namestring (launcher)) args)
+                                              :output out :error-output err
+                                              :ignore-error-status t))))
+               (values code (get-output-stream-string out) (get-output-stream-string err)))
+           (error (e) (values :error (get-output-stream-string out) (princ-to-string e))))
+      (setf (uiop:getenv "HYPERION_VIEW_NO_WINDOW") (or previous "")))))
 
 (defmacro with-launcher (&body body)
   `(let ((exe (launcher)))
@@ -181,6 +190,15 @@ code when it did not exit 0."
                              "0" "0" "2560" "1528" "1280" "860" "144" "16" "56"))
         "a URL before it: --placement is a mode of its own, not an option of a window")))
 
+(test hyperion-view-creates-no-window-when-told-not-to
+  ;; The guard RUN-LAUNCHER relies on (#521): with HYPERION_VIEW_NO_WINDOW=1, a call that would
+  ;; create a window exits 3 instead, and says why.
+  (with-launcher
+    (multiple-value-bind (code out err) (run-launcher "--report-placement" "800" "600")
+      (declare (ignore out))
+      (is (eql 3 code) "--report-placement under HYPERION_VIEW_NO_WINDOW=1 exits 3, got ~S" code)
+      (is (search "HYPERION_VIEW_NO_WINDOW" err) "and names the variable: ~S" err))))
+
 (test report-placement-refuses-what-is-not-two-positive-integers
   ;; Each of these is refused before webview_create, so no window is made on any OS. atoi read
   ;; "1280px" as 1280 and went on to create a window (review of train 21).
@@ -217,7 +235,7 @@ PowerShell's Start-Process -WindowStyle Hidden. Returns (values EXIT-CODE OUTPUT
          (let ((code (nth-value
                       2 (uiop:run-program
                          (list "pwsh" "-NoProfile" "-NonInteractive" "-Command"
-                               (format nil "$p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D'~@[,'~A'~] -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
+                               (format nil "Remove-Item Env:HYPERION_VIEW_NO_WINDOW -ErrorAction SilentlyContinue; $p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D'~@[,'~A'~] -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
                                        (uiop:native-namestring (launcher)) width height
                                        (and placement-file (uiop:native-namestring placement-file))
                                        (uiop:native-namestring out)))
