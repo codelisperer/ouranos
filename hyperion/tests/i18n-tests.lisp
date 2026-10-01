@@ -42,6 +42,43 @@
   (is (string= "[home/nope]" (i18n:translate (%dict) :en :home/nope)))
   (is (string= "[a/b/c]"     (i18n:translate (%dict) :en :a/b/c))))
 
+;;; --- whether a key has a translation (#490) -----------------------------------
+
+(defun %dict-with-marker-text ()
+  "%DICT plus home/marker, whose translation is literally the marker TRANSLATE would print
+for it, and trial/days-left with plural forms."
+  (i18n:make-dictionary
+   (%ht "en" (%ht "home" (%ht "hi" "Hello" "greet" "Hi {name}!" "marker" "[home/marker]")
+                  "trial" (%ht "days-left.one" "{count} day left"
+                               "days-left.other" "{count} days left"
+                               "plain" "no plural forms"))
+        "ru" (%ht "home" (%ht "hi" "Привет")))
+   :default :en))
+
+(test translation-exists-p-agrees-with-translate
+  "Present in the locale, present only in the default locale, and missing. CONTROL: a
+translation whose text is exactly the marker counts as present, where comparing TRANSLATE's
+result with the marker would call it missing."
+  (let ((d (%dict-with-marker-text)))
+    (is (eq t (i18n:translation-exists-p d :en :home/hi)))
+    (is (eq t (i18n:translation-exists-p d :ru :home/hi)))
+    (is (eq t (i18n:translation-exists-p d :ru :home/greet)) "only in the default locale")
+    (is (null (i18n:translation-exists-p d :en :home/nope)))
+    (is (null (i18n:translation-exists-p d :ru :home/nope)))
+    (is (string= "[home/marker]" (i18n:translate d :en :home/marker)))
+    (is (eq t (i18n:translation-exists-p d :en :home/marker)))
+    (is (null (i18n:translation-exists-p d :en :home))
+        "a section is not a translation")))
+
+(test translation-exists-p-with-a-count-follows-translate-plural
+  "With :COUNT, by TRANSLATE-PLURAL's fallbacks: the category, then other, then the bare key."
+  (let ((d (%dict-with-marker-text)))
+    (is (eq t (i18n:translation-exists-p d :en :trial/days-left :count 1)))
+    (is (eq t (i18n:translation-exists-p d :en :trial/days-left :count 5)))
+    (is (eq t (i18n:translation-exists-p d :ru :trial/days-left :count 3)) "from the default locale")
+    (is (eq t (i18n:translation-exists-p d :en :trial/plain :count 2)) "the bare key")
+    (is (null (i18n:translation-exists-p d :en :trial/nope :count 2)))))
+
 ;;; --- interpolation --------------------------------------------------------
 (test interpolation
   (is (string= "Hi Bob!" (i18n:translate (%dict) :en :home/greet :name "Bob")))

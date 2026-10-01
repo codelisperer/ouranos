@@ -434,6 +434,7 @@
   (:export
    ;; translation source
    #:translate #:translate-plural #:plural-key #:supported-locales #:default-locale
+   #:translation-exists-p
    #:make-json-source #:load-dictionary #:make-dictionary
    #:dictionary #:dictionary-p #:interpolate #:locale-supported-p #:*default-locale*
    ;; locale store

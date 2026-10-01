@@ -43,6 +43,14 @@ its tag.
   not 1.9, was built without threads or with experimental SHA-256, or whose functions resolve
   to another libgit2 already loaded in the process. Fetching and pushing are not in this step. The gate
   runs its suite when `OURANOS_WITH_LIBGIT=1`, which CI sets.
+- **hyperion/i18n: `translation-exists-p`, whether a key has a translation** (#490).
+  `(translation-exists-p source locale key &key count)` is true when `translate` (or, with
+  `:count`, `translate-plural`) would return text from the source rather than its
+  `"[section/key]"` marker, looking in the locale and then the source's default locale. A
+  component that wants its own fallback asks this instead of comparing `translate`'s result
+  with the marker, which reads a translation whose text looks like a marker as missing. It is
+  a generic function on the translation-source protocol: an app's own source, such as a
+  DB-backed one, should implement it beside its `translate` method.
 
 ### Fixed
 

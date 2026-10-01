@@ -76,6 +76,17 @@ callers throughout every app; adding a count-sensitive mode to it would change w
 existing call does. Same reasoning as FORM-PARAM keeping its meaning while FORM-PARAMS
 carried the new one (pre-publication issue 136)."))
 
+(defgeneric translation-exists-p (source locale key &key count)
+  (:documentation
+   "True when SOURCE has text for KEY in LOCALE or in its default locale: when TRANSLATE (or,
+with COUNT, TRANSLATE-PLURAL) would return a translation rather than its \"[section/key]\"
+marker. A component that wants a fallback of its own asks this instead of comparing
+TRANSLATE's result with the marker, which would read a translation whose text happens to look
+like a marker as missing (#490).
+
+Answered by the same lookup TRANSLATE uses, so the two cannot disagree. An app's own
+translation source (a DB-backed one, say) implements it beside its TRANSLATE method."))
+
 (defgeneric supported-locales (source)
   (:documentation "The list of locale keywords SOURCE provides."))
 
@@ -130,11 +141,17 @@ call changes."
       (unless (hash-table-p node) (return nil))
       (setf node (gethash seg node)))))
 
-(defmethod translate ((source dictionary) locale key &rest args)
+(defun %lookup (source locale key)
+  "The raw string for KEY in LOCALE, else in SOURCE's default locale, else NIL. TRANSLATE and
+TRANSLATION-EXISTS-P both use it."
   (let ((raw (or (%walk (dictionary-data source) (%loc-string locale) (%key-path key))
                  (%walk (dictionary-data source) (%loc-string (dictionary-default source))
                         (%key-path key)))))
-    (cond ((not (stringp raw)) (format nil "[~A]" (string-downcase (%name key))))
+    (and (stringp raw) raw)))
+
+(defmethod translate ((source dictionary) locale key &rest args)
+  (let ((raw (%lookup source locale key)))
+    (cond ((null raw) (format nil "[~A]" (string-downcase (%name key))))
           (args (interpolate raw args))
           (t raw))))
 
@@ -160,17 +177,28 @@ of the translation data."
     ;; the wrong language -- a German dictionary carrying only `other` should read "1 Tage",
     ;; not switch that one string to English. `other` is the language's default form, which
     ;; is exactly the right thing to reach for when the exact category is missing.
-    (flet ((in-locale (loc)
-             (let ((code (%loc-string loc)))
-               (dolist (k (list (plural-key key category) (plural-key key :other) key))
-                 (let ((raw (%walk (dictionary-data source) code (%key-path k))))
-                   (when (stringp raw) (return raw)))))))
-      (let ((raw (or (in-locale locale)
-                     (in-locale (dictionary-default source)))))
-        (if raw
-            (interpolate raw all)
-            (format nil "[~A.~A]" (string-downcase (%name key))
-                    (string-downcase (symbol-name category))))))))
+    (let ((raw (%plural-lookup source locale key category)))
+      (if raw
+          (interpolate raw all)
+          (format nil "[~A.~A]" (string-downcase (%name key))
+                  (string-downcase (symbol-name category)))))))
+
+(defun %plural-lookup (source locale key category)
+  "The raw string TRANSLATE-PLURAL uses for KEY in plural CATEGORY, by the fallbacks it
+describes, or NIL. TRANSLATE-PLURAL and TRANSLATION-EXISTS-P with :COUNT both use it."
+  (flet ((in-locale (loc)
+           (let ((code (%loc-string loc)))
+             (dolist (k (list (plural-key key category) (plural-key key :other) key))
+               (let ((raw (%walk (dictionary-data source) code (%key-path k))))
+                 (when (stringp raw) (return raw)))))))
+    (or (in-locale locale)
+        (in-locale (dictionary-default source)))))
+
+(defmethod translation-exists-p ((source dictionary) locale key &key count)
+  (and (if count
+           (%plural-lookup source locale key (plural:plural-category locale count))
+           (%lookup source locale key))
+       t))
 
 (defmethod supported-locales ((source dictionary)) (dictionary-supported source))
 (defmethod default-locale ((source dictionary)) (dictionary-default source))
