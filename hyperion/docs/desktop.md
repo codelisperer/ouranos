@@ -187,6 +187,14 @@ with `scripts/build-desktop-app.lisp --window-icon <file>`, giving the format th
 `.exe`'s own icon in Explorer, and from `build-dmg.sh --icon`, which sets the `.app`'s icon in
 Finder.
 
+**Where the window opens (#485).** On Windows, hyperion-view opens the window centred in the
+work area of its monitor, shrunk to fit when the requested size is larger. `run-app
+:placement-file PATH` also keeps the window's last position, size and maximised state in PATH,
+one line written by hyperion-view after every move or resize, and opens the window there next
+time if that rectangle still lies inside a monitor's work area. A monitor that was unplugged or
+rearranged, or a file that is not that line, is not an error: the window opens centred. Put the
+file in the app's data directory. macOS and Linux accept the option and ignore it for now.
+
 **What the bundle holds, by platform (#98).** On Linux the app is one dumped executable,
 `<name>`. On macOS and Windows it is three files, because an operating system's code signature
 cannot cover a dumped image, whose Lisp core sits where the signature goes:
