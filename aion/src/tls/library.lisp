@@ -69,8 +69,8 @@ build is one file carrying mbedTLS, its crypto and our C together.")
   "Every path LOAD-MBEDTLS tries, in order."
   (let ((explicit (uiop:getenv "AION_TLS_LIBRARY"))
         (image (%image-directory))
-        ;; Not in a desktop bundle, which must load its own copy or fail
-        ;; (AION/PLATFORM:*SEARCH-SOURCE-TREE*, #472).
+        ;; Not in a desktop bundle: it never consults the tree it was built from. The override
+        ;; and the OS's own search still apply (AION/PLATFORM:*SEARCH-SOURCE-TREE*, #472).
         (root (and aion/platform:*search-source-tree*
                    (ignore-errors
                     (uiop:pathname-parent-directory-pathname
