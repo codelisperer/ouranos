@@ -20,7 +20,8 @@
                     (#:bt #:bordeaux-threads)   ; pre-publication issue 418: fan-out is really concurrent now
                     (#:web-search #:praxeon/web-search)
                     (#:mem #:praxeon/memory)
-                    (#:dst #:praxeon/distil))
+                    (#:dst #:praxeon/distil)
+                    (#:obs #:praxeon/observe))
   (:export #:praxeon))
 
 (cl:in-package #:praxeon/tests)
@@ -4141,3 +4142,1080 @@ model, which is what the file's commentary is for."
             (llm:generate-structured p2 '((:role :user :content "b")) (%spec)))
         (is (string= "Ship" (gethash "headline" args)))
         (is (eq :truncated mark))))))
+
+;;; --------------------------------------------------------------------------
+;;; Observational memory, step A (#317): the thread scope, and the observer that runs distil
+;;; off the request path. A scripted model only.
+;;; --------------------------------------------------------------------------
+
+(test a-thread-observation-and-a-subject-fact-are-kept-apart
+  "An observation of a thread stands in for that thread's messages; a fact about the subject is
+recalled everywhere. A recall of one scope never returns the other. :ALL, for the access right,
+returns both, and forgetting the subject erases both."
+  (let ((store (mem:make-in-memory-store)))
+    (remember* store "member-1" "Prefers mornings.")
+    (remember* store "member-1" "Asked about the refund in this chat." :thread "conv-7")
+    (flet ((contents (os) (mapcar #'mem:observation-content os)))
+      (is (equal '("Prefers mornings.") (contents (mem:observations-of store "member-1"))))
+      (is (equal '("Asked about the refund in this chat.")
+                 (contents (mem:observations-of store "member-1" :thread "conv-7"))))
+      (is (null (mem:observations-of store "member-1" :thread "conv-8")) "another thread has none")
+      (is (= 2 (length (mem:observations-of store "member-1" :thread :all))))
+      (is (= 1 (length (mem:recall store "member-1" :thread "conv-7"))))
+      (let ((o (first (mem:observations-of store "member-1" :thread "conv-7"))))
+        (is (equal "conv-7" (mem:observation-thread (supersede* store o "Asked about the refund twice."))))
+        "a supersession stays in the thread")
+      (is (= 3 (mem:forget-subject store "member-1")))
+      (is (null (mem:observations-of store "member-1" :thread :all))))))
+
+(test a-provenance-can-name-a-range-of-turns
+  (let ((p (mem:make-provenance "conv-7" 3 :through 9)))
+    (is (= 3 (mem:provenance-turn p)))
+    (is (= 9 (mem:provenance-through p))))
+  (is (null (mem:provenance-through (mem:make-provenance "conv-7" 3))) "a single turn by default"))
+
+(test a-date-the-conversation-states-becomes-valid-from
+  "A readable date becomes VALID-FROM. An unreadable one drops only its own proposal, not the
+window; a null or empty one is no date."
+  (flet ((dated (content date)
+           (let ((ht (%ob content "fact"))) (setf (gethash "applies_from" ht) date) ht)))
+    (let* ((store (mem:make-in-memory-store))
+           (provider (%provider-returning (%call-with (dated "Starts the new job." "2026-11-02")
+                                                      (dated "Moved in spring." "2026-03")
+                                                      (dated "Likes jazz." 'null)
+                                                      (dated "Plays chess." ""))))
+           (written (apply-distillation* store (dst:distil provider "member-1" +window+))))
+      (is (equal '("Starts the new job." "Likes jazz." "Plays chess.") (mapcar #'mem:observation-content written))
+          "the proposal with the unreadable date is dropped alone")
+      (is (= (encode-universal-time 0 0 0 2 11 2026 0) (mem:observation-valid-from (first written)))))))
+
+(test parse-date-refuses-impossible-dates
+  (is (= (encode-universal-time 0 0 0 28 2 2026 0) (dst:parse-date "2026-02-28")))
+  (is (null (dst:parse-date "2026-02-30")) "not March 2")
+  (is (null (dst:parse-date "0099-12-31")) "not 1999")
+  (is (null (dst:parse-date "2026-13-01")))
+  (is (null (dst:parse-date "next Monday"))))
+
+(defclass capturing-scripted (scripted)
+  ((sent :initform '() :accessor sent-messages)))
+
+(defmethod llm:complete :before ((p capturing-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (push messages (sent-messages p)))
+
+(test distil-tells-the-model-todays-date
+  (let ((provider (make-instance 'capturing-scripted :script (list (%call-with (%ob "x" "fact"))))))
+    (dst:distil provider "member-1" +window+ :today (encode-universal-time 0 0 12 30 9 2026 0))
+    (is (search "Today is 2026-09-30." (format nil "~S" (first (sent-messages provider)))))))
+
+;;; The observer.
+
+(defclass slow-scripted (scripted)
+  ((delay :initarg :delay :reader slow-delay))
+  (:documentation "A scripted provider that takes DELAY seconds to answer."))
+
+(defmethod llm:complete :before ((p slow-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (sleep (slow-delay p)))
+
+(defclass failing-scripted (scripted)
+  ((failures :initarg :failures :accessor failing-count))
+  (:documentation "A scripted provider whose first FAILURES calls signal, as a rate limit would."))
+
+(defmethod llm:complete :before ((p failing-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (when (plusp (failing-count p))
+    (decf (failing-count p))
+    (error 'cnd:deliberation-failure :detail "429 Too Many Requests")))
+
+(defun %history (n &optional (words 60))
+  "N messages alternating user and assistant, each WORDS words, so their size is predictable."
+  (loop for i from 1 to n
+        collect (llm:msg (if (oddp i) "user" "assistant")
+                         (format nil "message ~D: ~{~A~^ ~}" i (make-list words :initial-element "word")))))
+
+(defun %step-for (n)
+  "A step that N of %HISTORY's messages just reach, so one window holds exactly N of them."
+  (prompt:messages-tokens (%history n)))
+
+(defun %thread-contents (store &optional (thread "conv-7"))
+  (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread thread)) #'string<))
+
+(test the-observer-distils-off-the-request-path-and-moves-the-mark
+  "The model takes a second to answer; OBSERVE-TURN returns long before that. The observations are
+the thread's, cite the conversation and the window's message range, and the mark moves to the
+window's end. A turn below the step starts nothing."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'slow-scripted :delay 1
+                                                 :script (list (%call-with (%ob "Planning a move to Lisbon." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (history (%history 6)))
+    (let ((start (get-internal-real-time)))
+      (is-true (obs:observe-turn observer history))
+      (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 0.5)
+          "the turn did not wait for the distillation"))
+    (is-true (obs:observer-busy-p observer))
+    (is-true (obs:await-observer observer :timeout 10))
+    (let ((written (mem:observations-of store "member-1" :thread "conv-7")))
+      (is (= 1 (length written)))
+      (let ((p (mem:observation-provenance (first written))))
+        (is (string= "conv-7" (mem:provenance-conversation p)))
+        (is (= 1 (mem:provenance-turn p)))
+        (is (= 6 (mem:provenance-through p)))))
+    (is (= 6 (obs:observer-mark observer)))
+    (is (null (mem:observations-of store "member-1")) "nothing became a fact about the subject")
+    (is-false (obs:observe-turn observer (append history (%history 1 5)))
+              "one short message past the mark is below the step")))
+
+(test a-backlog-is-distilled-one-step-sized-window-at-a-time
+  "Twelve messages past the mark, with a step of six messages' tokens: two windows, 1-6 and 7-12,
+in one run, not one window of twelve (#462's review)."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (%provider-returning (%call-with (%ob "First." "fact")) (%call-with (%ob "Second." "fact"))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    (flet ((range (content)
+             (let ((p (mem:observation-provenance
+                       (find content (mem:observations-of store "member-1" :thread "conv-7")
+                             :key #'mem:observation-content :test #'string=))))
+               (list (mem:provenance-turn p) (mem:provenance-through p)))))
+      (is (equal '(1 6) (range "First.")))
+      (is (equal '(7 12) (range "Second."))))
+    (is (= 12 (obs:observer-mark observer)))))
+
+(test a-new-observer-resumes-from-the-mark-the-store-holds
+  "After a restart, a new observer does not distil the thread again (#462's review): it takes its
+mark from the last message the thread's observations cite. Control: with :MARK 0 it would."
+  (let* ((store (mem:make-in-memory-store))
+         (history (%history 6)))
+    (let ((first (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                    store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (obs:observe-turn first history)
+      (obs:await-observer first :timeout 10))
+    (let ((second (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                     store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (is (= 6 (obs:observer-mark second)))
+      (is-false (obs:observe-turn second history) "nothing past the stored mark")
+      (is (equal '("Has a dog.") (%thread-contents store))))
+    (is (= 0 (obs:observer-mark (obs:make-observer (%provider-returning) store "member-1" "conv-7" :mark 0)))
+        "control: an explicit mark wins")))
+
+(test a-window-that-fails-is-retried-and-not-marked-observed
+  "A rate limit on the first call: the window is tried again, written once, and the failure is
+counted. The mark moves only after the write (#462's review)."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'failing-scripted :failures 1
+                                                    :script (list (%call-with (%ob "Has a dog." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '("Has a dog.") (%thread-contents store)))
+    (is (= 1 (obs:observer-failures observer)))
+    (is (typep (obs:observer-last-error observer) 'cnd:deliberation-failure))
+    (is (null (obs:observer-skipped observer)))
+    (is (= 6 (obs:observer-mark observer)))))
+
+(test a-window-that-keeps-failing-is-given-up-on-and-recorded
+  "After MAX-ATTEMPTS failures the window's range is recorded as skipped, so the prompt keeps those
+messages raw, and the mark moves past it."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'failing-scripted :failures 100 :script '()))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 2 (obs:observer-failures observer)))
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)) "messages 1 to 6, tried by one run")
+    (is (= 6 (obs:observer-mark observer)))
+    (is (null (%thread-contents store)))))
+
+(defclass flaky-store (mem:in-memory-store)
+  ((fail-at :initarg :fail-at :accessor flaky-fail-at)
+   (writes :initform 0 :accessor flaky-writes)))
+
+(defmethod mem:remember :before ((store flaky-store) subject content &key &allow-other-keys)
+  (declare (ignore subject content))
+  (when (= (incf (flaky-writes store)) (flaky-fail-at store))
+    (error "the store failed on write ~D" (flaky-fail-at store))))
+
+(test a-store-error-part-way-through-a-window-loses-nothing-and-duplicates-nothing
+  "The second of three writes fails. The window is tried again; the first observation is not
+written twice, and the other two are written."
+  (let* ((store (make-instance 'flaky-store :fail-at 2))
+         (provider (%provider-returning (%call-with (%ob "A." "fact") (%ob "B." "fact") (%ob "C." "fact"))
+                                        (%call-with (%ob "A." "fact") (%ob "B." "fact") (%ob "C." "fact"))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '("A." "B." "C.") (%thread-contents store)))
+    (is (= 1 (obs:observer-failures observer)))))
+
+(test the-observer-supersedes-only-with-the-apps-accept
+  "A later window proposes that a correction replaces an earlier thread observation. Without the
+app's ACCEPT both are current; with it the earlier one is superseded."
+  (flet ((observe-with (accept)
+           (let* ((store (mem:make-in-memory-store))
+                  (first (remember* store "member-1" "Lives in Porto." :thread "conv-7"))
+                  (provider (%provider-returning
+                             (%call-with (%ob "Lives in Lisbon." "correction"
+                                              :replaces (mem:observation-id first)
+                                              :because "the member corrected where they live"))))
+                  (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                                  :accept accept :mark 0)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (%thread-contents store))))
+    (is (equal '("Lives in Lisbon." "Lives in Porto.") (observe-with (constantly nil))) "default: nothing replaced")
+    (is (equal '("Lives in Lisbon.") (observe-with (constantly t))) "with ACCEPT: the correction replaces it")))
+
+(test nothing-becomes-a-subject-fact-without-promote
+  (flet ((observe-with (&rest keys)
+           (let* ((store (mem:make-in-memory-store))
+                  (provider (%provider-returning (%call-with (%ob "Is vegetarian." "preference"))))
+                  (observer (apply #'obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 keys)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (mapcar #'mem:observation-content (mem:observations-of store "member-1")))))
+    (is (null (observe-with)) "by default nothing is promoted")
+    (is (equal '("Is vegetarian.") (observe-with :promote (lambda (o) (eq :preference (mem:observation-kind o)))))
+        "the app's PROMOTE decides")))
+
+(test a-promoted-fact-is-not-stored-twice-and-its-correction-needs-promote-accept
+  "Window 1 promotes Lives in Porto. Window 2 corrects it in the thread, with ACCEPT. Without
+PROMOTE-ACCEPT the subject keeps one fact, the old one, and not both; with it the old fact is
+superseded by the correction. The same fact promoted from a second thread is not stored again
+(#462's review)."
+  (flet ((observe-with (&rest keys)
+           (let* ((store (mem:make-in-memory-store))
+                  (step (%step-for 6))
+                  (observer (apply #'obs:make-observer (make-instance 'scripted :script nil) store "member-1" "conv-7"
+                                   :step step :retry-delay 0 :accept (constantly t) :promote (constantly t) keys)))
+             (setf (scripted-script (obs::observer-provider observer))
+                   (list (%call-with (%ob "Lives in Porto." "fact"))))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (let ((porto (first (mem:observations-of store "member-1" :thread "conv-7"))))
+               (setf (scripted-script (obs::observer-provider observer))
+                     (list (%call-with (%ob "Lives in Lisbon." "correction"
+                                            :replaces (mem:observation-id porto) :because "moved"))))
+               (obs:observe-turn observer (%history 12))
+               (obs:await-observer observer :timeout 10))
+             (mapcar #'mem:observation-content (mem:observations-of store "member-1")))))
+    (is (equal '("Lives in Porto.") (observe-with)) "one current fact, not the fact and its correction")
+    (is (equal '("Lives in Lisbon.") (observe-with :promote-accept (constantly t)))))
+  (let* ((store (mem:make-in-memory-store)))
+    (dolist (thread '("conv-7" "conv-8"))
+      (let ((observer (obs:make-observer (%provider-returning (%call-with (%ob "Is vegetarian." "preference")))
+                                         store "member-1" thread :step (%step-for 6) :retry-delay 0 :promote (constantly t))))
+        (obs:observe-turn observer (%history 6))
+        (obs:await-observer observer :timeout 10)))
+    (is (equal '("Is vegetarian.") (mapcar #'mem:observation-content (mem:observations-of store "member-1")))
+        "promoted once, not once per thread")))
+
+(defun %supported (&rest numbers)
+  (llm:make-completion :stop-reason :tool-use
+                       :tool-calls (list (llm:make-tool-call :id "s1" :name "record_supported"
+                                                            :arguments (%args "supported" (coerce numbers 'vector))))))
+
+(test the-support-check-drops-what-the-window-does-not-support
+  "With a VERIFY provider, the proposals it does not find in the window are not written, and the
+rest keep their order. Control: without one, both are."
+  (flet ((observe-with (verify)
+           (let* ((store (mem:make-in-memory-store))
+                  (provider (%provider-returning (%call-with (%ob "Lives in Lisbon." "fact")
+                                                             (%ob "Has three children." "fact"))))
+                  (observer (obs:make-observer provider store "member-1" "conv-7"
+                                               :step (%step-for 6) :retry-delay 0 :verify verify)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (%thread-contents store))))
+    (is (equal '("Has three children." "Lives in Lisbon.") (observe-with nil)))
+    (is (equal '("Lives in Lisbon.") (observe-with (%provider-returning (%supported 1)))))))
+
+(test a-support-check-that-fails-is-counted-and-writes-nothing-unchecked
+  (let* ((store (mem:make-in-memory-store))
+         (provider (%provider-returning (%call-with (%ob "Lives in Lisbon." "fact"))))
+         (verify (%provider-returning (llm:make-completion :text "no tool call" :stop-reason :end)))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                         :verify verify :max-attempts 1)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (obs:observer-failures observer)))
+    (is-true (obs:observer-last-error observer))
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)) "messages 1 to 6, tried by one run")
+    (is (null (%thread-contents store)))))
+
+(test the-support-check-makes-no-call-when-there-is-nothing-to-check
+  (let* ((store (mem:make-in-memory-store))
+         (verify (%provider-returning (%supported 1)))
+         (observer (obs:make-observer (%provider-returning (%call-with)) store "member-1" "conv-7"
+                                      :step (%step-for 6) :retry-delay 0 :verify verify)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (length (scripted-script verify))) "the verifier was not asked")))
+
+(test flush-distils-the-tail-below-a-step
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Short chat." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (is-false (obs:observe-turn observer (%history 2)))
+    (is-true (obs:observe-turn observer (%history 2) :flush t))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '("Short chat.") (%thread-contents store)))
+    (is (= 2 (obs:observer-mark observer)))))
+
+(test a-hung-call-is-reported-and-stop-observer-ends-it
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'slow-scripted :delay 30 :script nil)
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :window-timeout 0)))
+    (obs:observe-turn observer (%history 6))
+    (sleep 1.2)
+    (is-true (obs:observer-stuck-p observer))
+    (is-false (obs:observe-turn observer (%history 12)) "a stuck observer starts nothing")
+    (is-false (obs:stop-observer observer :timeout 1) "it did not stop in time, so its thread was ended")
+    (sleep 0.2)
+    (is-false (obs:observer-busy-p observer))))
+
+(test a-window-that-cannot-be-distilled-is-skipped-and-counted
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning) store "member-1" "conv-7"
+                                      :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (obs:observer-failures observer)))
+    (is (typep (obs:observer-last-error observer) 'obs:window-not-distilled))
+    (is (= 6 (obs:observer-mark observer)) "the mark moves past it, so it is not paid for again")
+    (is (null (mem:observations-of store "member-1" :thread :all)))))
+
+;;; The in-memory store, shared with the observer's thread.
+
+(test the-in-memory-store-is-safe-to-share-between-threads
+  "Two threads each write 1,500 observations while reading. Every write is kept, every id is
+distinct, and reads never fail (#462's review measured 870 of 6,000 kept without a lock)."
+  (let* ((store (mem:make-in-memory-store))
+         (errors '()) (guard (bt:make-lock))
+         (threads (loop for tag in '("a" "b")
+                        collect (let ((tag tag))
+                                  (bt:make-thread
+                                   (lambda ()
+                                     (handler-case
+                                         (dotimes (i 1500)
+                                           (remember* store "member-1" (format nil "~A ~D" tag i) :thread "conv-7")
+                                           (when (zerop (mod i 50)) (mem:recall store "member-1" :thread "conv-7")))
+                                       (error (e) (bt:with-lock-held (guard) (push e errors))))))))))
+    (mapc #'bt:join-thread threads)
+    (is (null errors) "~{~A~^; ~}" errors)
+    (let ((all (mem:observations-of store "member-1" :thread "conv-7")))
+      (is (= 3000 (length all)))
+      (is (= 3000 (length (remove-duplicates (mapcar #'mem:observation-id all) :test #'string=)))))))
+
+(test recall-takes-one-scope
+  (let ((store (mem:make-in-memory-store)))
+    (signals cnd:praxeon-error (mem:recall store "member-1" :thread :all))
+    (is (null (mem:recall store "member-1")) "control: one scope is fine")))
+
+(test the-support-checks-spec-passes-praxeons-schema-check
+  "Its schema declares `items', which praxeon's check does not read, so the spec needs a validator
+or GENERATE-STRUCTURED refuses it before any request and every check fails."
+  (finishes (llm:check-schema-enforceable (obs::%support-spec)))
+  (is (stringp (funcall (first (llm:tool-spec-validators (obs::%support-spec))) (%args "supported" (vector "1"))))
+      "a number given as text is refused"))
+
+;;; --------------------------------------------------------------------------
+;;; The observer, after #462's second review: windows at exchange boundaries, keyword checking,
+;;; corrections of facts from elsewhere, retries that wait, progress kept in the store, the
+;;; app's own thread observations, promotion retried, and malformed dates.
+;;; --------------------------------------------------------------------------
+
+(defun %tool-exchange (i)
+  "One exchange of five messages: a question, a tool call and its result, and two answers."
+  (append (list (%u (format nil "question ~D: ~{~A~^ ~}" i (make-list 20 :initial-element "word"))))
+          (%tool-round (format nil "toolu_~D" i) "lookup" (format nil "result ~D" i))
+          (list (%a (format nil "answer ~D" i)) (%a (format nil "and more ~D" i)))))
+
+(test a-window-ends-at-an-exchange-boundary
+  "A step smaller than one exchange still ends the window at the exchange's end, so a tool call
+and its result are never in two windows. Cutting by tokens alone ends it after the question."
+  (let* ((history (append (%tool-exchange 1) (%tool-exchange 2) (%tool-exchange 3)))
+         (step (prompt:message-tokens (first history))))
+    (is (= 5 (obs::%window-end history 0 step)) "the first exchange, whole")
+    (is (= 10 (obs::%window-end history 5 step)) "then the second")
+    (is (= 10 (obs::%window-end history 0 (prompt:messages-tokens (subseq history 0 6))))
+        "a step reaching into the second exchange takes all of it")))
+
+(test a-misspelt-keyword-is-refused-by-the-in-memory-store
+  "The lock's methods list their generic's keys, so keyword checking still applies: a misspelt
+:thread is an error, not a fact about the subject."
+  (let ((store (mem:make-in-memory-store)))
+    (signals error (mem:remember store "member-1" "y" :provenance (test-provenance) :thraed "conv-7"))
+    (is (null (mem:observations-of store "member-1" :thread :all)) "nothing was stored")
+    (signals error (mem:observations-of store "member-1" :thraed "conv-7"))
+    (signals error (mem:recall store "member-1" :thraed "conv-7"))))
+
+(defun %correction-run (subject-fact-writer promote-accept)
+  "A store whose subject fact Lives in Porto. SUBJECT-FACT-WRITER put there; then conv-8 observes
+it and corrects it, with ACCEPT and PROMOTE. Returns the subject's current facts."
+  (let ((store (mem:make-in-memory-store)))
+    (funcall subject-fact-writer store)
+    (let* ((observer (obs:make-observer (make-instance 'scripted :script nil) store "member-1" "conv-8"
+                                        :step (%step-for 6) :retry-delay 0 :accept (constantly t)
+                                        :promote (constantly t) :promote-accept promote-accept)))
+      (setf (scripted-script (obs::observer-provider observer)) (list (%call-with (%ob "Lives in Porto." "fact"))))
+      (obs:observe-turn observer (%history 6))
+      (obs:await-observer observer :timeout 10)
+      (let ((porto (first (mem:observations-of store "member-1" :thread "conv-8"))))
+        (setf (scripted-script (obs::observer-provider observer))
+              (list (%call-with (%ob "Lives in Lisbon." "correction" :replaces (mem:observation-id porto)
+                                                                         :because "moved")))))
+      (obs:observe-turn observer (%history 12))
+      (obs:await-observer observer :timeout 10)
+      (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1")) #'string<))))
+
+(test a-correction-of-a-fact-from-elsewhere-needs-promote-accept
+  "The subject's fact came from the app, or from another conversation's observer. Without
+PROMOTE-ACCEPT the correction is not promoted and the subject keeps one fact; with it the fact is
+superseded. Never both as current facts."
+  (flet ((by-app (store) (remember* store "member-1" "Lives in Porto."))
+         (by-conv-7 (store)
+           (let ((o (obs:make-observer (%provider-returning (%call-with (%ob "Lives in Porto." "fact")))
+                                       store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                       :promote (constantly t))))
+             (obs:observe-turn o (%history 6))
+             (obs:await-observer o :timeout 10))))
+    (is (equal '("Lives in Porto.") (%correction-run #'by-app (constantly nil))))
+    (is (equal '("Lives in Lisbon.") (%correction-run #'by-app (constantly t))))
+    (is (equal '("Lives in Porto.") (%correction-run #'by-conv-7 (constantly nil))))
+    (is (equal '("Lives in Lisbon.") (%correction-run #'by-conv-7 (constantly t))))))
+
+(defclass outage-scripted (scripted)
+  ((until :initarg :until :reader outage-until))
+  (:documentation "A scripted provider that signals until internal real time UNTIL, as a rate limit
+lasting a while would."))
+
+(defmethod llm:complete :before ((p outage-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (when (< (get-internal-real-time) (outage-until p))
+    (error 'cnd:deliberation-failure :detail "429 Too Many Requests")))
+
+(test a-retry-waits-so-a-short-outage-is-survived
+  "A 0.3 s outage. With RETRY-DELAY 0 the three attempts run back to back and the window is
+given up on; with 0.2 s the third attempt comes 0.6 s in and the window is written."
+  (flet ((observe-with-delay (delay)
+           (let* ((store (mem:make-in-memory-store))
+                  (provider (make-instance 'outage-scripted
+                                           :until (+ (get-internal-real-time) (* 0.3 internal-time-units-per-second))
+                                           :script (list (%call-with (%ob "Has a dog." "fact")))))
+                  (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                                                                  :retry-delay delay)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (values (obs:observer-skipped observer) (%thread-contents store)))))
+    (multiple-value-bind (skipped contents) (observe-with-delay 0)
+      (is (equal '((1 6 1)) skipped) "control: no wait, so the outage outlasts every attempt")
+      (is (null contents)))
+    (multiple-value-bind (skipped contents) (observe-with-delay 0.2)
+      (is (null skipped))
+      (is (equal '("Has a dog.") contents)))))
+
+(test a-skipped-window-is-retried-by-a-new-observer
+  "The window is given up on, and the observer is replaced, as after a restart. The new one reads
+the skipped window from the store and distils it, though nothing past the mark is new."
+  (let ((store (mem:make-in-memory-store)))
+    (let ((first (obs:make-observer (make-instance 'failing-scripted :failures 1 :script nil)
+                                    store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
+      (obs:observe-turn first (%history 6))
+      (obs:await-observer first :timeout 10)
+      (is (equal '((1 6 1)) (obs:observer-skipped first))))
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+      (is (= 6 mark))
+      (is (equal '((1 6 1)) skipped) "the store holds the skipped window"))
+    (let ((second (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                     store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (is-true (obs:observe-turn second (%history 6)) "a due skipped window starts a run")
+      (obs:await-observer second :timeout 10)
+      (is (null (obs:observer-skipped second)))
+      (is (equal '("Has a dog.") (%thread-contents store))))))
+
+(test a-window-a-process-ended-in-is-finished-by-a-new-observer
+  "The process ended part-way through a window's writes: one of its three observations is in the
+store, and no progress was recorded past it, since progress is recorded after a window. A new
+observer distils the window again, writes the two missing observations, and does not write the
+first again. Working the mark out from the observations would start it at 6 and pass them."
+  (let ((store (mem:make-in-memory-store))
+        (reply (%call-with (%ob "A." "fact") (%ob "B." "fact") (%ob "C." "fact"))))
+    (mem:remember store "member-1" "A." :thread "conv-7" :kind :fact
+                  :provenance (mem:make-provenance "conv-7" 1 :through 6))
+    (let ((observer (obs:make-observer (%provider-returning reply) store "member-1" "conv-7"
+                                       :step (%step-for 6) :retry-delay 0)))
+      (is (= 0 (obs:observer-mark observer)))
+      (obs:observe-turn observer (%history 6))
+      (obs:await-observer observer :timeout 10)
+      (is (equal '("A." "B." "C.") (%thread-contents store))))))
+
+(test the-apps-own-thread-observations-do-not-move-the-mark
+  "An observation the app wrote into the thread, citing message 40, is not the observer's
+progress: a new observer starts at 0."
+  (let ((store (mem:make-in-memory-store)))
+    (mem:remember store "member-1" "Written by the app." :thread "conv-7"
+                  :provenance (mem:make-provenance "conv-7" 40))
+    (is (= 0 (obs:observer-mark (obs:make-observer (%provider-returning) store "member-1" "conv-7"))))
+    (is (= 0 (obs:stored-mark store "member-1" "conv-7")))))
+
+(defclass promotion-fails-store (mem:in-memory-store)
+  ((failed :initform nil :accessor promotion-failed))
+  (:documentation "Fails the first write of a fact about the subject, as a store error during
+promotion."))
+
+(defmethod mem:remember :before ((store promotion-fails-store) subject content
+                                 &key provenance kind value tokens valid-from thread)
+  (declare (ignore subject content provenance kind value tokens valid-from))
+  (when (and (null thread) (not (promotion-failed store)))
+    (setf (promotion-failed store) t)
+    (error "the store failed during promotion")))
+
+(test a-promotion-that-fails-is-retried
+  "The thread observation is written, then its promotion fails. The retry writes nothing new in
+the thread, and promotes the observation."
+  (let* ((store (make-instance 'promotion-fails-store))
+         (reply (%call-with (%ob "Is vegetarian." "preference")))
+         (observer (obs:make-observer (%provider-returning reply reply) store "member-1" "conv-7"
+                                      :step (%step-for 6) :retry-delay 0 :promote (constantly t))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (obs:observer-failures observer)))
+    (is (equal '("Is vegetarian.") (%thread-contents store)))
+    (is (equal '("Is vegetarian.") (mapcar #'mem:observation-content (mem:observations-of store "member-1"))))))
+
+(test a-malformed-date-drops-only-its-proposal
+  "\"2026-1--02\" has its dashes in place and seven digits, and is not a date. parse-date refuses
+it rather than signalling, so only that proposal is dropped."
+  (is (null (dst:parse-date "2026-1--02")))
+  (is (null (dst:parse-date "2026-01-0x")))
+  (let* ((bad (%ob "Starts a new job." "fact"))
+         (good (%ob "Has a dog." "fact")))
+    (setf (gethash "applies_from" bad) "2026-1--02")
+    (let ((d (dst:distil (%provider-returning (%call-with bad good)) "member-1" +window+)))
+      (is (equal '("Has a dog.") (mapcar #'dst:proposal-content (dst:distillation-proposals d)))))))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's third review: chains of corrections, one running observer per thread, and a
+;;; store with only one of the progress generics.
+;;; --------------------------------------------------------------------------
+
+(defun %observe-windows (store thread replies &rest keys)
+  "Run an observer of THREAD over successive six-message windows, one per entry of REPLIES:
+each a function of STORE and THREAD returning the window's completion, so it can name ids
+written earlier. Promotes everything and accepts every thread supersession; KEYS go to
+MAKE-OBSERVER."
+  (let ((observer (apply #'obs:make-observer (make-instance 'scripted :script nil) store "member-1" thread
+                         :step (%step-for 6) :retry-delay 0 :accept (constantly t) :promote (constantly t)
+                         keys)))
+    (loop for reply in replies
+          for n from 6 by 6
+          do (setf (scripted-script (obs::observer-provider observer)) (list (funcall reply store thread)))
+             (obs:observe-turn observer (%history n))
+             (obs:await-observer observer :timeout 10))
+    observer))
+
+(defun %says (content)
+  (lambda (store thread) (declare (ignore store thread)) (%call-with (%ob content "fact"))))
+
+(defun %corrects (old new)
+  "A reply correcting the thread's current observation OLD to NEW."
+  (lambda (store thread)
+    (let ((o (find old (mem:observations-of store "member-1" :thread thread)
+                   :key #'mem:observation-content :test #'string=)))
+      (%call-with (%ob new "correction" :replaces (mem:observation-id o) :because "moved")))))
+
+(defun %facts (store)
+  (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1")) #'string<))
+
+(test a-chain-of-corrections-leaves-one-current-fact
+  "Porto, then Lisbon, then Faro in one conversation. Without PROMOTE-ACCEPT the subject keeps
+the first promoted fact and nothing beside it; with it, the last."
+  (let ((store (mem:make-in-memory-store)))
+    (%observe-windows store "conv-7" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Lisbon.")
+                                           (%corrects "Lives in Lisbon." "Lives in Faro.")))
+    (is (equal '("Lives in Porto.") (%facts store))))
+  (let ((store (mem:make-in-memory-store)))
+    (%observe-windows store "conv-7" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Lisbon.")
+                                           (%corrects "Lives in Lisbon." "Lives in Faro."))
+                      :promote-accept (constantly t))
+    (is (equal '("Lives in Faro.") (%facts store)))))
+
+(test a-correction-of-a-fact-the-app-already-corrected-replaces-the-apps-correction
+  "The subject fact Porto, which the thread also observed, is corrected by the app to Lisbon; the
+thread then corrects its Porto to Faro. The thread's correction descends from a fact whose
+current successor is Lisbon: without PROMOTE-ACCEPT Lisbon stays alone, with it Faro replaces
+it."
+  (dolist (case (list (list (constantly nil) '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
+    (destructuring-bind (promote-accept expected) case
+      (let ((store (mem:make-in-memory-store)))
+        (remember* store "member-1" "Lives in Porto.")
+        (let ((observer (%observe-windows store "conv-8" (list (%says "Lives in Porto."))
+                                          :promote-accept promote-accept)))
+          (mem:supersede store (first (mem:observations-of store "member-1")) "Lives in Lisbon."
+                         :provenance (test-provenance 2))
+          (setf (scripted-script (obs::observer-provider observer))
+                (list (funcall (%corrects "Lives in Porto." "Lives in Faro.") store "conv-8")))
+          (obs:observe-turn observer (%history 12))
+          (obs:await-observer observer :timeout 10)
+          (is (= 0 (obs:observer-failures observer)) "every window distilled, none skipped"))
+        (is (equal expected (%facts store)))))))
+
+(test an-old-fact-observed-again-does-not-come-back-beside-its-correction
+  "The subject's Porto was corrected to Lisbon. A conversation later observes Porto, with no
+link to either. It descends from a fact whose current successor is Lisbon, so it is not
+promoted beside it."
+  (let ((store (mem:make-in-memory-store)))
+    (let ((porto (remember* store "member-1" "Lives in Porto.")))
+      (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2)))
+    (%observe-windows store "conv-9" (list (%says "Lives in Porto.")))
+    (is (equal '("Lives in Lisbon.") (%facts store)))))
+
+(test two-conversations-correcting-one-fact-leave-one-current-fact
+  "conv-7 promotes Porto and corrects it to Lisbon; conv-8, which also observed Porto, corrects
+its own copy to Faro. With PROMOTE-ACCEPT the subject ends with Faro alone."
+  (let ((store (mem:make-in-memory-store)))
+    (%observe-windows store "conv-7" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Lisbon."))
+                      :promote-accept (constantly t))
+    (%observe-windows store "conv-8" (list (%says "Lives in Porto.") (%corrects "Lives in Porto." "Lives in Faro."))
+                      :promote-accept (constantly t))
+    (is (equal '("Lives in Faro.") (%facts store)))))
+
+(test one-observer-of-a-thread-runs-at-a-time
+  "An observer made while another of the same thread is distilling starts nothing, as an app
+making an observer per request would. The window is distilled once."
+  (let* ((store (mem:make-in-memory-store))
+         (reply (%call-with (%ob "Has a dog." "fact")))
+         (first (obs:make-observer (make-instance 'slow-scripted :delay 0.5 :script (list reply))
+                                   store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (second (obs:make-observer (%provider-returning (%call-with (%ob "The member has a dog." "fact")))
+                                    store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (is-true (obs:observe-turn first (%history 6)))
+    (is (null (obs:observe-turn second (%history 6))) "the second starts nothing while the first runs")
+    (obs:await-observer first :timeout 10)
+    (is (equal '("Has a dog.") (%thread-contents store)))
+    (is (= 6 (obs:stored-mark store "member-1" "conv-7")))))
+
+(test the-stored-mark-is-never-lowered
+  "An observer made with a mark behind the store's takes the store's progress when it runs, so it
+neither distils those windows again nor writes the lower mark back."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :mark 0)))
+    (mem:record-thread-progress store "member-1" "conv-7" 12 '())
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    (is (null (%thread-contents store)) "nothing distilled again")
+    (is (= 12 (obs:stored-mark store "member-1" "conv-7")))))
+
+(defclass reader-only-store (mem:memory-store) ()
+  (:documentation "A store with THREAD-PROGRESS and no RECORD-THREAD-PROGRESS, standing in for an
+app's store that implements only the reader."))
+
+(defmethod mem:thread-progress ((store reader-only-store) subject thread)
+  (declare (ignore subject thread))
+  (values nil nil))
+
+(test a-store-without-both-progress-generics-is-refused
+  "MAKE-OBSERVER checks both progress generics, so a store with only the reader is refused when
+the observer is made, not on every save."
+  (signals cnd:praxeon-error
+    (obs:make-observer (%provider-returning) (make-instance 'reader-only-store) "member-1" "conv-7"))
+  (finishes (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7")))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's fourth review: simultaneous calls, retried windows, restatements, and the
+;;; function arguments.
+;;; --------------------------------------------------------------------------
+
+(test two-observers-called-at-the-same-moment-run-once
+  "Two observers of one thread are told the same turn at the same moment, 40 times. The claim
+itself holds the thread, so one runs and the other starts nothing, and the window is written
+once each time."
+  (let ((both 0) (written '()))
+    (dotimes (trial 40)
+      (let* ((store (mem:make-in-memory-store))
+             (observers (loop repeat 2
+                              collect (obs:make-observer
+                                       (make-instance 'slow-scripted :delay 0.05
+                                                                     :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                       store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+             (go (list nil))
+             (callers (loop for o in observers
+                            collect (let ((o o))
+                                      (bt:make-thread (lambda ()
+                                                        (loop until (car go))
+                                                        (obs:observe-turn o (%history 6)))
+                                                      :name "observe-turn-test")))))
+        (setf (car go) t)
+        (let ((started (mapcar #'bt:join-thread callers)))
+          (when (every #'identity started) (incf both)))
+        (dolist (o observers) (obs:await-observer o :timeout 10))
+        (push (length (%thread-contents store)) written)))
+    (is (= 0 both) "both started in ~D of 40 trials" both)
+    (is (every (lambda (n) (= n 1)) written) "the window was written once each time: ~S" written)))
+
+(test running-observer-names-the-observer-running-on-a-thread
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'slow-scripted :delay 0.3
+                                                                    :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (is (null (obs:running-observer store "member-1" "conv-7")))
+    (obs:observe-turn observer (%history 6))
+    (is (eq observer (obs:running-observer store "member-1" "conv-7")))
+    (obs:await-observer observer :timeout 10)
+    (is (null (obs:running-observer store "member-1" "conv-7")) "released when it ends")))
+
+;;; A skipped window is retried, distilled and promoted as if it had never been skipped, only
+;;; while no later window has been written to the thread; after that it is closed (#462's fifth
+;;; review).
+
+(defparameter +allergy+ "Is allergic to penicillin.")
+
+(defclass promotion-outage-store (mem:in-memory-store)
+  ((failures :initarg :failures :accessor promotion-failures))
+  (:documentation "Fails its first FAILURES writes of a fact about the subject, as a store that is
+down for a while during promotion."))
+
+(defmethod mem:remember :before ((store promotion-outage-store) subject content
+                                 &key provenance kind value tokens valid-from thread)
+  (declare (ignore subject content provenance kind value tokens valid-from))
+  (when (and (null thread) (plusp (promotion-failures store)))
+    (decf (promotion-failures store))
+    (error "the store is down")))
+
+(defun %allergy-observer (store provider &rest keys)
+  (apply #'obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+         :max-attempts 2 :promote (constantly t) keys))
+
+(test a-skipped-window-with-nothing-after-it-is-retried-and-promoted
+  "The only window is skipped. Retried at the next turn, by the same observer or a new one, it is
+distilled and promoted as any window is; the same when it was skipped because promotion failed."
+  ;; An outage at the provider; the same observer retries at the next turn.
+  (let* ((store (mem:make-in-memory-store))
+         (observer (%allergy-observer store (make-instance 'failing-scripted :failures 2
+                                                                            :script (list (%call-with (%ob +allergy+ "fact")))))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (null (obs:observer-skipped observer)))
+    (is (equal (list +allergy+) (%thread-contents store)))
+    (is (equal (list +allergy+) (%facts store)) "promoted, by the same observer"))
+  ;; The same outage; a new observer retries it.
+  (let ((store (mem:make-in-memory-store)))
+    (let ((first (%allergy-observer store (make-instance 'failing-scripted :failures 2 :script nil))))
+      (obs:observe-turn first (%history 6))
+      (obs:await-observer first :timeout 10))
+    (let ((second (%allergy-observer store (%provider-returning (%call-with (%ob +allergy+ "fact"))))))
+      (obs:observe-turn second (%history 6))
+      (obs:await-observer second :timeout 10)
+      (is (equal (list +allergy+) (%facts store)) "promoted, by a new observer")))
+  ;; Promotion failed on both attempts; the store is back at the next turn.
+  (let* ((store (make-instance 'promotion-outage-store :failures 2))
+         (reply (%call-with (%ob +allergy+ "fact")))
+         (observer (%allergy-observer store (%provider-returning reply reply reply))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (is (null (%facts store)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal (list +allergy+) (%thread-contents store)) "the thread observation is not written twice")
+    (is (equal (list +allergy+) (%facts store)) "promoted once the store is back")))
+
+(defun %closed-run (promote-accept)
+  "Window 1 (Porto) is skipped; window 2 says Lisbon. At the next turn window 3 corrects Lisbon to
+Faro. Returns the store and the observer."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (%allergy-observer store (make-instance 'failing-scripted :failures 2
+                                                                            :script (list (%call-with (%ob "Lives in Lisbon." "fact"))))
+                                      :accept (constantly t) :promote-accept promote-accept)))
+    (obs:observe-turn observer (%history 12))
+    (obs:await-observer observer :timeout 10)
+    ;; Only window 3's answer: a closed window 1 makes no model call.
+    (setf (scripted-script (obs::observer-provider observer))
+          (list (funcall (%corrects "Lives in Lisbon." "Lives in Faro.") store "conv-7")))
+    (obs:observe-turn observer (%history 18))
+    (obs:await-observer observer :timeout 10)
+    (values store observer)))
+
+(test a-skipped-window-with-a-later-window-written-is-closed-not-retried
+  "Window 1 is skipped and window 2 written. At the next turn window 1 is closed rather than
+retried, so the thread never holds the older Porto beside Lisbon or its correction, and after
+Faro the thread and the subject each hold one current statement of where the member lives."
+  (dolist (case (list (list (constantly nil) '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
+    (destructuring-bind (promote-accept facts) case
+      (multiple-value-bind (store observer) (%closed-run promote-accept)
+        (is (equal '((1 6 1 :closed)) (obs:observer-skipped observer)))
+        (is (equal '("Lives in Faro.") (%thread-contents store)) "one current observation in the thread")
+        (is (equal facts (%facts store)) "one current fact about the subject")))))
+
+(test a-closed-window-is-not-retried-on-a-later-turn
+  "A closed window starts no run, and a new observer reads it from the store as closed."
+  (multiple-value-bind (store observer) (%closed-run (constantly nil))
+    (is (null (obs:observe-turn observer (%history 18))) "nothing is due")
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+      (is (= 18 mark))
+      (is (equal '((1 6 1 :closed)) skipped)))
+    (is (null (obs:observe-turn (%allergy-observer store (%provider-returning)) (%history 18))))))
+
+(test a-restatement-of-an-old-value-does-not-revert-its-correction
+  "The subject's Porto was corrected to Lisbon. Another conversation says Porto, correcting
+nothing. Even with PROMOTE-ACCEPT T it is not a correction, so it does not replace Lisbon."
+  (let ((store (mem:make-in-memory-store)))
+    (let ((porto (remember* store "member-1" "Lives in Porto.")))
+      (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2)))
+    (%observe-windows store "conv-8" (list (%says "Lives in Porto.")) :promote-accept (constantly t))
+    (is (equal '("Lives in Lisbon.") (%facts store)))))
+
+(test make-observer-refuses-an-argument-that-is-not-a-function
+  (dolist (key '(:accept :promote :promote-accept :reflect-accept :reflect-accept-protected))
+    (signals cnd:praxeon-error
+      (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7" key nil)))
+  (finishes (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7"
+                               :promote 'identity)))
+
+(test a-thread-that-cannot-be-started-gives-the-claim-back
+  "When the worker thread cannot be made, OBSERVE-TURN signals and the thread is not left taken,
+so a later observer of it can run."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (start (fdefinition 'obs::%start-worker)))
+    (unwind-protect
+         (progn (setf (fdefinition 'obs::%start-worker)
+                      (lambda (&rest arguments) (declare (ignore arguments)) (error "no thread can be made")))
+                (signals error (obs:observe-turn observer (%history 6))))
+      (setf (fdefinition 'obs::%start-worker) start))
+    (is (null (obs:running-observer store "member-1" "conv-7")))
+    (is-true (obs:observe-turn observer (%history 6)) "the thread is free for the next call")
+    (obs:await-observer observer :timeout 10)))
+;;; --------------------------------------------------------------------------
+;;; Observational memory, step B (#317): the reflector, CONDENSE, and finding what came from a
+;;; conversation. A scripted model only.
+;;; --------------------------------------------------------------------------
+
+(test condense-supersedes-its-sources-and-the-past-still-shows-them
+  (let* ((store (mem:make-in-memory-store))
+         (a (remember* store "member-1" "Likes tea." :thread "conv-7"))
+         (b (remember* store "member-1" "Drinks green tea in the morning." :thread "conv-7"))
+         (before (progn (sleep 1.1) (ctx:now))))
+    (sleep 1.1)
+    (let ((c (mem:condense store (list a b) "Drinks green tea, mornings." :provenance (test-provenance))))
+      (is (equal (list (mem:observation-id a) (mem:observation-id b)) (mem:observation-condensed-from c)))
+      (is (equal "conv-7" (mem:observation-thread c)) "it stays in the sources' scope")
+      (is (equal '("Drinks green tea, mornings.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))))
+      (is (equal '("Drinks green tea in the morning." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content
+                               (mem:observations-of store "member-1" :thread "conv-7" :as-of before))
+                       #'string<))
+          "recall as of before the reflection returns the originals"))))
+
+(test condense-refuses-sources-it-cannot-condense
+  (let* ((store (mem:make-in-memory-store))
+         (a (remember* store "member-1" "A." :thread "conv-7"))
+         (b (remember* store "member-1" "B." :thread "conv-8"))
+         (c (remember* store "member-1" "C." :thread "conv-7")))
+    (signals cnd:praxeon-error (mem:condense store (list a b) "AB." :provenance (test-provenance))
+             "two scopes")
+    (supersede* store c "C, corrected.")
+    (signals cnd:praxeon-error (mem:condense store (list a c) "AC." :provenance (test-provenance))
+             "a source already superseded")
+    (signals cnd:praxeon-error (mem:condense store '() "nothing" :provenance (test-provenance)))
+    (is (equal '("A." "C, corrected.")
+               (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))
+                     #'string<))
+        "nothing changed but the supersession")))
+
+(test every-observation-from-a-conversation-is-found-through-condensations
+  "Erasure's question (#150): what came from conversation conv-A? The observation it wrote, the
+one condensed from it with another conversation's, and the one condensed from that. Not
+conv-B's own."
+  (let* ((store (mem:make-in-memory-store))
+         (a (mem:remember store "member-1" "From A." :provenance (mem:make-provenance "conv-A" 1)))
+         (b (mem:remember store "member-1" "From B." :provenance (mem:make-provenance "conv-B" 1)))
+         (x (mem:remember store "member-1" "Also from B." :provenance (mem:make-provenance "conv-B" 2)))
+         (ab (mem:condense store (list a b) "From A and B." :provenance (mem:make-provenance "" 0)))
+         (abx (mem:condense store (list ab x) "All three." :provenance (mem:make-provenance "" 0))))
+    (is (equal (list "From A." "From A and B." "All three.")
+               (mapcar #'mem:observation-content
+                       (sort (mem:observations-from-conversation store "member-1" "conv-A")
+                             (lambda (p q) (< (length (mem:observation-condensed-from p))
+                                              (length (mem:observation-condensed-from q))))))
+               ;; ordered by how many sources each has, since all were written in one second
+               ))
+    (is (null (set-difference (list (mem:observation-id b) (mem:observation-id x)
+                                    (mem:observation-id ab) (mem:observation-id abx))
+                              (mapcar #'mem:observation-id
+                                      (mem:observations-from-conversation store "member-1" "conv-B"))
+                              :test #'string=)))))
+
+(defun %condensed (&rest items)
+  "A completion whose record_condensed call carries ITEMS, each (content . source-ids)."
+  (llm:make-completion
+   :stop-reason :tool-use
+   :tool-calls (list (llm:make-tool-call
+                      :id "r1" :name "record_condensed"
+                      :arguments (%args "condensed"
+                                        (coerce (loop for (content . ids) in items
+                                                      collect (%args "content" content
+                                                                     "sources" (coerce ids 'vector)))
+                                                'vector))))))
+
+(defun %store-with (&rest specs)
+  "A store with observations in conv-7 for member-1: each spec (content kind)."
+  (let ((store (mem:make-in-memory-store)))
+    (values store (loop for (content kind) in specs
+                        collect (remember* store "member-1" content :thread "conv-7" :kind kind)))))
+
+(test the-reflector-does-nothing-under-its-threshold
+  (multiple-value-bind (store os) (%store-with '("A." :fact) '("B." :fact))
+    (let ((provider (%provider-returning (%condensed (list* "AB." (mapcar #'mem:observation-id os))))))
+      (is (null (obs:reflect provider store "member-1" :thread "conv-7" :threshold 1000 :accept (constantly t))))
+      (is (= 1 (length (scripted-script provider))) "no model call was made"))))
+
+(test the-reflector-condenses-only-what-the-app-accepts
+  (flet ((reflect-with (&rest keys)
+           (multiple-value-bind (store os) (%store-with '("Likes tea." :fact) '("Likes green tea." :fact))
+             (let ((provider (%provider-returning (%condensed (list* "Likes green tea." (mapcar #'mem:observation-id os))))))
+               (apply #'obs:reflect provider store "member-1" :thread "conv-7" :threshold 1 keys)
+               (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))
+                     #'string<)))))
+    (is (equal '("Likes green tea." "Likes tea.") (reflect-with)) "by default nothing is condensed")
+    (is (equal '("Likes green tea.") (reflect-with :accept (constantly t))))))
+
+(test the-reflector-keeps-a-correction-unless-the-app-allows-merging-it
+  (flet ((reflect-with (&rest keys)
+           (multiple-value-bind (store os) (%store-with '("Lives in Porto." :fact) '("Lives in Lisbon now." :correction))
+             (let ((provider (%provider-returning (%condensed (list* "Lives in Lisbon." (mapcar #'mem:observation-id os))))))
+               (apply #'obs:reflect provider store "member-1" :thread "conv-7" :threshold 1 :accept (constantly t) keys)
+               (length (mem:observations-of store "member-1" :thread "conv-7"))))))
+    (is (= 2 (reflect-with)) "ACCEPT alone does not merge a correction")
+    (is (= 1 (reflect-with :accept-protected (constantly t))) "ACCEPT-PROTECTED does")))
+
+(test the-reflector-signals-and-writes-nothing-from-an-answer-naming-unknown-ids
+  "An answer that cannot be used signals, so a caller can count it, rather than returning the NIL
+of a reflection that changed nothing."
+  (multiple-value-bind (store os) (%store-with '("A." :fact) '("B." :fact))
+    (declare (ignore os))
+    (let ((provider (%provider-returning (%condensed '("AB." "obs-999" "obs-998"))
+                                         (%condensed '("AB." "obs-999" "obs-998"))
+                                         (%condensed '("AB." "obs-999" "obs-998")))))
+      (signals llm:structured-result-invalid
+        (obs:reflect provider store "member-1" :thread "conv-7" :threshold 1 :accept (constantly t)))
+      (is (= 2 (length (mem:observations-of store "member-1" :thread "conv-7")))))))
+
+(test the-reflect-spec-describes-its-items-and-passes-the-schema-check
+  "OpenAI and Gemini refuse an array parameter without ITEMS, so the condensed array and each
+item's sources say what they hold; the validator is what lets the check accept that."
+  (let* ((spec (obs::%reflect-spec '("obs-1")))
+         (condensed (gethash "condensed" (gethash "properties" (llm:tool-spec-schema spec))))
+         (item (gethash "items" condensed)))
+    (finishes (llm:check-schema-enforceable spec))
+    (is (equal "object" (gethash "type" item)))
+    (is (equal "string" (gethash "type" (gethash "items" (gethash "sources" (gethash "properties" item))))))))
+
+(test condense-checks-and-writes-under-the-in-memory-stores-lock
+  "CONDENSE checks that its sources are current and supersedes them in one step under the
+store's lock. Here a source is superseded while CONDENSE waits for the lock: CONDENSE then
+refuses, and the correction stays current. Were the check made before the lock, CONDENSE would
+pass it, then supersede the correction's source a second time and leave both current."
+  (multiple-value-bind (store os) (%store-with '("A." :fact) '("B." :fact))
+    (let ((worker nil) (correction nil))
+      (bt:with-recursive-lock-held ((mem::store-lock store))
+        (setf worker (bt:make-thread
+                      (lambda ()
+                        (handler-case (mem:condense store os "A and B." :provenance (test-provenance))
+                          (error (e) e)))
+                      :name "condense-test"))
+        (sleep 0.3)
+        (setf correction (mem:supersede store (first os) "Not A." :provenance (test-provenance))))
+      (is (typep (sb-thread:join-thread worker :default nil :timeout 10) 'cnd:praxeon-error)
+          "condense refuses a source superseded before it held the lock")
+      (is (equal '("B." "Not A.")
+                 (sort (mapcar #'mem:observation-content
+                               (mem:observations-of store "member-1" :thread "conv-7"))
+                       #'string<)))
+      (is (equal (mem:observation-id correction) (mem:observation-superseded-by (first os)))))))
+
+(test a-failed-reflection-is-counted-and-the-window-stays-written
+  (let* ((store (mem:make-in-memory-store))
+         (bad (%condensed '("AB." "obs-999")))
+         (provider (%provider-returning (%call-with (%ob "Likes green tea." "fact")) bad bad bad))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                      :reflect-threshold 1 :reflect-accept (constantly t))))
+    (obs:observe-turn observer (%history 6))
+    (is-true (obs:await-observer observer :timeout 10))
+    (is (equal '("Likes green tea.")
+               (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))))
+    (is (= 1 (obs:observer-failures observer)))
+    (is (typep (obs:observer-last-error observer) 'llm:structured-result-invalid))
+    (is (= 6 (obs:observer-mark observer)))
+    (is (null (obs:observer-skipped observer)) "the window was written, so it is not skipped")))
+
+(test the-observer-reflects-after-a-distillation-when-asked
+  (let* ((store (mem:make-in-memory-store))
+         (a (remember* store "member-1" "Likes tea." :thread "conv-7"))
+         (provider (make-instance 'scripted :script nil)))
+    ;; The distillation writes one observation; the reflection then condenses it with A.
+    (setf (scripted-script provider)
+          (list (%call-with (%ob "Likes green tea." "fact"))
+                ;; the reflection's answer is built once the new id is known, below
+                ))
+    (let ((observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                       :reflect-threshold 1 :reflect-accept (constantly t))))
+      ;; Queue a reflection answer naming A and whatever id the store gives next.
+      (setf (scripted-script provider)
+            (append (scripted-script provider)
+                    (list (%condensed (list "Likes green tea." (mem:observation-id a) "obs-2")))))
+      (obs:observe-turn observer (%history 6))
+      (obs:await-observer observer :timeout 10)
+      (is (equal '("Likes green tea.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))))
+      (is (= 2 (length (mem:observation-condensed-from
+                        (first (mem:observations-of store "member-1" :thread "conv-7"))))))
+      (is (= 0 (obs:observer-failures observer)) "one window, distilled and reflected on"))))
+
+(test a-misspelt-keyword-to-condense-is-refused
+  "CONDENSE's lock method lists the generic's keys, so a misspelt :kind is an error and the
+sources stay current."
+  (multiple-value-bind (store os) (%store-with '("A." :fact) '("B." :fact))
+    (signals error (mem:condense store os "A and B." :provenance (test-provenance) :knd :fact))
+    (is (every #'mem:observation-current-p os))))
+
+(test a-correction-of-a-condensed-observation-reaches-the-facts-it-was-condensed-from
+  "The thread's promoted Porto is condensed with another observation, and the condensed one is
+then corrected. The correction descends from Porto through CONDENSED-FROM, so it replaces the
+subject's Porto only with PROMOTE-ACCEPT and is never promoted beside it."
+  (dolist (case (list (list (constantly nil) '("Lives in Porto."))
+                      (list (constantly t) '("Lives in Lisbon and has a dog."))))
+    (destructuring-bind (promote-accept expected) case
+      (let* ((store (mem:make-in-memory-store))
+             (observer (%observe-windows store "conv-7" (list (%says "Lives in Porto."))
+                                         :promote-accept promote-accept
+                                         :promote (lambda (o) (search "Lives" (mem:observation-content o))))))
+        (let ((dog (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                                 :provenance (mem:make-provenance "conv-7" 1 :through 6))))
+          (mem:condense store (list (find "Lives in Porto." (mem:observations-of store "member-1" :thread "conv-7")
+                                          :key #'mem:observation-content :test #'string=)
+                                    dog)
+                        "Lives in Porto and has a dog." :provenance (mem:make-provenance "conv-7" 1 :through 6)))
+        (setf (scripted-script (obs::observer-provider observer))
+              (list (funcall (%corrects "Lives in Porto and has a dog." "Lives in Lisbon and has a dog.")
+                             store "conv-7")))
+        (obs:observe-turn observer (%history 12))
+        (obs:await-observer observer :timeout 10)
+        (is (equal expected (%facts store)))))))
+
+(test condense-refuses-a-source-named-twice
+  "An observation named twice among the sources is refused, and nothing is written."
+  (multiple-value-bind (store os) (%store-with '("A." :fact) '("B." :fact))
+    (signals cnd:praxeon-error
+      (mem:condense store (list (first os) (first os)) "A." :provenance (test-provenance)))
+    (is (every #'mem:observation-current-p os))
+    (is (= 2 (length (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t))))))
