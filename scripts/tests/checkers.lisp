@@ -55,7 +55,36 @@
 (def-suite checkers)
 (in-suite checkers)
 
-(defun run-tests () (run! 'checkers))
+(defvar *run-directory* nil
+  "The directory this run's fixtures are made in, or NIL before the first one (#476).")
+
+(defun %new-directory (parent prefix)
+  "A directory under PARENT named PREFIX and a random suffix, which did not exist before this
+call made it."
+  (loop for dir = (merge-pathnames (format nil "~A~36R-~36R/" prefix
+                                           (random (expt 2 48) (make-random-state t))
+                                           (random (expt 2 48) (make-random-state t)))
+                                   parent)
+        unless (uiop:directory-exists-p dir)
+          do (ensure-directories-exist dir)
+             (return dir)))
+
+(defun %run-directory ()
+  "This run's directory, made the first time a fixture needs it."
+  (or *run-directory*
+      (setf *run-directory* (%new-directory (uiop:temporary-directory) "ouranos-checkers-run-"))))
+
+(defun %call-with-run-directory (thunk)
+  "Call THUNK with a run directory of its own, and delete that directory afterwards, however
+THUNK ends -- a failed check, a signalled error or a non-local exit. Fixtures are never deleted
+one by one (see %FRESH-TREE), so this is the one place they are removed. Before #476 nothing
+removed them, and one Windows machine had 2,952 of them, 190 MB, in its temporary directory."
+  (let ((*run-directory* nil))
+    (unwind-protect (funcall thunk)
+      (when *run-directory*
+        (aion/fs:delete-tree *run-directory* :if-does-not-exist :ignore)))))
+
+(defun run-tests () (%call-with-run-directory (lambda () (run! 'checkers))))
 
 ;;; --- the harness ------------------------------------------------------------
 
@@ -82,15 +111,14 @@ failure to have.")
 
 Fresh rather than cleaned: a fixture reusing a path and deleting afterwards passes because
 the delete worked last time, which is a dependency nobody sees until the run where it did
-not. The name carries the process id and a random suffix so two runs cannot collide even if
-one left its directory behind."
-  (let ((dir (merge-pathnames
-              (format nil "ouranos-checkers-~36R-~36R/"
-                      (random (expt 2 48) (make-random-state t))
-                      (random (expt 2 48) (make-random-state t)))
-              (uiop:temporary-directory))))
-    (ensure-directories-exist dir)
-    dir))
+not. The name carries a random suffix so two runs cannot collide even if one left its
+directory behind.
+
+It is made inside this run's directory (%RUN-DIRECTORY), which RUN-TESTS deletes when the
+suite ends, however it ends (#476). No test deletes its own fixture or relies on one having
+been deleted. A test run on its own with FIVEAM:RUN, outside RUN-TESTS, leaves its run
+directory behind."
+  (%new-directory (%run-directory) "tree-"))
 
 (defun %install-checker (tree name)
   "Copy checker NAME into TREE's scripts/ so its `*load-truename*' roots at TREE.
@@ -322,6 +350,33 @@ whatever `uiop:run-program' does with a missing file. Assert the arrangement dir
 worked last time, which is a dependency nobody sees until the run where it did not."
   (is (string/= (namestring (%fresh-tree)) (namestring (%fresh-tree)))
       "each fixture gets a directory that has never existed before"))
+
+(test fixtures-are-made-in-a-run-directory-that-is-deleted-however-the-run-ends
+  "#476: every fixture goes in one directory per run, which is deleted when the run ends, even
+when it ends with an error. The run here is a nested one with its own directory, so this run's
+own directory, holding this test's fixtures, is not the one deleted."
+  (let ((run nil) (fixture nil))
+    (is (eq :escaped
+            (catch 'escaped
+              (handler-case
+                  (%call-with-run-directory
+                   (lambda ()
+                     (setf fixture (%fresh-tree)
+                           run *run-directory*)
+                     (with-open-file (s (merge-pathnames "file" fixture) :direction :output)
+                       (write-line "x" s))
+                     (error "a test that fails part-way")))
+                (error () (throw 'escaped :escaped)))))
+        "the nested run ended with the error")
+    (is-true run "it made a run directory")
+    (is (uiop:subpathp fixture run) "the fixture ~A was made inside the run directory ~A" fixture run)
+    (is (uiop:subpathp run (uiop:temporary-directory))
+        "the run directory ~A is in the temporary directory" run)
+    (is (uiop:string-prefix-p "ouranos-checkers-run-" (car (last (pathname-directory run))))
+        "and is named for this suite: ~A" run)
+    (is-false (uiop:directory-exists-p run) "the run directory and the fixture in it are gone")
+    (is (not (equal run *run-directory*))
+        "and it was not the directory of the run this test belongs to")))
 
 ;;; --- check-assets -----------------------------------------------------------
 ;;;
