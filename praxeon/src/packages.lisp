@@ -102,7 +102,7 @@
            #:observation-supersedes #:observation-superseded-by #:observation-superseded-at
            #:observation-current-p
            #:remember #:supersede #:recall #:recall-similar #:observation->ctx-item
-   #:observations-of #:forget #:forget-subject))
+   #:observations-of #:forget #:forget-subject #:thread-progress #:record-thread-progress))
 
 (defpackage #:praxeon/results
   (:use #:cl)
@@ -201,7 +201,7 @@
            #:distillation #:make-distillation #:distillation-subject #:distillation-proposals
            #:distillation-replacements
            #:proposal #:proposal-content #:proposal-kind #:proposal-replaces
-           #:proposal-because #:proposal-applies-from #:parse-date
+           #:proposal-because #:proposal-applies-from #:parse-date #:date-string
            #:observation-tool #:*system-prompt*))
 
 (defpackage #:praxeon/prompt

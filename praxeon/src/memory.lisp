@@ -186,12 +186,27 @@ history cannot be made to forget is one a consuming app cannot use for personal 
 (defgeneric forget (store observation)
   (:documentation "Erase one observation. Returns true when it was there."))
 
+(defgeneric thread-progress (store subject thread)
+  (:documentation "How far the observer of THREAD about SUBJECT has got (#317). Returns two
+values: MARK, how many of the thread's messages it has finished with, distilled or given up on;
+and SKIPPED, the windows it gave up on, each a list (FROM THROUGH TRIES) of message positions
+counted from 1 and how many runs have tried it. Both NIL when nothing is recorded.
+
+KEPT IN THE STORE, NOT WORKED OUT FROM THE OBSERVATIONS (#462's second review). The largest
+message an observation cites passes a window whose writes failed part-way, forgets a window that
+was given up on, and counts observations the app wrote into the thread itself, so an observer
+restarted from it would pass messages that were never distilled. FORGET-SUBJECT erases it."))
+
+(defgeneric record-thread-progress (store subject thread mark skipped)
+  (:documentation "Record the observer's progress on THREAD about SUBJECT, as THREAD-PROGRESS
+returns it. Replaces what was recorded. Returns MARK."))
+
 ;;; RECALL NEVER MIXES THE SCOPES (#317). :ALL is for OBSERVATIONS-OF, the access right; a
 ;;; recall builds a prompt, and one that mixed two conversations' observations with the subject's
 ;;; facts would put another conversation into this one. A :BEFORE method on the base class, so
 ;;; every store refuses it for RECALL, including one written outside this tree.
-(defmethod recall :before ((store memory-store) subject &key thread &allow-other-keys)
-  (declare (ignore subject))
+(defmethod recall :before ((store memory-store) subject &key budget kind as-of thread)
+  (declare (ignore subject budget kind as-of))
   (when (eq thread :all)
     (error 'praxeon/conditions:praxeon-error
            :detail "recall takes one scope: NIL for the subject's facts, or a thread's id; :all is for observations-of")))
@@ -205,6 +220,8 @@ history cannot be made to forget is one a consuming app cannot use for personal 
 (defclass in-memory-store (memory-store)
   ((observations :initform (make-hash-table :test #'equal) :reader store-observations)
    (counter :initform 0 :accessor store-counter)
+   ;; (subject . thread) -> (mark . skipped), for THREAD-PROGRESS.
+   (progress :initform (make-hash-table :test #'equal) :reader store-progress)
    (lock :initform (bt:make-recursive-lock "praxeon-memory") :reader store-lock))
   (:documentation "Observations in a hash-table, keyed by id. No persistence.
 
@@ -216,24 +233,35 @@ extent, including SUPERSEDE's check that the observation is not already supersed
 recursive because SUPERSEDE calls REMEMBER."))
 
 ;;; Every generic's in-memory method runs under the store's lock. :AROUND methods, so the rule
-;;; is written once for each operation rather than repeated inside each body.
-(defmethod remember :around ((store in-memory-store) subject content &key &allow-other-keys)
-  (declare (ignore subject content))
+;;; is written once for each operation rather than repeated inside each body. EACH LISTS ITS
+;;; GENERIC'S KEYS rather than saying &ALLOW-OTHER-KEYS: one applicable method that allows other
+;;; keys turns off keyword checking for the whole call, so a misspelt :THREAD would be ignored
+;;; and the observation stored as a fact about the subject (#462's second review).
+(defmethod remember :around ((store in-memory-store) subject content
+                             &key provenance kind value tokens valid-from thread)
+  (declare (ignore subject content provenance kind value tokens valid-from thread))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
-(defmethod supersede :around ((store in-memory-store) observation content &key &allow-other-keys)
-  (declare (ignore observation content))
+(defmethod supersede :around ((store in-memory-store) observation content
+                              &key provenance kind value tokens valid-from)
+  (declare (ignore observation content provenance kind value tokens valid-from))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
-(defmethod observations-of :around ((store in-memory-store) subject &key &allow-other-keys)
-  (declare (ignore subject))
+(defmethod observations-of :around ((store in-memory-store) subject &key as-of include-superseded thread)
+  (declare (ignore subject as-of include-superseded thread))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
-(defmethod recall :around ((store in-memory-store) subject &key &allow-other-keys)
-  (declare (ignore subject))
+(defmethod recall :around ((store in-memory-store) subject &key budget kind as-of thread)
+  (declare (ignore subject budget kind as-of thread))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
 (defmethod forget :around ((store in-memory-store) observation)
   (declare (ignore observation))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
 (defmethod forget-subject :around ((store in-memory-store) subject)
   (declare (ignore subject))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod thread-progress :around ((store in-memory-store) subject thread)
+  (declare (ignore subject thread))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod record-thread-progress :around ((store in-memory-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
 
 (defun make-in-memory-store () (make-instance 'in-memory-store))
@@ -379,4 +407,17 @@ do I fix it' unanswerable."
 (defmethod forget-subject ((store in-memory-store) subject)
   (let ((doomed (observations-of store subject :include-superseded t :thread :all)))
     (dolist (o doomed) (forget store o))
+    (loop for key in (loop for k being the hash-keys of (store-progress store) collect k)
+          when (string= (car key) subject)
+            do (remhash key (store-progress store)))
     (length doomed)))
+
+(defmethod thread-progress ((store in-memory-store) subject thread)
+  (let ((entry (gethash (cons subject thread) (store-progress store))))
+    (if entry
+        (values (car entry) (copy-tree (cdr entry)))
+        (values nil nil))))
+
+(defmethod record-thread-progress ((store in-memory-store) subject thread mark skipped)
+  (setf (gethash (cons subject thread) (store-progress store)) (cons mark (copy-tree skipped)))
+  mark)

@@ -18,16 +18,30 @@ its tag.
   `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
   outside this tree that does not accept `:thread` is refused when it is added, at load time.
   `:thread` NIL, the default, means facts about the subject, which is what every observation has
-  been so far, so a call that does not pass it behaves as before. Such a store must also keep a
-  superseding observation in its predecessor's thread in `supersede`, or an accepted correction
-  of a thread observation becomes a fact about the subject, and must erase thread observations
-  in `forget-subject`. `recall` and `recall-similar` refuse `:thread :all`.
+  been so far, so a call that does not pass it behaves as before, and a misspelt keyword is
+  still an error. Such a store must also keep a superseding observation in its predecessor's
+  thread in `supersede`, or an accepted correction of a thread observation becomes a fact about
+  the subject, and must erase thread observations in `forget-subject`. `recall` refuses
+  `:thread :all` for every store; `recall-similar` has no shared method, so a store's own
+  `recall-similar` must refuse `:all` itself, as both stores in this tree do.
+- **praxeon/memory: an app's own memory store implements `thread-progress` and
+  `record-thread-progress` before `praxeon/observe` can use it** (#317). They keep an observer's
+  progress on a thread (how many messages it has finished with, and the windows it gave up on),
+  and `forget-subject` must erase it with the subject's observations. A store without them is
+  refused when `make-observer` is called.
+- **praxeon/memory-db: `supersede` refuses an observation that is already superseded**, as the
+  in-memory store always has. It checks and writes under the store's lock in one transaction, so
+  two supersessions of one observation no longer leave two current replacements. An app that
+  superseded the same observation twice now gets a `praxeon-error` on the second call.
 - **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
   `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
   not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
   columns in its own migration before it reads. Existing rows become facts about their subject,
-  as they were.
+  as they were. `ensure-schema` also creates a second table, the observations table's name with
+  `_progress` appended (`id`, `subject`, `thread`, `observed`, `skipped`, `updated_at`), which
+  `thread-progress` reads; an app with its own migrations creates it too before using
+  `praxeon/observe`.
 - **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
   by default.**
   `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
@@ -45,19 +59,28 @@ its tag.
   path, into observations of that conversation** (#317, step A). `make-observer` takes a
   provider, a store, a subject and a thread, and `observe-turn` is called with the thread's
   history after each turn and returns at once. When the messages past its mark reach `:step`
-  estimated tokens (6,000 by default), it distils them on a thread of its own, one step-sized
-  window at a time, writes each into the thread's scope with a provenance naming the
-  conversation and the messages' range, and moves the mark past it.
+  estimated tokens (6,000 by default), it distils them on a thread of its own, one window at a
+  time, writes each into the thread's scope with a provenance naming the conversation and the
+  messages' range, and moves the mark past it. A window is whole exchanges up to `:step` tokens
+  (`praxeon/prompt:exchanges`), so a tool call and its result are never in two windows.
   - The mark moves only past a window that was written, or given up on after `:max-attempts`
     failures (3 by default). A provider error, a store error part-way through the writes, or a
-    failed support check is retried, and a retry does not store an observation twice. A window
-    given up on is recorded in `observer-skipped`. Every failure is counted in
+    failed support check is retried after `:retry-delay` seconds (2 by default), and each later
+    retry waits twice as long. A retry does not store an observation twice, and it runs the
+    window's promotion again. A window given up on is recorded in `observer-skipped` as
+    `(from through tries)`, message positions counted from 1, and each later run tries it again
+    until `:max-attempts` runs have given up on it. Every failure is counted in
     `observer-failures`, with the last in `observer-last-error`.
-  - A new observer takes its mark from the store, so a restart does not distil the thread again.
+  - The mark and the skipped windows are kept in the store (`thread-progress`) after each
+    window, and a new observer starts from them. So a restart neither distils the thread again
+    nor passes a window that was given up on or that the process ended part-way through.
+    Observations the app wrote into the thread itself do not move the mark.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
-    does; a promoted fact is not stored twice, and a correction of one supersedes the subject's
-    fact only when `:promote-accept` allows it too.
+    does. A fact the subject already holds is not stored again. When a promoted observation
+    corrects one whose content the subject holds as a current fact, whether that fact came from
+    this conversation, another one or the app, the fact is superseded only when
+    `:promote-accept` allows it too; otherwise the correction is not promoted.
   - `:verify`, a provider, drops proposals the window does not support, judging their content,
     kind, date and any claim to replace an earlier observation.
   - `stop-observer` stops it at shutdown, `observer-stuck-p` reports a call running past
@@ -68,8 +91,9 @@ its tag.
     :all` reads both. The in-memory store is now safe to share between threads.
   - A provenance can name a range of turns with `:through`.
   - `distil`'s tool takes an optional `applies_from` date, which becomes the observation's
-    `valid-from`; `distil` takes `:today` to tell the model the date; a date that cannot be read
-    drops only its own proposal. `apply-distillation` takes `:thread`.
+    `valid-from`; `distil` takes `:today` to tell the model the date (the observer passes the
+    time `observe-turn` was called, in UTC); a date that cannot be read drops only its own
+    proposal. `apply-distillation` takes `:thread`.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
