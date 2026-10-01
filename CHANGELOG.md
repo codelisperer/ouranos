@@ -34,6 +34,21 @@ its tag.
   Windows is a desktop app that never exits and shows nothing. An app acts if its dumped image
   relies on SBCL's debugger, for a REPL of its own for example: pass `:debugger t` to
   `dump-executable` or `dump-core`, or call `sb-ext:enable-debugger` where it needs it. (#495)
+- **A desktop app no longer loads libuv or mbedTLS from the source tree it was built from.**
+  `aion/uv` and `aion/tls` searched `vendor/libuv` and `vendor/mbedtls` of the tree, found
+  through ASDF at run time, after the copy beside the image. In a desktop bundle that tree is the
+  build machine's, so a bundle missing its carried library still loaded on the machine or CI
+  runner that built it, and failed only on a user's machine: the desktop-release check that
+  removes the carried `libuv.dll` saw the app serving, on the runner's
+  `vendor\libuv\lib\libuv.dll` (#472). `scripts/build-desktop-app.lisp` now sets
+  `aion/platform:*search-source-tree*` to NIL in the app's image, and then the loaders try only
+  `AION_UV_LIBRARY` or `AION_TLS_LIBRARY`, the copy beside the image, and the operating system's
+  own search. Everything else, `bin/cons` and the tools dumped from the tree included, keeps
+  searching the tree as before. An app acts if its bundle worked only on the build machine:
+  carry the library, which `build-desktop-app.lisp` does for libuv and mbedTLS when the app loads
+  them, or point `AION_UV_LIBRARY` or `AION_TLS_LIBRARY` at a copy.
+  `scripts/verify-bundle-windows.ps1`'s control now compares long paths, and prints every copy
+  of a removed DLL that was loaded. (#472)
 
 ### Added
 
@@ -53,6 +68,33 @@ its tag.
   not 1.9, was built without threads or with experimental SHA-256, or whose functions resolve
   to another libgit2 already loaded in the process. Fetching and pushing are not in this step. The gate
   runs its suite when `OURANOS_WITH_LIBGIT=1`, which CI sets.
+- **hyperion/i18n: `translation-exists-p`, whether a key has a translation** (#490).
+  `(translation-exists-p source locale key &key count)` is true when `translate` (or, with
+  `:count`, `translate-plural`) would return text from the source rather than its
+  `"[section/key]"` marker, looking in the locale and then the source's default locale. A
+  component that wants its own fallback asks this instead of comparing `translate`'s result
+  with the marker, which reads a translation whose text looks like a marker as missing. It is
+  a generic function on the translation-source protocol: an app's own source, such as a
+  DB-backed one, should implement it beside its `translate` method.
+- **hyperion/i18n: a current translation source for the request** (#491).
+  `*translation-source*` is bound per request by the middleware `wrap-translation-source`,
+  given a source or a function of the request's environment that returns one, and locally by
+  `with-translation-source`. It is registered with `aion/dynamic`, so a thread the request
+  spawns through `aion/dynamic:inheriting` sees it. `translate-current` and
+  `translate-plural-current` call `translate` and `translate-plural` with it, and signal
+  `no-translation-source` when none is bound. A streaming response body sees the same source
+  as its handler. A component that defined its own source variable can use this one instead.
+- **hyperion/calendar: a month grid and a strip of days, as Spinneret components** (#489).
+  A new opt-in system. `month-grid` renders a Monday-first month with previous and next links,
+  and `days-strip` renders N consecutive days from any date. The caller supplies what a day
+  shows (`:render-day`) and where days and months link (`:href-for-day`, `:href-for-month`).
+  Dates are `"YYYY-MM-DD"` and months `"YYYY-MM"` strings, with `add-days`, `weekday`,
+  `month-step`, `month-dates`, `today` (optionally in a zone, through `aion/tz`) and the
+  validators beside them. Month and weekday names are translated under the `calendar` section
+  by the request's `hyperion/i18n:*translation-source*`, falling back to English. Its
+  stylesheet is served by `hyperion/assets` as `:calendar`: link `(hyperion/assets:url
+  :calendar)`. `hyperion/assets` gains `first-party-p` to tell the tree's own files from the
+  vendored ones. See `hyperion/docs/calendar.md`.
 
 ### Fixed
 

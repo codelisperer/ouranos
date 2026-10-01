@@ -144,7 +144,7 @@
     :cons/env :cons/cli :cons/coalton-repl
     :hermes/blob
     :hermes/payments
-    :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/session-db
+    :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/calendar :hyperion/session-db
     :hyperion/auth-db :hyperion/db-connection :hyperion/cli
     :aion/random
     ;; The credential wrapper (pre-publication issue 209) and its Coalton view. Two systems because
@@ -177,7 +177,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The desktop Coalton REPL example's answers to (exit), a long evaluation and a cancel
     ;; (#355), registered in the commit that adds the suite.
     :hyperion/examples/coalton-repl/tests
-    :hyperion/assets/tests :hermes/blob/tests
+    :hyperion/assets/tests :hyperion/calendar/tests :hermes/blob/tests
     ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
     ;; `hyperion/update/tests' is justified as "invisible to this checker until someone
     ;; looked, which is the praxeon/web gap exactly", and the praxeon/web gap was still open

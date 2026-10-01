@@ -226,7 +226,8 @@ onto another port is fragility bought for nothing.
 - **Clean-room bundle verification on macOS and Windows.** Only Linux runs the bundle on a
   machine with nothing installed (`scripts/verify-bundle.sh`, in `desktop-release.yml`).
   macOS and Windows have scripts that check which file the loader actually opened, which
-  is weaker: `scripts/verify-bundle-macos.sh`, not run by any workflow, and
+  is weaker: `scripts/verify-bundle-macos.sh`, run in `desktop-release.yml` as a blocking step
+  on the signed `.app` with `--require-carried libuv` (#472), and
   `scripts/verify-bundle-windows.ps1`, run in `desktop-release.yml` as a blocking step. The
   Windows script also traces `hyperion-view.exe` and the WebView2 runtime's processes, judges
   only the processes whose program is in the bundle, and reports whether the window opened

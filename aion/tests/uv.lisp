@@ -71,6 +71,53 @@
     (is (string= (first (last aion/uv/ffi::*library-names*))
                  (first (last candidates))))))
 
+(defmacro %with-env-unset ((name) &body body)
+  "Run BODY with the environment variable NAME empty, and put it back afterwards."
+  (let ((saved (gensym "SAVED")))
+    `(let ((,saved (uiop:getenv ,name)))
+       (unwind-protect (progn (setf (uiop:getenv ,name) "") ,@body)
+         (setf (uiop:getenv ,name) (or ,saved ""))))))
+
+(test a-bundle-does-not-search-the-source-tree
+  "#472: a desktop app's image has AION/PLATFORM:*SEARCH-SOURCE-TREE* NIL, so libuv's search
+leaves out vendor/libuv, which exists only where the app was built. Everything else does search
+it: bin/cons and the dumped tools need the tree's copy."
+  (let ((vendored (aion/uv/ffi::%vendored-candidates)))
+    (if (null vendored)
+        (skip "aion's source directory is unknown here, so there is no vendored path to leave out")
+        (progn
+          (let ((aion/platform:*search-source-tree* t))
+            (is (find (first vendored) (aion/uv/ffi::%candidates) :test #'string=)
+                "control: by default the source tree is searched"))
+          (let ((aion/platform:*search-source-tree* nil))
+            (is (null (intersection vendored (aion/uv/ffi::%candidates) :test #'string=))
+                "in a bundle it is not: ~S" (aion/uv/ffi::%candidates)))))))
+
+(test a-bundle-without-its-libuv-does-not-load-the-source-trees
+  "#472: with the copy beside the image missing and a vendor/libuv copy present, a bundle's image
+fails to load libuv, or loads one that is not the tree's, where any other image loads the tree's.
+On the CI runner that built the bundle, the tree's copy is what kept the desktop-release check
+from seeing a bundle without its libuv fail."
+  (let ((vendored (remove-if-not #'probe-file (aion/uv/ffi::%vendored-candidates))))
+    (if (null vendored)
+        (skip "no built libuv in vendor/ here, so nothing to leave out")
+        (%with-env-unset ("AION_UV_LIBRARY")
+          (unwind-protect
+               (flet ((attempt ()
+                        (aion/uv/ffi:unload-libuv)
+                        (handler-case (aion/uv/ffi:load-libuv :force t)
+                          (aion/uv/ffi:libuv-not-found () :not-found))))
+                 (let ((bundle (let ((aion/platform:*search-source-tree* nil)) (attempt)))
+                       (other (let ((aion/platform:*search-source-tree* t)) (attempt))))
+                   (is (or (eq bundle :not-found)
+                           (not (find bundle vendored :test #'string=)))
+                       "a bundle's image must not load the source tree's libuv: ~S" bundle)
+                   (is (find other vendored :test #'string=)
+                       "control: any other image loads the vendored copy: ~S" other)))
+            ;; Back to the library the rest of the suite uses.
+            (aion/uv/ffi:unload-libuv)
+            (aion/uv/ffi:load-libuv :force t))))))
+
 (test unload-releases-the-shared-object
   ;; The bundler closes libuv before dumping (ADR-0013), and this is what "closed" has to
   ;; mean: SBCL must no longer be holding the handle. It records every open shared object

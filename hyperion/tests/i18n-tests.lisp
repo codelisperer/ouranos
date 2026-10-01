@@ -42,6 +42,43 @@
   (is (string= "[home/nope]" (i18n:translate (%dict) :en :home/nope)))
   (is (string= "[a/b/c]"     (i18n:translate (%dict) :en :a/b/c))))
 
+;;; --- whether a key has a translation (#490) -----------------------------------
+
+(defun %dict-with-marker-text ()
+  "%DICT plus home/marker, whose translation is literally the marker TRANSLATE would print
+for it, and trial/days-left with plural forms."
+  (i18n:make-dictionary
+   (%ht "en" (%ht "home" (%ht "hi" "Hello" "greet" "Hi {name}!" "marker" "[home/marker]")
+                  "trial" (%ht "days-left.one" "{count} day left"
+                               "days-left.other" "{count} days left"
+                               "plain" "no plural forms"))
+        "ru" (%ht "home" (%ht "hi" "Привет")))
+   :default :en))
+
+(test translation-exists-p-agrees-with-translate
+  "Present in the locale, present only in the default locale, and missing. CONTROL: a
+translation whose text is exactly the marker counts as present, where comparing TRANSLATE's
+result with the marker would call it missing."
+  (let ((d (%dict-with-marker-text)))
+    (is (eq t (i18n:translation-exists-p d :en :home/hi)))
+    (is (eq t (i18n:translation-exists-p d :ru :home/hi)))
+    (is (eq t (i18n:translation-exists-p d :ru :home/greet)) "only in the default locale")
+    (is (null (i18n:translation-exists-p d :en :home/nope)))
+    (is (null (i18n:translation-exists-p d :ru :home/nope)))
+    (is (string= "[home/marker]" (i18n:translate d :en :home/marker)))
+    (is (eq t (i18n:translation-exists-p d :en :home/marker)))
+    (is (null (i18n:translation-exists-p d :en :home))
+        "a section is not a translation")))
+
+(test translation-exists-p-with-a-count-follows-translate-plural
+  "With :COUNT, by TRANSLATE-PLURAL's fallbacks: the category, then other, then the bare key."
+  (let ((d (%dict-with-marker-text)))
+    (is (eq t (i18n:translation-exists-p d :en :trial/days-left :count 1)))
+    (is (eq t (i18n:translation-exists-p d :en :trial/days-left :count 5)))
+    (is (eq t (i18n:translation-exists-p d :ru :trial/days-left :count 3)) "from the default locale")
+    (is (eq t (i18n:translation-exists-p d :en :trial/plain :count 2)) "the bare key")
+    (is (null (i18n:translation-exists-p d :en :trial/nope :count 2)))))
+
 ;;; --- interpolation --------------------------------------------------------
 (test interpolation
   (is (string= "Hi Bob!" (i18n:translate (%dict) :en :home/greet :name "Bob")))
@@ -155,3 +192,76 @@ that do not need them, and that is a rendering detail these tests must not depen
   (let ((html (i18n:language-switcher :current :ar :locales '(:en :ar))))
     (is (%attr-p html "dir" "rtl"))
     (is (search "العربية" html))))
+
+;;; --- the current translation source (#491) ------------------------------------
+
+(test translate-current-uses-the-bound-source
+  "TRANSLATE-CURRENT and TRANSLATE-PLURAL-CURRENT with a source bound: the count picks the
+plural form and is interpolated, and further arguments are passed on."
+  (i18n:with-translation-source ((%dict))
+    (is (string= "Привет" (i18n:translate-current :ru :home/hi)))
+    (is (string= "Hi Bob!" (i18n:translate-current :en :home/greet :name "Bob"))))
+  (i18n:with-translation-source ((i18n:make-dictionary
+                                  (%ht "en" (%ht "trial" (%ht "days-left.one" "{count} day left for {name}"
+                                                              "days-left.other" "{count} days left for {name}")))
+                                  :default :en))
+    (is (string= "1 day left for Ann" (i18n:translate-plural-current :en :trial/days-left 1 :name "Ann")))
+    (is (string= "5 days left for Ann" (i18n:translate-plural-current :en :trial/days-left 5 :name "Ann")))))
+
+(test translate-current-with-nothing-bound-signals
+  "Unbound, it signals NO-TRANSLATION-SOURCE naming the key, rather than rendering markers.
+CONTROL: bound, the same call returns the text."
+  (let ((i18n:*translation-source* nil))
+    (let ((c (handler-case (progn (i18n:translate-current :en :home/hi) nil)
+               (i18n:no-translation-source (c) c))))
+      (is (typep c 'i18n:no-translation-source))
+      (is (eq :home/hi (and c (i18n:no-translation-source-key c)))))
+    (signals i18n:no-translation-source (i18n:translate-plural-current :en :home/hi 2)))
+  (i18n:with-translation-source ((%dict))
+    (is (string= "Hello" (i18n:translate-current :en :home/hi)))))
+
+(test the-current-source-crosses-into-a-thread-the-request-spawns
+  "Through AION/DYNAMIC:INHERITING, as hyperion's request context does (#158). CONTROL: a thread
+spawned without it does not see the binding, so the first check could tell the difference."
+  (i18n:with-translation-source ((%dict))
+    ;; An error in the thread is returned as text: left unhandled it would end the test run.
+    (flet ((in-thread (fn)
+             ;; AION/TEST-THREADS:JOIN gives up after its deadline and names the thread, so a
+             ;; stuck thread fails this test instead of hanging the run.
+             (aion/test-threads:join
+              (sb-thread:make-thread (lambda () (handler-case (funcall fn)
+                                                  (error (e) (princ-to-string e))))
+                                     :name "i18n current-source test"))))
+      (is (string= "Hello"
+                   (in-thread (aion/dynamic:inheriting
+                               (lambda () (i18n:translate-current :en :home/hi))))))
+      (is (null (in-thread (lambda () i18n:*translation-source*)))))))
+
+(test wrap-translation-source-binds-it-per-request
+  "A source given directly; a source chosen per request by a function of the environment; and
+a streaming body, which runs after the handler has returned. CONTROL: the same streaming body
+called outside the middleware signals."
+  (let* ((handler (lambda (env)
+                    (declare (ignore env))
+                    (list 200 '() (list (i18n:translate-current :ru :home/hi)))))
+         (direct (i18n:wrap-translation-source handler (%dict))))
+    (is (equal '("Привет") (third (funcall direct '(:path-info "/"))))))
+  (let* ((other (i18n:make-dictionary (%ht "ru" (%ht "home" (%ht "hi" "Здравствуйте"))) :default :ru))
+         (per-request (i18n:wrap-translation-source
+                       (lambda (env)
+                         (declare (ignore env))
+                         (list 200 '() (list (i18n:translate-current :ru :home/hi))))
+                       (lambda (env) (if (equal "/a" (getf env :path-info)) (%dict) other)))))
+    (is (equal '("Привет") (third (funcall per-request '(:path-info "/a")))))
+    (is (equal '("Здравствуйте") (third (funcall per-request '(:path-info "/b"))))))
+  (let* ((streaming (lambda (env)
+                      (declare (ignore env))
+                      (list 200 '()
+                            (lambda (writer) (funcall writer (i18n:translate-current :en :home/hi))))))
+         (response (funcall (i18n:wrap-translation-source streaming (%dict)) '(:path-info "/")))
+         (written '()))
+    (funcall (third response) (lambda (s) (push s written)))
+    (is (equal '("Hello") written))
+    (let ((i18n:*translation-source* nil))
+      (signals i18n:no-translation-source
+        (funcall (third (funcall streaming '(:path-info "/"))) (lambda (s) (push s written)))))))

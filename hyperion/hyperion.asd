@@ -276,8 +276,31 @@
                              (:static-file "htmx.min.js")
                              (:static-file "alpine.min.js")
                              (:static-file "bulma.min.css")))
+               ;; The tree's own component stylesheets (#489), embedded the same way.
+               (:module "assets/components"
+                :components ((:static-file "calendar.css")))
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
+
+(defsystem "hyperion/calendar"
+  :description "A Monday-first month grid and a strip of consecutive days, as Spinneret components, with their date arithmetic and translated month and weekday names (#489)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/i18n; aion/tz for TODAY in a zone. Its stylesheet is served by
+  ;; hyperion/assets, which this system does not depend on, so an app that ships its own CSS
+  ;; does not carry the vendored files.
+  :depends-on ("hyperion" "aion/tz" "spinneret")
+  :components ((:file "src/calendar"))
+  :in-order-to ((test-op (test-op "hyperion/calendar/tests"))))
+
+(defsystem "hyperion/calendar/tests"
+  :description "Tests for hyperion/calendar: dates, translated names, and the rendered markup."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/calendar" "hyperion" "aion/tz" "spinneret" "fiveam")
+  :components ((:file "tests/calendar-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
 (defsystem "hyperion/test-ports"
   :description "Test support: a candidate port for a test server, and a retry when it is taken."
@@ -533,11 +556,13 @@
   :description "Example: a typed Coalton REPL in a native desktop window (no Electron/Tauri)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  ;; Hunchentoot, and for this app it is load-bearing rather than a preference: Woo binds
-  ;; libev at LOAD time, so a desktop bundle built against it dies before `main` on any
-  ;; machine without libev (pre-publication issue 139, ADR-0011). Pure CL is what makes the artifact shippable.
+  ;; Not Woo: Woo binds libev at LOAD time, so a desktop bundle built against it died before
+  ;; `main` on any machine without libev (pre-publication issue 139, ADR-0011). The desktop
+  ;; window runs on :uv (#472, ADR-0017), whose libuv the bundle carries and the
+  ;; desktop-release dry runs check is the one loaded. The web modes (`start', `serve') keep
+  ;; Hunchentoot, which is pure CL.
   :depends-on ("hyperion" "hyperion/desktop" "hyperion/assets" "cons/coalton-repl"
-               "spinneret" "lass" "clack-handler-hunchentoot")
+               "spinneret" "lass" "clack-handler-hunchentoot" "hyperion/server-uv")
   :serial t
   :components ((:module "examples/coalton-repl"
                 :serial t
@@ -568,6 +593,7 @@
   :description "Test suite for Hyperion."
   :depends-on ("aion/fs" "hyperion" "hyperion/import" "aion/log"   ; suite, csrf and logging tests call log:
                "fiveam" "aion/test-threads" "hyperion/test-ports"
+               "aion/dynamic"      ; i18n-tests spawn a thread through aion/dynamic:inheriting (#491)
                "sb-bsd-sockets"    ; server-tests: a free port, and "is it listening?"
                ;; TEST-ONLY: an in-memory octet input stream, to hand BODY-STRING a body
                ;; without a socket (pre-publication issue 211). Already present transitively via clack --

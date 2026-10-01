@@ -34,7 +34,7 @@
     from memory under a mountable router, plus Bulma theming as CSS custom properties.
     Nothing here touches the network or the filesystem at run time.")
   (:export #:asset #:assets #:asset-key #:asset-version #:asset-filename
-           #:asset-fingerprint #:asset-bytes #:asset-content-type
+           #:asset-fingerprint #:asset-bytes #:asset-content-type #:first-party-p
            #:*prefix* #:url #:handler #:mount #:routes #:serve
            #:theme #:hsl #:*default-theme*))
 
@@ -50,6 +50,26 @@
       (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
         (read-sequence v in)
         v))))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun %fnv1a-hex (octets)
+    "The 32-bit FNV-1a hash of OCTETS as 8 lowercase hex digits. The fingerprint of a
+FIRST-PARTY asset: a cache key that changes when the bytes do, computed when the file is
+compiled. Not a checksum anyone verifies, so no cryptographic hash, which this system does
+not otherwise need."
+    (let ((h #x811c9dc5))
+      (loop for b across octets
+            do (setf h (logand #xffffffff (* (logxor h b) #x01000193))))
+      (format nil "~(~8,'0x~)" h))))
+
+(defmacro %first-party (key filename relative)
+  "An ASSET for RELATIVE, a file this tree writes, rather than one it vendors. Its version is
+\"tree\" and its fingerprint is computed from its bytes when this file is compiled, so it has
+no line in ASSETS.pin, whose job is the provenance of third-party files."
+  (let ((bytes (%slurp relative)))
+    `(%asset :key ,key :version "tree" :filename ,filename
+             :fingerprint ,(%fnv1a-hex bytes)
+             :bytes (%embed ,relative))))
 
 (defmacro %embed (relative)
   "Expand to RELATIVE's contents as a literal octet vector. The bytes land in the fasl,
@@ -80,15 +100,24 @@ so the loaded image carries them and never consults the source tree again."
                 :bytes (%embed "assets/vendor/alpine.min.js"))
         (%asset :key :bulma :version "1.0.4" :filename "bulma.min.css"
                 :fingerprint "67fa26df"
-                :bytes (%embed "assets/vendor/bulma.min.css")))
-  "Every vendored asset. See assets/vendor/ASSETS.pin for provenance and licences.")
+                :bytes (%embed "assets/vendor/bulma.min.css"))
+        ;; First-party component stylesheets (#489). Not pinned: see %FIRST-PARTY.
+        (%first-party :calendar "calendar.css" "assets/components/calendar.css"))
+  "Every asset served from memory: the vendored ones, whose provenance and licences are in
+assets/vendor/ASSETS.pin, and the tree's own component stylesheets.")
+
+(defun first-party-p (asset)
+  "True when ASSET is a file this tree writes (a component stylesheet), not a vendored one."
+  (string= "tree" (asset-version asset)))
 
 (defun assets ()
-  "The vendored assets, as a list."
+  "Every asset, as a list: the vendored ones and the tree's own component stylesheets. Only
+the vendored ones have a line in ASSETS.pin; FIRST-PARTY-P tells them apart."
   (copy-list *assets*))
 
 (defun asset (key)
-  "The asset named KEY (:htmx :alpine :bulma), or NIL."
+  "The asset named KEY (:htmx :alpine :bulma, or a component stylesheet such as :calendar),
+or NIL."
   (find key *assets* :key #'asset-key))
 
 (defun %require (key)

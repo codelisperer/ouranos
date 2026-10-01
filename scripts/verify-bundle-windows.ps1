@@ -80,6 +80,13 @@
 .PARAMETER AppArgs
   Arguments passed to the app.
 
+.PARAMETER RequireLoaded
+  File names of DLLs the app must load from the bundle, e.g. libuv.dll. A name that the bundle
+  does not carry, or that no process loaded from the bundle on this run, fails the check. The
+  desktop-release dry runs pass libuv.dll, so a bundle whose app is not running on :uv, or
+  runs on a libuv from elsewhere, does not pass (#472). Check 3 then proves the copy loaded was
+  the carried one.
+
 .EXAMPLE
   .\scripts\verify-bundle-windows.ps1 dist\coalton-repl-0.1.0-windows-x86-64
 .EXAMPLE
@@ -89,7 +96,8 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$Bundle,
   [int]$Seconds = 20,
-  [string]$AppArgs = ''
+  [string]$AppArgs = '',
+  [string[]]$RequireLoaded = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -226,6 +234,19 @@ namespace OuranosVerify {
     // can be reported with the app's own words (SBCL names the shared object it could not
     // open). The handle is created inheritable and handed over through STARTF_USESTDHANDLES;
     // this process closes its copy once the child has one.
+    // The canonical long path of an existing directory, as the trace reports paths: through
+    // GetFinalPathNameByHandleW, so a short 8.3 name (C:\Users\RUNNER~1\...) or a different
+    // spelling is turned into the one the loader events use. Returns DIR unchanged if it
+    // cannot be opened.
+    public static string FinalPath(string dir) {
+      var sa = new SECURITY_ATTRIBUTES();
+      sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+      // No access is needed to ask for a name; FILE_FLAG_BACKUP_SEMANTICS opens a directory.
+      IntPtr h = CreateFileW(dir, 0, 7, ref sa, 3, 0x02000000, IntPtr.Zero);
+      if (h == new IntPtr(-1)) return dir;
+      return PathOf(h) ?? dir;
+    }
+
     public static LoadTrace Run(string exe, string args, string cwd, int seconds, string output) {
       var t = new LoadTrace();
       var si = new STARTUPINFO();
@@ -510,6 +531,17 @@ foreach ($f in $carriedFiles) {
     Note "$($f.Name) is carried but was not loaded on this run (another code path, or other -AppArgs, may need it)"
   }
 }
+# Libraries the caller requires to be loaded from the bundle (-RequireLoaded).
+foreach ($name in $RequireLoaded) {
+  $carried = @($carriedFiles | Where-Object { $_.Name -ieq $name })
+  if (-not $carried) {
+    Fail "$name is required to be loaded from the bundle, and the bundle does not carry it"
+  } elseif (-not ($loadedCarried | Where-Object { (Split-Path -Leaf $_) -ieq $name })) {
+    Fail "$name is required to be loaded from the bundle, and no process loaded the carried copy on this run"
+  } else {
+    Good "$name was loaded from the bundle, as required"
+  }
+}
 
 # Whether the window opened (#268). If it did not, the DLLs judged for hyperion-view.exe are
 # the ones it loaded before it stopped, and the report says so rather than passing quietly.
@@ -538,11 +570,23 @@ foreach ($dll in $loadedCarried) {
   # A copy, never the real bundle: an interrupted run must not leave the artifact broken.
   $copy = Join-Path $env:TEMP ("ouranos-verify-control-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
   Copy-Item -Recurse -LiteralPath $BundleDir -Destination $copy
+  # The trace reports long paths. TEMP may be a short 8.3 one (C:\Users\RUNNER~1\... on a CI
+  # runner), and compared as written it matched no process, so a copy loaded from outside the
+  # bundle was reported as "no other copy" (#472). Compare the canonical long path.
+  $copy = [OuranosVerify.LoadTrace]::FinalPath($copy).TrimEnd('\')
+  Note "TEMP is $env:TEMP; the control copy is $copy"
   try {
     Remove-Item -LiteralPath (Join-Path $copy $name) -Force
     $t = Invoke-Traced $copy (Join-Path $copy (Split-Path -Leaf $AppExe))
     $v = Get-RunVerdict $t
     $leaf = Split-Path -Leaf $name
+    # Every copy of the DLL any process loaded on this run, with its path, whatever the
+    # filter below decides: the control reports what was loaded, not an inference.
+    foreach ($q in $t.Procs) {
+      foreach ($d in @($q.Dlls | Where-Object { $_ -and (Split-Path -Leaf $_) -ieq $leaf } | Sort-Object -Unique)) {
+        Note "without $name, $(Split-Path -Leaf $q.Image) (pid $($q.Pid)) loaded $d"
+      }
+    }
     $outside = @($t.Procs | Where-Object { $_.Image -and (Test-Under $_.Image $copy) } | ForEach-Object { $_.Dlls } | Where-Object { $_ -and (Split-Path -Leaf $_) -ieq $leaf -and -not (Test-Under $_ $copy) })
     if ($outside) { Good "without $name the app loaded $($outside[0]) instead, which check 2 would report as a finding" }
     elseif (-not $v.Ok) { Good "without $name the app $($v.Text)" }
