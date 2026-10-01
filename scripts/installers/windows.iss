@@ -182,6 +182,10 @@ var
     does. An exception raised in CurStepChanged is reported and Setup still exits 0 (measured
     with /VERYSILENT /SUPPRESSMSGBOXES), so the exception alone does not tell the updater. }
   InstallFailed: Boolean;
+  { True when the swap finished but the app could not be started afterwards: GetCustomSetupExitCode
+    then ends Setup with 3, as windows.nsi does. The new version is installed, so nothing is put
+    back (review of train 21). }
+  RelaunchFailed: Boolean;
   { The version the uninstall entry named before this run. Setup writes the new one before
     CurStepChanged(ssPostInstall), so a swap that fails puts this back. }
   PreviousDisplayVersion: String;
@@ -238,6 +242,8 @@ function GetCustomSetupExitCode: Integer;
 begin
   if InstallFailed then
     Result := 2
+  else if RelaunchFailed then
+    Result := 3
   else
     Result := 0;
 end;
@@ -345,33 +351,44 @@ begin
 end;
 
 { Inno writes its uninstaller into the install directory during the install step, which the
-  swap is about to rename away, so it is copied into the staged directory first. }
+  swap is about to rename away, so it is copied into the staged directory first. A copy that
+  fails stops the update before the swap: swapped in without its uninstaller, the version would
+  be installed with an uninstall entry naming a file that is not there (review of train 21). }
 procedure CarryUninstaller;
 var
   Found: TFindRec;
+  Copied: Boolean;
 begin
   if FindFirst(AppDir + '\unins*.*', Found) then
   try
     repeat
 #if Ver >= EncodeVer(7, 0, 0)
       { Inno Setup 7 renamed FileCopy, and hints at every build that uses the old name. }
-      CopyFile(AppDir + '\' + Found.Name, AppDir + '.new\' + Found.Name, False);
+      Copied := CopyFile(AppDir + '\' + Found.Name, AppDir + '.new\' + Found.Name, False);
 #else
-      FileCopy(AppDir + '\' + Found.Name, AppDir + '.new\' + Found.Name, False);
+      Copied := FileCopy(AppDir + '\' + Found.Name, AppDir + '.new\' + Found.Name, False);
 #endif
+      if not Copied then
+        FailInstall('{#APPNAME} could not be updated: its uninstaller (' + Found.Name + ') could not be copied with the new files.');
     until not FindNext(Found);
   finally
     FindClose(Found);
   end;
 end;
 
-{ The update path gives the user their app back. See [Run] for why this is not an entry there. }
+{ The update path gives the user their app back. See [Run] for why this is not an entry there.
+  If the app cannot be started, Setup exits 3 and says why in its log. The new version is in
+  place by then, so this is not treated as a failed install, and nothing is put back. }
 procedure RelaunchIfSilent;
 var
   Code: Integer;
 begin
   if WizardSilent then
-    Exec(AppDir + '\{#EXENAME}', '', AppDir, SW_SHOWNORMAL, ewNoWait, Code);
+    if not Exec(AppDir + '\{#EXENAME}', '', AppDir, SW_SHOWNORMAL, ewNoWait, Code) then
+    begin
+      RelaunchFailed := True;
+      Log('{#APPNAME} was updated, but could not be started: ' + SysErrorMessage(Code));
+    end;
 end;
 
 function WebView2Present: Boolean;

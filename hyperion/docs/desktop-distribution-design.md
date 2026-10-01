@@ -368,7 +368,14 @@ directory's parent, and retries the first rename for 20 seconds while the app ex
 succeeds, nothing has changed: the staged copy is deleted and the installer exits 2, to be tried
 at the next update. The second rename is retried for 20 seconds as well, because a file open in
 `<install>.new` stops it too, which an antivirus scanner reading the new files can do; giving up
-on it moves `<install>.old` back.
+on it moves `<install>.old` back, deletes the staged copy and exits 2.
+
+Each installer puts its uninstaller into `<install>.new` before the swap: NSIS writes it there,
+and Inno copies the one it has just written into `<install>`. If that fails, the update stops
+before the swap with exit 2, because a version swapped in without it would have an uninstall
+entry naming a file that is not there. After the swap, a silent run starts the app; if it cannot,
+the installer exits 3. The new version is installed by then, so nothing is put back, and the
+exit code is what tells a caller that the app is not running (review of train 21).
 
 Inno needed two more things. A `[Run]` entry without `postinstall` runs before
 `CurStepChanged(ssPostInstall)`, where the swap happens, so the silent relaunch there started a

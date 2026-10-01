@@ -277,6 +277,12 @@ Section "Install"
 !endif
   WriteUninstaller "$INSTDIR.new\uninstall.exe"
   SetOutPath "$TEMP"
+  ; Swapped in without its uninstaller, the version would be installed with an uninstall entry
+  ; naming a file that is not there, so the update stops here instead (review of train 21).
+  IfFileExists "$INSTDIR.new\uninstall.exe" uninstaller_written
+    RMDir /r "$INSTDIR.new"
+    !insertmacro FailInstall "${APPNAME} could not be updated: its uninstaller could not be written with the new files."
+  uninstaller_written:
 
   ; The staged launcher checks the staged core, the check it makes at every start, and exits
   ; without starting the app (OURANOS_LAUNCHER_CHECK_ONLY, scripts/windows-launcher.c). Only a
@@ -327,8 +333,16 @@ Section "Install"
   ; write to stdout -- observed exactly that, the app never appeared after a silent install.
   ; ShellExecute gives the child its own console allocation, and works for a GUI-subsystem
   ; image too, so it is correct either way.
-  IfSilent 0 +2
+  ;
+  ; If it cannot be started, the installer exits 3: the new version is in place, so this is not
+  ; a failed install and nothing is put back, but the exit code says the app is not running
+  ; (review of train 21). ExecShell sets the error flag when ShellExecute fails.
+  IfSilent 0 relaunch_done
+    ClearErrors
     ExecShell "open" "$INSTDIR\${EXENAME}"
+    IfErrors 0 relaunch_done
+      SetErrorLevel 3
+  relaunch_done:
 SectionEnd
 
 Section "Uninstall"

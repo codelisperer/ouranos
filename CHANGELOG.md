@@ -215,7 +215,9 @@ its tag.
   `<install>.old` or `<install>.new`: both names are now the installers'. A bundle with
   `sbcl.core` and no `sbcl-runtime.exe`, or the other way round, is refused by
   `scripts/build-installer.ps1` and by both installers, which used to install it to fail at
-  launch. (#98)
+  launch. An uninstaller that cannot be copied (Inno) or written (NSIS) into `<install>.new`
+  stops the update before the swap, with exit 2. A silent update that installed the new version
+  but could not start the app exits 3, and the new version stays installed. (#98)
 
 ### Added
 

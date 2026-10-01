@@ -382,6 +382,33 @@ and a large 0.0.2, with their cores' hashes. Skips when a tool is missing; alway
            (%swap-uninstall (merge-pathnames "app/" ,tree) ,format))
          (aion/fs:delete-tree ,tree :if-does-not-exist :ignore)))))
 
+(defun %swap-hold-staged-file (dir name)
+  "Start a thread that opens NAME in DIR's staged copy (DIR.new) as soon as the installer has
+written it, and keeps it open. Returns a function that closes it and returns a plist: :HELD, true
+when the file was opened, and :SAW-OLD, true when DIR.old existed while it was open, which is
+the first rename having happened."
+  (let* ((path (merge-pathnames name (%swap-sibling dir ".new")))
+         (old (%swap-sibling dir ".old"))
+         (release nil) (held nil) (saw-old nil)
+         (thread (sb-thread:make-thread
+                  (lambda ()
+                    (loop until (or release held)
+                          do (let ((s (ignore-errors (open path :element-type '(unsigned-byte 8)))))
+                               (if (null s)
+                                   (sleep 0.005)
+                                   (unwind-protect
+                                        (progn (setf held t)
+                                               (loop until release
+                                                     do (when (uiop:directory-exists-p old)
+                                                          (setf saw-old t))
+                                                        (sleep 0.05)))
+                                     (close s))))))
+                  :name "hold a file in the staged copy")))
+    (lambda ()
+      (setf release t)
+      (sb-thread:join-thread thread :default nil)
+      (list :held held :saw-old saw-old))))
+
 (defun %swap-scenarios (format)
   "Every case, in order, against FORMAT's installers."
   (%with-swap-fixture (format tree v1 v1-sha v2 v2-sha)
@@ -442,6 +469,21 @@ and a large 0.0.2, with their cores' hashes. Skips when a tool is missing; alway
       (is (equal v1-sha (%swap-installed dir)) "leaving version 1 installed")
       (is (eql 0 (%swap-launcher-check dir)) "as a pair the launcher accepts")
       (is-false (uiop:directory-exists-p new) "and the staged copy deleted")
+
+      ;; A file held open in the STAGED copy for longer than the retry (review of train 21): the
+      ;; first rename succeeds, the second cannot, and the first is undone. That the first rename
+      ;; happened is checked, not assumed: .old existed while the file was held.
+      (let* ((release (%swap-hold-staged-file dir "sbcl.core"))
+             (code (%swap-run (%swap-install-argv v2 format dir) :wait t))
+             (hold (funcall release)))
+        (is (getf hold :held) "the staged sbcl.core was held open during the update: ~S" hold)
+        (is (getf hold :saw-old) "and the first rename happened while it was: ~S" hold)
+        (is (eql 2 code) "an update whose second rename never succeeds exits 2: exit ~A" code))
+      (is (equal v1-sha (%swap-installed dir)) "and the undo put version 1 back")
+      (is (eql 0 (%swap-launcher-check dir)) "as a pair the launcher accepts")
+      (is-false (uiop:directory-exists-p old) "with no previous version left beside it")
+      ;; The installer deleted what it could of the staged copy; the held file was not deletable.
+      (aion/fs:delete-tree new :if-does-not-exist :ignore)
 
       ;; An update that stopped between its two renames: the install directory is gone, the
       ;; checked copy is beside the previous version. The next run finishes the swap first; left
