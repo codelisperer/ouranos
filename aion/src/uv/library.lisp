@@ -97,7 +97,9 @@ in the directory the running executable lives in."
             ;; A shipped bundle FIRST: it carries the libuv it was built against, and must
             ;; use that one even on a machine that happens to have another installed.
             (%beside-image-candidates)
-            (%vendored-candidates)
+            ;; Not in a desktop bundle, which must load its own copy or fail
+            ;; (AION/PLATFORM:*SEARCH-SOURCE-TREE*, #472).
+            (when aion/platform:*search-source-tree* (%vendored-candidates))
             ;; Bare names: hand them to the OS loader and let it search its own paths.
             *library-names*)))
 

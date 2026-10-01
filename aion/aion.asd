@@ -112,7 +112,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  :depends-on ("cffi" "coalton")
+  :depends-on ("cffi" "coalton"
+               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
   :serial t
   :components ((:module "src/uv"
                 :serial t
@@ -137,7 +138,8 @@
   :license "MIT"
   :version "0.0.0"
   ;; cffi for the binding; aion/random for certificate serials, from the OS generator.
-  :depends-on ("cffi" "aion/random")
+  :depends-on ("cffi" "aion/random"
+               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
   :serial t
   :components ((:module "src/tls"
                 :serial t
@@ -154,7 +156,8 @@
   :description "Tests for aion/tls. Requires a built mbedTLS (scripts/build-mbedtls.lisp)."
   ;; cffi because two tests free a foreign suite list they made themselves.
   ;; aion/test-threads for JOIN, which gives up after a deadline and names the thread.
-  :depends-on ("aion/tls" "fiveam" "cffi" "aion/test-threads" (:require "sb-bsd-sockets"))
+  :depends-on ("aion/tls" "fiveam" "cffi" "aion/test-threads" (:require "sb-bsd-sockets")
+               "aion/platform")   ; *search-source-tree*, which the loader tests bind (#472)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -187,7 +190,8 @@
 
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
-  :depends-on ("aion/uv" "fiveam")
+  :depends-on ("aion/uv" "fiveam"
+               "aion/platform")   ; *search-source-tree*, which the loader tests bind (#472)
   :serial t
   :components ((:module "tests"
                 :serial t

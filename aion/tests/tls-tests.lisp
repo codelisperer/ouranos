@@ -422,3 +422,63 @@ socket WITHOUT close_notify (CLOSE :ABORT T frees the engine and closes the tran
     (dotimes (i 20)
       (with-engines (client server) (handshake client server)))
     (is (= before (hash-table-count aion/tls::*engines*)))))
+
+(defun %vendored-tls-candidates (candidates)
+  "The entries of CANDIDATES in the source tree's vendor/mbedtls."
+  (remove-if-not (lambda (c) (search "vendor/mbedtls/lib/" (substitute #\/ #\\ c))) candidates))
+
+(test a-bundle-does-not-search-the-source-tree-for-mbedtls
+  "#472: a desktop app's image has AION/PLATFORM:*SEARCH-SOURCE-TREE* NIL, so mbedTLS's search
+leaves out vendor/mbedtls, which exists only where the app was built."
+  (let ((tree (let ((aion/platform:*search-source-tree* t))
+                (%vendored-tls-candidates (aion/tls::%candidates)))))
+    (if (null tree)
+        (skip "aion's source directory is unknown here, so there is no vendored path to leave out")
+        (progn
+          (is-true tree "control: by default the source tree is searched")
+          (let ((aion/platform:*search-source-tree* nil))
+            (is (null (%vendored-tls-candidates (aion/tls::%candidates)))
+                "in a bundle it is not: ~S" (aion/tls::%candidates)))))))
+
+(defun %mbedtls-loaded-in-a-fresh-image (search-source-tree)
+  "Start a fresh image that loads aion/tls, sets AION/PLATFORM:*SEARCH-SOURCE-TREE* to
+SEARCH-SOURCE-TREE, and loads mbedTLS with AION_TLS_LIBRARY empty. Returns the path it loaded,
+or :FAILED. A fresh image, because in this one mbedTLS is already loaded for the other tests,
+and on Windows loading a library by its bare name returns a module of that name that is already
+loaded, without searching."
+  (let ((out (uiop:run-program
+              (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                    "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                    "--eval" "(require :asdf)"
+                    "--eval" (format nil "(load ~S)"
+                                     (uiop:native-namestring
+                                      (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+                    "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :aion/tls))"
+                    "--eval" "(setf (uiop:getenv \"AION_TLS_LIBRARY\") \"\")"
+                    "--eval" (format nil "(setf aion/platform:*search-source-tree* ~:[nil~;t~])" search-source-tree)
+                    "--eval" "(format t \"~&LOADED ~A~%\" (handler-case (aion/tls:load-mbedtls) (error () :failed)))")
+              :output :string :error-output nil :ignore-error-status t)))
+    (let ((line (find-if (lambda (l) (uiop:string-prefix-p "LOADED " l))
+                         (uiop:split-string out :separator '(#\Newline #\Return)))))
+      (if (null line)
+          (list :no-answer out)
+          (let ((value (subseq line 7)))
+            (if (string-equal value "FAILED") :failed value))))))
+
+(test a-bundle-without-its-mbedtls-does-not-load-the-source-trees
+  "#472: with no copy beside the image and a vendor/mbedtls copy present, a bundle's image fails
+to load mbedTLS, or loads one that is not the tree's, where any other image loads the tree's."
+  (let ((tree (remove-if-not #'probe-file
+                             (let ((aion/platform:*search-source-tree* t))
+                               (%vendored-tls-candidates (aion/tls::%candidates))))))
+    (if (null tree)
+        (skip "no built mbedTLS in vendor/ here, so nothing to leave out")
+        (let ((bundle (%mbedtls-loaded-in-a-fresh-image nil))
+              (other (%mbedtls-loaded-in-a-fresh-image t)))
+          (flet ((from-tree-p (path)
+                   (and (stringp path)
+                        (search "vendor/mbedtls/lib/" (substitute #\/ #\\ path)))))
+            (is (and (not (consp bundle)) (not (from-tree-p bundle)))
+                "a bundle's image must not load the source tree's mbedTLS: ~S" bundle)
+            (is (from-tree-p other)
+                "control: any other image loads the vendored copy: ~S" other))))))
