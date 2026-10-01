@@ -2691,8 +2691,8 @@ is no limit."
 #-win32
 (test auto-loops-follow-a-one-cpu-container-and-start-logs-where-from
   "With a cgroup quota of one CPU, :LOOPS :AUTO with workers is one loop, and the listening log
-line says :LOOPS-FROM cgroup. CONTROL: the same tree without the quota gives the host's count
-(at most 4), which is more than one on every CI runner, and does not say cgroup."
+line says :LOOPS-FROM cgroup. CONTROL: the same tree without the quota gives what sysconf and
+the affinity mask give (at most 4), and does not say cgroup."
   (let ((srv:*default-loops* :auto))
     (%with-cgroup-tree (root self) ((format nil "0::/~%")
                                     ("" (format nil "100000 100000~%")))
@@ -2712,13 +2712,33 @@ line says :LOOPS-FROM cgroup. CONTROL: the same tree without the quota gives the
                                     ("" (format nil "max 100000~%")))
       (let ((srv::*cgroup-root* root) (srv::*self-cgroup-file* self))
         (multiple-value-bind (n source) (srv::%default-loop-count 2)
-          (is (< 1 n) "~D loops on a host with ~D CPUs" n (srv::%online-cores))
+          ;; What this host gives without any quota, so the control holds on a one-CPU host
+          ;; too, where the count is 1 with or without the cgroup.
+          (is (= n (min 4 (srv::%smallest-cpu-count
+                           (list (cons :sysconf (srv::%online-cores))
+                                 (cons :affinity (srv::%affinity-count))))))
+              "~D loops; sysconf ~D, affinity ~D" n (srv::%online-cores) (srv::%affinity-count))
           (is (not (eq :cgroup source))))))))
 
 #+linux
-(test the-affinity-count-agrees-with-nproc
-  "The CPUs in this process's affinity mask, read through sched_getaffinity, are the count nproc
-prints, which reads the same mask by its own code."
-  (let ((nproc (parse-integer (uiop:run-program '("nproc") :output :string) :junk-allowed t)))
-    (is (eql nproc (srv::%affinity-count)))
-    (is (<= (srv::%affinity-count) (srv::%online-cores)))))
+(defun %cpus-allowed-list-count ()
+  "The CPUs in this process's Cpus_allowed_list in /proc/self/status, such as 0-3,8,10-11."
+  (with-open-file (in "/proc/self/status")
+    (loop for line = (read-line in nil) while line
+          when (uiop:string-prefix-p "Cpus_allowed_list:" line)
+            return (loop for range in (uiop:split-string
+                                       (string-trim '(#\Space #\Tab) (subseq line 18))
+                                       :separator ",")
+                         for dash = (position #\- range)
+                         sum (if dash
+                                 (1+ (- (parse-integer range :start (1+ dash))
+                                        (parse-integer range :end dash)))
+                                 1)))))
+
+#+linux
+(test the-affinity-count-agrees-with-the-kernels-cpus-allowed-list
+  "The CPUs in this process's affinity mask, read through sched_getaffinity, are the CPUs the
+kernel lists as allowed in /proc/self/status, a second reading of the same mask. Not nproc,
+which current coreutils also limits by the cgroup quota and by OMP_ variables."
+  (is (eql (%cpus-allowed-list-count) (srv::%affinity-count)))
+  (is (<= (srv::%affinity-count) (srv::%online-cores))))

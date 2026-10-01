@@ -1597,16 +1597,26 @@ be worth its thread.")
 
 (defun %affinity-count ()
   "The number of CPUs in this process's affinity mask, or NIL where it is not known. Linux only:
-other platforms have no sched_getaffinity."
+other platforms have no sched_getaffinity.
+
+The mask starts at 1024 CPUs, glibc's cpu_set_t, and doubles while the call fails, up to 65536
+CPUs. The kernel's mask is sized for the CPU ids the kernel can have, not for the ones online,
+so a fixed 1024-CPU buffer fails (EINVAL) on a host with ids past 1023, and the count would
+then fall back to sysconf's on the hosts most likely to run in a cpuset. For this process's own
+mask, a buffer too small is the only way the call fails, so a failure is retried rather than
+its errno read."
   #+linux
-  (let ((bytes 128))                    ; 1024 CPUs, glibc's cpu_set_t
-    (cffi:with-foreign-object (mask :uint8 bytes)
-      (dotimes (i bytes) (setf (cffi:mem-aref mask :uint8 i) 0))
-      (when (eql 0 (ignore-errors
-                    (cffi:foreign-funcall "sched_getaffinity" :int 0 :size bytes
-                                                              :pointer mask :int)))
-        (let ((n (loop for i below bytes sum (logcount (cffi:mem-aref mask :uint8 i)))))
-          (and (plusp n) n)))))
+  (loop for bytes = 128 then (* 2 bytes)
+        while (<= bytes 8192)
+        do (cffi:with-foreign-object (mask :uint8 bytes)
+             (dotimes (i bytes) (setf (cffi:mem-aref mask :uint8 i) 0))
+             (let ((status (ignore-errors
+                            (cffi:foreign-funcall "sched_getaffinity" :int 0 :size bytes
+                                                                      :pointer mask :int))))
+               (when (eql status 0)
+                 (let ((n (loop for i below bytes
+                                sum (logcount (cffi:mem-aref mask :uint8 i)))))
+                   (return (and (plusp n) n)))))))
   #-linux nil)
 
 (defun %parse-cpu-max (text)
