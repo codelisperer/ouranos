@@ -57,9 +57,12 @@
            do (format s "~2,'0x" b)))))
 
 (test every-declared-asset-is-present
-  "The three assets exist, are keyed as expected, and carry bytes."
-  (is (= 3 (length (assets:assets))))
-  (dolist (key '(:htmx :alpine :bulma))
+  "The three vendored assets and the calendar stylesheet (#489) exist, are keyed as
+expected, and carry bytes."
+  (is (= 4 (length (assets:assets))))
+  (is (equal '(:calendar) (mapcar #'assets:asset-key
+                                  (remove-if-not #'assets:first-party-p (assets:assets)))))
+  (dolist (key '(:htmx :alpine :bulma :calendar))
     (let ((a (assets:asset key)))
       (is (not (null a)) "no asset ~S" key)
       (is (plusp (length (assets:asset-bytes a))) "~S is empty" key))))
@@ -70,7 +73,7 @@ This is what makes the pin meaningful: it fails on a stale fasl or a swapped fil
 where a mere non-emptiness check would pass."
   (let ((pinned (%pin-hashes)))
     (is (= 3 (hash-table-count pinned)) "ASSETS.pin should record three hashes")
-    (dolist (a (assets:assets))
+    (dolist (a (remove-if #'assets:first-party-p (assets:assets)))
       (let* ((name (string-downcase (symbol-name (assets:asset-key a))))
              ;; :alpine is recorded under its npm name.
              (name (if (string= name "alpine") "alpinejs" name))
@@ -83,16 +86,33 @@ where a mere non-emptiness check would pass."
 (test fingerprint-is-the-head-of-the-hash
   "The URL fingerprint is derived from the real checksum, so the URL changes when --
 and only when -- the content does."
-  (dolist (a (assets:assets))
+  (dolist (a (remove-if #'assets:first-party-p (assets:assets)))
     (let ((hex (%sha256-hex (assets:asset-bytes a))))
       (is (string= (assets:asset-fingerprint a) (subseq hex 0 8))
           "~S fingerprint ~a is not the head of ~a"
           (assets:asset-key a) (assets:asset-fingerprint a) hex))))
 
+(test a-first-party-asset-is-the-file-in-the-tree-and-is-fingerprinted-by-its-bytes
+  "The calendar stylesheet in the image is the file in the tree, byte for byte, and its URL
+carries the FNV-1a hash of those bytes, so the URL changes when the file does. CONTROL: one
+byte changed gives another fingerprint."
+  (let* ((a (assets:asset :calendar))
+         (file (asdf:system-relative-pathname "hyperion" "assets/components/calendar.css"))
+         (on-disk (with-open-file (in file :element-type '(unsigned-byte 8))
+                    (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                      (subseq v 0 (read-sequence v in)))))
+         (changed (copy-seq (assets:asset-bytes a))))
+    (is (equalp on-disk (assets:asset-bytes a)))
+    (is (string= (assets::%fnv1a-hex (assets:asset-bytes a)) (assets:asset-fingerprint a)))
+    (is (search (assets:asset-fingerprint a) (assets:url :calendar)))
+    (setf (aref changed 0) (logxor 1 (aref changed 0)))
+    (is (string/= (assets::%fnv1a-hex changed) (assets:asset-fingerprint a)))))
+
 (test content-types-are-right
   (is (search "javascript" (assets:asset-content-type (assets:asset :htmx))))
   (is (search "javascript" (assets:asset-content-type (assets:asset :alpine))))
-  (is (search "text/css" (assets:asset-content-type (assets:asset :bulma)))))
+  (is (search "text/css" (assets:asset-content-type (assets:asset :bulma))))
+  (is (search "text/css" (assets:asset-content-type (assets:asset :calendar)))))
 
 (test unknown-asset-signals
   (signals error (assets:url :tailwind)))

@@ -1,0 +1,137 @@
+/* calendar.css --- styles for hyperion/calendar's MONTH-GRID and DAYS-STRIP.
+   Colors are custom properties on .cal and .cal-strip; override them to theme. */
+
+.cal,
+.cal-strip {
+  --cal-border: #e0e0e0;
+  --cal-text: #363636;
+  --cal-muted: #7a7a7a;
+  --cal-faint: #b5b5b5;
+  --cal-head-bg: #fbfbfb;
+  --cal-outside-bg: #fafafa;
+  --cal-weekend-bg: #f5f5f5;
+  --cal-today-bg: #eef3fb;
+  --cal-today-border: #a9bfe6;
+  --cal-accent: #2f5fb3;
+  --cal-hover-bg: rgba(47, 95, 179, 0.05);
+}
+
+/* --- month navigation ------------------------------------------------------ */
+.cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.cal-nav__prev,
+.cal-nav__next {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--cal-border);
+  border-radius: 4px;
+  color: var(--cal-text);
+  text-decoration: none;
+}
+.cal-nav__prev:hover,
+.cal-nav__next:hover { border-color: var(--cal-accent); color: var(--cal-accent); }
+
+/* --- the month grid: seven equal columns, Monday first. A cell grows with its
+   content rather than clipping it. ----------------------------------------- */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-top: 1px solid var(--cal-border);
+  border-left: 1px solid var(--cal-border);
+}
+.cal-grid__head {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--cal-muted);
+  background: var(--cal-head-bg);
+  border-right: 1px solid var(--cal-border);
+  border-bottom: 1px solid var(--cal-border);
+}
+.cal-day {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  min-height: 6.5rem;
+  padding: 0.3rem;
+  border-right: 1px solid var(--cal-border);
+  border-bottom: 1px solid var(--cal-border);
+}
+.cal-day--weekend { background: var(--cal-weekend-bg); }
+.cal-day--outside { background: var(--cal-outside-bg); }
+.cal-day--outside .cal-day__num { color: var(--cal-faint); }
+.cal-day--today { background: var(--cal-today-bg); }
+.cal-day--today .cal-day__num { color: var(--cal-accent); font-weight: 700; }
+
+/* The whole cell opens the day: a link stretched behind the cell's content, which sits
+   above it so links inside the content stay clickable. */
+.cal-day__open { position: absolute; inset: 0; z-index: 0; }
+.cal-day__open:hover { background: var(--cal-hover-bg); }
+.cal-day__num,
+.cal-day__body { position: relative; z-index: 1; }
+.cal-day__num { font-size: 0.8rem; color: var(--cal-text); pointer-events: none; }
+.cal-day__body { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+/* The body lets clicks through to the stretched link except on its own links. */
+.cal-day__open ~ .cal-day__body { pointer-events: none; }
+.cal-day__open ~ .cal-day__body a,
+.cal-day__open ~ .cal-day__body button { pointer-events: auto; }
+
+/* An optional one-line entry for RENDER-DAY output: an edge stripe (recolor with
+   border-left-color) and an ellipsis when the text is too long. */
+.cal-item {
+  display: block;
+  padding: 0.1rem 0.35rem;
+  border-left: 4px solid var(--cal-faint);
+  border-radius: 2px;
+  background: var(--cal-weekend-bg);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: var(--cal-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+a.cal-item:hover { color: var(--cal-accent); }
+
+@media (max-width: 48rem) {
+  .cal-day { min-height: 4rem; }
+  .cal-item { font-size: 0.7rem; }
+}
+
+/* --- the days strip ----------------------------------------------------------- */
+.cal-strip {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+.cal-strip__day {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  min-height: 6rem;
+  padding: 0.5rem;
+  border: 1px solid var(--cal-border);
+  border-radius: 4px;
+  color: var(--cal-text);
+  text-decoration: none;
+}
+a.cal-strip__day:hover { border-color: var(--cal-accent); }
+.cal-strip__day--weekend { background: var(--cal-weekend-bg); }
+.cal-strip__day--today { background: var(--cal-today-bg); border-color: var(--cal-today-border); }
+.cal-strip__name { font-size: 0.8rem; font-weight: 700; color: var(--cal-muted); }
+
+@media (max-width: 48rem) {
+  .cal-strip { grid-template-columns: 1fr; }
+  .cal-strip__day { min-height: auto; }
+}

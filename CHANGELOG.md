@@ -59,6 +59,17 @@ its tag.
   `translate-plural-current` call `translate` and `translate-plural` with it, and signal
   `no-translation-source` when none is bound. A streaming response body sees the same source
   as its handler. A component that defined its own source variable can use this one instead.
+- **hyperion/calendar: a month grid and a strip of days, as Spinneret components** (#489).
+  A new opt-in system. `month-grid` renders a Monday-first month with previous and next links,
+  and `days-strip` renders N consecutive days from any date. The caller supplies what a day
+  shows (`:render-day`) and where days and months link (`:href-for-day`, `:href-for-month`).
+  Dates are `"YYYY-MM-DD"` and months `"YYYY-MM"` strings, with `add-days`, `weekday`,
+  `month-step`, `month-dates`, `today` (optionally in a zone, through `aion/tz`) and the
+  validators beside them. Month and weekday names are translated under the `calendar` section
+  by the request's `hyperion/i18n:*translation-source*`, falling back to English. Its
+  stylesheet is served by `hyperion/assets` as `:calendar`: link `(hyperion/assets:url
+  :calendar)`. `hyperion/assets` gains `first-party-p` to tell the tree's own files from the
+  vendored ones. See `hyperion/docs/calendar.md`.
 
 ### Fixed
 

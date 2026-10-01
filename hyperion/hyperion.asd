@@ -276,8 +276,31 @@
                              (:static-file "htmx.min.js")
                              (:static-file "alpine.min.js")
                              (:static-file "bulma.min.css")))
+               ;; The tree's own component stylesheets (#489), embedded the same way.
+               (:module "assets/components"
+                :components ((:static-file "calendar.css")))
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
+
+(defsystem "hyperion/calendar"
+  :description "A Monday-first month grid and a strip of consecutive days, as Spinneret components, with their date arithmetic and translated month and weekday names (#489)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/i18n; aion/tz for TODAY in a zone. Its stylesheet is served by
+  ;; hyperion/assets, which this system does not depend on, so an app that ships its own CSS
+  ;; does not carry the vendored files.
+  :depends-on ("hyperion" "aion/tz" "spinneret")
+  :components ((:file "src/calendar"))
+  :in-order-to ((test-op (test-op "hyperion/calendar/tests"))))
+
+(defsystem "hyperion/calendar/tests"
+  :description "Tests for hyperion/calendar: dates, translated names, and the rendered markup."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/calendar" "hyperion" "aion/tz" "spinneret" "fiveam")
+  :components ((:file "tests/calendar-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
 (defsystem "hyperion/test-ports"
   :description "Test support: a candidate port for a test server, and a retry when it is taken."
