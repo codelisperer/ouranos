@@ -185,3 +185,26 @@ not search the tree it was built from (#472)."
                        (is (eql 0 code) "the app exited with ~A:~%~A" code out)
                        (is (search "FAILED" out) "with its copy deleted the app still loaded libgit2:~%~A" out))))))
           (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
+
+(test the-digest-is-read-from-every-sha256-tool-s-output
+  "sha256sum from Git for Windows puts a backslash before the digest when the path has one, and
+certutil may space its digest out. The digest is the 64 hex digits, wherever they are. The first
+word, which the first version took, failed #518's Windows run on the backslash."
+  (let ((digest "1a4fbe7589e814777ae76b64734ad80f4ecad22cd33a22682a2aaea4ae5375e7"))
+    (is (string= digest (ouranos-bundle-sources::%hex-digest
+                         (format nil "\\~A *D:\\a\\ouranos\\vendor\\libgit2-1.9.7.tar.gz~%" digest))))
+    (is (string= digest (ouranos-bundle-sources::%hex-digest
+                         (format nil "~A  vendor/libgit2-1.9.7.tar.gz~%" (string-upcase digest)))))
+    (is (string= digest (ouranos-bundle-sources::%hex-digest
+                         (format nil "SHA256 hash of x:~%~A~%CertUtil: -hashfile command completed successfully.~%"
+                                 digest))))
+    (is (null (ouranos-bundle-sources::%hex-digest "no digest here")))))
+
+(test sha256-of-agrees-with-ironclad
+  "The digest this platform's sha256 tool gives, as SHA256-OF reads it, is the one ironclad
+computes for the same file: a second reading by different code, on every CI leg."
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (let ((file (%bytes-file (merge-pathnames "sample.bin" tree) "the bytes a tarball would have")))
+           (is (string= (%sha256-hex file) (ouranos-bundle-sources:sha256-of file))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))

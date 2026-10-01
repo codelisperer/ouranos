@@ -53,21 +53,32 @@ under vendor/<package>/src/, the licence file it ships, and how its library file
                       (uiop:string-prefix-p (concatenate 'string name " ") trimmed))
               return (string-trim '(#\Space #\Tab) (subseq trimmed (length name)))))))
 
-(defun %first-word (s) (subseq s 0 (or (position #\Space s) (length s))))
+(defun %hex-digest (output)
+  "The first run of 64 hexadecimal digits in OUTPUT, lowercased, or NIL.
+
+Not the output's first word: sha256sum, from Git for Windows, puts a backslash before the
+digest when the file's path contains one, as every Windows path does, so the first word of
+\"\\1a4f...  *D:\\a\\...\" is not the digest. That made the bundler refuse the right
+tarball on #518's first Windows run."
+  (loop with run = 0
+        for i from 0 below (length output)
+        do (if (digit-char-p (char output i) 16)
+               (when (= (incf run) 64)
+                 (return (string-downcase (subseq output (- i 63) (1+ i)))))
+               (setf run 0))))
 
 (defun sha256-of (file)
   "FILE's sha256 in lowercase hex, from sha256sum, shasum or certutil, as build-libgit2.lisp
 computes it."
   (flet ((run (args) (uiop:run-program args :output :string :error-output nil)))
     (cond ((ignore-errors (run '("sha256sum" "--version")))
-           (%first-word (run (list "sha256sum" (uiop:native-namestring file)))))
+           (%hex-digest (run (list "sha256sum" (uiop:native-namestring file)))))
           ((ignore-errors (run '("shasum" "--version")))
-           (%first-word (run (list "shasum" "-a" "256" (uiop:native-namestring file)))))
+           (%hex-digest (run (list "shasum" "-a" "256" (uiop:native-namestring file)))))
           ((uiop:os-windows-p)
-           (let ((lines (uiop:split-string
-                         (run (list "certutil" "-hashfile" (uiop:native-namestring file) "SHA256"))
-                         :separator '(#\Newline))))
-             (string-downcase (remove #\Return (remove #\Space (or (second lines) ""))))))
+           ;; certutil prints the digest on its second line, sometimes with spaces in it.
+           (%hex-digest (remove #\Space (run (list "certutil" "-hashfile"
+                                                   (uiop:native-namestring file) "SHA256")))))
           (t (error 'source-refused :reason "no sha256 tool found (sha256sum, shasum or certutil)")))))
 
 (defun %tarball-name (entry root)
