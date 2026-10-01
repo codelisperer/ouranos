@@ -26,13 +26,25 @@
            (sb-alien:extern-alien "GetCurrentProcessId" (function sb-alien:unsigned-long)))
   #-win32 (sb-unix:unix-getpid))
 
+(defun %check-prefix (prefix)
+  "Signal an error unless PREFIX is one plain name: not empty, not . or .., and with no path
+separator, drive or device colon, or wildcard. A prefix is parsed as part of a pathname, so
+\"../other\" or \"/tmp/other\" would otherwise put the directory outside IN (Copilot's review
+of #516)."
+  (when (or (zerop (length prefix))
+            (member prefix '("." "..") :test #'string=)
+            (find-if (lambda (c) (find c "/\\:*?[]")) prefix))
+    (error "make-temporary-directory: the prefix ~S is not one plain name" prefix)))
+
 (defun make-temporary-directory (prefix &key (in (uiop:temporary-directory)))
   "Create a new, empty directory under IN (by default the system's temporary directory) and
 return its pathname. It is named PREFIX-PID-N, where PID is this process's id and N a counter
 of this process's own, so no other process running now and no other call in this process is
 given the same directory. A name that already exists is passed over for the next N. The caller
-deletes the directory when it is done, for instance with DELETE-TREE."
+deletes the directory when it is done, for instance with DELETE-TREE. PREFIX must be one plain
+name, with no path separator, colon or wildcard."
   (check-type prefix string)
+  (%check-prefix prefix)
   (loop
     (let* ((n (sb-thread:with-mutex (*temporary-lock*) (incf *temporary-count*)))
            (dir (uiop:ensure-directory-pathname

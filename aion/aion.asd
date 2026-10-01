@@ -593,7 +593,7 @@
 
 (defsystem "aion/fs/tests"
   :description "Tests for aion/fs: links planted inside and at the root of a tree, pointing outside it."
-  :depends-on ("aion/fs" "fiveam")
+  :depends-on ("aion/fs" "fiveam" "aion/test-threads")   ; JOIN-ALL, for the threads test (#515)
   :serial t
   :components ((:module "tests/fs"
                 :serial t

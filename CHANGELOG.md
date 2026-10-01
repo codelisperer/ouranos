@@ -40,7 +40,8 @@ its tag.
 - **aion/fs: `make-temporary-directory` creates a new temporary directory that no other process
   is given** (#515). It is named after a prefix, the process id and a counter of the process's
   own, and it counts as made only when this call created it, so two processes started at the same
-  moment never share one. The test fixtures in `hyperion/server-uv/tests`, `hyperion/tests` and
+  moment never share one. The prefix must be one plain name: one with a path separator, a colon,
+  a wildcard, or `.` or `..` alone is refused. The test fixtures in `hyperion/server-uv/tests`, `hyperion/tests` and
   `klio/tests` that made a directory by deleting a file from `uiop:tmpize-pathname`, or named it
   by the time and a counter, use it now; the first of those patterns failed when two suites
   started together on one machine.
