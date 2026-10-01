@@ -41,6 +41,11 @@
                      do (write-line (string-right-trim '(#\Return) line) out)))))
       (sb-bsd-sockets:socket-close socket))))
 
+;; The test checks the server the template chooses with no operator override, so a
+;; HYPERION_SERVER inherited from whoever runs the suite is cleared. An empty value is the same
+;; as unset to hyperion/server:default-server.
+(setf (uiop:getenv "HYPERION_SERVER") "")
+
 ;; The backend is printed before START, and a START that fails is printed rather than left to
 ;; end the process, so a template on another server still reports what it chose. (Hunchentoot,
 ;; the template's server before #472, does not start on port 0 at all: START times out.)
@@ -52,8 +57,11 @@
                   (error (e) (format t "~&TEMPLATE-START-FAILED ~A~%" e) nil)))
        (server-p (template-symbol "SERVER-P" "HYPERION/SERVER-UV"))
        (uv-p (and handler server-p (funcall server-p handler))))
+  ;; The number of worker threads, or NIL for no pool.
   (format t "~&TEMPLATE-WORKERS ~A~%"
-          (and uv-p (funcall (template-symbol "SERVER-WORKERS" "HYPERION/SERVER-UV") handler) t))
+          (let ((pool (and uv-p (funcall (template-symbol "SERVER-WORKERS" "HYPERION/SERVER-UV")
+                                         handler))))
+            (and pool (funcall (template-symbol "POOL-WORKERS" "AION/POOL") pool))))
   (when uv-p
     (let ((reply (template-get (funcall (template-symbol "SERVER-PORT" "HYPERION/SERVER-UV")
                                         handler))))

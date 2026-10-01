@@ -5,7 +5,7 @@
 ;;;; the web template with cons/init:scaffold, loads the generated project in a fresh sbcl
 ;;;; (server-uv-template-child.lisp), calls its START, and sends one request over a real
 ;;;; socket. The child prints one line per fact, and the test reads those lines: which backend
-;;;; START chose, whether that server has a worker pool, the response's status line, and
+;;;; START chose, how many workers that server's pool has, the response's status line, and
 ;;;; whether the page is the scaffolded one.
 ;;;;
 ;;;; A fresh image, because the point is what the generated .asd pulls in on its own. This image
@@ -29,7 +29,8 @@
   "Run server-uv-template-child.lisp in a fresh sbcl on the project at ROOT.
 Returns (values STDOUT STDERR EXIT-CODE)."
   (uiop:run-program
-   (list "sbcl" "--dynamic-space-size" "4096" "--non-interactive" "--no-userinit"
+   ;; Neither init file: what the child loads is what the generated .asd asks for.
+   (list "sbcl" "--dynamic-space-size" "4096" "--non-interactive" "--no-sysinit" "--no-userinit"
          "--eval" (format nil "(defparameter cl-user::*project-root* ~S)" (uiop:native-namestring root))
          "--eval" (format nil "(defparameter cl-user::*project-name* ~S)" +template-project+)
          "--load" (uiop:native-namestring
@@ -38,8 +39,8 @@ Returns (values STDOUT STDERR EXIT-CODE)."
    :output :string :error-output :string :ignore-error-status t))
 
 (test the-cons-web-template-starts-on-uv-with-workers-and-serves-its-page
-  "A project scaffolded from the cons web template, loaded in a fresh image, starts on :uv with a
-worker pool and answers GET / with 200 and its own page (#472)."
+  "A project scaffolded from the cons web template, loaded in a fresh image, starts on :uv with 2
+workers and answers GET / with 200 and its own page (#472)."
   (cons/tempdir:with-temporary-directory (work "uvplate")
     (let ((root (let ((*standard-output* (make-broadcast-stream)))
                   (cons/init:scaffold +template-project+ :template :web :target work))))
@@ -49,8 +50,8 @@ worker pool and answers GET / with 200 and its own page (#472)."
           (is (eql 0 code) "the child sbcl exited 0: ~A" context)
           (is (equal "UV" (%template-field output "TEMPLATE-BACKEND"))
               "START chose the :uv backend: ~A" context)
-          (is (equal "T" (%template-field output "TEMPLATE-WORKERS"))
-              "the :uv server has a worker pool: ~A" context)
+          (is (equal "2" (%template-field output "TEMPLATE-WORKERS"))
+              "the :uv server has a pool of 2 workers: ~A" context)
           (is (equal "HTTP/1.1 200 OK" (%template-field output "TEMPLATE-STATUS"))
               "GET / answered 200: ~A" context)
           (is (equal "T" (%template-field output "TEMPLATE-PAGE"))
