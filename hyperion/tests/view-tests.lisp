@@ -186,6 +186,17 @@ code when it did not exit 0."
     (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16)) "eight numbers")
     (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16 56 7)) "ten numbers")
     (is (eql 2 (%placement 0 0 2560 1528 1280 860 "x" 16 56)) "a word in place of a number")
+    ;; Out of range (review of train 22): strtol's ERANGE, and values whose product would
+    ;; overflow a long in place_in_work_area. Run, like every call here, with
+    ;; HYPERION_VIEW_NO_WINDOW=1; this mode creates no window in any case.
+    (is (eql 2 (%placement 0 0 2560 1528 "99999999999999999999" 860 144 16 56))
+        "a value past LONG_MAX")
+    (is (eql 2 (%placement 0 0 2560 1528 2000000000 860 144 16 56))
+        "a client width whose product with the DPI overflows a 32-bit long")
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 2000000000 16 56)) "a DPI as large")
+    (is (eql 2 (%placement -2000000 0 2560 1528 1280 860 144 16 56))
+        "a coordinate more than a million pixels from the origin")
+    (is (eql 2 (%placement 0 0 2560 1528 1280 860 0 16 56)) "a DPI of 0")
     (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--placement"
                              "0" "0" "2560" "1528" "1280" "860" "144" "16" "56"))
         "a URL before it: --placement is a mode of its own, not an option of a window")))
@@ -399,7 +410,10 @@ when it did not exit 0."
                              "hyperion-view-placement 1 100 50 1380 910 2"
                              "hyperion-view-placement 1 100 50 1380 910"
                              "hyperion-view-placement 1 100 50 1380 910 0 extra"
-                             "hyperion-view-placement 1 100 50 1380px 910 0"))
+                             "hyperion-view-placement 1 100 50 1380px 910 0"
+                             ;; Coordinates beyond a million pixels, where the subtractions in
+                             ;; the fit check could overflow (review of train 22).
+                             "hyperion-view-placement 1 -2147483648 50 2147483647 910 0"))
                (is (equal "ignore malformed" (decide text 0 0 2560 1528))
                    "not a malformed line: ~S" text))
              (is (equal "ignore unreadable"

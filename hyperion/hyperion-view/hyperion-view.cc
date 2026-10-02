@@ -712,14 +712,20 @@ int main(int argc, char **argv) {
       }
       long v[9];
       for (int k = 0; k < 9; k++) {
-        char *end = nullptr;
-        v[k] = std::strtol(argv[i + 1 + k], &end, 10);
-        if (end == argv[i + 1 + k] || *end != '\0') {
-          std::fprintf(stderr, "hyperion-view: --placement: not an integer: %s\n\n",
+        if (!parse_long(argv[i + 1 + k], &v[k])) {
+          std::fprintf(stderr, "hyperion-view: --placement: not an integer a long holds: %s\n\n",
                        argv[i + 1 + k]);
           print_usage(stderr);
           return 2;
         }
+      }
+      if (!placement_inputs_in_range(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8])) {
+        std::fprintf(stderr,
+                     "hyperion-view: --placement: a value is out of range (coordinates within "
+                     "%ld of 0, client size 1 to %ld, DPI 1 to %ld, frame 0 to %ld)\n\n",
+                     kMaxCoordinate, kMaxClientSize, kMaxDpi, kMaxFrame);
+        print_usage(stderr);
+        return 2;
       }
       window_placement p =
           place_in_work_area(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);

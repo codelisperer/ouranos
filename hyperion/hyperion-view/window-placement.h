@@ -32,6 +32,27 @@ struct window_placement {
 // (scale_value_for_dpi: value * dpi / 96, rounding down), so the size computed here is the one
 // webview_set_size gave the window. Each dimension is cut to the work area's when it is larger,
 // and the result is centred, rounding down.
+// The values place_in_work_area is defined for, when they come from a command line rather than
+// from Windows (--placement, review of train 22). Within them the arithmetic cannot overflow a
+// long, which is 32 bits on Windows: the largest product, client size times DPI, is 10^9. A
+// screen coordinate a million pixels from the origin, or a window 100000 logical pixels wide,
+// is not one any display has.
+const long kMaxCoordinate = 1000000;
+const long kMaxClientSize = 100000;
+const long kMaxDpi = 10000;
+const long kMaxFrame = 10000;
+
+inline bool placement_inputs_in_range(long work_left, long work_top, long work_right,
+                                      long work_bottom, long client_width, long client_height,
+                                      long dpi, long frame_width, long frame_height) {
+  auto coordinate = [](long v) { return v >= -kMaxCoordinate && v <= kMaxCoordinate; };
+  return coordinate(work_left) && coordinate(work_top) && coordinate(work_right) &&
+         coordinate(work_bottom) && client_width >= 1 && client_width <= kMaxClientSize &&
+         client_height >= 1 && client_height <= kMaxClientSize && dpi >= 1 && dpi <= kMaxDpi &&
+         frame_width >= 0 && frame_width <= kMaxFrame && frame_height >= 0 &&
+         frame_height <= kMaxFrame;
+}
+
 inline window_placement place_in_work_area(long work_left, long work_top, long work_right,
                                            long work_bottom, long client_width,
                                            long client_height, long dpi, long frame_width,
@@ -69,7 +90,8 @@ const long kMinSavedWidth = 200;
 const long kMinSavedHeight = 150;
 
 // TEXT, one saved placement line, in *OUT. False unless TEXT is exactly the format above,
-// optionally followed by whitespace.
+// optionally followed by whitespace, with each coordinate within kMaxCoordinate of the origin,
+// so that the subtractions in saved_placement_fits cannot overflow.
 inline bool parse_saved_placement(const char *text, saved_placement *out) {
   const char *tag = "hyperion-view-placement 1 ";
   size_t tag_len = std::strlen(tag);
@@ -86,6 +108,8 @@ inline bool parse_saved_placement(const char *text, saved_placement *out) {
   }
   while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
   if (*p != '\0' || (v[4] != 0 && v[4] != 1)) return false;
+  for (int k = 0; k < 4; k++)
+    if (v[k] < -kMaxCoordinate || v[k] > kMaxCoordinate) return false;
   *out = {v[0], v[1], v[2], v[3], v[4] == 1};
   return true;
 }
