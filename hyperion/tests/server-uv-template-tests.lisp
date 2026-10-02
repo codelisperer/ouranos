@@ -119,8 +119,12 @@ directory outside the tree, answers GET / with 200 and its page (#513)."
           (is-true (uiop:directory-files (merge-pathnames "LICENSES/" bin))
                    "with its license under bin/LICENSES/"))
         (is-true (%bin-executable bin) "and the binary was dumped")
-        ;; Run it from somewhere else.
+        ;; Run it from somewhere else. UIOP:COPY-FILE does not keep the execute bit on Unix
+        ;; (cp -r, which a person would use, does), so it is set again on the copy.
         (%copy-directory bin away)
+        (let ((exe (%bin-executable away)))
+          (when (and exe (not (uiop:os-windows-p)))
+            (uiop:run-program (list "chmod" "755" (uiop:native-namestring exe)))))
         (let* ((exe (%bin-executable away))
                (port (cons/init::dev-port +template-project+))
                (log (merge-pathnames "run.log" work))
