@@ -59,9 +59,18 @@
 ;;;; RUNNING-OBSERVER is NIL. Observers of one thread through two store objects over one
 ;;;; database, or in two processes, are not coordinated.
 ;;;;
-;;;; ERASURE. `forget-subject' while a window is being distilled can be followed by that
-;;;; window's writes. Stop the subject's observers before erasing it: STOP-OBSERVER on
-;;;; RUNNING-OBSERVER of each of the subject's threads.
+;;;; ERASURE. `praxeon/memory:forget-subject' refuses while an observer of the subject is running
+;;;; in this process, so a run cannot write after the erasure: stop it (STOP-OBSERVER on
+;;;; RUNNING-OBSERVER) and try again. Observers in other processes are stopped first by the app.
+;;;; The erasure leaves each thread's progress as its mark alone, the subject's id, the thread's
+;;;; id and a count, with no skipped windows and no content (the maintainer's ruling). An
+;;;; observer that held skipped windows from before merges with that record at its next run and
+;;;; drops them, since the record holds no window overlapping them; a new observer starts at
+;;;; the mark. So the messages up to the mark are not observed again, later ones are observed
+;;;; normally, and the app's transcript, which this does not erase, is not distilled again. A
+;;;; conversation continued with a shortened or replaced transcript uses a new thread id: the
+;;;; merge keeps the larger mark, so an explicit :MARK below it is overridden, and the first
+;;;; messages of such a transcript would never be observed.
 ;;;;
 ;;;; WHAT IT WRITES, AND WHAT IT DOES NOT.
 ;;;;
@@ -145,6 +154,25 @@ otherwise both find no live worker and both run."
                      (log:debug "memory observer not started: another observer of the thread is running"
                                 :thread (observer-thread observer)))
                  nil))))))
+
+(define-condition observer-running (praxeon/conditions:praxeon-error)
+  ((subject :initarg :subject :reader observer-running-subject)
+   (thread :initarg :thread :reader observer-running-thread))
+  (:report (lambda (c stream)
+             (format stream "Cannot forget ~A: an observer of thread ~A is running. Stop it (stop-observer on running-observer) and try again."
+                     (observer-running-subject c) (observer-running-thread c))))
+  (:documentation "FORGET-SUBJECT was called while an observer of the subject is running in this
+process. A slot of its own for the thread, since PRAXEON-ERROR carries no detail (#505)."))
+
+(defmethod mem:forget-subject :before ((store mem:memory-store) subject)
+  "Refuse to erase SUBJECT while an observer of it is running in this process: that run could
+write after the erasure (#462, the maintainer's ruling)."
+  (let ((running (bt:with-lock-held (*running-lock*)
+                   (loop for key being the hash-keys of *running*
+                         when (and (eq (first key) store) (string= (second key) subject))
+                           collect (third key)))))
+    (when running
+      (error 'observer-running :subject subject :thread (first running)))))
 
 (defun running-observer (store subject thread)
   "The observer running on THREAD about SUBJECT in STORE in this process, or NIL. An app that

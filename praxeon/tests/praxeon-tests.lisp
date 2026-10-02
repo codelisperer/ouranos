@@ -5357,3 +5357,68 @@ observation's range or by a skipped window."
         (let ((u (%uncovered store)))
           (when u (push (list trial u) lost)))))
     (is (null lost) "~D of 60 trials lost messages: ~S" (length lost) lost)))
+
+;;; --------------------------------------------------------------------------
+;;; Erasure (#462, the maintainer's ruling): FORGET-SUBJECT keeps each thread's mark and nothing
+;;; else, and refuses while an observer of the subject is running.
+;;; --------------------------------------------------------------------------
+
+(test after-erasure-a-stopped-observer-distils-nothing-from-before
+  "An observer holds window 1-6 skipped. It is stopped and the subject erased. Told the next
+turn, it merges with the record the erasure left, (6 NIL), drops the window, and makes no model
+call: nothing from before the erasure is distilled again."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'failing-scripted :failures 2
+                                                    :script (list (%call-with (%ob "Has a dog." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                                   :max-attempts 2)))
+    (%turn observer 6)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (obs:stop-observer observer)
+    (mem:forget-subject store "member-1")
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+      (is (and (eql 6 mark) (null skipped)) "the record holds the mark and no window: ~S ~S" mark skipped))
+    (%turn observer 6)
+    (is (= 1 (length (scripted-script provider))) "no model call")
+    (is (null (mem:observations-of store "member-1" :thread :all)) "nothing written")
+    (is (null (obs:observer-skipped observer)))))
+
+(test forget-subject-refuses-while-an-observer-of-the-subject-runs
+  "A run that is distilling could write after the erasure, so FORGET-SUBJECT refuses, naming the
+thread, until the observer has stopped."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'slow-scripted :delay 0.5
+                                                                    :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (obs:observe-turn observer (%history 6))
+    (let ((refusal (handler-case (progn (mem:forget-subject store "member-1") nil)
+                     (cnd:praxeon-error (e) e))))
+      (is (typep refusal 'obs:observer-running))
+      (is (equal "conv-7" (and refusal (obs:observer-running-thread refusal))))
+      (is (search "conv-7" (princ-to-string refusal)) "the report names the thread"))
+    (obs:stop-observer observer)
+    (finishes (mem:forget-subject store "member-1"))
+    (is (null (mem:observations-of store "member-1" :thread :all)) "nothing written after the erasure")))
+
+(test after-erasure-a-new-observer-starts-at-the-mark
+  "An app that makes an observer per request erases the subject and keeps its transcript. The
+next observer starts at the mark the erasure kept and does not distil the transcript again."
+  (let ((store (mem:make-in-memory-store)))
+    (%turn (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)
+           6)
+    (mem:forget-subject store "member-1")
+    (let ((next (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                   store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (is (eql 6 (obs:observer-mark next)))
+      (is (null (obs:observe-turn next (%history 6))) "nothing to distil")
+      (is (null (mem:observations-of store "member-1" :thread :all))))))
+
+(test forgetting-one-observation-leaves-the-progress-alone
+  (let ((store (mem:make-in-memory-store)))
+    (mem:record-thread-progress store "member-1" "conv-7" 6 '((1 6 1)))
+    (let ((o (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                           :provenance (mem:make-provenance "conv-7" 7 :through 12))))
+      (mem:forget store o))
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+      (is (and (= 6 mark) (equal '((1 6 1)) skipped))))))

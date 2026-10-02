@@ -27,8 +27,9 @@ its tag.
 - **praxeon/memory: an app's own memory store implements `thread-progress` and
   `record-thread-progress` before `praxeon/observe` can use it** (#317). They keep an observer's
   progress on a thread (how many messages it has finished with, and the windows it gave up on),
-  and `forget-subject` must erase it with the subject's observations. A store without both is
-  refused when `make-observer` is called.
+  and `forget-subject` must reduce each of the subject's records to its mark, with no skipped
+  windows, when it erases the subject's observations. A store without both is refused when
+  `make-observer` is called.
 - **praxeon/memory-db: `supersede` refuses an observation that is already superseded**, as the
   in-memory store always has. It checks and writes under the store's lock in one transaction, and
   its UPDATE changes the row only while it is still current, so two supersessions of one
@@ -93,9 +94,18 @@ its tag.
     nothing else; a refused `:flush` is not queued, so flush again once `running-observer`
     returns NIL. Observers of one thread through two store objects over one database, or in two
     processes, are not coordinated.
-  - Stop a subject's observers before `forget-subject`, with `stop-observer` on the
-    `running-observer` of each of its threads; a window being distilled during the erasure can
-    be written after it.
+  - `forget-subject` refuses, with `observer-running` naming the thread, while an observer of the
+    subject is running in this process; stop it with `stop-observer` on `running-observer` and
+    call it again. Observers in other processes cannot be seen, and the app stops them first.
+  - `forget-subject` erases the subject's observations, as before, and leaves each of its
+    threads' progress records as the mark alone: the subject's id, the thread's id and a count
+    of messages, with no skipped windows and no content. A thread with no record gets none. It
+    does not erase the app's own transcript. Messages up to the mark are not observed again, so
+    an observer that held skipped windows from before drops them at its next run and a new
+    observer starts at the mark; later messages are observed normally. A conversation continued
+    after an erasure with a shortened or replaced transcript uses a new thread id, because the
+    stored mark wins over a lower `:mark`, and the transcript's first messages would otherwise
+    never be observed.
   - A skipped window is retried only while no later window has been written to the thread, and
     then it is distilled and promoted as if it had never been skipped. Once an observation from a
     later window is in the thread, the skipped window is closed: it is never retried, and

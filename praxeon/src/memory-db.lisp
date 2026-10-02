@@ -570,9 +570,12 @@ so that case needs a row written some other way."
       ;; THE PROGRESS TABLE MAY NOT EXIST: an app with its own migrations needs it only to use
       ;; praxeon/observe. It is looked for first rather than a failed delete caught, because on
       ;; Postgres a failed statement would abort a transaction the app wrapped around this call.
+      ;; Each of the subject's progress rows keeps its mark and loses its skipped windows, the
+      ;; only part of it that described the conversation (#462, the maintainer's ruling).
       (when (%table-exists-p store (%progress-table (store-table store)))
         (q:run (store-connection store)
-               (list :delete-from (%progress-table (store-table store))
+               (list :update (%progress-table (store-table store))
+                     :set (list :skipped "" :updated_at (get-universal-time))
                      :where (list := :subject subject))
                :dialect (store-dialect store)))
       (if (integerp n) n 0))))
