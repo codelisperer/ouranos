@@ -10,6 +10,17 @@
 (ql:quickload "{{name}}")
 
 (ensure-directories-exist "bin/")
+;; The native libraries the Ouranos tree builds and the app may load lazily -- libuv, for a
+;; server on :uv, and mbedTLS, for TLS -- are copied beside bin/{{name}}, where the binary looks
+;; for them first, and the binary is set not to look in the tree it was built from (#513).
+;; Without that, a binary that loads one runs on this machine, which has the tree, and fails on
+;; any other. tree-natives.lisp is the code a desktop bundle is built with; for an app that loads
+;; neither library it copies nothing. It stops the build, with exit code 3 and the reason, if
+;; the app loads one this machine has no built copy of.
+(load (merge-pathnames "scripts/tree-natives.lisp"
+                       (uiop:pathname-parent-directory-pathname
+                        (asdf:system-source-directory "cons/env"))))
+(ouranos-tree-natives:carry-tree-natives "bin/" :label "build-{{name}}")
 ;; UIOP's dump hook runs before the dump, and its restore hook runs first when the binary
 ;; starts. Without them the binary keeps this machine's temporary directory and fasl cache:
 ;; built on a CI runner, it looks for the runner's temp directory on a user's machine and

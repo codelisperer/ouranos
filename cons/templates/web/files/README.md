@@ -11,8 +11,12 @@ TODO: one-line description.
 
 The app serves on `hyperion/server-uv`, Ouranos's own HTTP server, which runs on libuv.
 Build libuv once in the Ouranos tree (`sbcl --script scripts/build-libuv.lisp` from its
-root), or install libuv on the system. A dumped `bin/{{name}}` looks for libuv beside
-itself first, then in the tree that built it, then on the system. To use another server,
+root). Running from source (`cons build`, `cons dev`, `cons serve`) also works with a libuv
+installed on the system, but `cons bin` needs the one the tree built: it copies that libuv
+beside `bin/{{name}}`, with its license under `bin/LICENSES/`, and stops with exit code 3,
+naming the command to run, if the app would load a system copy instead. The binary looks for
+libuv beside itself, so copy `bin/` as a whole to run it on another machine. To use another
+server,
 replace `hyperion/server-uv` in `{{name}}.asd` with `clack-handler-hunchentoot`, which needs
 nothing installed.
 
