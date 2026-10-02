@@ -337,21 +337,37 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
 // then never happen. Each write goes to PATH.tmp and is renamed over PATH, so a process ended
 // part-way through leaves the previous line, not half of a new one.
 
-// Up to 256 bytes of the file at PATH (UTF-8), or "" if it cannot be read. A placement line is
-// about 60 bytes.
+#if defined(_WIN32)
+// TEXT (UTF-8) as UTF-16, in *OUT. False when it does not convert. The buffer has room for the
+// terminator MultiByteToWideChar writes, which is removed afterwards (review of #521).
+static bool widen_utf8(const char *text, std::wstring *out) {
+  int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, nullptr, 0);
+  if (len <= 0) return false;
+  std::wstring wide(static_cast<size_t>(len), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, &wide[0], len) != len)
+    return false;
+  wide.resize(static_cast<size_t>(len - 1));
+  *out = wide;
+  return true;
+}
+#endif
+
+// The longest placement file read. A placement line is about 60 bytes.
+const size_t kMaxPlacementFile = 256;
+
+// The file at PATH (UTF-8), up to one byte more than kMaxPlacementFile so that a longer file
+// can be told from one that fits, or "" if it cannot be read.
 static std::string read_small_file(const char *path) {
   std::string out;
 #if defined(_WIN32)
-  int wide_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-  if (wide_len <= 0) return out;
-  std::wstring wide(static_cast<size_t>(wide_len - 1), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, path, -1, &wide[0], wide_len);
+  std::wstring wide;
+  if (!widen_utf8(path, &wide)) return out;
   std::FILE *f = _wfopen(wide.c_str(), L"rb");
 #else
   std::FILE *f = std::fopen(path, "rb");
 #endif
   if (f == nullptr) return out;
-  char buf[256];
+  char buf[kMaxPlacementFile + 1];
   size_t n = std::fread(buf, 1, sizeof buf, f);
   std::fclose(f);
   return std::string(buf, n);
@@ -365,6 +381,12 @@ static bool load_saved_placement(const char *path, saved_placement *out, const c
     *reason = "unreadable";
     return false;
   }
+  // Validation covers the whole file, so a valid line followed by anything else is refused
+  // rather than read as its first 256 bytes (review of #521).
+  if (text.size() > kMaxPlacementFile) {
+    *reason = "too-long";
+    return false;
+  }
   if (text.find('\0') != std::string::npos || !parse_saved_placement(text.c_str(), out)) {
     *reason = "malformed";
     return false;
@@ -374,6 +396,10 @@ static bool load_saved_placement(const char *path, saved_placement *out, const c
 
 #if defined(_WIN32)
 static std::wstring g_placement_path;
+static std::string g_placement_path_utf8;
+// A save that fails is reported on stderr once per run, so an app that asked for the placement
+// to be kept learns that it is not, without a line for every move (review of #521).
+static bool g_save_failure_reported = false;
 // The window's rectangle when it was last neither maximised nor minimised: what is saved while
 // it is maximised, so that restoring it un-maximises to the right place.
 static RECT g_normal_rect;
@@ -382,20 +408,29 @@ static bool g_in_size_move = false;
 static WNDPROC g_previous_window_proc = nullptr;
 
 static void set_placement_path(const char *path) {
-  int wide_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-  if (wide_len <= 0) return;
-  g_placement_path.assign(static_cast<size_t>(wide_len - 1), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, path, -1, &g_placement_path[0], wide_len);
+  g_placement_path_utf8 = path;
+  if (!widen_utf8(path, &g_placement_path)) g_placement_path.clear();
+}
+
+static bool save_failed(const char *step) {
+  if (!g_save_failure_reported) {
+    g_save_failure_reported = true;
+    std::fprintf(stderr, "hyperion-view: could not save the window placement to %s (%s)\n",
+                 g_placement_path_utf8.c_str(), step);
+    std::fflush(stderr);
+  }
+  return false;
 }
 
 // Write where HWND is to the placement file. False when there is no file, the window is
 // minimised, or the write failed.
 static bool save_placement(HWND hwnd) {
-  if (g_placement_path.empty() || IsIconic(hwnd)) return false;
+  if (g_placement_path_utf8.empty() || IsIconic(hwnd)) return false;
+  if (g_placement_path.empty()) return save_failed("the path is not valid UTF-8");
   bool maximized = IsZoomed(hwnd) != 0;
   if (!maximized) {
     RECT r;
-    if (!GetWindowRect(hwnd, &r)) return false;
+    if (!GetWindowRect(hwnd, &r)) return save_failed("GetWindowRect");
     g_normal_rect = r;
     g_have_normal_rect = true;
   }
@@ -404,17 +439,21 @@ static bool save_placement(HWND hwnd) {
                        g_normal_rect.bottom, maximized};
   char line[128];
   int n = format_saved_placement(p, line, sizeof line);
-  if (n <= 0 || n >= static_cast<int>(sizeof line)) return false;
+  if (n <= 0 || n >= static_cast<int>(sizeof line)) return save_failed("format");
   std::wstring tmp = g_placement_path + L".tmp";
   std::FILE *f = _wfopen(tmp.c_str(), L"wb");
-  if (f == nullptr) return false;
+  if (f == nullptr) return save_failed("opening the temporary file");
   bool ok = std::fwrite(line, 1, static_cast<size_t>(n), f) == static_cast<size_t>(n);
   ok = (std::fclose(f) == 0) && ok;
   if (!ok) {
     _wremove(tmp.c_str());
-    return false;
+    return save_failed("writing the temporary file");
   }
-  return MoveFileExW(tmp.c_str(), g_placement_path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+  if (MoveFileExW(tmp.c_str(), g_placement_path.c_str(), MOVEFILE_REPLACE_EXISTING) == 0) {
+    _wremove(tmp.c_str());
+    return save_failed("replacing the file");
+  }
+  return true;
 }
 
 // Ahead of webview.h's own window procedure: saves the placement when a move or resize ends,

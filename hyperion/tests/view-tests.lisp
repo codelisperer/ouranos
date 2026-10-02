@@ -405,7 +405,7 @@ when it did not exit 0."
              (is (equal "ignore does-not-fit"
                         (decide "hyperion-view-placement 1 100 50 250 150 0" 0 0 2560 1528))
                  "not smaller than 200 by 150")
-             (dolist (text '("junk"
+             (dolist (text (list "junk"
                              "hyperion-view-placement 2 100 50 1380 910 0"
                              "hyperion-view-placement 1 100 50 1380 910 2"
                              "hyperion-view-placement 1 100 50 1380 910"
@@ -413,9 +413,19 @@ when it did not exit 0."
                              "hyperion-view-placement 1 100 50 1380px 910 0"
                              ;; Coordinates beyond a million pixels, where the subtractions in
                              ;; the fit check could overflow (review of train 22).
-                             "hyperion-view-placement 1 -2147483648 50 2147483647 910 0"))
+                             "hyperion-view-placement 1 -2147483648 50 2147483647 910 0"
+                             ;; Fields not separated by a space, a tab between them, a plus sign
+                             ;; (review of #521).
+                             "hyperion-view-placement 1 100-50 1380 910 0"
+                             (format nil "hyperion-view-placement 1 100 50~C1380 910 0" #\Tab)
+                             "hyperion-view-placement 1 +100 50 1380 910 0"))
                (is (equal "ignore malformed" (decide text 0 0 2560 1528))
                    "not a malformed line: ~S" text))
+             (is (equal "ignore too-long"
+                        (decide (format nil "hyperion-view-placement 1 100 50 1380 910 0~A junk"
+                                        (make-string 300 :initial-element #\Space))
+                                0 0 2560 1528))
+                 "not a valid line followed by anything past 256 bytes (review of #521)")
              (is (equal "ignore unreadable"
                         (%saved-placement (merge-pathnames "absent" dir) 0 0 2560 1528))
                  "not a file that is not there")
@@ -493,7 +503,12 @@ opens centred when the saved placement is on no monitor."
                              (let ((window (subseq (%report-numbers line) 11 15)))
                                (is (equal (format nil "hyperion-view-placement 1 ~{~D~^ ~} 0~%" window)
                                           (uiop:read-file-string file))
-                                   "and that placement is saved: ~S" line)))))))))
+                                   "and that placement is saved: ~S" line))))
+                       ;; A file that cannot be written is reported, not silently skipped.
+                       (multiple-value-bind (code out)
+                           (%report-placement 1280 860 (merge-pathnames "no-such-dir/window-placement" dir))
+                         (is (eql 1 code) "a placement file that cannot be written fails the mode: ~S ~A" code out)
+                         (is-true (%report-line out "save-failed") "and says so: ~S" out)))))))
             (aion/fs:delete-tree dir))))))
 
 (defun run-tests ()
