@@ -186,6 +186,17 @@ this worker in that moment has its wake-up passed on, which is what a test holds
 TESTS ONLY: a refusal holds no place in the pool, and a test holds a refused submitter here to
 show that another submitter is still accepted when a place frees.")
 
+(sb-ext:defglobal *%after-stop-check* nil
+  "NIL, or a function a worker calls after it has found the pool stopping and decided whether
+to exit, with T when it will exit and NIL when it stays. FOR TESTS ONLY: a test that needs a
+broken pool's workers to have exited waits for each worker's decision here, instead of
+sleeping for a time that a loaded machine can exceed (#520).")
+
+(sb-ext:defglobal *%before-wait* nil
+  "NIL, or a function of the worker's %WORKER-STATE that a worker calls when its second look
+has found nothing, just before it waits on its semaphore. FOR TESTS ONLY: a test that needs a
+worker to be past its second look waits for it here, instead of sleeping (#520).")
+
 (defun %wake-all (pool)
   "Wake every worker, so each can see the pool is stopping and drained."
   (dolist (w (pool-wakes pool))
@@ -230,12 +241,13 @@ worker's %WORKER-STATE."
       ;; follow an atomic read-modify-write, which already orders later accesses on arm64
       ;; (LDADDAL, and a successful CASAL) and on x86-64 (a LOCK-prefixed instruction), so
       ;; they are kept only as statements of intent; #512's review checked this.
-      (when (and (pool-stopping pool)
-                 (progn (sb-thread:barrier (:memory))
-                        (let ((outstanding (pool-outstanding pool)))
-                          (sb-thread:barrier (:memory))
-                          (<= outstanding (pool-running pool)))))
-        (return nil))
+      (when (pool-stopping pool)
+        (let ((leave (progn (sb-thread:barrier (:memory))
+                            (let ((outstanding (pool-outstanding pool)))
+                              (sb-thread:barrier (:memory))
+                              (<= outstanding (pool-running pool))))))
+          (when *%after-stop-check* (funcall *%after-stop-check* leave))
+          (when leave (return nil))))
       (when *%after-empty-look* (funcall *%after-empty-look*))
       ;; Become findable BEFORE the second look, so a submitter that enqueues after the look
       ;; finds this worker on IDLE and wakes it.
@@ -258,6 +270,7 @@ worker's %WORKER-STATE."
                (sb-ext:atomic-incf (pool-running pool))
                (return job))
               (t
+               (when *%before-wait* (funcall *%before-wait* w))
                (sb-thread:wait-on-semaphore (%worker-state-wake w))
                (setf (%worker-state-state w) :busy)))))))
 
