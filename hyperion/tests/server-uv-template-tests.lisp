@@ -172,9 +172,12 @@ directory outside the tree, answers GET / with 200 and its page (#513)."
             ;; machine has: the image was dumped with *search-source-tree* NIL (review of #524).
             ;; Where a system libuv is installed, the binary may load that instead, and this run
             ;; shows nothing either way, so it is skipped.
+            ;; Retried: on a Windows runner the DLL stayed locked for a moment after the first
+            ;; run was stopped ("Access is denied", run 36955970876), though not here.
             (dolist (file (uiop:directory-files away))
               (when (uiop:string-prefix-p "libuv" (file-namestring file))
-                (delete-file file)))
+                (is-true (%wait-until (lambda () (ignore-errors (delete-file file) t)) :seconds 20)
+                         "the carried ~A could be deleted for the second run" (file-namestring file))))
             (if (%system-libuv-p)
                 (skip "A system libuv is installed here, so a binary without its own copy can load that one")
                 (multiple-value-bind (response output) (%run-binary exe away port log)
