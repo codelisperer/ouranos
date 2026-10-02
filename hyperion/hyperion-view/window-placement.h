@@ -89,9 +89,11 @@ struct saved_placement {
 const long kMinSavedWidth = 200;
 const long kMinSavedHeight = 150;
 
-// TEXT, one saved placement line, in *OUT. False unless TEXT is exactly the format above,
-// optionally followed by whitespace, with each coordinate within kMaxCoordinate of the origin,
-// so that the subtractions in saved_placement_fits cannot overflow.
+// TEXT, one saved placement line, in *OUT. False unless TEXT is exactly the format above: the
+// fields separated by spaces, each a decimal number with an optional minus sign, optionally
+// followed by whitespace at the end, and each coordinate within kMaxCoordinate of the origin, so
+// that the subtractions in saved_placement_fits cannot overflow. strtol alone would accept
+// "100-50" as two numbers and skip tabs and newlines between them (review of #521).
 inline bool parse_saved_placement(const char *text, saved_placement *out) {
   const char *tag = "hyperion-view-placement 1 ";
   size_t tag_len = std::strlen(tag);
@@ -99,7 +101,9 @@ inline bool parse_saved_placement(const char *text, saved_placement *out) {
   const char *p = text + tag_len;
   long v[5];
   for (int k = 0; k < 5; k++) {
+    if (k > 0 && *p != ' ') return false;
     while (*p == ' ') p++;
+    if (*p != '-' && (*p < '0' || *p > '9')) return false;
     char *end = nullptr;
     errno = 0;
     v[k] = std::strtol(p, &end, 10);
