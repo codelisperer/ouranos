@@ -515,7 +515,8 @@
   ;; The submitter is long gone by then -- no future, no result channel -- so if the pool
   ;; says nothing, nothing anywhere does. That is the doctrine this file's own header
   ;; states: consumers that want logging depend on aion/log.
-  :depends-on ("aion/log")
+  ;; sb-concurrency, an SBCL contrib, for the lock-free queue the submit path uses (#466).
+  :depends-on ("aion/log" (:require "sb-concurrency"))
   :pathname "src/pool"
   :serial t
   :components ((:file "packages")
@@ -523,7 +524,8 @@
 
 (defsystem "aion/pool/tests"
   :description "Tests for aion/pool: FIFO order, the bound, refusal, and shutdown drain."
-  :depends-on ("aion/pool" "fiveam")
+  ;; aion/test-threads for JOIN-ALL, which gives up after one deadline and names the thread.
+  :depends-on ("aion/pool" "fiveam" "aion/test-threads")
   :serial t
   :components ((:module "tests"
                 :serial t

@@ -85,11 +85,13 @@ binary, `OURANOS_BOOTSTRAP_KEEP_HEAP=1` keeps it — and warns, because the cons
 permanent and otherwise invisible. `sbcl --script scripts/baked-heap.lisp bin/cons` answers the
 question at any time.
 
-**One optional extra, for one opt-in system.** `aion/uv` (libuv: event loop, async and
-sync filesystem, timers, file watching) needs **a C compiler — the one your OS already
-ships**: Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC
-on Windows. Not MSYS2, not cmake, not make. Nothing else in the tree needs it, and no C
-toolchain is ever required merely to *load* anything here.
+**One extra, for libuv.** `aion/uv` (libuv: event loop, async and sync filesystem, timers,
+file watching) and `hyperion/server-uv`, the HTTP server built on it, need libuv, which
+`sbcl --script scripts/build-libuv.lisp` builds with **a C compiler — the one your OS already
+ships**: Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC on
+Windows. Not MSYS2, not cmake, not make. A libuv installed on the system also works. An app
+made with `cons init --template web` serves on `hyperion/server-uv`, so it needs this (#472).
+No C toolchain is ever required merely to *load* anything here.
 
 ## 2. Install the frameworks
 
@@ -145,7 +147,8 @@ Nothing else depends on the launcher, so bootstrap carries on without it. Set
 
 ## 3. Create your app
 
-The one-liner is `cons init my-site --template web` (or `--template agent`), and it
+The one-liner is `cons init my-site --template web` (or `--template agent`); a web app
+serves on `hyperion/server-uv` and needs libuv (section 1). It
 works today — `cons` implements `init` / `setup` / `conform` / `env` / `db-repl` / `db-url` / `template check` / `version`. `cons setup` then puts the app on the
 load path with its own drop-in beside Ouranos's; the rest of this section is what that
 does for you:
