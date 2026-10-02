@@ -502,9 +502,10 @@ limit, and in 3 of 300 at a limit of 8."
     (is (= 0 stuck-trials) "~D of ~D trials' submitters did not finish" stuck-trials trials)))
 
 (test two-jobs-calling-stop-pool-at-once-both-return
-  "For 2 and 4 workers, two jobs that are running at the same time both call STOP-POOL. Each
-call skips the other's worker, so both return; before #520 each joined the other's worker and
-neither returned."
+  "For 2 and 4 workers, two jobs that are running at the same time both call STOP-POOL. At least
+one of the two calls sees the other's flag and skips that worker, so it returns, its job
+finishes, and the other call's join of its worker returns too. Before #520 each call joined the
+other's worker and neither returned."
   (dolist (size '(2 4))
     (let* ((p (pool:make-pool :size size :queue-limit 4))
            (arrived (sb-thread:make-semaphore)) (both (sb-thread:make-semaphore))

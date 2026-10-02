@@ -79,8 +79,10 @@ A WARN rather than an ERROR level: the pool is fine, the job is not."
 ;;; --- the queue and its counts (#466) --------------------------------------------------
 ;;;
 ;;; NO POOL MUTEX ON THE SUBMIT PATH. Waking a worker still signals that worker's own semaphore,
-;;; which has a lock inside it, but only the one submitter that claimed the worker, the worker
-;;; itself, and STOP-POOL ever take that lock; see below. Every request a server-uv loop
+;;; which has a lock inside it, but while the pool runs normally only the one submitter that
+;;; claimed the worker and the worker itself take that lock; see below. Once the pool is
+;;; stopping, STOP-POOL, every worker that finishes a job, and every submitter refused because
+;;; the pool is stopping wake every worker and take it too. Every request a server-uv loop
 ;;; dispatches comes through TRY-SUBMIT, and with several loops they all used to serialise on
 ;;; one mutex, which each job then took twice more (taken by a worker, finished). #466 measured
 ;;; four loops at about 87,000 requests/s through the pool against about 101,000 with handlers
@@ -351,8 +353,10 @@ nothing was the wrong answer, and why a reporter that signals still cannot kill 
 is at its limit or the pool is stopping.
 
 NEVER WAITS FOR A JOB OR A WORKER, AND TAKES NO POOL MUTEX (#466). It can still be held up
-briefly in two places. Waking an idle worker signals that worker's own semaphore, whose lock
-only the claiming submitter, that worker and STOP-POOL share. And SB-CONCURRENCY:ENQUEUE
+briefly in two places. Waking an idle worker signals that worker's own semaphore, whose lock,
+while the pool runs normally, only the claiming submitter and that worker take. Once the pool
+is stopping, more threads take it: STOP-POOL, every worker that finishes a job, and every
+submitter refused because the pool is stopping all wake every worker. And SB-CONCURRENCY:ENQUEUE
 retries while another thread that is enqueuing sits between its compare-and-swap and its
 store of the new tail, so a submitter whose fellow submitter lost the processor at that point
 spins until it runs again. Neither waits on work. The caller may be an event loop's own thread,
