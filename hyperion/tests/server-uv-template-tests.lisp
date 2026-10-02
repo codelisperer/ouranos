@@ -88,6 +88,39 @@ sets the variable to the empty string, which the loaders here treat as unset."
   (or (probe-file (merge-pathnames (format nil "~A.exe" +template-project+) bin))
       (probe-file (merge-pathnames +template-project+ bin))))
 
+(defun %run-binary (exe directory port log)
+  "Start EXE in DIRECTORY with AION_UV_LIBRARY and HYPERION_SERVER cleared, and wait up to 60
+seconds for it to answer GET / on PORT or to exit. Returns (values RESPONSE OUTPUT), where
+RESPONSE is the response, :EXITED, or NIL, and OUTPUT is what the binary printed. The process is
+stopped before this returns."
+  (let ((process (%with-environment
+                  '(("AION_UV_LIBRARY" . nil) ("HYPERION_SERVER" . nil))
+                  (lambda ()
+                    (uiop:launch-program (list (uiop:native-namestring exe))
+                                         :directory directory :output log :error-output :output
+                                         :if-output-exists :supersede))))
+        (response nil))
+    (unwind-protect
+         (setf response
+               (%wait-until (lambda ()
+                              (or (ignore-errors (get* port "GET / HTTP/1.1" "Host: x"))
+                                  (and (not (uiop:process-alive-p process)) :exited)))
+                            :seconds 60))
+      (ignore-errors (uiop:terminate-process process :urgent t))
+      (ignore-errors (uiop:wait-process process)))
+    (values response (if (probe-file log) (uiop:read-file-string log) ""))))
+
+(defun %system-libuv-p ()
+  "Whether this machine has a libuv the operating system's loader would find by name: on Linux
+one that ldconfig lists, on macOS one in Homebrew's or /usr/local's lib directory. Windows has no
+such place, so NIL there."
+  (cond ((uiop:os-windows-p) nil)
+        ((uiop:os-macosx-p)
+         (or (probe-file "/opt/homebrew/lib/libuv.1.dylib") (probe-file "/usr/local/lib/libuv.1.dylib")))
+        (t (let ((out (ignore-errors (uiop:run-program (list "ldconfig" "-p") :output :string
+                                                       :ignore-error-status t))))
+             (and out (search "libuv.so.1" out) t)))))
+
 (test cons-bin-carries-libuv-and-the-binary-serves-outside-the-tree
   "The web template's build script copies libuv beside bin/<name>, and the binary, moved to a
 directory outside the tree, answers GET / with 200 and its page (#513)."
@@ -125,32 +158,28 @@ directory outside the tree, answers GET / with 200 and its page (#513)."
         (let ((exe (%bin-executable away)))
           (when (and exe (not (uiop:os-windows-p)))
             (uiop:run-program (list "chmod" "755" (uiop:native-namestring exe)))))
-        (let* ((exe (%bin-executable away))
-               (port (cons/init::dev-port +template-project+))
-               (log (merge-pathnames "run.log" work))
-               (process (and exe
-                             (%with-environment
-                              '(("AION_UV_LIBRARY" . nil) ("HYPERION_SERVER" . nil))
-                              (lambda ()
-                                (uiop:launch-program (list (uiop:native-namestring exe))
-                                                     :directory away :output log
-                                                     :error-output :output
-                                                     :if-output-exists :supersede)))))
-               (response nil))
-          (unwind-protect
-               (when process
-                 (setf response
-                       (%wait-until (lambda ()
-                                      (or (ignore-errors (get* port "GET / HTTP/1.1" "Host: x"))
-                                          (and (not (uiop:process-alive-p process)) :exited)))
-                                    :seconds 60))
-                 (let ((context (if (probe-file log) (uiop:read-file-string log) "")))
-                   (is (and response (not (eq response :exited)) (= 200 (status-of response)))
-                       "the moved binary answered GET / with 200: ~S~%~A" response context)
-                   (is (and response (not (eq response :exited))
-                            (search (format nil "~A is running" +template-project+)
-                                    (body-of response)))
-                       "with its page")))
-            (when process
-              (ignore-errors (uiop:terminate-process process :urgent t))
-              (ignore-errors (uiop:wait-process process)))))))))
+        (let ((exe (%bin-executable away))
+              (port (cons/init::dev-port +template-project+))
+              (log (merge-pathnames "run.log" work)))
+          (when exe
+            (multiple-value-bind (response output) (%run-binary exe away port log)
+              (is (and response (not (eq response :exited)) (= 200 (status-of response)))
+                  "the moved binary answered GET / with 200: ~S~%~A" response output)
+              (is (and response (not (eq response :exited))
+                       (search (format nil "~A is running" +template-project+) (body-of response)))
+                  "with its page"))
+            ;; Without the carried copy it must not fall back to the tree's vendor/, which this
+            ;; machine has: the image was dumped with *search-source-tree* NIL (review of #524).
+            ;; Where a system libuv is installed, the binary may load that instead, and this run
+            ;; shows nothing either way, so it is skipped.
+            (dolist (file (uiop:directory-files away))
+              (when (uiop:string-prefix-p "libuv" (file-namestring file))
+                (delete-file file)))
+            (if (%system-libuv-p)
+                (skip "A system libuv is installed here, so a binary without its own copy can load that one")
+                (multiple-value-bind (response output) (%run-binary exe away port log)
+                  (is (eq :exited response)
+                      "without the carried libuv the binary does not serve: ~S~%~A" response output)
+                  (is (search "LIBUV-NOT-FOUND" output)
+                      "and stops with LIBUV-NOT-FOUND, not finding the tree's vendor/ copy: ~A"
+                      output)))))))))

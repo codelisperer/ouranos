@@ -38,6 +38,15 @@
                               (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
   "This tree's vendor/ directory: a library under it is one this tree built, and is carried.")
 
+(defun %build-command (build-script)
+  "The command that builds the library BUILD-SCRIPT names, with the script's absolute path in
+this tree. A path relative to the tree would be wrong when the build runs from an app's own
+project, as `cons bin' does (review of #524)."
+  (format nil "sbcl --script ~A"
+          (uiop:native-namestring
+           (merge-pathnames (format nil "scripts/~A" build-script)
+                            (uiop:pathname-parent-directory-pathname *vendor*)))))
+
 (defvar *label* "build-desktop-app"
   "The name every message here starts with: the script that is running.")
 
@@ -84,7 +93,7 @@ be built. Those are two different right answers and they shared a code path."
                    (format t "time -- and the bundle cannot carry what will not resolve here.~%")
                    (format t "Shipping it would produce an artifact that works on every build~%")
                    (format t "machine and fails on every user's (ADR-0011, #72, #78).~%~%")
-                   (format t "Build the library first:  sbcl --script scripts/~A~%" build-script)
+                   (format t "Build the library first:  ~A~%" (%build-command build-script))
                    (finish-output))
                  (sb-ext:exit :code 3)))
         else
@@ -207,7 +216,7 @@ natives, so they never reach this pass."
                (format t "that happen to have their own copy. It works on this build machine~%")
                (format t "and fails on every user's (ADR-0011, #72, #78).~%~%")
                (format t "Build the vendored library first:~%")
-               (format t "  sbcl --script scripts/~A~%" build-script)
+               (format t "  ~A~%" (%build-command build-script))
                (format t "~%Then rebuild. The tree's search prefers vendor/ over the system copy,~%")
                (format t "so no other change is needed.~%"))
              (sb-ext:exit :code 3)))))
