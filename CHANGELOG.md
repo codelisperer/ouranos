@@ -54,8 +54,7 @@ its tag.
   generated `start` passes `:workers 2` to `hyperion/server:start` when the server is `:uv`, so a
   slow handler does not hold up other requests. A project generated this way needs a built libuv:
   run `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree, or install libuv on the
-  system. A `bin/<name>` dumped by `cons bin` looks for libuv beside itself, then in the tree
-  that built it, then on the system, so on another machine put libuv and its licence beside it.
+  system. `cons bin` copies libuv beside the `bin/<name>` it dumps (#513, below).
   Projects generated before this are unchanged. To keep Hunchentoot in a new project, replace
   `hyperion/server-uv` with `clack-handler-hunchentoot` in its `.asd`. (#472)
 - **aion/pool: `pool-queued` is exact only when the pool is quiet** (#466). It is now
@@ -65,6 +64,18 @@ its tag.
   `aion/pool`'s own tests read it, and only once the pool is quiet.
 
 ### Added
+
+- **`cons bin` copies libuv and mbedTLS beside the binary it dumps, when the app loads them.**
+  The build script a `cons init` project gets (`scripts/build-<name>.lisp`, for the agent, cli
+  and web templates) now loads the Ouranos tree's `scripts/tree-natives.lisp` before the dump.
+  For each library the tree builds that the app's image loads, it copies the library into
+  `bin/` and its license into `bin/LICENSES/`, and sets `aion/platform:*search-source-tree*` to
+  NIL in the image, so the binary uses the copy beside it rather than the tree's `vendor/`. A
+  `bin/<name>` from the web template therefore runs on a machine without the tree and without
+  libuv; copy `bin/` as a whole. The build stops with exit code 3 if the app loads a library
+  this machine has no built copy of. A project generated before this change keeps its old build
+  script: replace it with the template's, or add the two forms after
+  `(ensure-directories-exist "bin/")`. `scripts/build-desktop-app.lisp` uses the same file. (#513)
 
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
