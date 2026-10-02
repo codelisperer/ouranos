@@ -549,23 +549,32 @@ only the subject's facts. :ALL is refused, since a recall builds a prompt."
       (signals cnd:praxeon-error (mem:recall-similar store "member-10" query :thread :all))
       (signals cnd:praxeon-error (mem:recall store "member-10" :thread :all)))))
 
-(test thread-progress-round-trips-and-is-erased-with-the-subject
+(test thread-progress-round-trips-and-keeps-only-its-mark-after-erasure
   "The observer's progress on a thread, kept in its own table: replaced by each record, separate
-per thread, and erased by FORGET-SUBJECT with the observations."
+per thread. FORGET-SUBJECT erases the observations and leaves each of the subject's records as
+its mark alone, with no skipped windows; another subject's record is untouched (#462, the
+maintainer's ruling)."
   (with-store (store)
     (is (null (mem:thread-progress store "member-12" "conv-1")) "nothing recorded yet")
     (mem:record-thread-progress store "member-12" "conv-1" 6 '((1 6 1)))
     (mem:record-thread-progress store "member-12" "conv-1" 12 '((1 6 2 :closed) (7 12 1)))
     (mem:record-thread-progress store "member-12" "conv-2" 3 '())
+    (mem:record-thread-progress store "member-99" "conv-1" 9 '((1 4 1)))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-1")
       (is (= 12 mark))
       (is (equal '((1 6 2 :closed) (7 12 1)) skipped) "a closed window reads back closed"))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-2")
       (is (= 3 mark))
       (is (null skipped)))
+    (mem:remember store "member-12" "Lives in Porto." :thread "conv-1" :provenance (test-provenance))
     (mem:forget-subject store "member-12")
-    (is (null (mem:thread-progress store "member-12" "conv-1")))
-    (is (null (mem:thread-progress store "member-12" "conv-2")))))
+    (is (null (mem:observations-of store "member-12" :thread :all :include-superseded t)))
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-1")
+      (is (and (= 12 mark) (null skipped)) "conv-1 keeps its mark and nothing else: ~S ~S" mark skipped))
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-2")
+      (is (and (= 3 mark) (null skipped))))
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-99" "conv-1")
+      (is (and (= 9 mark) (equal '((1 4 1)) skipped)) "another subject's record is untouched"))))
 
 (test supersede-refuses-an-observation-already-superseded-on-the-sql-store
   "The SQL store checks, under its lock and in the same transaction as its writes, that the

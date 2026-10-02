@@ -181,7 +181,19 @@ thread's observations, and :ALL for both, which is what the access right needs."
 
 ERASURE, NOT SUPERSESSION. The observations are gone, including from `:as-of' views. A
 tombstone that keeps the content and marks it deleted is not erasure, and a store whose
-history cannot be made to forget is one a consuming app cannot use for personal data."))
+history cannot be made to forget is one a consuming app cannot use for personal data.
+
+WHAT IS LEFT (#462, the maintainer's ruling). For each of SUBJECT's threads that has a progress
+record (THREAD-PROGRESS), the record is replaced by one holding only the mark: the subject's id,
+the thread's id and a count of messages, with no skipped windows and no content. A thread with
+no record gets none. So an observer of the thread does not distil the messages up to the mark
+again; it observes later messages normally. The app's own transcript is not touched: erasing it
+is the app's. A conversation continued after an erasure with a shortened or replaced transcript
+uses a new thread id, or its first messages are never observed.
+
+Where `praxeon/observe' is loaded, this refuses while an observer of SUBJECT is running in this
+process; stop it (STOP-OBSERVER on RUNNING-OBSERVER) and try again. Observers in other
+processes cannot be seen from here and are stopped first by the app."))
 
 (defgeneric forget (store observation)
   (:documentation "Erase one observation. Returns true when it was there."))
@@ -196,7 +208,8 @@ was written and it will not be tried again. Both NIL when nothing is recorded.
 KEPT IN THE STORE, NOT WORKED OUT FROM THE OBSERVATIONS (#462's second review). The largest
 message an observation cites passes a window whose writes failed part-way, forgets a window that
 was given up on, and counts observations the app wrote into the thread itself, so an observer
-restarted from it would pass messages that were never distilled. FORGET-SUBJECT erases it."))
+restarted from it would pass messages that were never distilled. FORGET-SUBJECT reduces it to
+the mark, with no skipped windows (#462, the maintainer's ruling)."))
 
 (defgeneric record-thread-progress (store subject thread mark skipped)
   (:documentation "Record the observer's progress on THREAD about SUBJECT, as THREAD-PROGRESS
@@ -408,9 +421,11 @@ do I fix it' unanswerable."
 (defmethod forget-subject ((store in-memory-store) subject)
   (let ((doomed (observations-of store subject :include-superseded t :thread :all)))
     (dolist (o doomed) (forget store o))
+    ;; Each of the subject's progress records keeps its mark and loses everything else.
     (loop for key in (loop for k being the hash-keys of (store-progress store) collect k)
           when (string= (car key) subject)
-            do (remhash key (store-progress store)))
+            do (setf (gethash key (store-progress store))
+                     (cons (car (gethash key (store-progress store))) '())))
     (length doomed)))
 
 (defmethod thread-progress ((store in-memory-store) subject thread)
