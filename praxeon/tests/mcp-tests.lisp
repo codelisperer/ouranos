@@ -28,10 +28,13 @@
     ;; The failed tests' names go in the error, because the gate shows only the last lines of
     ;; a failed suite's output.
     (unless (results-status results)
-      (error "praxeon/mcp tests failed: ~{~A~^, ~}"
-             (remove-duplicates
-              (mapcar (lambda (r) (fiveam::name (fiveam::test-case r)))
-                      (remove-if-not #'fiveam::test-failure-p results)))))))
+      (error "praxeon/mcp tests failed: ~{~A~^; ~}"
+             (mapcar (lambda (r)
+                       (let ((reason (substitute #\Space #\Newline
+                                                 (princ-to-string (fiveam::reason r)))))
+                         (format nil "~A: ~A" (fiveam::name (fiveam::test-case r))
+                                 (subseq reason 0 (min 200 (length reason))))))
+                     (remove-if-not #'fiveam::test-failure-p results))))))
 
 ;;; --- the test server -------------------------------------------------------------------
 
