@@ -183,17 +183,23 @@ ERASURE, NOT SUPERSESSION. The observations are gone, including from `:as-of' vi
 tombstone that keeps the content and marks it deleted is not erasure, and a store whose
 history cannot be made to forget is one a consuming app cannot use for personal data.
 
-WHAT IS LEFT (#462, the maintainer's ruling). For each of SUBJECT's threads that has a progress
-record (THREAD-PROGRESS), the record is replaced by one holding only the mark: the subject's id,
-the thread's id and a count of messages, with no skipped windows and no content. A thread with
-no record gets none. So an observer of the thread does not distil the messages up to the mark
-again; it observes later messages normally. The app's own transcript is not touched: erasing it
+WHAT IS LEFT (#462, the maintainer's ruling). For each of SUBJECT's threads, the progress record
+(THREAD-PROGRESS) is replaced by one holding only the mark: the subject's id, the thread's id and
+a count of messages, with no skipped windows and no content. The mark is the larger of the
+stored mark and the last message any of the thread's erased observations cites (#462's eighth
+review): a progress write that failed leaves the stored mark behind what was distilled, and an
+observer starting from it would distil erased messages again. For the same reason a thread that
+has observations and no record gets one. A thread with neither gets none. So an observer of the
+thread does not distil the messages up to the mark again; it observes later messages normally.
+The erased observations are read, deleted and the marks written as one step under the store's
+lock, and in one transaction on a SQL store. The app's own transcript is not touched: erasing it
 is the app's. A conversation continued after an erasure with a shortened or replaced transcript
 uses a new thread id, or its first messages are never observed.
 
 Where `praxeon/observe' is loaded, this refuses while an observer of SUBJECT is running in this
-process; stop it (STOP-OBSERVER on RUNNING-OBSERVER) and try again. Observers in other
-processes cannot be seen from here and are stopped first by the app."))
+process through the same store object; stop it (STOP-OBSERVER on RUNNING-OBSERVER) and try
+again. Observers through another store object over the same database, or in other processes,
+cannot be seen from here and are stopped first by the app."))
 
 (defgeneric forget (store observation)
   (:documentation "Erase one observation. Returns true when it was there."))
@@ -418,14 +424,38 @@ do I fix it' unanswerable."
       (remhash id (store-observations store))
       t)))
 
+(defun %last-cited-by-thread (observations)
+  "Each thread among OBSERVATIONS, with the last message any of its observations cites (the
+provenance's THROUGH, else its TURN), as an alist (THREAD . MESSAGE). A store's FORGET-SUBJECT
+reads it before erasing them."
+  (let ((last (make-hash-table :test #'equal)))
+    (dolist (o observations)
+      (let ((thread (observation-thread o)) (p (observation-provenance o)))
+        (when (and thread p)
+          (let ((message (or (provenance-through p) (provenance-turn p))))
+            (when (integerp message)
+              (setf (gethash thread last) (max (gethash thread last 0) message)))))))
+    (loop for thread being the hash-keys of last using (hash-value message)
+          collect (cons thread message))))
+
+(defun %raise-marks (store subject cited)
+  "After an erasure: give each thread in CITED, from %LAST-CITED-BY-THREAD, a progress record
+whose mark is at least the last message its erased observations cited, with nothing skipped."
+  (loop for (thread . message) in cited
+        do (let ((mark (or (thread-progress store subject thread) 0)))
+             (when (> message mark)
+               (record-thread-progress store subject thread message '())))))
+
 (defmethod forget-subject ((store in-memory-store) subject)
-  (let ((doomed (observations-of store subject :include-superseded t :thread :all)))
+  (let* ((doomed (observations-of store subject :include-superseded t :thread :all))
+         (cited (%last-cited-by-thread doomed)))
     (dolist (o doomed) (forget store o))
     ;; Each of the subject's progress records keeps its mark and loses everything else.
     (loop for key in (loop for k being the hash-keys of (store-progress store) collect k)
           when (string= (car key) subject)
             do (setf (gethash key (store-progress store))
                      (cons (car (gethash key (store-progress store))) '())))
+    (%raise-marks store subject cited)
     (length doomed)))
 
 (defmethod thread-progress ((store in-memory-store) subject thread)

@@ -561,20 +561,40 @@ maintainer's ruling)."
     (mem:record-thread-progress store "member-12" "conv-2" 3 '())
     (mem:record-thread-progress store "member-99" "conv-1" 9 '((1 4 1)))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-1")
-      (is (= 12 mark))
+      (is (eql 12 mark))
       (is (equal '((1 6 2 :closed) (7 12 1)) skipped) "a closed window reads back closed"))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-2")
-      (is (= 3 mark))
+      (is (eql 3 mark))
       (is (null skipped)))
     (mem:remember store "member-12" "Lives in Porto." :thread "conv-1" :provenance (test-provenance))
     (mem:forget-subject store "member-12")
     (is (null (mem:observations-of store "member-12" :thread :all :include-superseded t)))
+    ;; EQL, not =: a control that deletes the records fails here, not with a TYPE-ERROR
+    ;; (#462's eighth review).
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-1")
-      (is (and (= 12 mark) (null skipped)) "conv-1 keeps its mark and nothing else: ~S ~S" mark skipped))
+      (is (and (eql 12 mark) (null skipped)) "conv-1 keeps its mark and nothing else: ~S ~S" mark skipped))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-12" "conv-2")
-      (is (and (= 3 mark) (null skipped))))
+      (is (and (eql 3 mark) (null skipped))))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-99" "conv-1")
-      (is (and (= 9 mark) (equal '((1 4 1)) skipped)) "another subject's record is untouched"))))
+      (is (and (eql 9 mark) (equal '((1 4 1)) skipped)) "another subject's record is untouched"))))
+
+(test erasure-keeps-a-mark-no-lower-than-what-the-observations-cite-on-the-sql-store
+  "A progress write that failed leaves the stored mark behind what was distilled, and a thread
+can have observations and no record. The erasure keeps, for each thread, the larger of the
+stored mark and the last message its erased observations cited, in the same transaction as the
+deletion (#462's eighth review)."
+  (with-store (store)
+    (mem:record-thread-progress store "member-14" "conv-1" 6 '())
+    (mem:remember store "member-14" "Lives in Lisbon." :thread "conv-1"
+                  :provenance (mem:make-provenance "conv-1" 7 :through 12))
+    (mem:remember store "member-14" "Has a dog." :thread "conv-2"
+                  :provenance (mem:make-provenance "conv-2" 1 :through 5))
+    (mem:remember store "member-14" "Likes tea." :provenance (test-provenance))
+    (mem:forget-subject store "member-14")
+    (is (null (mem:observations-of store "member-14" :thread :all :include-superseded t)))
+    (is (eql 12 (mem:thread-progress store "member-14" "conv-1")) "raised to what was cited")
+    (is (eql 5 (mem:thread-progress store "member-14" "conv-2")) "a thread with no record gets one")
+    (is (null (mem:thread-progress store "member-14" "conv-test")) "a fact about the subject has no thread")))
 
 (test supersede-refuses-an-observation-already-superseded-on-the-sql-store
   "The SQL store checks, under its lock and in the same transaction as its writes, that the

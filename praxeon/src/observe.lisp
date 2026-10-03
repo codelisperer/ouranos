@@ -32,8 +32,10 @@
 ;;;; retried, and its messages stay raw in the prompt (#317, step C). A window still open when an
 ;;;; observation from a later window is found in the thread, as one left by an earlier run, is
 ;;;; closed by the next run. So within a thread nothing older is written over or beside anything
-;;;; newer, and a window with nothing after it keeps its facts. Across a subject's threads that
-;;;; does not hold; see %MAYBE-PROMOTE.
+;;;; newer, and a window with nothing after it keeps its facts, with one exception: a progress
+;;;; write that fails while another observer of the thread runs lets that observer distil older
+;;;; windows after newer ones (see the store being behind, below; #462's eighth review). Across
+;;;; a subject's threads it does not hold; see %MAYBE-PROMOTE.
 ;;;;
 ;;;; THE MARK AND THE SKIPPED WINDOWS ARE KEPT IN THE STORE (`praxeon/memory:thread-progress'),
 ;;;; written after each window, and a new observer starts from them. So an app that makes an
@@ -60,14 +62,20 @@
 ;;;; database, or in two processes, are not coordinated.
 ;;;;
 ;;;; ERASURE. `praxeon/memory:forget-subject' refuses while an observer of the subject is running
-;;;; in this process, so a run cannot write after the erasure: stop it (STOP-OBSERVER on
-;;;; RUNNING-OBSERVER) and try again. Observers in other processes are stopped first by the app.
+;;;; in this process through the same store object, so such a run cannot write after the
+;;;; erasure: stop it (STOP-OBSERVER on RUNNING-OBSERVER) and try again. Observers through another
+;;;; store object over the same database, or in other processes, are stopped first by the app.
 ;;;; The erasure leaves each thread's progress as its mark alone, the subject's id, the thread's
-;;;; id and a count, with no skipped windows and no content (the maintainer's ruling). An
-;;;; observer that held skipped windows from before merges with that record at its next run and
-;;;; drops them, since the record holds no window overlapping them; a new observer starts at
-;;;; the mark. So the messages up to the mark are not observed again, later ones are observed
-;;;; normally, and the app's transcript, which this does not erase, is not distilled again. A
+;;;; id and a count, with no skipped windows and no content (the maintainer's ruling). The mark
+;;;; is at least the last message the thread's erased observations cited, so a progress write
+;;;; that failed before the erasure does not let those messages be distilled again (#462's
+;;;; eighth review). An observer that held skipped windows from before merges with that record
+;;;; at its next run: it drops the ones up to the kept mark, since the record holds no window
+;;;; overlapping them, and keeps any past it, which it then tries as usual. Nothing from those
+;;;; was stored before the erasure, since a window past the mark was never written. A new
+;;;; observer starts at the mark. So the messages up to the mark are not observed again, later
+;;;; ones are observed normally, and the app's transcript, which this does not erase, is not
+;;;; distilled again up to the mark. A
 ;;;; conversation continued with a shortened or replaced transcript uses a new thread id: the
 ;;;; merge keeps the larger mark, so an explicit :MARK below it is overridden, and the first
 ;;;; messages of such a transcript would never be observed.
@@ -353,8 +361,11 @@ running afterwards."
 (defun stop-observer (observer &key (timeout 30))
   "Stop OBSERVER at shutdown: it finishes the attempt it is on, waits for no retry, and starts no
 other window. Waits at most TIMEOUT seconds, then ends its thread. Returns T when it stopped in
-time. A window it stopped during is neither written nor given up on, so the next observer of
-the thread distils it."
+time. When it returns NIL the thread is ended asynchronously, so RUNNING-OBSERVER can still name
+OBSERVER for a moment afterwards. A window it stopped during is not given up on. It is not
+written either, unless the stop came after the window's observations were written and before
+its progress was: then the next observer of the thread distils it again (#462's eighth
+review)."
   (setf (observer-stopping observer) t)
   (or (await-observer observer :timeout timeout)
       (let ((w (observer-worker observer)))
@@ -388,32 +399,34 @@ thread would end the process."
   "Two records of one thread's progress, merged. Returns the merged mark and skipped windows.
 
 The mark is the larger. Past the smaller mark, skipped windows come from the record that reached
-it. Up to the smaller mark:
-  - a window both records hold is kept once, :CLOSED beating open and more tries beating fewer;
-  - a window only one record holds is dropped when the other record holds no skipped window
-    overlapping it, because a record that reached its end without anything skipped there
-    distilled those messages;
-  - it is kept when the other record holds an overlapping skipped window, as when two observers
-    cut the same messages with a different :STEP or flush. Keeping both can mean those messages
-    are covered twice; dropping either would leave some of them undistilled and uncovered
-    (#462's seventh review).
-The result is the same whichever record is A, and merging it again with either changes nothing,
-so it is applied on adoption and on save alike."
+it. Up to the smaller mark, each record has distilled every message it holds no skipped window
+for, so a message is still undistilled only when both records hold a skipped window over it.
+For each pair of overlapping skipped windows, one from each record, only their overlap is kept,
+with the larger tries, and :CLOSED when either is closed (#462's eighth review). A window only
+one record holds is dropped, and so is the part of a window the other record distilled. Each
+overlap starts at some window's start and ends at some window's end, so it is still whole
+exchanges.
+
+The result is the same whichever record is A, and no message both records left undistilled is
+lost. When neither record holds two overlapping windows, which is true of every record an
+observer or this merge writes (the overlaps of two sets of disjoint windows are disjoint), the
+result holds none either, and merging it again with either record or with itself changes
+nothing. Up to the smaller mark it is not associative: three records merged in two orders can
+keep different windows, but in each order every message that all of them left undistilled is
+kept."
   (let* ((low (min mark-a mark-b))
          (high-skipped (cond ((> mark-a mark-b) skipped-a)
                              ((> mark-b mark-a) skipped-b)
                              (t '())))
          (kept '()))
     (flet ((keep (entry) (unless (find-if (lambda (k) (%same-window-p k entry)) kept) (push entry kept))))
-      (loop for (this other) in (list (list skipped-a skipped-b) (list skipped-b skipped-a))
-            do (dolist (e this)
-                 (when (<= (second e) low)
-                   (let ((same (find-if (lambda (o) (%same-window-p o e)) other)))
-                     (cond
-                       (same (keep (append (list (first e) (second e) (max (third e) (third same)))
-                                           (unless (and (%open-p e) (%open-p same)) (list :closed)))))
-                       ((some (lambda (o) (and (<= (second o) low) (%overlap-p o e))) other)
-                        (keep e)))))))
+      (dolist (a skipped-a)
+        (when (<= (second a) low)
+          (dolist (b skipped-b)
+            (when (and (<= (second b) low) (%overlap-p a b))
+              (keep (append (list (max (first a) (first b)) (min (second a) (second b))
+                                  (max (third a) (third b)))
+                            (unless (and (%open-p a) (%open-p b)) (list :closed))))))))
       (dolist (e high-skipped)
         (when (> (second e) low) (keep e))))
     (values (max mark-a mark-b)
@@ -430,7 +443,7 @@ so it is applied on adoption and on save alike."
 (defun %sync-progress (observer &key (read-failure :record))
   "Read the store's progress, merge OBSERVER's own into it (%MERGE-PROGRESS), take the result,
 and write it when it differs from what is stored. The stored mark is never lowered, and newer
-progress at an equal mark is never overwritten. A failed write marks OBSERVER unsaved. A failed
+progress at an equal mark is never overwritten, through one store object in one process. A failed write marks OBSERVER unsaved. A failed
 read does the same with READ-FAILURE :RECORD, and with :SIGNAL it is signalled, which ends the
 run that is reconciling."
   (let ((stored nil) (skipped nil))
