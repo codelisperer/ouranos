@@ -447,6 +447,10 @@ names the authorization server that issued the token, the token is not sent."
 offer, so discovery signals PINNED-CONNECT-UNSUPPORTED there and nothing is fetched."
   #-os-windows (skip "the pinned connection is available here")
   #+os-windows
+  ;; A resolver that answers with a public address: FETCH-PUBLIC resolves and checks the host
+  ;; before it tries to pin, and a made-up host would be refused as unresolvable first.
   (signals http:pinned-connect-unsupported
-    (oauth:discover (%broker) "https://mcp.example/mcp"
+    (oauth:discover (%broker :resolve (lambda (host) (declare (ignore host))
+                                        (list (http:parse-address "93.184.216.34"))))
+                    "https://mcp.example/mcp"
                     :challenge "Bearer resource_metadata=\"https://mcp.example/prm\"")))
