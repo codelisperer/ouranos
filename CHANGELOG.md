@@ -28,7 +28,10 @@ its tag.
   `record-thread-progress` before `praxeon/observe` can use it** (#317). They keep an observer's
   progress on a thread (how many messages it has finished with, and the windows it gave up on),
   and `forget-subject` must reduce each of the subject's records to its mark, with no skipped
-  windows, when it erases the subject's observations. A store without both is refused when
+  windows, when it erases the subject's observations. `thread-progress` must return the skipped
+  windows as they were recorded, including the `:closed` after a closed one, and in the order
+  given: the observer reads whether a window is closed from that record alone, so a store that
+  drops `:closed` makes it retry a window it closed. A store without both is refused when
   `make-observer` is called.
 - **praxeon/memory-db: `supersede` refuses an observation that is already superseded**, as the
   in-memory store always has. It checks and writes under the store's lock in one transaction, and
@@ -121,14 +124,19 @@ its tag.
     replaced transcript uses a new thread id, because the stored mark wins over a lower `:mark`, and
     the transcript's first messages would otherwise never be observed.
   - A skipped window is retried only while no later window has been written to the thread, and
-    then it is distilled and promoted as if it had never been skipped. Once an observation from a
-    later window is in the thread, the skipped window is closed: it is never retried, and
-    `observer-skipped` shows it as `(from through tries :closed)`. Writing a window, in a run or
-    in a retry, closes every open skipped window before it at once, whatever its tries; a window
-    whose tries are spent is not closed by that alone, but by the next run once a later window is
-    in the thread.
+    then it is distilled and promoted as if it had never been skipped. Writing a window, in a run
+    or in a retry, closes every open skipped window before it at once, whatever its tries: it is
+    never retried, and `observer-skipped` shows it as `(from through tries :closed)`. Whether a
+    window is closed comes from the progress record alone, not from the thread's observations,
+    so an observation the app writes into the thread closes nothing, and erasing a later
+    window's observations reopens nothing. A window whose tries are spent, with no later window
+    written, stays open and is not tried again.
   - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
-    the name of one.
+    the name of one, including a symbol that names a macro or a special operator, such as
+    `when`.
+  - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
+    claim on the conversation, however the attempt ends, so a later call can start a run.
+    `stop-observer :timeout 0` returns at once instead of signalling a `type-error`.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
     does. A fact the subject already holds is not stored again. A promoted observation is
@@ -141,7 +149,8 @@ its tag.
     within one thread: a correction refused in one conversation can still reach the subject when
     another conversation states the corrected value with nothing to link it. A thread fact that
     contradicts a subject fact with no such link is promoted beside it; `:promote` has to judge
-    that case.
+    that case. The subject then holds both as current facts, and when a later correction's chain
+    reaches several current facts, only the first is replaced and the others stay current.
   - `:verify`, a provider, drops proposals the window does not support, judging their content,
     kind, date and any claim to replace an earlier observation.
   - `stop-observer` stops it at shutdown, `observer-stuck-p` reports a call running past

@@ -220,7 +220,12 @@ KEPT IN THE STORE, NOT WORKED OUT FROM THE OBSERVATIONS (#462's second review). 
 message an observation cites passes a window whose writes failed part-way, forgets a window that
 was given up on, and counts observations the app wrote into the thread itself, so an observer
 restarted from it would pass messages that were never distilled. FORGET-SUBJECT reduces it to
-the mark, with no skipped windows (#462, the maintainer's ruling)."))
+the mark, with no skipped windows (#462, the maintainer's ruling).
+
+A STORE RETURNS SKIPPED AS IT WAS RECORDED, :CLOSED included and in the order given (#508). The
+observer decides whether a window is closed from this record alone, so a store that drops
+:CLOSED makes it try again a window it closed, and distil and promote messages older than a
+window it has already written."))
 
 (defgeneric record-thread-progress (store subject thread mark skipped)
   (:documentation "Record the observer's progress on THREAD about SUBJECT, as THREAD-PROGRESS
