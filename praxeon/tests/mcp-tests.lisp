@@ -500,3 +500,16 @@ reaches the app, while the app's handler on the first thread does not see the co
   (is (equal (list "one" (format nil "two~%three") "four")
              (mcp::parse-event-stream
               (format nil ": comment~%data: one~%~%event: message~%data: two~%data:three~%~%id: 7~%~%data: four~%")))))
+
+(test a-request-is-given-up-at-its-deadline-whatever-the-transport-does
+  "The deadline does not depend on the transport's read timeout, which dexador's WinHTTP
+backend did not honour on #530's Windows leg. Here the transport is given 30 seconds and the
+deadline 1: the request is given up within about a second while the server takes 3."
+  (th:with-server (s (lambda (r stream) (declare (ignore r))
+                       (sleep 3) (th:write-response stream 200 '() "{}")))
+    (let ((started (get-internal-real-time)))
+      (signals aion/http-client:http-error
+        (mcp::%send-within (aion/http-client:make-request :url (th:server-url s "/mcp")
+                                                          :read-timeout 30)
+                           1))
+      (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 2)))))

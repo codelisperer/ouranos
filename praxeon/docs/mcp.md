@@ -58,6 +58,7 @@ All of these let the turn go on. They are subclasses of `praxeon/conditions:tool
   - a current-revision request that a legacy server could not read;
   - a legacy request that a current server rejected with a current-revision error;
   - the legacy 404 for an ended session.
+- **Every request has a deadline of its own.** A request runs on its own thread and is given up one second after its timeout, whatever the transport does. On #530's Windows leg, dexador's WinHTTP backend let a request outlive its read timeout. A request given up this way is not sent again.
 - **No secret follows a redirect.** Requests are sent with redirects off, so a token is never forwarded to another host. A 3xx fails the request.
 
 ### Handlers stay on the thread that set them

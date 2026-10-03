@@ -170,13 +170,37 @@ Returns the response. A failed connection or a timeout fails the call."
                    ;; A request that carries a token is never forwarded to another host.
                    :follow-redirects nil
                    :max-body-bytes (connection-max-body-bytes connection))))
-    (handler-case (http:send-request request '())
+    (handler-case (%send-within request (1+ timeout))
       (http:response-too-large ()
         (%failed-in-flight client "its reply was larger than ~D bytes."
                            (list (connection-max-body-bytes connection))))
       (http:http-error ()
         (%failed-in-flight client "it did not answer within ~D seconds, or the connection failed."
                            (list timeout))))))
+
+(defun %send-within (request seconds)
+  "Send REQUEST and return its response, or signal HTTP-ERROR when it has not finished within
+SECONDS.
+
+The transport's own read timeout is not relied on alone. On Windows, dexador's WinHTTP
+backend let a request to a server that answered after 3 seconds succeed under a 1-second read
+timeout (#530's Windows leg), so a call could wait as long as the server chose. The request
+runs on its own thread, and this gives up on it at the deadline. Given up, the request is left
+to finish or fail on that thread, and nothing sends it again."
+  (let* ((none '#:none)
+         (thread (sb-thread:make-thread
+                  ;; THREAD-LIFETIME: independent -- it only performs the request and returns
+                  ;; the outcome as a value; it reads no binding of the caller's.
+                  (lambda ()
+                    (handler-case (list :ok (http:send-request request '()))
+                      (error (e) (list :error e))))
+                  :name "praxeon/mcp request"))
+         (outcome (sb-thread:join-thread thread :timeout seconds :default none)))
+    (cond ((eq outcome none)
+           (log:warn "praxeon/mcp: request abandoned at its deadline" :seconds seconds)
+           (error 'http:http-error :detail "the request did not finish before its deadline"))
+          ((eq (first outcome) :ok) (second outcome))
+          (t (error (second outcome))))))
 
 (defun %messages (client response)
   "The JSON-RPC messages in RESPONSE: one for a JSON reply, each event's for an event stream."
