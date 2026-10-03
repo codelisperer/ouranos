@@ -185,8 +185,12 @@ NAME/tests holding it, named by NAME's test-op. Returns DIR."
 ;;; without it the strict failure could be coming from somewhere else.
 
 (defun %plain-load-succeeds-p (name)
+  ;; A compilation unit of its own, so the deferred warning is printed here, into the
+  ;; discarded output. Under ASDF:TEST-SYSTEM it was otherwise printed when the test run's
+  ;; unit ended, and the gate failed CONS/TESTS for a fixture's planted warning.
   (let ((*error-output* (make-broadcast-stream)) (*standard-output* (make-broadcast-stream)))
-    (null (handler-case (progn (asdf:load-system name) nil) (error (e) e)))))
+    (null (handler-case (progn (with-compilation-unit (:override t) (asdf:load-system name)) nil)
+            (error (e) e)))))
 
 (test an-undefined-variable-fails-the-strict-load
   (%with-strict-project (dir name "undef-plain" *strict-undefined-source*)
