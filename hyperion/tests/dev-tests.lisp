@@ -20,18 +20,10 @@
 (def-suite dev :description "The hot-reload watcher's file selection." :in hyperion)
 (in-suite dev)
 
-(defvar *dev-tree-seq* 0
-  "Counter making each temp root unique. Not tmpize-pathname: that CREATES a file, and we
-need a DIRECTORY of that name -- which fails with \"a file with the same name already
-exists\".")
-
 (defun %dev-tree ()
   "A temp tree shaped like a real project: sources, assets, build output, a VCS directory
 and the editor droppings that appear beside a file on every save."
-  (let ((root (uiop:ensure-directory-pathname
-               (merge-pathnames (format nil "hyperion-dev-test-~D-~D"
-                                        (get-universal-time) (incf *dev-tree-seq*))
-                                (uiop:temporary-directory)))))
+  (let ((root (aion/fs:make-temporary-directory "hyperion-dev-test")))
     (flet ((touch (rel)
              (let ((p (merge-pathnames rel root)))
                (ensure-directories-exist p)
@@ -389,12 +381,7 @@ and the editor droppings that appear beside a file on every save."
 ;;; root, with a builder that starts nothing.
 
 (defun %fresh-dev-root ()
-  (let ((root (uiop:ensure-directory-pathname
-               (merge-pathnames (format nil "hyperion-dev-438-~D-~D"
-                                        (get-universal-time) (incf *dev-tree-seq*))
-                                (uiop:temporary-directory)))))
-    (ensure-directories-exist root)
-    root))
+  (aion/fs:make-temporary-directory "hyperion-dev-438"))
 
 (defun %write-dev-file (root name text)
   "Write TEXT to ROOT/NAME, waiting first so the new write date differs from the last one:

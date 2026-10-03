@@ -580,7 +580,7 @@
   :perform (test-op (op c) (uiop:symbol-call :aion/signature/tests :run-tests)))
 
 (defsystem "aion/fs"
-  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347)."
+  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347), and a temporary directory no other process can be given (#515)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -593,17 +593,19 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "delete-tree")
-                             (:file "attributes"))))
+                             (:file "attributes")
+                             (:file "temporary"))))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
 
 (defsystem "aion/fs/tests"
   :description "Tests for aion/fs: links planted inside and at the root of a tree, pointing outside it."
-  :depends-on ("aion/fs" "fiveam")
+  :depends-on ("aion/fs" "fiveam" "aion/test-threads")   ; JOIN-ALL, for the threads test (#515)
   :serial t
   :components ((:module "tests/fs"
                 :serial t
                 :components ((:file "delete-tree-tests")
-                             (:file "attributes-tests"))))
+                             (:file "attributes-tests")
+                             (:file "temporary-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"

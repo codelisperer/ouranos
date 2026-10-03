@@ -258,7 +258,7 @@
                "aion/log"                                             ; and the log line #475's test reads
                "hyperion/http1"                                       ; and the encoder it names (#110)
                "aion/uv/net"                                          ; and its connection class (#262)
-               "aion/fs"                                              ; and the dev:serve test's temp root (#432)
+               "aion/fs"                                              ; and the dev:serve test's temp root (#432), and its temporary directories (#515)
                "hyperion/desktop"                                     ; and run-app's :uv default (#472)
                "cons"                                                 ; and the web template it scaffolds (#472)
                "fiveam" "aion/test-threads" (:require "sb-bsd-sockets"))
