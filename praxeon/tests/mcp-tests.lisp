@@ -47,7 +47,7 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
 :STRUCTURED. REQUIRE-TOKEN is NIL or the bearer token every request must carry."
   era reply page-size tools require-token legacy-version
   (reject-headers nil)
-  (fail-next nil) (endless nil)
+  (fail-next nil) (endless nil) (initialize-status nil)
   (sessions '()) (end-session nil) (calls 0) (initializes 0)
   (lock (sb-thread:make-mutex)))
 
@@ -105,6 +105,7 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                       "isError" t))
          (:structured (%obj "content" #() "structuredContent" (%obj "n" 3)))
          (:null-result :null-result)
+         (:status-409 (list :status 409))
          (:keepalive :keepalive)
          (:slow (sleep 3) (%obj "content" #()))
          (:status-500 (list :status 500))
@@ -178,6 +179,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
            (th:write-response stream 400 '(("Content-Type" . "application/json"))
                               (jzon:stringify (%error-message id -32022 "Unsupported protocol version"))))
           ;; The legacy revisions.
+          ((and (equal method "initialize") (fake-initialize-status fake))
+           (th:write-response stream (fake-initialize-status fake) '() "unavailable"))
           ((equal method "initialize")
            (let ((session (format nil "s~D" (incf (fake-initializes fake)))))
              (push session (fake-sessions fake))
@@ -603,10 +606,18 @@ my_docs__ means and revokes them; an app's own means that starts with the prefix
         (actor:register-means agent "docs__notes" "the app's own" (lambda (a) (declare (ignore a)) "n"))
         (is (equal '("my_docs__search") (mcp:grant-tools agent mine :only :all)))
         (is (equal '("docs__search") (mcp:grant-tools agent docs :only :all)))
+        (actor:register-means agent "docs__look-alike" "the app's, with a grant-like source"
+                              (lambda (a) (declare (ignore a)) "l")
+                              :source '(:connection "docs" :tool "look-alike"))
+        (actor:register-means agent "plain" "the app's, with a string source"
+                              (lambda (a) (declare (ignore a)) "p") :source "not a plist")
         (is (= 1 (mcp:revoke-tools agent mine)))
         (is (null (gethash "my_docs__search" (actor:agent-means agent))))
         (is (= 1 (mcp:revoke-tools agent docs)))
-        (is-true (gethash "docs__notes" (actor:agent-means agent)) "the app's means stays")))))
+        (is-true (gethash "docs__notes" (actor:agent-means agent)) "the app's means stays")
+        (is-true (gethash "docs__look-alike" (actor:agent-means agent))
+                 "a means whose :source names the connection, but which the grant did not register, stays")
+        (is-true (gethash "plain" (actor:agent-means agent)))))))
 
 (test a-keep-alive-stream-is-given-up-at-the-deadline-and-its-thread-is-counted
   "A server that sends a keep-alive comment every half second never lets a read timeout fire,
@@ -619,7 +630,10 @@ finished the count is back to zero."
              (long (find "long" tools :key #'mcp:tool-name :test #'equal))
              (started (get-internal-real-time)))
         (handler-case (progn (mcp:call-tool client long (%obj)) (fail "the keep-alive call finished"))
-          (mcp:request-failed (e) (is (eq :unknown (cnd:tool-error-result-outcome e)))))
+          (mcp:request-failed (e)
+            (is (eq :unknown (cnd:tool-error-result-outcome e)))
+            (is-true (search "within 3 seconds" (cnd:tool-error-result-text e))
+                     "the deadline, call-timeout plus one second, is the time given")))
         (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 4.5))
         (is (= 1 (mcp::client-abandoned client)))
         (let ((mcp::*max-abandoned-requests* 1))
@@ -645,3 +659,34 @@ finished the count is back to zero."
     (is (equal '(("Mcp-Param-S" . "12")) (mcp::header-params paths (%obj "s" "12")))))
   (is (eq :invalid (mcp::x-mcp-header-paths (%schema "x" (%obj "type" "string" "x-mcp-header" "Région")))))
   (is (equal "=?base64?PT9iYXNlNjQ/PQ==?=" (mcp::encode-header-value "=?base64?="))))
+
+
+(test a-failed-handshake-before-a-tool-call-is-not-a-tool-that-may-have-run
+  "A legacy server answers initialize with 503 during a tool call on a new client. The tool
+never ran, so the outcome is :ERROR, not :UNKNOWN, and the server processed no tools/call."
+  (let ((fake (make-fake :era :legacy :tools (%tools "a"))))
+    (setf (fake-initialize-status fake) 503)
+    (with-fake (client fake)
+      (handler-case (progn (mcp:call-tool client (praxeon/mcp::%make-tool :name "a") (%obj))
+                           (fail "a 503 handshake did not fail the call"))
+        (mcp:request-failed (e) (is (eq :error (cnd:tool-error-result-outcome e)))))
+      (is (= 0 (fake-calls fake))))))
+
+(test a-refusal-of-a-tool-call-is-not-run
+  (let ((fake (make-fake :tools (%tools '("busy" :do :status-409)))))
+    (with-fake (client fake)
+      (handler-case (progn (%call client "busy") (fail "a 409 did not fail the call"))
+        (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e))))))))
+
+(test a-given-up-request-whose-thread-is-terminated-is-taken-off-the-count
+  "However a given-up request's thread ends, here by TERMINATE-THREAD, it takes itself off the
+client's count, so the client does not come to refuse every request with no thread alive."
+  (let ((fake (make-fake :tools (%tools '("long" :do :keepalive)))))
+    (with-fake (client fake :call-timeout 1)
+      (let ((long (first (mcp:list-tools client))))
+        (handler-case (mcp:call-tool client long (%obj)) (mcp:request-failed () nil))
+        (is (= 1 (mcp::client-abandoned client)))
+        (dolist (th (sb-thread:list-all-threads))
+          (when (equal "praxeon/mcp request" (sb-thread:thread-name th))
+            (ignore-errors (sb-thread:terminate-thread th))))
+        (is-true (wait-until-zero (lambda () (mcp::client-abandoned client)) 5))))))

@@ -51,7 +51,8 @@ OAuth sign-in, resources and prompts, and local servers over stdio are parts 2, 
 | The tool answered with `isError` | the result's text, as an error result | `:error` | `tool-error` is the cause |
 | The server answered a JSON-RPC error, or refused the version | that the connection failed, with the code | `:error` or `:not-run` | `request-failed` |
 | A 401 or 403, or no principal for a per-user connection | that the user must sign in, with no URL | `:not-run` | `authorization-required` is signalled, and a `:sign-in-required` event is emitted |
-| A timeout, a dropped connection, a 5xx, or a reply that ends early, during `tools/call` | that the outcome is unknown, the tool may have run, and it should not be called again before checking with the user | `:unknown` | `request-failed` |
+| A timeout, a dropped connection, a 5xx, a reply that ends early, or a result that is not a JSON object, during `tools/call` | that the outcome is unknown, the tool may have run, and it should not be called again before checking with the user | `:unknown` | `request-failed` |
+| A redirect or a 4xx such as 409, 413, 422 or 429; a header argument that does not have its declared type; or at `*max-abandoned-requests*` given-up requests still running | that the connection failed or refused the call | `:not-run` | `request-failed` |
 
 All of these let the turn go on. They are subclasses of `praxeon/conditions:tool-error-result`, which a turn reports to the model as an error result.
 
@@ -63,7 +64,7 @@ All of these let the turn go on. They are subclasses of `praxeon/conditions:tool
   - On #530's Windows leg, dexador's WinHTTP backend let a request outlive its read timeout (#537).
   - On every platform, a server that sends a keep-alive line every so often keeps a read timeout from firing.
 
-  A request given up this way is not sent again. Its thread keeps running, with the connection open, until the server finishes or the transport ends it, and it logs how the request ended. A client counts those threads. With `*max-abandoned-requests*` of them (8) still running, it refuses new requests, as not run, until some finish. The thread sees the global values of special variables, so dexador settings such as `dex:*default-proxy*` reach MCP requests only when they are set globally.
+  A request given up this way is not sent again. Its thread keeps running, with the connection open, until the server finishes or the transport ends it, and it logs how the request ended. Each client counts those threads; the bound is per client. At `*max-abandoned-requests*` of them (8) still running, the client refuses new requests, as not run, until some finish. Calls made at the same moment can go a few past it. However a thread ends, it takes itself off the count, and its log line carries the caller's log context. The thread sees the global values of special variables, so dexador settings such as `dex:*default-proxy*` reach MCP requests only when they are set globally.
 - **No secret follows a redirect.** Requests are sent with redirects off, so a token is never forwarded to another host. A 3xx fails the request.
 
 ### Handlers stay on the thread that set them
@@ -105,6 +106,7 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
 
 - **Finding the era.** The first request goes out in the current form.
   - A 400, 404 or 405 whose body is not a current-revision JSON-RPC error means a legacy server. Those errors are -32020, -32021 or -32022, or a 404 carrying -32601. The client then sends `initialize`, offering 2025-11-25, and keeps the `Mcp-Session-Id` for each principal.
+  - The era is recorded only once the legacy request has gone through. A server on the current revision that answered one request badly, through a proxy's 404 or a header it would not take, answers the legacy `initialize` with a current-revision error; that one request then fails as not run, and the next request probes again.
   - A 401 or 403 says nothing about the era. The next request probes again.
   - The era is kept for the connection. When a request in the kept era gets the other era's answer, the client probes again, once.
 - **Replies** are read as JSON or as an event stream. Notifications in the stream before the reply are counted in the log and dropped.
@@ -112,6 +114,7 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
   - A tool parameter with this annotation is copied into an `Mcp-Param-{name}` header. A value that is not plain ASCII, or that has spaces at either end, or that looks like the encoded form, goes out as `=?base64?...?=`.
   - An integer outside JavaScript's safe range is refused before the call is sent.
   - A tool whose annotation breaks the specification's rules is left out of `list-tools`, with a warning in the log. Such an annotation is one reached through anything but `properties` keys, one on a type other than string, integer or boolean, one that is empty or not an HTTP token, or two that are equal ignoring case.
+- **Settings an app may change.** `*max-abandoned-requests*` (8), `*max-list-pages*` (1000), `*max-schema-characters*` (20000) and `*max-description-characters*` (2000) are exported from `praxeon/mcp`.
 - **Tool definitions.**
   - A tool whose `inputSchema` is not a JSON object schema, with `"type": "object"`, is left out of `list-tools`, with a warning in the log, since both providers take only an object schema.
   - So is a tool whose schema is longer than `*max-schema-characters*` (20000) as JSON, since the schema is sent with every request.
