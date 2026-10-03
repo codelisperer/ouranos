@@ -318,6 +318,7 @@
   ;; The transport tests run a small HTTP server in the test image (usocket, bordeaux-threads)
   ;; and, off Windows, a TLS one (cl+ssl) (#295).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
+               "aion/test-http"
                (:feature (:not :os-windows) "cl+ssl"))
   :serial t
   :components ((:module "tests"
@@ -658,6 +659,16 @@
   ;; No dependencies: sb-thread ships with SBCL. Used by the test systems of aion, hyperion
   ;; and praxeon (#178); aion is the one framework all of them may depend on.
   :components ((:file "tests/test-threads")))
+
+(defsystem "aion/test-http"
+  :description "Test support: a small HTTP/1.1 server on 127.0.0.1 that a test drives with a handler."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; Moved out of aion/http-client's tests so the tests of aion/oauth and praxeon/mcp can run
+  ;; their own servers in the test image (#527). TLS is reached through cl+ssl when a test asks
+  ;; for it, and that test's system loads cl+ssl; this one does not, so it loads on Windows.
+  :depends-on ("usocket" "bordeaux-threads" "aion/test-threads")
+  :components ((:file "tests/test-http")))
 
 (defsystem "aion/test-threads/tests"
   :description "Tests for aion/test-threads: values, the timeout and abort paths, and JOIN-ALL's single group deadline."
