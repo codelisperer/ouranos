@@ -52,7 +52,7 @@ or tab at either end, and not in the base64 sentinel form."
          (or (zerop n)
              (and (not (member (char string 0) '(#\Space #\Tab)))
                   (not (member (char string (1- n)) '(#\Space #\Tab)))))
-         (not (and (>= n 11)
+         (not (and (>= n 10)
                    (string= "=?base64?" string :end2 9)
                    (string= "?=" string :start2 (- n 2)))))))
 
@@ -69,22 +69,35 @@ form =?base64?...?= over its UTF-8 octets."
   "The largest integer an x-mcp-header parameter may carry, JavaScript's safe range.")
 
 (defun %tchar-p (c)
-  (or (alphanumericp c) (find c "!#$%&'*+-.^_`|~")))
+  "Whether C may appear in an HTTP token (RFC 9110). ALPHANUMERICP alone is true for non-ASCII
+letters on SBCL, which a header name cannot carry."
+  (or (and (< (char-code c) 128) (alphanumericp c)) (find c "!#$%&'*+-.^_`|~")))
 
 (defun %header-param-value (value type)
   "VALUE, a tool argument whose schema TYPE is \"string\", \"integer\" or \"boolean\", as the
-string an Mcp-Param header carries, or NIL when it has no header (JSON null). Strings, integers
-in JavaScript's safe range, and booleans only. jzon reads JSON false as NIL, so for a boolean
-NIL is false."
-  (cond ((%json-null-p value) nil)
-        ((equal type "boolean") (cond ((eq value t) "true") ((null value) "false")))
-        ((null value) nil)
-        ((stringp value) (encode-header-value value))
-        ((integerp value)
-         (if (<= (abs value) +max-safe-integer+)
-             (princ-to-string value)
-             (error 'header-value-refused :reason "an integer outside the range JavaScript can represent exactly")))
-        (t (error 'header-value-refused :reason "a value that is not a string, an integer or a boolean"))))
+string an Mcp-Param header carries, or NIL when it has no header (JSON null).
+
+The conversion follows TYPE, the type the schema declares, not the type the value happens to
+have: the model chose the value, and a value of the wrong type would otherwise go out as a
+header that does not match the body, or as no header while the body has one. Such a value is
+refused, so the model gets an error it can correct. jzon reads JSON false as NIL, so for a
+boolean NIL is false, and for a string or an integer NIL is a JSON false, which is refused."
+  (flet ((refuse (reason) (error 'header-value-refused :reason reason)))
+    (cond ((%json-null-p value) nil)
+          ((equal type "boolean")
+           (cond ((eq value t) "true")
+                 ((null value) "false")
+                 (t (refuse "not a boolean, though the tool declares one"))))
+          ((equal type "integer")
+           (cond ((not (integerp value)) (refuse "not an integer, though the tool declares one"))
+                 ((> (abs value) +max-safe-integer+)
+                  (refuse "an integer outside the range JavaScript can represent exactly"))
+                 (t (princ-to-string value))))
+          ((equal type "string")
+           (if (stringp value)
+               (encode-header-value value)
+               (refuse "not a string, though the tool declares one")))
+          (t (refuse "of a type a header cannot carry")))))
 
 (define-condition header-value-refused (error)
   ((reason :initarg :reason :reader header-value-refused-reason))

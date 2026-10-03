@@ -63,6 +63,10 @@ with SIGN-IN-NEEDED."))
   (:documentation "The call failed because a user has to sign in to the connection first. The
 model's text names the connection and asks it to tell the user; it carries no URL."))
 
+(define-condition %current-revision-after-all (error) ()
+  (:documentation "Internal: the legacy handshake was answered with a current-revision error, so
+the server speaks the current revision and the legacy fallback was wrong."))
+
 (define-condition tool-name-conflict (mcp-error)
   ((names :initarg :names :reader tool-name-conflict-names))
   (:report (lambda (c s)
@@ -101,7 +105,9 @@ session: (SESSION-ID . VERSION)."
   (protocol-version nil)
   (sessions (make-hash-table :test #'equal))
   (lock (sb-thread:make-mutex :name "praxeon/mcp client"))
-  (next-id 0 :type sb-ext:word))
+  (next-id 0 :type sb-ext:word)
+  ;; Requests given up at their deadline whose threads are still running (%SEND-WITHIN).
+  (abandoned 0 :type sb-ext:word))
 
 (defun make-client (connection)
   "A client for CONNECTION. It sends nothing until it is first used."
@@ -125,11 +131,15 @@ the model is told the outcome is unknown, and nothing retries the call (#527).")
            :connection name :code code :outcome outcome
            :text (format nil "The MCP connection ~A failed: ~?" name control arguments))))
 
+(defvar *in-flight-method* nil
+  "The method of the POST being sent or read, so that only a failure of the tools/call POST
+itself, not of a handshake before it, counts as a tool that may have run.")
+
 (defun %failed-in-flight (client control arguments)
   "Fail a request that may have reached the server. For a tool call this means the tool may
 have run, so the model is told the outcome is unknown and is asked not to call it again before
 checking with the user."
-  (if *call-may-run*
+  (if (and *call-may-run* (equal *in-flight-method* "tools/call"))
       (%request-failed client "~?~%The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
                        (list control arguments) :outcome :unknown)
       (%request-failed client control arguments)))
@@ -157,6 +167,7 @@ checking with the user."
 Returns the response. A failed connection or a timeout fails the call."
   (let* ((connection (client-connection client))
          (token (%token client principal))
+         (method (setf *in-flight-method* (gethash "method" body)))
          (request (http:make-request
                    :method :post :url (connection-url connection)
                    :headers (append (list (cons "Content-Type" "application/json")
@@ -170,44 +181,86 @@ Returns the response. A failed connection or a timeout fails the call."
                    ;; A request that carries a token is never forwarded to another host.
                    :follow-redirects nil
                    :max-body-bytes (connection-max-body-bytes connection))))
-    (handler-case (%send-within request (1+ timeout))
+    (handler-case (%send-within client request (1+ timeout) method)
       (http:response-too-large ()
         (%failed-in-flight client "its reply was larger than ~D bytes."
                            (list (connection-max-body-bytes connection))))
       (http:http-error ()
         (%failed-in-flight client "it did not answer within ~D seconds, or the connection failed."
-                           (list timeout))))))
+                           (list (1+ timeout)))))))
 
-(defun %send-within (request seconds)
+(defparameter *max-abandoned-requests* 8
+  "The most requests on one client that may be given up at their deadline and still be running.
+Past it, the client refuses new requests until some of them finish, so a server that keeps
+streaming past every timeout cannot make the client hold one thread per call without bound.")
+
+(defun %send-within (client request seconds method)
   "Send REQUEST and return its response, or signal HTTP-ERROR when it has not finished within
 SECONDS.
 
 The transport's own read timeout is not relied on alone. On Windows, dexador's WinHTTP
 backend let a request to a server that answered after 3 seconds succeed under a 1-second read
-timeout (#530's Windows leg), so a call could wait as long as the server chose. The request
-runs on its own thread, and this gives up on it at the deadline. Given up, the request is left
-to finish or fail on that thread, and nothing sends it again."
-  (let* ((none '#:none)
-         (thread (sb-thread:make-thread
-                  ;; THREAD-LIFETIME: independent -- it only performs the request and returns
-                  ;; the outcome as a value; it reads no binding of the caller's.
-                  (lambda ()
-                    (handler-case (list :ok (http:send-request request '()))
-                      (error (e) (list :error e))))
-                  :name "praxeon/mcp request"))
-         (outcome (sb-thread:join-thread thread :timeout seconds :default none)))
-    (cond ((eq outcome none)
-           (log:warn "praxeon/mcp: request abandoned at its deadline" :seconds seconds)
-           (error 'http:http-error :detail "the request did not finish before its deadline"))
-          ((eq (first outcome) :ok) (second outcome))
-          (t (error (second outcome))))))
+timeout (#530's Windows leg, #537), and on every platform a server that sends a keep-alive line
+every so often keeps a read timeout from firing. The request runs on its own thread, and this
+gives up on it at the deadline.
+
+A request given up this way keeps running on its thread, with its connection open, until the
+server finishes or the transport ends it. Nothing sends it again. CLIENT counts such threads,
+each one logs when it finishes, and past *MAX-ABANDONED-REQUESTS* still running the client
+refuses new requests.
+
+The thread sees the global values of special variables, not the caller's bindings. That holds
+for aion/http-client, which reads none, but dexador's own variables, such as
+DEX:*DEFAULT-PROXY*, apply here only when they are set globally."
+  (let ((name (connection-name (client-connection client))))
+    (when (>= (client-abandoned client) *max-abandoned-requests*)
+      (%request-failed client "~D earlier requests to it are still running after their deadline, so no new request was sent."
+                       (list (client-abandoned client)) :outcome :not-run))
+    (let* ((none '#:none)
+           (state (list :waiting))
+           (started (get-internal-real-time))
+           (thread (sb-thread:make-thread
+                    ;; THREAD-LIFETIME: independent -- it performs the request and returns the
+                    ;; outcome as a value; it reads no binding of the caller's (see above).
+                    (lambda ()
+                      (let ((outcome (handler-case (list :ok (http:send-request request '()))
+                                       (error (e) (list :error e)))))
+                        (unless (eq :waiting (sb-ext:compare-and-swap (car state) :waiting :done))
+                          ;; Given up at the deadline: this thread is the only one left to say
+                          ;; how the request ended.
+                          (sb-ext:atomic-decf (client-abandoned client))
+                          (log:info "praxeon/mcp: a request given up at its deadline finished"
+                                    :connection name :method method
+                                    :status (if (eq (first outcome) :ok)
+                                                (http:response-status (second outcome))
+                                                :failed)
+                                    :ms (round (* 1000 (- (get-internal-real-time) started))
+                                               internal-time-units-per-second)))
+                        outcome))
+                    :name "praxeon/mcp request"))
+           (outcome (sb-thread:join-thread thread :timeout seconds :default none)))
+      ;; Counted before the mark, and the count taken back when the mark fails, so the
+      ;; thread's decrement can never come before this increment.
+      (when (eq outcome none) (sb-ext:atomic-incf (client-abandoned client)))
+      (cond ((and (eq outcome none)
+                  (eq :waiting (sb-ext:compare-and-swap (car state) :waiting :abandoned)))
+             (log:warn "praxeon/mcp: request given up at its deadline"
+                       :connection name :method method :seconds seconds)
+             (error 'http:http-error :detail "the request did not finish before its deadline"))
+            ((eq outcome none)
+             ;; It finished in the moment between the deadline and the mark.
+             (sb-ext:atomic-decf (client-abandoned client))
+             (let ((late (sb-thread:join-thread thread :default none)))
+               (if (eq (first late) :ok) (second late) (error (second late)))))
+            ((eq (first outcome) :ok) (second outcome))
+            (t (error (second outcome)))))))
 
 (defun %messages (client response)
   "The JSON-RPC messages in RESPONSE: one for a JSON reply, each event's for an event stream."
   (let* ((type (or (http:header-value (http:response-headers response) "content-type") ""))
          (body (http:response-body response)))
     (handler-case
-        (if (search "text/event-stream" type)
+        (if (search "text/event-stream" type :test #'char-equal)
             (mapcar #'jzon:parse (parse-event-stream body))
             (let ((parsed (jzon:parse body)))
               (if (vectorp parsed) (coerce parsed 'list) (list parsed))))
@@ -299,9 +352,13 @@ current revision uses to tell an unknown method apart from a server without the 
                                                      "clientInfo" (%object "name" *client-name*
                                                                            "version" *client-version*)))
                           '() principal (connection-timeout connection))))
+    (when (%modern-error-p response)
+      (error '%current-revision-after-all))
     (%check-status client response principal)
     (let* ((reply (%reply-for client response id))
            (version (%get reply "result" "protocolVersion")))
+      (when (member (%error-code reply) +modern-error-codes+)
+        (error '%current-revision-after-all))
       (when (gethash "error" reply)
         (%request-failed client "it refused to start a session (code ~A)."
                          (list (%error-code reply)) :code (%error-code reply)))
@@ -371,10 +428,19 @@ may have been processed is never sent twice."
                (%modern-request client method (and params (%copy params)) principal timeout
                                 extra-headers)
              (cond ((%legacy-signal-p response)
-                    (setf (client-era client) :legacy)
-                    (log:info "praxeon/mcp: legacy server"
-                              :connection (connection-name (client-connection client)))
-                    (%legacy-request client method params principal timeout))
+                    ;; The era is set only once the legacy request has gone through. A server
+                    ;; on the current revision that answered this one request badly, through
+                    ;; a proxy's 404 or a header it would not take, answers the legacy
+                    ;; handshake with a current-revision error: this request then fails as not
+                    ;; run, and the next one probes again.
+                    (handler-case
+                        (multiple-value-prog1
+                            (%legacy-request client method params principal timeout)
+                          (setf (client-era client) :legacy)
+                          (log:info "praxeon/mcp: legacy server"
+                                    :connection (connection-name (client-connection client))))
+                      (%current-revision-after-all ()
+                        (values response id))))
                    ((member (http:response-status response) '(401 403))
                     ;; Says nothing about the era; the next request probes again.
                     (values response id))
@@ -395,7 +461,15 @@ may have been processed is never sent twice."
              (values response id))))
       (:legacy
        (multiple-value-bind (response id)
-           (%legacy-request client method params principal timeout)
+           (handler-case (%legacy-request client method params principal timeout)
+             (%current-revision-after-all ()
+               ;; The server moved to the current revision: find out again, once.
+               (setf (client-era client) nil)
+               (if reprobed
+                   (%request-failed client "it answered the legacy handshake with a current-revision error." '()
+                                    :outcome :not-run)
+                   (return-from %send
+                     (%send client method params principal timeout extra-headers t)))))
          (if (and (not reprobed) (= 400 (http:response-status response))
                   (%modern-error-p response))
              ;; The server now speaks the current revision and rejected the legacy form.
@@ -407,7 +481,8 @@ may have been processed is never sent twice."
 
 (defun %request (client method params &key principal timeout extra-headers)
   "Send METHOD with PARAMS for PRINCIPAL and return the result object."
-  (let* ((connection (client-connection client))
+  (let* ((*in-flight-method* nil)
+         (connection (client-connection client))
          (timeout (or timeout (connection-timeout connection)))
          (started (get-internal-real-time)))
     (multiple-value-bind (response id)
@@ -431,13 +506,15 @@ may have been processed is never sent twice."
               (-32020
                ;; The specification says a client SHOULD list the tools again and retry. This
                ;; client does not: a new listing could change the tool's schema without the app
-               ;; granting it again. The call fails, and the app grants the tool again.
+               ;; granting it again. The call fails, and the app calls REVOKE-TOOLS and GRANT-TOOLS again.
                (%request-failed client "it rejected the request's headers (HeaderMismatch). The tool's definition may have changed on the server; it has to be granted again."
                                 '() :code code :outcome :not-run))
               (t
                (%request-failed client "it answered ~A with an error (code ~A)."
                                 (list method code) :code code)))))
         (let ((result (gethash "result" reply)))
+          (unless (hash-table-p result)
+            (%failed-in-flight client "its result was not a JSON object." '()))
           (when (equal "input_required" (%get result "resultType"))
             (%request-failed client "the tool asked for input this client cannot provide."
                              '() :outcome :not-run))
@@ -459,12 +536,34 @@ may have been processed is never sent twice."
   (annotations nil)
   (header-paths '()))
 
+(defparameter *max-schema-characters* 20000
+  "The most characters a tool's inputSchema may take as JSON. The schema is sent to the model
+provider with every request, like the description, so its size is bounded too.")
+
+(defun %clip-name (value)
+  (let ((s (princ-to-string value))) (subseq s 0 (min 100 (length s)))))
+
+(defun %schema-problem (schema)
+  "Why SCHEMA, a tool's inputSchema, cannot be passed to a model provider, or NIL. Providers take
+a JSON Schema object, and MCP requires one whose type is \"object\"."
+  (cond ((not (and (hash-table-p schema) (equal "object" (gethash "type" schema))))
+         "its inputSchema is not an object schema")
+        ((> (length (jzon:stringify schema)) *max-schema-characters*)
+         "its inputSchema is too large")))
+
 (defun %tool-from-json (object)
-  (let ((paths (x-mcp-header-paths (gethash "inputSchema" object))))
-    (if (eq paths :invalid)
-        (progn (log:warn "praxeon/mcp: tool dropped, invalid x-mcp-header"
-                         :tool (gethash "name" object))
-               nil)
+  (let ((paths (x-mcp-header-paths (gethash "inputSchema" object)))
+        (problem (%schema-problem (gethash "inputSchema" object))))
+    (cond
+      (problem
+       (log:warn "praxeon/mcp: tool dropped" :tool (%clip-name (gethash "name" object))
+                                             :reason problem)
+       nil)
+      ((eq paths :invalid)
+       (log:warn "praxeon/mcp: tool dropped, invalid x-mcp-header"
+                 :tool (%clip-name (gethash "name" object)))
+       nil)
+      (t
         (let ((name (gethash "name" object)))
           (and (stringp name)
                (%make-tool :name name
@@ -473,7 +572,10 @@ may have been processed is never sent twice."
                                           (and (stringp v) v))
                            :input-schema (gethash "inputSchema" object)
                            :annotations (gethash "annotations" object)
-                           :header-paths paths))))))
+                           :header-paths paths)))))))
+
+(defparameter *max-list-pages* 1000
+  "The most pages LIST-TOOLS reads before it decides the listing does not end.")
 
 (defun list-tools (client &key principal)
   "The tools CLIENT's server offers, following each page's nextCursor. Gives them to no agent.
@@ -490,8 +592,13 @@ A tool whose x-mcp-header annotation is invalid is left out, as the specificatio
                 for tool = (and (hash-table-p object) (%tool-from-json object))
                 when tool do (push tool tools)))
         (setf cursor (gethash "nextCursor" result))
-        (when (or (not (stringp cursor)) (zerop (length cursor)) (> pages 1000))
-          (return))))
+        (when (or (not (stringp cursor)) (zerop (length cursor)))
+          (return))
+        (when (>= pages *max-list-pages*)
+          ;; A partial listing would let `:only :all' grant part of the server's tools without
+          ;; saying so.
+          (%request-failed client "its tool listing went past ~D pages without ending." (list pages)
+                           :outcome :not-run))))
     (log:info "praxeon/mcp: tools listed"
               :connection (connection-name (client-connection client))
               :count (length tools) :pages pages)
@@ -610,15 +717,14 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
     names))
 
 (defun revoke-tools (agent client)
-  "Remove every means GRANT-TOOLS registered on AGENT for CLIENT's connection. Returns how many
-were removed."
-  (let ((prefix (format nil "~A__" (connection-name (client-connection client))))
+  "Remove every means GRANT-TOOLS registered on AGENT for CLIENT's connection, found by the
+connection named in each means' :SOURCE, and return how many were removed. A means the app
+registered itself, whatever its name, is left alone."
+  (let ((name (connection-name (client-connection client)))
         (removed '()))
-    (maphash (lambda (name entry)
-               (declare (ignore entry))
-               (when (and (>= (length name) (length prefix))
-                          (string= prefix name :end2 (length prefix)))
-                 (push name removed)))
+    (maphash (lambda (means entry)
+               (when (equal name (getf (actor:means-entry-source entry) :connection))
+                 (push means removed)))
              (actor:agent-means agent))
-    (dolist (name removed) (remhash name (actor:agent-means agent)))
+    (dolist (means removed) (remhash means (actor:agent-means agent)))
     (length removed)))
