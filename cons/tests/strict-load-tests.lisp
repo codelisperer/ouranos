@@ -244,7 +244,7 @@ NAME/tests holding it, named by NAME's test-op. Returns DIR."
                  (printed (with-output-to-string (out)
                             (let ((*error-output* out) (*standard-output* out))
                               (with-compilation-unit ()
-                                (setf err (%strict-load name dir :force-own t)))))))
+                                (setf err (%strict-load name dir)))))))
             (is (null err) "warnings from libraries outside ROOT must not fail the project: ~A" err)
             ;; The library's deferred warning is muffled too. Without a compilation unit of
             ;; its own it was printed when the caller's unit ended, after the loader returned.

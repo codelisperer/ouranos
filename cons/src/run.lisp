@@ -145,12 +145,17 @@ both upcased for the standard readtable."
                 (own-load (name)
                   ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
                   ;; handler is for the ones deferred to the end of the unit; see above.
-                  ;; COMPILE-WARNED-WARNING is ASDF's own report that a file compiled with
-                  ;; style-warnings only, so it is not counted.
-                  (let ((caught '()))
+                  ;; Two of ASDF's own warnings are not about the project's code, so they are
+                  ;; not counted: COMPILE-WARNED-WARNING reports that a file compiled with
+                  ;; style-warnings only, and RECURSIVE-OPERATE that the loader was called from
+                  ;; inside an ASDF operation, as it is when cons's own tests run under
+                  ;; ASDF:TEST-SYSTEM.
+                  (let ((caught '())
+                        (recursive (uiop:find-symbol* :recursive-operate :asdf/operate nil)))
                     (handler-bind ((warning (lambda (w)
-                                              (unless (typep w '(or style-warning
-                                                                 uiop:compile-warned-warning))
+                                              (unless (or (typep w '(or style-warning
+                                                                     uiop:compile-warned-warning))
+                                                          (and recursive (typep w recursive)))
                                                 (push w caught)))))
                       (with-compilation-unit (:override t)
                         (asdf :load-system name :force (if force-own own nil))))
