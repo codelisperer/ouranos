@@ -49,7 +49,8 @@ Windows test below checks that it refuses."
 served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) or :ROOT."
   prm-at issuer-path s256 registration cimd iss-supported send-iss scopes challenge-scope
   as-scopes expires-in rotate prm-resource wrong-issuer bad-token-endpoint token-redirect-to
-  (other-issuer nil)
+  (other-issuer nil) (prm-status nil) (token-type "Bearer") (refresh-error nil)
+  (revoke-status 200) (refresh-clients (make-hash-table :test #'equal))
   (base "") (codes (make-hash-table :test #'equal)) (access (make-hash-table :test #'equal))
   (refresh (make-hash-table :test #'equal)) (registrations 0) (token-requests 0)
   (refresh-requests 0) (revoked '()) (last-registration nil)
@@ -85,12 +86,14 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
     (setf (gethash token table) resource)
     token))
 
-(defun %issue (as stream resource scope)
-  (%json stream 200 (%obj "access_token" (%new-token as :access resource)
-                          "token_type" "Bearer"
-                          "expires_in" (as-expires-in as)
-                          "refresh_token" (%new-token as :refresh resource)
-                          "scope" (or scope ""))))
+(defun %issue (as stream resource scope client)
+  (let ((rt (%new-token as :refresh resource)))
+    (setf (gethash rt (as-refresh-clients as)) client)
+    (%json stream 200 (%obj "access_token" (%new-token as :access resource)
+                            "token_type" (as-token-type as)
+                            "expires_in" (as-expires-in as)
+                            "refresh_token" rt
+                            "scope" (or scope "")))))
 
 (defun %serve (as)
   (lambda (request stream)
@@ -113,6 +116,8 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
                                       (as-challenge-scope as))))
                   ""))))
           ;; The protected resource metadata.
+          ((and (as-prm-status as) (string= bare "/prm"))
+           (th:write-response stream (as-prm-status as) '() "not now"))
           ((or (and (eq (as-prm-at as) :challenge) (string= bare "/prm"))
                (and (eq (as-prm-at as) :path) (string= bare "/.well-known/oauth-protected-resource/mcp"))
                (and (eq (as-prm-at as) :root) (string= bare "/.well-known/oauth-protected-resource")))
@@ -139,11 +144,14 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
           ((string= bare "/authorize")
            (let* ((q (%query path))
                   (code (format nil "code-~D" (random 1000000000))))
-             (setf (gethash code (as-codes as))
-                   (list :challenge (cdr (assoc "code_challenge" q :test #'string=))
-                         :resource (cdr (assoc "resource" q :test #'string=))
-                         :client (cdr (assoc "client_id" q :test #'string=))
-                         :scope (cdr (assoc "scope" q :test #'string=))))
+             ;; A code is issued only for PKCE with S256, as a real server that requires it does.
+             (when (equal "S256" (cdr (assoc "code_challenge_method" q :test #'string=)))
+               (setf (gethash code (as-codes as))
+                     (list :challenge (cdr (assoc "code_challenge" q :test #'string=))
+                           :resource (cdr (assoc "resource" q :test #'string=))
+                           :client (cdr (assoc "client_id" q :test #'string=))
+                           :redirect (cdr (assoc "redirect_uri" q :test #'string=))
+                           :scope (cdr (assoc "scope" q :test #'string=)))))
              (th:write-response
               stream 302
               (list (cons "Location"
@@ -168,30 +176,43 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
                   (if (and entry
                            (equal (getf entry :challenge)
                                   (%b64url-sha256 (or (cdr (assoc "code_verifier" form :test #'string=)) "")))
-                           (equal (getf entry :resource) (cdr (assoc "resource" form :test #'string=))))
-                      (%issue as stream (getf entry :resource) (getf entry :scope))
+                           (equal (getf entry :resource) (cdr (assoc "resource" form :test #'string=)))
+                           (equal (getf entry :client) (cdr (assoc "client_id" form :test #'string=)))
+                           (equal (getf entry :redirect) (cdr (assoc "redirect_uri" form :test #'string=))))
+                      (%issue as stream (getf entry :resource) (getf entry :scope)
+                              (getf entry :client))
                       (%json stream 400 (%obj "error" "invalid_grant")))))
                ((equal grant "refresh_token")
                 (incf (as-refresh-requests as))
                 (let* ((rt (cdr (assoc "refresh_token" form :test #'string=)))
                        (resource (gethash rt (as-refresh as))))
                   (sleep 0.05)   ; long enough for a second refresh to overlap a first
-                  (cond ((or (null resource) (member rt (as-revoked as) :test #'string=))
+                  (cond ((as-refresh-error as)
+                         (%json stream 400 (%obj "error" (as-refresh-error as))))
+                        ((or (null resource) (member rt (as-revoked as) :test #'string=)
+                             (not (equal resource (cdr (assoc "resource" form :test #'string=))))
+                             (not (equal (gethash rt (as-refresh-clients as))
+                                         (cdr (assoc "client_id" form :test #'string=)))))
                          (%json stream 400 (%obj "error" "invalid_grant")))
                         (t
                          (when (as-rotate as) (remhash rt (as-refresh as)))
                          (%json stream 200
-                                (append-refresh as resource))))))
+                                (append-refresh as resource (gethash rt (as-refresh-clients as))))))))
                (t (%json stream 400 (%obj "error" "unsupported_grant_type"))))))
           ((string= bare "/revoke")
-           (push (cdr (assoc "token" (%form request) :test #'string=)) (as-revoked as))
-           (th:write-response stream 200 '() ""))
+           (when (= 200 (as-revoke-status as))
+             (push (cdr (assoc "token" (%form request) :test #'string=)) (as-revoked as)))
+           (th:write-response stream (as-revoke-status as) '() ""))
           (t (th:write-response stream 404 '() "")))))))
 
-(defun append-refresh (as resource)
+(defun append-refresh (as resource client)
   (%obj "access_token" (%new-token as :access resource)
-        "token_type" "Bearer" "expires_in" (as-expires-in as)
-        "refresh_token" (if (as-rotate as) (%new-token as :refresh resource) 'null)))
+        "token_type" (as-token-type as) "expires_in" (as-expires-in as)
+        "refresh_token" (if (as-rotate as)
+                            (let ((rt (%new-token as :refresh resource)))
+                              (setf (gethash rt (as-refresh-clients as)) client)
+                              rt)
+                            'null)))
 
 (defmacro with-as ((as &rest options) &body body)
   (let ((server (gensym)))
@@ -454,3 +475,189 @@ offer, so discovery signals PINNED-CONNECT-UNSUPPORTED there and nothing is fetc
                                         (list (http:parse-address "93.184.216.34"))))
                     "https://mcp.example/mcp"
                     :challenge "Bearer resource_metadata=\"https://mcp.example/prm\"")))
+
+;;; --- the review of #539 ----------------------------------------------------------------
+
+;;; A store written as an app would write one: in its own package, through exported symbols
+;;; only, keeping every record as strings, as a database row would.
+
+(cl:defpackage #:aion/oauth/tests/string-store
+  (:use #:cl)
+  (:local-nicknames (#:oauth #:aion/oauth) (#:secret #:aion/secret))
+  (:export #:string-store))
+
+(cl:in-package #:aion/oauth/tests/string-store)
+
+(defclass string-store (oauth:store)
+  ((rows :initform (make-hash-table :test #'equal) :reader rows))
+  (:documentation "Keeps each record as an alist of strings, rebuilt on every read."))
+
+(defun %s (x) (cond ((null x) "") ((stringp x) x) (t (princ-to-string x))))
+(defun %n (s) (if (string= s "") nil (parse-integer s)))
+(defun %o (s) (if (string= s "") nil s))
+(defun %get (row key) (cdr (assoc key row :test #'string=)))
+
+(defun %token-row (ts)
+  (list (cons "access" (secret:reveal (oauth:token-set-access ts)))
+        (cons "refresh" (if (oauth:token-set-refresh ts) (secret:reveal (oauth:token-set-refresh ts)) ""))
+        (cons "expires-at" (%s (oauth:token-set-expires-at ts)))
+        (cons "scope" (%s (oauth:token-set-scope ts)))
+        (cons "resource" (%s (oauth:token-set-resource ts)))
+        (cons "issuer" (%s (oauth:token-set-issuer ts)))
+        (cons "client-id" (%s (oauth:token-set-client-id ts)))
+        (cons "token-endpoint" (%s (oauth:token-set-token-endpoint ts)))
+        (cons "revocation-endpoint" (%s (oauth:token-set-revocation-endpoint ts)))
+        (cons "metadata-url" (%s (oauth:token-set-metadata-url ts)))))
+
+(defun %token-from (row)
+  (oauth:make-token-set
+   :access (secret:make-secret (%get row "access"))
+   :refresh (and (%o (%get row "refresh")) (secret:make-secret (%get row "refresh")))
+   :expires-at (%n (%get row "expires-at"))
+   :scope (%o (%get row "scope")) :resource (%o (%get row "resource"))
+   :issuer (%o (%get row "issuer")) :client-id (%o (%get row "client-id"))
+   :token-endpoint (%o (%get row "token-endpoint"))
+   :revocation-endpoint (%o (%get row "revocation-endpoint"))
+   :metadata-url (%o (%get row "metadata-url"))))
+
+(defun %pending-row (p)
+  (list (cons "principal" (%s (oauth:pending-principal p)))
+        (cons "connection" (%s (oauth:pending-connection p)))
+        (cons "resource" (%s (oauth:pending-resource p)))
+        (cons "issuer" (%s (oauth:pending-issuer p)))
+        (cons "client-id" (%s (oauth:pending-client-id p)))
+        (cons "verifier" (secret:reveal (oauth:pending-verifier p)))
+        (cons "token-endpoint" (%s (oauth:pending-token-endpoint p)))
+        (cons "revocation-endpoint" (%s (oauth:pending-revocation-endpoint p)))
+        (cons "iss-required" (if (oauth:pending-iss-required p) "t" ""))
+        (cons "scope" (%s (oauth:pending-scope p)))
+        (cons "expires-at" (%s (oauth:pending-expires-at p)))
+        (cons "metadata-url" (%s (oauth:pending-metadata-url p)))))
+
+(defun %pending-from (row)
+  (oauth:make-pending
+   :principal (%get row "principal") :connection (%get row "connection")
+   :resource (%o (%get row "resource")) :issuer (%o (%get row "issuer"))
+   :client-id (%o (%get row "client-id"))
+   :verifier (secret:make-secret (%get row "verifier"))
+   :token-endpoint (%o (%get row "token-endpoint"))
+   :revocation-endpoint (%o (%get row "revocation-endpoint"))
+   :iss-required (string= "t" (%get row "iss-required"))
+   :scope (%o (%get row "scope")) :expires-at (%n (%get row "expires-at"))
+   :metadata-url (%o (%get row "metadata-url"))))
+
+(defmethod oauth:get-token ((s string-store) principal connection)
+  (let ((row (gethash (list :token principal connection) (rows s)))) (and row (%token-from row))))
+(defmethod oauth:put-token ((s string-store) principal connection token-set)
+  (setf (gethash (list :token principal connection) (rows s)) (%token-row token-set)))
+(defmethod oauth:delete-token ((s string-store) principal connection)
+  (remhash (list :token principal connection) (rows s)))
+(defmethod oauth:get-client ((s string-store) issuer redirect-uri)
+  (gethash (list :client issuer redirect-uri) (rows s)))
+(defmethod oauth:put-client ((s string-store) issuer redirect-uri client-id)
+  (setf (gethash (list :client issuer redirect-uri) (rows s)) client-id))
+(defmethod oauth:put-pending ((s string-store) state pending)
+  (setf (gethash (list :pending state) (rows s)) (%pending-row pending)))
+(defmethod oauth:take-pending ((s string-store) state)
+  (let ((row (gethash (list :pending state) (rows s))))
+    (remhash (list :pending state) (rows s))
+    (and row (%pending-from row))))
+
+(cl:in-package #:aion/oauth/tests)
+
+(net-test a-store-of-strings-written-with-exported-symbols-works-throughout
+  "Sign-in, the issuer check, a refresh and a disconnect, through a store that keeps every
+record as strings and uses only aion/oauth's exported symbols."
+  (with-as (as :expires-in 0 :rotate t)
+    (let ((broker (%broker :store (make-instance 'aion/oauth/tests/string-store:string-store))))
+      (is (equal "u1" (%sign-in as broker)))
+      (setf (as-expires-in as) 3600)
+      (let ((token (oauth:access-token broker "u1" "docs" (%resource as))))
+        (is (stringp token))
+        (is (= 1 (as-refresh-requests as)) "the expired token was refreshed")
+        (is (= 200 (%call-resource as token))))
+      (oauth:disconnect broker "u1" "docs")
+      (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs")))
+      (is (= 1 (length (as-revoked as)))))))
+
+(net-test an-unreadable-metadata-answer-is-not-cached-as-an-answer
+  "A 404 or a 503 from the protected resource's metadata fails the check for that call; once the
+metadata answers again, the token is returned with no new sign-in."
+  (dolist (status '(404 503))
+    (with-as (as)
+      (let ((broker (%broker :metadata-grace 0)))
+        (%sign-in as broker)
+        (setf (as-prm-status as) status)
+        (signals oauth:oauth-error (oauth:access-token broker "u1" "docs" (%resource as)))
+        (setf (as-prm-status as) nil)
+        (is (stringp (oauth:access-token broker "u1" "docs" (%resource as))) "status ~D" status)))))
+
+(net-test an-expired-answer-is-not-renewed-by-a-failed-fetch
+  "Once the cached answer has expired and its grace has passed, a failed fetch withholds the
+token instead of extending the old answer."
+  (with-as (as)
+    (let ((broker (%broker :metadata-lifetime 1 :metadata-grace 0)))
+      (%sign-in as broker)
+      (is (stringp (oauth:access-token broker "u1" "docs" (%resource as))))
+      (sleep 2)
+      (setf (as-prm-status as) 503)
+      (signals oauth:oauth-error (oauth:access-token broker "u1" "docs" (%resource as)))
+      (signals oauth:oauth-error (oauth:access-token broker "u1" "docs" (%resource as))))))
+
+(net-test a-sign-in-needs-a-principal-at-both-ends
+  (with-as (as)
+    (let ((broker (%broker)))
+      (signals oauth:wrong-user
+        (oauth:start-sign-in broker nil "docs" (%resource as) :challenge (%challenge-of as)))
+      (let ((params (%approve (oauth:start-sign-in broker "u1" "docs" (%resource as)
+                                                   :challenge (%challenge-of as)))))
+        (signals oauth:wrong-user (oauth:finish-sign-in broker nil params))
+        (signals oauth:unknown-sign-in (oauth:finish-sign-in broker "u1" params))
+        (is (= 0 (as-token-requests as))))
+      ;; A sign-in recorded for no principal, as a store could hold, is not finished by a return
+      ;; with no session principal either.
+      (oauth:put-pending (oauth:broker-store broker) "no-one"
+                         (oauth:make-pending :principal nil :connection "docs"
+                                             :expires-at (+ (get-universal-time) 600)))
+      (signals oauth:wrong-user
+        (oauth:finish-sign-in broker nil (list (cons "state" "no-one") (cons "code" "c"))))
+      (is (= 0 (as-token-requests as))))))
+
+(net-test tokens-that-are-not-bearer-tokens-are-refused
+  (with-as (as)
+    (setf (as-token-type as) "DPoP")
+    (signals oauth:sign-in-failed (%sign-in as (%broker)))))
+
+(net-test a-resource-on-plain-http-gets-no-token
+  (signals oauth:url-refused
+    (oauth:discover (%broker) "http://192.0.2.1/mcp"
+                    :challenge "Bearer resource_metadata=\"https://192.0.2.1/prm\""))
+  (signals oauth:url-refused (oauth:access-token (%broker) "u1" "docs" "http://192.0.2.1/mcp")))
+
+(net-test a-refresh-refused-for-the-client-deletes-the-tokens
+  (with-as (as :expires-in 0)
+    (let ((broker (%broker)))
+      (%sign-in as broker)
+      (setf (as-refresh-error as) "invalid_client")
+      (is (null (oauth:access-token broker "u1" "docs" (%resource as))))
+      (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs"))))))
+
+(net-test an-expired-sign-in-cannot-be-finished
+  (with-as (as)
+    (let ((broker (%broker :sign-in-lifetime -1)))
+      (signals oauth:unknown-sign-in (%sign-in as broker))
+      (is (= 0 (as-token-requests as))))))
+
+(net-test a-client-metadata-url-that-is-not-https-is-not-used
+  (with-as (as :cimd t)
+    (let ((broker (%broker :client-metadata-url "http://app.example/client.json")))
+      (%sign-in as broker)
+      (is (= 1 (as-registrations as)) "registered dynamically instead"))))
+
+(net-test a-refused-revocation-still-deletes-the-tokens
+  (with-as (as)
+    (let ((broker (%broker)))
+      (%sign-in as broker)
+      (setf (as-revoke-status as) 500)
+      (oauth:disconnect broker "u1" "docs")
+      (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs"))))))

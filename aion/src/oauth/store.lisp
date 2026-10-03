@@ -17,8 +17,14 @@ protected-resource metadata was found, so the issuer can be checked again later.
   access refresh expires-at scope resource issuer client-id token-endpoint revocation-endpoint
   metadata-url)
 
-(defstruct (pending (:constructor %make-pending))
-  "A sign-in in progress, kept under its STATE until the browser comes back."
+(defstruct (pending (:constructor make-pending
+                       (&key principal connection resource issuer client-id verifier
+                             token-endpoint revocation-endpoint iss-required scope expires-at
+                             metadata-url)))
+  "A sign-in in progress, kept under its STATE until the browser comes back. A store keeps every
+slot: VERIFIER is an AION/SECRET value, whose text is AION/SECRET:REVEAL's; ISS-REQUIRED is a
+boolean; EXPIRES-AT a universal time; the rest are strings, except PRINCIPAL, which is what the
+app uses for its users."
   principal connection resource issuer client-id verifier token-endpoint revocation-endpoint
   iss-required scope expires-at metadata-url)
 
@@ -89,7 +95,14 @@ and finished on another would not be found there. Nothing it holds survives a re
 (defmethod put-client ((s memory-store) issuer redirect-uri client-id)
   (%with-store (s) (setf (gethash (list issuer redirect-uri) (slot-value s 'clients)) client-id)))
 (defmethod put-pending ((s memory-store) state pending)
-  (%with-store (s) (setf (gethash state (slot-value s 'pending)) pending)))
+  ;; Expired sign-ins are dropped here, so one started and never finished does not keep its
+  ;; record and verifier for the life of the process.
+  (%with-store (s)
+    (let ((table (slot-value s 'pending)) (now (get-universal-time)))
+      (loop for key being the hash-keys of table using (hash-value p)
+            when (< (pending-expires-at p) now) collect key into expired
+            finally (dolist (k expired) (remhash k table)))
+      (setf (gethash state table) pending))))
 (defmethod take-pending ((s memory-store) state)
   (%with-store (s)
     (let ((p (gethash state (slot-value s 'pending))))

@@ -50,6 +50,7 @@ ACCESS-TOKEN returns NIL."))
                        (&key store redirect-uri (client-name "aion/oauth client")
                              (application-type "web") client-metadata-url pre-registered
                              (timeout 30) (sign-in-lifetime 600) (metadata-lifetime 3600)
+                             (metadata-grace 60)
                              (address-policy #'http:address-category)
                              (resolve #'http:resolve-host))))
   "What an app's sign-ins share.
@@ -65,9 +66,11 @@ ADDRESS-POLICY and RESOLVE are passed to FETCH-PUBLIC; tests use them to allow 1
 
 METADATA-LIFETIME is how many seconds the protected-resource metadata a token was issued under
 is kept before ACCESS-TOKEN fetches it again to check that the resource still names the same
-authorization server. It is also fetched again after the server refuses a token."
+authorization server. It is also fetched again after the server refuses a token, and after a
+sign-in. When that fetch fails, the expired answer is used for METADATA-GRACE seconds more,
+and never renewed; after that ACCESS-TOKEN signals OAUTH-ERROR until a fetch succeeds."
   store redirect-uri client-name application-type client-metadata-url pre-registered
-  timeout sign-in-lifetime metadata-lifetime address-policy resolve
+  timeout sign-in-lifetime metadata-lifetime metadata-grace address-policy resolve
   (metadata-cache (make-hash-table :test #'equal))
   (metadata-lock (sb-thread:make-mutex :name "aion/oauth metadata cache")))
 
@@ -247,6 +250,7 @@ is one (RFC 8414 section 3.1, RFC 9728 section 3.1)."
   "Find and check the authorization server for the protected resource at RESOURCE-URL.
 CHALLENGE is the WWW-Authenticate value of the 401 that started this, or NIL. EXPECTED-ISSUER,
 when given, is the only issuer accepted. Returns a METADATA."
+  (%check-url resource-url "protected resource")
   (let* ((resource (canonical-resource resource-url))
          (params (parse-challenge challenge))
          (prm-url nil)
@@ -299,6 +303,12 @@ CLIENT-METADATA-URL. Its client_id is that URL, as the specification requires."
             "token_endpoint_auth_method" "none"
             "application_type" (broker-application-type broker))))
 
+(defun %client-metadata-url-p (url)
+  "Whether URL can identify a client ID metadata document: an https URL with a path."
+  (let ((uri (and (stringp url) (ignore-errors (quri:uri url)))))
+    (and uri (string-equal "https" (quri:uri-scheme uri))
+         (let ((path (quri:uri-path uri))) (and path (> (length path) 1))))))
+
 (defun %client-id (broker metadata)
   "The client id to use with METADATA's issuer, in the specification's order: pre-registered,
 a client ID metadata document, one registered earlier, then a dynamic registration."
@@ -306,7 +316,8 @@ a client ID metadata document, one registered earlier, then a dynamic registrati
         (store (broker-store broker))
         (redirect (broker-redirect-uri broker)))
     (or (cdr (assoc issuer (broker-pre-registered broker) :test #'string=))
-        (and (metadata-cimd-p metadata) (broker-client-metadata-url broker))
+        (and (metadata-cimd-p metadata) (%client-metadata-url-p (broker-client-metadata-url broker))
+             (broker-client-metadata-url broker))
         (get-client store issuer redirect)
         (let ((endpoint (metadata-registration-endpoint metadata)))
           (unless endpoint
@@ -358,6 +369,8 @@ CHALLENGE is the WWW-Authenticate value that showed a sign-in is needed, if ther
 SCOPES, when given, are the scopes this connection needs. Otherwise the challenge's scope is
 used, then the protected resource's scopes_supported. The scopes of an earlier sign-in to the
 same connection are kept, so a step-up for more scope does not lose what was granted."
+  (unless principal
+    (error 'wrong-user :detail "a sign-in needs the principal of a signed-in user"))
   (let* ((metadata (discover broker resource-url :challenge challenge
                                                   :expected-issuer expected-issuer))
          (client-id (%client-id broker metadata))
@@ -373,7 +386,7 @@ same connection are kept, so a step-up for more scope does not lose what was gra
          (state (%random-token))
          (verifier (%random-token)))
     (put-pending (broker-store broker) state
-                 (%make-pending :principal principal :connection connection
+                 (make-pending :principal principal :connection connection
                                 :resource (metadata-resource metadata)
                                 :issuer (metadata-issuer metadata)
                                 :client-id client-id
@@ -407,8 +420,11 @@ same connection are kept, so a step-up for more scope does not lose what was gra
 token is kept when the server did not rotate it."
   (let* ((doc (and (= 200 (http:response-status response))
                    (ignore-errors (jzon:parse (http:response-body response)))))
-         (access (and (hash-table-p doc) (gethash "access_token" doc))))
-    (unless (stringp access)
+         (access (and (hash-table-p doc) (gethash "access_token" doc)))
+         (type (and (hash-table-p doc) (gethash "token_type" doc))))
+    ;; A token this client cannot send as Bearer, such as a DPoP one, would only fail later.
+    (unless (and (stringp access) (plusp (length access))
+                 (stringp type) (string-equal type "Bearer"))
       (return-from %token-set-from nil))
     (let ((refresh (gethash "refresh_token" doc))
           (expires-in (gethash "expires_in" doc)))
@@ -446,8 +462,8 @@ and the tokens are stored."
     (when (or (null pending) (< (pending-expires-at pending) (get-universal-time)))
       (error 'unknown-sign-in
              :detail "this sign-in is not waiting here: it expired, it was already finished, or it was started on another instance of the app, which needs a store the instances share"))
-    (unless (equal principal (pending-principal pending))
-      (error 'wrong-user :detail "the sign-in came back in another user's session"))
+    (unless (and principal (equal principal (pending-principal pending)))
+      (error 'wrong-user :detail "the sign-in came back in another user's session, or in none"))
     (let ((iss (%param parameters "iss")))
       (when (if iss
                 (not (string= iss (pending-issuer pending)))
@@ -474,7 +490,13 @@ and the tokens are stored."
           (error 'sign-in-failed :code (%error-code-of response)
                                  :detail (format nil "the token endpoint answered ~D"
                                                  (http:response-status response))))
-        (put-token (broker-store broker) principal (pending-connection pending) token-set)
+        ;; Under the refresh lock, so a refresh of the old tokens still running cannot overwrite
+        ;; or delete the new ones afterwards.
+        (call-with-refresh-lock (broker-store broker) (list principal (pending-connection pending))
+                                (lambda ()
+                                  (put-token (broker-store broker) principal
+                                             (pending-connection pending) token-set)))
+        (%forget-metadata broker token-set)
         (log:info "aion/oauth: sign-in finished" :connection (pending-connection pending))
         (values principal (pending-connection pending))))))
 
@@ -512,19 +534,28 @@ REFRESH-FAILED when the server could not be reached."
             (secret:reveal (token-set-access current)))
            ((null (token-set-refresh current)) nil)
            (t
-            (let ((response (%fetch broker :post (token-set-token-endpoint current)
-                                    :headers '(("Accept" . "application/json"))
-                                    :content (list (cons "grant_type" "refresh_token")
-                                                   (cons "refresh_token"
-                                                         (secret:reveal (token-set-refresh current)))
-                                                   (cons "client_id" (token-set-client-id current))
-                                                   (cons "resource" resource)))))
+            (let ((response
+                    (handler-case
+                        (%fetch broker :post (token-set-token-endpoint current)
+                                :headers '(("Accept" . "application/json"))
+                                :content (list (cons "grant_type" "refresh_token")
+                                               (cons "refresh_token"
+                                                     (secret:reveal (token-set-refresh current)))
+                                               (cons "client_id" (token-set-client-id current))
+                                               (cons "resource" resource)))
+                      (http:pinned-connect-unsupported (e) (error e))
+                      (oauth-error ()
+                        (error 'refresh-failed :detail "the token endpoint could not be reached")))))
               (let ((renewed (%token-set-from response nil current)))
                 (cond (renewed
                        (put-token store principal connection renewed)
                        (log:info "aion/oauth: tokens refreshed" :connection connection)
                        (secret:reveal (token-set-access renewed)))
-                      ((member (%error-code-of response) '("invalid_grant") :test #'equal)
+                      ;; The grant is spent, or the client is no longer accepted: these tokens
+                      ;; will never refresh, so they are deleted and the user signs in again.
+                      ((member (%error-code-of response)
+                               '("invalid_grant" "invalid_client" "unauthorized_client")
+                               :test #'equal)
                        (delete-token store principal connection)
                        (log:info "aion/oauth: refresh refused, tokens deleted" :connection connection)
                        nil)
@@ -532,28 +563,44 @@ REFRESH-FAILED when the server could not be reached."
                                 :detail (format nil "the token endpoint answered ~D"
                                                 (http:response-status response))))))))))))))
 
+(defun %fetch-issuers (broker token-set)
+  "The issuers TOKEN-SET's protected-resource metadata names now, and T; or NIL and NIL when the
+metadata could not be read. Only a 200 with a JSON object body is an answer. A document that
+names another resource is an answer too: it names no issuer for this one."
+  (let ((url (token-set-metadata-url token-set)))
+    (handler-case
+        (progn
+          (%check-url url "protected resource metadata URL")
+          (let ((doc (%get-json broker url)))
+            (if doc
+                (values (and (equal (canonical-resource (or (gethash "resource" doc) ""))
+                                    (token-set-resource token-set))
+                             (%strings (gethash "authorization_servers" doc)))
+                        t)
+                (values nil nil))))
+      (http:pinned-connect-unsupported (e) (error e))
+      (oauth-error () (values nil nil)))))
+
 (defun %current-issuers (broker token-set)
   "The authorization servers TOKEN-SET's resource names now, from its protected-resource
-metadata, kept for the broker's METADATA-LIFETIME. A cached answer is used when a fetch fails."
+metadata. An answer is kept for the broker's METADATA-LIFETIME. When a fetch fails, an expired
+answer is used for METADATA-GRACE seconds after it expired and is not renewed; past that, or
+with no answer at all, this signals OAUTH-ERROR, which fails the call rather than asking the
+user to sign in again."
   (let* ((url (token-set-metadata-url token-set))
          (cache (broker-metadata-cache broker))
          (now (get-universal-time))
          (cached (sb-thread:with-mutex ((broker-metadata-lock broker)) (gethash url cache))))
     (if (and cached (> (cdr cached) now))
         (car cached)
-        (let ((issuers
-                (handler-case
-                    (progn
-                      (%check-url url "protected resource metadata URL")
-                      (let ((doc (%get-json broker url)))
-                        (and doc (equal (canonical-resource (or (gethash "resource" doc) ""))
-                                        (token-set-resource token-set))
-                             (%strings (gethash "authorization_servers" doc)))))
-                  (http:pinned-connect-unsupported (e) (error e))
-                  (oauth-error () (if cached (car cached) (error 'oauth-error :detail "the protected resource metadata could not be read"))))))
-          (sb-thread:with-mutex ((broker-metadata-lock broker))
-            (setf (gethash url cache) (cons issuers (+ now (broker-metadata-lifetime broker)))))
-          issuers))))
+        (multiple-value-bind (issuers ok) (%fetch-issuers broker token-set)
+          (cond (ok
+                 (sb-thread:with-mutex ((broker-metadata-lock broker))
+                   (setf (gethash url cache) (cons issuers (+ now (broker-metadata-lifetime broker)))))
+                 issuers)
+                ((and cached (> (+ (cdr cached) (broker-metadata-grace broker)) now))
+                 (car cached))
+                (t (error 'oauth-error :detail "the protected resource metadata could not be read")))))))
 
 (defun %forget-metadata (broker token-set)
   (when (and token-set (token-set-metadata-url token-set))
@@ -567,6 +614,7 @@ resource's protected-resource metadata still names the authorization server that
 a connection whose URL or authorization server changed gets NIL, and its user signs in again.
 The metadata is kept for the broker's METADATA-LIFETIME, so this costs a request only when the
 cache has expired or the server has refused a token."
+  (%check-url resource-url "protected resource")
   (let* ((resource (canonical-resource resource-url))
          (current (get-token (broker-store broker) principal connection)))
     (cond ((null current) nil)
@@ -579,21 +627,31 @@ cache has expired or the server has refused a token."
 
 (defun disconnect (broker principal connection)
   "Revoke PRINCIPAL's tokens for CONNECTION at the authorization server when it offers a
-revocation endpoint (RFC 7009), and delete them either way. A failed revocation is logged and
-does not stop the deletion."
-  (let* ((store (broker-store broker))
-         (current (get-token store principal connection)))
-    (when current
-      (let ((endpoint (token-set-revocation-endpoint current))
-            (token (or (token-set-refresh current) (token-set-access current))))
-        (when endpoint
-          (handler-case
-              (%fetch broker :post endpoint
-                      :content (list (cons "token" (secret:reveal token))
-                                     (cons "token_type_hint" (if (token-set-refresh current)
-                                                                 "refresh_token"
-                                                                 "access_token"))
-                                     (cons "client_id" (token-set-client-id current))))
-            (oauth-error () (log:warn "aion/oauth: revocation failed" :connection connection)))))
-      (delete-token store principal connection))
+revocation endpoint (RFC 7009), and delete them either way. A revocation that fails, or that the
+server refuses, is logged and does not stop the deletion. Runs under the refresh lock, so a
+refresh still running cannot store rotated tokens after the disconnect."
+  (let ((store (broker-store broker)))
+    (call-with-refresh-lock
+     store (list principal connection)
+     (lambda ()
+       (let ((current (get-token store principal connection)))
+         (when current
+           (let ((endpoint (token-set-revocation-endpoint current))
+                 (token (or (token-set-refresh current) (token-set-access current))))
+             (when endpoint
+               (handler-case
+                   (let ((response (%fetch broker :post endpoint
+                                           :content (list (cons "token" (secret:reveal token))
+                                                          (cons "token_type_hint"
+                                                                (if (token-set-refresh current)
+                                                                    "refresh_token"
+                                                                    "access_token"))
+                                                          (cons "client_id"
+                                                                (token-set-client-id current))))))
+                     (unless (<= 200 (http:response-status response) 299)
+                       (log:warn "aion/oauth: revocation refused" :connection connection
+                                                                  :status (http:response-status response))))
+                 ;; Including PINNED-CONNECT-UNSUPPORTED on Windows: the tokens are deleted.
+                 (error () (log:warn "aion/oauth: revocation failed" :connection connection)))))
+           (delete-token store principal connection)))))
     t))

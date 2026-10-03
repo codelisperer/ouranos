@@ -477,10 +477,8 @@
   :components ((:file "tests/session-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/session-db/tests :run-tests)))
 
-;;; Lends each request a connection from a mnemosyne pool, bound to the app's own connection
-;;; variable (#325), so an app written against one global connection can run under
-;;; `start :workers'. Aux system so hyperion core keeps no DB dependency (same pattern as
-;;; session-db).
+;;; The routes an app mounts for aion/oauth sign-ins (#527): the page the browser returns to, and
+;;; the app's client ID metadata document.
 (defsystem "hyperion/oauth"
   :description "The routes an app mounts for aion/oauth sign-ins: the return page and the client metadata document (#527)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -496,6 +494,10 @@
   :components ((:file "tests/oauth-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/oauth/tests :run-tests)))
 
+;;; Lends each request a connection from a mnemosyne pool, bound to the app's own connection
+;;; variable (#325), so an app written against one global connection can run under
+;;; `start :workers'. Aux system so hyperion core keeps no DB dependency (same pattern as
+;;; session-db).
 (defsystem "hyperion/db-connection"
   :description "A Ring middleware that binds an app's connection variable to a pooled mnemosyne connection per request."
   :author "Bob <eternal.recursion@proton.me>"
