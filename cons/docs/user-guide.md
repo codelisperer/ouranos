@@ -107,7 +107,8 @@ This includes the warnings SBCL reports when the compilation unit ends rather th
 file compiles: a variable that is never defined, and a special variable used in one file
 before a later file of the same system defines it with `defvar`. ASDF does not fail the
 compile over these, so `cons` counts them itself and fails the load with an error naming
-each variable (#525).
+each variable (#525). A full `WARNING` that one of the project's own files signals when it
+is loaded, such as a toplevel `warn`, fails the load in the same way.
 
 A fasl that is already current is loaded without compiling, so a warning in it is not seen
 again. That happens when the fasl was compiled while warnings were muffled, for example by

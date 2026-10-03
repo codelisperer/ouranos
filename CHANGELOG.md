@@ -19,7 +19,8 @@ its tag.
   `compile-file` has returned without a failure. This includes a special variable that a later
   file of the same system defines with `defvar`. `cons/run:load-system-strictly` printed that
   WARNING and still loaded the system, so the target exited 0. It now fails the load with an
-  error that names the system and each variable. Libraries outside the project directory are
+  error that names the system and each variable. A full WARNING that one of the project's own
+  files signals when its fasl loads, such as a toplevel `warn`, fails the load the same way. Libraries outside the project directory are
   still loaded with their warnings muffled, including a library that signals a WARNING when its
   fasl loads. An app acts if its code has such a warning, which now fails its build. An app that
   carries its own strict-build script to catch this case can use `cons --strict build` instead.

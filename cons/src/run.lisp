@@ -144,7 +144,9 @@ both upcased for the standard readtable."
                       (asdf :load-system name))))
                 (own-load (name)
                   ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
-                  ;; handler is for the ones deferred to the end of the unit; see above.
+                  ;; handler is for the ones it does not fail on: those deferred to the end of
+                  ;; the unit (see above), and those the project's own files signal when they
+                  ;; load, such as a toplevel WARN, which fail the load under #303 as well.
                   ;; Two of ASDF's own warnings are not about the project's code, so they are
                   ;; not counted: COMPILE-WARNED-WARNING reports that a file compiled with
                   ;; style-warnings only, and RECURSIVE-OPERATE that the loader was called from
@@ -160,7 +162,7 @@ both upcased for the standard readtable."
                       (with-compilation-unit (:override t)
                         (asdf :load-system name :force (if force-own own nil))))
                     (when caught
-                      (error "Loading ~A signalled ~D WARNING~:P at the end of the compilation unit, after its files compiled:~{~%  ~A~}"
+                      (error "Loading ~A signalled ~D WARNING~:P that its compilation did not fail on, either when the compilation unit ended or when one of its files was loaded:~{~%  ~A~}"
                              name (length caught) (reverse caught)))))
                 (missing-p (c)
                   (typep c (uiop:find-symbol* :missing-component :asdf)))

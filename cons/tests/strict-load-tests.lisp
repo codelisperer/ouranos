@@ -224,6 +224,17 @@ NAME/tests holding it, named by NAME's test-op. Returns DIR."
   (%with-strict-project (dir name "undef-unit" *strict-undefined-source*)
     (is (typep (with-compilation-unit () (%strict-load name dir)) 'error))))
 
+(test a-warning-the-projects-own-file-signals-when-it-loads-fails-the-strict-load
+  ;; The same handler sees it, and under #303 the project's own full WARNING fails the load
+  ;; whenever it is signalled. The same source in a library is the next test's case.
+  (%with-strict-project (dir name "loadwarn-own" *strict-warns-at-load-source*)
+    (let ((err (%strict-load name dir)))
+      (is (typep err 'error) "a WARNING the project's own file signals at load must fail")
+      (is (search "signalled when its fasl loads" (princ-to-string err))
+          "the error must carry the warning: ~A" err)
+      (is (search "when one of its files was loaded" (princ-to-string err))
+          "the error must say a warning can come from a load: ~A" err))))
+
 (test an-undefined-variable-in-a-test-system-fails-with-tests
   (%with-strict-project (dir name "undef-tests" *strict-clean-source*
                              :test-source *strict-undefined-source*)
