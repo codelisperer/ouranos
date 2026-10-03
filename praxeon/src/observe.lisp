@@ -366,23 +366,30 @@ conversation, so a later call can start a run."
   "Join OBSERVER's running distillation, waiting at most TIMEOUT seconds. Returns T when none is
 running afterwards."
   (let ((w (observer-worker observer)))
-    ;; JOIN-THREAD signals a TYPE-ERROR for a timeout of 0, so 0 only looks (#508).
+    ;; JOIN-THREAD signals a TYPE-ERROR for a timeout of 0, so 0 only looks, and STOP-OBSERVER
+    ;; with 0 ends the run at once (#508).
     (when (and w (bt:thread-alive-p w) (plusp timeout))
       (sb-thread:join-thread w :default nil :timeout timeout))
     (not (observer-busy-p observer))))
 
 (defun stop-observer (observer &key (timeout 30))
   "Stop OBSERVER at shutdown: it finishes the attempt it is on, waits for no retry, and starts no
-other window. Waits at most TIMEOUT seconds, then ends its thread. Returns T when it stopped in
-time. When it returns NIL the thread is ended asynchronously, so RUNNING-OBSERVER can still name
-OBSERVER for a moment afterwards. A window it stopped during is not given up on. It is not
+other window. Waits at most TIMEOUT seconds, then ends its thread, waits up to 5 seconds more
+for it to end, and gives back its claim on the conversation, so RUNNING-OBSERVER no longer names
+it. Returns T when it stopped in time. A window it stopped during is not given up on. It is not
 written either, unless the stop came after the window's observations were written and before
 its progress was: then the next observer of the thread distils it again (#462's eighth review),
 unless an erasure came between, whose raised mark covers the window."
   (setf (observer-stopping observer) t)
   (or (await-observer observer :timeout timeout)
       (let ((w (observer-worker observer)))
-        (when (and w (bt:thread-alive-p w)) (ignore-errors (bt:destroy-thread w)))
+        (when (and w (bt:thread-alive-p w))
+          (ignore-errors (bt:destroy-thread w))
+          ;; A THREAD ENDED BEFORE %RUN'S UNWIND-PROTECT WAS ENTERED never gives back the claim
+          ;; on the conversation, so it is given back here once the thread has ended (#508's
+          ;; review). %RELEASE removes it only while this observer holds it.
+          (ignore-errors (sb-thread:join-thread w :default nil :timeout 5))
+          (unless (bt:thread-alive-p w) (%release observer)))
         nil)))
 
 ;;; --- the windows ------------------------------------------------------------------------
