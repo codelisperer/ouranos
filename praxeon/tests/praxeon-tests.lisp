@@ -4913,7 +4913,9 @@ distilled and promoted as any window is; the same when it was skipped because pr
     (let ((second (%allergy-observer store (%provider-returning (%call-with (%ob +allergy+ "fact"))))))
       (obs:observe-turn second (%history 6))
       (obs:await-observer second :timeout 10)
-      (is (equal (list +allergy+) (%facts store)) "promoted, by a new observer")))
+      (is (equal (list +allergy+) (%facts store)) "promoted, by a new observer")
+      (is (equal '(6 nil) (multiple-value-list (mem:thread-progress store "member-1" "conv-7")))
+          "and its progress is recorded: past the window, with nothing skipped (#508)")))
   ;; Promotion failed on both attempts; the store is back at the next turn.
   (let* ((store (make-instance 'promotion-outage-store :failures 2))
          (reply (%call-with (%ob +allergy+ "fact")))
@@ -4927,21 +4929,50 @@ distilled and promoted as any window is; the same when it was skipped because pr
     (is (equal (list +allergy+) (%thread-contents store)) "the thread observation is not written twice")
     (is (equal (list +allergy+) (%facts store)) "promoted once the store is back")))
 
+(defclass windowed (llm:provider)
+  ((answers :initarg :answers :accessor windowed-answers)
+   (calls :initform '() :accessor windowed-calls))
+  (:documentation "A provider that answers by window (#508). ANSWERS is a list of (FIRST FAILURES
+REPLY): a request whose first %HISTORY message is number FIRST signals the next FAILURES times,
+as an outage would, and then gets (FUNCALL REPLY). CALLS is the FIRST of every request, oldest
+first. A test whose answers depend on the window cannot hand a retried window another
+window's answer, so a wrong retry shows in the result and not only in a count."))
+
+(defun %first-message-number (messages)
+  (loop for m in messages
+        for c = (llm:content m)
+        when (and (stringp c) (uiop:string-prefix-p "message " c))
+          return (parse-integer c :start 8 :junk-allowed t)))
+
+(defmethod llm:complete ((p windowed) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (let* ((first (%first-message-number messages))
+         (entry (find first (windowed-answers p) :key #'first)))
+    (setf (windowed-calls p) (append (windowed-calls p) (list first)))
+    (cond ((null entry) (llm:make-completion :text "" :stop-reason :end))
+          ((plusp (second entry))
+           (decf (second entry))
+           (error 'cnd:deliberation-failure :detail "429 Too Many Requests"))
+          (t (funcall (third entry))))))
+
+(defmethod llm:supports-tool-choice-p ((p windowed)) t)
+
 (defun %closed-run (promote-accept)
   "Window 1 (Porto) is skipped; window 2 says Lisbon. At the next turn window 3 corrects Lisbon to
-Faro. Returns the store and the observer."
+Faro. Returns the store, the observer and its provider. The answers are keyed by window, so a
+window 1 retried by mistake gets Porto (#508)."
   (let* ((store (mem:make-in-memory-store))
-         (observer (%allergy-observer store (make-instance 'failing-scripted :failures 2
-                                                                            :script (list (%call-with (%ob "Lives in Lisbon." "fact"))))
-                                      :accept (constantly t) :promote-accept promote-accept)))
+         (provider (make-instance 'windowed
+                                  :answers (list (list 1 2 (lambda () (%call-with (%ob "Lives in Porto." "fact"))))
+                                                 (list 7 0 (lambda () (%call-with (%ob "Lives in Lisbon." "fact"))))
+                                                 (list 13 0 (lambda () (funcall (%corrects "Lives in Lisbon." "Lives in Faro.")
+                                                                                store "conv-7"))))))
+         (observer (%allergy-observer store provider :accept (constantly t) :promote-accept promote-accept)))
     (obs:observe-turn observer (%history 12))
     (obs:await-observer observer :timeout 10)
-    ;; Only window 3's answer: a closed window 1 makes no model call.
-    (setf (scripted-script (obs::observer-provider observer))
-          (list (funcall (%corrects "Lives in Lisbon." "Lives in Faro.") store "conv-7")))
     (obs:observe-turn observer (%history 18))
     (obs:await-observer observer :timeout 10)
-    (values store observer)))
+    (values store observer provider)))
 
 (test a-skipped-window-with-a-later-window-written-is-closed-not-retried
   "Window 1 is skipped and window 2 written. At the next turn window 1 is closed rather than
@@ -4949,7 +4980,8 @@ retried, so the thread never holds the older Porto beside Lisbon or its correcti
 Faro the thread and the subject each hold one current statement of where the member lives."
   (dolist (case (list (list (constantly nil) '("Lives in Lisbon.")) (list (constantly t) '("Lives in Faro."))))
     (destructuring-bind (promote-accept facts) case
-      (multiple-value-bind (store observer) (%closed-run promote-accept)
+      (multiple-value-bind (store observer provider) (%closed-run promote-accept)
+        (is (equal '(1 1 7 13) (windowed-calls provider)) "window 1 was not asked about again")
         (is (equal '((1 6 1 :closed)) (obs:observer-skipped observer)))
         (is (equal '("Lives in Faro.") (%thread-contents store)) "one current observation in the thread")
         (is (equal facts (%facts store)) "one current fact about the subject")))))
@@ -4958,8 +4990,10 @@ Faro the thread and the subject each hold one current statement of where the mem
   "A closed window starts no run, and a new observer reads it from the store as closed."
   (multiple-value-bind (store observer) (%closed-run (constantly nil))
     (is (null (obs:observe-turn observer (%history 18))) "nothing is due")
+    ;; Waited for, so a run started by mistake has finished before the store is read (#508).
+    (obs:await-observer observer :timeout 10)
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
-      (is (= 18 mark))
+      (is (eql 18 mark)) ; EQL, so a control that writes no progress fails here (#533's review)
       (is (equal '((1 6 1 :closed)) skipped)))
     (is (null (obs:observe-turn (%allergy-observer store (%provider-returning)) (%history 18))))))
 
@@ -5084,22 +5118,22 @@ message, writes the progress, so a new observer does not distil the window again
       (obs:await-observer second :timeout 10))
     (is (equal '("Has a dog.") (%thread-contents store)) "nothing written twice")))
 
-(test an-exhausted-skipped-window-from-an-earlier-run-is-closed
-  "The store records window 1-6 as skipped with its tries spent, and holds an observation from
-window 7-12, as an earlier run or another process left them. A new observer's next turn closes
-the window; a window with no later one written starts no run."
+(test an-exhausted-skipped-window-stays-open-whatever-the-thread-holds
+  "The store records window 1-6 as skipped with its tries spent. Whether or not the thread holds an
+observation from a later window, it starts no run and is not closed: closing comes from the
+progress record alone (#508)."
   (let ((store (mem:make-in-memory-store)))
     (mem:record-thread-progress store "member-1" "conv-7" 12 '((1 6 1)))
     (let ((idle (obs:make-observer (%provider-returning) store "member-1" "conv-7"
                                    :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
-      (is (null (obs:observe-turn idle (%history 12))) "no later window yet: nothing to do"))
+      (is (null (obs:observe-turn idle (%history 12))) "nothing to do"))
     (mem:remember store "member-1" "Has a dog." :thread "conv-7"
                   :provenance (mem:make-provenance "conv-7" 7 :through 12))
     (let ((observer (obs:make-observer (%provider-returning) store "member-1" "conv-7"
                                        :step (%step-for 6) :retry-delay 0 :max-attempts 1)))
-      (is-true (obs:observe-turn observer (%history 12)))
+      (is (null (obs:observe-turn observer (%history 12))) "still nothing to do")
       (obs:await-observer observer :timeout 10)
-      (is (equal '((1 6 1 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))))))
+      (is (equal '((1 6 1)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; After #462's sixth review: progress merged on save and on adoption, a failed reconciling
@@ -5238,9 +5272,10 @@ retries 7-12, which is written: 1-6 is closed at once, as when any window is wri
     (is (equal '((1 6 2 :closed)) (obs:observer-skipped observer)))
     (is (equal '((1 6 2 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7"))))))
 
-(test a-failed-thread-read-does-not-fail-the-apps-request
-  "Deciding whether an exhausted window is due reads the thread on the request thread. When that
-read fails, OBSERVE-TURN logs it and returns NIL rather than signalling into the app."
+(test observe-turn-reads-no-thread-for-an-exhausted-window
+  "Deciding whether an exhausted window is due used to read the thread on the app's request
+thread. It reads nothing now (#508), so a store whose thread reads fail cannot fail the request
+and is not even asked."
   (let ((store (make-instance 'flaky-reads-store)))
     (mem:record-thread-progress store "member-1" "conv-7" 6 '((1 6 1)))
     (let ((observer (obs:make-observer (%provider-returning) store "member-1" "conv-7"
@@ -5248,7 +5283,7 @@ read fails, OBSERVE-TURN logs it and returns NIL rather than signalling into the
       (setf (thread-read-failures store) 1)
       (is (null (handler-case (obs:observe-turn observer (%history 6))
                   (error (e) (format nil "signalled: ~A" e)))))
-      (is (= 0 (thread-read-failures store)) "the read was made, and failed"))))
+      (is (= 1 (thread-read-failures store)) "the thread was not read"))))
 
 ;;; --------------------------------------------------------------------------
 ;;; After #462's seventh review: two observers that cut the same messages differently.
@@ -5582,3 +5617,218 @@ The superseded observation still counts, so the erasure keeps mark 12."
       (mem:supersede store o "Lives in Faro." :provenance (mem:make-provenance "conv-7" 3)))
     (mem:forget-subject store "member-1")
     (is (eql 12 (mem:thread-progress store "member-1" "conv-7")))))
+
+;;; --------------------------------------------------------------------------
+;;; #508: follow-ups from #462's reviews. The claim given back however starting the worker
+;;; ends, macros refused as functions, STOP-OBSERVER with a timeout of 0, and closure read
+;;; from the progress record alone.
+;;; --------------------------------------------------------------------------
+
+(test the-claim-is-given-back-when-starting-the-worker-throws
+  "A THROW out of %START-WORKER, which is not an ERROR, still gives back the claim on the thread,
+so a later call can run. A HANDLER-BIND on ERROR missed it."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (start (fdefinition 'obs::%start-worker)))
+    (unwind-protect
+         (progn (setf (fdefinition 'obs::%start-worker)
+                      (lambda (&rest arguments) (declare (ignore arguments)) (throw '%no-worker :thrown)))
+                (is (eq :thrown (catch '%no-worker (obs:observe-turn observer (%history 6))))))
+      (setf (fdefinition 'obs::%start-worker) start))
+    (is (null (obs:running-observer store "member-1" "conv-7")))
+    (is-true (obs:observe-turn observer (%history 6)) "the thread is free for the next call")
+    (obs:await-observer observer :timeout 10)))
+
+(test make-observer-refuses-a-macro-or-a-special-operator
+  "WHEN names a macro and IF a special operator. Both are FBOUNDP, and called as functions every
+window would fail with UNDEFINED-FUNCTION."
+  (dolist (key '(:accept :promote :promote-accept))
+    (dolist (name '(when if))
+      (signals cnd:praxeon-error
+        (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7" key name)))))
+
+(defclass blocking-scripted (scripted)
+  ((gate :initform (sb-thread:make-semaphore :name "blocking-scripted") :reader blocking-gate)
+   (entered :initform nil :accessor blocking-entered))
+  (:documentation "A scripted provider whose calls set BLOCKING-ENTERED, then wait until the test
+signals BLOCKING-GATE, or 10 seconds pass."))
+
+(defmethod llm:complete :before ((p blocking-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (setf (blocking-entered p) t)
+  (sb-thread:wait-on-semaphore (blocking-gate p) :timeout 10))
+
+(test stop-observer-with-a-timeout-of-0-ends-the-run-at-once
+  "SB-THREAD:JOIN-THREAD signals a TYPE-ERROR for :TIMEOUT 0. STOP-OBSERVER with 0 waits for
+nothing: it returns NIL, as for any timeout that passes, and ends the run's thread, which gives
+back the claim on the conversation. The model call is held until the test releases it, and the
+run and the claim are checked as soon as the stop returns, before anything waits for the run
+(#533's review): a stop that returned without ending the thread fails here."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'blocking-scripted :script (list (%call-with (%ob "Has a dog." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (is-true (obs:observe-turn observer (%history 6)))
+    ;; The worker is inside the model call before the stop, so it cannot end on its own by seeing
+    ;; the stop before it calls the model.
+    (loop repeat 1000 until (blocking-entered provider) do (sleep 0.005))
+    (is-true (blocking-entered provider) "precondition: the worker is in the model call")
+    (is (null (handler-case (obs:stop-observer observer :timeout 0)
+                (error (e) e)))
+        "returns NIL rather than signalling")
+    (is (not (obs:observer-busy-p observer)) "the run's thread has ended")
+    (is (null (obs:running-observer store "member-1" "conv-7")) "and the claim is given back")
+    (sb-thread:signal-semaphore (blocking-gate provider) 10)
+    (obs:await-observer observer :timeout 10)
+    (is (null (%thread-contents store)) "the window was not written")))
+
+(test erasing-a-later-windows-observations-does-not-reopen-a-skipped-window
+  "Window 1-6 is skipped and window 7-12 written, which closes 1-6. The app erases 7-12's
+observations. At the next turn window 1-6 is not tried again, so its Porto never lands beside
+the Lisbon the subject already holds."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'windowed
+                                  :answers (list (list 1 2 (lambda () (%call-with (%ob "Lives in Porto." "fact"))))
+                                                 (list 7 0 (lambda () (%call-with (%ob "Lives in Lisbon." "fact")))))))
+         (observer (%allergy-observer store provider)))
+    (%turn observer 12)
+    (is (equal '((1 6 1 :closed)) (obs:observer-skipped observer)))
+    (dolist (o (mem:observations-of store "member-1" :thread "conv-7"))
+      (mem:forget store o))
+    (let ((later (%allergy-observer store provider)))
+      (is (null (obs:observe-turn later (%history 12))) "nothing is due")
+      (obs:await-observer later :timeout 10))
+    (%turn observer 12)
+    (is (equal '(1 1 7) (windowed-calls provider)) "window 1 was not asked about again")
+    (is (equal '("Lives in Lisbon.") (%facts store)))
+    (is (equal '((1 6 1 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test an-observation-the-app-writes-closes-no-skipped-window
+  "Window 1-6 is skipped and open. The app writes an observation into the thread citing messages
+7-12. The next turn still retries window 1-6 and writes it: what the app writes into the thread
+does not affect progress."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'windowed
+                                  :answers (list (list 1 0 (lambda () (%call-with (%ob +allergy+ "fact"))))))))
+    (mem:record-thread-progress store "member-1" "conv-7" 12 '((1 6 1)))
+    (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                  :provenance (mem:make-provenance "conv-7" 7 :through 12))
+    (let ((observer (%allergy-observer store provider)))
+      (is-true (obs:observe-turn observer (%history 12)) "the open window is due")
+      (obs:await-observer observer :timeout 10)
+      (is (equal '(1) (windowed-calls provider)))
+      (is (equal (list "Has a dog." +allergy+) (%thread-contents store)))
+      (is (null (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))))))
+
+;;; --------------------------------------------------------------------------
+;;; After the review of #533: closing earlier windows before a window is written, the claim and
+;;; the worker as one step, and await-observer with no limit.
+;;; --------------------------------------------------------------------------
+
+(defclass selective-progress-store (mem:in-memory-store)
+  ((fails-when :initarg :fails-when :initform (constantly nil) :accessor fails-when))
+  (:documentation "Fails a progress write when (FUNCALL FAILS-WHEN MARK SKIPPED) is true."))
+
+(defmethod mem:record-thread-progress :before ((store selective-progress-store) subject thread mark skipped)
+  (declare (ignore subject thread))
+  (when (funcall (fails-when store) mark skipped)
+    (error "the progress write failed")))
+
+(defun %porto-lisbon-provider ()
+  "Window 1-6 fails twice, then says Porto; window 7-12 says Lisbon."
+  (make-instance 'windowed
+                 :answers (list (list 1 2 (lambda () (%call-with (%ob "Lives in Porto." "fact"))))
+                                (list 7 0 (lambda () (%call-with (%ob "Lives in Lisbon." "fact")))))))
+
+(test a-failed-save-after-a-later-window-does-not-reopen-an-earlier-one
+  "Window 1-6 is skipped and 7-12 written, and the progress write at mark 12 fails. 1-6 was closed
+and saved before 7-12 was written, so a new observer does not ask the model about 1-6, and
+Porto never lands beside Lisbon (#533's review)."
+  (let* ((store (make-instance 'selective-progress-store
+                               :fails-when (lambda (mark skipped) (declare (ignore skipped)) (>= mark 12))))
+         (a (%allergy-observer store (%porto-lisbon-provider))))
+    (%turn a 12)
+    (is (equal '((1 6 1 :closed)) (nth-value 1 (mem:thread-progress store "member-1" "conv-7")))
+        "the store holds 1-6 closed although the save at 12 failed")
+    (setf (fails-when store) (constantly nil))
+    (let* ((provider (%porto-lisbon-provider))
+           (b (%allergy-observer store provider)))
+      (%turn b 12)
+      (is (not (member 1 (windowed-calls provider))) "1-6 was not asked about: ~S" (windowed-calls provider)))
+    (is (equal '("Lives in Lisbon.") (%facts store)))
+    (is (not (member "Lives in Porto." (%thread-contents store) :test #'string=)))))
+
+(test a-failed-closing-save-writes-nothing-of-the-later-window
+  "Every progress write that would record 1-6 closed fails. 7-12's observations are then never
+written, because closing 1-6 and saving it comes first (#533's review)."
+  (let* ((store (make-instance 'selective-progress-store
+                               :fails-when (lambda (mark skipped) (declare (ignore mark))
+                                             (some (lambda (e) (eq (fourth e) :closed)) skipped))))
+         (a (%allergy-observer store (%porto-lisbon-provider))))
+    (%turn a 12)
+    (is (null (%thread-contents store)) "nothing of 7-12 was written")
+    (is (null (%facts store)))))
+
+(defclass claim-checking (scripted)
+  ((store :initarg :store :reader checked-store)
+   (lost :initform 0 :accessor claims-lost))
+  (:documentation "A scripted provider that counts the calls made while no observer holds the
+thread: a worker running without the claim."))
+
+(defmethod llm:complete :before ((p claim-checking) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (unless (obs:running-observer (checked-store p) "member-1" "conv-7")
+    (incf (claims-lost p))))
+
+(defun %observer-threads-finished (&key (seconds 10))
+  "Wait until no thread named praxeon-observer is alive, at most SECONDS."
+  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
+        until (or (notany (lambda (th) (and (equal (sb-thread:thread-name th) "praxeon-observer")
+                                            (sb-thread:thread-alive-p th)))
+                          (sb-thread:list-all-threads))
+                  (> (get-internal-real-time) deadline))
+        do (sleep 0.005)))
+
+(defun %deadline-trial (seconds)
+  "One OBSERVE-TURN that starts a run, under a timeout of SECONDS when SECONDS is not NIL. Returns
+the model calls made without the claim, whether a claim was left held with no worker, and how
+long the OBSERVE-TURN call took, in internal time units."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'claim-checking :store store
+                                                  :script (list (%call-with (%ob "Has a dog." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (history (%history 6))
+         (t0 (get-internal-real-time)))
+    (if seconds
+        (handler-case (sb-ext:with-timeout seconds (obs:observe-turn observer history))
+          (sb-ext:timeout () nil))
+        (obs:observe-turn observer history))
+    (let ((took (- (get-internal-real-time) t0)))
+      (%observer-threads-finished)
+      (values (claims-lost provider)
+              (and (obs:running-observer store "member-1" "conv-7") (not (obs:observer-busy-p observer)))
+              took))))
+
+(test a-deadline-around-observe-turn-never-leaves-a-worker-without-the-claim
+  "500 calls to OBSERVE-TURN, each under a timeout drawn from 0 to three times the median time an
+OBSERVE-TURN that starts a run takes on this machine, as an app's own request deadline would be.
+Whatever point the timeout interrupts, a worker that started holds the claim while it calls the
+model, and no claim is left held with no worker (#533's review)."
+  (let* ((rs (sb-ext:seed-random-state 533))
+         (median (let ((times (loop repeat 21 collect (nth-value 2 (%deadline-trial nil)))))
+                   (/ (nth 10 (sort times #'<)) internal-time-units-per-second)))
+         (lost 0) (kept 0))
+    (dotimes (i 500)
+      (multiple-value-bind (l k) (%deadline-trial (* (random 1.0 rs) 3 (max median 1/100000)))
+        (incf lost l)
+        (when k (incf kept))))
+    (is (= 0 lost) "~D worker calls ran without the claim" lost)
+    (is (= 0 kept) "~D claims were kept with no worker" kept)))
+
+(test await-observer-with-no-timeout-waits-for-the-run
+  (let ((observer (obs:make-observer (make-instance 'slow-scripted :delay 0.2
+                                                                    :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                     (mem:make-in-memory-store) "member-1" "conv-7"
+                                     :step (%step-for 6) :retry-delay 0)))
+    (obs:observe-turn observer (%history 6))
+    (is-true (obs:await-observer observer :timeout nil))))
