@@ -26,7 +26,11 @@ ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
   (description "" :type string)
   (schema nil)
   (capability nil)
-  (fn nil))
+  (fn nil)
+  ;; SOURCE: NIL, or a plist naming where the means comes from, such as (:connection "docs"
+  ;; :tool "search") for an MCP tool (#527). It travels on the :TOOL-CALL and :TOOL-RESULT
+  ;; events, so a usage ledger can attribute each call.
+  (source nil))
 
 (defstruct (agent (:constructor make-agent))
   "A runtime agent.
@@ -94,14 +98,16 @@ so one agent can serve several users without one user's call using another's cre
 ;; same user, and one that starts an independent lifetime must not (#158).
 (aion/dynamic:register-inheritable '*principal*)
 
-(defun register-means (agent name description fn &key schema capability)
+(defun register-means (agent name description fn &key schema capability source)
   "Register a means under NAME: a human DESCRIPTION, the FN performing it (a
 function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
-CAPABILITY string a caller must hold to see or use it (#90). Returns NAME."
+CAPABILITY string a caller must hold to see or use it (#90). SOURCE is NIL or a plist that
+names where the means comes from; the :TOOL-CALL and :TOOL-RESULT events carry it (#527).
+Returns NAME."
   (setf (gethash name (agent-means agent))
         (make-means-entry :name name :description description
-                          :schema schema :capability capability :fn fn))
+                          :schema schema :capability capability :fn fn :source source))
   name)
 
 (defun means-permitted-p (entry permit)
@@ -561,21 +567,31 @@ part per requested call."
         (t "(no result)")))
 
 (defun %apply-call (agent name args permit)
-  "Apply the means NAME to ARGS through ACT. Return its result as a string, and a second value
-that is true when the means reported an error for the model to see (#527).
+  "Apply the means NAME to ARGS through ACT. Return its result as a string; a second value
+that is true when the means reported an error for the model to see (#527); the outcome, :OK or
+the condition's OUTCOME; and how many milliseconds the call took.
 
 A means reports such an error by signalling CND:TOOL-ERROR-RESULT. The handler here takes only
 that case, and gives the model the condition's text as an error result. Every other failure
 of a means is declined, so it reaches the app's handlers with ACT's restarts still in place,
 and ends the turn when nothing handles it, as before."
-  (block call
-    (handler-bind ((cnd:means-failure
-                     (lambda (failure)
-                       (let ((cause (cnd:means-failure-cause failure)))
-                         (when (typep cause 'cnd:tool-error-result)
-                           (return-from call
-                             (values (cnd:tool-error-result-text cause) t)))))))
-      (values (%result-string (act agent name args :permit permit)) nil))))
+  (let ((started (get-internal-real-time)))
+    (flet ((ms () (round (* 1000 (- (get-internal-real-time) started))
+                         internal-time-units-per-second)))
+      (block call
+        (handler-bind ((cnd:means-failure
+                         (lambda (failure)
+                           (let ((cause (cnd:means-failure-cause failure)))
+                             (when (typep cause 'cnd:tool-error-result)
+                               (return-from call
+                                 (values (cnd:tool-error-result-text cause) t
+                                         (cnd:tool-error-result-outcome cause) (ms))))))))
+          (let ((result (%result-string (act agent name args :permit permit))))
+            (values result nil :ok (ms))))))))
+
+(defun %means-source (agent name)
+  (let ((entry (gethash name (agent-means agent))))
+    (and entry (means-entry-source entry))))
 
 (defun %tool-results-message (agent calls &key permit)
   "Apply each requested CALL via ACT and gather the results into a neutral user
@@ -587,11 +603,14 @@ each so a client can report progress."
               (let ((id (llm:tool-call-id call))
                     (name (llm:tool-call-name call))
                     (args (llm:tool-call-arguments call)))
-                (evt:emit :tool-call :id id :name name :arguments args)
-                (multiple-value-bind (result error-p) (%apply-call agent name args permit)
-                  (if error-p
-                      (evt:emit :tool-result :id id :name name :content result :is-error t)
-                      (evt:emit :tool-result :id id :name name :content result))
+                (evt:emit :tool-call :id id :name name :arguments args
+                                     :source (%means-source agent name) :principal *principal*)
+                (multiple-value-bind (result error-p outcome ms)
+                    (%apply-call agent name args permit)
+                  (apply #'evt:emit :tool-result :id id :name name :content result
+                         :source (%means-source agent name) :principal *principal*
+                         :outcome outcome :ms ms
+                         (when error-p (list :is-error t)))
                   ;; What the history carries: the result, or its stand-in when it is kept
                   ;; outside the conversation (#319).
                   (llm:tool-result-part id (%store-result agent id name args result) error-p))))
