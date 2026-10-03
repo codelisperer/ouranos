@@ -101,6 +101,9 @@ whose text happens to look like hyperion/i18n's `"[section/key]"` marker is used
 | `calendar/next-month` | Next month (the next link's `aria-label`) |
 
 `month-year` exists so that a locale can change the word order, as in `{year}年{month}`.
+In many locales its value is the same as the English one, `{month} {year}`. An app that checks
+its dictionaries for keys whose translation equals the English text will report this key in
+those locales, so exempt `calendar/month-year` from that check.
 
 ## CSS classes
 
