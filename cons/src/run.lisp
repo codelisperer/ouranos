@@ -96,6 +96,18 @@ both upcased for the standard readtable."
 ;;;     framework) is loaded first with warnings muffled, as Quicklisp's quiet mode did. A
 ;;;     warning inside a library is not the app's to fix, and must not fail the app's build.
 ;;;
+;;; A WARNING that SBCL defers to the end of the compilation unit -- an undefined variable,
+;;; including one a later file of the same system defines -- is signalled after COMPILE-FILE
+;;; has returned with FAILURE-P false, so ASDF does not fail the load over it (#525). When it
+;;; arrives, *COMPILE-FILE-TRUENAME* is NIL and *LOAD-TRUENAME* names whatever file called the
+;;; loader, not the file with the mistake, so neither can say whose warning it is. The loader
+;;; does not need them to: by the time the own systems load, every other system is already
+;;; loaded, so a full WARNING signalled during that load is the project's own. Each load gets
+;;; its own compilation unit, with :OVERRIDE T, so that the deferred warnings are signalled
+;;; before the load returns even when the caller is inside a compilation unit of its own:
+;;; the own systems' inside the handler that counts them, and the others' inside the handler
+;;; that muffles them.
+;;;
 ;;; A system Quicklisp has not downloaded yet cannot be found by ASDF; FIND-SYSTEM then
 ;;; signals MISSING-COMPONENT, and the loader quickloads the missing name and tries again.
 ;;;
@@ -128,7 +140,23 @@ both upcased for the standard readtable."
                   ;; A system ASDF can already find: load it with warnings muffled, which is
                   ;; what Quicklisp's quiet mode does, without asking Quicklisp to look it up.
                   (handler-bind ((warning (function muffle-warning)))
-                    (asdf :load-system name)))
+                    (with-compilation-unit (:override t)
+                      (asdf :load-system name))))
+                (own-load (name)
+                  ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
+                  ;; handler is for the ones deferred to the end of the unit; see above.
+                  ;; COMPILE-WARNED-WARNING is ASDF's own report that a file compiled with
+                  ;; style-warnings only, so it is not counted.
+                  (let ((caught '()))
+                    (handler-bind ((warning (lambda (w)
+                                              (unless (typep w '(or style-warning
+                                                                 uiop:compile-warned-warning))
+                                                (push w caught)))))
+                      (with-compilation-unit (:override t)
+                        (asdf :load-system name :force (if force-own own nil))))
+                    (when caught
+                      (error "Loading ~A signalled ~D WARNING~:P at the end of the compilation unit, after its files compiled:~{~%  ~A~}"
+                             name (length caught) (reverse caught)))))
                 (missing-p (c)
                   (typep c (uiop:find-symbol* :missing-component :asdf)))
                 (find-sys (name)
@@ -179,10 +207,10 @@ both upcased for the standard readtable."
                               (t (push name others))))))))
          (visit system)
          (dolist (name (reverse others)) (quiet name))
-         (asdf :load-system system :force (if force-own own nil))
+         (own-load system)
          (when with-tests
            (dolist (name (reverse own))
-             (asdf :load-system name :force (if force-own own nil))))
+             (own-load name)))
          (values (reverse own) (reverse others)))))
   "The loader, as a form. See the comment above.")
 

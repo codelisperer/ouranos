@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **`cons build`, `cons test` and `cons --strict` fail on an undefined variable in the project's
+  own code.** SBCL reports an undefined variable when the compilation unit ends, after
+  `compile-file` has returned without a failure. This includes a special variable that a later
+  file of the same system defines with `defvar`. `cons/run:load-system-strictly` printed that
+  WARNING and still loaded the system, so the target exited 0. It now fails the load with an
+  error that names the system and each variable. Libraries outside the project directory are
+  still loaded with their warnings muffled, including a library that signals a WARNING when its
+  fasl loads. An app acts if its code has such a warning, which now fails its build. An app that
+  carries its own strict-build script to catch this case can use `cons --strict build` instead.
+  (#525)
 - **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
   by default.**
   `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and
