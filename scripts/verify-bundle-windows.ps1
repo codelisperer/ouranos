@@ -118,6 +118,14 @@ $OnCI = ($env:GITHUB_ACTIONS -eq 'true') -or [bool]$env:CI
 if ($env:OS -ne 'Windows_NT') { Write-Host 'ERROR: Windows only; see verify-bundle.sh and verify-bundle-macos.sh' -ForegroundColor Red; exit 2 }
 if (-not (Test-Path -LiteralPath $Bundle -PathType Container)) { Write-Host "ERROR: no such bundle directory: $Bundle" -ForegroundColor Red; exit 2 }
 $BundleDir = (Resolve-Path -LiteralPath $Bundle).Path.TrimEnd('\')
+
+# A library whose licence is not permissive travels with its source: libgit2's pinned tarball
+# under SOURCES\ and its licence under LICENSES\ (ADR-0013's amendment of 2026-10-01, #429).
+& sbcl --script (Join-Path $PSScriptRoot 'check-bundle-sources.lisp') $BundleDir
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "ERROR: the bundle lacks a source or licence a carried library requires" -ForegroundColor Red
+  exit 1
+}
 $WinDir = $env:WINDIR.TrimEnd('\')
 $Sys32 = [Environment]::SystemDirectory.TrimEnd('\')
 

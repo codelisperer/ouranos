@@ -63,6 +63,41 @@ its tag.
   taken it is a reading of two changing numbers. An app that reads it to decide something while
   the pool is busy, rather than to report it, should not rely on it being exact. In the tree, only
   `aion/pool`'s own tests read it, and only once the pool is quiet.
+- **A Windows update installs the whole new version or none of it.** Both installers,
+  `scripts/installers/windows.nsi` and `windows.iss`, used to write the new files over the
+  install directory one at a time, so an update that stopped part-way left a launcher and a
+  `sbcl.core` from different versions, which the launcher refuses (exit 126). They now extract
+  to `<install>.new`, have the staged `<name>.exe` check the staged core
+  (`OURANOS_LAUNCHER_CHECK_ONLY=1`), and rename `<install>` to `<install>.old` and
+  `<install>.new` to `<install>`. The launcher deletes `<install>.old` after it starts the
+  runtime, and the next installer run finishes or undoes a swap that stopped between its
+  renames. `hyperion/update`'s `launch-installer` starts the installer in its staging directory.
+  An app acts if something it starts keeps the install directory as its current directory, or a
+  file there open, after the app exits: the installer waits 20 seconds for the directory, then
+  fails without changing anything and exits 2, the NSIS installer and the Inno one alike. An
+  app acts too if its packaging puts its
+  own files into the install directory after the installer runs, or keeps anything in
+  `<install>.old` or `<install>.new`: both names are now the installers'. A bundle with
+  `sbcl.core` and no `sbcl-runtime.exe`, or the other way round, is refused by
+  `scripts/build-installer.ps1` and by both installers, which used to install it to fail at
+  launch. An uninstaller that cannot be copied (Inno) or written (NSIS) into `<install>.new`
+  stops the update before the swap, with exit 2. Both installers' exit codes are now: 0, the new
+  version is installed and, on a silent run, the app was started; 2, the update failed and the
+  installed version is unchanged (or, if the previous version could not be put back, the checked
+  new copy is kept in `<install>.new` for the next run to finish); 3, the new version is
+  installed but the app could not be started. An app or script that runs an installer itself
+  and treats any non-zero code as "not updated" acts on 3. (#98)
+- **`cons build`, `cons test` and `cons --strict` fail on an undefined variable in the project's
+  own code.** SBCL reports an undefined variable when the compilation unit ends, after
+  `compile-file` has returned without a failure. This includes a special variable that a later
+  file of the same system defines with `defvar`. `cons/run:load-system-strictly` printed that
+  WARNING and still loaded the system, so the target exited 0. It now fails the load with an
+  error that names the system and each variable. A full WARNING that one of the project's own
+  files signals when its fasl loads, such as a toplevel `warn`, fails the load the same way. Libraries outside the project directory are
+  still loaded with their warnings muffled, including a library that signals a WARNING when its
+  fasl loads. An app acts if its code has such a warning, which now fails its build. An app that
+  carries its own strict-build script to catch this case can use `cons --strict build` instead.
+  (#525)
 
 ### Added
 
@@ -117,6 +152,15 @@ its tag.
   draining on `stop-pool`, and reporting a job that signals. On macOS in `hyperion/bench` with
   4 loops and 8 workers, `/tile` went from about 96,800 to about 110,700 requests/s, against
   about 111,100 with handlers run on the loops. See "An app may have to act" for `pool-queued`.
+- **Desktop bundles carry libgit2 when the app loads `aion/libgit`, with its source and its
+  licence** (#429). `scripts/build-desktop-app.lisp` wakes and carries libgit2 as it does libuv and
+  mbedTLS. libgit2 is GPLv2 with a linking exception, so the bundle also carries the pinned
+  source tarball under `SOURCES/` and `COPYING` under `LICENSES/`, as ADR-0013's amendment of
+  2026-10-01 records. The bundler refuses to build a bundle whose tarball's sha256 is not the
+  one `libgit2.pin` records. `scripts/check-bundle-sources.lisp BUNDLE` checks a built bundle, and
+  the three verify-bundle scripts run it. In a bundle, `aion/libgit` no longer looks in the source
+  tree's `vendor/libgit2`, as `aion/uv` and `aion/tls` already did not (#472). The bundler now
+  also finds licence files named `COPYING*`, and those beside the library in `lib/`.
 
 ### Fixed
 
@@ -162,6 +206,14 @@ its tag.
   rectangle Windows reports and exits; start it hidden. Rebuild
   `hyperion-view` (`hyperion/hyperion-view/build.ps1`) to get it. macOS already centred the
   window; Linux leaves placement to the window manager. (#485)
+- **aion/pool: two jobs that call `stop-pool` at the same time both return, and a later
+  `stop-pool` from outside the pool waits for every worker** (#520). With two or more workers,
+  two jobs calling `stop-pool` at once used to wait for each other's worker and never returned;
+  a call from a job now skips any worker whose own job is inside `stop-pool`. After a job had
+  called `stop-pool`, a later call from outside returned at once, while that job's worker was
+  still running the jobs queued behind it; it now joins every worker, so when it returns no job
+  is running and none will start. `stop-pool`'s docstring now says that the calling job's
+  worker runs the jobs queued behind it before it exits.
 
 ## v0.1.7 — 2026-09-30
 

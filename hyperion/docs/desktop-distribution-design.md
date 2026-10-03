@@ -332,7 +332,7 @@ bundle.
 
 **Windows — `nsis`: hand off to our own installer.** The payload *is* the installer, so
 after verifying it: launch it with `/S` (silent) `/D=<install dir>`, then **exit
-immediately** so nothing is locked; NSIS replaces the files and `Exec`s the new build on
+immediately** so nothing is locked; NSIS installs the new version and `Exec`s it on
 completion. This sidesteps the locked-exe problem entirely — a running `.exe` cannot be
 overwritten, and the process that would be overwritten is gone before the installer starts.
 It also keeps shortcuts, the uninstall entry and the install location correct, which a
@@ -341,6 +341,66 @@ file-level swap silently drifts away from.
 The cost is a brief close-and-reopen (Tauri behaves the same), and that once the installer
 is handed control we can no longer report progress — so the UI states "installing…" until
 the new process reports its version.
+
+**Both Windows installers swap the whole install directory (#98, step 3).** A Windows bundle
+is `<name>.exe` (the launcher), `sbcl-runtime.exe` and `sbcl.core`, and the launcher refuses
+a core it was not built with, so a directory holding some files of each version does not
+start. Until step 3 both installers extracted file by file over the live directory, and an
+install that stopped part-way left exactly that. Now `windows.nsi` and `windows.iss`:
+
+1. finish or undo a swap an earlier run left half done (below);
+2. extract to `<install>.new`, beside the install directory on the same volume;
+3. run the staged launcher with `OURANOS_LAUNCHER_CHECK_ONLY=1`, which checks the staged core
+   as it does at every start and exits 0 or 126 without starting the app;
+4. rename `<install>` to `<install>.old`, then `<install>.new` to `<install>`;
+5. relaunch. The launcher deletes `<install>.old` once it has started the runtime.
+
+`<install>.old` exists only after step 3 passed, so a run that finds no `<install>` beside an
+`<install>.old` moves a `<install>.new` into place, or moves `<install>.old` back when there is
+none. Any other `<install>.new` is an extraction that did not finish, and is deleted.
+
+A directory cannot be renamed while a process has its current directory inside it or a file
+in it open, whatever the sharing mode; a program running from it does not prevent it
+(measured on Windows 11, #98). The app is started in its install directory, and the installer
+inherited the app's current directory until `launch-installer` started it in its staging
+directory. So each installer moves its own current directory out first, to the install
+directory's parent, and retries the first rename for 20 seconds while the app exits. If it never
+succeeds, nothing has changed: the staged copy is deleted and the installer exits 2, to be tried
+at the next update. The second rename is retried for 20 seconds as well, because a file open in
+`<install>.new` stops it too, which an antivirus scanner reading the new files can do; giving up
+on it moves `<install>.old` back, deletes the staged copy and exits 2.
+
+Each installer puts its uninstaller into `<install>.new` before the swap: NSIS writes it there,
+and Inno copies the one it has just written into `<install>`. If that fails, the update stops
+before the swap with exit 2, because a version swapped in without it would have an uninstall
+entry naming a file that is not there. After the swap, a silent run starts the app; if it cannot,
+the installer exits 3. The new version is installed by then, so nothing is put back, and the
+exit code is what tells a caller that the app is not running (review of train 21).
+
+Both installers end a silent run with one of three exit codes:
+
+| code | meaning |
+|---|---|
+| 0 | The new version is installed, and on a silent run the app was started. |
+| 2 | The update failed and the installed version is unchanged, or, if the previous version could not be put back, the checked new copy is kept in `<install>.new` for the next run to move into place. |
+| 3 | The new version is installed, but the app could not be started afterwards. |
+
+`scripts/tests/windows-installer-swap.lisp` forces each failure: a file held open in the install
+directory or in `<install>.new` (exit 2), a directory with the uninstaller's name made in
+`<install>.new` (exit 2), and an installer whose program is not in its bundle (exit 3).
+
+Inno needed two more things. A `[Run]` entry without `postinstall` runs before
+`CurStepChanged(ssPostInstall)`, where the swap happens, so the silent relaunch there started a
+file that was still in `<install>.new`. It failed, and Setup exited 0 anyway, because
+`/SUPPRESSMSGBOXES` answers the error with OK. The relaunch is therefore started from code after
+the swap. Setup also exits 0 after an exception in `CurStepChanged`, so a failed swap sets the
+exit code to 2 through `GetCustomSetupExitCode`, and restores the uninstall entry's
+`DisplayVersion`, which Setup has already rewritten by then.
+
+`scripts/tests/windows-installer-swap.lisp` runs both installers through a first install, an
+update stopped part-way through the copy with the finished update as its control, a
+directory held for 4 seconds, a file held open throughout, and a swap stopped between its
+renames, and checks after every silent install that the app was started.
 
 **Windows — `inno`: the same handoff, different flags, and one property that had to be
 measured.** Inno Setup is supported alongside NSIS because it signs the installer *and the
@@ -394,8 +454,9 @@ claims, and only the second one is what an update promises.
 *Fallback, for a portable install with no installer present:* the rename dance ADR-0008
 anticipated — a running `.exe` cannot be deleted or overwritten but **can be renamed**, so
 rename `<app>.exe` → `.old`, write the new one, relaunch, delete `.old` at next startup.
-Kept in the design because a portable/no-install mode is a plausible future ask, and
-because it is the rollback path if an installer run fails midway.
+Kept in the design because a portable/no-install mode is a plausible future ask. An installer
+run that fails midway no longer needs it: the directory swap above leaves the old version
+whole.
 
 **macOS — `app-targz`.** Replacing files inside a signed `.app` invalidates its signature,
 so swap the **whole bundle**: unpack the `.tar.gz` (the system `tar` — no library needed)

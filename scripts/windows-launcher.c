@@ -36,6 +36,15 @@
  * BEFORE STARTING THE RUNTIME it checks sbcl.core's SHA-256 against the one compiled in
  * (OURANOS_CORE_SHA256, below) and exits with 126, saying so, when they differ (#98, step 2).
  *
+ * With OURANOS_LAUNCHER_CHECK_ONLY set in its environment, it checks the core, reports nothing,
+ * and exits 0 when the core is the one it was built with and 126 when it is not, without
+ * starting the runtime. The installers run it this way against the files they staged (#98,
+ * step 3); an environment variable, because every argument belongs to the app.
+ *
+ * AFTER STARTING THE RUNTIME it deletes <install>.old, the directory beside its own that an
+ * installer leaves when it swaps a new version in (scripts/installers/, #98 step 3). That is
+ * the previous version, kept only until the new one has started.
+ *
  * OURANOS_HEAP_MB and OURANOS_CORE_SHA256 are set when build-desktop-app.lisp compiles this
  * file, after the core is dumped: the heap of the process that dumped it, and its hash.
  */
@@ -73,6 +82,9 @@
 
 /* Exit code for a core that is not the one the launcher was built with. */
 #define EXIT_CORE_CHANGED 126
+
+/* When set in the environment, check the core and exit without starting the runtime. */
+#define CHECK_ONLY_VARIABLE L"OURANOS_LAUNCHER_CHECK_ONLY"
 
 static void fail(const wchar_t *what, const wchar_t *path) {
   fwprintf(stderr, L"launcher: %ls %ls (error %lu)\n", what, path ? path : L"", GetLastError());
@@ -125,6 +137,51 @@ done:
   return result;
 }
 
+/* Delete the directory tree at PATH, which is not followed through a junction or a symbolic
+   link: those are removed as links. A file that cannot be deleted, such as a program still
+   running from the previous version, is left, and the next start or the next update tries
+   again. */
+static void delete_tree(const wchar_t *path) {
+  wchar_t pattern[MAX_PATH * 4], child[MAX_PATH * 4];
+  WIN32_FIND_DATAW found;
+  if (swprintf_s(pattern, sizeof pattern / sizeof pattern[0], L"%ls\\*", path) < 0) return;
+  HANDLE search = FindFirstFileW(pattern, &found);
+  if (search != INVALID_HANDLE_VALUE) {
+    do {
+      if (wcscmp(found.cFileName, L".") == 0 || wcscmp(found.cFileName, L"..") == 0) continue;
+      if (swprintf_s(child, sizeof child / sizeof child[0], L"%ls\\%ls", path, found.cFileName) < 0)
+        continue;
+      if (found.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+        SetFileAttributesW(child, found.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
+      if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+          !(found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        delete_tree(child);
+      } else if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        RemoveDirectoryW(child);
+      } else {
+        DeleteFileW(child);
+      }
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+  }
+  RemoveDirectoryW(path);
+}
+
+/* Delete DIR.old, the previous version an installer's swap leaves beside the install directory
+   DIR, if it is there and is a directory. A junction or symbolic link of that name is removed
+   as a link, and what it points to is not touched. */
+static void delete_previous_version(const wchar_t *dir) {
+  wchar_t old[MAX_PATH * 4];
+  if (swprintf_s(old, sizeof old / sizeof old[0], L"%ls.old", dir) < 0) return;
+  DWORD attributes = GetFileAttributesW(old);
+  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) return;
+  if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    RemoveDirectoryW(old);
+  } else {
+    delete_tree(old);
+  }
+}
+
 /* The rest of the command line after the program name, following the rules the C runtime
    uses to split argv[0]: a quoted name ends at the next quote, an unquoted one at the first
    space or tab. Leading spaces of the rest are kept out. */
@@ -170,7 +227,14 @@ int wmain(void) {
   {
     wchar_t found[65] = L"";
     wchar_t message[MAX_PATH * 4 + 512];
+    /* Set and not empty: GetEnvironmentVariableW returns 0 for an empty value as for none, so
+       a caller that clears the variable by emptying it does not leave the app unable to start. */
+    wchar_t flag[8];
+    BOOL check_only = GetEnvironmentVariableW(CHECK_ONLY_VARIABLE, flag, 8) > 0;
     DWORD err = sha256_file(core, found);
+    if (check_only) {
+      return (err == 0 && _wcsicmp(found, WSTR(OURANOS_CORE_SHA256)) == 0) ? 0 : EXIT_CORE_CHANGED;
+    }
     if (err != 0) {
       swprintf_s(message, sizeof message / sizeof message[0],
                  L"cannot read %ls to check it (error %lu). Reinstall the app.", core, err);
@@ -222,6 +286,8 @@ int wmain(void) {
     return 127;
   }
   CloseHandle(pi.hThread);
+  /* The new version has started, so the previous one an update left beside it can go. */
+  delete_previous_version(dir);
   WaitForSingleObject(pi.hProcess, INFINITE);
   DWORD code = 127;
   if (!GetExitCodeProcess(pi.hProcess, &code)) {

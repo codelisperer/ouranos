@@ -96,6 +96,18 @@ both upcased for the standard readtable."
 ;;;     framework) is loaded first with warnings muffled, as Quicklisp's quiet mode did. A
 ;;;     warning inside a library is not the app's to fix, and must not fail the app's build.
 ;;;
+;;; A WARNING that SBCL defers to the end of the compilation unit -- an undefined variable,
+;;; including one a later file of the same system defines -- is signalled after COMPILE-FILE
+;;; has returned with FAILURE-P false, so ASDF does not fail the load over it (#525). When it
+;;; arrives, *COMPILE-FILE-TRUENAME* is NIL and *LOAD-TRUENAME* names whatever file called the
+;;; loader, not the file with the mistake, so neither can say whose warning it is. The loader
+;;; does not need them to: by the time the own systems load, every other system is already
+;;; loaded, so a full WARNING signalled during that load is the project's own. Each load gets
+;;; its own compilation unit, with :OVERRIDE T, so that the deferred warnings are signalled
+;;; before the load returns even when the caller is inside a compilation unit of its own:
+;;; the own systems' inside the handler that counts them, and the others' inside the handler
+;;; that muffles them.
+;;;
 ;;; A system Quicklisp has not downloaded yet cannot be found by ASDF; FIND-SYSTEM then
 ;;; signals MISSING-COMPONENT, and the loader quickloads the missing name and tries again.
 ;;;
@@ -128,7 +140,30 @@ both upcased for the standard readtable."
                   ;; A system ASDF can already find: load it with warnings muffled, which is
                   ;; what Quicklisp's quiet mode does, without asking Quicklisp to look it up.
                   (handler-bind ((warning (function muffle-warning)))
-                    (asdf :load-system name)))
+                    (with-compilation-unit (:override t)
+                      (asdf :load-system name))))
+                (own-load (name)
+                  ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
+                  ;; handler is for the ones it does not fail on: those deferred to the end of
+                  ;; the unit (see above), and those the project's own files signal when they
+                  ;; load, such as a toplevel WARN, which fail the load under #303 as well.
+                  ;; Two of ASDF's own warnings are not about the project's code, so they are
+                  ;; not counted: COMPILE-WARNED-WARNING reports that a file compiled with
+                  ;; style-warnings only, and RECURSIVE-OPERATE that the loader was called from
+                  ;; inside an ASDF operation, as it is when cons's own tests run under
+                  ;; ASDF:TEST-SYSTEM.
+                  (let ((caught '())
+                        (recursive (uiop:find-symbol* :recursive-operate :asdf/operate nil)))
+                    (handler-bind ((warning (lambda (w)
+                                              (unless (or (typep w '(or style-warning
+                                                                     uiop:compile-warned-warning))
+                                                          (and recursive (typep w recursive)))
+                                                (push w caught)))))
+                      (with-compilation-unit (:override t)
+                        (asdf :load-system name :force (if force-own own nil))))
+                    (when caught
+                      (error "Loading ~A signalled ~D WARNING~:P that its compilation did not fail on, either when the compilation unit ended or when one of its files was loaded:~{~%  ~A~}"
+                             name (length caught) (reverse caught)))))
                 (missing-p (c)
                   (typep c (uiop:find-symbol* :missing-component :asdf)))
                 (find-sys (name)
@@ -179,10 +214,10 @@ both upcased for the standard readtable."
                               (t (push name others))))))))
          (visit system)
          (dolist (name (reverse others)) (quiet name))
-         (asdf :load-system system :force (if force-own own nil))
+         (own-load system)
          (when with-tests
            (dolist (name (reverse own))
-             (asdf :load-system name :force (if force-own own nil))))
+             (own-load name)))
          (values (reverse own) (reverse others)))))
   "The loader, as a form. See the comment above.")
 

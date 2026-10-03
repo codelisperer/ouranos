@@ -13,7 +13,8 @@
 # The maintainer approved this dependency on #429 (comment 5916493345): libgit2 v1.9.7, built
 # without cmake, HTTPS through the platform (SecureTransport on macOS, WinHTTP on Windows,
 # OpenSSL loaded at run time on Linux), and bundles that carry the binary ship this tarball and
-# its licence beside it.
+# its licence beside it: SOURCES/ and LICENSES/, put there by scripts/build-desktop-app.lisp and
+# checked by scripts/check-bundle-sources.lisp (ADR-0013's amendment of 2026-10-01).
 
 version 1.9.7
 sha256  1a4fbe7589e814777ae76b64734ad80f4ecad22cd33a22682a2aaea4ae5375e7
