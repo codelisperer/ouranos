@@ -159,6 +159,15 @@ on which machine the app runs on. In development there is no bundled copy, and I
   (let ((path (or bundled (and icon (%readable-file icon)))))
     (when path (list "--icon" (uiop:native-namestring path)))))
 
+(defun %placement-arguments (placement-file)
+  "The --placement-file arguments RUN-APP passes the launcher for PLACEMENT-FILE, or none when it
+is NIL (#485). The file's directory is created first: the launcher writes the file, and does not
+create directories."
+  (when placement-file
+    (let ((path (merge-pathnames placement-file)))
+      (ensure-directories-exist path)
+      (list "--placement-file" (uiop:native-namestring path)))))
+
 (define-condition launcher-not-found (error)
   ((path :initarg :path :reader launcher-not-found-path))
   ;; NB: no FORMAT ~<newline> continuations anywhere -- see the root CLAUDE.md gotcha.
@@ -312,7 +321,7 @@ anyway and would warn about being given a count."
                          (shell :webview)
                          (request-guard :same-origin)
                          (launcher (default-launcher))
-                         icon (workers nil workers-p) (loops nil loops-p)
+                         icon placement-file (workers nil workers-p) (loops nil loops-p)
                          on-ready on-close)
   "Run a Hyperion APP as a native desktop window, blocking until the window closes.
 See hyperion/docs/desktop.md.
@@ -335,6 +344,14 @@ ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon 
   Windows, nor a bundled .app's icon on macOS -- both come from elsewhere. A shipped bundle
   built with --window-icon carries its own copy, and that copy is used instead
   (BUNDLED-WINDOW-ICON), because ICON is usually a path on the machine that built the app.
+PLACEMENT-FILE -- a pathname for the file where the window's position, size and maximised state
+  are kept between runs (#485). NIL, the default, keeps none, and the window opens centred in
+  the work area each time. With a file, the window opens where it was last time if that still
+  fits a monitor, and centred otherwise; the file is rewritten after every move or resize. Put
+  it in the app's own data directory, for example (merge-pathnames \"window-placement\"
+  data-dir). Its directory is created if needed. Windows only for now: elsewhere the launcher
+  accepts it and ignores it. It needs a hyperion-view built with this change; an older one
+  refuses the option and exits 2.
 WORKERS -- the number of threads that run the embedded server's handlers, passed to
   HYPERION/SERVER:START. It defaults to 2 when SERVER is :uv (#472): without workers, :uv runs
   every handler on its loop thread, so a handler that waits -- a model call, a slow query, a
@@ -379,7 +396,8 @@ process exiting from another thread, it stops the launcher on the way out (#355)
                         ;; trailing argument as noise, but a --icon pointing at nothing
                         ;; would still cost a silent failed load on every start. A bundle's
                         ;; own copy comes first (#74); see %ICON-ARGUMENTS.
-                        (%icon-arguments icon)))))
+                        (%icon-arguments icon)
+                        (%placement-arguments placement-file)))))
              (:browser
               (open-in-browser url)
               (%wait-for-interrupt))))
