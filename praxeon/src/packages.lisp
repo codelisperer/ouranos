@@ -49,7 +49,7 @@
   (:export
    #:praxeon-error
    #:means-failure #:means-failure-means #:means-failure-cause
-   #:tool-error-result #:tool-error-result-text
+   #:tool-error-result #:tool-error-result-text #:tool-error-result-outcome
    #:deliberation-failure
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
@@ -293,7 +293,7 @@
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens
    #:request-messages
-   #:means-entry #:register-means #:means-permitted-p #:agent-means-for
+   #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.

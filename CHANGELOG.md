@@ -109,6 +109,26 @@ its tag.
   `klio/tests` that made a directory by deleting a file from `uiop:tmpize-pathname`, or named it
   by the time and a counter, use it now; the first of those patterns failed when two suites
   started together on one machine.
+- **praxeon/mcp: agents can use the tools an MCP server offers** (#527, part 1). A new system,
+  `praxeon/mcp`, talks to MCP servers over Streamable HTTP, in the current revision of the
+  specification (2026-07-28) or, when a server does not understand it, in the legacy
+  revisions with their `initialize` handshake. `make-connection` describes a server: its name,
+  URL, `:token-source` (a function of the connection and a principal that returns a bearer
+  token), and `:per-user`. `list-tools` reads a server's tools and gives them to no agent.
+  `grant-tools` registers the tools the app chooses as means named `<connection>__<tool>`, and
+  refuses with `tool-name-conflict`, registering nothing, when a name is taken. `revoke-tools`
+  removes them. Each call uses the token of the turn's principal. A failed call is reported
+  to the model and the turn goes on: `tool-error` for a result with `isError`,
+  `request-failed` for a failed request, and `sign-in-needed` when the user must sign in, which
+  also signals `authorization-required` and emits a `:sign-in-required` event. A tool call that
+  may have run is never sent twice. See `praxeon/docs/mcp.md`. OAuth sign-in is part 2.
+- **praxeon: the `:tool-call` and `:tool-result` events carry `:source` and `:principal`, and
+  `:tool-result` carries `:outcome` and `:ms`** (#527). `register-means` takes a `:source`
+  plist, such as `(:connection "docs" :tool "search")` for an MCP tool, and `:outcome` is
+  `:ok`, `:error`, `:not-run` or `:unknown`, from `tool-error-result-outcome`. This is what a
+  usage ledger needs to record a call, until #493 settles the usage interface.
+- **aion/test-http: the HTTP server aion/http-client's tests ran, as its own system** (#527), so
+  other test suites can run a server in the test image. Test support only.
 - **praxeon: a means can report an error to the model, and the turn goes on** (#527). A means
   that signals `praxeon/conditions:tool-error-result` with a `:text` gives the model a tool
   result marked as an error, carrying that text, and `run-turn` runs its next step. Any other
