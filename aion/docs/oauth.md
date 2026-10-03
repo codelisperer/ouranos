@@ -50,18 +50,18 @@ It follows the authorization section of the MCP specification, revision 2026-07-
   - The protected-resource metadata is found where the specification says: the `resource_metadata` URL in the challenge, or failing that the path-inserted well-known URL, then the root one. Its `resource` must be the connection's canonical URI.
   - The authorization server's metadata is looked for at the RFC 8414 URL, then the OpenID Connect ones. For an issuer with a path, the path goes after the well-known suffix. The document's `issuer` must be identical to the issuer it was fetched for.
   - The server must offer PKCE with `S256`.
-- **URLs from servers.** Every URL a server supplies must be https, or http on a loopback address. It is fetched through `aion/http-client:fetch-public`, which refuses internal addresses and here follows no redirect. A request carrying a code, a refresh token or client metadata is therefore never forwarded to another host. On Windows, where `fetch-public` cannot pin a connection, these requests go out without the address check, and still without redirects.
+- **URLs from servers.** Every URL a server supplies must be https, or http on a loopback address. It is fetched through `aion/http-client:fetch-public`, which refuses internal addresses and here follows no redirect. A request carrying a code, a refresh token or client metadata is therefore never forwarded to another host.
+- **Not on Windows yet.** `fetch-public` cannot pin a connection on Windows, and #295 decided that it signals `pinned-connect-unsupported` there rather than connect without the check. `aion/oauth` keeps that rule for every request, so a sign-in on Windows signals it, until `aion/http-client` can pin a connection there (#536).
 - **The client id.** It comes from the first of these that applies:
   1. a client pre-registered for the issuer (`:pre-registered`, an alist of issuer to client id);
   2. the app's client ID metadata document, when the server sets `client_id_metadata_document_supported`;
   3. a client registered earlier with the same issuer;
   4. a dynamic registration (RFC 7591), sending `application_type`.
 
-  A registered client is never used with another issuer.
+  A registered client is never used with another issuer. The client id is recorded with each sign-in, and the code is redeemed with that client, so a sign-in finished on another instance of the app still works. The client store should be shared by an app's instances, so that the app registers one client per issuer, not one per instance.
 - **Scopes.** The scopes come from the first source that has some: the caller's `:scopes`, the challenge's `scope`, then the protected resource's `scopes_supported`. The scopes of an earlier sign-in to the same connection are kept, so a step-up after an `insufficient_scope` 403 does not lose them. `offline_access` is added when the authorization server lists it.
-- **Tokens.** A token is kept with the resource and the issuer it was issued for, and `access-token` returns it only for that resource. A connection whose URL changes under the same name therefore needs a new sign-in. Tokens and the verifier are `aion/secret` values, and nothing is logged but connection names, issuers and outcomes.
+- **Tokens.** A token is kept with the resource and the issuer it was issued for. `access-token` returns it only for that resource, and only while the resource's protected-resource metadata still names that issuer. The metadata is cached per resource for the broker's `:metadata-lifetime`, one hour by default, and read again after the server refuses a token, so the check does not cost a request on every call. A connection whose URL changes under the same name therefore needs a new sign-in. Tokens and the verifier are `aion/secret` values, and nothing is logged but connection names, issuers and outcomes.
 
 ## Known limitations
 
-- **Issuer changes go unseen until a sign-in or a refresh.** `access-token` checks the resource on every call. It checks the issuer only when a sign-in starts, because that check needs a discovery round trip.
 - **An MCP reply stream left open after the reply** is read until the read timeout, because `aion/http-client` reads a whole body. The call then fails, with outcome `:unknown` for a tool call. The specification says a server's final response SHOULD end the stream.

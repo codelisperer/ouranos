@@ -52,6 +52,8 @@ A token source is anything that implements `token-for`: a function, NIL for no t
 - It refreshes an expired token, and refreshes once more when the server refuses the token.
 - After an `insufficient_scope` 403 it does not refresh, because only a new sign-in with more scope can help.
 
+Sign-in is not available on Windows yet. `aion/oauth` fetches every URL a server supplies through `fetch-public`, which cannot pin a connection on Windows and refuses there (#295). A sign-in on Windows therefore signals `pinned-connect-unsupported`, until `aion/http-client` can pin a connection there (#536).
+
 When there is no usable token, the call fails with `sign-in-needed`. The app then starts a sign-in with `oauth:start-sign-in` from the challenge that `authorization-required` carried.
 
 ```lisp

@@ -49,7 +49,7 @@ ACCESS-TOKEN returns NIL."))
 (defstruct (broker (:constructor make-broker
                        (&key store redirect-uri (client-name "aion/oauth client")
                              (application-type "web") client-metadata-url pre-registered
-                             (timeout 30) (sign-in-lifetime 600)
+                             (timeout 30) (sign-in-lifetime 600) (metadata-lifetime 3600)
                              (address-policy #'http:address-category)
                              (resolve #'http:resolve-host))))
   "What an app's sign-ins share.
@@ -61,9 +61,15 @@ APPLICATION-TYPE is sent with a dynamic registration: \"web\" for an app served 
 where the app publishes its client ID metadata document (CLIENT-METADATA-DOCUMENT), or NIL.
 PRE-REGISTERED is an alist of (ISSUER . CLIENT-ID) for clients registered by hand. TIMEOUT
 bounds each request, in seconds, and SIGN-IN-LIFETIME how long a started sign-in waits.
-ADDRESS-POLICY and RESOLVE are passed to FETCH-PUBLIC; tests use them to allow 127.0.0.1."
+ADDRESS-POLICY and RESOLVE are passed to FETCH-PUBLIC; tests use them to allow 127.0.0.1.
+
+METADATA-LIFETIME is how many seconds the protected-resource metadata a token was issued under
+is kept before ACCESS-TOKEN fetches it again to check that the resource still names the same
+authorization server. It is also fetched again after the server refuses a token."
   store redirect-uri client-name application-type client-metadata-url pre-registered
-  timeout sign-in-lifetime address-policy resolve)
+  timeout sign-in-lifetime metadata-lifetime address-policy resolve
+  (metadata-cache (make-hash-table :test #'equal))
+  (metadata-lock (sb-thread:make-mutex :name "aion/oauth metadata cache")))
 
 ;;; --- URLs ------------------------------------------------------------------------------
 
@@ -99,33 +105,30 @@ path."
     url))
 
 (defun %fetch (broker method url &key content headers)
-  "One request to URL, a URL from a server, checked by FETCH-PUBLIC and following no
-redirect. On Windows, where FETCH-PUBLIC cannot pin a connection, the request is sent without
-the address check and still without redirects."
-  (flet ((plain ()
-           (http:send-request
-            (http:make-request :method method :url url :headers headers :content content
-                               :connect-timeout (broker-timeout broker)
-                               :read-timeout (broker-timeout broker)
-                               :follow-redirects nil :max-body-bytes (* 1024 1024))
-            '())))
-    (handler-case
-        (handler-case
-            (http:fetch-public url :method method :headers headers :content content
-                                   :max-redirects 0 :max-body-bytes (* 1024 1024)
-                                   :connect-timeout (broker-timeout broker)
-                                   :read-timeout (broker-timeout broker)
-                                   :address-policy (broker-address-policy broker)
-                                   :resolve (broker-resolve broker))
-          (http:pinned-connect-unsupported () (plain)))
-      (http:too-many-redirects ()
-        (error 'oauth-error :detail (format nil "~A answered with a redirect, which is not followed"
-                                            (%host-of url))))
-      (http:fetch-refused (e)
-        (error 'url-refused :detail (format nil "~A was refused: ~(~A~)" (http:fetch-refused-host e)
-                                            (http:fetch-refused-reason e))))
-      (http:http-error ()
-        (error 'oauth-error :detail (format nil "a request to ~A failed" (%host-of url)))))))
+  "One request to URL, a URL from a server, through FETCH-PUBLIC: the address is checked and
+the connection pinned to it, and no redirect is followed, so a code, a refresh token or client
+metadata is never sent anywhere else.
+
+On Windows FETCH-PUBLIC cannot pin a connection, and this signals PINNED-CONNECT-UNSUPPORTED,
+as #295 decided for every URL a server or a user supplies: there is no fallback that connects
+without the check. Sign-in is therefore not available on Windows until aion/http-client can
+pin a connection there."
+  (handler-case
+      (http:fetch-public url :method method :headers headers :content content
+                             :max-redirects 0 :max-body-bytes (* 1024 1024)
+                             :connect-timeout (broker-timeout broker)
+                             :read-timeout (broker-timeout broker)
+                             :address-policy (broker-address-policy broker)
+                             :resolve (broker-resolve broker))
+    (http:pinned-connect-unsupported (e) (error e))
+    (http:too-many-redirects ()
+      (error 'oauth-error :detail (format nil "~A answered with a redirect, which is not followed"
+                                          (%host-of url))))
+    (http:fetch-refused (e)
+      (error 'url-refused :detail (format nil "~A was refused: ~(~A~)" (http:fetch-refused-host e)
+                                          (http:fetch-refused-reason e))))
+    (http:http-error ()
+      (error 'oauth-error :detail (format nil "a request to ~A failed" (%host-of url))))))
 
 (defun %host-of (url) (or (ignore-errors (quri:uri-host (quri:uri url))) "?"))
 
@@ -180,7 +183,7 @@ lower-cased names to values, or NIL."
 server chosen. SCOPES is the protected resource's scopes_supported; CHALLENGE-SCOPE the 401's
 scope parameter. AS-SCOPES is the authorization server's scopes_supported."
   resource issuer authorization-endpoint token-endpoint registration-endpoint
-  revocation-endpoint scopes as-scopes challenge-scope cimd-p iss-required)
+  revocation-endpoint scopes as-scopes challenge-scope cimd-p iss-required metadata-url)
 
 (defun %well-known (url suffix)
   "The well-known URL for SUFFIX at URL's origin, with URL's path inserted after it when there
@@ -214,7 +217,7 @@ is one (RFC 8414 section 3.1, RFC 9728 section 3.1)."
             (unless (and (stringp claimed) (string= (canonical-resource claimed) resource))
               (error 'metadata-refused
                      :detail "the protected resource metadata names a different resource"))
-            (return doc)))))))
+            (return (values doc url))))))))
 
 (defun %as-metadata-urls (issuer)
   (let* ((uri (quri:uri issuer))
@@ -246,7 +249,10 @@ CHALLENGE is the WWW-Authenticate value of the 401 that started this, or NIL. EX
 when given, is the only issuer accepted. Returns a METADATA."
   (let* ((resource (canonical-resource resource-url))
          (params (parse-challenge challenge))
-         (prm (%resource-metadata broker resource params))
+         (prm-url nil)
+         (prm (multiple-value-bind (doc url) (%resource-metadata broker resource params)
+                (setf prm-url url)
+                doc))
          (issuers (%strings (gethash "authorization_servers" prm)))
          (issuers (if expected-issuer
                       (remove expected-issuer issuers :test-not #'string=)
@@ -262,7 +268,7 @@ when given, is the only issuer accepted. Returns a METADATA."
                                             :detail (format nil "the metadata has no ~A" name)))))))
             (return
               (make-metadata
-               :resource resource :issuer issuer
+               :resource resource :issuer issuer :metadata-url prm-url
                :authorization-endpoint (endpoint "authorization_endpoint" t)
                :token-endpoint (endpoint "token_endpoint" t)
                :registration-endpoint (endpoint "registration_endpoint")
@@ -376,6 +382,7 @@ same connection are kept, so a step-up for more scope does not lose what was gra
                                 :revocation-endpoint (metadata-revocation-endpoint metadata)
                                 :iss-required (metadata-iss-required metadata)
                                 :scope (format nil "~{~A~^ ~}" wanted)
+                                :metadata-url (metadata-metadata-url metadata)
                                 :expires-at (+ (get-universal-time)
                                                (broker-sign-in-lifetime broker))))
     (log:info "aion/oauth: sign-in started" :connection connection :issuer (metadata-issuer metadata))
@@ -417,7 +424,8 @@ token is kept when the server did not rotate it."
        :client-id (if old (token-set-client-id old) (pending-client-id pending))
        :token-endpoint (if old (token-set-token-endpoint old) (pending-token-endpoint pending))
        :revocation-endpoint (if old (token-set-revocation-endpoint old)
-                                (pending-revocation-endpoint pending))))))
+                                (pending-revocation-endpoint pending))
+       :metadata-url (if old (token-set-metadata-url old) (pending-metadata-url pending))))))
 
 (defun %error-code-of (response)
   (let ((doc (ignore-errors (jzon:parse (http:response-body response)))))
@@ -492,6 +500,7 @@ refresh. Refreshes of one token run one at a time (CALL-WITH-REFRESH-LOCK). Sign
 REFRESH-FAILED when the server could not be reached."
   (let ((store (broker-store broker))
         (resource (canonical-resource resource-url)))
+    (when rejected (%forget-metadata broker (get-token store principal connection)))
     (call-with-refresh-lock
      store (list principal connection)
      (lambda ()
@@ -523,14 +532,48 @@ REFRESH-FAILED when the server could not be reached."
                                 :detail (format nil "the token endpoint answered ~D"
                                                 (http:response-status response))))))))))))))
 
+(defun %current-issuers (broker token-set)
+  "The authorization servers TOKEN-SET's resource names now, from its protected-resource
+metadata, kept for the broker's METADATA-LIFETIME. A cached answer is used when a fetch fails."
+  (let* ((url (token-set-metadata-url token-set))
+         (cache (broker-metadata-cache broker))
+         (now (get-universal-time))
+         (cached (sb-thread:with-mutex ((broker-metadata-lock broker)) (gethash url cache))))
+    (if (and cached (> (cdr cached) now))
+        (car cached)
+        (let ((issuers
+                (handler-case
+                    (progn
+                      (%check-url url "protected resource metadata URL")
+                      (let ((doc (%get-json broker url)))
+                        (and doc (equal (canonical-resource (or (gethash "resource" doc) ""))
+                                        (token-set-resource token-set))
+                             (%strings (gethash "authorization_servers" doc)))))
+                  (http:pinned-connect-unsupported (e) (error e))
+                  (oauth-error () (if cached (car cached) (error 'oauth-error :detail "the protected resource metadata could not be read"))))))
+          (sb-thread:with-mutex ((broker-metadata-lock broker))
+            (setf (gethash url cache) (cons issuers (+ now (broker-metadata-lifetime broker)))))
+          issuers))))
+
+(defun %forget-metadata (broker token-set)
+  (when (and token-set (token-set-metadata-url token-set))
+    (sb-thread:with-mutex ((broker-metadata-lock broker))
+      (remhash (token-set-metadata-url token-set) (broker-metadata-cache broker)))))
+
 (defun access-token (broker principal connection resource-url)
   "PRINCIPAL's access token for CONNECTION, refreshed first when it has expired, or NIL when
-there is none. A token is returned only for the resource it was issued for, so a connection
-whose URL changed under the same name gets NIL, and its user signs in again."
+there is none. A token is returned only for the resource it was issued for, and only while that
+resource's protected-resource metadata still names the authorization server that issued it, so
+a connection whose URL or authorization server changed gets NIL, and its user signs in again.
+The metadata is kept for the broker's METADATA-LIFETIME, so this costs a request only when the
+cache has expired or the server has refused a token."
   (let* ((resource (canonical-resource resource-url))
          (current (get-token (broker-store broker) principal connection)))
     (cond ((null current) nil)
           ((not (equal (token-set-resource current) resource)) nil)
+          ((not (member (token-set-issuer current) (%current-issuers broker current)
+                        :test #'equal))
+           nil)
           ((%usable current resource))
           (t (refresh broker principal connection resource-url)))))
 

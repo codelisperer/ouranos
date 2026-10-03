@@ -80,7 +80,9 @@ its tag.
     URLs from servers must be https and are fetched through `fetch-public` with no redirects,
     the `iss` response parameter is checked, and the client id comes from a pre-registered
     client, a client ID metadata document (`client-metadata-document`), or a dynamic
-    registration. See `aion/docs/oauth.md`.
+    registration. A token is sent only while the resource's metadata, cached for
+    `:metadata-lifetime`, still names the issuer that issued it. See `aion/docs/oauth.md`.
+  - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
 - **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
   `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
   `:principal-of` reads from the request's session. `client-metadata-handler` serves the app's

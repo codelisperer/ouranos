@@ -34,6 +34,8 @@ SESSION-PRINCIPAL."
     (format nil "http://127.0.0.1:1/callback?~A" (quri:url-encode-params params))))
 
 (test the-return-route-finishes-a-sign-in-for-the-session-that-started-it
+  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+  #-os-windows
   (at::with-as (as)
     (let* ((broker (at::%broker))
            (handler (hoauth:sign-in-return-handler

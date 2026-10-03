@@ -748,6 +748,8 @@ server AS issued; every other path is AS. URL is the MCP endpoint."
   "The path the issue names: a 401, the app signs the user in from the challenge, the call
 succeeds; the server refuses the token, the client refreshes once and retries without
 running the tool twice; the refresh token is revoked, and the user is asked to sign in."
+  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+  #-os-windows
   (with-oauth-mcp (as fake url) (:rotate t) (:tools (%tools "a"))
     (let* ((broker (aion/oauth/tests::%broker))
            (client (mcp:make-client

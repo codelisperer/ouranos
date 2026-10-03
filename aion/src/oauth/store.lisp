@@ -4,7 +4,7 @@
 
 (defstruct (token-set (:constructor make-token-set
                           (&key access refresh expires-at scope resource issuer client-id
-                                token-endpoint revocation-endpoint)))
+                                token-endpoint revocation-endpoint metadata-url)))
   "The tokens one principal holds for one connection, and where they came from.
 
 ACCESS and REFRESH are AION/SECRET values, so neither can reach a log or a backtrace by
@@ -12,13 +12,15 @@ accident; REFRESH is NIL when the server issued none. EXPIRES-AT is a universal 
 when the server gave no lifetime. SCOPE is the space-separated scopes granted or requested.
 RESOURCE is the canonical URI the tokens were issued for, and ISSUER the authorization server
 that issued them: a token is never sent to another resource. CLIENT-ID, TOKEN-ENDPOINT and
-REVOCATION-ENDPOINT are what a refresh and a disconnect need."
-  access refresh expires-at scope resource issuer client-id token-endpoint revocation-endpoint)
+REVOCATION-ENDPOINT are what a refresh and a disconnect need. METADATA-URL is where the
+protected-resource metadata was found, so the issuer can be checked again later."
+  access refresh expires-at scope resource issuer client-id token-endpoint revocation-endpoint
+  metadata-url)
 
 (defstruct (pending (:constructor %make-pending))
   "A sign-in in progress, kept under its STATE until the browser comes back."
   principal connection resource issuer client-id verifier token-endpoint revocation-endpoint
-  iss-required scope expires-at)
+  iss-required scope expires-at metadata-url)
 
 (defclass store () ()
   (:documentation "Where a broker keeps tokens, registered clients and sign-ins in progress.

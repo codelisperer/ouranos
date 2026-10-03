@@ -20,6 +20,15 @@
 (def-suite oauth :description "aion/oauth: discovery, sign-in, refresh and disconnect.")
 (in-suite oauth)
 
+(defmacro net-test (name &body body)
+  "A test that talks to the test authorization server. On Windows it is skipped, because
+aion/oauth signs in only through FETCH-PUBLIC, which cannot pin a connection there (#295); the
+Windows test below checks that it refuses."
+  (let ((doc (and (stringp (first body)) (list (pop body)))))
+    `(test ,name ,@doc
+       #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+       #-os-windows (progn ,@body))))
+
 (defun run-tests ()
   (let ((results (run 'oauth)))
     (explain! results)
@@ -40,6 +49,7 @@
 served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) or :ROOT."
   prm-at issuer-path s256 registration cimd iss-supported send-iss scopes challenge-scope
   as-scopes expires-in rotate prm-resource wrong-issuer bad-token-endpoint token-redirect-to
+  (other-issuer nil)
   (base "") (codes (make-hash-table :test #'equal)) (access (make-hash-table :test #'equal))
   (refresh (make-hash-table :test #'equal)) (registrations 0) (token-requests 0)
   (refresh-requests 0) (revoked '()) (last-registration nil)
@@ -107,7 +117,7 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
                (and (eq (as-prm-at as) :path) (string= bare "/.well-known/oauth-protected-resource/mcp"))
                (and (eq (as-prm-at as) :root) (string= bare "/.well-known/oauth-protected-resource")))
            (%json stream 200 (%obj "resource" (or (as-prm-resource as) (%resource as))
-                                   "authorization_servers" (vector (%issuer as))
+                                   "authorization_servers" (vector (or (as-other-issuer as) (%issuer as)))
                                    "scopes_supported" (coerce (as-scopes as) 'vector))))
           ;; The authorization server metadata, at the path-inserted URL for an issuer with a path.
           ((string= bare (format nil "/.well-known/oauth-authorization-server~A" (as-issuer-path as)))
@@ -220,7 +230,7 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
 
 ;;; --- the whole path --------------------------------------------------------------------
 
-(test from-the-first-401-to-a-call-that-succeeds
+(net-test from-the-first-401-to-a-call-that-succeeds
   "A 401, discovery, dynamic registration, sign-in, the code exchanged with the verifier and
 the resource, and a call with the token."
   (with-as (as :scopes '("generate"))
@@ -239,7 +249,7 @@ the resource, and a call with the token."
 
 ;;; --- discovery -------------------------------------------------------------------------
 
-(test the-metadata-is-found-where-the-specification-says
+(net-test the-metadata-is-found-where-the-specification-says
   (dolist (at '(:challenge :path :root))
     (with-as (as :prm-at at)
       (let ((m (oauth:discover (%broker) (%resource as)
@@ -251,7 +261,7 @@ the resource, and a call with the token."
                                                       :challenge (%challenge-of as))))
         "an issuer with a path: the path goes after the well-known suffix")))
 
-(test metadata-that-does-not-check-out-is-refused
+(net-test metadata-that-does-not-check-out-is-refused
   (with-as (as :prm-resource "https://other.example/mcp")
     (signals oauth:metadata-refused (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as))))
   (with-as (as :wrong-issuer t)
@@ -259,7 +269,7 @@ the resource, and a call with the token."
   (with-as (as :s256 nil)
     (signals oauth:metadata-refused (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as)))))
 
-(test a-url-from-a-server-must-be-https
+(net-test a-url-from-a-server-must-be-https
   (with-as (as :bad-token-endpoint "http://evil.example/token")
     (signals oauth:url-refused (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as))))
   (signals oauth:url-refused
@@ -273,13 +283,15 @@ the resource, and a call with the token."
 
 ;;; --- finishing a sign-in ---------------------------------------------------------------
 
-(test a-sign-in-is-finished-only-by-its-user-once-and-from-its-issuer
+(net-test a-sign-in-is-finished-only-by-its-user-once-and-from-its-issuer
   (with-as (as)
     (let* ((broker (%broker))
            (params (%approve (oauth:start-sign-in broker "u1" "docs" (%resource as)
                                                   :challenge (%challenge-of as)))))
       (signals oauth:wrong-user (oauth:finish-sign-in broker "u2" params))
-      (is (= 0 (as-token-requests as)) "the code was not redeemed for the wrong user")))
+      (is (= 0 (as-token-requests as)) "the code was not redeemed for the wrong user")
+      (signals oauth:unknown-sign-in (oauth:finish-sign-in broker "u1" params))
+      (is (= 0 (as-token-requests as)) "the refusal used up the state; the link cannot be completed")))
   (with-as (as)
     (let* ((broker (%broker))
            (params (%approve (oauth:start-sign-in broker "u1" "docs" (%resource as)
@@ -297,7 +309,7 @@ the resource, and a call with the token."
   (with-as (as :send-iss nil)
     (is (equal "u1" (%sign-in as (%broker))) "no iss, and none promised: accepted")))
 
-(test the-client-id-comes-from-the-first-source-that-has-one
+(net-test the-client-id-comes-from-the-first-source-that-has-one
   (with-as (as :cimd t)
     (let ((broker (%broker :client-metadata-url "https://app.example/client.json")))
       (%sign-in as broker)
@@ -317,7 +329,7 @@ the resource, and a call with the token."
       (%sign-in as broker :principal "u2")
       (is (= 1 (as-registrations as)) "a registered client is kept, keyed by issuer"))))
 
-(test the-scopes-requested-are-the-least-that-will-do
+(net-test the-scopes-requested-are-the-least-that-will-do
   (flet ((scope-of (url) (cdr (assoc "scope" (%query url) :test #'string=))))
     (with-as (as :scopes '("a" "b") :challenge-scope "a")
       (is (equal "a" (scope-of (oauth:start-sign-in (%broker) "u1" "docs" (%resource as)
@@ -341,7 +353,7 @@ the resource, and a call with the token."
 
 ;;; --- tokens in use ---------------------------------------------------------------------
 
-(test an-expired-token-is-refreshed-and-a-revoked-one-is-deleted
+(net-test an-expired-token-is-refreshed-and-a-revoked-one-is-deleted
   (with-as (as :expires-in 0 :rotate t)
     (let* ((broker (%broker))
            (store (oauth:broker-store broker)))
@@ -356,7 +368,7 @@ the resource, and a call with the token."
       (is (null (oauth:access-token broker "u1" "docs" (%resource as))))
       (is (null (oauth:get-token store "u1" "docs")) "invalid_grant deletes the tokens"))))
 
-(test two-refreshes-at-once-use-the-refresh-token-once
+(net-test two-refreshes-at-once-use-the-refresh-token-once
   "With rotation, a second refresh with the same refresh token is refused. Serialised, the
 second caller finds the first one's new token and does not refresh at all."
   (with-as (as :expires-in 0 :rotate t)
@@ -374,7 +386,7 @@ second caller finds the first one's new token and does not refresh at all."
           (is (= 1 (as-refresh-requests as)))
           (is-true (oauth:get-token (oauth:broker-store broker) "u1" "docs")))))))
 
-(test a-token-is-only-for-the-resource-it-was-issued-for
+(net-test a-token-is-only-for-the-resource-it-was-issued-for
   (with-as (as)
     (let ((broker (%broker)))
       (%sign-in as broker)
@@ -382,7 +394,7 @@ second caller finds the first one's new token and does not refresh at all."
       (is (null (oauth:access-token broker "u1" "docs" (format nil "~A/other" (as-base as))))
           "the same connection name with another URL gets no token"))))
 
-(test disconnecting-revokes-at-the-server-and-deletes
+(net-test disconnecting-revokes-at-the-server-and-deletes
   (with-as (as)
     (let ((broker (%broker)))
       (%sign-in as broker)
@@ -391,7 +403,7 @@ second caller finds the first one's new token and does not refresh at all."
         (is (member refresh (as-revoked as) :test #'equal))
         (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs")))))))
 
-(test a-token-endpoint-that-redirects-gets-no-code-forwarded
+(net-test a-token-endpoint-that-redirects-gets-no-code-forwarded
   (let ((hits 0))
     (th:with-server (target (lambda (r s) (declare (ignore r)) (incf hits)
                               (th:write-response s 200 '() "{}")))
@@ -411,3 +423,30 @@ second caller finds the first one's new token and does not refresh at all."
   (is (equal "https://mcp.example.com" (oauth:canonical-resource "HTTPS://MCP.Example.com/")))
   (is (equal "https://mcp.example.com/mcp" (oauth:canonical-resource "https://mcp.example.com:443/mcp#f")))
   (is (equal "https://mcp.example.com:8443/mcp" (oauth:canonical-resource "https://mcp.example.com:8443/mcp/"))))
+
+(net-test a-token-is-withheld-when-the-resource-names-another-issuer
+  "The protected resource's metadata is read again when its cache expires. When it no longer
+names the authorization server that issued the token, the token is not sent."
+  (with-as (as)
+    (let ((cached (%broker))
+          (fresh (%broker :metadata-lifetime 0)))
+      (%sign-in as cached)
+      (%sign-in as fresh)
+      (is (stringp (oauth:access-token cached "u1" "docs" (%resource as))))
+      (setf (as-other-issuer as) "https://other.example")
+      (is (null (oauth:access-token fresh "u1" "docs" (%resource as)))
+          "the metadata names another issuer")
+      (is (stringp (oauth:access-token cached "u1" "docs" (%resource as)))
+          "within its lifetime the cached metadata is used, with no request")
+      (oauth:refresh cached "u1" "docs" (%resource as) :rejected "refused")
+      (is (null (oauth:access-token cached "u1" "docs" (%resource as)))
+          "a refused token makes the metadata be read again"))))
+
+(test on-windows-sign-in-refuses-instead-of-connecting-unpinned
+  "#295: a URL from a server is fetched only over a pinned connection, which Windows does not
+offer, so discovery signals PINNED-CONNECT-UNSUPPORTED there and nothing is fetched."
+  #-os-windows (skip "the pinned connection is available here")
+  #+os-windows
+  (signals http:pinned-connect-unsupported
+    (oauth:discover (%broker) "https://mcp.example/mcp"
+                    :challenge "Bearer resource_metadata=\"https://mcp.example/prm\"")))
