@@ -38,6 +38,7 @@ OAuth sign-in, resources and prompts, and local servers over stdio are parts 2, 
   - `timeout` bounds every request, and `call-timeout` bounds a tool call.
   - `max-body-bytes` bounds a reply.
 - **The principal is chosen for each call.** `run-turn :principal` binds `actor:*principal*` for the turn, and each MCP means reads it when it is called. One agent can therefore serve several users, and each call uses the token of the user whose turn it is. A delegated sub-turn keeps the principal of the turn that delegated it.
+- **A grant names its tools.** `:only` is required: a list of the server's tool names, or `:all`. No default grants every tool on a server.
 - **A grant is fixed when the app makes it.** Nothing a server sends later changes which tools an agent has. A `notifications/tools/list_changed` from the server is not acted on. The app calls `grant-tools` or `revoke-tools` again.
 - **Names.** A tool's means name is the connection's name, two underscores, and the tool's name. Characters outside `A-Z a-z 0-9 _ -` become `_`, and the whole is cut to 64 characters. A name that clashes with a means the agent already has, or with another tool in the same grant, signals `tool-name-conflict`, and nothing is registered.
 
@@ -68,8 +69,9 @@ When a turn continues on another thread, `aion/dynamic` carries `actor:*principa
 ### For a usage ledger
 
 The `:tool-call` and `:tool-result` events carry what a ledger needs to record a call:
-- `:source`, which is `(:connection "docs" :tool "search")` for an MCP tool;
+- `:source`, which is `(:connection "docs" :tool "search" :per-user t)` for an MCP tool;
 - `:principal`;
+- `:agent`, the agent's name, and `:conversation`;
 - `:outcome` on the result;
 - `:ms`, the call's duration, on the result.
 

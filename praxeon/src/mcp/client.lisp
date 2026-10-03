@@ -541,12 +541,13 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
 (defun %clip (string limit)
   (if (> (length string) limit) (subseq string 0 limit) string))
 
-(defun grant-tools (agent client &key tools only capability)
+(defun grant-tools (agent client &key tools (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability)
   "Register the tools of CLIENT's server that the app chooses as means of AGENT, and return the
 means names.
 
 TOOLS is a list from LIST-TOOLS; when it is NIL the server is asked, with no principal. ONLY is
-a list of the server's tool names to grant; NIL grants every tool. CAPABILITY is passed to
+required: a list of the server's tool names to grant, or :ALL. There is no default that grants
+every tool, so a grant is always a decision the app wrote down. CAPABILITY is passed to
 REGISTER-MEANS, so a caller without it does not see the tools.
 
 Each means calls its tool for the principal of the turn it runs in, ACTOR:*PRINCIPAL*. A name
@@ -554,10 +555,10 @@ that clashes with a means AGENT already has, or with another tool in the grant, 
 TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes the grant."
   (let* ((connection (client-connection client))
          (tools (or tools (list-tools client)))
-         (chosen (if only
+         (chosen (if (eq only :all)
+                     tools
                      (remove-if-not (lambda (tool) (member (tool-name tool) only :test #'string=))
-                                    tools)
-                     tools))
+                                    tools)))
          (names (mapcar (lambda (tool) (means-name connection (tool-name tool))) chosen))
          (taken (remove-duplicates
                  (append (remove-if-not (lambda (n) (nth-value 1 (gethash n (actor:agent-means agent))))
@@ -578,7 +579,8 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                 :schema (tool-input-schema tool)
                 :capability capability
                 :source (list :connection (connection-name connection)
-                              :tool (tool-name tool)))))
+                              :tool (tool-name tool)
+                              :per-user (and (connection-per-user connection) t)))))
     (log:info "praxeon/mcp: tools granted" :connection (connection-name connection)
                                            :count (length names))
     names))

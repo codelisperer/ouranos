@@ -604,11 +604,14 @@ each so a client can report progress."
                     (name (llm:tool-call-name call))
                     (args (llm:tool-call-arguments call)))
                 (evt:emit :tool-call :id id :name name :arguments args
-                                     :source (%means-source agent name) :principal *principal*)
+                                     :source (%means-source agent name) :principal *principal*
+                                     :agent (agent-name agent)
+                                     :conversation (agent-conversation agent))
                 (multiple-value-bind (result error-p outcome ms)
                     (%apply-call agent name args permit)
                   (apply #'evt:emit :tool-result :id id :name name :content result
                          :source (%means-source agent name) :principal *principal*
+                         :agent (agent-name agent) :conversation (agent-conversation agent)
                          :outcome outcome :ms ms
                          (when error-p (list :is-error t)))
                   ;; What the history carries: the result, or its stand-in when it is kept
