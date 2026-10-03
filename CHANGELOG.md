@@ -260,7 +260,9 @@ its tag.
     is closed, whatever its tries, and the progress is saved; if that save fails, the window's
     attempt fails and nothing is written. A closed window is never retried, and
     `observer-skipped` shows it as `(from through tries :closed)`. A window is closed this way
-    even when the later window's write then fails. Whether a
+    even when the later window's write then fails. While progress writes keep failing and an
+    earlier skipped window is open, or closed but not yet saved, no later window is written; an
+    observer with no skipped window before it keeps writing observations. Whether a
     window is closed comes from the progress record alone, not from the thread's observations,
     so an observation the app writes into the thread closes nothing, and erasing a later
     window's observations reopens nothing. A window whose tries are spent, with no later window

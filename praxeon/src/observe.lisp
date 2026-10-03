@@ -574,11 +574,17 @@ stop or a restart came between the two, and the next observer, which reads closu
 record alone, retried the older window after the newer one was written. The cost: a window is
 closed when a later window is about to be written, even if that write then fails.
 
-AN UNSAVED OBSERVER SAVES HERE TOO, even with nothing left to close: an earlier attempt may have
-closed the windows in memory and failed to save that, and writing now would leave the stored
-record showing them open."
-  (when (or (observer-unsaved observer)
-            (some (lambda (e) (and (%open-p e) (<= (second e) start))) (observer-skipped observer)))
+A CLOSED WINDOW IS SAVED HERE TOO WHILE THE OBSERVER IS UNSAVED: an earlier attempt may have
+closed it in memory and failed to save that, and writing now would leave the stored record
+showing it open. An unsaved observer with no skipped window before START does not save here, so
+a store whose progress writes keep failing still receives observations (the second review of
+#533). WHEN PROGRESS WRITES KEEP FAILING AND A SKIPPED WINDOW BEFORE START IS OPEN, OR CLOSED BUT
+NOT SAVED, NOTHING MORE IS WRITTEN until a progress write succeeds: that is intended, because the
+stored record would otherwise show a window open while a later window's observations are
+stored."
+  (when (some (lambda (e) (and (<= (second e) start)
+                                (or (%open-p e) (observer-unsaved observer))))
+              (observer-skipped observer))
     (%close-before observer start)
     (%save-progress observer)
     (when (observer-unsaved observer)

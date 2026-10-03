@@ -7021,3 +7021,22 @@ model, and no claim is left held with no worker (#533's review)."
                                      :step (%step-for 6) :retry-delay 0)))
     (obs:observe-turn observer (%history 6))
     (is-true (obs:await-observer observer :timeout nil))))
+
+(defclass always-failing-progress-store (mem:in-memory-store) ()
+  (:documentation "Every RECORD-THREAD-PROGRESS signals."))
+
+(defmethod mem:record-thread-progress :before ((store always-failing-progress-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (error "the progress write failed"))
+
+(test an-observer-whose-progress-writes-keep-failing-still-writes-observations
+  "Every progress write fails and no window is skipped. Each window is still written: saving
+before a write is needed only for a skipped window whose closure the store may lack (the second
+review of #533). At 8e8fdd6 only the first window was written."
+  (let* ((store (make-instance 'always-failing-progress-store))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "A." "fact")) (%call-with (%ob "B." "fact"))
+                                                           (%call-with (%ob "C." "fact")) (%call-with (%ob "D." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)))
+    (dolist (n '(6 12 18 24)) (%turn observer n))
+    (is (equal '("A." "B." "C." "D.") (%thread-contents store)))
+    (is (null (obs:observer-skipped observer)))))
