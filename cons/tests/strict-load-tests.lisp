@@ -17,21 +17,38 @@
 
 (defparameter *strict-clean-source* "(defun strict-fixture-h () 1)")
 
+(defparameter *strict-undefined-source* "(defun strict-fixture-u () (+ 1 *strict-fixture-no-such-variable*))"
+  "A full WARNING that SBCL defers to the end of the compilation unit (#525).")
+
+(defun %used-before-defined-sources (tag)
+  "Two files: the first uses a variable that the second defines. That is the same deferred
+WARNING. The variable is named after TAG, because once a copy has loaded, its DEFVAR has made
+the variable special in this image and no later copy using that name would warn."
+  (values (format nil "(defun strict-fixture-~A () (+ 1 *strict-fixture-~A-later*))" tag tag)
+          (format nil "(defvar *strict-fixture-~A-later* 1)" tag)))
+
+(defparameter *strict-warns-at-load-source* "(warn \"a library's warning, signalled when its fasl loads\")"
+  "A file that compiles cleanly and signals a full WARNING each time it is loaded.")
+
 (defun %strict-name (tag)
   (format nil "strictfix-~A-~36R" tag (random (expt 36 8))))
 
-(defun %strict-project (dir name source &key depends-on test-source)
+(defun %strict-project (dir name source &key depends-on test-source later-source)
   "Write system NAME into DIR: one file holding SOURCE, depending on DEPENDS-ON. With
-TEST-SOURCE, also NAME/tests holding it, named by NAME's test-op. Returns DIR."
+LATER-SOURCE, a second file holding it, compiled after the first. With TEST-SOURCE, also
+NAME/tests holding it, named by NAME's test-op. Returns DIR."
   (with-open-file (out (merge-pathnames (format nil "~A.asd" name) dir)
                        :direction :output :if-exists :supersede)
-    (format out "(asdf:defsystem ~S :depends-on ~S :components ((:file \"a\"))~@[ :in-order-to ((asdf:test-op (asdf:test-op ~S)))~])~%"
-            name depends-on (and test-source (format nil "~A/tests" name)))
+    (format out "(asdf:defsystem ~S :depends-on ~S :serial t :components ((:file \"a\")~:[~; (:file \"b\")~])~@[ :in-order-to ((asdf:test-op (asdf:test-op ~S)))~])~%"
+            name depends-on later-source (and test-source (format nil "~A/tests" name)))
     (when test-source
       (format out "(asdf:defsystem ~S :depends-on (~S) :components ((:file \"t\")))~%"
               (format nil "~A/tests" name) name)))
   (with-open-file (out (merge-pathnames "a.lisp" dir) :direction :output :if-exists :supersede)
     (write-line source out))
+  (when later-source
+    (with-open-file (out (merge-pathnames "b.lisp" dir) :direction :output :if-exists :supersede)
+      (write-line later-source out)))
   (when test-source
     (with-open-file (out (merge-pathnames "t.lisp" dir) :direction :output :if-exists :supersede)
       (write-line test-source out)))
@@ -159,6 +176,96 @@ TEST-SOURCE, also NAME/tests holding it, named by NAME's test-op. Returns DIR."
       (is (typep (%strict-load name #P"./") 'error)
           "the project's own system, with the root given as ./, must fail on its warning"))))
 
+;;; --- warnings deferred to the end of the compilation unit (#525) ---------------------
+;;;
+;;; SBCL reports an undefined variable when the compilation unit ends, after COMPILE-FILE
+;;; has returned with FAILURE-P false, so ASDF loads the system without an error. Each test
+;;; below that expects a failure first loads a separate fresh copy of the same project with
+;;; plain ASDF and nothing muffled, and checks that it succeeds: that is the defect, and
+;;; without it the strict failure could be coming from somewhere else.
+
+(defun %plain-load-succeeds-p (name)
+  ;; A compilation unit of its own, so the deferred warning is printed here, into the
+  ;; discarded output. Under ASDF:TEST-SYSTEM it was otherwise printed when the test run's
+  ;; unit ended, and the gate failed CONS/TESTS for a fixture's planted warning.
+  (let ((*error-output* (make-broadcast-stream)) (*standard-output* (make-broadcast-stream)))
+    (null (handler-case (progn (with-compilation-unit (:override t) (asdf:load-system name)) nil)
+            (error (e) e)))))
+
+(test an-undefined-variable-fails-the-strict-load
+  (%with-strict-project (dir name "undef-plain" *strict-undefined-source*)
+    (is (%plain-load-succeeds-p name)
+        "plain ASDF must load it, or this test is not showing the defect"))
+  (%with-strict-project (dir name "undef" *strict-undefined-source*)
+    (multiple-value-bind (err printed) (%strict-load name dir)
+      (declare (ignore printed))
+      (is (typep err 'error) "an undefined variable must fail the strict load")
+      (is (search "*STRICT-FIXTURE-NO-SUCH-VARIABLE*" (princ-to-string err))
+          "the error must name the variable: ~A" err))))
+
+(test a-variable-used-before-a-later-file-defines-it-fails-the-strict-load
+  (let ((tag (%strict-name "plain")))
+    (multiple-value-bind (uses defines) (%used-before-defined-sources tag)
+      (%with-strict-project (dir name "later-plain" uses :later-source defines)
+        (is (%plain-load-succeeds-p name)
+            "plain ASDF must load it, or this test is not showing the defect"))))
+  (let ((tag (%strict-name "strict")))
+    (multiple-value-bind (uses defines) (%used-before-defined-sources tag)
+      (%with-strict-project (dir name "later" uses :later-source defines)
+        (let ((err (%strict-load name dir)))
+          (is (typep err 'error) "a variable used before its file defines it must fail")
+          (is (search (string-upcase (format nil "*strict-fixture-~A-later*" tag))
+                      (princ-to-string err))
+              "the error must name the variable: ~A" err))))))
+
+(test an-undefined-variable-fails-the-strict-load-inside-the-callers-compilation-unit
+  ;; A caller inside its own compilation unit would otherwise receive the deferred warning
+  ;; when its unit ends, after the loader has returned.
+  (%with-strict-project (dir name "undef-unit" *strict-undefined-source*)
+    (is (typep (with-compilation-unit () (%strict-load name dir)) 'error))))
+
+(test a-warning-the-projects-own-file-signals-when-it-loads-fails-the-strict-load
+  ;; The same handler sees it, and under #303 the project's own full WARNING fails the load
+  ;; whenever it is signalled. The same source in a library is the next test's case.
+  (%with-strict-project (dir name "loadwarn-own" *strict-warns-at-load-source*)
+    (let ((err (%strict-load name dir)))
+      (is (typep err 'error) "a WARNING the project's own file signals at load must fail")
+      (is (search "signalled when its fasl loads" (princ-to-string err))
+          "the error must carry the warning: ~A" err)
+      (is (search "when one of its files was loaded" (princ-to-string err))
+          "the error must say a warning can come from a load: ~A" err))))
+
+(test an-undefined-variable-in-a-test-system-fails-with-tests
+  (%with-strict-project (dir name "undef-tests" *strict-clean-source*
+                             :test-source *strict-undefined-source*)
+    (is (typep (%strict-load name dir :with-tests t) 'error))))
+
+(test a-dependency-that-warns-at-load-or-defers-a-warning-does-not-fail-the-project
+  ;; Some libraries signal a full WARNING when they load (dbi's "redefining DEFTYPE type to
+  ;; be a class"), and a library can carry an undefined variable. Neither is the app's to
+  ;; fix. Both libraries sit outside ROOT, and the load runs inside a compilation unit of
+  ;; the caller's, where an unfinished one of the library's would end.
+  (tempdir:with-temporary-directory (libdir "strictlib")
+    (let* ((loads (%strict-name "loadwarn"))
+           (undef (%strict-name "libundef"))
+           (asdf:*central-registry* (cons libdir asdf:*central-registry*)))
+      (ensure-directories-exist (merge-pathnames "u/" libdir))
+      (%strict-project libdir loads *strict-warns-at-load-source*)
+      (%strict-project (merge-pathnames "u/" libdir) undef *strict-undefined-source*)
+      (let ((asdf:*central-registry* (cons (merge-pathnames "u/" libdir) asdf:*central-registry*)))
+        (%with-strict-project (dir name "libapp" *strict-clean-source*
+                                   :depends-on (list loads undef))
+          (let* ((err nil)
+                 (printed (with-output-to-string (out)
+                            (let ((*error-output* out) (*standard-output* out))
+                              (with-compilation-unit ()
+                                (setf err (%strict-load name dir)))))))
+            (is (null err) "warnings from libraries outside ROOT must not fail the project: ~A" err)
+            ;; The library's deferred warning is muffled too. Without a compilation unit of
+            ;; its own it was printed when the caller's unit ended, after the loader returned.
+            (is (null (search "*STRICT-FIXTURE-NO-SUCH-VARIABLE*" printed))
+                "the library's undefined variable must not be printed:~%~A" printed)))))))
+
 ;;; --- through the targets, as bin/cons runs them ------------------------------------
 ;;;
 ;;; Review of #331: the tests above call LOAD-SYSTEM-STRICTLY directly, so they would stay
@@ -166,7 +273,7 @@ TEST-SOURCE, also NAME/tests holding it, named by NAME's test-op. Returns DIR."
 ;;; test' and `cons --fresh build' through CLI-RUN in a child SBCL, which is what bin/cons
 ;;; calls, and read its exit code and what it printed.
 
-(defun %cons-target-in-child (dir target &key fresh)
+(defun %cons-target-in-child (dir target &key fresh strict)
   "Run TARGET of the cons.lisp in DIR through CONS/RUN:CLI-RUN in a child SBCL, which loads
 cons from this tree. Returns (values EXIT-CODE OUTPUT). The child, and the sbcl a --fresh
 target starts, find the fixture and this tree through CL_SOURCE_REGISTRY."
@@ -182,8 +289,8 @@ target starts, find the fixture and this tree through CL_SOURCE_REGISTRY."
                  "--eval" (format nil "(load ~S)" (uiop:native-namestring
                                                    (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
                  "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cons))"
-                 "--eval" (format nil "(cons/run:cli-run (cons/spec:load-spec ~S) (list ~S) :fresh ~S)"
-                                  (uiop:native-namestring dir) target fresh))
+                 "--eval" (format nil "(cons/run:cli-run (cons/spec:load-spec ~S) (list ~S) :fresh ~S :strict ~S)"
+                                  (uiop:native-namestring dir) target fresh strict))
            :output :string :error-output :output :ignore-error-status t :directory dir
            :environment (cons (format nil "CL_SOURCE_REGISTRY=~A" registry)
                               (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
@@ -211,6 +318,16 @@ a `test' target testing it; NAME's one file holds SOURCE."
         (multiple-value-bind (code out) (%cons-target-in-child dir target :fresh fresh)
           (is (eql 1 code) "cons ~:[~;--fresh ~]~A must exit 1 on the warning, got ~A:~%~A" fresh target code out)
           (is (search "not a number" out) "cons ~:[~;--fresh ~]~A must print the warning:~%~A" fresh target out))))))
+
+(test cons-strict-build-and-strict-fresh-build-fail-on-an-undefined-variable
+  ;; #525 was reported through `cons --strict build'. --strict matters here: the first run
+  ;; writes a fasl, because ASDF does not fail the compile, and the second run would load
+  ;; that fasl without compiling it if --strict did not recompile the project's systems.
+  (%with-cons-project (dir name "cliundef" *strict-undefined-source*)
+    (dolist (fresh '(nil t))
+      (multiple-value-bind (code out) (%cons-target-in-child dir "build" :fresh fresh :strict t)
+        (is (eql 1 code) "cons --strict ~:[~;--fresh ~]build must exit 1 on an undefined variable, got ~A:~%~A" fresh code out)
+        (is (search "*STRICT-FIXTURE-NO-SUCH-VARIABLE*" out) "cons --strict ~:[~;--fresh ~]build must name the variable:~%~A" fresh out)))))
 
 (test cons-build-and-fresh-build-pass-a-clean-project
   ;; The control: the same child, the same targets, a project without the warning.
