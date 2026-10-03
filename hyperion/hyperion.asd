@@ -481,6 +481,21 @@
 ;;; variable (#325), so an app written against one global connection can run under
 ;;; `start :workers'. Aux system so hyperion core keeps no DB dependency (same pattern as
 ;;; session-db).
+(defsystem "hyperion/oauth"
+  :description "The routes an app mounts for aion/oauth sign-ins: the return page and the client metadata document (#527)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion" "aion/oauth")
+  :components ((:file "src/oauth"))
+  :in-order-to ((test-op (test-op "hyperion/oauth/tests"))))
+
+(defsystem "hyperion/oauth/tests"
+  :description "Tests for hyperion/oauth, against aion/oauth's test authorization server."
+  :depends-on ("hyperion/oauth" "hyperion" "aion/oauth" "aion/oauth/tests" "fiveam"
+               "com.inuoe.jzon" "quri")
+  :components ((:file "tests/oauth-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/oauth/tests :run-tests)))
+
 (defsystem "hyperion/db-connection"
   :description "A Ring middleware that binds an app's connection variable to a pooled mnemosyne connection per request."
   :author "Bob <eternal.recursion@proton.me>"

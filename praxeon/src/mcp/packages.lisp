@@ -7,7 +7,8 @@
                     (#:log #:aion/log)
                     (#:actor #:praxeon/actor)
                     (#:cnd #:praxeon/conditions)
-                    (#:evt #:praxeon/event))
+                    (#:evt #:praxeon/event)
+                    (#:oauth #:aion/oauth))
   (:documentation
    "A client for MCP (Model Context Protocol) servers, and the bridge that gives their tools to
     Praxeon agents as means (#527).
@@ -35,6 +36,9 @@
    ;; limits an app may set
    #:*max-abandoned-requests* #:*max-list-pages* #:*max-schema-characters*
    #:*max-description-characters*
+
+   ;; token sources
+   #:token-for #:token-refused #:oauth-token-source
    ;; tools
    #:tool #:tool-name #:tool-title #:tool-description #:tool-input-schema #:tool-annotations
    #:list-tools #:call-tool #:grant-tools #:revoke-tools #:means-name

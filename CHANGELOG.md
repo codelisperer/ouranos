@@ -66,6 +66,31 @@ its tag.
 
 ### Added
 
+- **aion/oauth: sign an app's users in to other services with OAuth 2.1** (#527, part 2). A new
+  opt-in system, in aion so that hermes can use it too.
+  - `make-broker` holds the app's settings and a store. `start-sign-in` returns the URL to send
+    a user's browser to, and the scopes it requests. `finish-sign-in` takes the parameters the
+    browser came back with and the principal of the session it came back in.
+  - `access-token` returns a principal's token for a connection, refreshing it when it has
+    expired, and `refresh` and `disconnect` do what they say.
+  - The store protocol (`get-token`, `put-token`, `delete-token`, `get-client`, `put-client`,
+    `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by the app, over
+    its own storage. `memory-store` is for tests and one-process apps.
+  - It follows the MCP authorization specification, revision 2026-07-28. Metadata is checked,
+    URLs from servers must be https and are fetched through `fetch-public` with no redirects,
+    the `iss` response parameter is checked, and the client id comes from a pre-registered
+    client, a client ID metadata document (`client-metadata-document`), or a dynamic
+    registration. See `aion/docs/oauth.md`.
+- **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
+  `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
+  `:principal-of` reads from the request's session. `client-metadata-handler` serves the app's
+  client ID metadata document.
+- **praxeon/mcp: MCP servers that require an OAuth sign-in** (#527, part 2).
+  - A token source is now anything that implements `token-for`, as functions already do.
+  - A source may implement `token-refused`, so that a request the server refused with a 401
+    or 403 is sent once more with a new token.
+  - `oauth-token-source` gives each principal's tokens from an `aion/oauth` broker, refreshing
+    them as needed.
 - **praxeon/mcp: agents can use the tools an MCP server offers** (#527, part 1). A new system,
   `praxeon/mcp`, talks to MCP servers over Streamable HTTP, in the current revision of the
   specification (2026-07-28) or, when a server does not understand it, in the legacy
