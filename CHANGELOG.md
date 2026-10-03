@@ -78,16 +78,18 @@ its tag.
   - The mark and the skipped windows are kept in the store (`thread-progress`) after each
     window, and a new observer starts from them. So a restart neither distils the thread again
     nor passes a window that was given up on or that the process ended part-way through.
-    Observations the app wrote into the thread itself do not move the mark. A progress write
+    Observations the app wrote into the thread itself do not move the mark, except at an
+    erasure (below). A progress write
     that fails is made again at the next `observe-turn`, even one with no new message; until it
     is made, a stop, a restart or a new observer distils that window again. Progress is merged
     with the store's, never written over it: a run starts by merging, and each save merges again,
     so, through one store object in one process, the stored mark is never lowered and newer
     progress at an equal mark is kept. Up to the smaller of two records' marks, a message stays
     skipped only when both records hold a skipped window over it: for each pair of overlapping
-    skipped windows the merge keeps their overlap. So where two observers cut the same messages
-    into different windows no message is left undistilled and uncovered, and a window one of
-    them has since written is not put back. A run whose first read of the store's progress
+    skipped windows the merge keeps their overlap, and a window of the further record that
+    crosses the smaller mark is split there. So where two observers cut the same messages into
+    different windows no message is left undistilled and uncovered, and no message one of them
+    has since distilled is put back to be retried. A run whose first read of the store's progress
     fails ends there.
   - One observer of a thread runs at a time in a process: `observe-turn` starts nothing while
     another observer of the same store object, subject and thread holds the thread, even when
@@ -101,19 +103,23 @@ its tag.
     `stop-observer` on `running-observer` and call it again. Observers through another store
     object over the same database, or in other processes, cannot be seen, and the app stops them
     first. On `praxeon/memory-db` the check and the erasure hold the store's lock together, and
-    the erasure is one transaction.
+    the erasure is one transaction, a savepoint inside a transaction the app opened with
+    `conn:with-transaction`. A transaction begun with a raw `BEGIN` is not seen: on SQLite the
+    call then signals and changes nothing.
   - `forget-subject` erases the subject's observations, as before, and leaves each of its
     threads' progress records as the mark alone: the subject's id, the thread's id and a count
     of messages, with no skipped windows and no content. The mark is at least the last message
-    the thread's erased observations cited, so a progress write that failed before the erasure
-    does not let erased content be distilled and written again; for the same reason a thread
-    with observations and no record gets one. It does not erase the app's own transcript.
-    Messages up to the mark are not observed again: an observer that held skipped windows from
-    before drops those up to the mark at its next run and keeps any past it, which were never
-    written, and a new observer starts at the mark. Later messages are observed normally. A conversation continued
-    after an erasure with a shortened or replaced transcript uses a new thread id, because the
-    stored mark wins over a lower `:mark`, and the transcript's first messages would otherwise
-    never be observed.
+    the thread's erased observations cited, counting only provenance that names the thread
+    itself, so a progress write that failed before the erasure does not let erased content be
+    distilled and written again; for the same reason a thread with observations and no record
+    gets one. An app that writes observations into a thread cites the thread's message
+    positions, counted from 1, or the mark can pass messages never observed. It does not erase
+    the app's own transcript. Messages up to the mark are not observed again: an observer that
+    held skipped windows from before drops the parts up to the mark at its next run and keeps
+    the parts past it, which were never written, and a new observer starts at the mark. Later
+    messages are observed normally. A conversation continued after an erasure with a shortened or
+    replaced transcript uses a new thread id, because the stored mark wins over a lower `:mark`, and
+    the transcript's first messages would otherwise never be observed.
   - A skipped window is retried only while no later window has been written to the thread, and
     then it is distilled and promoted as if it had never been skipped. Once an observation from a
     later window is in the thread, the skipped window is closed: it is never retried, and

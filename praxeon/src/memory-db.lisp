@@ -569,8 +569,10 @@ so that case needs a row written some other way."
 
 (defmethod mem:forget-subject ((store db-memory-store) subject)
   "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150). The
-deletion and the progress rows' new marks are one transaction (#462's eighth review): an inner
-one is a savepoint, so this is safe inside a transaction of the app's."
+deletion and the progress rows' new marks are one transaction (#462's eighth review). Inside a
+transaction the app opened with CONN:WITH-TRANSACTION in the same dynamic extent, it is a
+savepoint. A transaction the app began with a raw BEGIN is not seen: on SQLite this call then
+signals and changes nothing, and on Postgres its COMMIT would end the app's transaction."
   (conn:with-transaction ((store-connection store))
     (let* ((cited (mem::%last-cited-by-thread
                    (mem:observations-of store subject :include-superseded t :thread :all)))

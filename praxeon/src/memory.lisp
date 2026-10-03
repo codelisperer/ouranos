@@ -61,7 +61,11 @@ NIL means the source time was not recorded -- an absent measurement, not a zero 
 THROUGH IS THE LAST TURN of the window an observation came from, when it came from more than
 one turn (#317): an observer distils a window of messages, and the observation is sourced to
 all of them. NIL means the single turn TURN. An observer's TURN and THROUGH are message
-positions in the thread, counted from 1, not exchanges."
+positions in the thread, counted from 1, not exchanges. AN APP THAT WRITES AN OBSERVATION INTO
+A THREAD, with CONVERSATION naming that thread, cites the thread's message positions the same
+way (#462's ninth review): FORGET-SUBJECT keeps each thread's mark at least at the last position
+its observations cite, so a position past the transcript's end would keep an observer from
+ever observing the messages up to it."
   (conversation "" :type string)
   (turn 0 :type integer)
   (at nil :type (or null integer))
@@ -186,15 +190,16 @@ history cannot be made to forget is one a consuming app cannot use for personal 
 WHAT IS LEFT (#462, the maintainer's ruling). For each of SUBJECT's threads, the progress record
 (THREAD-PROGRESS) is replaced by one holding only the mark: the subject's id, the thread's id and
 a count of messages, with no skipped windows and no content. The mark is the larger of the
-stored mark and the last message any of the thread's erased observations cites (#462's eighth
-review): a progress write that failed leaves the stored mark behind what was distilled, and an
-observer starting from it would distil erased messages again. For the same reason a thread that
-has observations and no record gets one. A thread with neither gets none. So an observer of the
-thread does not distil the messages up to the mark again; it observes later messages normally.
-The erased observations are read, deleted and the marks written as one step under the store's
-lock, and in one transaction on a SQL store. The app's own transcript is not touched: erasing it
-is the app's. A conversation continued after an erasure with a shortened or replaced transcript
-uses a new thread id, or its first messages are never observed.
+stored mark and the last message any of the thread's erased observations cites, counting only
+provenance that names the thread itself, in the thread's message positions (#462's eighth and
+ninth reviews; see PROVENANCE): a progress write that failed leaves the stored mark behind what
+was distilled, and an observer starting from it would distil erased messages again. For the same
+reason a thread that has observations and no record gets one. A thread with neither gets none.
+So an observer of the thread does not distil the messages up to the mark again; it observes
+later messages normally. The erased observations are read, deleted and the marks written as one
+step under the store's lock, and in one transaction on a SQL store. The app's own transcript is
+not touched: erasing it is the app's. A conversation continued after an erasure with a shortened
+or replaced transcript uses a new thread id, or its first messages are never observed.
 
 Where `praxeon/observe' is loaded, this refuses while an observer of SUBJECT is running in this
 process through the same store object; stop it (STOP-OBSERVER on RUNNING-OBSERVER) and try
@@ -427,11 +432,16 @@ do I fix it' unanswerable."
 (defun %last-cited-by-thread (observations)
   "Each thread among OBSERVATIONS, with the last message any of its observations cites (the
 provenance's THROUGH, else its TURN), as an alist (THREAD . MESSAGE). A store's FORGET-SUBJECT
-reads it before erasing them."
+reads it before erasing them.
+
+ONLY A PROVENANCE NAMING THE THREAD ITSELF COUNTS (#462's ninth review). A correction made in
+another conversation keeps the corrected observation's thread but carries a provenance of its
+own, whose turn is a position in that other conversation; counting it would raise this
+thread's mark past messages it never observed. The observer reads positions the same way."
   (let ((last (make-hash-table :test #'equal)))
     (dolist (o observations)
       (let ((thread (observation-thread o)) (p (observation-provenance o)))
-        (when (and thread p)
+        (when (and thread p (equal (provenance-conversation p) thread))
           (let ((message (or (provenance-through p) (provenance-turn p))))
             (when (integerp message)
               (setf (gethash thread last) (max (gethash thread last 0) message)))))))

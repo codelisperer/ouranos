@@ -5442,8 +5442,9 @@ records merged together."
 (test merges-of-merged-records-commute-repeat-and-lose-no-message
   "2,000 random pairs of records that are themselves merges, which is what the store holds: the
 merge gives one result in either order, merging it again with either record or with itself
-changes nothing, and every message it counts as distilled one of the two records distilled. The
-seventh review's merge changed 1,812 such pairs when merged again."
+changes nothing, every message it counts as distilled one of the two records distilled, and no
+message it keeps skipped was distilled by either. The seventh review's merge changed 1,812 such
+pairs when merged again; the eighth review's kept whole a window crossing the smaller mark."
   (let ((rs (sb-ext:seed-random-state 4628)) (bad '()))
     (dotimes (i 2000)
       (multiple-value-bind (ma sa) (%merged-record rs)
@@ -5457,20 +5458,30 @@ seventh review's merge changed 1,812 such pairs when merged again."
                            (loop for n from 1 to m1
                                  never (and (%distilled-p n m1 s1)
                                             (not (%distilled-p n ma sa))
-                                            (not (%distilled-p n mb sb)))))
+                                            (not (%distilled-p n mb sb))))
+                           (loop for n from 1 to m1
+                                 never (and (not (%distilled-p n m1 s1))
+                                            (or (%distilled-p n ma sa) (%distilled-p n mb sb)))))
                 (push (list ma sa mb sb m1 s1) bad)))))))
     (is (null bad) "~D of 2000 failed; the first: ~S" (length bad) (first bad))))
 
-(test a-window-written-since-is-not-put-back-by-the-merge
+(test a-message-the-other-record-distilled-is-not-put-back-by-the-merge
   "The eighth review's case. A, with a step of 4, has closed 1-4 and written 5-8. The store still
 holds B's (6 ((1 6 1))). Merged, only 1-4 stays skipped, closed: messages 5-6 were distilled by
-A, so 1-6 is not put back to be retried, and nothing older is written after 5-8."
+A, so 1-6 is not put back to be retried, and nothing older is written after 5-8. The ninth
+review's cases: a window of the further record that crosses the smaller mark is split there."
   (multiple-value-bind (mark skipped) (obs::%merge-progress 8 '((1 4 2 :closed)) 6 '((1 6 1)))
     (is (eql 8 mark))
     (is (equal '((1 4 2 :closed)) skipped)))
   (multiple-value-bind (mark skipped) (obs::%merge-progress 8 '((1 4 1)) 8 '((3 6 1)))
     (is (eql 8 mark))
-    (is (equal '((3 4 1)) skipped) "only the messages neither record distilled stay skipped")))
+    (is (equal '((3 4 1)) skipped) "only the messages neither record distilled stay skipped"))
+  (dolist (case '((10 ((1 10 1)) 8 () ((9 10 1)))
+                  (10 ((1 10 1)) 8 ((5 8 1)) ((5 8 1) (9 10 1)))
+                  (12 ((7 12 1)) 8 () ((9 12 1)))))
+    (destructuring-bind (ma sa mb sb want) case
+      (is (equal (list ma want) (multiple-value-list (obs::%merge-progress ma sa mb sb)))
+          "~S and ~S: a crossing window keeps only what the other record did not distil" sa sb))))
 
 (test after-erasure-a-mark-behind-what-was-distilled-is-raised
   "A writes 1-6, then 7-12, and the progress write after 7-12 fails, so the store holds mark 6
@@ -5509,3 +5520,65 @@ gives it a record at the last message they cited. A thread with neither still ge
     (mem:forget-subject store "member-1")
     (is (eql 6 (mem:thread-progress store "member-1" "conv-7")))
     (is (null (mem:thread-progress store "member-1" "conv-8")) "a thread with neither gets none")))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's ninth review: a window crossing the smaller mark, and provenance from another
+;;; conversation at an erasure.
+;;; --------------------------------------------------------------------------
+
+(test after-erasure-a-window-crossing-the-kept-mark-distils-only-past-it
+  "The ninth review's case. A (step 10) gives up on 1-10 and its progress write fails, so the
+store holds nothing from A. B (step 4) writes 1-4 and 5-8 and saves (8 NIL). Both are stopped
+and the subject erased, keeping mark 8. At A's next turn the merge splits 1-10 at the mark, so A
+distils only 9-10: nothing it writes cites a message before 9."
+  (let* ((store (make-instance 'flaky-reads-store))
+         (a-provider (make-instance 'failing-scripted :failures 2
+                                                      :script (list (%call-with (%ob "Moved to Lisbon." "fact")))))
+         (a (obs:make-observer a-provider store "member-1" "conv-7" :step (%step-for 10) :retry-delay 0
+                                                                   :max-attempts 2))
+         (b (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact"))
+                                                    (%call-with (%ob "Moved to Lisbon." "fact")))
+                               store "member-1" "conv-7" :step (%step-for 4) :retry-delay 0)))
+    (setf (progress-write-failures store) 1)
+    (%turn a 10)
+    (is (equal '((1 10 1)) (obs:observer-skipped a)) "precondition: A gave up on 1-10")
+    (is (null (mem:thread-progress store "member-1" "conv-7")) "precondition: and saved nothing")
+    (%turn b 8)
+    (is (eql 8 (mem:thread-progress store "member-1" "conv-7")))
+    (obs:stop-observer a)
+    (obs:stop-observer b)
+    (mem:forget-subject store "member-1")
+    (is (eql 8 (mem:thread-progress store "member-1" "conv-7")))
+    (%turn a 10)
+    (let ((written (mem:observations-of store "member-1" :thread :all :include-superseded t)))
+      (is (= 1 (length written)) "A distilled one window: ~S" (mapcar #'mem:observation-content written))
+      (is (every (lambda (o) (>= (mem:provenance-turn (mem:observation-provenance o)) 9)) written)
+          "and cited nothing before message 9"))))
+
+(test after-erasure-a-correction-from-another-conversation-does-not-raise-the-mark
+  "An observer of conv-7 wrote 1-6. The app corrected that observation from conv-9, at turn 40:
+the correction keeps conv-7's thread but cites conv-9. The erasure keeps conv-7's mark at 6, and
+a new observer distils 7-12."
+  (let ((store (mem:make-in-memory-store)))
+    (%turn (obs:make-observer (%provider-returning (%call-with (%ob "Lives in Porto." "fact")))
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)
+           6)
+    (let ((porto (first (mem:observations-of store "member-1" :thread "conv-7"))))
+      (mem:supersede store porto "Lives in Lisbon." :provenance (mem:make-provenance "conv-9" 40)))
+    (mem:forget-subject store "member-1")
+    (is (eql 6 (mem:thread-progress store "member-1" "conv-7")) "another conversation's turn does not count")
+    (let ((next (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                   store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+      (is-true (obs:observe-turn next (%history 12)) "messages 7-12 are observed")
+      (obs:await-observer next :timeout 10))
+    (is (equal '("Has a dog.") (%thread-contents store)))))
+
+(test after-erasure-a-superseded-observation-counts-toward-the-mark
+  "The thread's observation of 7-12 was corrected within the thread at message 3, by the app.
+The superseded observation still counts, so the erasure keeps mark 12."
+  (let ((store (mem:make-in-memory-store)))
+    (let ((o (mem:remember store "member-1" "Lives in Lisbon." :thread "conv-7"
+                           :provenance (mem:make-provenance "conv-7" 7 :through 12))))
+      (mem:supersede store o "Lives in Faro." :provenance (mem:make-provenance "conv-7" 3)))
+    (mem:forget-subject store "member-1")
+    (is (eql 12 (mem:thread-progress store "member-1" "conv-7")))))
