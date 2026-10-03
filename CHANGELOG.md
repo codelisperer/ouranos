@@ -223,6 +223,14 @@ its tag.
   next poll. `watch-site` now reloads a change once two polls in a row have seen it, so an edit
   is served one `:interval` later than before. A write held open for longer than an interval can
   still be read while empty. (#534)
+- **aion/http-client: `fetch-public` returns the body of a 4xx or 5xx response, and an empty
+  response no longer fails** (#527). Over the pinned connection `fetch-public` uses, the
+  connection was closed before the body of a non-2xx response was read. The body came back
+  empty, and a response with no body at all, such as a 404, signalled
+  `sb-int:closed-stream-error` instead of returning. An app that read an error's details from
+  `fetch-public`'s response, or treated a closed-stream error from it as "not found", now gets
+  the response itself. Windows is unaffected, because `fetch-public` does not pin a connection
+  there.
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that

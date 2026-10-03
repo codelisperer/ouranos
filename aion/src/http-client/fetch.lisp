@@ -207,8 +207,18 @@ Host header is the URL's too."
                  (setf stream (cl+ssl:make-ssl-client-stream stream :hostname host
                                                                     :verify :required)))))
            (multiple-value-bind (body status headers)
-               (apply #'dex:request (request-url req) :stream stream
-                      :use-connection-pool nil :keep-alive nil (%dex-args req))
+               ;; A non-2xx is caught HERE, while the connection is open, and returned like any
+               ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
+               ;; through this UNWIND-PROTECT first, which closed the socket, and the body of
+               ;; every 4xx and 5xx fetched this way was lost -- such as an OAuth token
+               ;; endpoint's {"error":"invalid_grant"} (#527).
+               (handler-case
+                   (apply #'dex:request (request-url req) :stream stream
+                          :use-connection-pool nil :keep-alive nil (%dex-args req))
+                 (dexador.error:http-request-failed (e)
+                   (values (dexador.error:response-body e)
+                           (dexador.error:response-status e)
+                           (ignore-errors (dexador.error:response-headers e)))))
              ;; A streamed body (MAX-BODY-BYTES) still needs the connection, and
              ;; %READ-CAPPED closes it when it has read enough. Otherwise the connection is
              ;; finished with here.
