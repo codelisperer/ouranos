@@ -191,7 +191,7 @@
   :license "MIT"
   ;; cl-base64 for the specification's encoding of header values that are not plain ASCII.
   ;; Everything here is already in the tree; see docs/dependencies.md.
-  :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon" "cl-base64")
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64")
   :serial t
   :components ((:module "src/mcp"
                 :serial t
@@ -202,8 +202,9 @@
 
 (defsystem "praxeon/mcp/tests"
   :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
+  ;; aion/oauth/tests for its test authorization server, which the OAuth path here runs against.
   :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
-               "aion/http-client"
+               "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret"
                "com.inuoe.jzon" "cl-base64")
   :serial t
   :components ((:file "tests/mcp-tests"))

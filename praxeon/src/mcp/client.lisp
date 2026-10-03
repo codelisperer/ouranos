@@ -158,18 +158,45 @@ checking with the user."
            :text (format nil "The connection ~A needs the user to sign in before this tool can be used. Ask the user to sign in."
                          name))))
 
+(defgeneric token-for (source connection principal)
+  (:documentation "The bearer token SOURCE gives for PRINCIPAL's calls to CONNECTION, or NIL to
+send none. A function is a source: it is called with CONNECTION and PRINCIPAL."))
+
+(defgeneric token-refused (source connection principal token challenge)
+  (:documentation "The server refused TOKEN, with a 401 or 403 whose WWW-Authenticate value is
+CHALLENGE. Return a different token to retry the request with once, or NIL to give up, after
+which the user must sign in. The default gives up."))
+
+(defmethod token-for ((source null) connection principal)
+  (declare (ignore connection principal))
+  nil)
+
+(defmethod token-for ((source function) connection principal)
+  (funcall source connection principal))
+
+(defmethod token-refused (source connection principal token challenge)
+  (declare (ignore source connection principal token challenge))
+  nil)
+
+(defvar *sent-token* nil
+  "The token the last POST of the current request carried, so that a 401 can be answered by
+asking the source for another.")
+
 (defun %token (client principal)
-  (let* ((connection (client-connection client))
-         (source (connection-token-source connection)))
+  (let ((connection (client-connection client)))
     (when (and (connection-per-user connection) (null principal))
       (%require-sign-in client nil nil))
-    (and source (funcall source connection principal))))
+    (handler-case (token-for (connection-token-source connection) connection principal)
+      (error ()
+        ;; A token source that fails, say one that could not reach its authorization server to
+        ;; refresh, fails the call without running it rather than ending the turn.
+        (%request-failed client "its token could not be obtained." '() :outcome :not-run)))))
 
 (defun %post (client body headers principal timeout)
   "POST BODY, a JSON-RPC message as a hash table, with HEADERS and the token for PRINCIPAL.
 Returns the response. A failed connection or a timeout fails the call."
   (let* ((connection (client-connection client))
-         (token (%token client principal))
+         (token (setf *sent-token* (%token client principal)))
          (method (setf *in-flight-method* (gethash "method" body)))
          (request (http:make-request
                    :method :post :url (connection-url connection)
@@ -515,7 +542,20 @@ may have been processed is never sent twice."
          (timeout (or timeout (connection-timeout connection)))
          (started (get-internal-real-time)))
     (multiple-value-bind (response id)
-        (%send client method params principal timeout extra-headers)
+        (let ((*sent-token* nil))
+          (multiple-value-bind (response id)
+              (%send client method params principal timeout extra-headers)
+            (let ((sent *sent-token*)
+                  (challenge (http:header-value (http:response-headers response) "www-authenticate")))
+              ;; A refused token: the server did not process the request, so it can be sent
+              ;; once more with another token, when the source has one.
+              (if (and sent (member (http:response-status response) '(401 403))
+                       (let ((fresh (ignore-errors
+                                     (token-refused (connection-token-source connection)
+                                                    connection principal sent challenge))))
+                         (and fresh (not (equal fresh sent)))))
+                  (%send client method params principal timeout extra-headers)
+                  (values response id)))))
       (%check-status client response principal)
       (let ((reply (%reply-for client response id)))
         (log:info "praxeon/mcp: request" :connection (connection-name connection)
@@ -553,6 +593,29 @@ may have been processed is never sent twice."
   (let ((copy (make-hash-table :test #'equal)))
     (maphash (lambda (k v) (setf (gethash k copy) v)) table)
     copy))
+
+;;; --- tokens from an OAuth sign-in ------------------------------------------------------
+
+(defclass oauth-token-source ()
+  ((broker :initarg :broker :reader oauth-token-source-broker))
+  (:documentation "A token source over an AION/OAUTH broker: each principal's own token for the
+connection, refreshed when it has expired or the server refuses it. A connection that uses it
+should be :PER-USER, unless the app signs in once for everyone under a fixed principal."))
+
+(defun oauth-token-source (broker)
+  "A token source that takes each principal's tokens from BROKER (#527, part 2)."
+  (make-instance 'oauth-token-source :broker broker))
+
+(defmethod token-for ((source oauth-token-source) connection principal)
+  (oauth:access-token (oauth-token-source-broker source) principal
+                      (connection-name connection) (connection-url connection)))
+
+(defmethod token-refused ((source oauth-token-source) connection principal token challenge)
+  ;; A 403 for insufficient scope needs a new sign-in with more scope, not a refresh.
+  (unless (equal "insufficient_scope"
+                 (cdr (assoc "error" (oauth:parse-challenge challenge) :test #'string=)))
+    (oauth:refresh (oauth-token-source-broker source) principal (connection-name connection)
+                   (connection-url connection) :rejected token)))
 
 ;;; --- tools -----------------------------------------------------------------------------
 

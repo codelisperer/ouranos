@@ -154,8 +154,8 @@
     :hyperion/http1
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
-    ;; The MCP client (#527).
-    :praxeon/mcp
+    ;; The MCP client and its OAuth sign-in (#527).
+    :praxeon/mcp :aion/oauth :hyperion/oauth
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
     :praxeon/elise :praxeon/chat-rbt
     :hyperion/examples/active-search :hyperion/examples/active-search-db
@@ -203,6 +203,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The MCP client (#527), registered in the commit that adds it. Its MCP servers run on
     ;; 127.0.0.1 in the test image, so it runs on every leg with no network.
     :praxeon/mcp/tests
+    ;; The OAuth client and its routes (#527 part 2), registered in the commit that adds them.
+    ;; Their authorization server runs on 127.0.0.1 in the test image.
+    :aion/oauth/tests :hyperion/oauth/tests
     ;; The gate's own checkers, tested against trees built to break them (#163). Here
     ;; rather than in the +CHECKERS+ block because that block must not move the check
     ;; count, and a fix for "nothing attests these work" that produces no number would be
