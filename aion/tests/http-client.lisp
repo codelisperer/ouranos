@@ -452,6 +452,33 @@ Nothing connects."
   "Test policy: the test server's 127.0.0.1 counts as public; everything else as usual."
   (if (equalp address #(127 0 0 1)) :public (http:address-category address)))
 
+(test fetch-public-keeps-the-body-of-an-error-response
+  "The body of a 400 fetched over a pinned connection is the body the server sent. It used to
+be lost, because the connection was closed before the body was read (#527)."
+  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 400 '(("Content-Type" . "application/json"))
+                                       "{\"error\":\"invalid_grant\"}")))
+      (let ((r (http:fetch-public (%local s "/token" "start.test")
+                                  :resolve (%resolver '(("start.test" "127.0.0.1")))
+                                  :address-policy #'%loopback-allowed :read-timeout 5)))
+        (is (= 400 (http:response-status r)))
+        (is (equal "{\"error\":\"invalid_grant\"}" (http:response-body r)))))))
+
+(test fetch-public-returns-an-empty-response
+  "A 404 with an empty body is an ordinary response: status 404, no bytes. It used to fail with
+CLOSED-STREAM-ERROR, because the connection was closed before the body was read (#527)."
+  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 404 '() "")))
+      (let ((r (http:fetch-public (%local s "/missing" "start.test")
+                                  :resolve (%resolver '(("start.test" "127.0.0.1")))
+                                  :address-policy #'%loopback-allowed :read-timeout 5)))
+        (is (= 404 (http:response-status r)))
+        (is (zerop (length (http:response-bytes r))))))))
+
 (test every-redirect-hop-is-checked-again
   "A public-looking URL redirects to one that resolves to the metadata address; that hop is
 refused, and the server saw only the first request. Control: a redirect to an allowed host is
