@@ -109,6 +109,18 @@ its tag.
   `klio/tests` that made a directory by deleting a file from `uiop:tmpize-pathname`, or named it
   by the time and a counter, use it now; the first of those patterns failed when two suites
   started together on one machine.
+- **praxeon: a means can report an error to the model, and the turn goes on** (#527). A means
+  that signals `praxeon/conditions:tool-error-result` with a `:text` gives the model a tool
+  result marked as an error, carrying that text, and `run-turn` runs its next step. Any other
+  error from a means still ends the turn as `means-failure`, with `act`'s restarts, as before.
+  The `:tool-result` event carries `:is-error t` for such a result. The Anthropic adapter
+  already sent `is_error`; the OpenAI-compatible adapter, whose format has no such field, now
+  starts the content with `Error: `.
+- **praxeon: `run-turn` and `run-turn-through` take a `:principal`, the user the turn runs for**
+  (#527). It is bound for the turn as `praxeon/actor:*principal*`, which a means reads when it
+  is called, so one agent can serve several users and act for each with that user's
+  credentials. A turn without one keeps the principal of an enclosing turn, so a delegated
+  sub-turn runs for the same user.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.

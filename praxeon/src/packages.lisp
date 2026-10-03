@@ -49,6 +49,7 @@
   (:export
    #:praxeon-error
    #:means-failure #:means-failure-means #:means-failure-cause
+   #:tool-error-result #:tool-error-result-text
    #:deliberation-failure
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
@@ -298,7 +299,7 @@
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.
    #:means-entry-name #:means-entry-description #:means-entry-capability #:agent-tool-specs #:register-agent-as-means
    #:deliberate #:act #:run-turn #:converse-repl
-   #:run-turn-through))
+   #:run-turn-through #:*principal*))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Workflow: deterministic multi-agent coordination (the code-driven counterpart

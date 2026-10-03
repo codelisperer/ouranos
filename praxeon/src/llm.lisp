@@ -653,11 +653,14 @@ block into it would put vendor shapes in front of a model that did not ask for t
           (gethash "function" ht) fn)
     ht))
 
-(defun %oai-tool-result (tool-call-id content)
+(defun %oai-tool-result (tool-call-id content &optional is-error)
+  "An OpenAI tool message. Its format has no field that marks a failed call, so a result with
+IS-ERROR set says so in its CONTENT instead, which is the only place the model can see it
+(#527). Anthropic's format has the field, and its adapter sets is_error."
   (let ((ht (make-hash-table :test #'equal)))
     (setf (gethash "role" ht) "tool"
           (gethash "tool_call_id" ht) tool-call-id
-          (gethash "content" ht) content)
+          (gethash "content" ht) (if is-error (concatenate 'string "Error: " content) content))
     ht))
 
 (defun %message->openai (m)
@@ -676,7 +679,8 @@ expand into one role:\"tool\" message each)."
                      tool-calls))
               (:tool-result
                (push (%oai-tool-result (getf part :tool-use-id)
-                                       (getf part :content))
+                                       (getf part :content)
+                                       (getf part :is-error))
                      tool-msgs))))
           (if tool-msgs
               (nreverse tool-msgs)
