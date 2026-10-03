@@ -42,14 +42,14 @@
 ;;;; observer per request, or restarts, neither distils the thread again from the start nor
 ;;;; passes a window that was given up on or written only part-way. They are not worked out from
 ;;;; the thread's observations, which would count observations the app wrote itself; the one
-;;;; exception is an erasure (below). A WRITE
-;;;; THAT FAILS leaves the observer unsaved, and the next OBSERVE-TURN starts a run to make it,
-;;;; even with no new message. Until it is made the store is behind: after a stop, a restart or
-;;;; with a new observer, the window it covers is distilled again, and a model that words its
-;;;; answer differently leaves both wordings. The same can happen with long-lived observers: one
-;;;; whose write failed, followed by another observer's turn before the first writes it, lets
-;;;; the second distil the window again. A failed write also loses a give-up from the record, so
-;;;; more than MAX-ATTEMPTS runs can give up on one window (#462's ninth review).
+;;;; exception is an erasure (below). A WRITE THAT FAILS leaves the observer unsaved, and the
+;;;; next OBSERVE-TURN starts a run to make it, even with no new message. Until it is made the
+;;;; store is behind: after a stop, a restart or with a new observer, the window it covers is
+;;;; distilled again, and a model that words its answer differently leaves both wordings. The
+;;;; same can happen with long-lived observers: one whose write failed, followed by another
+;;;; observer's turn before the first writes it, lets the second distil the window again. A
+;;;; failed write also loses a give-up from the record, so more than MAX-ATTEMPTS runs can give
+;;;; up on one window (#462's ninth review).
 ;;;;
 ;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS, FOR ONE STORE OBJECT. OBSERVE-TURN
 ;;;; starts nothing while another observer of the same store object, subject and thread holds
@@ -403,6 +403,11 @@ thread would end the process."
 (defun %merge-progress (mark-a skipped-a mark-b skipped-b)
   "Two records of one thread's progress, merged. Returns the merged mark and skipped windows.
 
+A RECORD HOLDING A SKIPPED WINDOW PAST ITS OWN MARK IS TREATED AS REACHING THAT WINDOW'S END
+(#462's tenth review). An observer made with a :MARK below a window the store holds skipped has
+such a record. Its mark is first raised to the end of its last skipped window, so that window is
+compared with the other record's windows like any other.
+
 The mark is the larger. Each record has distilled every message up to its own mark that it holds
 no skipped window for, so up to the smaller mark a message is still undistilled only when both
 records hold a skipped window over it. For each pair of overlapping skipped windows there, one
@@ -423,7 +428,9 @@ nothing.
 A split window starts at an exchange boundary only when the smaller mark ends a window. A mark
 an erasure raised from an observation's provenance need not, so the part kept can start inside
 an exchange; keeping the whole window would distil erased messages again instead."
-  (let* ((low (min mark-a mark-b))
+  (let* ((mark-a (reduce #'max skipped-a :key #'second :initial-value mark-a))
+         (mark-b (reduce #'max skipped-b :key #'second :initial-value mark-b))
+         (low (min mark-a mark-b))
          (high-skipped (cond ((> mark-a mark-b) skipped-a) ((> mark-b mark-a) skipped-b) (t '())))
          (low-skipped (cond ((> mark-a mark-b) skipped-b) ((> mark-b mark-a) skipped-a) (t '())))
          (kept '()))
@@ -461,9 +468,9 @@ an exchange; keeping the whole window would distil erased messages again instead
 (defun %sync-progress (observer &key (read-failure :record))
   "Read the store's progress, merge OBSERVER's own into it (%MERGE-PROGRESS), take the result,
 and write it when it differs from what is stored. The stored mark is never lowered, and newer
-progress at an equal mark is never overwritten, through one store object in one process. A failed write marks OBSERVER unsaved. A failed
-read does the same with READ-FAILURE :RECORD, and with :SIGNAL it is signalled, which ends the
-run that is reconciling."
+progress at an equal mark is never overwritten, through one store object in one process. A
+failed write marks OBSERVER unsaved. A failed read does the same with READ-FAILURE :RECORD, and
+with :SIGNAL it is signalled, which ends the run that is reconciling."
   (let ((stored nil) (skipped nil))
     (handler-case (multiple-value-setq (stored skipped)
                     (mem:thread-progress (observer-store observer) (observer-subject observer)

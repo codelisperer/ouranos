@@ -603,6 +603,16 @@ deletion (#462's eighth review)."
   (declare (ignore subject thread mark skipped))
   (error "the progress write failed"))
 
+(test a-superseded-observation-counts-toward-the-mark-on-the-sql-store
+  "The thread's observation of 7-12 was corrected within the thread at message 3. The SQL
+store's erasure counts the superseded observation too, and keeps mark 12 (#462's tenth review)."
+  (with-store (store)
+    (let ((o (mem:remember store "member-16" "Lives in Lisbon." :thread "conv-1"
+                           :provenance (mem:make-provenance "conv-1" 7 :through 12))))
+      (mem:supersede store o "Lives in Faro." :provenance (mem:make-provenance "conv-1" 3)))
+    (mem:forget-subject store "member-16")
+    (is (eql 12 (mem:thread-progress store "member-16" "conv-1")))))
+
 (test an-erasure-whose-mark-write-fails-erases-nothing-on-the-sql-store
   "The deletion and the raised marks are one transaction (#462's ninth review). When raising a
 mark fails, FORGET-SUBJECT signals and the observations are all still there."

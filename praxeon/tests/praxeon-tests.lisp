@@ -6427,8 +6427,11 @@ size, each skipped with probability 1/3, some of those closed."
     (values mark (nreverse skipped))))
 
 (defun %distilled-p (n mark skipped)
-  "Whether the record (MARK SKIPPED) says message N was distilled."
-  (and (<= n mark) (notany (lambda (e) (<= (first e) n (second e))) skipped)))
+  "Whether the record (MARK SKIPPED) says message N was distilled. A record holding a skipped
+window past its own mark reaches that window's end, as %MERGE-PROGRESS reads it (#462's tenth
+review): its windows came from a record that reached that far."
+  (let ((mark (reduce #'max skipped :key #'second :initial-value mark)))
+    (and (<= n mark) (notany (lambda (e) (<= (first e) n (second e))) skipped))))
 
 (test progress-merges-commute-repeat-and-lose-no-message
   "2,000 random pairs of records: the merge gives one result in either order, merging it again
@@ -6591,11 +6594,15 @@ next observer starts at the mark the erasure kept and does not distil the transc
 
 (defun %merged-record (random-state)
   "A progress record as the store holds it after merges: one, two or three of %RANDOM-RECORD's
-records merged together."
+records merged together. One in four has its mark lowered below the end of its last skipped
+window, as an observer made with a :MARK below a window the store holds skipped has it (#462's
+tenth review)."
   (multiple-value-bind (mark skipped) (%random-record random-state)
     (dotimes (i (random 3 random-state))
       (multiple-value-bind (m s) (%random-record random-state)
         (multiple-value-setq (mark skipped) (obs::%merge-progress mark skipped m s))))
+    (when (and skipped (zerop (random 4 random-state)))
+      (setf mark (random (second (car (last skipped))) random-state)))
     (values mark skipped)))
 
 (test merges-of-merged-records-commute-repeat-and-lose-no-message
@@ -6635,6 +6642,9 @@ review's cases: a window of the further record that crosses the smaller mark is 
   (multiple-value-bind (mark skipped) (obs::%merge-progress 8 '((1 4 1)) 8 '((3 6 1)))
     (is (eql 8 mark))
     (is (equal '((3 4 1)) skipped) "only the messages neither record distilled stay skipped"))
+  ;; The tenth review's case: a record whose skipped window lies past its own mark counts as
+  ;; reaching that window's end, so the window is not kept twice.
+  (is (equal '(10 ((1 10 1))) (multiple-value-list (obs::%merge-progress 5 '((1 10 1)) 10 '((1 10 1))))))
   (dolist (case '((10 ((1 10 1)) 8 () ((9 10 1)))
                   (10 ((1 10 1)) 8 ((5 8 1)) ((5 8 1) (9 10 1)))
                   (12 ((7 12 1)) 8 () ((9 12 1)))))
@@ -6741,3 +6751,23 @@ The superseded observation still counts, so the erasure keeps mark 12."
       (mem:supersede store o "Lives in Faro." :provenance (mem:make-provenance "conv-7" 3)))
     (mem:forget-subject store "member-1")
     (is (eql 12 (mem:thread-progress store "member-1" "conv-7")))))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's tenth review: a record holding a skipped window past its own mark.
+;;; --------------------------------------------------------------------------
+
+(test an-observer-made-with-a-mark-below-a-stored-skipped-window-retries-it-once
+  "The store holds (10 ((1 10 1))), and the observer is made with :MARK 5. Its record holds
+window 1-10 past its own mark, and the merge treats it as reaching 10, so the run retries 1-10
+once: one model call, one observation. At 10d1915 the merge kept 1-10 and 6-10, and the run made
+two calls."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (%provider-returning (%call-with (%ob "Has a dog." "fact"))
+                                        (%call-with (%ob "Has a cat." "fact")))))
+    (mem:record-thread-progress store "member-1" "conv-7" 10 '((1 10 1)))
+    (let ((observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 10)
+                                                                         :retry-delay 0 :mark 5)))
+      (%turn observer 10))
+    (is (= 1 (length (scripted-script provider))) "one model call")
+    (is (equal '("Has a dog.") (%thread-contents store)) "one observation")
+    (is (equal '(10 nil) (multiple-value-list (mem:thread-progress store "member-1" "conv-7"))))))
