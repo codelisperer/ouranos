@@ -32,9 +32,13 @@ What praxeon has today, surveyed on `main` at 51c1c32:
   `means-permitted-p` refuses a capability the caller's permit lacks. Workflow steps, praxeon/web's
   responder and the Elise example pass no permit, so no capability-bearing means can run there.
   A tool result is a string with no label.
-- **Providers come from `make-provider-from-env`.** An explicit `:api-key`, NIL included, already
-  wins over the environment, but there is no hook through which an app supplies a key, and praxeon
-  does not use `hades/credentials`.
+- **An app can already pass a provider with its own key, but nothing chooses the provider and key
+  for a persona or a user.** `make-agent` takes a `:provider`, and the exported `anthropic` and
+  `openai-compatible` classes take an `:api-key`, which wins over the environment when given, NIL
+  included. `make-provider-from-env` builds a provider from environment variables, for development
+  and examples. What is missing is a hook through which praxeon asks the app which provider and key
+  to use for a given persona, user and context. Praxeon does not read keys from
+  `hades/credentials`.
 - **praxeon/ceiling** has grants, a per-session ledger, `budget-guard` and `meter`, and nothing
   outside its tests calls them (#161).
 - **praxeon/workflow** runs fixed steps and parallel groups over an in-memory blackboard of strings,
@@ -110,3 +114,8 @@ joining them with nothing.
 Drafted by the hub on 2026-10-01 at the maintainer's request, from the three requirement notes on
 #497 and a survey of `main` at 51c1c32, which is where every statement under Context comes from. The
 maintainer confirmed the direction and the order of the three stages before drafting began.
+
+Revised on 2026-10-03 after the review on #503. The Context said there was no way for an app to
+supply a key. At 51c1c32, as now, `make-agent` takes a provider and both provider classes take an
+`:api-key`, so the statement now says that what is missing is choosing the provider and key for a
+persona and a user.
