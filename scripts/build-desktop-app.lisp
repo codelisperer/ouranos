@@ -37,6 +37,7 @@
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
 (load (merge-pathnames "carry-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; an app's own libraries (#78)
 (load (merge-pathnames "lazy-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; the tree's own libraries (#481)
+(load (merge-pathnames "bundle-sources.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; a library that travels with its source (#429)
 
 ;;; --- argv -------------------------------------------------------------------
 (defun argv-value (name &optional default)
@@ -771,10 +772,20 @@ NIL if this app pulled in no FFI at all."
   (car (last (pathname-directory (vendor-package-directory library-path)))))
 
 (defun license-files (library-path)
-  "The license texts shipped with that package. We carry the code, so we carry the license."
-  (let ((pkg (vendor-package-directory library-path)))
-    (append (directory (merge-pathnames "LICENSE*" pkg))
-            (directory (merge-pathnames "src/*/LICENSE*" pkg)))))
+  "The license texts shipped with that package. We carry the code, so we carry the license.
+
+LICENSE* and COPYING*, in the package's directory, beside the library in its lib/, or in its
+unpacked source under src/. COPYING because that is what libgit2 calls its licence, which
+build-libgit2.lisp copies into lib/ (#429). One file per name: the same licence in lib/ and in
+src/ is carried once."
+  (let ((pkg (vendor-package-directory library-path))
+        (found '()))
+    (dolist (dir '("" "lib/" "src/*/"))
+      (dolist (pattern '("LICENSE*" "COPYING*"))
+        (dolist (file (directory (merge-pathnames (concatenate 'string dir pattern) pkg)))
+          (unless (find (file-namestring file) found :key #'file-namestring :test #'string=)
+            (push file found)))))
+    (nreverse found)))
 
 (defun carry-native-libraries ()
   "Copy every vendored native library the image has open into the bundle, and report the rest.
@@ -821,7 +832,19 @@ be missing from a step named for waking."
                                  *bundle*)))
                        (ensure-directories-exist dst)
                        (uiop:copy-file license dst)
-                       (format t "~&            + LICENSES/~A~%" (file-namestring dst))))))
+                       (format t "~&            + LICENSES/~A~%" (file-namestring dst))))
+                   ;; A library whose licence is not permissive travels with its source
+                   ;; (ADR-0013's amendment of 2026-10-01, #429).
+                   (let ((entry (ouranos-bundle-sources:source-for-package
+                                 (vendor-package-name truename))))
+                     (when entry
+                       (handler-case
+                           (let ((copy (ouranos-bundle-sources:carry-source entry *root* *bundle*)))
+                             (format t "~&            + SOURCES/~A~%" (file-namestring copy)))
+                         (ouranos-bundle-sources:source-refused (e)
+                           (format *error-output* "~&build-desktop-app: ~A~%~%The bundle would carry ~A without its source, which its licence requires (ADR-0013). Not building it.~%"
+                                   e (getf entry :package))
+                           (sb-ext:exit :code 3)))))))
                 (truename
                  (format t "~&  system    ~A (~A) -- not carried; if the app ships it, pass --carry with that path~%" name (human-path:human-path truename)))
                 (t

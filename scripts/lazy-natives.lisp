@@ -27,7 +27,12 @@
     ;; aion/tls records the loaded path in its internal *PATH*; the exported MBEDTLS-PATH is a
     ;; function, and the bundler reads a variable.
     ("AION/TLS" "LOAD-MBEDTLS" "UNLOAD-MBEDTLS" "*PATH*" "*LIBRARY-NAMES*"
-     "build-mbedtls.lisp" "aion/tls"))
+     "build-mbedtls.lisp" "aion/tls")
+    ;; libgit2 (#429), the one library a bundle carries whose licence is not permissive. A
+    ;; bundle that carries it also carries its source tarball under SOURCES/: see
+    ;; scripts/bundle-sources.lisp and ADR-0013's amendment of 2026-10-01.
+    ("AION/LIBGIT" "LOAD-LIBGIT2" "UNLOAD-LIBGIT2" "*PATH*" "*LIBRARY-NAMES*"
+     "build-libgit2.lisp" "aion/libgit"))
   "Foreign libraries this tree loads LAZILY, and how to wake and release each one: (package
 loader unloader path-variable names-variable build-script system), all strings. Lazy loading is
 deliberate (ADR-0011: binding at load time is what made a missing library unloadable rather

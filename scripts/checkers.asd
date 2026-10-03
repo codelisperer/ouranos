@@ -49,5 +49,5 @@ that hides which scripts it is about.")
                 :serial t
                 :components ((:file "checkers") (:file "dump-image") (:file "carry-natives")
                              (:file "windows-launcher") (:file "lazy-natives")
-                             (:file "windows-installer-swap"))))
+                             (:file "windows-installer-swap") (:file "bundle-sources"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))

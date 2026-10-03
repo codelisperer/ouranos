@@ -81,6 +81,13 @@ case "$TARGET" in
 esac
 DIR=$(cd "$DIR" && pwd)
 
+# A library whose licence is not permissive travels with its source: libgit2's pinned tarball
+# under SOURCES/ and its licence under LICENSES/ (ADR-0013's amendment of 2026-10-01, #429). In
+# a .app both are in Contents/Resources, reached through the symlinks build-dmg.sh leaves here.
+sbcl --script "$(cd "$(dirname "$0")" && pwd)/check-bundle-sources.lisp" "$DIR" || {
+  echo "verify-bundle-macos: FAILED -- the bundle lacks a source or licence a carried library requires" >&2
+  exit 1; }
+
 BIN=""
 for f in "$DIR"/*; do
   [ -f "$f" ] && [ -x "$f" ] || continue

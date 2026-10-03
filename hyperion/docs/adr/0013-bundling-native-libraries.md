@@ -126,6 +126,32 @@ no LGPL library this way). The checkers suite tests it by dumping an image that 
 library from a directory, deleting the directory, and running the image; the controls are the
 same bundle with the carried copy deleted, and a dump without carrying, and both must fail.
 
+## Amendment, 2026-10-01: libgit2, the one non-permissive library a bundle carries (#429)
+
+Decision 4 says only permissively licensed libraries travel inside the image, and that an LGPL
+library must not. This amendment records one exception, which the maintainer decided on
+2026-09-30 on #429 (comment 5916493345). It does not change decision 4's text.
+
+**libgit2, which `aion/libgit` binds, may be carried in a desktop bundle.** Its licence is the
+GNU GPL version 2 with the libgit2 linking exception. The exception allows a program under any
+licence to link the library. The library itself stays under the GPL, which requires that
+anyone who distributes the binary also makes its source available. So a bundle that carries
+libgit2 must also carry:
+
+- **its exact pinned source**: the tarball `libgit2.pin` names, under `SOURCES/` in the
+  bundle, with the sha256 `libgit2.pin` records;
+- **its licence**: `COPYING` from that tarball, under `LICENSES/`.
+
+`scripts/build-desktop-app.lisp` puts both there when it carries the library, and refuses to
+build the bundle if the tarball's sha256 does not match the pin. The `verify-bundle` scripts
+check that both are present whenever the library is.
+
+**This is not a general rule for linking exceptions or for the GPL.** LGPL libraries stay
+excluded, for decision 4's reason: the LGPL's relinking obligation is a real constraint, and
+satisfying it is the packaging layer's job, not this mechanism's. Any other library whose
+licence is not permissive needs its own decision by the maintainer, recorded here as an
+amendment like this one.
+
 ## Alternatives considered
 
 - **`$ORIGIN` in `DT_RUNPATH`** — the conventional Linux answer, and the initial lean here.

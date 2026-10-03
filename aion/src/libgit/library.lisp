@@ -4,7 +4,9 @@
 ;;;; ADR-0013):
 ;;;;   1. AION_LIBGIT_LIBRARY     -- an explicit path. Always wins.
 ;;;;   2. beside the running image -- how a shipped bundle carries its own copy.
-;;;;   3. vendor/libgit2/lib/...  -- what scripts/build-libgit2.lisp produced.
+;;;;   3. vendor/libgit2/lib/...  -- what scripts/build-libgit2.lisp produced. Not in a desktop
+;;;;                                 bundle, which never searches the tree it was built from
+;;;;                                 (AION/PLATFORM:*SEARCH-SOURCE-TREE*, #472).
 ;;;;   4. the bare soname          -- left to the OS loader.
 ;;;;
 ;;;; After loading, a library is refused with LIBGIT2-MISMATCH, naming the file, unless:
@@ -71,9 +73,12 @@ aion/uv and aion/tls."
   "Every path LOAD-LIBGIT2 tries, in order."
   (let ((explicit (uiop:getenv "AION_LIBGIT_LIBRARY"))
         (image (%image-directory))
-        (root (ignore-errors
-               (uiop:pathname-parent-directory-pathname
-                (asdf:system-source-directory :aion)))))
+        ;; Not in a desktop bundle: it never consults the tree it was built from. The override
+        ;; and the OS's own search still apply (AION/PLATFORM:*SEARCH-SOURCE-TREE*, #472).
+        (root (and aion/platform:*search-source-tree*
+                   (ignore-errors
+                    (uiop:pathname-parent-directory-pathname
+                     (asdf:system-source-directory :aion))))))
     (append (when (and explicit (plusp (length explicit))) (list explicit))
             (when image
               (mapcar (lambda (n) (namestring (merge-pathnames n image))) *library-names*))
