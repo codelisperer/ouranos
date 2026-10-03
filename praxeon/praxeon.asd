@@ -202,7 +202,7 @@
 
 (defsystem "praxeon/mcp/tests"
   :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
-  :depends-on ("praxeon/mcp" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
+  :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
                "com.inuoe.jzon" "cl-base64")
   :serial t
   :components ((:file "tests/mcp-tests"))
