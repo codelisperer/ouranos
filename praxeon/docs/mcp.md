@@ -75,6 +75,18 @@ The `:tool-call` and `:tool-result` events carry what a ledger needs to record a
 - `:outcome` on the result;
 - `:ms`, the call's duration, on the result.
 
+`:outcome` is one of four values:
+- `:ok`: the means returned a result.
+- `:error`: the tool ran and reported an error. For MCP this is a result with `isError` set, or a JSON-RPC error answer from the server.
+- `:not-run`: the call was refused before the tool could run. Part 1 produces it in these cases:
+  - a 401 or 403;
+  - a per-user connection called with no principal;
+  - a header argument that cannot be encoded;
+  - an `UnsupportedProtocolVersionError` or a `HeaderMismatch`;
+  - a 4xx reply the client could not read;
+  - an `input_required` result.
+- `:unknown`: the tool may have run. This is a `tools/call` that timed out, lost its connection, got a 5xx, or got a reply that ended before answering.
+
 This holds until #493 settles the usage interface.
 
 ## The protocol
