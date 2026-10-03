@@ -101,6 +101,50 @@ its tag.
 
 ### Added
 
+- **praxeon/mcp: agents can use the tools an MCP server offers** (#527, part 1). A new system,
+  `praxeon/mcp`, talks to MCP servers over Streamable HTTP, in the current revision of the
+  specification (2026-07-28) or, when a server does not understand it, in the legacy
+  revisions with their `initialize` handshake. `make-connection` describes a server: its name,
+  URL, `:token-source` (a function of the connection and a principal that returns a bearer
+  token), `:per-user`, `:timeout` and `:call-timeout` (seconds, 30 and 120), and
+  `:max-body-bytes` (8 MiB). `make-client` makes the client that talks to it, and nothing is
+  sent until it is first used. `list-tools` reads a server's tools and gives them to no agent,
+  leaving out a tool whose `inputSchema` is not an object schema or is larger than
+  `*max-schema-characters*` (20000), and failing a listing that goes past `*max-list-pages*`
+  (1000) pages. A tool's description is clipped to `*max-description-characters*` (2000).
+  `call-tool` calls one directly. `means-name` gives the name a tool is granted under.
+  `grant-tools` registers the tools the app names in its required `:only` (a list, or `:all`)
+  as means named `<connection>__<tool>`, and
+  refuses with `tool-name-conflict`, registering nothing, when a name is taken. `revoke-tools`
+  removes them. Each call uses the token of the turn's principal. A failed call is reported
+  to the model and the turn goes on: `tool-error` for a result with `isError`,
+  `request-failed` for a failed request, and `sign-in-needed` when the user must sign in, which
+  also signals `authorization-required` and emits a `:sign-in-required` event. A tool call that
+  may have run is never sent twice. Every request has a deadline of its own, one second past its
+  timeout, whatever the transport does; a request given up at it keeps running on a
+  `praxeon/mcp request` thread until it ends, and logs how it ended. At
+  `*max-abandoned-requests*` (8) such threads on a client, the client refuses new requests until
+  some finish. See `praxeon/docs/mcp.md`. OAuth sign-in is part 2.
+- **praxeon: the `:tool-call` and `:tool-result` events carry `:source`, `:principal`, `:agent`
+  and `:conversation`, and `:tool-result` carries `:outcome` and `:ms`** (#527).
+  `register-means` takes a `:source` plist, such as `(:connection "docs" :tool "search"
+  :per-user t)` for an MCP tool, and `:outcome` is
+  `:ok`, `:error`, `:not-run` or `:unknown`, from `tool-error-result-outcome`. This is what a
+  usage ledger needs to record a call, until #493 settles the usage interface.
+- **aion/test-http: the HTTP server aion/http-client's tests ran, as its own system** (#527), so
+  other test suites can run a server in the test image. Test support only.
+- **praxeon: a means can report an error to the model, and the turn goes on** (#527). A means
+  that signals `praxeon/conditions:tool-error-result` with a `:text` gives the model a tool
+  result marked as an error, carrying that text, and `run-turn` runs its next step. Any other
+  error from a means still ends the turn as `means-failure`, with `act`'s restarts, as before.
+  The `:tool-result` event carries `:is-error t` for such a result. The Anthropic adapter
+  already sent `is_error`; the OpenAI-compatible adapter, whose format has no such field, now
+  starts the content with `Error: `.
+- **praxeon: `run-turn` and `run-turn-through` take a `:principal`, the user the turn runs for**
+  (#527). It is bound for the turn as `praxeon/actor:*principal*`, which a means reads when it
+  is called, so one agent can serve several users and act for each with that user's
+  credentials. A turn without one keeps the principal of an enclosing turn, so a delegated
+  sub-turn runs for the same user.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.

@@ -24,7 +24,7 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 | **Memory** | `praxeon/memory` — `remember`, `supersede`, `recall` within a token budget, per person rather than per agent, bitemporal, a provenance on every write, and erasure; an in-memory store and a SQL store with similarity recall (`praxeon/memory-db`), on Postgres with pgvector or on SQLite (#425). `praxeon/distil` has a model propose observations from a window of a transcript. **Nothing runs `distil` automatically or condenses observations yet (#317), and no application uses these modules.** | Observational Memory: an observer and a reflector compress each thread | persistent, pluggable backends |
 | **Provider neutrality** | `complete` generic; anthropic + openai-compatible | model routing, 40+ providers | LangChain's model layer |
 | **Tools** | `Means`, provider-neutral `tool-spec` | `createTool()` with schemas | tools + a **Skills** system |
-| **MCP** | — (#64) | authors MCP servers | consumes MCP tools |
+| **MCP** | consumes MCP servers' tools over Streamable HTTP (`praxeon/mcp`, #527); resources, prompts and stdio planned | authors MCP servers | consumes MCP tools |
 | **Filesystem for agents** | — | — | pluggable local/sandboxed/remote |
 | **Evals** | **—** | built in | — |
 | **Observability** | `aion/log` structured fields only | tracing/metrics as a product surface | LangSmith-adjacent |
@@ -99,8 +99,9 @@ ontology and then built only step-by-step improvisation. Deliberate-once-then-ex
 different control flow from ReAct, not a refinement of it, and DeepAgents targets exactly the
 case praxeon left empty.
 
-**5. No MCP (#64).** Rapidly becoming table stakes; both references have it in some form.
-Being provider-neutral and *protocol*-absent is an odd combination to defend.
+**5. MCP, partly (#527).** `praxeon/mcp` gives agents the tools of MCP servers over Streamable HTTP, in
+the current revision of the specification and the legacy ones. OAuth sign-in, resources and
+prompts, and local servers over stdio are later parts of #527.
 
 **6. Context offload.** The most on-thesis idea in DeepAgents, and praxeon has the disk for
 it (`hermes/blob`). See the DAG note below — the obvious implementation is illegal.
