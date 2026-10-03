@@ -4141,3 +4141,98 @@ model, which is what the file's commentary is for."
             (llm:generate-structured p2 '((:role :user :content "b")) (%spec)))
         (is (string= "Ship" (gethash "headline" args)))
         (is (eq :truncated mark))))))
+
+;;; --- a means reports an error to the model, and the turn goes on (#527) -----------------
+
+(defun %tool-result-parts (agent)
+  "Every tool-result part in AGENT's history, oldest first."
+  (loop for m in (actor:agent-history agent)
+        for content = (llm:content m)
+        when (listp content)
+          append (remove-if-not (lambda (p) (eq :tool-result (getf p :type))) content)))
+
+(test a-tool-error-result-reaches-the-model-and-the-turn-goes-on
+  "A means that signals TOOL-ERROR-RESULT gives the model an error result with the condition's
+text, and the turn runs its next step instead of ending."
+  (let* ((call (llm:make-tool-call :id "t1" :name "lookup" :arguments (%args "city" "x")))
+         (provider (make-instance 'transcribing
+                                  :script (list (llm:make-completion :tool-calls (list call)
+                                                                     :stop-reason :tool-use)
+                                                (llm:make-completion :text "no such city"
+                                                                     :stop-reason :end))))
+         (ag (actor:make-agent :provider provider))
+         (events '()))
+    (actor:register-means ag "lookup" "looks a city up"
+                          (lambda (in) (declare (ignore in))
+                            (error 'cnd:tool-error-result :text "unknown city: x")))
+    (is (string= "no such city"
+                 (evt:with-observer ((lambda (e) (push e events)))
+                   (actor:run-turn ag "where is x"))))
+    (let ((part (first (%tool-result-parts ag))))
+      (is (equal "unknown city: x" (getf part :content)))
+      (is (eq t (getf part :is-error))))
+    (let ((event (find :tool-result events :key #'evt:event-type)))
+      (is (eq t (getf event :is-error))))
+    (is-true (search "unknown city: x" (prin1-to-string (transcribing-messages provider)))
+             "the second step's request carried the error result")))
+
+(test any-other-error-from-a-means-still-ends-the-turn
+  "Only TOOL-ERROR-RESULT is reported to the model. Any other error from a means ends the turn
+as before, as MEANS-FAILURE with its cause."
+  (let* ((call (llm:make-tool-call :id "t1" :name "boom" :arguments (%args)))
+         (ag (actor:make-agent
+              :provider (make-instance 'scripted
+                                       :script (list (llm:make-completion :tool-calls (list call)
+                                                                          :stop-reason :tool-use)
+                                                     (llm:make-completion :text "unreached"
+                                                                          :stop-reason :end))))))
+    (actor:register-means ag "boom" "fails" (lambda (in) (declare (ignore in)) (error "boom")))
+    (signals cnd:means-failure (actor:run-turn ag "go"))))
+
+(test an-error-result-is-marked-in-both-adapters-formats
+  "Anthropic's format marks an error result with is_error. OpenAI's has no such field, so the
+content says it."
+  (let ((part (llm:tool-result-part "t1" "unknown city" t)))
+    (is (eq t (gethash "is_error" (praxeon/llm::%part->json part))))
+    (let* ((msgs (praxeon/llm::%messages->openai (list (llm:msg "user" (list part))) nil))
+           (tool (find "tool" msgs :key (lambda (m) (gethash "role" m)) :test #'equal)))
+      (is (equal "Error: unknown city" (gethash "content" tool)))))
+  (let* ((part (llm:tool-result-part "t1" "fine"))
+         (msgs (praxeon/llm::%messages->openai (list (llm:msg "user" (list part))) nil))
+         (tool (find "tool" msgs :key (lambda (m) (gethash "role" m)) :test #'equal)))
+    (is (null (gethash "is_error" (praxeon/llm::%part->json part))))
+    (is (equal "fine" (gethash "content" tool)))))
+
+(test a-turn-runs-for-its-principal-and-a-delegated-turn-keeps-it
+  "RUN-TURN binds *PRINCIPAL* for the turn. A means sees it, a sub-agent's turn run by delegation
+sees the same one, and a turn with no principal sees NIL."
+  (flet ((agent-that-records (seen &optional (name "who"))
+           (let* ((call (llm:make-tool-call :id "t1" :name name :arguments (%args)))
+                  (ag (actor:make-agent
+                       :provider (make-instance
+                                  'scripted
+                                  :script (list (llm:make-completion :tool-calls (list call)
+                                                                     :stop-reason :tool-use)
+                                                (llm:make-completion :text "ok"
+                                                                     :stop-reason :end))))))
+             (actor:register-means ag name "records the principal"
+                                   (lambda (in) (declare (ignore in))
+                                     (push actor:*principal* (car seen)) "ok"))
+             ag)))
+    (let ((seen (list '())))
+      (actor:run-turn (agent-that-records seen) "go" :principal "user-a")
+      (actor:run-turn (agent-that-records seen) "go")
+      (is (equal '(nil "user-a") (car seen))))
+    (let* ((seen (list '()))
+           (sub (agent-that-records seen))
+           (call (llm:make-tool-call :id "d1" :name "sub" :arguments (%args "task" "t")))
+           (coordinator (actor:make-agent
+                         :provider (make-instance
+                                    'scripted
+                                    :script (list (llm:make-completion :tool-calls (list call)
+                                                                       :stop-reason :tool-use)
+                                                  (llm:make-completion :text "done"
+                                                                       :stop-reason :end))))))
+      (actor:register-agent-as-means coordinator sub :name "sub")
+      (actor:run-turn coordinator "go" :principal "user-b")
+      (is (equal '("user-b") (car seen))))))
