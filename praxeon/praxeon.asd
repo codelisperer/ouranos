@@ -67,6 +67,7 @@
                              (:file "structured")   ; forced tool calls (pre-publication issue 416)
                              (:file "distil")       ; window -> observations (pre-publication issue 452)
                              (:file "prompt")       ; what is SENT: trim + placement (pre-publication issue 402)
+                             (:file "observe")      ; distil a thread off the request path (#317)
                              (:file "turn")         ; a turn as a value (interceptor context)
                              (:file "ceiling")      ; cost/rate ceiling as pipeline stages
                              (:file "actor")        ; the deliberate/act loop
