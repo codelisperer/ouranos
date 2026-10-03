@@ -560,13 +560,24 @@ so that case needs a row written some other way."
                     :dialect (store-dialect store))))
       (and (integerp n) (plusp n)))))
 
+(defmethod mem:forget-subject :around ((store db-memory-store) subject)
+  ;; THE STORE'S LOCK IS HELD AROUND EVERY METHOD, the :BEFORE that praxeon/observe adds to
+  ;; refuse while an observer runs included, so no run can start between that check and the
+  ;; deletion (#462's eighth review). The in-memory store does the same.
+  (declare (ignore subject))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+
 (defmethod mem:forget-subject ((store db-memory-store) subject)
-  "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150)."
-  (bt:with-recursive-lock-held ((store-lock store))
-    (let ((n (q:run (store-connection store)
-                    (list :delete-from (store-table store)
-                          :where (list := :subject subject))
-                    :dialect (store-dialect store))))
+  "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150). The
+deletion and the progress rows' new marks are one transaction (#462's eighth review): an inner
+one is a savepoint, so this is safe inside a transaction of the app's."
+  (conn:with-transaction ((store-connection store))
+    (let* ((cited (mem::%last-cited-by-thread
+                   (mem:observations-of store subject :include-superseded t :thread :all)))
+           (n (q:run (store-connection store)
+                     (list :delete-from (store-table store)
+                           :where (list := :subject subject))
+                     :dialect (store-dialect store))))
       ;; THE PROGRESS TABLE MAY NOT EXIST: an app with its own migrations needs it only to use
       ;; praxeon/observe. It is looked for first rather than a failed delete caught, because on
       ;; Postgres a failed statement would abort a transaction the app wrapped around this call.
@@ -577,7 +588,10 @@ so that case needs a row written some other way."
                (list :update (%progress-table (store-table store))
                      :set (list :skipped "" :updated_at (get-universal-time))
                      :where (list := :subject subject))
-               :dialect (store-dialect store)))
+               :dialect (store-dialect store))
+        ;; A thread whose observations cite messages past its stored mark, or that has no
+        ;; record, gets that mark. Without the progress table there is no observer to protect.
+        (mem::%raise-marks store subject cited))
       (if (integerp n) n 0))))
 
 (defun %table-exists-p (store table)

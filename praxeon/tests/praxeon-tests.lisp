@@ -5336,8 +5336,8 @@ merged record still holds a skipped window covering 1-4, which neither observer 
 
 (test observers-with-mixed-steps-under-failures-lose-no-message
   "60 trials. Three observers of one thread, with steps of 4, 6 and 8 messages, take 24 random
-turns on a growing history while half of the model calls and 30% of the progress writes fail. After a
-last turn each with nothing failing, every message up to the stored mark is covered by an
+turns on a growing history while half of the model calls and 30% of the progress writes fail.
+After a last turn each with nothing failing, every message up to the stored mark is covered by an
 observation's range or by a skipped window."
   (let ((rs (sb-ext:seed-random-state 4627)) (lost '()))
     (dotimes (trial 60)
@@ -5421,4 +5421,91 @@ next observer starts at the mark the erasure kept and does not distil the transc
                            :provenance (mem:make-provenance "conv-7" 7 :through 12))))
       (mem:forget store o))
     (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
-      (is (and (= 6 mark) (equal '((1 6 1)) skipped))))))
+      ;; EQL, not =: a control that deletes the record fails here, not with a TYPE-ERROR
+      ;; (#462's eighth review).
+      (is (and (eql 6 mark) (equal '((1 6 1)) skipped)) "the record is untouched: ~S ~S" mark skipped))))
+
+;;; --------------------------------------------------------------------------
+;;; After #462's eighth review: the merge keeps only the overlap of skipped windows, and the
+;;; erasure keeps a mark no lower than what the thread's observations cite.
+;;; --------------------------------------------------------------------------
+
+(defun %merged-record (random-state)
+  "A progress record as the store holds it after merges: one, two or three of %RANDOM-RECORD's
+records merged together."
+  (multiple-value-bind (mark skipped) (%random-record random-state)
+    (dotimes (i (random 3 random-state))
+      (multiple-value-bind (m s) (%random-record random-state)
+        (multiple-value-setq (mark skipped) (obs::%merge-progress mark skipped m s))))
+    (values mark skipped)))
+
+(test merges-of-merged-records-commute-repeat-and-lose-no-message
+  "2,000 random pairs of records that are themselves merges, which is what the store holds: the
+merge gives one result in either order, merging it again with either record or with itself
+changes nothing, and every message it counts as distilled one of the two records distilled. The
+seventh review's merge changed 1,812 such pairs when merged again."
+  (let ((rs (sb-ext:seed-random-state 4628)) (bad '()))
+    (dotimes (i 2000)
+      (multiple-value-bind (ma sa) (%merged-record rs)
+        (multiple-value-bind (mb sb) (%merged-record rs)
+          (multiple-value-bind (m1 s1) (obs::%merge-progress ma sa mb sb)
+            (let ((again (list (multiple-value-list (obs::%merge-progress mb sb ma sa))
+                               (multiple-value-list (obs::%merge-progress m1 s1 ma sa))
+                               (multiple-value-list (obs::%merge-progress m1 s1 mb sb))
+                               (multiple-value-list (obs::%merge-progress m1 s1 m1 s1)))))
+              (unless (and (every (lambda (r) (equal r (list m1 s1))) again)
+                           (loop for n from 1 to m1
+                                 never (and (%distilled-p n m1 s1)
+                                            (not (%distilled-p n ma sa))
+                                            (not (%distilled-p n mb sb)))))
+                (push (list ma sa mb sb m1 s1) bad)))))))
+    (is (null bad) "~D of 2000 failed; the first: ~S" (length bad) (first bad))))
+
+(test a-window-written-since-is-not-put-back-by-the-merge
+  "The eighth review's case. A, with a step of 4, has closed 1-4 and written 5-8. The store still
+holds B's (6 ((1 6 1))). Merged, only 1-4 stays skipped, closed: messages 5-6 were distilled by
+A, so 1-6 is not put back to be retried, and nothing older is written after 5-8."
+  (multiple-value-bind (mark skipped) (obs::%merge-progress 8 '((1 4 2 :closed)) 6 '((1 6 1)))
+    (is (eql 8 mark))
+    (is (equal '((1 4 2 :closed)) skipped)))
+  (multiple-value-bind (mark skipped) (obs::%merge-progress 8 '((1 4 1)) 8 '((3 6 1)))
+    (is (eql 8 mark))
+    (is (equal '((3 4 1)) skipped) "only the messages neither record distilled stay skipped")))
+
+(test after-erasure-a-mark-behind-what-was-distilled-is-raised
+  "A writes 1-6, then 7-12, and the progress write after 7-12 fails, so the store holds mark 6
+while the thread holds an observation of 7-12. The erasure keeps mark 12, the last message the
+erased observations cited, so a new observer does not distil 7-12 and write it again."
+  (let* ((store (make-instance 'flaky-reads-store))
+         (a (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact"))
+                                                    (%call-with (%ob "Lives in Lisbon." "fact")))
+                               store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                         :promote (constantly t))))
+    (%turn a 6)
+    (setf (progress-write-failures store) 1)
+    (%turn a 12)
+    (is (eql 6 (mem:thread-progress store "member-1" "conv-7")) "precondition: the store is behind")
+    (obs:stop-observer a)
+    (mem:forget-subject store "member-1")
+    (multiple-value-bind (mark skipped) (mem:thread-progress store "member-1" "conv-7")
+      (is (and (eql 12 mark) (null skipped)) "the mark covers what was distilled: ~S ~S" mark skipped))
+    (let ((next (obs:make-observer (%provider-returning (%call-with (%ob "Lives in Lisbon." "fact")))
+                                   store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                                             :promote (constantly t))))
+      (is (null (obs:observe-turn next (%history 12))) "nothing to distil")
+      (obs:await-observer next :timeout 10))
+    (is (null (mem:observations-of store "member-1" :thread :all)) "nothing erased comes back")))
+
+(test after-erasure-a-thread-with-observations-and-no-record-gets-one
+  "The only progress write failed, so the thread has observations and no record. The erasure
+gives it a record at the last message they cited. A thread with neither still gets none."
+  (let* ((store (make-instance 'flaky-reads-store))
+         (a (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                               store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
+    (setf (progress-write-failures store) 1)
+    (%turn a 6)
+    (is (null (mem:thread-progress store "member-1" "conv-7")) "precondition: no record")
+    (obs:stop-observer a)
+    (mem:forget-subject store "member-1")
+    (is (eql 6 (mem:thread-progress store "member-1" "conv-7")))
+    (is (null (mem:thread-progress store "member-1" "conv-8")) "a thread with neither gets none")))

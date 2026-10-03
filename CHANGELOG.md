@@ -83,10 +83,12 @@ its tag.
     is made, a stop, a restart or a new observer distils that window again. Progress is merged
     with the store's, never written over it: a run starts by merging, and each save merges again,
     so, through one store object in one process, the stored mark is never lowered and newer
-    progress at an equal mark is kept. Where two observers cut the same messages into different
-    windows, the merge keeps both records' overlapping skipped windows, which can cover messages
-    twice but never leaves one uncovered. A run whose first read of the store's progress fails
-    ends there.
+    progress at an equal mark is kept. Up to the smaller of two records' marks, a message stays
+    skipped only when both records hold a skipped window over it: for each pair of overlapping
+    skipped windows the merge keeps their overlap. So where two observers cut the same messages
+    into different windows no message is left undistilled and uncovered, and a window one of
+    them has since written is not put back. A run whose first read of the store's progress
+    fails ends there.
   - One observer of a thread runs at a time in a process: `observe-turn` starts nothing while
     another observer of the same store object, subject and thread holds the thread, even when
     both are called at the same moment, so an app may make an observer per request.
@@ -95,14 +97,20 @@ its tag.
     returns NIL. Observers of one thread through two store objects over one database, or in two
     processes, are not coordinated.
   - `forget-subject` refuses, with `observer-running` naming the thread, while an observer of the
-    subject is running in this process; stop it with `stop-observer` on `running-observer` and
-    call it again. Observers in other processes cannot be seen, and the app stops them first.
+    subject is running in this process through the same store object; stop it with
+    `stop-observer` on `running-observer` and call it again. Observers through another store
+    object over the same database, or in other processes, cannot be seen, and the app stops them
+    first. On `praxeon/memory-db` the check and the erasure hold the store's lock together, and
+    the erasure is one transaction.
   - `forget-subject` erases the subject's observations, as before, and leaves each of its
     threads' progress records as the mark alone: the subject's id, the thread's id and a count
-    of messages, with no skipped windows and no content. A thread with no record gets none. It
-    does not erase the app's own transcript. Messages up to the mark are not observed again, so
-    an observer that held skipped windows from before drops them at its next run and a new
-    observer starts at the mark; later messages are observed normally. A conversation continued
+    of messages, with no skipped windows and no content. The mark is at least the last message
+    the thread's erased observations cited, so a progress write that failed before the erasure
+    does not let erased content be distilled and written again; for the same reason a thread
+    with observations and no record gets one. It does not erase the app's own transcript.
+    Messages up to the mark are not observed again: an observer that held skipped windows from
+    before drops those up to the mark at its next run and keeps any past it, which were never
+    written, and a new observer starts at the mark. Later messages are observed normally. A conversation continued
     after an erasure with a shortened or replaced transcript uses a new thread id, because the
     stored mark wins over a lower `:mark`, and the transcript's first messages would otherwise
     never be observed.
