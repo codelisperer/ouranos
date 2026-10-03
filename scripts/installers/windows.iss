@@ -23,6 +23,14 @@
 ; second copy elsewhere, leaves the running one untouched, and looks to the user like an
 ; update that silently did nothing.
 ;
+; THE NEW VERSION IS SWAPPED IN WHOLE (#98, step 3), as windows.nsi does, and its header has
+; the reasons and the measurements. [Files] extracts to {app}.new, never into {app}. After
+; the install step, CurStepChanged(ssPostInstall) copies the uninstaller Inno wrote into {app}
+; across, has the staged launcher check the staged core, and swaps the directories with two
+; renames, keeping {app}.old until the launcher deletes it at the new version's first start.
+; PrepareToInstall first finishes or undoes a swap an earlier run left half done. A check or
+; swap that fails leaves {app} as it was, deletes {app}.new, and ends Setup with an error.
+;
 ; PER-USER ON PURPOSE (section 1). PrivilegesRequired=lowest and an install under
 ; {localappdata}\Programs mean the app can rewrite itself with no elevation. A Program
 ; Files install would need a UAC prompt on every single update, or a privileged updater
@@ -96,13 +104,13 @@ UninstallDisplayIcon={app}\{#APPNAME}.ico
 #endif
 
 [Files]
-Source: "{#SRCDIR}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#SRCDIR}\*"; DestDir: "{app}.new"; Flags: recursesubdirs createallsubdirs ignoreversion
 #ifdef WV2BOOTSTRAPPER
 Source: "{#WV2BOOTSTRAPPER}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebview2Setup.exe"; \
   Flags: deleteafterinstall
 #endif
 #ifdef ICON
-Source: "{#ICON}"; DestDir: "{app}"; DestName: "{#APPNAME}.ico"; Flags: ignoreversion
+Source: "{#ICON}"; DestDir: "{app}.new"; DestName: "{#APPNAME}.ico"; Flags: ignoreversion
 #endif
 
 [Icons]
@@ -143,18 +151,245 @@ Root: HKCU; Subkey: "Software\{#APPNAME}"; ValueType: string; ValueName: "Instal
 ; /VERYSILENT, and without the second line every in-app update would have left the user
 ; staring at a closed application. The control also confirms the install itself still
 ; succeeds, so the difference is the relaunch and nothing else.
+;
+; THE SILENT RELAUNCH IS NO LONGER A [Run] ENTRY (#98, step 3). A [Run] entry without
+; `postinstall' runs at the end of the install step, BEFORE CurStepChanged(ssPostInstall),
+; which is where the new version is swapped into {app}. As an entry here it started while the
+; files were still in {app}.new, failed with "CreateProcess failed; code 2. The system cannot
+; find the file specified.", and Setup still exited 0, because /SUPPRESSMSGBOXES answers that
+; error with OK (Setup's /LOG). So RelaunchIfSilent starts it from code after SwapIn.
+; scripts/tests/windows-installer-swap.lisp checks after every silent install that the app
+; started. The finish-page entry below runs after ssPostInstall and is unaffected.
 Filename: "{app}\{#EXENAME}"; Description: "Launch {#APPNAME}"; \
   Flags: nowait postinstall skipifsilent
-Filename: "{app}\{#EXENAME}"; Flags: nowait; Check: WizardSilent
 
 [UninstallDelete]
-; Nothing here on purpose. The app's own data lives in ~/.<appname> and an uninstall must
-; not eat someone's database -- the same promise windows.nsi makes in its Uninstall
-; section, and the guarantee tracked separately because nothing currently asserts it.
+; The install directory and what an update may leave beside it. The uninstall log names the
+; files where [Files] put them, under {app}.new, so it does not find them in {app} after the
+; swap. The app's own data lives in ~/.<appname> and is not touched: an uninstall must not eat
+; someone's database -- the same promise windows.nsi makes in its Uninstall section.
+Type: filesandordirs; Name: "{app}"
+Type: filesandordirs; Name: "{app}.old"
+Type: filesandordirs; Name: "{app}.new"
 
 [Code]
 const
   WV2_CLIENT = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  UNINSTALL_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#APPNAME}_is1';
+
+var
+  { True once FailInstall ran: GetCustomSetupExitCode then ends Setup with 2, as windows.nsi
+    does. An exception raised in CurStepChanged is reported and Setup still exits 0 (measured
+    with /VERYSILENT /SUPPRESSMSGBOXES), so the exception alone does not tell the updater. }
+  InstallFailed: Boolean;
+  { True when the swap finished but the app could not be started afterwards: GetCustomSetupExitCode
+    then ends Setup with 3, as windows.nsi does. The new version is installed, so nothing is put
+    back (review of train 21). }
+  RelaunchFailed: Boolean;
+  { The version the uninstall entry named before this run. Setup writes the new one before
+    CurStepChanged(ssPostInstall), so a swap that fails puts this back. }
+  PreviousDisplayVersion: String;
+
+function SetEnvironmentVariable(Name: String; Value: String): BOOL;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+{ The same function, to delete the variable: a NULL value removes it. }
+function DeleteEnvironmentVariable(Name: String; Null: Cardinal): BOOL;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+function AppDir: String;
+begin
+  Result := ExpandConstant('{app}');
+end;
+
+{ Finish or undo a swap an earlier run left half done. AppDir + '.old' exists only after the
+  staged copy passed its check, so with no AppDir, a '.new' beside '.old' is a checked copy and
+  is moved into place; without one, '.old' is moved back. Any other '.new' is an extraction that
+  did not finish, and is deleted. Returns '' or the reason Setup cannot go on. }
+function RepairSwap: String;
+begin
+  Result := '';
+  if (not DirExists(AppDir)) and DirExists(AppDir + '.old') then
+  begin
+    if DirExists(AppDir + '.new') then
+      RenameFile(AppDir + '.new', AppDir)
+    else
+      RenameFile(AppDir + '.old', AppDir);
+  end
+  else if DirExists(AppDir + '.new') then
+    DelTree(AppDir + '.new', True, True, True);
+  if DirExists(AppDir + '.new') then
+    Result := AppDir + '.new is left from an earlier update and could not be removed.';
+end;
+
+{ This process's current directory must not be inside a directory it renames, and not inside
+  its own temporary directory either, which it then cannot delete when it exits (Setup's /LOG
+  said "Failed to remove temporary directory" while it was). The parent of the install
+  directory is neither, and is never renamed. }
+procedure LeaveAppDir;
+begin
+  SetCurrentDir(ExtractFileDir(AppDir));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  LeaveAppDir;
+  PreviousDisplayVersion := '';
+  RegQueryStringValue(HKCU, UNINSTALL_KEY, 'DisplayVersion', PreviousDisplayVersion);
+  Result := RepairSwap;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if InstallFailed then
+    Result := 2
+  else if RelaunchFailed then
+    Result := 3
+  else
+    Result := 0;
+end;
+
+{ Give up, and end Setup with an error, leaving whatever is in AppDir.new where it is. }
+procedure FailKeepingStaged(Message: String);
+begin
+  if PreviousDisplayVersion <> '' then
+    RegWriteStringValue(HKCU, UNINSTALL_KEY, 'DisplayVersion', PreviousDisplayVersion);
+  InstallFailed := True;
+  RaiseException(Message);
+end;
+
+{ Give up: delete the staged copy, leaving AppDir as it was, and end Setup with an error. }
+procedure FailInstall(Message: String);
+begin
+  DelTree(AppDir + '.new', True, True, True);
+  FailKeepingStaged(Message);
+end;
+
+{ The staged launcher checks the staged core and exits without starting the app
+  (OURANOS_LAUNCHER_CHECK_ONLY, scripts/windows-launcher.c). Only a bundle with the launcher's
+  layout has a pair to check; a one-file image has neither file. Exactly one of the two is
+  neither layout: it would be swapped in and fail at launch, so it is refused (review of train
+  20). }
+procedure CheckStaged;
+var
+  Staged: String;
+  Code: Integer;
+  HasCore, HasRuntime: Boolean;
+begin
+  Staged := AppDir + '.new';
+  HasCore := FileExists(Staged + '\sbcl.core');
+  HasRuntime := FileExists(Staged + '\sbcl-runtime.exe');
+  if HasCore <> HasRuntime then
+    FailInstall('{#APPNAME} could not be updated: the downloaded files are incomplete, with one of sbcl.core and sbcl-runtime.exe and not the other.');
+  if HasCore and HasRuntime then
+  begin
+    SetEnvironmentVariable('OURANOS_LAUNCHER_CHECK_ONLY', '1');
+    if not Exec(Staged + '\{#EXENAME}', '', ExtractFileDir(AppDir), SW_HIDE,
+                ewWaitUntilTerminated, Code) then
+      Code := -1;
+    { Deleted, not emptied, so that the relaunch does not inherit it. }
+    DeleteEnvironmentVariable('OURANOS_LAUNCHER_CHECK_ONLY', 0);
+    if Code <> 0 then
+      FailInstall('The downloaded files did not pass their check (' + IntToStr(Code) + ').');
+  end;
+end;
+
+{ Swap AppDir.new in for AppDir, keeping the old one as AppDir.old until the new version starts.
+  The first rename is retried for 20 seconds while the app finishes exiting: until it succeeds
+  nothing has changed. The second is retried for 20 seconds too, because a file open in
+  AppDir.new stops it -- an antivirus scanner reading the files just written, for one (measured
+  with a process reading them, #98) -- and giving up on it undoes the first. That undo is retried
+  for 20 seconds as well, and AppDir.new is deleted only once AppDir is back. If it never comes
+  back, AppDir.new is kept: it is a complete, checked copy, and with AppDir.old beside it and no
+  AppDir, the next run's RepairSwap moves it into place. Deleting it then could leave part of it,
+  which RepairSwap would take for the whole. }
+procedure SwapIn;
+var
+  Tries: Integer;
+  Moved: Boolean;
+begin
+  Moved := not DirExists(AppDir);
+  Tries := 0;
+  while not Moved do
+  begin
+    { A previous version still here from the last update is in the way of the first rename. }
+    DelTree(AppDir + '.old', True, True, True);
+    if (not DirExists(AppDir + '.old')) and RenameFile(AppDir, AppDir + '.old') then
+      Moved := True
+    else
+    begin
+      Tries := Tries + 1;
+      if Tries >= 40 then
+        FailInstall('{#APPNAME} could not be updated because its folder is in use: a window or a program may have it open. Close it and run this installer again.');
+      Sleep(500);
+    end;
+  end;
+  Tries := 0;
+  Moved := RenameFile(AppDir + '.new', AppDir);
+  while (not Moved) and (Tries < 40) do
+  begin
+    Tries := Tries + 1;
+    Sleep(500);
+    Moved := RenameFile(AppDir + '.new', AppDir);
+  end;
+  if not Moved then
+  begin
+    if DirExists(AppDir + '.old') then
+    begin
+      Tries := 0;
+      Moved := RenameFile(AppDir + '.old', AppDir);
+      while (not Moved) and (Tries < 40) do
+      begin
+        Tries := Tries + 1;
+        Sleep(500);
+        Moved := RenameFile(AppDir + '.old', AppDir);
+      end;
+      if not Moved then
+        FailKeepingStaged('{#APPNAME} could not be updated, and its previous version could not be put back. Run this installer again to finish the update.');
+    end;
+    FailInstall('{#APPNAME} could not be updated: its new files could not be moved into place.');
+  end;
+end;
+
+{ Inno writes its uninstaller into the install directory during the install step, which the
+  swap is about to rename away, so it is copied into the staged directory first. A copy that
+  fails stops the update before the swap: swapped in without its uninstaller, the version would
+  be installed with an uninstall entry naming a file that is not there (review of train 21). }
+procedure CarryUninstaller;
+var
+  Found: TFindRec;
+  Copied: Boolean;
+begin
+  if FindFirst(AppDir + '\unins*.*', Found) then
+  try
+    repeat
+#if Ver >= EncodeVer(7, 0, 0)
+      { Inno Setup 7 renamed FileCopy, and hints at every build that uses the old name. }
+      Copied := CopyFile(AppDir + '\' + Found.Name, AppDir + '.new\' + Found.Name, False);
+#else
+      Copied := FileCopy(AppDir + '\' + Found.Name, AppDir + '.new\' + Found.Name, False);
+#endif
+      if not Copied then
+        FailInstall('{#APPNAME} could not be updated: its uninstaller (' + Found.Name + ') could not be copied with the new files.');
+    until not FindNext(Found);
+  finally
+    FindClose(Found);
+  end;
+end;
+
+{ The update path gives the user their app back. See [Run] for why this is not an entry there.
+  If the app cannot be started, Setup exits 3 and says why in its log. The new version is in
+  place by then, so this is not treated as a failed install, and nothing is put back. }
+procedure RelaunchIfSilent;
+var
+  Code: Integer;
+begin
+  if WizardSilent then
+    if not Exec(AppDir + '\{#EXENAME}', '', AppDir, SW_SHOWNORMAL, ewNoWait, Code) then
+    begin
+      RelaunchFailed := True;
+      Log('{#APPNAME} was updated, but could not be started: ' + SysErrorMessage(Code));
+    end;
+end;
 
 function WebView2Present: Boolean;
 var
@@ -183,6 +418,10 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    LeaveAppDir;
+    CarryUninstaller;
+    CheckStaged;
+    SwapIn;
     if not WebView2Present then
     begin
 #ifdef WV2BOOTSTRAPPER
@@ -196,5 +435,6 @@ begin
         was already running and therefore the runtime was already there; failing an update
         over a detection hiccup would break a working install to fix nothing. }
     end;
+    RelaunchIfSilent;
   end;
 end;

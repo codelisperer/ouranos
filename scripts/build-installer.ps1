@@ -153,6 +153,14 @@ if ($matches['os'] -ne 'windows') { Die "bundle '$leaf' is for $($matches['os'])
 
 $exe = "$app.exe"
 if (-not (Test-Path (Join-Path $BundleDir $exe))) { Die "bundle has no $exe" }
+# The launcher's layout is sbcl-runtime.exe and sbcl.core beside $exe (#98); a one-file image has
+# neither. A bundle with exactly one of them would install and then fail at launch, so it is
+# refused here, as both installers refuse it when they stage it (review of train 20).
+$hasCore = Test-Path (Join-Path $BundleDir 'sbcl.core')
+$hasRuntime = Test-Path (Join-Path $BundleDir 'sbcl-runtime.exe')
+if ($hasCore -ne $hasRuntime) {
+  Die "bundle has $(if ($hasCore) { 'sbcl.core but no sbcl-runtime.exe' } else { 'sbcl-runtime.exe but no sbcl.core' }): it is incomplete"
+}
 if (-not (Test-Path (Join-Path $BundleDir 'hyperion-view.exe'))) {
   Write-Host "WARNING: bundle has no hyperion-view.exe -- the installed app will not open a window." -ForegroundColor Yellow
 }

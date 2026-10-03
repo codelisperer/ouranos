@@ -14,6 +14,30 @@ its tag.
 
 ### An app may have to act
 
+- **A Windows update installs the whole new version or none of it.** Both installers,
+  `scripts/installers/windows.nsi` and `windows.iss`, used to write the new files over the
+  install directory one at a time, so an update that stopped part-way left a launcher and a
+  `sbcl.core` from different versions, which the launcher refuses (exit 126). They now extract
+  to `<install>.new`, have the staged `<name>.exe` check the staged core
+  (`OURANOS_LAUNCHER_CHECK_ONLY=1`), and rename `<install>` to `<install>.old` and
+  `<install>.new` to `<install>`. The launcher deletes `<install>.old` after it starts the
+  runtime, and the next installer run finishes or undoes a swap that stopped between its
+  renames. `hyperion/update`'s `launch-installer` starts the installer in its staging directory.
+  An app acts if something it starts keeps the install directory as its current directory, or a
+  file there open, after the app exits: the installer waits 20 seconds for the directory, then
+  fails without changing anything and exits 2, the NSIS installer and the Inno one alike. An
+  app acts too if its packaging puts its
+  own files into the install directory after the installer runs, or keeps anything in
+  `<install>.old` or `<install>.new`: both names are now the installers'. A bundle with
+  `sbcl.core` and no `sbcl-runtime.exe`, or the other way round, is refused by
+  `scripts/build-installer.ps1` and by both installers, which used to install it to fail at
+  launch. An uninstaller that cannot be copied (Inno) or written (NSIS) into `<install>.new`
+  stops the update before the swap, with exit 2. Both installers' exit codes are now: 0, the new
+  version is installed and, on a silent run, the app was started; 2, the update failed and the
+  installed version is unchanged (or, if the previous version could not be put back, the checked
+  new copy is kept in `<install>.new` for the next run to finish); 3, the new version is
+  installed but the app could not be started. An app or script that runs an installer itself
+  and treats any non-zero code as "not updated" acts on 3. (#98)
 - **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
   by default.**
   `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and

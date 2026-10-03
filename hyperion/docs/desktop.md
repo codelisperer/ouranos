@@ -216,6 +216,15 @@ dumped, and the dump ends the process that does it, the Windows build runs the d
 process and compiles the launcher after it. Anything that rewrites `sbcl.core` after the build,
 for example to patch it, must rebuild the launcher too.
 
+**An update installs the whole new version or none of it (#98, step 3).** Both Windows
+installers extract to `<install>.new`, run the staged launcher with
+`OURANOS_LAUNCHER_CHECK_ONLY=1` set, which makes the core check and exits 0 or 126 without
+starting the app, and then swap the directories by renaming them, keeping the old version as
+`<install>.old`. The launcher deletes `<install>.old` after it has started the runtime. An
+update that stops part-way leaves the old version whole, and the next one finishes or undoes
+the swap first. The steps, and why the rename can fail, are in
+[`desktop-distribution-design.md`](desktop-distribution-design.md) §7.
+
 **Honest cost (from ADR-0008):** this glue — updater self-replace, installers, native
 FFIs, CI matrix — is the ~90%; the webview is the easy ~10%. **OS code-signing +
 notarization** is an unavoidable tax, identical for Tauri/Electron.

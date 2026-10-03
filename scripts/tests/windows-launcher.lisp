@@ -122,3 +122,88 @@ differs, before starting the runtime."
     (is-false (uiop:symbol-call :ouranos-windows-launcher :compile-launcher
                                 "app.exe" 777 (uiop:temporary-directory) bad)
               "refused ~S" bad)))
+
+
+;;; --- what the installers use: check only, and the previous version removed (#98, step 3) ---
+
+(defun %launcher-run-check-only (exe)
+  "Run EXE with OURANOS_LAUNCHER_CHECK_ONLY=1, set in a child shell rather than in this image.
+Returns (values EXIT-CODE OUTPUT)."
+  (multiple-value-bind (out err code)
+      (uiop:run-program (format nil "set OURANOS_LAUNCHER_CHECK_ONLY=1&& \"~A\""
+                                (uiop:native-namestring exe))
+                        :force-shell t :output :string :error-output :string
+                        :ignore-error-status t)
+    (values code (concatenate 'string out err))))
+
+(test the-launcher-checks-the-core-without-starting-it-when-asked
+  "The installers run the staged launcher with OURANOS_LAUNCHER_CHECK_ONLY set to check the
+staged core. It exits 0 or 126 and never starts the runtime, whose probe core would print ARGV
+and exit 42."
+  #-win32 (skip "The Windows launcher is built and run on Windows only")
+  #+win32
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (multiple-value-bind (ok output) (%launcher-bundle tree 777)
+           (if (and (not ok) (search "no MSVC" output))
+               (skip "No MSVC here: ~A" output)
+               (let ((exe (merge-pathnames "app.exe" tree)))
+                 (multiple-value-bind (code out) (%launcher-run-check-only exe)
+                   (is (eql 0 code) "the core it was built with passes: exit ~A" code)
+                   (is (null (search "ARGV" out)) "and the runtime was not started: ~A" out))
+                 (is (eql 42 (%probe-report exe '("x")))
+                     "the control: without the variable, the same launcher starts the runtime")
+                 (with-open-file (s (merge-pathnames "sbcl.core" tree) :direction :output
+                                    :if-exists :append :element-type '(unsigned-byte 8))
+                   (write-byte 0 s))
+                 (multiple-value-bind (code out) (%launcher-run-check-only exe)
+                   (is (eql 126 code) "a changed core fails with 126: exit ~A" code)
+                   (is (null (search "ARGV" out)) "and the runtime was not started: ~A" out)))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(defun %launcher-sibling (tree suffix)
+  (uiop:ensure-directory-pathname
+   (concatenate 'string (string-right-trim "\\" (uiop:native-namestring tree)) suffix)))
+
+(test the-launcher-removes-the-previous-version-an-update-left
+  "An installer's swap leaves the previous version as <install>.old. The launcher deletes it once
+it has started the runtime. It deletes nothing else beside it, and a junction of that name is
+removed as a link: what it points to is not touched."
+  #-win32 (skip "The Windows launcher is built and run on Windows only")
+  #+win32
+  (let* ((tree (%fresh-tree))
+         (old (%launcher-sibling tree ".old"))
+         (older (%launcher-sibling tree ".older"))
+         (target (%launcher-sibling tree ".target")))
+    (unwind-protect
+         (multiple-value-bind (ok output) (%launcher-bundle tree 777)
+           (if (and (not ok) (search "no MSVC" output))
+               (skip "No MSVC here: ~A" output)
+               (let ((exe (merge-pathnames "app.exe" tree)))
+                 (dolist (dir (list (merge-pathnames "sub/" old) older))
+                   (ensure-directories-exist dir)
+                   (with-open-file (s (merge-pathnames "file" dir) :direction :output)
+                     (write-line "x" s)))
+                 (is (eql 42 (%probe-report exe '("x"))) "the app started")
+                 (is-false (uiop:directory-exists-p old) "<install>.old and what it held are gone")
+                 (is-true (probe-file (merge-pathnames "file" older))
+                          "<install>.older, which is not the installers', is untouched")
+                 ;; A junction named .old, pointing at a directory with a file in it.
+                 (ensure-directories-exist target)
+                 (with-open-file (s (merge-pathnames "keep" target) :direction :output)
+                   (write-line "x" s))
+                 (uiop:run-program (list "cmd" "/c" "mklink" "/J"
+                                         (string-right-trim "\\" (uiop:native-namestring old))
+                                         (string-right-trim "\\" (uiop:native-namestring target)))
+                                   :output nil :error-output nil :ignore-error-status t)
+                 (is-true (probe-file (merge-pathnames "keep" old)) "the junction was made")
+                 (is (eql 42 (%probe-report exe '("x"))) "the app started again")
+                 (is-false (probe-file (merge-pathnames "keep" old)) "the junction is gone")
+                 (is-true (probe-file (merge-pathnames "keep" target))
+                          "and the directory it pointed to still has its file"))))
+      (dolist (dir (list old older target))
+        (ignore-errors
+         (uiop:run-program (list "cmd" "/c" "rmdir" (string-right-trim "\\" (uiop:native-namestring dir)))
+                           :output nil :error-output nil :ignore-error-status t))
+        (aion/fs:delete-tree dir :if-does-not-exist :ignore))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
