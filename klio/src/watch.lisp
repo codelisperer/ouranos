@@ -13,6 +13,15 @@
 ;;;; the same length (a one-letter typo fixed), would look unchanged. The snapshot therefore
 ;;;; includes a hash of each file's text.
 ;;;;
+;;;; A CHANGE IS RELOADED ONCE TWO POLLS IN A ROW SEE IT (#534). A file saved in place is opened
+;;;; with O_TRUNC, so it is empty from the open until the close writes the new text. A poll that
+;;;; lands in that window used to reload the empty file and publish it: a document with no front
+;;;; matter, served with no title, until the next poll. Waiting for a second poll to see the same
+;;;; snapshot skips a write that finishes within one interval, which an editor's save does. A
+;;;; write held open for longer than an interval still looks settled while it is empty, and is
+;;;; reloaded; the change is then reloaded again when the write finishes. The cost is one more
+;;;; interval before an edit is served.
+;;;;
 ;;;; RELOAD, NOT RELOAD-OR-FAIL. A bad edit must not end the watcher: RELOAD keeps serving the
 ;;;; last good tree and reports the failures, which are logged, and the next save that fixes
 ;;;; the file publishes it. That is ADR-0001's reload rule, which is what an author wants while
@@ -37,6 +46,15 @@ a hash of its text, in CONTENT-FILES order."
                     (and text (sxhash text)))))
           (content-files directory)))
 
+(defun %watch-step (seen pending now)
+  "One poll's decision. SEEN is the snapshot last reloaded, PENDING the change the previous poll
+saw (NIL when none), NOW this poll's snapshot. Returns (values RELOAD-P SEEN PENDING), the last
+two for the next poll: a change is reloaded only when NOW equals PENDING, so two polls in a row
+have seen it."
+  (cond ((equal now seen) (values nil seen nil))
+        ((equal now pending) (values t now nil))
+        (t (values nil seen now))))
+
 (defstruct (watcher (:constructor %make-watcher) (:copier nil))
   (site nil :read-only t)
   (thread nil)
@@ -52,7 +70,8 @@ a hash of its text, in CONTENT-FILES order."
 
 (defun watch-site (site &key (interval 1) on-reload)
   "Start a thread that reloads SITE whenever a file in its content directory changes, checking
-every INTERVAL seconds. Returns a WATCHER; STOP-WATCHING stops it.
+every INTERVAL seconds. A change is reloaded once two polls in a row have seen it, so a file
+read while it is being written is not published. Returns a WATCHER; STOP-WATCHING stops it.
 
 ON-RELOAD, when given, is called with RELOAD's two values (the outcome and the failures) after
 each reload, on the watcher's thread; the outcome and the failing files are also logged. A bad
@@ -68,11 +87,12 @@ edit leaves the last good content published (see RELOAD), and the watcher keeps 
           ;; THREAD-LIFETIME: independent -- runs until STOP-WATCHING, which joins it.
           (sb-thread:make-thread
            (lambda ()
-             (let ((seen baseline))
+             (let ((seen baseline) (pending nil))
                (loop until (sb-thread:wait-on-semaphore (watcher-stop watcher) :timeout interval)
-                     do (let ((now (content-snapshot directory)))
-                          (unless (equal now seen)
-                            (setf seen now)
+                     do (multiple-value-bind (reload-p next-seen next-pending)
+                            (%watch-step seen pending (content-snapshot directory))
+                          (setf seen next-seen pending next-pending)
+                          (when reload-p
                             (multiple-value-bind (outcome failures) (reload site)
                               (incf (watcher-reloads watcher))
                               (%report-reload outcome failures)

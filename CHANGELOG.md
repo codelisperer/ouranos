@@ -120,6 +120,12 @@ its tag.
 
 ### Fixed
 
+- **klio: `watch-site` no longer publishes a file read while it is being written.** A file saved
+  in place is empty from the moment it is opened until the new text is written, and a poll that
+  landed in that moment reloaded the empty file: the page was served with no title until the
+  next poll. `watch-site` now reloads a change once two polls in a row have seen it, so an edit
+  is served one `:interval` later than before. A write held open for longer than an interval can
+  still be read while empty. (#534)
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that
