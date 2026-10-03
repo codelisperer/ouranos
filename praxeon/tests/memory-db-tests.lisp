@@ -596,6 +596,25 @@ deletion (#462's eighth review)."
     (is (eql 5 (mem:thread-progress store "member-14" "conv-2")) "a thread with no record gets one")
     (is (null (mem:thread-progress store "member-14" "conv-test")) "a fact about the subject has no thread")))
 
+(defclass progress-write-fails-store (mdb:db-memory-store) ()
+  (:documentation "A SQL store whose RECORD-THREAD-PROGRESS signals, for the erasure's rollback."))
+
+(defmethod mem:record-thread-progress :before ((store progress-write-fails-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (error "the progress write failed"))
+
+(test an-erasure-whose-mark-write-fails-erases-nothing-on-the-sql-store
+  "The deletion and the raised marks are one transaction (#462's ninth review). When raising a
+mark fails, FORGET-SUBJECT signals and the observations are all still there."
+  (with-store (store)
+    (mem:remember store "member-15" "Lives in Lisbon." :thread "conv-1"
+                  :provenance (mem:make-provenance "conv-1" 7 :through 12))
+    (mem:remember store "member-15" "Likes tea." :provenance (test-provenance))
+    (change-class store 'progress-write-fails-store)
+    (signals error (mem:forget-subject store "member-15"))
+    (is (= 2 (length (mem:observations-of store "member-15" :thread :all)))
+        "the deletion was rolled back")))
+
 (test supersede-refuses-an-observation-already-superseded-on-the-sql-store
   "The SQL store checks, under its lock and in the same transaction as its writes, that the
 observation is still current, as the in-memory store does. A second supersession of the same
