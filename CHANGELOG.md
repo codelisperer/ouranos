@@ -136,7 +136,9 @@ its tag.
     `when`.
   - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
     claim on the conversation, however the attempt ends, so a later call can start a run.
-    `stop-observer :timeout 0` returns at once instead of signalling a `type-error`.
+    `stop-observer :timeout 0` ends the run at once and returns NIL, as it does when any
+    timeout passes, instead of signalling a `type-error`; `await-observer :timeout 0` only
+    reports whether a run is going.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
     does. A fact the subject already holds is not stored again. A promoted observation is

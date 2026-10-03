@@ -5648,16 +5648,21 @@ window would fail with UNDEFINED-FUNCTION."
       (signals cnd:praxeon-error
         (obs:make-observer (%provider-returning) (mem:make-in-memory-store) "member-1" "conv-7" key name)))))
 
-(test stop-observer-with-a-timeout-of-0-returns
-  "SB-THREAD:JOIN-THREAD signals a TYPE-ERROR for :TIMEOUT 0. STOP-OBSERVER with 0 returns NIL
-while the run is still going, rather than signalling."
-  (let ((observer (obs:make-observer (make-instance 'slow-scripted :delay 1 :script (list (%call-with (%ob "Has a dog." "fact"))))
-                                     (mem:make-in-memory-store) "member-1" "conv-7"
-                                     :step (%step-for 6) :retry-delay 0)))
+(test stop-observer-with-a-timeout-of-0-ends-the-run-at-once
+  "SB-THREAD:JOIN-THREAD signals a TYPE-ERROR for :TIMEOUT 0. STOP-OBSERVER with 0 waits for
+nothing: it returns NIL, as for any timeout that passes, and ends the run's thread, which gives
+back the claim on the conversation."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'slow-scripted :delay 1 :script (list (%call-with (%ob "Has a dog." "fact"))))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0)))
     (is-true (obs:observe-turn observer (%history 6)))
-    (is (eq :returned (handler-case (progn (obs:stop-observer observer :timeout 0) :returned)
-                        (error (e) e))))
-    (obs:await-observer observer :timeout 10)))
+    (is (null (handler-case (obs:stop-observer observer :timeout 0)
+                (error (e) e)))
+        "returns NIL rather than signalling")
+    (obs:await-observer observer :timeout 10)
+    (is (not (obs:observer-busy-p observer)) "the run's thread has ended")
+    (is (null (obs:running-observer store "member-1" "conv-7")) "and the claim is given back")
+    (is (null (%thread-contents store)) "the window was not written")))
 
 (test erasing-a-later-windows-observations-does-not-reopen-a-skipped-window
   "Window 1-6 is skipped and window 7-12 written, which closes 1-6. The app erases 7-12's
