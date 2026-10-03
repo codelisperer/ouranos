@@ -21,10 +21,11 @@ OAuth sign-in, resources and prompts, and local servers over stdio are parts 2, 
 (defparameter *docs-client* (mcp:make-client *docs*))
 
 ;; Reads what the server offers. Gives it to no agent.
-(mcp:list-tools *docs-client* :principal "user-42")
+(defparameter *docs-tools* (mcp:list-tools *docs-client* :principal "user-42"))
 
 ;; Gives an agent the tools the app chooses, as the means docs__search and docs__fetch.
-(mcp:grant-tools agent *docs-client* :only '("search" "fetch"))
+;; The listing is passed on: on a :per-user connection, a listing with no principal is refused.
+(mcp:grant-tools agent *docs-client* :tools *docs-tools* :only '("search" "fetch"))
 
 ;; Each tool call uses the token of the user this turn runs for.
 (actor:run-turn agent "Find the release notes" :principal "user-42")
@@ -58,7 +59,11 @@ All of these let the turn go on. They are subclasses of `praxeon/conditions:tool
   - a current-revision request that a legacy server could not read;
   - a legacy request that a current server rejected with a current-revision error;
   - the legacy 404 for an ended session.
-- **Every request has a deadline of its own.** A request runs on its own thread and is given up one second after its timeout, whatever the transport does. On #530's Windows leg, dexador's WinHTTP backend let a request outlive its read timeout. A request given up this way is not sent again.
+- **Every request has a deadline of its own.** A request runs on its own thread and is given up one second after its timeout, whatever the transport does. Two cases need this:
+  - On #530's Windows leg, dexador's WinHTTP backend let a request outlive its read timeout (#537).
+  - On every platform, a server that sends a keep-alive line every so often keeps a read timeout from firing.
+
+  A request given up this way is not sent again. Its thread keeps running, with the connection open, until the server finishes or the transport ends it, and it logs how the request ended. A client counts those threads. With `*max-abandoned-requests*` of them (8) still running, it refuses new requests, as not run, until some finish. The thread sees the global values of special variables, so dexador settings such as `dex:*default-proxy*` reach MCP requests only when they are set globally.
 - **No secret follows a redirect.** Requests are sent with redirects off, so a token is never forwarded to another host. A 3xx fails the request.
 
 ### Handlers stay on the thread that set them
@@ -107,9 +112,14 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
   - A tool parameter with this annotation is copied into an `Mcp-Param-{name}` header. A value that is not plain ASCII, or that has spaces at either end, or that looks like the encoded form, goes out as `=?base64?...?=`.
   - An integer outside JavaScript's safe range is refused before the call is sent.
   - A tool whose annotation breaks the specification's rules is left out of `list-tools`, with a warning in the log. Such an annotation is one reached through anything but `properties` keys, one on a type other than string, integer or boolean, one that is empty or not an HTTP token, or two that are equal ignoring case.
+- **Tool definitions.**
+  - A tool whose `inputSchema` is not a JSON object schema, with `"type": "object"`, is left out of `list-tools`, with a warning in the log, since both providers take only an object schema.
+  - So is a tool whose schema is longer than `*max-schema-characters*` (20000) as JSON, since the schema is sent with every request.
+  - A listing that goes past `*max-list-pages*` (1000) pages without ending fails, so `:only :all` never grants part of a server's tools as though it were all of them.
+- **Header arguments follow the declared type.** An `x-mcp-header` argument must have the type its property declares: a string, an integer, or a boolean. One that does not is refused before the call is sent, so the model gets an error it can correct. Header names must be ASCII HTTP tokens.
 - **`resultType: "input_required"`.** This client offers no client capabilities, so it cannot answer an input request. Such a result fails the call without running it.
 - **Where this client departs from the specification.**
-  - On a `HeaderMismatch` (-32020), the specification says a client SHOULD list the tools again and retry. This client fails the call instead. A new listing could change a tool's schema without the app granting it again, and a grant is the app's decision. The app grants the tool again.
+  - On a `HeaderMismatch` (-32020), the specification says a client SHOULD list the tools again and retry. This client fails the call instead. A new listing could change a tool's schema without the app granting it again, and a grant is the app's decision. The app calls `revoke-tools`, then `grant-tools` again, since `grant-tools` refuses a name the agent already has.
   - `ttlMs` and `cacheScope` on list results are ignored, because a grant does not change by itself.
   - The deprecated HTTP+SSE transport from 2024-11-05 is not implemented.
 

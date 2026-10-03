@@ -47,6 +47,7 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
 :STRUCTURED. REQUIRE-TOKEN is NIL or the bearer token every request must carry."
   era reply page-size tools require-token legacy-version
   (reject-headers nil)
+  (fail-next nil) (endless nil)
   (sessions '()) (end-session nil) (calls 0) (initializes 0)
   (lock (sb-thread:make-mutex)))
 
@@ -56,6 +57,11 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
     h))
 
 (defun %reply (stream fake status message &key headers)
+  (when (and (eq (fake-reply fake) :sse-capitals) (= status 200))
+    (th:write-response stream 200 (append '(("Content-Type" . "Text/Event-Stream")) headers)
+                       (format nil "data: ~A~C~C~C~C" (jzon:stringify message)
+                               #\Return #\Newline #\Return #\Newline))
+    (return-from %reply))
   (if (and (eq (fake-reply fake) :sse) (= status 200))
       (th:write-response stream 200 (append '(("Content-Type" . "text/event-stream")) headers)
                          (format nil ": a comment~C~Cdata: ~A~C~C~Cdata: ~A~C~C~C"
@@ -73,7 +79,7 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
 
 (defun %tool-json (name plist)
   (%obj "name" name "description" (format nil "the ~A tool" name)
-        "inputSchema" (or (getf plist :schema) (%obj "type" "object"))))
+        "inputSchema" (if (member :schema plist) (getf plist :schema) (%obj "type" "object"))))
 
 (defun %result (fake method params)
   "The result for METHOD, or (:ERROR code text), or (:STATUS n)."
@@ -84,7 +90,9 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
             (end (min (length all) (+ start (fake-page-size fake))))
             (page (subseq all start end)))
        (%obj "tools" (map 'vector (lambda (e) (%tool-json (car e) (cdr e))) page)
-             "nextCursor" (if (< end (length all)) (princ-to-string end) 'null))))
+             "nextCursor" (cond ((fake-endless fake) "0")
+                                ((< end (length all)) (princ-to-string end))
+                                (t 'null)))))
     ((string= method "tools/call")
      (sb-thread:with-mutex ((fake-lock fake)) (incf (fake-calls fake)))
      (let* ((name (gethash "name" params))
@@ -96,6 +104,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
          (:fail (%obj "content" (vector (%obj "type" "text" "text" "no such city"))
                       "isError" t))
          (:structured (%obj "content" #() "structuredContent" (%obj "n" 3)))
+         (:null-result :null-result)
+         (:keepalive :keepalive)
          (:slow (sleep 3) (%obj "content" #()))
          (:status-500 (list :status 500))
          (:input (%obj "resultType" "input_required" "inputRequests" (%obj)))
@@ -122,12 +132,36 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
            (params (or (and (hash-table-p message) (gethash "params" message)) (%obj)))
            (auth (th:request-header request "Authorization")))
       (flet ((answer (result)
-               (cond ((and (consp result) (eq (first result) :status))
+               (cond ((eq result :null-result)
+                      (%reply stream fake 200 (%obj "jsonrpc" "2.0" "id" id "result" 'null)))
+                     ((eq result :keepalive)
+                      ;; An event stream that sends a comment every half second for 5 seconds,
+                      ;; then the reply: a read timeout never fires on it.
+                      (th:write-head stream 200 '(("Content-Type" . "text/event-stream")))
+                      (dotimes (i 10)
+                        (write-sequence (sb-ext:string-to-octets (format nil ": keep-alive~C~C" #\Return #\Newline)
+                                                                 :external-format :utf-8)
+                                        stream)
+                        (finish-output stream)
+                        (sleep 0.5))
+                      (write-sequence (sb-ext:string-to-octets
+                                       (format nil "data: ~A~C~C~C~C"
+                                               (jzon:stringify (%obj "jsonrpc" "2.0" "id" id
+                                                                     "result" (%obj "content" #())))
+                                               #\Return #\Newline #\Return #\Newline)
+                                       :external-format :utf-8)
+                                      stream)
+                      (finish-output stream))
+                     ((and (consp result) (eq (first result) :status))
                       (th:write-response stream (second result) '() "server error"))
                      ((consp result)
                       (%reply stream fake 200 (%error-message id (second result) (third result))))
                      (t (%reply stream fake 200 (%obj "jsonrpc" "2.0" "id" id "result" result))))))
         (cond
+          ((fake-fail-next fake)
+           ;; One answer that is not the server's, as a proxy or a deploy can give.
+           (setf (fake-fail-next fake) nil)
+           (th:write-response stream 404 '(("Content-Type" . "text/html")) "<html>not here</html>"))
           ((and (fake-require-token fake)
                 (not (equal auth (format nil "Bearer ~A" (fake-require-token fake)))))
            (th:write-response stream 401
@@ -509,7 +543,105 @@ deadline 1: the request is given up within about a second while the server takes
                        (sleep 3) (th:write-response stream 200 '() "{}")))
     (let ((started (get-internal-real-time)))
       (signals aion/http-client:http-error
-        (mcp::%send-within (aion/http-client:make-request :url (th:server-url s "/mcp")
+        (mcp::%send-within (mcp:make-client (mcp:make-connection :name "d" :url "x"))
+                           (aion/http-client:make-request :url (th:server-url s "/mcp")
                                                           :read-timeout 30)
-                           1))
+                           1 "tools/call"))
       (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 2)))))
+
+
+;;; --- the review of #530 ----------------------------------------------------------------
+
+(test one-bad-answer-does-not-leave-the-client-in-the-legacy-era
+  "A current-revision server's one 404 from a proxy sends the client to the legacy handshake,
+which the server answers with a current-revision error. That one call fails as not run, the era
+stays unknown, and the next call probes again and works."
+  (let ((fake (make-fake :era :modern :tools (%tools "a"))))
+    (with-fake (client fake)
+      (setf (fake-fail-next fake) t)
+      (handler-case (progn (mcp:list-tools client) (fail "the 404 did not fail the call"))
+        (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))
+      (is (null (mcp:client-era client)))
+      (is (equal '("a") (mapcar #'mcp:tool-name (mcp:list-tools client))))
+      (is (eq :modern (mcp:client-era client))))))
+
+(test a-result-that-is-not-an-object-fails-the-call
+  (let ((fake (make-fake :tools (%tools '("n" :do :null-result)))))
+    (with-fake (client fake)
+      (handler-case (progn (%call client "n") (fail "a null result did not fail the call"))
+        (mcp:request-failed (e) (is (eq :unknown (cnd:tool-error-result-outcome e))))))))
+
+(test a-tool-whose-schema-is-not-an-object-schema-or-too-large-is-dropped
+  (let ((fake (make-fake :tools (list (list "good")
+                                      (list "null-schema" :schema 'null)
+                                      (list "string-schema" :schema (%obj "type" "string"))
+                                      (list "huge" :schema (%schema "x" (%obj "type" "string"
+                                                                              "description" (make-string 30000 :initial-element #\a))))))))
+    (with-fake (client fake)
+      (is (equal '("good") (mapcar #'mcp:tool-name (mcp:list-tools client)))))))
+
+(test a-listing-that-does-not-end-fails-instead-of-granting-part-of-it
+  (let ((fake (make-fake :tools (%tools "a"))))
+    (setf (fake-endless fake) t)
+    (with-fake (client fake)
+      (let ((mcp::*max-list-pages* 5))
+        (signals mcp:request-failed (mcp:list-tools client))))))
+
+(test an-event-stream-in-any-letter-case-is-read
+  (let ((fake (make-fake :reply :sse-capitals :tools (%tools "a"))))
+    (with-fake (client fake)
+      (is (equal '("a") (mapcar #'mcp:tool-name (mcp:list-tools client)))))))
+
+(test revoking-removes-exactly-what-the-grant-registered
+  "Matched on each means' source, not on a name prefix: a connection named \"my docs\" grants
+my_docs__ means and revokes them; an app's own means that starts with the prefix stays."
+  (let ((fake (make-fake :tools (%tools "search"))))
+    (th:with-server (s (%serve fake))
+      (let* ((mine (mcp:make-client (mcp:make-connection :name "my docs" :url (th:server-url s "/mcp"))))
+             (docs (mcp:make-client (mcp:make-connection :name "docs" :url (th:server-url s "/mcp"))))
+             (agent (actor:make-agent)))
+        (actor:register-means agent "docs__notes" "the app's own" (lambda (a) (declare (ignore a)) "n"))
+        (is (equal '("my_docs__search") (mcp:grant-tools agent mine :only :all)))
+        (is (equal '("docs__search") (mcp:grant-tools agent docs :only :all)))
+        (is (= 1 (mcp:revoke-tools agent mine)))
+        (is (null (gethash "my_docs__search" (actor:agent-means agent))))
+        (is (= 1 (mcp:revoke-tools agent docs)))
+        (is-true (gethash "docs__notes" (actor:agent-means agent)) "the app's means stays")))))
+
+(test a-keep-alive-stream-is-given-up-at-the-deadline-and-its-thread-is-counted
+  "A server that sends a keep-alive comment every half second never lets a read timeout fire,
+on any platform. The call is given up at its deadline; the thread that is still running is
+counted, a second call past the limit is refused without being sent, and once the thread has
+finished the count is back to zero."
+  (let ((fake (make-fake :tools (%tools '("long" :do :keepalive) "a"))))
+    (with-fake (client fake :call-timeout 2)
+      (let* ((tools (mcp:list-tools client))
+             (long (find "long" tools :key #'mcp:tool-name :test #'equal))
+             (started (get-internal-real-time)))
+        (handler-case (progn (mcp:call-tool client long (%obj)) (fail "the keep-alive call finished"))
+          (mcp:request-failed (e) (is (eq :unknown (cnd:tool-error-result-outcome e)))))
+        (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 4.5))
+        (is (= 1 (mcp::client-abandoned client)))
+        (let ((mcp::*max-abandoned-requests* 1))
+          (handler-case (progn (mcp:call-tool client long (%obj)) (fail "past the limit, sent anyway"))
+            (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e))))))
+        (is (= 1 (fake-calls fake)) "the refused call was not sent")
+        (is-true (wait-until-zero (lambda () (mcp::client-abandoned client)) 10)
+                 "the given-up request's thread finished and was counted off")))))
+
+(defun wait-until-zero (fn seconds)
+  (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (loop (when (zerop (funcall fn)) (return t))
+          (when (> (get-internal-real-time) deadline) (return nil))
+          (sleep 0.1))))
+
+(test header-arguments-must-have-the-type-the-tool-declares
+  (let ((paths (mcp::x-mcp-header-paths
+                (%schema "n" (%obj "type" "integer" "x-mcp-header" "N")
+                         "s" (%obj "type" "string" "x-mcp-header" "S")))))
+    (signals mcp::header-value-refused (mcp::header-params paths (%obj "n" "12")))
+    (signals mcp::header-value-refused (mcp::header-params paths (%obj "n" nil)))
+    (signals mcp::header-value-refused (mcp::header-params paths (%obj "s" 12)))
+    (is (equal '(("Mcp-Param-S" . "12")) (mcp::header-params paths (%obj "s" "12")))))
+  (is (eq :invalid (mcp::x-mcp-header-paths (%schema "x" (%obj "type" "string" "x-mcp-header" "Région")))))
+  (is (equal "=?base64?PT9iYXNlNjQ/PQ==?=" (mcp::encode-header-value "=?base64?="))))
