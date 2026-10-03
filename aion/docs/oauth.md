@@ -24,6 +24,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
   `call-with-refresh-lock` serialises refreshes of one token. Its default method locks within the process; a store shared by several instances overrides it with a lock they share, such as a database row lock.
 
   `memory-store` is for tests and for an app that runs as one process. An app with several instances cannot use it, because a sign-in started on one instance would not be found on another.
+  Every slot of a `token-set` and of a `pending` sign-in is exported, with `make-token-set` and `make-pending`, so a store can save each as strings and rebuild it. A `pending` record's verifier and a token set's tokens are `aion/secret` values: save `aion/secret:reveal`'s text, encrypted at rest, and rebuild with `aion/secret:make-secret`. `memory-store` drops expired pending sign-ins when it stores a new one. The test suite has a store of strings written with exported symbols only.
 - **Two routes**, from `hyperion/oauth`:
   - `sign-in-return-handler` at the redirect URI. It needs a `:principal-of` function that reads the signed-in user from the request's session.
   - `client-metadata-handler` at the client metadata URL, when the app publishes one.
@@ -31,7 +32,8 @@ It follows the authorization section of the MCP specification, revision 2026-07-
 ## The flow
 
 1. **The app finds out a sign-in is needed.** An MCP call answered 401 signals `praxeon/mcp:authorization-required`, carrying the `WWW-Authenticate` challenge.
-2. **The user starts it.** From the app's settings page, and never from inside a conversation, the app calls `(oauth:start-sign-in broker principal connection resource-url :challenge challenge)`. It returns the URL to send the browser to, and the scopes it requests, so the app can show them first. Before it builds the URL, it:
+2. **The user starts it, signed in to the app.** A sign-in needs a principal: `start-sign-in` refuses NIL, and `finish-sign-in` refuses a return with no session principal, using up the `state` either way. So a sign-in shared by everyone is not possible through `oauth-token-source`, which looks up each call's principal.
+   From the app's settings page, and never from inside a conversation, the app calls `(oauth:start-sign-in broker principal connection resource-url :challenge challenge)`. It returns the URL to send the browser to, and the scopes it requests, so the app can show them first. Before it builds the URL, it:
    - discovers and checks the metadata;
    - gets a client id;
    - stores the PKCE verifier and the expected issuer under a new `state`.
@@ -60,7 +62,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
 
   A registered client is never used with another issuer. The client id is recorded with each sign-in, and the code is redeemed with that client, so a sign-in finished on another instance of the app still works. The client store should be shared by an app's instances, so that the app registers one client per issuer, not one per instance.
 - **Scopes.** The scopes come from the first source that has some: the caller's `:scopes`, the challenge's `scope`, then the protected resource's `scopes_supported`. The scopes of an earlier sign-in to the same connection are kept, so a step-up after an `insufficient_scope` 403 does not lose them. `offline_access` is added when the authorization server lists it.
-- **Tokens.** A token is kept with the resource and the issuer it was issued for. `access-token` returns it only for that resource, and only while the resource's protected-resource metadata still names that issuer. The metadata is cached per resource for the broker's `:metadata-lifetime`, one hour by default, and read again after the server refuses a token, so the check does not cost a request on every call. A connection whose URL changes under the same name therefore needs a new sign-in. Tokens and the verifier are `aion/secret` values, and nothing is logged but connection names, issuers and outcomes.
+- **Tokens.** A token is kept with the resource and the issuer it was issued for. `access-token` returns it only for that resource, and only while the resource's protected-resource metadata still names that issuer. The metadata is cached per metadata URL for the broker's `:metadata-lifetime`, one hour by default, and read again after the server refuses a token and after a sign-in, so the check does not cost a request on every call. Only a 200 with a JSON object is an answer. When a fetch fails, an expired answer is used for `:metadata-grace` seconds more (60 by default) and never renewed; after that `access-token` signals `oauth-error`, which `praxeon/mcp` reports as a call not run, until a fetch succeeds. A connection whose URL changes under the same name therefore needs a new sign-in. Tokens and the verifier are `aion/secret` values, and nothing is logged but connection names, issuers and outcomes.
 
 ## Known limitations
 

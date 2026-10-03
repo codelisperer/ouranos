@@ -730,6 +730,11 @@ client's count, so the client does not come to refuse every request with no thre
 
 ;;; --- OAuth: the whole path, with aion/oauth's test authorization server (#527 part 2) ---
 
+(defvar *gate* nil
+  "How the OAuth test server's gate in front of /mcp misbehaves: NIL, :REFUSE-INITIALIZE-ONCE
+\(the next initialize gets a 401 whatever its token) or :INSUFFICIENT-SCOPE (every request gets
+a 403 for insufficient scope).")
+
 (defmacro with-oauth-mcp ((as fake url) (&rest as-options) (&rest fake-options) &body body)
   "One test server: /mcp is the MCP server FAKE, reached only with a token the authorization
 server AS issued; every other path is AS. URL is the MCP endpoint."
@@ -743,15 +748,26 @@ server AS issued; every other path is AS. URL is the MCP endpoint."
                           (if (string= "/mcp" (aion/oauth/tests::%path-only (th:request-path request)))
                               (let* ((auth (th:request-header request "Authorization"))
                                      (token (and auth (> (length auth) 7) (subseq auth 7))))
-                                (if (and token (sb-thread:with-mutex ((aion/oauth/tests::as-lock ,as))
-                                                 (gethash token (aion/oauth/tests::as-access ,as))))
-                                    (funcall ,mcp-handler request stream)
+                                (cond
+                                  ((eq *gate* :insufficient-scope)
+                                   (th:write-response
+                                    stream 403
+                                    '(("WWW-Authenticate" . "Bearer error=\"insufficient_scope\", scope=\"more\""))
+                                    ""))
+                                  ((and (eq *gate* :refuse-initialize-once)
+                                        (search "\"initialize\"" (th:request-body-string request)))
+                                   (setf *gate* nil)
+                                   (th:write-response stream 401 '(("WWW-Authenticate" . "Bearer")) ""))
+                                  ((and token (sb-thread:with-mutex ((aion/oauth/tests::as-lock ,as))
+                                                (gethash token (aion/oauth/tests::as-access ,as))))
+                                   (funcall ,mcp-handler request stream))
+                                  (t
                                     (th:write-response
                                      stream 401
                                      (list (cons "WWW-Authenticate"
                                                  (format nil "Bearer resource_metadata=\"~A/prm\""
                                                          (aion/oauth/tests::as-base ,as))))
-                                     "")))
+                                     ""))))
                               (funcall ,as-handler request stream))))
          (setf (aion/oauth/tests::as-base ,as) (format nil "http://127.0.0.1:~D" (th:server-port ,server)))
          (let ((,url (format nil "~A/mcp" (aion/oauth/tests::as-base ,as))))
@@ -799,3 +815,77 @@ running the tool twice; the refresh token is revoked, and the user is asked to s
   (aion/oauth:finish-sign-in
    broker "u1"
    (aion/oauth/tests::%approve (aion/oauth:start-sign-in broker "u1" "docs" url :challenge challenge))))
+
+
+;;; --- the review of #539 ----------------------------------------------------------------
+
+(defun %signed-in-oauth-client (as url)
+  (let ((broker (aion/oauth/tests::%broker)))
+    (handler-case (mcp:list-tools (mcp:make-client (mcp:make-connection
+                                                    :name "docs" :url url :per-user t
+                                                    :token-source (mcp:oauth-token-source broker)))
+                                  :principal "u1")
+      (mcp:sign-in-needed () nil))
+    (aion/oauth:finish-sign-in
+     broker "u1"
+     (aion/oauth/tests::%approve
+      (aion/oauth:start-sign-in broker "u1" "docs" url
+                                :challenge (format nil "Bearer resource_metadata=\"~A/prm\""
+                                                   (aion/oauth/tests::as-base as)))))
+    (values (mcp:make-client (mcp:make-connection :name "docs" :url url :per-user t
+                                                  :token-source (mcp:oauth-token-source broker)))
+            broker)))
+
+(test a-legacy-handshake-refused-for-its-token-is-retried-after-a-refresh
+  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+  #-os-windows
+  (with-oauth-mcp (as fake url) (:rotate t) (:era :legacy :tools (%tools "a"))
+    (let ((client (%signed-in-oauth-client as url)))
+      ;; The token is good, and only the legacy initialize is refused: the refusal is answered
+      ;; by the one retry after a refresh, not by a sign-in.
+      (setf *gate* :refuse-initialize-once)
+      (unwind-protect
+           (is (equal '("a") (mapcar #'mcp:tool-name (mcp:list-tools client :principal "u1"))))
+        (setf *gate* nil))
+      (is (= 1 (aion/oauth/tests::as-refresh-requests as))))))
+
+(test insufficient-scope-asks-for-a-sign-in-without-a-refresh
+  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+  #-os-windows
+  (with-oauth-mcp (as fake url) () (:tools (%tools "a"))
+    (let ((client (%signed-in-oauth-client as url)))
+      (setf *gate* :insufficient-scope)
+      (unwind-protect
+           (signals mcp:sign-in-needed (mcp:list-tools client :principal "u1"))
+        (setf *gate* nil))
+      (is (= 0 (aion/oauth/tests::as-refresh-requests as))))))
+
+(defclass two-token-source () ()
+  (:documentation "TOKEN-FOR always gives \"old\"; TOKEN-REFUSED gives \"new\", with no state
+shared between them."))
+(defmethod mcp:token-for ((s two-token-source) connection principal)
+  (declare (ignore connection principal))
+  "old")
+(defmethod mcp:token-refused ((s two-token-source) connection principal token challenge)
+  (declare (ignore connection principal token challenge))
+  "new")
+
+(defclass failing-refresh-source () ())
+(defmethod mcp:token-for ((s failing-refresh-source) connection principal)
+  (declare (ignore connection principal))
+  "old")
+(defmethod mcp:token-refused ((s failing-refresh-source) connection principal token challenge)
+  (declare (ignore connection principal token challenge))
+  (error "the authorization server could not be reached"))
+
+(test the-retry-sends-the-token-token-refused-returned
+  (let ((fake (make-fake :tools (%tools "a") :require-token "new")))
+    (with-fake (client fake :token-source (make-instance 'two-token-source))
+      (is (equal '("a") (mapcar #'mcp:tool-name (mcp:list-tools client)))))))
+
+(test a-refresh-that-fails-is-not-a-reason-to-sign-in
+  (let ((fake (make-fake :tools (%tools "a") :require-token "new")))
+    (with-fake (client fake :token-source (make-instance 'failing-refresh-source))
+      (handler-case (progn (mcp:list-tools client) (fail "no failure"))
+        (mcp:sign-in-needed () (fail "a failed refresh asked for a sign-in"))
+        (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e))))))))

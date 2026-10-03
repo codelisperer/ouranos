@@ -78,7 +78,8 @@ All of these let the turn go on. They are subclasses of `praxeon/conditions:tool
 - **No `tools/call` is sent twice.** The client retries a request only when the reply shows the server did not process it:
   - a current-revision request that a legacy server could not read;
   - a legacy request that a current server rejected with a current-revision error;
-  - the legacy 404 for an ended session.
+  - the legacy 404 for an ended session;
+  - a 401 or 403 to a token that the token source then replaces, once, including on the legacy `initialize`. The server refused the request before processing it. An app that marks tools as spending will be able to exclude them from this retry once #531 gives it a way to mark them; until then every refused token gets the one retry.
 - **Every request has a deadline of its own.** A request runs on its own thread and is given up one second after its timeout, whatever the transport does. Two cases need this:
   - On #530's Windows leg, dexador's WinHTTP backend let a request outlive its read timeout (#537).
   - On every platform, a server that sends a keep-alive line every so often keeps a read timeout from firing.

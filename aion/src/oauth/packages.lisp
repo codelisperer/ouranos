@@ -39,8 +39,11 @@
    #:call-with-refresh-lock
    #:token-set #:make-token-set #:token-set-access #:token-set-refresh #:token-set-expires-at
    #:token-set-scope #:token-set-resource #:token-set-issuer #:token-set-client-id
-   #:token-set-token-endpoint #:token-set-revocation-endpoint
-   #:pending #:pending-principal #:pending-connection #:pending-expires-at
+   #:token-set-token-endpoint #:token-set-revocation-endpoint #:token-set-metadata-url
+   #:pending #:make-pending #:pending-principal #:pending-connection #:pending-resource
+   #:pending-issuer #:pending-client-id #:pending-verifier #:pending-token-endpoint
+   #:pending-revocation-endpoint #:pending-iss-required #:pending-scope #:pending-expires-at
+   #:pending-metadata-url
    ;; the flow
    #:canonical-resource #:parse-challenge #:discover
    #:metadata #:metadata-issuer #:metadata-resource #:metadata-scopes
