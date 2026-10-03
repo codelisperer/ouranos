@@ -144,6 +144,14 @@ its tag.
 
 ### Fixed
 
+- **aion/pool: two jobs that call `stop-pool` at the same time both return, and a later
+  `stop-pool` from outside the pool waits for every worker** (#520). With two or more workers,
+  two jobs calling `stop-pool` at once used to wait for each other's worker and never returned;
+  a call from a job now skips any worker whose own job is inside `stop-pool`. After a job had
+  called `stop-pool`, a later call from outside returned at once, while that job's worker was
+  still running the jobs queued behind it; it now joins every worker, so when it returns no job
+  is running and none will start. `stop-pool`'s docstring now says that the calling job's
+  worker runs the jobs queued behind it before it exits.
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that

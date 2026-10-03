@@ -319,17 +319,25 @@ second look at the queue. The hook holds the worker at exactly that point."
 (test a-place-reserved-when-the-pool-stops-is-not-lost
   "A submitter has reserved a place but not yet enqueued its job when STOP-POOL runs. The
 workers must not exit while a place is reserved, so the job runs and STOP-POOL returns after
-it. The hook holds the submitter at exactly that point."
+it. The hook holds the submitter at exactly that point, and the submitter is released only
+after both workers have seen STOPPING and decided whether to exit, so a broken pool's workers
+have exited by then however slowly the machine runs (#520)."
   (let* ((at-the-point (sb-thread:make-semaphore))
          (go-on (sb-thread:make-semaphore))
          (armed (list t))
          (ran (list 0))
-         (p (pool:make-pool :size 2 :queue-limit 4)))
+         (decided (list nil))
+         (p (pool:make-pool :size 2 :queue-limit 4 :name "rsv")))
     (setf aion/pool::*%after-reserve*
           (lambda ()
             (when (sb-ext:compare-and-swap (car armed) t nil)
               (sb-thread:signal-semaphore at-the-point)
-              (sb-thread:wait-on-semaphore go-on :timeout 10))))
+              (sb-thread:wait-on-semaphore go-on :timeout 10)))
+          aion/pool::*%after-stop-check*
+          (lambda (leave)
+            (declare (ignore leave))
+            (when (%thread-named-p-prefix "rsv-")
+              (sb-ext:atomic-push sb-thread:*current-thread* (car decided)))))
     (unwind-protect
          (let ((submitter (sb-thread:make-thread
                            (lambda ()
@@ -338,13 +346,15 @@ it. The hook holds the submitter at exactly that point."
            (is (sb-thread:wait-on-semaphore at-the-point :timeout 10))
            (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) :stopped)
                                                  :name "pool reserve stopper")))
-             ;; Give a broken pool's workers time to see STOPPING and an empty queue, and exit.
-             (sleep 0.2)
+             (is-true (wait-until (lambda () (= 2 (length (remove-duplicates (car decided)))))
+                                  :timeout 10)
+                      "both workers saw STOPPING and decided whether to exit")
              (sb-thread:signal-semaphore go-on)
              (is (equal '(t :stopped)
                         (aion/test-threads:join-all (list submitter stopper) :timeout 10)))
              (is (= 1 (car ran)) "the job whose place was reserved ran ~D times" (car ran))))
-      (setf aion/pool::*%after-reserve* nil)
+      (setf aion/pool::*%after-reserve* nil
+            aion/pool::*%after-stop-check* nil)
       (pool:stop-pool p))))
 
 ;;; --- the three races #512's review forced (comment 5940402609) ------------------------
@@ -361,6 +371,9 @@ it. The hook holds the submitter at exactly that point."
 (defun %arrived-p (gate) (sb-thread:wait-on-semaphore (%gate-arrive gate) :timeout 10))
 (defun %release (gate) (sb-thread:signal-semaphore (%gate-release gate)))
 (defun %thread-named-p (name) (equal name (sb-thread:thread-name sb-thread:*current-thread*)))
+(defun %thread-named-p-prefix (prefix)
+  (let ((name (sb-thread:thread-name sb-thread:*current-thread*)))
+    (and name (eql 0 (search prefix name)))))
 (defun %seconds () (/ (get-internal-real-time) internal-time-units-per-second))
 
 (test a-wake-up-meant-for-a-worker-that-took-another-job-is-passed-on
@@ -370,6 +383,7 @@ A runs X, so the wake-up must reach B, or Y waits behind X while B sleeps. X her
 to start, as a job that waits on another would; Y must start at once, not when X gives up."
   (let ((empty-a (%make-gate)) (empty-b (%make-gate))
         (pushed-b (%make-gate)) (found-a (%make-gate))
+        (b-waiting (sb-thread:make-semaphore)) (b-armed (list t))
         (y-started (list nil)) (x-saw (list :unset)))
     (setf aion/pool::*%after-empty-look*
           (lambda () (cond ((%thread-named-p "lw-0") (%hold empty-a))
@@ -377,7 +391,14 @@ to start, as a job that waits on another would; Y must start at once, not when X
           aion/pool::*%after-push*
           (lambda (w) (declare (ignore w)) (when (%thread-named-p "lw-1") (%hold pushed-b)))
           aion/pool::*%after-second-look-found*
-          (lambda (w) (declare (ignore w)) (when (%thread-named-p "lw-0") (%hold found-a))))
+          (lambda (w) (declare (ignore w)) (when (%thread-named-p "lw-0") (%hold found-a)))
+          ;; Signalled, not held: B goes on into its wait. Y is submitted only after this, so
+          ;; B's second look has already found the queue empty and cannot take Y itself (#520).
+          aion/pool::*%before-wait*
+          (lambda (w)
+            (declare (ignore w))
+            (when (and (%thread-named-p "lw-1") (sb-ext:compare-and-swap (car b-armed) t nil))
+              (sb-thread:signal-semaphore b-waiting))))
     (unwind-protect
          (with-pool (p :size 2 :queue-limit 4 :name "lw")
            (is (and (%arrived-p empty-a) (%arrived-p empty-b)) "both workers at their first look")
@@ -392,7 +413,8 @@ to start, as a job that waits on another would; Y must start at once, not when X
            (%release empty-a)
            (is (%arrived-p found-a) "A's second look took X")
            (%release pushed-b)
-           (sleep 0.3)                         ; B looks, finds nothing, and waits
+           (is-true (sb-thread:wait-on-semaphore b-waiting :timeout 10)
+                    "B's second look found nothing and B is about to wait")
            (let ((submitted (%seconds)))
              (is (pool:try-submit p (lambda () (setf (car y-started) (%seconds)))))
              (%release found-a)
@@ -404,7 +426,8 @@ to start, as a job that waits on another would; Y must start at once, not when X
              (is (eq :y-started (car x-saw)))))
       (setf aion/pool::*%after-empty-look* nil
             aion/pool::*%after-push* nil
-            aion/pool::*%after-second-look-found* nil))))
+            aion/pool::*%after-second-look-found* nil
+            aion/pool::*%before-wait* nil))))
 
 (test a-refused-submitter-holds-no-place
   "Capacity 1, taken by a running job. A submitter is refused, and held just after its refusal.
@@ -442,3 +465,84 @@ and the other workers do not wait for it either."
       (let ((ok (sb-thread:wait-on-semaphore returned :timeout 10)))
         (is-true ok "~D workers: STOP-POOL called from a job did not return" size)
         (when ok (pool:stop-pool p))))))
+
+;;; --- #520: stopping and submitting at once, and STOP-POOL called by several jobs ------
+
+(test a-submitter-paused-anywhere-while-the-pool-stops-loses-no-accepted-job
+  "A submitter submits until the pool refuses it after STOP-POOL was called. In each of 500
+trials it is paused for up to 2 ms, by an interrupt that lands at whatever point it has
+reached, just as STOP-POOL starts. Every job TRY-SUBMIT accepted must have run once STOP-POOL
+and the submitter have returned. A pool that read STOPPING before reserving a place loses a job
+when the pause falls between the read and the reservation (#520).
+
+The queue limit is large so that the submitter is rarely refused and spends its time on the
+path that reserves a place. On macOS, that pool lost a job in 119 of 1,000 trials at this
+limit, and in 3 of 300 at a limit of 8."
+  (let ((trials 500) (lost-trials 0) (stuck-trials 0))
+    (dotimes (trial trials)
+      (let* ((p (pool:make-pool :size 2 :queue-limit 4096))
+             (accepted (list 0)) (ran (list 0)) (stop-called (list nil))
+             (submitter
+               (sb-thread:make-thread
+                (lambda ()
+                  (loop
+                    (if (pool:try-submit p (lambda () (sb-ext:atomic-incf (car ran))))
+                        (sb-ext:atomic-incf (car accepted))
+                        (if (car stop-called) (return :done) (sb-thread:thread-yield)))))
+                :name "pool paused submitter")))
+        (sleep (random 0.0005))
+        (ignore-errors
+         (sb-thread:interrupt-thread submitter (lambda () (sleep (random 0.002)))))
+        (setf (car stop-called) t)
+        (pool:stop-pool p)
+        (if (eq :done (ignore-errors (aion/test-threads:join submitter :timeout 10)))
+            (unless (= (car accepted) (car ran)) (incf lost-trials))
+            (incf stuck-trials))))
+    (is (= 0 lost-trials) "~D of ~D trials lost an accepted job" lost-trials trials)
+    (is (= 0 stuck-trials) "~D of ~D trials' submitters did not finish" stuck-trials trials)))
+
+(test two-jobs-calling-stop-pool-at-once-both-return
+  "For 2 and 4 workers, two jobs that are running at the same time both call STOP-POOL. At least
+one of the two calls sees the other's flag and skips that worker, so it returns, its job
+finishes, and the other call's join of its worker returns too. Before #520 each call joined the
+other's worker and neither returned."
+  (dolist (size '(2 4))
+    (let* ((p (pool:make-pool :size size :queue-limit 4))
+           (arrived (sb-thread:make-semaphore)) (both (sb-thread:make-semaphore))
+           (returned (sb-thread:make-semaphore)))
+      (dotimes (i 2)
+        (is (pool:try-submit p (lambda ()
+                                 (sb-thread:signal-semaphore arrived)
+                                 (sb-thread:wait-on-semaphore both :timeout 10)
+                                 (pool:stop-pool p)
+                                 (sb-thread:signal-semaphore returned)))))
+      (is-true (and (sb-thread:wait-on-semaphore arrived :timeout 10)
+                    (sb-thread:wait-on-semaphore arrived :timeout 10))
+               "~D workers: both jobs started" size)
+      (sb-thread:signal-semaphore both 2)
+      ;; As in the test above it, stopped again only when both calls returned, so a deadlock
+      ;; fails this check instead of hanging the run.
+      (let ((ok (and (sb-thread:wait-on-semaphore returned :timeout 10)
+                     (sb-thread:wait-on-semaphore returned :timeout 10))))
+        (is-true ok "~D workers: two jobs calling STOP-POOL at once did not both return" size)
+        (when ok (pool:stop-pool p))))))
+
+(test stop-pool-from-outside-waits-for-a-worker-whose-job-stopped-the-pool
+  "One worker. Its job calls STOP-POOL with three jobs queued behind it, which the worker runs
+before it exits. A later STOP-POOL from outside the pool must return only after those three
+have run; before #520 it returned at once, and they started afterwards."
+  (let* ((p (pool:make-pool :size 1 :queue-limit 4))
+         (go-on (sb-thread:make-semaphore)) (job-stopped (sb-thread:make-semaphore))
+         (ran (list 0)))
+    (is (pool:try-submit p (lambda ()
+                             (sb-thread:wait-on-semaphore go-on :timeout 10)
+                             (pool:stop-pool p)
+                             (sb-thread:signal-semaphore job-stopped))))
+    (dotimes (i 3)
+      (is (pool:try-submit p (lambda () (sleep 0.05) (sb-ext:atomic-incf (car ran))))))
+    (sb-thread:signal-semaphore go-on)
+    (is-true (sb-thread:wait-on-semaphore job-stopped :timeout 10))
+    (let ((stopper (sb-thread:make-thread (lambda () (pool:stop-pool p) (car ran))
+                                          :name "pool outside stopper")))
+      (is (eql 3 (aion/test-threads:join stopper :timeout 10))
+          "STOP-POOL from outside returned before the queued jobs had run"))))
