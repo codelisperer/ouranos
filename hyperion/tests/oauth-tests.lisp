@@ -16,7 +16,11 @@
 (defun run-tests ()
   (let ((results (run 'hyperion-oauth)))
     (explain! results)
-    (unless (results-status results) (error "hyperion/oauth tests failed"))))
+    (unless (results-status results)
+      (error "hyperion/oauth tests failed: ~{~A~^, ~}"
+             (remove-duplicates
+              (mapcar (lambda (r) (fiveam::name (fiveam::test-case r)))
+                      (remove-if-not #'fiveam::test-failure-p results)))))))
 
 (defun %env-for (url session-principal)
   "A Clack env for the browser's return to URL, in a session whose principal is

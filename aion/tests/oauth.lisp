@@ -23,7 +23,11 @@
 (defun run-tests ()
   (let ((results (run 'oauth)))
     (explain! results)
-    (unless (results-status results) (error "aion/oauth tests failed"))))
+    (unless (results-status results)
+      (error "aion/oauth tests failed: ~{~A~^, ~}"
+             (remove-duplicates
+              (mapcar (lambda (r) (fiveam::name (fiveam::test-case r)))
+                      (remove-if-not #'fiveam::test-failure-p results)))))))
 
 ;;; --- the test server -------------------------------------------------------------------
 
