@@ -46,13 +46,22 @@ a hash of its text, in CONTENT-FILES order."
                     (and text (sxhash text)))))
           (content-files directory)))
 
+(defun %watch-start (directory)
+  "The state a watcher of DIRECTORY starts from: (values SEEN PENDING) for %WATCH-STEP, the
+directory's snapshot with no change pending."
+  (values (content-snapshot directory) :none))
+
 (defun %watch-step (seen pending now)
   "One poll's decision. SEEN is the snapshot last reloaded, PENDING the change the previous poll
-saw (NIL when none), NOW this poll's snapshot. Returns (values RELOAD-P SEEN PENDING), the last
-two for the next poll: a change is reloaded only when NOW equals PENDING, so two polls in a row
-have seen it."
-  (cond ((equal now seen) (values nil seen nil))
-        ((equal now pending) (values t now nil))
+saw (:NONE when none), NOW this poll's snapshot. Returns (values RELOAD-P SEEN PENDING), the
+last two for the next poll: a change is reloaded only when NOW equals PENDING, so two polls in
+a row have seen it.
+
+:NONE, not NIL, marks no pending change, because NIL is a snapshot: the one of a directory with
+no content files left. With NIL, the first poll to see the last file removed reloaded at once
+(Copilot's review of #535)."
+  (cond ((equal now seen) (values nil seen :none))
+        ((and (not (eq pending :none)) (equal now pending)) (values t now :none))
         (t (values nil seen now))))
 
 (defstruct (watcher (:constructor %make-watcher) (:copier nil))
@@ -82,12 +91,12 @@ edit leaves the last good content published (see RELOAD), and the watcher keeps 
          ;; THE BASELINE IS TAKEN HERE, before the thread exists. Taken on the thread, it
          ;; could be taken after the caller's first edit, which would then be the baseline
          ;; and never be seen as a change.
-         (baseline (content-snapshot directory)))
+         (baseline (multiple-value-list (%watch-start directory))))
     (setf (watcher-thread watcher)
           ;; THREAD-LIFETIME: independent -- runs until STOP-WATCHING, which joins it.
           (sb-thread:make-thread
            (lambda ()
-             (let ((seen baseline) (pending nil))
+             (destructuring-bind (seen pending) baseline
                (loop until (sb-thread:wait-on-semaphore (watcher-stop watcher) :timeout interval)
                      do (multiple-value-bind (reload-p next-seen next-pending)
                             (%watch-step seen pending (content-snapshot directory))

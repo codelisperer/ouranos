@@ -1153,26 +1153,56 @@ the file is empty from the open to the close, and a watcher poll in that window 
         (when watcher (k:stop-watching watcher))))))
 
 (test the-watcher-reloads-a-change-only-once-two-polls-have-seen-it
-  ;; The decision, without the timing (#534). A, B and C stand for snapshots.
-  (multiple-value-bind (reload seen pending) (klio::%watch-step :a nil :a)
-    (is (equal '(nil :a nil) (list reload seen pending)) "nothing changed"))
-  (multiple-value-bind (reload seen pending) (klio::%watch-step :a nil :b)
-    (is (equal '(nil :a :b) (list reload seen pending)) "a change seen once waits"))
-  (multiple-value-bind (reload seen pending) (klio::%watch-step :a :b :b)
-    (is (equal '(t :b nil) (list reload seen pending)) "and is reloaded when the next poll sees it"))
-  (multiple-value-bind (reload seen pending) (klio::%watch-step :a :b :c)
-    (is (equal '(nil :a :c) (list reload seen pending)) "a file still changing waits again"))
-  (multiple-value-bind (reload seen pending) (klio::%watch-step :a :b :a)
-    (is (equal '(nil :a nil) (list reload seen pending)) "a change undone before it settled is dropped")))
+  ;; The decision, without the timing (#534). A, B and C stand for snapshots; NONE is the
+  ;; watcher's own value for "no change pending", taken from %WATCH-START so that a value that
+  ;; can also be a snapshot fails here.
+  (with-content-dir (dir ("one.md" . +good+))
+    (let ((none (nth-value 1 (klio::%watch-start dir))))
+      (flet ((decide (seen pending now) (multiple-value-list (klio::%watch-step seen pending now))))
+        (is (equal (list nil :a none) (decide :a none :a)) "nothing changed")
+        (is (equal (list nil :a :b) (decide :a none :b)) "a change seen once waits")
+        (is (equal (list t :b none) (decide :a :b :b)) "and is reloaded when the next poll sees it")
+        (is (equal (list nil :a :c) (decide :a :b :c)) "a file still changing waits again")
+        (is (equal (list nil :a none) (decide :a :b :a)) "a change undone before it settled is dropped")
+        ;; NIL is the snapshot of a directory with no content files (Copilot's review of #535).
+        (is (equal (list nil :a nil) (decide :a none nil)) "the first poll to see every file gone waits")
+        (is (equal (list nil :a none) (decide :a nil :a))
+            "and the files coming back at the next poll reload nothing")
+        (is (equal (list t nil none) (decide :a nil nil)) "two polls that see every file gone reload")))))
+
+(test a-directory-emptied-for-one-poll-is-not-published
+  ;; The only content file is gone for one poll and then back. The watcher reloads nothing, so
+  ;; the site never serves an empty tree (Copilot's review of #535).
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (seen nil) (pending nil) (reloads 0)
+           (path (merge-pathnames "one.md" dir))
+           (aside (merge-pathnames "one.md.aside" dir)))
+      (k:boot site)
+      ;; The watcher's own starting state, so a wrong one fails here too.
+      (multiple-value-setq (seen pending) (klio::%watch-start dir))
+      (flet ((poll ()
+               (multiple-value-bind (reload next-seen next-pending)
+                   (klio::%watch-step seen pending (k:content-snapshot dir))
+                 (setf seen next-seen pending next-pending)
+                 (when reload (incf reloads) (k:reload site)))))
+        (rename-file path aside)
+        (is (null (k:content-snapshot dir)) "control: the directory has no content file")
+        (poll)
+        (rename-file aside path)
+        (poll)
+        (is (= 0 reloads))
+        (is (%served-title site "one") "one.md is still served")))))
 
 (test a-file-truncated-for-one-poll-is-not-published
   ;; The watcher sees one.md empty for exactly one poll, as a poll in the middle of an in-place
   ;; save does, and then whole. The empty file is never reloaded (#534).
   (with-content-dir (dir ("one.md" . +good+))
     (let* ((site (k:make-site dir))
-           (baseline (k:content-snapshot dir))
-           (seen baseline) (pending nil) (reloads 0))
+           (seen nil) (pending nil) (reloads 0))
       (k:boot site)
+      ;; The watcher's own starting state, so a wrong one fails here too.
+      (multiple-value-setq (seen pending) (klio::%watch-start dir))
       (flet ((poll ()
                (multiple-value-bind (reload next-seen next-pending)
                    (klio::%watch-step seen pending (k:content-snapshot dir))
