@@ -372,7 +372,7 @@ the outcome is unknown."
                             :token-source (lambda (c principal) (declare (ignore c))
                                             (format nil "token-~A" principal)))
       (let ((agent (actor:make-agent)))
-        (mcp:grant-tools agent client :tools (mcp:list-tools client :principal "u0"))
+        (mcp:grant-tools agent client :tools (mcp:list-tools client :principal "u0") :only :all)
         (let ((fn (actor::means-entry-fn (gethash "docs__a" (actor:agent-means agent)))))
           (dolist (p '("u1" "u2"))
             (let ((actor:*principal* p)) (funcall fn (%obj))))))
@@ -413,7 +413,7 @@ the outcome is unknown."
         (token (list "good")) (seen '()) (events '()))
     (with-fake (client fake :token-source (lambda (c p) (declare (ignore c p)) (car token)))
       (let ((agent (%agent-calling "docs__a")))
-        (mcp:grant-tools agent client)
+        (mcp:grant-tools agent client :only '("a"))
         (setf (car token) "expired")
         (is (equal "done"
                    (handler-bind ((mcp:authorization-required
@@ -426,8 +426,9 @@ the outcome is unknown."
           (is (eq t (getf result :is-error)))
           (is (eq :not-run (getf result :outcome)))
           (is (null (search "http" (getf result :content))) "no URL reaches the model")
-          (is (equal '(:connection "docs" :tool "a") (getf result :source)))
-          (is (equal "u1" (getf result :principal))))
+          (is (equal '(:connection "docs" :tool "a" :per-user nil) (getf result :source)))
+          (is (equal "u1" (getf result :principal)))
+          (is (equal (actor:agent-name agent) (getf result :agent))))
         (is-true (find :sign-in-required events :key #'evt:event-type))))))
 
 (test on-another-thread-the-app-gets-the-event-but-not-the-condition
@@ -438,7 +439,7 @@ reaches the app, while the app's handler on the first thread does not see the co
         (events '()) (seen 0) (lock (sb-thread:make-mutex)))
     (with-fake (client fake :token-source (lambda (c p) (declare (ignore c p)) "expired"))
       (let ((agent (%agent-calling "docs__a")))
-        (mcp:grant-tools agent client
+        (mcp:grant-tools agent client :only :all
                          :tools (list (praxeon/mcp::%make-tool :name "a")))
         (handler-bind ((mcp:authorization-required (lambda (c) (declare (ignore c)) (incf seen))))
           (evt:with-observer ((lambda (e) (sb-thread:with-mutex (lock) (push e events))))
@@ -463,8 +464,9 @@ reaches the app, while the app's handler on the first thread does not see the co
                    (mcp:grant-tools agent client :only '("search" "weird name!"))))
         (is-true (gethash "docs__search" (actor:agent-means agent)))
         (is (null (gethash "docs__delete" (actor:agent-means agent))) "not granted, not there")
-        (is (equal '(:connection "docs" :tool "search")
+        (is (equal '(:connection "docs" :tool "search" :per-user nil)
                    (actor:means-entry-source (gethash "docs__search" (actor:agent-means agent)))))
+        (signals error (mcp:grant-tools (actor:make-agent) client))
         (is (= 2 (mcp:revoke-tools agent client)))
         (is (zerop (hash-table-count (actor:agent-means agent))))))))
 
@@ -473,7 +475,7 @@ reaches the app, while the app's handler on the first thread does not see the co
     (with-fake (client fake)
       (let ((agent (actor:make-agent)))
         (actor:register-means agent "docs__search" "the app's own" (lambda (a) (declare (ignore a)) "mine"))
-        (handler-case (progn (mcp:grant-tools agent client) (fail "no conflict signalled"))
+        (handler-case (progn (mcp:grant-tools agent client :only :all) (fail "no conflict signalled"))
           (mcp:tool-name-conflict (e)
             (is (equal '("docs__search") (mcp:tool-name-conflict-names e)))))
         (is (= 1 (hash-table-count (actor:agent-means agent))) "nothing was registered")

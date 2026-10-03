@@ -115,16 +115,18 @@ its tag.
   revisions with their `initialize` handshake. `make-connection` describes a server: its name,
   URL, `:token-source` (a function of the connection and a principal that returns a bearer
   token), and `:per-user`. `list-tools` reads a server's tools and gives them to no agent.
-  `grant-tools` registers the tools the app chooses as means named `<connection>__<tool>`, and
+  `grant-tools` registers the tools the app names in its required `:only` (a list, or `:all`)
+  as means named `<connection>__<tool>`, and
   refuses with `tool-name-conflict`, registering nothing, when a name is taken. `revoke-tools`
   removes them. Each call uses the token of the turn's principal. A failed call is reported
   to the model and the turn goes on: `tool-error` for a result with `isError`,
   `request-failed` for a failed request, and `sign-in-needed` when the user must sign in, which
   also signals `authorization-required` and emits a `:sign-in-required` event. A tool call that
   may have run is never sent twice. See `praxeon/docs/mcp.md`. OAuth sign-in is part 2.
-- **praxeon: the `:tool-call` and `:tool-result` events carry `:source` and `:principal`, and
-  `:tool-result` carries `:outcome` and `:ms`** (#527). `register-means` takes a `:source`
-  plist, such as `(:connection "docs" :tool "search")` for an MCP tool, and `:outcome` is
+- **praxeon: the `:tool-call` and `:tool-result` events carry `:source`, `:principal`, `:agent`
+  and `:conversation`, and `:tool-result` carries `:outcome` and `:ms`** (#527).
+  `register-means` takes a `:source` plist, such as `(:connection "docs" :tool "search"
+  :per-user t)` for an MCP tool, and `:outcome` is
   `:ok`, `:error`, `:not-run` or `:unknown`, from `tool-error-result-outcome`. This is what a
   usage ledger needs to record a call, until #493 settles the usage interface.
 - **aion/test-http: the HTTP server aion/http-client's tests ran, as its own system** (#527), so
