@@ -107,7 +107,10 @@ session: (SESSION-ID . VERSION)."
   (lock (sb-thread:make-mutex :name "praxeon/mcp client"))
   (next-id 0 :type sb-ext:word)
   ;; Requests given up at their deadline whose threads are still running (%SEND-WITHIN).
-  (abandoned 0 :type sb-ext:word))
+  (abandoned 0 :type sb-ext:word)
+  ;; agent -> (name . means-entry) for each means GRANT-TOOLS registered on it, for
+  ;; REVOKE-TOOLS. Weak on the agent, so a client does not keep an agent alive.
+  (grants (make-hash-table :test #'eq :weakness :key :synchronized t)))
 
 (defun make-client (connection)
   "A client for CONNECTION. It sends nothing until it is first used."
@@ -185,18 +188,25 @@ Returns the response. A failed connection or a timeout fails the call."
       (http:response-too-large ()
         (%failed-in-flight client "its reply was larger than ~D bytes."
                            (list (connection-max-body-bytes connection))))
+      (%deadline-passed ()
+        (%failed-in-flight client "it did not answer within ~D seconds." (list (1+ timeout))))
       (http:http-error ()
         (%failed-in-flight client "it did not answer within ~D seconds, or the connection failed."
-                           (list (1+ timeout)))))))
+                           (list timeout))))))
+
+(define-condition %deadline-passed (http:http-error) ()
+  (:documentation "Internal: %SEND-WITHIN gave up on a request at its deadline."))
 
 (defparameter *max-abandoned-requests* 8
-  "The most requests on one client that may be given up at their deadline and still be running.
-Past it, the client refuses new requests until some of them finish, so a server that keeps
-streaming past every timeout cannot make the client hold one thread per call without bound.")
+  "How many requests on one client may be given up at their deadline and still be running before
+the client refuses new ones. At this many, it refuses new requests, as not run, until some of
+them finish, so a server that keeps streaming past every timeout cannot make the client hold one
+thread per call without bound. The bound is per client. Calls made at the same moment can each
+pass the check before any of them is counted, so concurrent calls can go a few past it.")
 
 (defun %send-within (client request seconds method)
   "Send REQUEST and return its response, or signal HTTP-ERROR when it has not finished within
-SECONDS.
+SECONDS (%DEADLINE-PASSED when the deadline, not the transport, ended the wait).
 
 The transport's own read timeout is not relied on alone. On Windows, dexador's WinHTTP
 backend let a request to a server that answered after 3 seconds succeed under a 1-second read
@@ -205,14 +215,16 @@ every so often keeps a read timeout from firing. The request runs on its own thr
 gives up on it at the deadline.
 
 A request given up this way keeps running on its thread, with its connection open, until the
-server finishes or the transport ends it. Nothing sends it again. CLIENT counts such threads,
-each one logs when it finishes, and past *MAX-ABANDONED-REQUESTS* still running the client
-refuses new requests.
+server finishes or the transport ends it. Nothing sends it again. CLIENT counts such threads.
+Each one, however it ends, takes itself off the count and logs how the request ended, with the
+caller's log context, and at *MAX-ABANDONED-REQUESTS* still running the client refuses new
+requests.
 
-The thread sees the global values of special variables, not the caller's bindings. That holds
-for aion/http-client, which reads none, but dexador's own variables, such as
-DEX:*DEFAULT-PROXY*, apply here only when they are set globally."
-  (let ((name (connection-name (client-connection client))))
+The thread sees the caller's AION/LOG:*CONTEXT* and, otherwise, the global values of special
+variables. That holds for aion/http-client, which reads none, but dexador's own variables, such
+as DEX:*DEFAULT-PROXY*, apply here only when they are set globally."
+  (let ((name (connection-name (client-connection client)))
+        (context log:*context*))
     (when (>= (client-abandoned client) *max-abandoned-requests*)
       (%request-failed client "~D earlier requests to it are still running after their deadline, so no new request was sent."
                        (list (client-abandoned client)) :outcome :not-run))
@@ -220,40 +232,53 @@ DEX:*DEFAULT-PROXY*, apply here only when they are set globally."
            (state (list :waiting))
            (started (get-internal-real-time))
            (thread (sb-thread:make-thread
-                    ;; THREAD-LIFETIME: independent -- it performs the request and returns the
-                    ;; outcome as a value; it reads no binding of the caller's (see above).
+                    ;; THREAD-LIFETIME: continuation -- it performs this request for the
+                    ;; caller, so it carries the caller's log context and nothing else.
                     (lambda ()
-                      (let ((outcome (handler-case (list :ok (http:send-request request '()))
-                                       (error (e) (list :error e)))))
-                        (unless (eq :waiting (sb-ext:compare-and-swap (car state) :waiting :done))
-                          ;; Given up at the deadline: this thread is the only one left to say
-                          ;; how the request ended.
-                          (sb-ext:atomic-decf (client-abandoned client))
-                          (log:info "praxeon/mcp: a request given up at its deadline finished"
-                                    :connection name :method method
-                                    :status (if (eq (first outcome) :ok)
-                                                (http:response-status (second outcome))
-                                                :failed)
-                                    :ms (round (* 1000 (- (get-internal-real-time) started))
-                                               internal-time-units-per-second)))
+                      (let ((log:*context* context)
+                            (outcome (list :ended)))
+                        (unwind-protect
+                             (setf outcome (handler-case (list :ok (http:send-request request '()))
+                                             (error (e) (list :error e))))
+                          ;; In the cleanup, so that a thread ended by anything, an error, a
+                          ;; storage condition or TERMINATE-THREAD, still settles the count.
+                          (unless (eq :waiting (sb-ext:compare-and-swap (car state) :waiting :done))
+                            ;; Given up at the deadline: this thread is the only one left to
+                            ;; say how the request ended.
+                            (sb-ext:atomic-decf (client-abandoned client))
+                            (log:info "praxeon/mcp: a request given up at its deadline finished"
+                                      :connection name :method method
+                                      :status (case (first outcome)
+                                                (:ok (http:response-status (second outcome)))
+                                                (:error :failed)
+                                                (t :ended))
+                                      :ms (round (* 1000 (- (get-internal-real-time) started))
+                                                 internal-time-units-per-second))))
                         outcome))
-                    :name "praxeon/mcp request"))
-           (outcome (sb-thread:join-thread thread :timeout seconds :default none)))
-      ;; Counted before the mark, and the count taken back when the mark fails, so the
-      ;; thread's decrement can never come before this increment.
-      (when (eq outcome none) (sb-ext:atomic-incf (client-abandoned client)))
-      (cond ((and (eq outcome none)
-                  (eq :waiting (sb-ext:compare-and-swap (car state) :waiting :abandoned)))
-             (log:warn "praxeon/mcp: request given up at its deadline"
-                       :connection name :method method :seconds seconds)
-             (error 'http:http-error :detail "the request did not finish before its deadline"))
-            ((eq outcome none)
-             ;; It finished in the moment between the deadline and the mark.
-             (sb-ext:atomic-decf (client-abandoned client))
-             (let ((late (sb-thread:join-thread thread :default none)))
-               (if (eq (first late) :ok) (second late) (error (second late)))))
-            ((eq (first outcome) :ok) (second outcome))
-            (t (error (second outcome)))))))
+                    :name "praxeon/mcp request")))
+      (multiple-value-bind (outcome why) (sb-thread:join-thread thread :timeout seconds :default none)
+        (cond
+          ((and (eq outcome none) (not (eq why :timeout)))
+           ;; The thread ended without a result, by a non-local exit: its cleanup has run and
+           ;; marked it done, so there is nothing to count.
+           (error 'http:http-error :detail "the request's thread ended without a result"))
+          ((eq outcome none)
+           ;; Counted before the mark, and the count taken back when the mark fails, so the
+           ;; thread's decrement can never come before this increment.
+           (sb-ext:atomic-incf (client-abandoned client))
+           (cond ((eq :waiting (sb-ext:compare-and-swap (car state) :waiting :abandoned))
+                  (log:warn "praxeon/mcp: request given up at its deadline"
+                            :connection name :method method :seconds seconds)
+                  (error '%deadline-passed :detail "the request did not finish before its deadline"))
+                 (t
+                  ;; It ended in the moment between the deadline and the mark.
+                  (sb-ext:atomic-decf (client-abandoned client))
+                  (let ((late (sb-thread:join-thread thread :default none)))
+                    (if (and (consp late) (eq (first late) :ok))
+                        (second late)
+                        (error 'http:http-error :detail "the request failed"))))))
+          ((eq (first outcome) :ok) (second outcome))
+          (t (error (second outcome))))))))
 
 (defun %messages (client response)
   "The JSON-RPC messages in RESPONSE: one for a JSON reply, each event's for an event stream."
@@ -406,7 +431,11 @@ in."
           ((or (<= 200 status 299) (member status '(400 404 405))))
           ((<= 500 status 599)
            (%failed-in-flight client "it answered with HTTP status ~D." (list status)))
-          (t (%request-failed client "it answered with HTTP status ~D." (list status))))))
+          (t
+           ;; A redirect, which is not followed, or a 4xx such as 409, 413, 422 or 429: the
+           ;; server refused the request, so a tool call did not run.
+           (%request-failed client "it answered with HTTP status ~D." (list status)
+                            :outcome (if (<= 300 status 499) :not-run :error))))))
 
 (defun %legacy-signal-p (response)
   "Whether RESPONSE says the server does not understand a current-revision request: a 400, 404
@@ -711,20 +740,23 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                 :capability capability
                 :source (list :connection (connection-name connection)
                               :tool (tool-name tool)
-                              :per-user (and (connection-per-user connection) t)))))
+                              :per-user (and (connection-per-user connection) t)))
+               ;; Remember the entry itself, so REVOKE-TOOLS removes this registration and
+               ;; nothing the app registered under a name or a :SOURCE that looks the same.
+               (push (cons name (gethash name (actor:agent-means agent)))
+                     (gethash agent (client-grants client)))))
     (log:info "praxeon/mcp: tools granted" :connection (connection-name connection)
                                            :count (length names))
     names))
 
 (defun revoke-tools (agent client)
-  "Remove every means GRANT-TOOLS registered on AGENT for CLIENT's connection, found by the
-connection named in each means' :SOURCE, and return how many were removed. A means the app
-registered itself, whatever its name, is left alone."
-  (let ((name (connection-name (client-connection client)))
-        (removed '()))
-    (maphash (lambda (means entry)
-               (when (equal name (getf (actor:means-entry-source entry) :connection))
-                 (push means removed)))
-             (actor:agent-means agent))
-    (dolist (means removed) (remhash means (actor:agent-means agent)))
-    (length removed)))
+  "Remove from AGENT every means that GRANT-TOOLS registered there through CLIENT, and return how
+many were removed. A means is removed only while it is still the very entry that grant
+registered, so a means the app registered itself, whatever its name or :SOURCE, is left alone."
+  (let ((removed 0))
+    (loop for (name . entry) in (gethash agent (client-grants client))
+          when (and entry (eq entry (gethash name (actor:agent-means agent))))
+            do (remhash name (actor:agent-means agent))
+               (incf removed))
+    (remhash agent (client-grants client))
+    removed))

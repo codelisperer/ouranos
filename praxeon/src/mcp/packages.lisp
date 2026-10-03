@@ -32,6 +32,9 @@
    #:connection-call-timeout
    #:client #:make-client #:client-connection #:client-era #:client-protocol-version
    #:+protocol-version+ #:+legacy-protocol-versions+
+   ;; limits an app may set
+   #:*max-abandoned-requests* #:*max-list-pages* #:*max-schema-characters*
+   #:*max-description-characters*
    ;; tools
    #:tool #:tool-name #:tool-title #:tool-description #:tool-input-schema #:tool-annotations
    #:list-tools #:call-tool #:grant-tools #:revoke-tools #:means-name
