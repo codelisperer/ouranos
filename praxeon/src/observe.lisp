@@ -27,9 +27,12 @@
 ;;;;
 ;;;; A SKIPPED WINDOW IS RETRIED ONLY WHILE NO LATER WINDOW HAS BEEN WRITTEN TO THE THREAD (#462's
 ;;;; fifth review). Until then a retry distils and promotes it exactly as if it had never been
-;;;; skipped. When a later window is written, by a run or by a retry, every open skipped window
-;;;; before it is closed at once, whatever its tries: marked :CLOSED in OBSERVER-SKIPPED, never
-;;;; retried, and its messages stay raw in the prompt (#317, step C). Whether a window is closed
+;;;; skipped. Before a later window's observations are first written, by a run or by a retry,
+;;;; every open skipped window before it is closed, whatever its tries, and the progress saved;
+;;;; when that save fails, nothing of the later window is written (#533's review). A closed
+;;;; window is marked :CLOSED in OBSERVER-SKIPPED, never retried, and its messages stay raw in
+;;;; the prompt (#317, step C). A window is closed this way even when the later window's write
+;;;; then fails. Whether a window is closed
 ;;;; is read from the progress record alone, never worked out from the thread's observations
 ;;;; (#508): an observation the app writes into the thread closes nothing, and an app that erases
 ;;;; a later window's observations reopens nothing. A window whose tries are spent, with no later
@@ -160,25 +163,28 @@ window, Mastra's step.")
 
 (defun %claim (observer)
   "Make OBSERVER the one running on its store, subject and thread in this process, until
-%RELEASE. NIL when another observer of the same thread holds it.
+%RELEASE. Returns NIL when it did, and the other observer when another observer of the same
+thread holds it. It logs nothing: OBSERVE-TURN calls it with interrupts deferred and logs a
+refusal afterwards (%LOG-REFUSAL; #533's review).
 
 THE CLAIM ITSELF HOLDS THE THREAD, not the other observer's worker being alive (#462's fourth
 review): the worker is made after the claim, so two OBSERVE-TURN calls arriving together would
 otherwise both find no live worker and both run."
-  (let* ((key (list (observer-store observer) (observer-subject observer) (observer-thread observer)))
-         (other (bt:with-lock-held (*running-lock*)
-                  (let ((other (gethash key *running*)))
-                    (if (or (null other) (eq other observer))
-                        (progn (setf (gethash key *running*) observer) nil)
-                        other)))))
-    ;; Logged after the process-wide lock is released (#508).
-    (cond ((null other) observer)
-          (t (if (observer-stuck-p other)
-                 (log:warn "memory observer not started: the thread's running observer is stuck"
-                           :thread (observer-thread observer))
-                 (log:debug "memory observer not started: another observer of the thread is running"
-                            :thread (observer-thread observer)))
-             nil))))
+  (let ((key (list (observer-store observer) (observer-subject observer) (observer-thread observer))))
+    (bt:with-lock-held (*running-lock*)
+      (let ((other (gethash key *running*)))
+        (if (or (null other) (eq other observer))
+            (progn (setf (gethash key *running*) observer) nil)
+            other)))))
+
+(defun %log-refusal (observer other)
+  "Log that OBSERVER did not start because OTHER holds the thread: a warning when OTHER is stuck.
+Called after the process-wide lock is released (#508)."
+  (if (observer-stuck-p other)
+      (log:warn "memory observer not started: the thread's running observer is stuck"
+                :thread (observer-thread observer))
+      (log:debug "memory observer not started: another observer of the thread is running"
+                 :thread (observer-thread observer))))
 
 (define-condition observer-running (praxeon/conditions:praxeon-error)
   ((subject :initarg :subject :reader observer-running-subject)
@@ -323,8 +329,9 @@ retries a skipped window still due, and one that writes progress a failed write 
 Deciding reads nothing from the store. The history is copied here, and today's date taken here,
 so messages the app adds later are the next call's.
 
-Signals when the thread for the run cannot be made, after giving back the claim on the
-conversation, so a later call can start a run."
+Signals when the thread for the run cannot be made. By the time the error leaves OBSERVE-TURN
+the claim on the conversation has been given back, so a later call can start a run; a
+HANDLER-BIND handler, which runs before the unwind, still sees it held."
   (let ((snapshot (copy-list history))
         (today (get-universal-time)))
     (bt:with-lock-held ((observer-lock observer))
@@ -334,25 +341,36 @@ conversation, so a later call can start a run."
                                            :seconds (- (get-universal-time) (observer-started observer)))
          nil)
         ((observer-busy-p observer) nil)
-        ((and (or (let ((window (unobserved observer snapshot)))
+        ((or (let ((window (unobserved observer snapshot)))
                (and window (or flush (>= (prompt:messages-tokens window) (observer-step observer)))))
-                  (%retry-due-p observer snapshot)
-                  ;; A progress write that failed is made again at the next turn, even one with
-                  ;; no new message (Copilot's review of #462).
-                  (observer-unsaved observer))
-              ;; ONE RUNNING OBSERVER PER THREAD in this process, so an observer made per
-              ;; request does not distil a window another one is distilling (#462's third review).
-              (%claim observer))
-         (setf (observer-started observer) (get-universal-time)
-               (observer-stopping observer) nil)
-         ;; THE CLAIM IS GIVEN BACK UNLESS THE WORKER STARTED, however %START-WORKER is left: an
-         ;; error, a STORAGE-CONDITION, a timeout or a THROW (#508). Otherwise the thread would
-         ;; stay claimed with nothing running to release it.
-         (let ((worker nil))
-           (unwind-protect (setf worker (%start-worker observer snapshot flush today))
-             (unless worker (%release observer)))
-           (setf (observer-worker observer) worker))
-         t)
+             (%retry-due-p observer snapshot)
+             ;; A progress write that failed is made again at the next turn, even one with no
+             ;; new message (Copilot's review of #462).
+             (observer-unsaved observer))
+         ;; THE CLAIM, THE WORKER AND ITS RECORDING ARE ONE STEP, with interrupts deferred
+         ;; (#533's review). An asynchronous exit, such as a deadline around the app's request,
+         ;; that landed after the worker started and before it was recorded gave back the claim
+         ;; while the worker ran; one that landed between the claim and the start kept the claim
+         ;; with no worker. Deferred, it is taken after the step, and the run, which holds the
+         ;; claim, gives it back when it ends. The UNWIND-PROTECT is for a synchronous exit from
+         ;; %START-WORKER: an error, a STORAGE-CONDITION or a THROW (#508).
+         (multiple-value-bind (started other)
+             (sb-sys:without-interrupts
+               ;; ONE RUNNING OBSERVER PER THREAD in this process, so an observer made per
+               ;; request does not distil a window another one is distilling (#462's third
+               ;; review).
+               (let ((other (%claim observer)))
+                 (if other
+                     (values nil other)
+                     (let ((worker nil))
+                       (setf (observer-started observer) (get-universal-time)
+                             (observer-stopping observer) nil)
+                       (unwind-protect (setf worker (%start-worker observer snapshot flush today))
+                         (unless worker (%release observer)))
+                       (setf (observer-worker observer) worker)
+                       (values t nil)))))
+           (when other (%log-refusal observer other))
+           started))
         (t nil)))))
 
 (defun %start-worker (observer history flush today)
@@ -363,12 +381,12 @@ conversation, so a later call can start a run."
                   :name "praxeon-observer"))
 
 (defun await-observer (observer &key (timeout 300))
-  "Join OBSERVER's running distillation, waiting at most TIMEOUT seconds. Returns T when none is
-running afterwards."
+  "Join OBSERVER's running distillation, waiting at most TIMEOUT seconds, or with no limit when
+TIMEOUT is NIL. Returns T when none is running afterwards."
   (let ((w (observer-worker observer)))
     ;; JOIN-THREAD signals a TYPE-ERROR for a timeout of 0, so 0 only looks, and STOP-OBSERVER
     ;; with 0 ends the run at once (#508).
-    (when (and w (bt:thread-alive-p w) (plusp timeout))
+    (when (and w (bt:thread-alive-p w) (or (null timeout) (plusp timeout)))
       (sb-thread:join-thread w :default nil :timeout timeout))
     (not (observer-busy-p observer))))
 
@@ -376,7 +394,10 @@ running afterwards."
   "Stop OBSERVER at shutdown: it finishes the attempt it is on, waits for no retry, and starts no
 other window. Waits at most TIMEOUT seconds, then ends its thread, waits up to 5 seconds more
 for it to end, and gives back its claim on the conversation, so RUNNING-OBSERVER no longer names
-it. Returns T when it stopped in time. A window it stopped during is not given up on. It is not
+it. Returns T when it stopped in time. When the thread has not ended 5 seconds after TIMEOUT, as
+when it is inside a call that defers interrupts, it returns NIL with the claim still held, and
+RUNNING-OBSERVER names OBSERVER until the thread ends. A window it stopped during is not given
+up on. It is not
 written either, unless the stop came after the window's observations were written and before
 its progress was: then the next observer of the thread distils it again (#462's eighth review),
 unless an erasure came between, whose raised mark covers the window."
@@ -389,7 +410,12 @@ unless an erasure came between, whose raised mark covers the window."
           ;; on the conversation, so it is given back here once the thread has ended (#508's
           ;; review). %RELEASE removes it only while this observer holds it.
           (ignore-errors (sb-thread:join-thread w :default nil :timeout 5))
-          (unless (bt:thread-alive-p w) (%release observer)))
+          ;; Under the observer's lock, and only while its worker is still the thread that was
+          ;; ended, so a claim a later run of the same observer took is not given back (#533's
+          ;; review).
+          (bt:with-lock-held ((observer-lock observer))
+            (when (and (eq (observer-worker observer) w) (not (bt:thread-alive-p w)))
+              (%release observer))))
         nil)))
 
 ;;; --- the windows ------------------------------------------------------------------------
@@ -526,6 +552,32 @@ mark the store may have passed."
       (log:info "memory observer window closed" :thread (observer-thread observer)
                                                 :from (first e) :through (second e)))))
 
+(define-condition closing-not-saved (praxeon/conditions:praxeon-error) ()
+  (:documentation "The progress write that closes the skipped windows before a window failed, so
+that window's observations were not written; the attempt fails and is retried."))
+
+(defun %close-open-windows-before (observer start)
+  "Before the first thread write of the window from START: close every open skipped window that
+ends at or before START, and save the progress. When that save fails, signal, so the attempt
+fails and nothing is written (#533's review).
+
+THE STORED RECORD THEN NEVER SHOWS A WINDOW OPEN WHILE A LATER WINDOW'S OBSERVATIONS ARE
+STORED. Closing only after the write left that state whenever the save after it failed, or a
+stop or a restart came between the two, and the next observer, which reads closure from the
+record alone, retried the older window after the newer one was written. The cost: a window is
+closed when a later window is about to be written, even if that write then fails.
+
+AN UNSAVED OBSERVER SAVES HERE TOO, even with nothing left to close: an earlier attempt may have
+closed the windows in memory and failed to save that, and writing now would leave the stored
+record showing them open."
+  (when (or (observer-unsaved observer)
+            (some (lambda (e) (and (%open-p e) (<= (second e) start))) (observer-skipped observer)))
+    (%close-before observer start)
+    (%save-progress observer)
+    (when (observer-unsaved observer)
+      (error 'closing-not-saved
+             :detail "the progress write closing the skipped windows before this window failed"))))
+
 (defun %run-windows (observer history flush today)
   (loop
     (let* ((start (observer-mark observer))
@@ -553,15 +605,18 @@ distilled and promoted as any window is. A window written now leaves OBSERVER-SK
 fails again counts the try.
 
 WHETHER A WINDOW IS STILL OPEN COMES FROM THE PROGRESS RECORD ALONE, never from the thread's
-observations (#508). A written window closes the open ones before it when it is written
-(%CLOSE-BEFORE), so nothing has to be inferred later. Inferring it let an observation the app
-wrote close a window, and let an app that erased a later window's observations reopen one."
+observations (#508). A window closes the open ones before it, and saves that, before its
+observations are first written (%CLOSE-OPEN-WINDOWS-BEFORE), so the stored record never shows a
+window open beside a later window's observations, and nothing has to be inferred later.
+Inferring it let an observation the app wrote close a window, and let an app that erased a
+later window's observations reopen one."
   (dolist (entry (copy-list (observer-skipped observer)))
     (destructuring-bind (from through tries &optional status) entry
       (declare (ignore status))
       (when (and (%open-p entry) (<= through (length history)) (not (observer-stopping observer))
                  (< tries (observer-max-attempts observer)))
-        (let ((outcome (%observe-window observer (subseq history (1- from) through) (1- from) through today)))
+        (let ((outcome (%observe-window observer (subseq history (1- from) through)
+                                        (1- from) through today)))
           (unless (eq outcome :stopped)
             (bt:with-lock-held ((observer-lock observer))
               (setf (observer-skipped observer)
@@ -655,9 +710,11 @@ was written. Never raises: this runs on a thread of its own."
                      (remove-if (lambda (p) (find (distil:proposal-content p) done
                                                   :key #'mem:observation-content :test #'string=))
                                 (distil:distillation-proposals checked))))
-             (written (distil:apply-distillation store fresh :provenance provenance
-                                                             :accept (observer-accept observer)
-                                                             :thread thread)))
+             (written (progn (%close-open-windows-before observer start)
+                             (distil:apply-distillation store fresh
+                                                        :provenance provenance
+                                                        :accept (observer-accept observer)
+                                                        :thread thread))))
         ;; PROMOTION RUNS OVER EVERY CURRENT OBSERVATION OF THE WINDOW, not only this attempt's
         ;; writes, so an attempt that failed during promotion is finished by the next one.
         ;; %MAYBE-PROMOTE leaves alone a fact the subject already holds, so running it again

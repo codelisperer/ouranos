@@ -124,9 +124,12 @@ its tag.
     replaced transcript uses a new thread id, because the stored mark wins over a lower `:mark`, and
     the transcript's first messages would otherwise never be observed.
   - A skipped window is retried only while no later window has been written to the thread, and
-    then it is distilled and promoted as if it had never been skipped. Writing a window, in a run
-    or in a retry, closes every open skipped window before it at once, whatever its tries: it is
-    never retried, and `observer-skipped` shows it as `(from through tries :closed)`. Whether a
+    then it is distilled and promoted as if it had never been skipped. Before a window's
+    observations are first written, in a run or in a retry, every open skipped window before it
+    is closed, whatever its tries, and the progress is saved; if that save fails, the window's
+    attempt fails and nothing is written. A closed window is never retried, and
+    `observer-skipped` shows it as `(from through tries :closed)`. A window is closed this way
+    even when the later window's write then fails. Whether a
     window is closed comes from the progress record alone, not from the thread's observations,
     so an observation the app writes into the thread closes nothing, and erasing a later
     window's observations reopens nothing. A window whose tries are spent, with no later window
@@ -135,10 +138,15 @@ its tag.
     the name of one, including a symbol that names a macro or a special operator, such as
     `when`.
   - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
-    claim on the conversation, however the attempt ends, so a later call can start a run.
-    `stop-observer :timeout 0` ends the run at once and returns NIL, as it does when any
-    timeout passes, instead of signalling a `type-error`; `await-observer :timeout 0` only
-    reports whether a run is going.
+    claim on the conversation, so a later call can start a run. The claim, the thread and its
+    recording are one step with interrupts deferred, so a deadline around the app's request
+    neither gives back the claim while the thread runs nor keeps it with no thread.
+  - `stop-observer` gives back the claim once the thread it ended has stopped, so
+    `running-observer` no longer names the observer. When the thread has not stopped 5 seconds
+    after `:timeout`, it returns NIL with the claim still held. `stop-observer :timeout 0` ends
+    the run without waiting first and returns NIL, as for any timeout that passes, instead of
+    signalling a `type-error`; `await-observer :timeout 0` only reports whether a run is going,
+    and `:timeout nil` waits with no limit.
   - A proposed replacement is applied only when `:accept` allows it. A thread observation also
     becomes a fact about the subject only when `:promote` allows it, and by default nothing
     does. A fact the subject already holds is not stored again. A promoted observation is
