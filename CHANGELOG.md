@@ -141,6 +141,9 @@ its tag.
     `aion/docs/oauth.md`.
   - Every request has an overall deadline, one second past the broker's `:timeout`, so a server
     that sends a byte now and then cannot hold a sign-in or a refresh, and its lock, for longer.
+    A request given up at its deadline keeps running until the server finishes; when
+    `aion/oauth::*max-abandoned-requests*` (8) of them are still running for one host, a new
+    request to that host signals `oauth-error` without being sent. Other hosts are not affected.
   - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
 - **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
   `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
@@ -198,7 +201,7 @@ its tag.
 - **praxeon: `run-turn` and `run-turn-through` take a `:principal`, the user the turn runs for**
   (#527). It is bound for the turn as `praxeon/actor:*principal*`, which a means reads when it
   is called, so each call acts with that user's credentials. It does not separate
-  conversations: an agent has one history, sent with every request, so each user needs an agent,
+  conversations: an agent has one history, from which every request is built, so each user needs an agent,
   or at least a history, of their own. A turn without a principal keeps the principal of an
   enclosing turn, so a delegated sub-turn runs for the same user.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).

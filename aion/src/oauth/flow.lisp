@@ -60,8 +60,9 @@ route for FINISH-SIGN-IN. CLIENT-NAME is what an authorization server shows the 
 APPLICATION-TYPE is sent with a dynamic registration: \"web\" for an app served from a host,
 \"native\" for a desktop app or a localhost redirect. CLIENT-METADATA-URL is the https URL
 where the app publishes its client ID metadata document (CLIENT-METADATA-DOCUMENT), or NIL.
-PRE-REGISTERED is an alist of (ISSUER . CLIENT-ID) for clients registered by hand. TIMEOUT
-bounds each request, in seconds, and SIGN-IN-LIFETIME how long a started sign-in waits.
+PRE-REGISTERED is an alist of (ISSUER . CLIENT-ID) for clients registered by hand. TIMEOUT, in
+seconds, bounds each connect and each read of a request, and the whole request is given up
+after TIMEOUT + 1 seconds (see %WITHIN). SIGN-IN-LIFETIME is how long a started sign-in waits.
 ADDRESS-POLICY and RESOLVE are passed to FETCH-PUBLIC; tests use them to allow 127.0.0.1.
 
 METADATA-LIFETIME is how many seconds the protected-resource metadata a token was issued under
@@ -74,7 +75,10 @@ and never renewed; after that ACCESS-TOKEN signals OAUTH-ERROR until a fetch suc
   (metadata-cache (make-hash-table :test #'equal))
   ;; key -> how many times its entry was forgotten; see %CURRENT-ISSUERS.
   (metadata-generations (make-hash-table :test #'equal))
-  (metadata-lock (sb-thread:make-mutex :name "aion/oauth metadata cache")))
+  (metadata-lock (sb-thread:make-mutex :name "aion/oauth metadata cache"))
+  ;; host -> how many requests to it were given up at their deadline and are still running.
+  (abandoned (make-hash-table :test #'equalp))
+  (abandoned-lock (sb-thread:make-mutex :name "aion/oauth abandoned requests")))
 
 ;;; --- URLs ------------------------------------------------------------------------------
 
@@ -109,23 +113,84 @@ path."
       (error 'url-refused :detail (format nil "the ~A is not an https URL" what)))
     url))
 
-(defun %within (seconds what thunk)
-  "Call THUNK on a thread of its own and return its value, or signal OAUTH-ERROR when it has not
-finished within SECONDS. The transport's connect and read timeouts bound each wait, but not a
-server that keeps sending a byte now and then; this bounds the whole request, and so how long a
-refresh holds its lock (#544). A request given up this way is left to end on its thread."
-  (let* ((none '#:none)
-         (thread (sb-thread:make-thread
-                  ;; THREAD-LIFETIME: independent -- it performs one request and returns the
-                  ;; outcome as a value; it reads no binding of the caller's.
-                  (lambda () (handler-case (list :ok (funcall thunk))
-                               (error (e) (list :error e))))
-                  :name "aion/oauth request"))
-         (outcome (sb-thread:join-thread thread :timeout seconds :default none)))
-    (cond ((eq outcome none)
-           (error 'oauth-error :detail (format nil "~A did not answer within ~D seconds" what seconds)))
+(defparameter *max-abandoned-requests* 8
+  "How many requests to one host may be given up at their deadline and still be running before
+a broker refuses new requests to that host. At this many, a request to the host signals
+OAUTH-ERROR without being sent, until some of them finish, so a server that keeps streaming past
+every deadline cannot make the broker hold one thread per request without bound. The count is
+per host, so one slow authorization server does not stop sign-in and refresh with any other.
+Requests made at the same moment can each pass the check before any of them is counted, so
+concurrent requests can go a few past it.")
+
+(defun %abandoned-change (broker host delta)
+  (sb-thread:with-mutex ((broker-abandoned-lock broker))
+    (let ((n (+ delta (gethash host (broker-abandoned broker) 0))))
+      (if (plusp n)
+          (setf (gethash host (broker-abandoned broker)) n)
+          (remhash host (broker-abandoned broker)))
+      n)))
+
+(defun %within (broker host seconds thunk)
+  "Call THUNK, one request to HOST, on a thread of its own and return its value, or signal
+OAUTH-ERROR when it has not finished within SECONDS. The transport's connect and read timeouts
+bound each wait, but not a server that keeps sending a byte now and then; this bounds the whole
+request, and so how long a refresh holds its lock (#544).
+
+A request given up this way keeps running on its thread, with its connection open, until the
+server finishes or the transport ends it. Nothing sends it again. BROKER counts such requests
+per host. Each one, however it ends, takes itself off the count and logs how it ended, with the
+caller's log context, and at *MAX-ABANDONED-REQUESTS* still running for HOST a new request to
+HOST is refused without being sent. This follows PRAXEON/MCP's %SEND-WITHIN."
+  (let ((context log:*context*)
+        (running (sb-thread:with-mutex ((broker-abandoned-lock broker))
+                   (gethash host (broker-abandoned broker) 0))))
+    (when (>= running *max-abandoned-requests*)
+      (error 'oauth-error
+             :detail (format nil "~D earlier requests to ~A are still running after their deadline, so no new request was sent" running host)))
+    (let* ((none '#:none)
+           (state (list :waiting))
+           (started (get-internal-real-time))
+           (thread (sb-thread:make-thread
+                    ;; THREAD-LIFETIME: continuation -- it performs this request for the
+                    ;; caller, so it carries the caller's log context and nothing else.
+                    (lambda ()
+                      (let ((log:*context* context)
+                            (outcome (list :ended)))
+                        (unwind-protect
+                             (setf outcome (handler-case (list :ok (funcall thunk))
+                                             (error (e) (list :error e))))
+                          ;; In the cleanup, so that a thread ended by anything still settles
+                          ;; the count.
+                          (unless (eq :waiting (sb-ext:compare-and-swap (car state) :waiting :done))
+                            (%abandoned-change broker host -1)
+                            (log:info "aion/oauth: a request given up at its deadline finished"
+                                      :host host
+                                      :status (case (first outcome) (:ok :answered) (:error :failed) (t :ended))
+                                      :ms (round (* 1000 (- (get-internal-real-time) started))
+                                                 internal-time-units-per-second))))
+                        outcome))
+                    :name "aion/oauth request")))
+      (multiple-value-bind (outcome why) (sb-thread:join-thread thread :timeout seconds :default none)
+        (cond
+          ((and (eq outcome none) (not (eq why :timeout)))
+           (error 'oauth-error :detail (format nil "the request to ~A ended without a result" host)))
+          ((eq outcome none)
+           ;; Counted before the mark, and the count taken back when the mark fails, so the
+           ;; thread's decrement can never come before this increment.
+           (%abandoned-change broker host 1)
+           (cond ((eq :waiting (sb-ext:compare-and-swap (car state) :waiting :abandoned))
+                  (log:warn "aion/oauth: request given up at its deadline" :host host :seconds seconds)
+                  (error 'oauth-error
+                         :detail (format nil "~A did not answer within ~D seconds" host seconds)))
+                 (t
+                  ;; It ended in the moment between the deadline and the mark.
+                  (%abandoned-change broker host -1)
+                  (let ((late (sb-thread:join-thread thread :default none)))
+                    (cond ((and (consp late) (eq (first late) :ok)) (second late))
+                          ((and (consp late) (eq (first late) :error)) (error (second late)))
+                          (t (error 'oauth-error :detail (format nil "the request to ~A failed" host))))))))
           ((eq (first outcome) :ok) (second outcome))
-          (t (error (second outcome))))))
+          (t (error (second outcome))))))))
 
 (defun %fetch (broker method url &key content headers)
   "One request to URL, a URL from a server, through FETCH-PUBLIC: the address is checked and
@@ -137,7 +202,7 @@ as #295 decided for every URL a server or a user supplies: there is no fallback 
 without the check. Sign-in is therefore not available on Windows until aion/http-client can
 pin a connection there."
   (handler-case
-      (%within (1+ (broker-timeout broker)) (%host-of url)
+      (%within broker (%host-of url) (1+ (broker-timeout broker))
                (lambda ()
                  (http:fetch-public url :method method :headers headers :content content
                                         :max-redirects 0 :max-body-bytes (* 1024 1024)

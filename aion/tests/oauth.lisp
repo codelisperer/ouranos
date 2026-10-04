@@ -49,7 +49,7 @@ Windows test below checks that it refuses."
 served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) or :ROOT."
   prm-at issuer-path s256 registration cimd iss-supported send-iss scopes challenge-scope
   as-scopes expires-in rotate prm-resource wrong-issuer bad-token-endpoint token-redirect-to
-  (other-issuer nil) (slow-prm nil) (prm-status nil) (token-type "Bearer") (refresh-error nil)
+  (other-issuer nil) (slow-prm nil) (slow-prm-requests 0) (prm-status nil) (token-type "Bearer") (refresh-error nil)
   (revoke-status 200) (refresh-clients (make-hash-table :test #'equal))
   (base "") (codes (make-hash-table :test #'equal)) (access (make-hash-table :test #'equal))
   (refresh (make-hash-table :test #'equal)) (registrations 0) (token-requests 0)
@@ -73,6 +73,10 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
     (if q (quri:url-decode-params (subseq path (1+ q))) '())))
 
 (defun %path-only (path) (subseq path 0 (or (position #\? path) (length path))))
+
+(defun substitute-string (string old new)
+  (let ((at (search old string)))
+    (if at (concatenate 'string (subseq string 0 at) new (subseq string (+ at (length old)))) string)))
 
 (defun %issuer (as) (format nil "~A~A" (as-base as) (as-issuer-path as)))
 (defun %resource (as) (format nil "~A/mcp" (as-base as)))
@@ -119,6 +123,7 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
           ((and (as-slow-prm as) (string= bare "/prm"))
            ;; A body that arrives one byte every 0.3 s: no single read waits long enough for a
            ;; read timeout, but the whole reply takes 6 s.
+           (incf (as-slow-prm-requests as))
            (th:write-head stream 200 '(("Content-Type" . "application/json") ("Content-Length" . "20")))
            (dotimes (i 20) (sleep 0.3) (write-byte 32 stream) (finish-output stream)))
           ((and (as-prm-status as) (string= bare "/prm"))
@@ -795,3 +800,33 @@ seconds. With a timeout of 1 s, the request is given up within about two."
       (signals oauth:oauth-error
         (oauth:discover (%broker :timeout 1) (%resource as) :challenge (%challenge-of as)))
       (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 4)))))
+
+(net-test a-host-with-too-many-given-up-requests-is-refused-without-sending
+  "A request given up at its deadline keeps running. Once *MAX-ABANDONED-REQUESTS* of them are
+running for one host, the next request to that host is refused at once and not sent, and a
+request to another host still runs."
+  (let ((oauth::*max-abandoned-requests* 1)
+        (broker (%broker :timeout 1
+                         :resolve (lambda (host) (declare (ignore host)) (http:resolve-host "127.0.0.1")))))
+    (with-as (slow)
+      (setf (as-slow-prm slow) t)
+      (with-as (fast)
+        ;; The second server is reached as localhost, which is another host to the broker.
+        ;; The slow server holds its lock while it streams, so its challenge is read beforehand.
+        (let ((challenge (%challenge-of fast))
+              (slow-challenge (%challenge-of slow)))
+          (setf (as-base fast) (substitute-string (as-base fast) "127.0.0.1" "localhost"))
+          (setf challenge (substitute-string challenge "127.0.0.1" "localhost"))
+          (signals oauth:oauth-error
+            (oauth:discover broker (%resource slow) :challenge slow-challenge))
+          (is (= 1 (as-slow-prm-requests slow)))
+          (let ((started (get-internal-real-time)))
+            (handler-case (progn (oauth:discover broker (%resource slow) :challenge slow-challenge)
+                                 (fail "a request was made"))
+              (oauth:oauth-error (e)
+                (is-true (search "still running" (princ-to-string e)))))
+            (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 1/2)
+                "refused at once"))
+          (is (= 1 (as-slow-prm-requests slow)) "the refused request was not sent")
+          (is-true (oauth:discover broker (%resource fast) :challenge challenge)
+                   "another host is not affected"))))))
