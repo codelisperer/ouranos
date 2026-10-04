@@ -109,6 +109,25 @@ its tag.
   `klio/tests` that made a directory by deleting a file from `uiop:tmpize-pathname`, or named it
   by the time and a counter, use it now; the first of those patterns failed when two suites
   started together on one machine.
+- **praxeon: a means can require the user's confirmation before it runs** (#531, part of #64).
+  `register-means :confirm` (T, or a function of the arguments returning an estimate plist) marks
+  a means. `run-turn :on-hold` is the app's policy: NIL, the default, runs no held call and tells
+  the model no confirmation was available; a function returns `:approve`, `:decline` or `:hold`;
+  `:hold` ends the turn with `(values nil :held held-turn)`. The app stores the held turn
+  (`held-turn-to-plist`, `held-turn-from-plist`) and continues the turn with
+  `continue-turn` and the user's decision, from any request or thread or after a restart. A
+  decision is recorded once through the app's `:claim`, so an approved call runs once even when
+  two decisions arrive together. `continue-turn` checks the principal (`wrong-principal`), the
+  agent and the history (`held-turn-mismatch`). `run-turn` signals `held-turn-required` when the
+  history ends with undecided held calls and no `:held` is given; `abandon-held-turn` closes one.
+  The events `:tool-held` and `:tool-decided` record what was asked and decided.
+  `run-turn-through` takes the same arguments and returns the held turn as a third value. A
+  delegated sub-turn inherits a blocking `:on-hold`, not `:hold`. A turn with no principal holds
+  nothing. See `praxeon/docs/confirm.md`.
+- **praxeon/mcp: `grant-tools :confirm`** (#531), a list of the server's tool names to hold, or
+  `:all`. Such a tool is registered with `:confirm t`, and after a refused token it is not sent
+  again: the token is refreshed and the call fails as not run, telling the model the user can
+  ask again. `call-tool` takes `:held` for the same rule.
 - **aion/oauth: sign an app's users in to other services with OAuth 2.1** (#527, part 2). A new
   opt-in system, in aion so that hermes can use it too.
   - `make-broker` holds the app's settings and a store: `:redirect-uri`, `:client-name`,

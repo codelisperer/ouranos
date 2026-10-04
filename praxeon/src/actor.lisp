@@ -30,7 +30,11 @@ ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
   ;; SOURCE: NIL, or a plist naming where the means comes from, such as (:connection "docs"
   ;; :tool "search") for an MCP tool (#527). It travels on the :TOOL-CALL and :TOOL-RESULT
   ;; events, so a usage ledger can attribute each call.
-  (source nil))
+  (source nil)
+  ;; CONFIRM (#531): NIL runs the means as usual. T holds every call until the user decides.
+  ;; A function of the arguments holds the call too, and returns an estimate plist of what the
+  ;; call will cost, such as (:credits 40), or NIL. See hold.lisp.
+  (confirm nil))
 
 (defstruct (agent (:constructor make-agent))
   "A runtime agent.
@@ -99,16 +103,32 @@ history, from which every request is built, so each user needs an agent, or a hi
 ;; same user, and one that starts an independent lifetime must not (#158).
 (aion/dynamic:register-inheritable '*principal*)
 
-(defun register-means (agent name description fn &key schema capability source)
+(defvar *on-hold* nil
+  "What the current turn does when the model calls a means registered with :CONFIRM (#531): NIL,
+a function, or :HOLD. RUN-TURN binds it from its ON-HOLD argument; see there.")
+
+(defvar *hold-allowed* nil
+  "True in a turn whose caller gave ON-HOLD, false in a delegated sub-turn that inherited it. A
+call is held only where it is true, because a sub-agent's hold cannot end the coordinator's
+turn (#531).")
+
+;; Inheritable for the reason *PRINCIPAL* is: a thread that continues this turn acts under the
+;; same policy (#158).
+(aion/dynamic:register-inheritable '*on-hold*)
+(aion/dynamic:register-inheritable '*hold-allowed*)
+
+(defun register-means (agent name description fn &key schema capability source confirm)
   "Register a means under NAME: a human DESCRIPTION, the FN performing it (a
 function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
 CAPABILITY string a caller must hold to see or use it (#90). SOURCE is NIL or a plist that
 names where the means comes from; the :TOOL-CALL and :TOOL-RESULT events carry it (#527).
-Returns NAME."
+CONFIRM is NIL, T or a function of the arguments returning an estimate plist: a means with one
+is held until the user decides (#531, see RUN-TURN's :ON-HOLD). Returns NAME."
   (setf (gethash name (agent-means agent))
         (make-means-entry :name name :description description
-                          :schema schema :capability capability :fn fn :source source))
+                          :schema schema :capability capability :fn fn :source source
+                          :confirm confirm))
   name)
 
 (defun means-permitted-p (entry permit)
@@ -623,7 +643,8 @@ each so a client can report progress."
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
-(defun run-turn (agent user-input &key (max-steps 8) permit max-tokens principal)
+(defun run-turn (agent user-input &key (max-steps 8) permit max-tokens principal
+                                       (on-hold nil on-hold-p) held claim)
   "Run one full turn: record USER-INPUT, then deliberate and act until the model
 replies with no further tool call. Returns the model's final text. MAX-STEPS
 bounds the deliberate/act cycle so a misbehaving loop stays finite.
@@ -666,14 +687,41 @@ PRINCIPAL is whatever the app uses to tell its users apart, and is the user this
 (#527). It is bound as *PRINCIPAL* for the turn, so a means that acts for a user, such as an
 MCP tool that needs that user's token, reads it at call time. NIL keeps the principal of an
 enclosing turn, which is how a delegated sub-turn runs for the same user; with neither, a
-means that needs a principal refuses the call."
-  (let ((*principal* (or principal *principal*)))
+means that needs a principal refuses the call.
+
+ON-HOLD is what the app does when the model calls a means registered with :CONFIRM (#531):
+  NIL         no confirmation is available, and the call is not run. The default.
+  a function  called with a plist describing the call (:PRINCIPAL :AGENT :NAME :SOURCE
+              :ARGUMENTS :ESTIMATE), on this thread; it returns :APPROVE, :DECLINE or :HOLD.
+  :HOLD       the turn ends with the call held: RUN-TURN returns NIL, :HELD and a HELD-TURN,
+              which the app stores and later passes to CONTINUE-TURN with the user's decision.
+When ON-HOLD is not given, a turn uses the enclosing turn's, so a delegated sub-turn asks the
+same blocking function; :HOLD is not passed down, because a sub-agent's hold cannot end the
+coordinator's turn, and counts there as no confirmation available. A turn with no principal
+cannot hold a call.
+
+HELD is the HELD-TURN of an earlier turn whose held calls were never decided. When the history
+ends with calls that have no results, RUN-TURN needs it, or an earlier ABANDON-HELD-TURN, and
+signals HELD-TURN-REQUIRED without it. With it, the held calls get \"not run: the user did not
+confirm\" before the new message. CLAIM is the app's function that records a decision once; see
+CONTINUE-TURN."
+  (let* ((*principal* (or principal *principal*))
+         (*on-hold* (cond (on-hold-p on-hold)
+                          ((eq *on-hold* :hold) nil)
+                          (t *on-hold*)))
+         (*hold-allowed* on-hold-p))
+    (%settle-unanswered agent held claim)
     (%run-turn agent user-input max-steps permit max-tokens)))
 
 (defun %run-turn (agent user-input max-steps permit max-tokens)
-  "RUN-TURN's steps, with *PRINCIPAL* already bound."
+  "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."
   (%append-history agent (llm:msg "user" user-input))
-  (let ((limit (%output-limit agent max-tokens)))
+  (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
+
+(defun %turn-loop (agent max-steps permit limit)
+  "Deliberate and act until the model answers, at most MAX-STEPS times. Returns RUN-TURN's
+values. CONTINUE-TURN enters here too, after it has written a held step's results."
+  (progn
     (dotimes (step max-steps
                    (error 'cnd:deliberation-failure
                           :detail (format nil "no final answer within ~A steps"
@@ -767,8 +815,14 @@ means that needs a principal refuses the call."
                  (progn
                    (evt:emit :answer :text text)
                    (return text))
-                 (%append-history agent (%tool-results-message agent calls
-                                                               :permit permit))))))))))
+                 (multiple-value-bind (message held) (%tool-results-step agent calls permit)
+                   (if held
+                       ;; A call is held (#531): the step's other results wait in the held
+                       ;; turn, and nothing more is added to the history until it is decided.
+                       (return (values nil :held
+                                       (%make-held-turn-from agent held (- max-steps step 1)
+                                                             limit)))
+                       (%append-history agent message)))))))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Delegation: an agent as another agent's means (multi-agent coordination, A).
@@ -863,7 +917,8 @@ acyclic to stay finite."
 ;;; --------------------------------------------------------------------------
 
 (defun run-turn-through (agent input &key (locale "en") chain (max-steps 8) permit
-                                          max-tokens principal)
+                                          max-tokens principal (on-hold nil on-hold-p) held
+                                          claim)
   "Run one turn for AGENT through CHAIN, returning the final TURN (not a string).
 
 CHAIN is a list of stages built with PRAXEON/TURN's ENTER-STAGE / LEAVE-STAGE /
@@ -875,7 +930,9 @@ Returns the turn so the caller can distinguish an answer from a refusal -- ask
 TURN:TURN-HALTED, and read TURN:TURN-NOTE for the reason. Callers wanting only the text
 can take TURN:TURN-REPLY.
 
-MAX-STEPS, PERMIT, MAX-TOKENS and PRINCIPAL are passed to RUN-TURN. When a handler ends the turn through
+MAX-STEPS, PERMIT, MAX-TOKENS, PRINCIPAL, ON-HOLD, HELD and CLAIM are passed to RUN-TURN. When the
+turn holds a call (#531), the second value is :HELD, the third the HELD-TURN, and the effect's
+reply is empty; the leave stages run as they do for an abandoned turn. When a handler ends the turn through
 a restart of OUTPUT-TRUNCATED (#326), the second value is RUN-TURN's: :TRUNCATED after
 ACCEPT-TRUNCATED, when the effect's reply is the cut-off text, and :ABANDONED after
 ABANDON-TURN, when the effect's reply is empty. It is NIL otherwise.
@@ -884,7 +941,7 @@ The leave stages run after the effect in every case, so the final reply is what 
 effect's reply. A guardrail that adds a note to the reply adds it to an abandoned turn's empty
 reply too, and the turn is returned with that note and :ABANDONED. The second value says how the
 model's part of the turn ended, not what the final reply contains."
-  (let ((outcome nil))
+  (let ((outcome nil) (held-turn nil))
     (values
      (turn:run-chain
       ;; Coalton checks that CHAIN is a list, not what is in it (#110).
@@ -894,12 +951,14 @@ model's part of the turn ended, not what the final reply contains."
         ;; The one impure pivot. It reads the turn's INPUT rather than the argument, so an
         ;; enter stage that rewrote the input (translation, redaction, a system preamble) is
         ;; what the model actually sees.
-        (multiple-value-bind (reply ended)
-            (run-turn agent (turn:turn-input tn)
-                      :max-steps max-steps :permit permit :max-tokens max-tokens
-                      :principal principal)
-          (setf outcome ended)
-          ;; TURN-REPLY is a String, and an abandoned turn has no text.
+        (multiple-value-bind (reply ended held-value)
+            (apply #'run-turn agent (turn:turn-input tn)
+                   :max-steps max-steps :permit permit :max-tokens max-tokens
+                   :principal principal :held held :claim claim
+                   (when on-hold-p (list :on-hold on-hold)))
+          (setf outcome ended held-turn held-value)
+          ;; TURN-REPLY is a String, and an abandoned or held turn has no text.
           (turn:with-reply tn (or reply ""))))
       (turn:make-turn input locale))
-     outcome)))
+     outcome
+     held-turn)))

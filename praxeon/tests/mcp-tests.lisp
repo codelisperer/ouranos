@@ -958,3 +958,35 @@ with client B, to another server: B sends its own token, not the one A's retry c
              (mcp::parse-event-stream (format nil "data: a~C~C~C~Cdata: b~C~C~C~C"
                                               #\Return #\Newline #\Return #\Newline
                                               #\Return #\Newline #\Return #\Newline)))))
+
+;;; --- tools held for confirmation (#531) --------------------------------------------------
+
+(test grant-tools-marks-the-tools-to-confirm
+  (let ((fake (make-fake :tools (%tools "spend" "look"))))
+    (with-fake (client fake)
+      (let ((agent (actor:make-agent)))
+        (mcp:grant-tools agent client :only :all :confirm '("spend"))
+        (is (eq t (actor::means-entry-confirm (gethash "docs__spend" (actor:agent-means agent)))))
+        (is (null (actor::means-entry-confirm (gethash "docs__look" (actor:agent-means agent)))))))))
+
+(test a-held-tool-is-not-sent-again-after-a-refused-token
+  "A tool the app holds for confirmation may spend the user's credits, so after the server
+refuses its token it is not sent again. The token is refreshed for the next call, and this one
+fails as not run."
+  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+  #-os-windows
+  (with-oauth-mcp (as fake url) (:rotate t) (:tools (%tools "a"))
+    (let* ((client (%signed-in-oauth-client as url))
+           (tool (first (mcp:list-tools client :principal "u1"))))
+      (clrhash (aion/oauth/tests::as-access as))
+      (setf (fake-calls fake) 0)
+      (handler-case (progn (mcp:call-tool client tool (%obj) :principal "u1" :held t)
+                           (fail "a held tool was sent again"))
+        (mcp:request-failed (e)
+          (is (eq :not-run (cnd:tool-error-result-outcome e)))
+          (is-true (search "ask again" (cnd:tool-error-result-text e)))))
+      (is (= 0 (fake-calls fake)))
+      (is (= 1 (aion/oauth/tests::as-refresh-requests as)))
+      (is (equal "echo {}" (mcp:call-tool client tool (%obj) :principal "u1" :held t))
+          "the refreshed token is used by the next call")
+      (is (= 1 (fake-calls fake))))))

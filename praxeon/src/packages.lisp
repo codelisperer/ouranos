@@ -299,7 +299,13 @@
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.
    #:means-entry-name #:means-entry-description #:means-entry-capability #:agent-tool-specs #:register-agent-as-means
    #:deliberate #:act #:run-turn #:converse-repl
-   #:run-turn-through #:*principal*))
+   #:run-turn-through #:*principal*
+   ;; holding a call until the user decides (#531)
+   #:held-turn #:held-turn-id #:held-turn-principal #:held-turn-agent #:held-turn-calls
+   #:held-turn-expires-at #:held-turn-to-plist #:held-turn-from-plist
+   #:continue-turn #:abandon-held-turn
+   #:wrong-principal #:held-turn-mismatch #:held-turn-mismatch-reason
+   #:held-turn-required #:held-turn-required-ids))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Workflow: deterministic multi-agent coordination (the code-driven counterpart
