@@ -185,6 +185,30 @@
                 :components ((:file "retrieval-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))
 
+(defsystem "praxeon/mcp"
+  :description "Agents that use the tools an MCP server offers, over Streamable HTTP (#527)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; cl-base64 for the specification's encoding of header values that are not plain ASCII.
+  ;; Everything here is already in the tree; see docs/dependencies.md.
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon" "cl-base64")
+  :serial t
+  :components ((:module "src/mcp"
+                :serial t
+                :components ((:file "packages")
+                             (:file "wire")
+                             (:file "client"))))
+  :in-order-to ((test-op (test-op "praxeon/mcp/tests"))))
+
+(defsystem "praxeon/mcp/tests"
+  :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
+  :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
+               "aion/http-client"
+               "com.inuoe.jzon" "cl-base64")
+  :serial t
+  :components ((:file "tests/mcp-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
+
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
   :author "Bob <eternal.recursion@proton.me>"

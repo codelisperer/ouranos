@@ -234,82 +234,33 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
   (asdf:system-relative-pathname :aion/http-client/tests
                                  (format nil "tests/fixtures/http-client/~A" name)))
 
-(defun %read-head (stream)
-  "The request head from STREAM, up to the blank line, as a string (Latin-1)."
-  (let ((bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-    (loop for b = (read-byte stream nil nil)
-          while b
-          do (vector-push-extend b bytes)
-          until (and (>= (length bytes) 4)
-                     (equalp (subseq bytes (- (length bytes) 4)) #(13 10 13 10))))
-    (sb-ext:octets-to-string bytes :external-format :latin-1)))
-
-(defun %head-path (head)
-  (second (uiop:split-string (subseq head 0 (position #\Return head)) :separator " ")))
-
 (defun %head-header (head name)
   (loop for line in (uiop:split-string head :separator (string #\Newline))
         for colon = (position #\: line)
         when (and colon (string-equal (string-trim " " (subseq line 0 colon)) name))
           return (string-trim '(#\Space #\Return) (subseq line (1+ colon)))))
 
-(defun %write-response (stream status headers body &key (content-length t))
-  (let ((body (if (stringp body) (sb-ext:string-to-octets body :external-format :utf-8) body)))
-    (write-sequence
-     (sb-ext:string-to-octets
-      (with-output-to-string (s)
-        (format s "HTTP/1.1 ~D X~C~C" status #\Return #\Newline)
-        (loop for (k . v) in headers do (format s "~A: ~A~C~C" k v #\Return #\Newline))
-        (when content-length (format s "Content-Length: ~D~C~C" (length body) #\Return #\Newline))
-        (format s "Connection: close~C~C~C~C" #\Return #\Newline #\Return #\Newline))
-      :external-format :latin-1)
-     stream)
-    (write-sequence body stream)
-    (finish-output stream)))
+;;; The server itself is aion/test-http's (#527). These wrappers keep this file's handlers in
+;;; the shape they were written in, a function of (path head stream).
 
-(defstruct server port heads listener thread stop)
+(defun %write-response (stream status headers body &key (content-length t))
+  (aion/test-http:write-response stream status headers body :content-length content-length))
+
+(defun server-port (server) (aion/test-http:server-port server))
+(defun server-heads (server) (aion/test-http:server-heads server))
 
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
 the response. Records every request head. TLS presents the test certificate."
-  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
-                                                        :element-type '(unsigned-byte 8)))
-         (server (make-server :port (usocket:get-local-port listener) :heads '()
-                              :listener listener))
-         (lock (bt:make-lock)))
-    (setf (server-thread server)
-          (bt:make-thread
-           (lambda ()
-             ;; WAIT, THEN ACCEPT, AND CHECK THE STOP FLAG BETWEEN WAITS. A thread blocked in
-             ;; accept() is not woken when another thread closes the listening socket on SBCL,
-             ;; so a server that simply looped on SOCKET-ACCEPT could never be joined, and every
-             ;; test using it hung in its cleanup.
-             (loop
-               (when (server-stop server) (return))
-               (let ((conn (handler-case
-                               (and (usocket:wait-for-input listener :timeout 0.1 :ready-only t)
-                                    (usocket:socket-accept listener))
-                             (error () (return)))))
-                 (when conn
-                 (unwind-protect
-                      (ignore-errors
-                       (let ((stream (usocket:socket-stream conn)))
-                         #-os-windows
-                         (when tls
-                           (setf stream (cl+ssl:make-ssl-server-stream
-                                         stream :certificate (namestring (%fixture "pinned-test.crt"))
-                                                :key (namestring (%fixture "pinned-test.key")))))
-                         (let ((head (%read-head stream)))
-                           (bt:with-lock-held (lock) (push head (server-heads server)))
-                           (funcall handler (%head-path head) head stream))))
-                   (ignore-errors (usocket:socket-close conn)))))))
-           :name "http-client test server"))
-    server))
+  (aion/test-http:start-server
+   (lambda (request stream)
+     (funcall handler (aion/test-http:request-path request)
+              (aion/test-http:request-head request) stream))
+   :tls-certificate (and tls (%fixture "pinned-test.crt"))
+   :tls-key (and tls (%fixture "pinned-test.key"))
+   :name "http-client test server"))
 
-(defun %stop-server (server)
-  (setf (server-stop server) t)
-  (ignore-errors (aion/test-threads:join (server-thread server)))
-  (ignore-errors (usocket:socket-close (server-listener server))))
+(defun %stop-server (server) (aion/test-http:stop-server server))
 
 (defmacro with-server ((var handler &key tls) &body body)
   `(let ((,var (%start-server ,handler :tls ,tls)))
