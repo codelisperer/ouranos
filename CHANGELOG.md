@@ -139,6 +139,8 @@ its tag.
     deletes the tokens, and `invalid_client` also forgets a client registered dynamically, when
     it is the one those tokens were issued to, so the next sign-in registers a new one. See
     `aion/docs/oauth.md`.
+  - Every request has an overall deadline, one second past the broker's `:timeout`, so a server
+    that sends a byte now and then cannot hold a sign-in or a refresh, and its lock, for longer.
   - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
 - **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
   `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
@@ -195,9 +197,10 @@ its tag.
   starts the content with `Error: `.
 - **praxeon: `run-turn` and `run-turn-through` take a `:principal`, the user the turn runs for**
   (#527). It is bound for the turn as `praxeon/actor:*principal*`, which a means reads when it
-  is called, so one agent can serve several users and act for each with that user's
-  credentials. A turn without one keeps the principal of an enclosing turn, so a delegated
-  sub-turn runs for the same user.
+  is called, so each call acts with that user's credentials. It does not separate
+  conversations: an agent has one history, sent with every request, so each user needs an agent,
+  or at least a history, of their own. A turn without a principal keeps the principal of an
+  enclosing turn, so a delegated sub-turn runs for the same user.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.

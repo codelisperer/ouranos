@@ -118,6 +118,7 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                       "isError" t))
          (:structured (%obj "content" #() "structuredContent" (%obj "n" 3)))
          (:null-result :null-result)
+         (:bad-image (%obj "content" (vector (%obj "type" "image" "data" 42 "mimeType" "image/png"))))
          (:status-409 (list :status 409))
          (:keepalive :keepalive)
          (:slow (sleep 3) (%obj "content" #()))
@@ -933,3 +934,27 @@ with client B, to another server: B sends its own token, not the one A's retry c
                       (mapcar (lambda (r) (th:request-header r "Authorization"))
                               (th:server-requests server-b))
                       :test #'equal))))))))
+
+
+;;; --- Copilot's review of train 24 (#544) ------------------------------------------------
+
+(test a-content-block-the-client-cannot-read-fails-the-call
+  (let ((fake (make-fake :tools (%tools '("img" :do :bad-image)))))
+    (with-fake (client fake)
+      (handler-case (progn (%call client "img") (fail "no failure"))
+        (mcp:request-failed (e) (is (eq :unknown (cnd:tool-error-result-outcome e))))))))
+
+(test an-explicit-empty-tool-list-grants-nothing-and-sends-nothing
+  (let ((fake (make-fake :tools (%tools "a"))))
+    (with-fake (client fake :per-user t :token-source (lambda (c p) (declare (ignore c p)) "t"))
+      (let ((agent (actor:make-agent)))
+        (is (null (mcp:grant-tools agent client :tools '() :only :all)))
+        (is (null (requests)) "nothing was sent")))))
+
+(test events-separated-by-a-lone-cr-are-read
+  (is (equal '("a" "b")
+             (mcp::parse-event-stream (format nil "data: a~C~Cdata: b~C~C" #\Return #\Return #\Return #\Return))))
+  (is (equal '("a" "b")
+             (mcp::parse-event-stream (format nil "data: a~C~C~C~Cdata: b~C~C~C~C"
+                                              #\Return #\Newline #\Return #\Newline
+                                              #\Return #\Newline #\Return #\Newline)))))

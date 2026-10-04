@@ -92,7 +92,8 @@ client rendering `agent-history' still shows the whole conversation."
 (defvar *principal* nil
   "The user the current turn runs for, as the app identifies its users, or NIL (#527). RUN-TURN
 binds it from its PRINCIPAL argument. A means that acts for a user reads it when it is called,
-so one agent can serve several users without one user's call using another's credentials.")
+so each call uses that user's credentials. It does not separate conversations: an agent has one
+history, which every request sends, so each user needs an agent, or a history, of their own.")
 
 ;; Inheritable for the reason *OBSERVER* is: a thread that continues this turn acts for the
 ;; same user, and one that starts an independent lifetime must not (#158).

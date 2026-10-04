@@ -49,7 +49,7 @@ Windows test below checks that it refuses."
 served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) or :ROOT."
   prm-at issuer-path s256 registration cimd iss-supported send-iss scopes challenge-scope
   as-scopes expires-in rotate prm-resource wrong-issuer bad-token-endpoint token-redirect-to
-  (other-issuer nil) (prm-status nil) (token-type "Bearer") (refresh-error nil)
+  (other-issuer nil) (slow-prm nil) (prm-status nil) (token-type "Bearer") (refresh-error nil)
   (revoke-status 200) (refresh-clients (make-hash-table :test #'equal))
   (base "") (codes (make-hash-table :test #'equal)) (access (make-hash-table :test #'equal))
   (refresh (make-hash-table :test #'equal)) (registrations 0) (token-requests 0)
@@ -116,6 +116,11 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
                                       (as-challenge-scope as))))
                   ""))))
           ;; The protected resource metadata.
+          ((and (as-slow-prm as) (string= bare "/prm"))
+           ;; A body that arrives one byte every 0.3 s: no single read waits long enough for a
+           ;; read timeout, but the whole reply takes 6 s.
+           (th:write-head stream 200 '(("Content-Type" . "application/json") ("Content-Length" . "20")))
+           (dotimes (i 20) (sleep 0.3) (write-byte 32 stream) (finish-output stream)))
           ((and (as-prm-status as) (string= bare "/prm"))
            (th:write-response stream (as-prm-status as) '() "not now"))
           ((or (and (eq (as-prm-at as) :challenge) (string= bare "/prm"))
@@ -750,3 +755,43 @@ is checked first."
       (setf (as-revoke-status as) 500)
       (oauth:disconnect broker "u1" "docs")
       (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs"))))))
+
+
+;;; --- Copilot's review of train 24 (#544) ------------------------------------------------
+
+(net-test a-fetch-overtaken-by-a-forget-does-not-store-its-old-answer
+  "A fetch of the metadata starts, and is held after it has read the old issuer list. Meanwhile a
+refused token forgets the entry, and a new fetch caches the list naming another issuer. The first
+fetch, released, must not store its old list over the new one."
+  (with-as (as)
+    (let* ((broker (%broker :metadata-grace 0))
+           (arrived (sb-thread:make-semaphore)) (release (sb-thread:make-semaphore))
+           (armed (list t)))
+      (%sign-in as broker)
+      (setf aion/oauth::*%after-issuer-fetch*
+            (lambda () (when (sb-ext:compare-and-swap (car armed) t nil)
+                         (sb-thread:signal-semaphore arrived)
+                         (sb-thread:wait-on-semaphore release :timeout 10))))
+      (unwind-protect
+           (let ((first (sb-thread:make-thread
+                         (lambda () (oauth:access-token broker "u1" "docs" (%resource as))))))
+             (is-true (sb-thread:wait-on-semaphore arrived :timeout 10))
+             (setf (as-other-issuer as) "https://other.example")
+             (oauth:refresh broker "u1" "docs" (%resource as) :rejected "refused")
+             (is (null (oauth:access-token broker "u1" "docs" (%resource as)))
+                 "the new list names another issuer")
+             (sb-thread:signal-semaphore release)
+             (aion/test-threads:join first)
+             (is (null (oauth:access-token broker "u1" "docs" (%resource as)))
+                 "the overtaken fetch did not store the old list"))
+        (setf aion/oauth::*%after-issuer-fetch* nil)))))
+
+(net-test a-request-that-streams-past-its-deadline-is-given-up
+  "The metadata arrives one byte at a time, so no read times out, but the whole reply takes six
+seconds. With a timeout of 1 s, the request is given up within about two."
+  (with-as (as)
+    (setf (as-slow-prm as) t)
+    (let ((started (get-internal-real-time)))
+      (signals oauth:oauth-error
+        (oauth:discover (%broker :timeout 1) (%resource as) :challenge (%challenge-of as)))
+      (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 4)))))

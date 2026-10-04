@@ -20,6 +20,22 @@ not an object."
 
 ;;; --- event streams ---------------------------------------------------------------------
 
+(defun %stream-lines (text)
+  "TEXT split into lines at CRLF, LF or CR."
+  (let ((lines '()) (start 0) (n (length text)) (i 0))
+    (loop while (< i n)
+          do (let ((c (char text i)))
+               (cond ((char= c #\Return)
+                      (push (subseq text start i) lines)
+                      (when (and (< (1+ i) n) (char= (char text (1+ i)) #\Newline)) (incf i))
+                      (setf start (1+ i)))
+                     ((char= c #\Newline)
+                      (push (subseq text start i) lines)
+                      (setf start (1+ i)))))
+             (incf i))
+    (push (subseq text start) lines)
+    (nreverse lines)))
+
 (defun parse-event-stream (text)
   "The data of each event in TEXT, a text/event-stream body, in order. Lines starting with a
 colon are comments and are skipped; an event's data lines are joined with newlines; fields
@@ -29,8 +45,9 @@ other than data are ignored. An event with no data is dropped."
              (when data
                (push (format nil "~{~A~^~%~}" (reverse data)) events)
                (setf data '()))))
-      (dolist (raw (uiop:split-string text :separator (string #\Newline)))
-        (let ((line (string-right-trim '(#\Return) raw)))
+      ;; A line ends at CRLF, LF or CR (the event-stream format allows all three).
+      (dolist (line (%stream-lines text))
+        (progn
           (cond ((zerop (length line)) (finish))
                 ((char= #\: (char line 0)))
                 (t (let* ((colon (position #\: line))

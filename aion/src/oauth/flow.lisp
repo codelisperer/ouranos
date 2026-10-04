@@ -72,6 +72,8 @@ and never renewed; after that ACCESS-TOKEN signals OAUTH-ERROR until a fetch suc
   store redirect-uri client-name application-type client-metadata-url pre-registered
   timeout sign-in-lifetime metadata-lifetime metadata-grace address-policy resolve
   (metadata-cache (make-hash-table :test #'equal))
+  ;; key -> how many times its entry was forgotten; see %CURRENT-ISSUERS.
+  (metadata-generations (make-hash-table :test #'equal))
   (metadata-lock (sb-thread:make-mutex :name "aion/oauth metadata cache")))
 
 ;;; --- URLs ------------------------------------------------------------------------------
@@ -107,6 +109,24 @@ path."
       (error 'url-refused :detail (format nil "the ~A is not an https URL" what)))
     url))
 
+(defun %within (seconds what thunk)
+  "Call THUNK on a thread of its own and return its value, or signal OAUTH-ERROR when it has not
+finished within SECONDS. The transport's connect and read timeouts bound each wait, but not a
+server that keeps sending a byte now and then; this bounds the whole request, and so how long a
+refresh holds its lock (#544). A request given up this way is left to end on its thread."
+  (let* ((none '#:none)
+         (thread (sb-thread:make-thread
+                  ;; THREAD-LIFETIME: independent -- it performs one request and returns the
+                  ;; outcome as a value; it reads no binding of the caller's.
+                  (lambda () (handler-case (list :ok (funcall thunk))
+                               (error (e) (list :error e))))
+                  :name "aion/oauth request"))
+         (outcome (sb-thread:join-thread thread :timeout seconds :default none)))
+    (cond ((eq outcome none)
+           (error 'oauth-error :detail (format nil "~A did not answer within ~D seconds" what seconds)))
+          ((eq (first outcome) :ok) (second outcome))
+          (t (error (second outcome))))))
+
 (defun %fetch (broker method url &key content headers)
   "One request to URL, a URL from a server, through FETCH-PUBLIC: the address is checked and
 the connection pinned to it, and no redirect is followed, so a code, a refresh token or client
@@ -117,12 +137,14 @@ as #295 decided for every URL a server or a user supplies: there is no fallback 
 without the check. Sign-in is therefore not available on Windows until aion/http-client can
 pin a connection there."
   (handler-case
-      (http:fetch-public url :method method :headers headers :content content
-                             :max-redirects 0 :max-body-bytes (* 1024 1024)
-                             :connect-timeout (broker-timeout broker)
-                             :read-timeout (broker-timeout broker)
-                             :address-policy (broker-address-policy broker)
-                             :resolve (broker-resolve broker))
+      (%within (1+ (broker-timeout broker)) (%host-of url)
+               (lambda ()
+                 (http:fetch-public url :method method :headers headers :content content
+                                        :max-redirects 0 :max-body-bytes (* 1024 1024)
+                                        :connect-timeout (broker-timeout broker)
+                                        :read-timeout (broker-timeout broker)
+                                        :address-policy (broker-address-policy broker)
+                                        :resolve (broker-resolve broker))))
     (http:pinned-connect-unsupported (e) (error e))
     (http:too-many-redirects ()
       (error 'oauth-error :detail (format nil "~A answered with a redirect, which is not followed"
@@ -598,6 +620,10 @@ names another resource is an answer too: it names no issuer for this one."
 (defun %metadata-key (token-set)
   (list (token-set-metadata-url token-set) (token-set-resource token-set)))
 
+(sb-ext:defglobal *%after-issuer-fetch* nil
+  "NIL, or a function called after %CURRENT-ISSUERS has fetched and before it stores. FOR TESTS
+ONLY: it lets a test hold a fetch at the point where a %FORGET-METADATA can overtake it.")
+
 (defun %current-issuers (broker token-set)
   "The authorization servers TOKEN-SET's resource names now, from its protected-resource
 metadata. An answer is kept for the broker's METADATA-LIFETIME. When a fetch fails, an expired
@@ -607,13 +633,21 @@ user to sign in again."
   (let* ((key (%metadata-key token-set))
          (cache (broker-metadata-cache broker))
          (now (get-universal-time))
-         (cached (sb-thread:with-mutex ((broker-metadata-lock broker)) (gethash key cache))))
+         (generation nil)
+         (cached (sb-thread:with-mutex ((broker-metadata-lock broker))
+                   (setf generation (gethash key (broker-metadata-generations broker) 0))
+                   (gethash key cache))))
     (if (and cached (> (cdr cached) now))
         (car cached)
         (multiple-value-bind (issuers ok) (%fetch-issuers broker token-set)
+          (when *%after-issuer-fetch* (funcall *%after-issuer-fetch*))
           (cond (ok
+                 ;; Stored only when the entry was not forgotten while this fetch ran. A fetch
+                 ;; that began before a refused token's %FORGET-METADATA would otherwise store
+                 ;; the list read before it, over the one read after it, for a whole lifetime.
                  (sb-thread:with-mutex ((broker-metadata-lock broker))
-                   (setf (gethash key cache) (cons issuers (+ now (broker-metadata-lifetime broker)))))
+                   (when (eql generation (gethash key (broker-metadata-generations broker) 0))
+                     (setf (gethash key cache) (cons issuers (+ now (broker-metadata-lifetime broker))))))
                  issuers)
                 ((and cached (> (+ (cdr cached) (broker-metadata-grace broker)) now))
                  (car cached))
@@ -622,7 +656,8 @@ user to sign in again."
 (defun %forget-metadata (broker token-set)
   (when (and token-set (token-set-metadata-url token-set))
     (sb-thread:with-mutex ((broker-metadata-lock broker))
-      (remhash (%metadata-key token-set) (broker-metadata-cache broker)))))
+      (remhash (%metadata-key token-set) (broker-metadata-cache broker))
+      (incf (gethash (%metadata-key token-set) (broker-metadata-generations broker) 0)))))
 
 (defun access-token (broker principal connection resource-url)
   "PRINCIPAL's access token for CONNECTION, refreshed first when it has expired, or NIL when

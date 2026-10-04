@@ -782,7 +782,12 @@ signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the
                              :principal principal
                              :timeout (connection-call-timeout connection)
                              :extra-headers headers)))
-         (text (result-text result)))
+         ;; A content block the client cannot read, such as a number as an image's data, fails
+         ;; the call like any reply it cannot read; the tool ran, so its outcome is unknown.
+         (text (handler-case (result-text result)
+                 (error ()
+                   (%request-failed client "its result could not be read. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
+                                    '() :outcome :unknown)))))
     (when (eq t (gethash "isError" result))
       (log:info "praxeon/mcp: tool reported an error" :connection (connection-name connection)
                                                        :tool (tool-name tool))
@@ -805,11 +810,12 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
 (defun %clip (string limit)
   (if (> (length string) limit) (subseq string 0 limit) string))
 
-(defun grant-tools (agent client &key tools (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability)
+(defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability)
   "Register the tools of CLIENT's server that the app chooses as means of AGENT, and return the
 means names.
 
-TOOLS is a list from LIST-TOOLS; when it is NIL the server is asked, with no principal. ONLY is
+TOOLS is a list from LIST-TOOLS; when it is not given, the server is asked, with no principal.
+An empty list grants nothing and sends nothing. ONLY is
 required: a list of the server's tool names to grant, or :ALL. There is no default that grants
 every tool, so a grant is always a decision the app wrote down. CAPABILITY is passed to
 REGISTER-MEANS, so a caller without it does not see the tools.
@@ -818,7 +824,7 @@ Each means calls its tool for the principal of the turn it runs in, ACTOR:*PRINC
 that clashes with a means AGENT already has, or with another tool in the grant, signals
 TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes the grant."
   (let* ((connection (client-connection client))
-         (tools (or tools (list-tools client)))
+         (tools (if tools-p tools (list-tools client)))
          (chosen (if (eq only :all)
                      tools
                      (remove-if-not (lambda (tool) (member (tool-name tool) only :test #'string=))
