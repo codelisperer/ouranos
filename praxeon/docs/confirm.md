@@ -59,7 +59,8 @@ LangGraph's `interrupt()` re-runs the interrupted node when it resumes, which a 
 3. **History:** the agent's history has the model message that holds these calls.
    - If a result follows it for every held call, the turn was decided before, and `:already-decided` is returned with the decision the claim recorded.
    - If the message is missing, it signals `held-turn-mismatch`.
-4. **Arguments:** the arguments that run are the ones in the history, which the model wrote. If the held turn's copy, which is what the user was shown, differs, it signals `held-turn-mismatch`.
+4. **Calls:** the held turn's calls are the model message's calls, in the model's order and once each, and each held call names the means the model message names. Otherwise it signals `held-turn-mismatch`, because the held turn decides which means runs and the order in which results are written.
+5. **Arguments:** the arguments that run are the ones in the history, which the model wrote. If the held turn's copy, which is what the user was shown, differs, it signals `held-turn-mismatch`.
 
 Then it records the decision through the claim, and runs what was approved:
 - **The claim.** `:claim` is the app's function of the held turn's id and the decision. It records the decision as one step, returns true the first time, and after that returns NIL and the decision recorded first. For a database it is `UPDATE … SET decision = ? WHERE id = ? AND decision IS NULL`.

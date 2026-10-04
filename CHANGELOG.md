@@ -118,8 +118,11 @@ its tag.
   `continue-turn` and the user's decision, from any request or thread or after a restart. A
   decision is recorded once through the app's `:claim`, so an approved call runs once even when
   two decisions arrive together. `continue-turn` checks the principal (`wrong-principal`), the
-  agent and the history (`held-turn-mismatch`). `run-turn` signals `held-turn-required` when the
-  history ends with undecided held calls and no `:held` is given; `abandon-held-turn` closes one.
+  agent, and that the held turn's calls, their means, their order and their arguments are the
+  ones in the history's model message (`held-turn-mismatch`). `run-turn` signals
+  `held-turn-required` when the history ends with undecided held calls and no `:held` is given;
+  `abandon-held-turn` closes one, and returns `(values nil :already-decided decision)` with the
+  decision recorded first when the turn was decided before.
   The events `:tool-held` and `:tool-decided` record what was asked and decided, with the
   tool-call id under `:id` and the held turn's id under `:held`. Without `:claim`, decisions
   are kept in a table in the process that is never emptied, so a long-running server supplies

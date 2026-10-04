@@ -4505,6 +4505,40 @@ leaves the history as it was, because the newer calls still have no results."
         (signals actor:held-turn-mismatch (actor:continue-turn fresh held :approve :principal "u1")))
       (is (equal '(0 1) counts)))))
 
+(test a-held-turn-naming-another-means-or-repeating-a-call-is-refused
+  "The held turn says which means runs and in what order the results are written, so a held
+turn that names another registered means, with that means' source, or that repeats a call id,
+is refused before anything is recorded or run (#547)."
+  (let ((other-runs 0) (claims '()))
+    (flet ((claim (id d) (push (cons id d) claims) (values t d)))
+      (multiple-value-bind (ag counts)
+          (%hold-agent :extra-means (lambda (ag counts)
+                                      (declare (ignore counts))
+                                      (actor:register-means ag "other" "another means"
+                                                            (lambda (in) (declare (ignore in)) (incf other-runs) "other ran")
+                                                            :confirm t :source '(:connection "svc" :tool "other"))))
+        (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+               (before (copy-list (actor:agent-history ag)))
+               (renamed (actor:held-turn-from-json (actor:held-turn-to-json held)))
+               (repeated (actor:held-turn-from-json (actor:held-turn-to-json held))))
+          (setf (getf (first (actor:held-turn-calls renamed)) :name) "other"
+                (getf (first (actor:held-turn-calls renamed)) :source) '(:connection "svc" :tool "other"))
+          (setf (actor::held-turn-order repeated) '("s1" "s1" "l1"))
+          (signals actor:held-turn-mismatch (actor:continue-turn ag renamed :approve :principal "u1" :claim #'claim))
+          (signals actor:held-turn-mismatch (actor:continue-turn ag repeated :approve :principal "u1" :claim #'claim))
+          (is (= 0 other-runs))
+          (is (equal '(0 1) counts))
+          (is (null claims) "nothing recorded")
+          (is (equal before (actor:agent-history ag)) "nothing written"))))))
+
+(test abandoning-an-answered-held-turn-returns-the-decision-recorded-first
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (declare (ignore counts))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (actor:continue-turn ag held :decline :principal "u1")
+      (is (equal '(nil :already-decided :decline)
+                 (multiple-value-list (actor:abandon-held-turn ag held :principal "u1")))))))
+
 (test an-approved-call-whose-means-changed-is-not-run
   (multiple-value-bind (ag counts) (%hold-agent :answers 1)
     (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))

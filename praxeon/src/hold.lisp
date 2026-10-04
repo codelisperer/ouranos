@@ -344,11 +344,20 @@ state of the history, :PENDING or :ANSWERED."
     (when (eq state :missing)
       (error 'held-turn-mismatch
              :reason "the history has no model message holding these calls"))
+    ;; The held turn says which means runs and in what order the results are written, so it
+    ;; must say what the model message says: the same call ids, in order, once each (#547).
+    (unless (equal (held-turn-order held)
+                   (mapcar (lambda (p) (getf p :id)) (%tool-use-parts message)))
+      (error 'held-turn-mismatch
+             :reason "its calls are not the model message's calls, in the model's order"))
     ;; The arguments that run are the ones the model wrote, in the history; the held turn's
-    ;; copy is what the user was shown, so the two must agree.
+    ;; copy is what the user was shown, so the two must agree, as must the means named.
     (dolist (c (held-turn-calls held))
       (let ((part (find (getf c :id) (%tool-use-parts message)
                         :key (lambda (p) (getf p :id)) :test #'equal)))
+        (unless (equal (getf part :name) (getf c :name))
+          (error 'held-turn-mismatch
+                 :reason (format nil "the means of ~A differs from the history's" (getf c :id))))
         (unless (%json-equal (getf part :input) (getf c :arguments))
           (error 'held-turn-mismatch
                  :reason (format nil "the arguments of ~A differ from the history's" (getf c :id))))))
@@ -465,7 +474,10 @@ the results it calls for are written, and nothing runs. Checked as CONTINUE-TURN
   (let* ((*principal* principal)
          (state (%check-held agent held principal)))
     (when (eq state :answered)
-      (return-from abandon-held-turn (values nil :already-decided)))
+      ;; Decided before: the decision recorded first comes from the claim, as in CONTINUE-TURN.
+      (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) :unanswered)
+        (return-from abandon-held-turn
+          (values nil :already-decided (if first :unanswered recorded)))))
     (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) :unanswered)
       (cond (first (%write-held-results agent held :unanswered nil) t)
             (t (%write-held-results agent held recorded nil :recorded t)
