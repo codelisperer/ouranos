@@ -300,12 +300,8 @@ globally would turn it on for a production image in the same process."
 
 Real files on a real disk, because the loader's job is to walk a tree and report what it
 found there, and a fixture that hands it strings would test everything except that."
-  (let ((stamp (gensym "STAMP")) (f (gensym "F")) (path (gensym "PATH")))
-    `(let* ((,stamp (uiop:tmpize-pathname
-                     (merge-pathnames "klio-content" (uiop:temporary-directory))))
-            (,dir (uiop:ensure-directory-pathname ,stamp)))
-       (ignore-errors (delete-file ,stamp))
-       (ensure-directories-exist ,dir)
+  (let ((f (gensym "F")) (path (gensym "PATH")))
+    `(let ((,dir (aion/fs:make-temporary-directory "klio-content")))
        (dolist (,f (list ,@(loop for (name . text) in files
                                  collect `(cons ,name ,text))))
          (let ((,path (merge-pathnames (car ,f) ,dir)))
@@ -903,10 +899,11 @@ It must still list the two roles of the tree the request started with."
 ;;; --- the static export (#353) ------------------------------------------------------------
 
 (defmacro with-export-dir ((dir) &body body)
-  "A fresh directory name, not created, deleted afterwards."
-  `(let ((,dir (uiop:ensure-directory-pathname
-                (uiop:tmpize-pathname (merge-pathnames "klio-export" (uiop:temporary-directory))))))
-     (ignore-errors (delete-file (string-right-trim "/" (namestring ,dir))))
+  "A fresh directory name, not created, deleted afterwards. The directory is made and removed
+again, so the export creates it: the name carries this process's id (#515), so no other
+process can take it in between."
+  `(let ((,dir (aion/fs:make-temporary-directory "klio-export")))
+     (aion/fs:delete-tree ,dir)
      (unwind-protect (progn ,@body)
        (ignore-errors (aion/fs:delete-tree ,dir :if-does-not-exist :ignore)))))
 
