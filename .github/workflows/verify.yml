@@ -69,8 +69,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Generous on purpose: verify-tree runs 40+ ISOLATED SBCL images (one per system, one
     # per suite) and a cold Coalton compile is minutes on its own. A tight limit here would
-    # turn a slow cache miss into a red build.
-    timeout-minutes: 40
+    # turn a slow cache miss into a red build. The limit was 40 minutes until 2026-10-04. By
+    # then, Windows runs that missed the fasl cache (any change to an .asd file misses it) took
+    # 35 to 40 minutes, and one was cancelled at the limit with every suite it had run passing.
+    timeout-minutes: 60
 
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is
