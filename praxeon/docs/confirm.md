@@ -70,7 +70,7 @@ Then it records the decision through the claim, and runs what was approved:
   - an unanswered or expired turn gives that.
 - **Expiry.** A held turn past its `expires-at` is declined, as "not run: the user did not confirm in time".
 - **The last step.** If the call was held on the turn's last step (`:max-steps`), the decided calls run and the turn then signals `deliberation-failure`, as an ordinary turn does after its last step. The model is not asked again.
-- **A changed means.** An approved call whose means is no longer registered with the same `:source`, for example after `revoke-tools`, is not run.
+- **A changed means.** An approved call whose means is no longer registered with the same `:source`, for example after `revoke-tools`, is not run. The two sources are compared as they come back from JSON, so a keyword or a list in a source does not make a stored held turn's call look changed.
 
 ## When the user moves on
 

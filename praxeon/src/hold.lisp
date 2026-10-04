@@ -294,6 +294,19 @@ this is the first decision, and otherwise NIL and the decision recorded first."
          (and (= (length a) (length b)) (every #'%json-equal a b)))
         (t (equal a b))))
 
+(defun %source-as-json (source)
+  "SOURCE as HELD-TURN-TO-JSON writes it and JSON reads it back: a keyword becomes its name and a
+list a vector. Signals when SOURCE has a value JSON cannot hold."
+  (com.inuoe.jzon:parse (com.inuoe.jzon:stringify (%names-out source))))
+
+(defun %same-source-p (a b)
+  "Whether the means sources A and B are the same, compared in the form a stored held turn keeps:
+a held call's source has been through JSON when the held turn was stored, and the registered
+means's has not, so a keyword or a list in it would otherwise never compare equal."
+  (or (equal a b)
+      (handler-case (%json-equal (%source-as-json a) (%source-as-json b))
+        (error () nil))))
+
 (defun %held-state (agent held)
   "Where the agent's history stands with HELD: :PENDING when its last message is the model
 message holding the held calls, :ANSWERED when that message is followed by their results, and
@@ -355,7 +368,7 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
        (cond (recorded
               (%not-run-part agent id name args +may-have-run+ :outcome :unknown :announce nil))
              ((let ((entry (gethash name (agent-means agent))))
-                (and entry (equal (means-entry-source entry) (getf call :source))))
+                (and entry (%same-source-p (means-entry-source entry) (getf call :source))))
               ;; Its :TOOL-CALL event was emitted when it was held.
               (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
                 (apply #'evt:emit :tool-result :id id :name name :content result

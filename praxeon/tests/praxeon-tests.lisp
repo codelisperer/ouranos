@@ -4342,6 +4342,25 @@ registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs l
         (is (equal "looked" (%result-for fresh "l1")))
         (is (equal '(0 1) counts))))))
 
+(test a-stored-held-call-whose-source-has-a-keyword-and-a-list-still-runs
+  "A source written to JSON comes back with a keyword as its name and a list as a vector. The
+approved call still runs on the means it was held for."
+  (flet ((with-source (ag counts)
+           (actor:register-means ag "spend" "spends credits"
+                                 (lambda (a) (declare (ignore a)) (incf (first counts)) "spent")
+                                 :confirm t :source '(:connection "svc" :kind :local :path ("a" "b")))))
+    (multiple-value-bind (ag counts) (%hold-agent :extra-means #'with-source)
+      (declare (ignore counts))
+      (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+             (stored (actor:held-turn-to-json held)))
+        (multiple-value-bind (fresh fresh-counts) (%hold-agent :answers 1 :extra-means #'with-source)
+          (setf (actor:agent-history fresh) (copy-list (actor:agent-history ag)))
+          (setf (scripted-script (actor:agent-provider fresh))
+                (list (llm:make-completion :text "done" :stop-reason :end)))
+          (actor:continue-turn fresh (actor:held-turn-from-json stored) :approve :principal "u1")
+          (is (equal "spent" (%result-for fresh "s1")))
+          (is (equal '(1 0) fresh-counts)))))))
+
 (test an-estimate-that-fails-means-the-call-is-not-run
   (dolist (confirm (list (lambda (a) (declare (ignore a)) (error "bad arguments"))
                          (lambda (a) (declare (ignore a)) (list :credits 1/3))))
