@@ -18,7 +18,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
 
 - **A store.** The broker keeps three kinds of record behind generic functions, and the app implements them over its own storage, encrypted at rest:
   - `get-token`, `put-token` and `delete-token`, keyed by principal and connection name;
-  - `get-client`, `put-client` and `delete-client`, for a client registered dynamically, keyed by issuer and redirect URI. A store must implement all three: after `invalid_client`, `refresh` calls `delete-client` before it deletes the tokens;
+  - `get-client`, `put-client` and `delete-client`, for a client registered dynamically, keyed by issuer and redirect URI. A store must implement all three: after `invalid_client`, `refresh` calls `delete-client` before it deletes the tokens. `delete-client` takes the client id as well, and deletes only when the stored id is that one, in one step (`DELETE … WHERE client_id = ?`), so a client registered meanwhile by another sign-in is never forgotten in its place;
   - `put-pending` and `take-pending`, for a sign-in in progress, keyed by its `state`. `take-pending` removes what it returns, so a `state` works once.
 
   `call-with-refresh-lock` serialises refreshes of one token. Its default method locks within the process; a store shared by several instances overrides it with a lock they share, such as a database row lock.

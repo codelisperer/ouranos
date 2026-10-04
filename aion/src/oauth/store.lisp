@@ -44,10 +44,12 @@ rest. Keys are compared with EQUAL."))
 (defgeneric put-client (store issuer redirect-uri client-id)
   (:documentation "Keep CLIENT-ID, registered with ISSUER for REDIRECT-URI. A client is never
 used with another issuer."))
-(defgeneric delete-client (store issuer redirect-uri)
-  (:documentation "Forget the client id registered with ISSUER for REDIRECT-URI. Called when the
-authorization server answers a refresh with invalid_client, so the next sign-in registers a new
-client instead of reusing one the server no longer knows."))
+(defgeneric delete-client (store issuer redirect-uri client-id)
+  (:documentation "Forget the client registered dynamically with ISSUER for REDIRECT-URI, but
+only when the stored id is CLIENT-ID, and as one step, so that a client registered meanwhile by
+another sign-in is never forgotten in its place (a database store can use DELETE ... WHERE
+client_id = ?). Called when the authorization server answers a refresh with invalid_client, so
+the next sign-in registers a new client instead of reusing one the server no longer knows."))
 (defgeneric put-pending (store state pending)
   (:documentation "Keep PENDING, a sign-in in progress, under STATE."))
 (defgeneric take-pending (store state)
@@ -98,8 +100,11 @@ and finished on another would not be found there. Nothing it holds survives a re
   (%with-store (s) (gethash (list issuer redirect-uri) (slot-value s 'clients))))
 (defmethod put-client ((s memory-store) issuer redirect-uri client-id)
   (%with-store (s) (setf (gethash (list issuer redirect-uri) (slot-value s 'clients)) client-id)))
-(defmethod delete-client ((s memory-store) issuer redirect-uri)
-  (%with-store (s) (remhash (list issuer redirect-uri) (slot-value s 'clients))))
+(defmethod delete-client ((s memory-store) issuer redirect-uri client-id)
+  (%with-store (s)
+    (let ((key (list issuer redirect-uri)))
+      (when (equal client-id (gethash key (slot-value s 'clients)))
+        (remhash key (slot-value s 'clients))))))
 (defmethod put-pending ((s memory-store) state pending)
   ;; Expired sign-ins are dropped here, so one started and never finished does not keep its
   ;; record and verifier for the life of the process.

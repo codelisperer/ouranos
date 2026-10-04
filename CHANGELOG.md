@@ -124,14 +124,13 @@ its tag.
     `sign-in-failed`, `metadata-refused`, `url-refused`, `no-client` and `refresh-failed`.
   - The store protocol (`get-token`, `put-token`, `delete-token`, `get-client`, `put-client`,
     `delete-client`, `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by
-    the app, over its
-    own storage. Every slot of `token-set` and `pending` is exported, with `make-token-set` and
+    the app, over its own storage. `delete-client` takes the client id and deletes only on a
+    match, as one step. Every slot of `token-set` and `pending` is exported, with `make-token-set` and
     `make-pending`, so a store can keep both as strings. `memory-store` is for tests and
     one-process apps, and drops expired pending sign-ins.
   - It follows the MCP authorization specification, revision 2026-07-28. Metadata is checked;
     the resource URL and every URL from a server must be https, or http on a loopback host,
-    and are fetched through
-    `fetch-public` with no redirects; the `iss` response parameter is checked; a token response
+    and are fetched through `fetch-public` with no redirects; the `iss` response parameter is checked; a token response
     must say `token_type` Bearer; and the client id comes from a pre-registered client, a client
     ID metadata document at an https URL (`client-metadata-document`), or a dynamic
     registration. A token is sent only while the resource's metadata, cached for
