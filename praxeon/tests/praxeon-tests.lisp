@@ -4684,3 +4684,120 @@ under :HELD, which is NIL for a call decided on the spot."
                          :content)))
       (is (not (equal "looked" stored)) "the stand-in, not the result")
       (is-true (search "read-result" stored)))))
+
+;;; --- a failure in the middle of a step leaves a result for every call (#546) -------------
+
+(defun %every-call-answered-p (agent)
+  "Whether every tool call in AGENT's history is followed, in the next message, by its result."
+  (loop for (m next) on (actor:agent-history agent)
+        for ids = (let ((c (llm:content m)))
+                    (and (listp c) (equal "assistant" (llm:role m))
+                         (loop for p in c when (eq :tool-use (getf p :type)) collect (getf p :id))))
+        always (or (null ids)
+                   (and next (listp (llm:content next))
+                        (every (lambda (id)
+                                 (find-if (lambda (p) (and (eq :tool-result (getf p :type))
+                                                           (equal id (getf p :tool-use-id))))
+                                          (llm:content next)))
+                               ids)))))
+
+(defun %step-agent (calls &key (answers 1))
+  "An agent whose model makes CALLS, a list of (id name), in one step, then answers \"done\"
+ANSWERS times. Means a and c return their name; b signals an error."
+  (let ((ag (actor:make-agent
+             :provider (make-instance
+                        'scripted
+                        :script (cons (llm:make-completion
+                                       :tool-calls (mapcar (lambda (c) (llm:make-tool-call :id (first c) :name (second c)
+                                                                                            :arguments (%args)))
+                                                           calls)
+                                       :stop-reason :tool-use)
+                                      (loop repeat answers
+                                            collect (llm:make-completion :text "done" :stop-reason :end)))))))
+    (dolist (name '("a" "c"))
+      (let ((name name))
+        (actor:register-means ag name name (lambda (in) (declare (ignore in)) (format nil "~A ran" name)))))
+    (actor:register-means ag "b" "fails" (lambda (in) (declare (ignore in)) (error "b broke")))
+    ag))
+
+(test a-means-that-fails-mid-step-leaves-a-result-for-every-call
+  (let ((ag (%step-agent '(("1" "a") ("2" "b") ("3" "c"))))
+        (events '()))
+    (evt:with-observer ((lambda (e) (push e events)))
+      (signals cnd:means-failure (actor:run-turn ag "go")))
+    (is (equal "a ran" (%result-for ag "1")))
+    (is-true (search "may have run" (%result-for ag "2")))
+    (is-true (search "turn ended" (%result-for ag "3")))
+    (is (equal '(nil t t) (mapcar (lambda (id) (%error-for ag id)) '("1" "2" "3"))))
+    (is (eq :unknown (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                     (equal "2" (getf e :id))))
+                                    events)
+                           :outcome)))
+    (is (eq :not-run (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                     (equal "3" (getf e :id))))
+                                    events)
+                           :outcome)))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again")))))
+
+(test a-call-to-an-unregistered-means-is-answered-as-not-run
+  (let ((ag (%step-agent '(("1" "ghost")))))
+    (signals cnd:means-failure (actor:run-turn ag "go"))
+    (is-true (search "no such tool" (%result-for ag "1")))
+    (is-true (%error-for ag "1"))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again")))))
+
+(test a-failure-after-a-hold-in-the-same-step-wins
+  "The step holds s1 and then the means b fails. The failure reaches the caller, no held turn
+is returned, the held call is written as not run with a :TOOL-DECIDED event, and the next turn
+needs no held turn."
+  (multiple-value-bind (ag counts)
+      (%hold-agent :calls '(("s1" "spend") ("b1" "b") ("l1" "look"))
+                   :extra-means (lambda (ag counts)
+                                  (declare (ignore counts))
+                                  (actor:register-means ag "b" "fails"
+                                                        (lambda (in) (declare (ignore in)) (error "b broke")))))
+    (let ((events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (signals cnd:means-failure (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+      (is-true (search "turn ended" (%result-for ag "s1")))
+      (is-true (search "may have run" (%result-for ag "b1")))
+      (is-true (search "turn ended" (%result-for ag "l1")))
+      (let ((held (find :tool-held events :key #'evt:event-type))
+            (decided (find :tool-decided events :key #'evt:event-type)))
+        (is (equal "s1" (getf decided :id)))
+        (is (eq :turn-failed (getf decided :decision)))
+        (is (equal (getf held :held) (getf decided :held)))
+        (is-true (getf decided :held)))
+      (is (equal '(0 0) counts))
+      (is-true (%every-call-answered-p ag))
+      (is (equal "done" (actor:run-turn ag "again" :principal "u1"))))))
+
+(test an-approved-call-that-fails-in-continue-turn-leaves-a-complete-history
+  (multiple-value-bind (ag counts)
+      (%hold-agent :answers 1
+                   :extra-means (lambda (ag counts)
+                                  (declare (ignore counts))
+                                  (actor:register-means ag "spend" "spends credits"
+                                                        (lambda (in) (declare (ignore in)) (error "spend broke"))
+                                                        :confirm t :source '(:connection "svc" :tool "spend"))))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (signals cnd:means-failure (actor:continue-turn ag held :approve :principal "u1"))
+      (is-true (search "may have run" (%result-for ag "s1")))
+      (is (equal "looked" (%result-for ag "l1")))
+      (is-true (%every-call-answered-p ag))
+      (is (equal "done" (actor:run-turn ag "next" :principal "u1")) "no :HELD needed")
+      (is (eq :already-decided (nth-value 1 (actor:continue-turn ag held :approve :principal "u1"))))
+      (is (equal '(0 1) counts)))))
+
+(test a-handler-that-substitutes-a-result-writes-nothing-extra
+  (let ((ag (%step-agent '(("1" "a") ("2" "b") ("3" "c")))))
+    (is (equal "done"
+               (handler-bind ((cnd:means-failure
+                                (lambda (c) (cnd:substitute-result "fixed" c))))
+                 (actor:run-turn ag "go"))))
+    (is (equal '("a ran" "fixed" "c ran") (mapcar (lambda (id) (%result-for ag id)) '("1" "2" "3"))))
+    (is (= 1 (count-if (lambda (m) (and (equal "user" (llm:role m)) (listp (llm:content m))))
+                       (actor:agent-history ag)))
+        "one results message")))

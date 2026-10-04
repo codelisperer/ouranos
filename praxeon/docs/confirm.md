@@ -82,6 +82,15 @@ With the held turn, it records `:unanswered` through the claim, and writes the o
 - When the claim was already taken, the results the recorded decision calls for are written instead, and `abandon-held-turn` returns `(values nil :already-decided decision)`.
 - When the held turn passed is not the one the history ends with, for example an older one that was already answered, nothing is written and `run-turn` signals `held-turn-required`.
 
+## When a means fails in the same step
+
+When a means fails and nothing handles the failure, the turn writes a result for every call of the step before the failure leaves it (#546), and the failure wins over a hold:
+- `run-turn` signals the failure and returns no held turn.
+- A call held earlier in the step gets "Not run: the turn ended before this call was run." and a `:tool-decided` event with decision `:turn-failed`. Nothing is recorded through the claim, because the held turn never reached the app.
+- The next `run-turn` needs no `:held`.
+
+When an approved call fails inside `continue-turn`, it is written as may-have-run, and the held calls after it as not run. The history is complete, so the next `run-turn` needs no `:held`, and a later `continue-turn` for that held turn returns `:already-decided`.
+
 ## Events
 
 - `:tool-held` is emitted when a call is held. It carries:
@@ -89,7 +98,7 @@ With the held turn, it records `:unanswered` through the claim, and writes the o
   - `:principal`, `:agent` and `:conversation`;
   - the means `:name`, its `:source` and the `:estimate`;
   - `:at`, a universal time.
-- `:tool-decided` is emitted when a decision is applied, once per call. It carries the same fields, plus `:decision`, one of `:approve`, `:decline`, `:expired`, `:unanswered`, `:no-confirmation` or `:may-have-run`. For a call decided on the spot, by a blocking function or because the turn has no principal, `:held` is NIL.
+- `:tool-decided` is emitted when a decision is applied, once per call. It carries the same fields, plus `:decision`, one of `:approve`, `:decline`, `:expired`, `:unanswered`, `:no-confirmation`, `:may-have-run` or `:turn-failed`. For a call decided on the spot, by a blocking function or because the turn has no principal, `:held` is NIL.
 
 The held call's `:tool-result` event follows. Its outcome is `:not-run`, or `:unknown` for a call that may have run, unless the call was approved and ran. A result that was not run is sent to the model as an error result. These events let an app keep an audit trail of what its users approved, beside the usage fields of #527.
 

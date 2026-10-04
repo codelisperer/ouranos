@@ -296,6 +296,20 @@ its tag.
 
 ### Fixed
 
+- **praxeon: after a means fails in the middle of a step, the agent's next turn starts**
+  (#546). A step's calls are no longer left without results when a failure leaves the turn:
+  `run-turn` writes a result for every call of the step before the failure goes on, and
+  `act`'s restarts are still available to a handler. A call that finished keeps its result.
+  The call whose means failed gets "the tool may have run; its outcome is unknown", outcome
+  `:unknown`. A call to a means that is not registered, or that the permit does not allow, gets
+  "Not run: no such tool is available." The calls after it get "Not run: the turn ended before
+  this call was run." Each gets a `:tool-result` event. Before this, the next turn sent tool
+  calls without results, which the providers refuse, and with #545 it signalled
+  `held-turn-required` with no held turn to pass. A failure in the same step as a call held
+  under `:on-hold :hold` wins: no held turn is returned, and the held call is written as not
+  run with a `:tool-decided` event whose decision is `:turn-failed`. An approved call that fails
+  inside `continue-turn` is written as may-have-run in the same way.
+
 - **klio: `watch-site` no longer publishes a file read while it is being written.** A file saved
   in place is empty from the moment it is opened until the new text is written, and a poll that
   landed in that moment reloaded the empty file: the page was served with no title until the
