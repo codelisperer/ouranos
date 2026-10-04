@@ -41,8 +41,8 @@ server gave one that can be trusted; a response whose `iss' did not match gives 
 (define-condition refresh-failed (oauth-error) ()
   (:documentation "A refresh could not reach the authorization server, or got an answer that
 was not a token. The stored tokens are kept, because the failure may be temporary. A refresh
-the server refused with `invalid_grant' is not this: those tokens are deleted, and
-ACCESS-TOKEN returns NIL."))
+the server refused with `invalid_grant', `invalid_client' or `unauthorized_client' is not
+this: those tokens are deleted, and ACCESS-TOKEN returns NIL."))
 
 ;;; --- the broker ------------------------------------------------------------------------
 
@@ -515,11 +515,13 @@ and the tokens are stored."
 
 (defun refresh (broker principal connection resource-url &key rejected)
   "Refresh PRINCIPAL's tokens for CONNECTION and return the new access token, or NIL when there
-is nothing to refresh with or the server refused (invalid_grant, after which the tokens are
-deleted). REJECTED is an access token the resource server just refused: a token other than it,
-stored by a refresh that ran while this one waited for the lock, is returned without another
-refresh. Refreshes of one token run one at a time (CALL-WITH-REFRESH-LOCK). Signals
-REFRESH-FAILED when the server could not be reached."
+is nothing to refresh with or the server refused (invalid_grant, invalid_client or
+unauthorized_client, after which the tokens are deleted; after invalid_client the registered
+client is forgotten too, so the next sign-in registers a new one). REJECTED is an access token
+the resource server just refused: a token other than it, stored by a refresh that ran while
+this one waited for the lock, is returned without another refresh. Refreshes of one token run
+one at a time (CALL-WITH-REFRESH-LOCK). Signals REFRESH-FAILED when the server could not be
+reached, or gave any other answer that was not a token."
   (let ((store (broker-store broker))
         (resource (canonical-resource resource-url)))
     (when rejected (%forget-metadata broker (get-token store principal connection)))
@@ -552,10 +554,14 @@ REFRESH-FAILED when the server could not be reached."
                        (log:info "aion/oauth: tokens refreshed" :connection connection)
                        (secret:reveal (token-set-access renewed)))
                       ;; The grant is spent, or the client is no longer accepted: these tokens
-                      ;; will never refresh, so they are deleted and the user signs in again.
+                      ;; will never refresh, so they are deleted and the next call asks the user
+                      ;; to sign in. A client the server no longer knows is forgotten as well,
+                      ;; or every later sign-in would reuse it and fail.
                       ((member (%error-code-of response)
                                '("invalid_grant" "invalid_client" "unauthorized_client")
                                :test #'equal)
+                       (when (equal "invalid_client" (%error-code-of response))
+                         (delete-client store (token-set-issuer current) (broker-redirect-uri broker)))
                        (delete-token store principal connection)
                        (log:info "aion/oauth: refresh refused, tokens deleted" :connection connection)
                        nil)
@@ -581,22 +587,28 @@ names another resource is an answer too: it names no issuer for this one."
       (http:pinned-connect-unsupported (e) (error e))
       (oauth-error () (values nil nil)))))
 
+;; The answer depends on the token set's resource as well as on the document: a document that
+;; names another resource names no issuer for this one. So the key holds both, and an answer
+;; read for one resource is never used for another that shares the metadata URL.
+(defun %metadata-key (token-set)
+  (list (token-set-metadata-url token-set) (token-set-resource token-set)))
+
 (defun %current-issuers (broker token-set)
   "The authorization servers TOKEN-SET's resource names now, from its protected-resource
 metadata. An answer is kept for the broker's METADATA-LIFETIME. When a fetch fails, an expired
 answer is used for METADATA-GRACE seconds after it expired and is not renewed; past that, or
 with no answer at all, this signals OAUTH-ERROR, which fails the call rather than asking the
 user to sign in again."
-  (let* ((url (token-set-metadata-url token-set))
+  (let* ((key (%metadata-key token-set))
          (cache (broker-metadata-cache broker))
          (now (get-universal-time))
-         (cached (sb-thread:with-mutex ((broker-metadata-lock broker)) (gethash url cache))))
+         (cached (sb-thread:with-mutex ((broker-metadata-lock broker)) (gethash key cache))))
     (if (and cached (> (cdr cached) now))
         (car cached)
         (multiple-value-bind (issuers ok) (%fetch-issuers broker token-set)
           (cond (ok
                  (sb-thread:with-mutex ((broker-metadata-lock broker))
-                   (setf (gethash url cache) (cons issuers (+ now (broker-metadata-lifetime broker)))))
+                   (setf (gethash key cache) (cons issuers (+ now (broker-metadata-lifetime broker)))))
                  issuers)
                 ((and cached (> (+ (cdr cached) (broker-metadata-grace broker)) now))
                  (car cached))
@@ -605,7 +617,7 @@ user to sign in again."
 (defun %forget-metadata (broker token-set)
   (when (and token-set (token-set-metadata-url token-set))
     (sb-thread:with-mutex ((broker-metadata-lock broker))
-      (remhash (token-set-metadata-url token-set) (broker-metadata-cache broker)))))
+      (remhash (%metadata-key token-set) (broker-metadata-cache broker)))))
 
 (defun access-token (broker principal connection resource-url)
   "PRINCIPAL's access token for CONNECTION, refreshed first when it has expired, or NIL when

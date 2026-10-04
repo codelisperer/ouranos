@@ -556,6 +556,8 @@ offer, so discovery signals PINNED-CONNECT-UNSUPPORTED there and nothing is fetc
   (gethash (list :client issuer redirect-uri) (rows s)))
 (defmethod oauth:put-client ((s string-store) issuer redirect-uri client-id)
   (setf (gethash (list :client issuer redirect-uri) (rows s)) client-id))
+(defmethod oauth:delete-client ((s string-store) issuer redirect-uri)
+  (remhash (list :client issuer redirect-uri) (rows s)))
 (defmethod oauth:put-pending ((s string-store) state pending)
   (setf (gethash (list :pending state) (rows s)) (%pending-row pending)))
 (defmethod oauth:take-pending ((s string-store) state)
@@ -635,12 +637,81 @@ token instead of extending the old answer."
   (signals oauth:url-refused (oauth:access-token (%broker) "u1" "docs" "http://192.0.2.1/mcp")))
 
 (net-test a-refresh-refused-for-the-client-deletes-the-tokens
-  (with-as (as :expires-in 0)
-    (let ((broker (%broker)))
+  "invalid_client and unauthorized_client delete the tokens. After invalid_client the registered
+client is forgotten too, so the next sign-in registers a new one."
+  (dolist (code '("invalid_client" "unauthorized_client"))
+    (with-as (as :expires-in 0)
+      (let ((broker (%broker)))
+        (%sign-in as broker)
+        (setf (as-refresh-error as) code)
+        (is (null (oauth:access-token broker "u1" "docs" (%resource as))) "~A" code)
+        (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs")) "~A" code)
+        (setf (as-refresh-error as) nil)
+        (%sign-in as broker)
+        (is (= (if (equal code "invalid_client") 2 1) (as-registrations as))
+            "~A: the client is registered again only after invalid_client" code)))))
+
+(net-test a-token-type-is-compared-without-regard-to-case
+  (with-as (as)
+    (setf (as-token-type as) "bearer")
+    (is (equal "u1" (%sign-in as (%broker))))))
+
+(test memory-store-drops-expired-sign-ins-when-it-stores-a-new-one
+  (let ((store (oauth:make-memory-store)))
+    (oauth:put-pending store "old" (oauth:make-pending :principal "u1" :connection "docs"
+                                                       :expires-at (- (get-universal-time) 10)))
+    (oauth:put-pending store "new" (oauth:make-pending :principal "u1" :connection "docs"
+                                                       :expires-at (+ (get-universal-time) 600)))
+    (is (null (oauth:take-pending store "old")))
+    (is-true (oauth:take-pending store "new"))))
+
+(net-test an-expired-answer-is-used-for-its-grace-and-not-renewed
+  "With a lifetime of 1 s and a grace of 4 s, a failed fetch inside the grace still gives the
+token, and does not move the answer's expiry: 5 s after the fill, past the first expiry and its
+grace, the token is withheld. A failed fetch that renewed the answer would still give it then."
+  (with-as (as)
+    (let ((broker (%broker :metadata-lifetime 1 :metadata-grace 4)))
       (%sign-in as broker)
-      (setf (as-refresh-error as) "invalid_client")
-      (is (null (oauth:access-token broker "u1" "docs" (%resource as))))
-      (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs"))))))
+      (is (stringp (oauth:access-token broker "u1" "docs" (%resource as))))
+      (sleep 2)
+      (setf (as-prm-status as) 503)
+      (is (stringp (oauth:access-token broker "u1" "docs" (%resource as)))
+          "inside the grace, the expired answer is used")
+      (sleep 3)
+      (signals oauth:oauth-error (oauth:access-token broker "u1" "docs" (%resource as))))))
+
+(net-test a-sign-in-drops-the-cached-metadata
+  "A sign-in drops the answer cached for its metadata URL and resource. With the metadata failing
+after a second sign-in, the next call fails instead of using the answer cached before that
+sign-in."
+  (with-as (as)
+    (let ((broker (%broker :metadata-grace 0)))
+      (%sign-in as broker)
+      (is (stringp (oauth:access-token broker "u1" "docs" (%resource as))))
+      (%sign-in as broker)
+      (setf (as-prm-status as) 503)
+      (signals oauth:oauth-error (oauth:access-token broker "u1" "docs" (%resource as))))))
+
+(net-test the-issuer-cache-answers-for-the-token-sets-resource
+  "Two token sets share a metadata URL but name different resources: R, which the metadata
+names, and S, which it does not. The answer read for one is not used for the other, whichever
+is checked first."
+  (dolist (r-first '(t nil))
+    (with-as (as)
+      (let* ((broker (%broker))
+             (store (oauth:broker-store broker))
+             (s (format nil "~A/other" (as-base as))))
+        (%sign-in as broker)
+        (let ((ts (copy-structure (oauth:get-token store "u1" "docs"))))
+          (setf (oauth:token-set-resource ts) (oauth:canonical-resource s))
+          (oauth:put-token store "u1" "docs2" ts))
+        (flet ((for-r () (oauth:access-token broker "u1" "docs" (%resource as)))
+               (for-s () (oauth:access-token broker "u1" "docs2" s)))
+          (if r-first
+              (progn (is (stringp (for-r)))
+                     (is (null (for-s)) "the answer cached for R is not used for S"))
+              (progn (is (null (for-s)))
+                     (is (stringp (for-r)) "the answer cached for S is not used for R"))))))))
 
 (net-test an-expired-sign-in-cannot-be-finished
   (with-as (as)

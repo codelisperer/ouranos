@@ -123,19 +123,22 @@ its tag.
     them. The conditions are `oauth-error`, and under it `unknown-sign-in`, `wrong-user`,
     `sign-in-failed`, `metadata-refused`, `url-refused`, `no-client` and `refresh-failed`.
   - The store protocol (`get-token`, `put-token`, `delete-token`, `get-client`, `put-client`,
-    `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by the app, over its
+    `delete-client`, `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by
+    the app, over its
     own storage. Every slot of `token-set` and `pending` is exported, with `make-token-set` and
     `make-pending`, so a store can keep both as strings. `memory-store` is for tests and
     one-process apps, and drops expired pending sign-ins.
   - It follows the MCP authorization specification, revision 2026-07-28. Metadata is checked;
-    the resource URL and every URL from a server must be https and are fetched through
+    the resource URL and every URL from a server must be https, or http on a loopback host,
+    and are fetched through
     `fetch-public` with no redirects; the `iss` response parameter is checked; a token response
     must say `token_type` Bearer; and the client id comes from a pre-registered client, a client
     ID metadata document at an https URL (`client-metadata-document`), or a dynamic
     registration. A token is sent only while the resource's metadata, cached for
     `:metadata-lifetime`, still names the issuer that issued it; a failed fetch never renews the
     cache. A refresh refused with `invalid_grant`, `invalid_client` or `unauthorized_client`
-    deletes the tokens. See `aion/docs/oauth.md`.
+    deletes the tokens, and `invalid_client` also forgets the registered client, so the next
+    sign-in registers a new one. See `aion/docs/oauth.md`.
   - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
 - **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
   `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
