@@ -4801,3 +4801,70 @@ needs no held turn."
     (is (= 1 (count-if (lambda (m) (and (equal "user" (llm:role m)) (listp (llm:content m))))
                        (actor:agent-history ag)))
         "one results message")))
+
+(test held-calls-after-a-failed-approval-are-each-decided
+  "Three held calls, decided approve, approve, decline; s1's means fails inside CONTINUE-TURN.
+s1 may have run, s2 was not run, s3 keeps the user's decline, and each held call has exactly
+one :TOOL-DECIDED event."
+  (multiple-value-bind (ag counts)
+      (%hold-agent :calls '(("s1" "boom") ("s2" "spend") ("s3" "spend"))
+                   :extra-means (lambda (ag counts)
+                                  (declare (ignore counts))
+                                  (actor:register-means ag "boom" "fails"
+                                                        (lambda (in) (declare (ignore in)) (error "boom"))
+                                                        :confirm t :source '(:connection "svc" :tool "boom"))))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+          (events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (signals cnd:means-failure
+          (actor:continue-turn ag held '(("s1" . :approve) ("s2" . :approve) ("s3" . :decline))
+                               :principal "u1")))
+      (is-true (search "may have run" (%result-for ag "s1")))
+      (is-true (search "turn ended" (%result-for ag "s2")))
+      (is-true (search "declined" (%result-for ag "s3")))
+      (is (equal '(0 0) counts) "spend did not run")
+      (let ((decided (remove :tool-decided events :key #'evt:event-type :test-not #'eq)))
+        (is (= 3 (length decided)))
+        (is (equal '(("s1" . :approve) ("s2" . :turn-failed) ("s3" . :decline))
+                   (sort (mapcar (lambda (e) (cons (getf e :id) (getf e :decision))) decided)
+                         #'string< :key #'car))))
+      (is-true (%every-call-answered-p ag)))))
+
+(test an-on-hold-function-that-signals-leaves-its-call-not-run
+  "The app's ON-HOLD function signals while it decides the second call. The failure reaches the
+caller, the first call keeps its result, and the second and third are written as not run."
+  (let ((ag (%step-agent '(("1" "a") ("2" "s") ("3" "c"))))
+        (runs 0)
+        (events '()))
+    (actor:register-means ag "s" "spends" (lambda (in) (declare (ignore in)) (incf runs) "spent")
+                          :confirm t)
+    (evt:with-observer ((lambda (e) (push e events)))
+      (signals simple-error
+        (actor:run-turn ag "go" :principal "u1"
+                        :on-hold (lambda (c) (declare (ignore c)) (error "the policy broke")))))
+    (is (equal "a ran" (%result-for ag "1")))
+    (is-true (search "turn ended" (%result-for ag "2")))
+    (is-true (search "turn ended" (%result-for ag "3")))
+    (is (= 0 runs))
+    (flet ((event (type) (find-if (lambda (e) (and (eq type (evt:event-type e)) (equal "2" (getf e :id))))
+                                  events)))
+      (is-true (event :tool-call))
+      (is (eq :not-run (getf (event :tool-result) :outcome))))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again" :principal "u1")))))
+
+(test a-call-the-permit-does-not-allow-is-refused-like-an-unknown-means
+  "#90: the refusal of a means the permit does not allow looks the same as the refusal of a means
+that is not registered."
+  (let ((ag (%step-agent '(("1" "admin"))))
+        (unknown (%step-agent '(("1" "ghost"))))
+        (events '()))
+    (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
+                          :capability "admin")
+    (evt:with-observer ((lambda (e) (push e events)))
+      (signals cnd:means-failure (actor:run-turn ag "go")))
+    (signals cnd:means-failure (actor:run-turn unknown "go"))
+    (is (equal (%result-for unknown "1") (%result-for ag "1")))
+    (is-true (%error-for ag "1"))
+    (is (eq :not-run (getf (find :tool-result events :key #'evt:event-type) :outcome)))
+    (is (equal "done" (actor:run-turn ag "again")))))

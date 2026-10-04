@@ -84,12 +84,12 @@ With the held turn, it records `:unanswered` through the claim, and writes the o
 
 ## When a means fails in the same step
 
-When a means fails and nothing handles the failure, the turn writes a result for every call of the step before the failure leaves it (#546), and the failure wins over a hold:
+When a failure leaves the step, the turn first writes a result for every call of the step (#546), and the failure wins over a hold. This happens when nothing handles the failure, and also when the app handles it outside the turn, for example with a `handler-case` around `run-turn`, because that handler unwinds through the step. Only a handler that takes one of `act`'s restarts (`substitute-result`, `abandon-action`, `retry-action`) keeps the step going, and then nothing extra is written.
 - `run-turn` signals the failure and returns no held turn.
 - A call held earlier in the step gets "Not run: the turn ended before this call was run." and a `:tool-decided` event with decision `:turn-failed`. Nothing is recorded through the claim, because the held turn never reached the app.
 - The next `run-turn` needs no `:held`.
 
-When an approved call fails inside `continue-turn`, it is written as may-have-run, and the held calls after it as not run. The history is complete, so the next `run-turn` needs no `:held`, and a later `continue-turn` for that held turn returns `:already-decided`.
+When an approved call fails inside `continue-turn`, it is written as may-have-run. An approved held call after it is written as not run, with a `:tool-decided` event whose decision is `:turn-failed`, and a declined one keeps the declined text, with its own `:tool-decided` event. The history is complete, so the next `run-turn` needs no `:held`, and a later `continue-turn` for that held turn returns `:already-decided`.
 
 ## Events
 

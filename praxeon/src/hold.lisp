@@ -445,8 +445,9 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
 (defun %write-held-results (agent held decision permit &key recorded)
   "Append the held step's results in the model's order: the stored results of the other calls,
 and each held call's under DECISION. When an approved call fails inside its means and the
-failure leaves, the results are appended first (#546): that call may have run, and the held
-calls after it were not run."
+failure leaves, the results are appended first (#546): that call may have run, an approved call
+after it was not run, with a :TOOL-DECIDED event whose decision is :TURN-FAILED, and any other
+held call after it is written under its decision, with its own :TOOL-DECIDED event."
   (let ((done '()) (current nil) (finished nil))
     (unwind-protect
          (let ((parts
@@ -477,11 +478,25 @@ calls after it were not run."
                                       :test #'equal)
                                 (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal)
                                 (let ((call (find id (held-turn-calls held)
-                                                  :key (lambda (c) (getf c :id)) :test #'equal)))
-                                  (%not-run-part agent id (getf call :name) (getf call :arguments)
-                                                 (if (equal id current) +may-have-run+ +turn-ended+)
-                                                 :outcome (if (equal id current) :unknown :not-run)
-                                                 :announce nil))))
+                                                  :key (lambda (c) (getf c :id)) :test #'equal))
+                                      (d (%decision-of decision id)))
+                                  (cond
+                                    ((equal id current)
+                                     ;; Its :TOOL-DECIDED event was emitted before it ran.
+                                     (%not-run-part agent id (getf call :name) (getf call :arguments)
+                                                    +may-have-run+ :outcome :unknown :announce nil))
+                                    (t
+                                     ;; Not reached: each gets its own :TOOL-DECIDED event. A call
+                                     ;; the user approved did not run; any other decision is
+                                     ;; written as it would have been, which runs nothing.
+                                     (%held-event :tool-decided (held-turn-id held) call
+                                                  :decision (if (eq d :approve) :turn-failed d)
+                                                  :agent (agent-name agent)
+                                                  :conversation (agent-conversation agent))
+                                     (if (eq d :approve)
+                                         (%not-run-part agent id (getf call :name) (getf call :arguments)
+                                                        +turn-ended+ :announce nil)
+                                         (%held-part agent call d permit recorded)))))))
                           (held-turn-order held))))))))
 
 (defun %valid-decision-p (decision held)

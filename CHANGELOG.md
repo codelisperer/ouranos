@@ -302,13 +302,19 @@ its tag.
   `act`'s restarts are still available to a handler. A call that finished keeps its result.
   The call whose means failed gets "the tool may have run; its outcome is unknown", outcome
   `:unknown`. A call to a means that is not registered, or that the permit does not allow, gets
-  "Not run: no such tool is available." The calls after it get "Not run: the turn ended before
-  this call was run." Each gets a `:tool-result` event. Before this, the next turn sent tool
+  "Not run: no such tool is available." The calls after it, and a call the app's `:on-hold`
+  function signalled while deciding, get "Not run: the turn ended before this call was run."
+  Each gets a `:tool-result` event. This happens whenever the failure leaves the step, including
+  when the app handles it with a `handler-case` around `run-turn`. Before this, the next turn sent tool
   calls without results, which the providers refuse, and with #545 it signalled
   `held-turn-required` with no held turn to pass. A failure in the same step as a call held
   under `:on-hold :hold` wins: no held turn is returned, and the held call is written as not
   run with a `:tool-decided` event whose decision is `:turn-failed`. An approved call that fails
-  inside `continue-turn` is written as may-have-run in the same way.
+  inside `continue-turn` is written as may-have-run; an approved call after it gets the
+  turn-ended text and `:turn-failed`, and a declined one keeps the declined text. **An app that
+  edited `agent-history` after such a failure to let the next turn start, for example by
+  removing the model's last message, should stop:** that edit now removes the step's results
+  instead, and the next turn fails again.
 
 - **klio: `watch-site` no longer publishes a file read while it is being written.** A file saved
   in place is empty from the moment it is opened until the new text is written, and a poll that
