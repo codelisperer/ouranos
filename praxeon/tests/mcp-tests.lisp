@@ -47,7 +47,7 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
 :STRUCTURED. REQUIRE-TOKEN is NIL or the bearer token every request must carry."
   era reply page-size tools require-token legacy-version
   (reject-headers nil)
-  (fail-next nil) (endless nil) (initialize-status nil)
+  (fail-next nil) (endless nil) (initialize-status nil) (bad-tools nil)
   (sessions '()) (end-session nil) (calls 0) (initializes 0)
   (lock (sb-thread:make-mutex)))
 
@@ -89,6 +89,9 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
             (start (let ((c (gethash "cursor" params))) (if (stringp c) (parse-integer c) 0)))
             (end (min (length all) (+ start (fake-page-size fake))))
             (page (subseq all start end)))
+       (case (fake-bad-tools fake)
+         (:missing (return-from %result (%obj "nextCursor" 'null)))
+         (:string (return-from %result (%obj "tools" "not a list" "nextCursor" 'null))))
        (%obj "tools" (map 'vector (lambda (e) (%tool-json (car e) (cdr e))) page)
              "nextCursor" (cond ((fake-endless fake) "0")
                                 ((< end (length all)) (princ-to-string end))
@@ -589,6 +592,16 @@ stays unknown, and the next call probes again and works."
     (with-fake (client fake)
       (let ((mcp::*max-list-pages* 5))
         (signals mcp:request-failed (mcp:list-tools client))))))
+
+(test a-page-without-a-list-of-tools-fails-the-listing
+  "A tools/list reply with no tools member, or a string there, is not an empty page."
+  (dolist (bad '(:missing :string))
+    (let ((fake (make-fake :tools (%tools "a"))))
+      (setf (fake-bad-tools fake) bad)
+      (with-fake (client fake)
+        (handler-case (progn (mcp:list-tools client) (fail "~S was read as a page" bad))
+          (mcp:request-failed (e)
+            (is (eq :not-run (cnd:tool-error-result-outcome e)))))))))
 
 (test an-event-stream-in-any-letter-case-is-read
   (let ((fake (make-fake :reply :sse-capitals :tools (%tools "a"))))

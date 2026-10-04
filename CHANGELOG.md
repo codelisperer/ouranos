@@ -119,7 +119,8 @@ its tag.
   sent until it is first used. `list-tools` reads a server's tools and gives them to no agent,
   leaving out a tool whose `inputSchema` is not an object schema or is larger than
   `*max-schema-characters*` (20000), and failing a listing that goes past `*max-list-pages*`
-  (1000) pages. A tool's description is clipped to `*max-description-characters*` (2000).
+  (1000) pages, or that has a page whose `tools` member is missing or is not a list. A tool's
+  description is clipped to `*max-description-characters*` (2000).
   `call-tool` calls one directly. `means-name` gives the name a tool is granted under.
   `grant-tools` registers the tools the app names in its required `:only` (a list, or `:all`)
   as means named `<connection>__<tool>`, and

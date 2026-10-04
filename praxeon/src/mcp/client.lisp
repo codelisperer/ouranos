@@ -608,7 +608,8 @@ a JSON Schema object, and MCP requires one whose type is \"object\"."
 
 (defun list-tools (client &key principal)
   "The tools CLIENT's server offers, following each page's nextCursor. Gives them to no agent.
-A tool whose x-mcp-header annotation is invalid is left out, as the specification requires."
+A tool whose x-mcp-header annotation is invalid is left out, as the specification requires. A
+page whose tools member is missing or is not a list signals REQUEST-FAILED."
   (let ((tools '()) (cursor nil) (pages 0))
     (loop
       (let* ((result (%request client "tools/list"
@@ -616,10 +617,15 @@ A tool whose x-mcp-header annotation is invalid is left out, as the specificatio
                                :principal principal))
              (page (gethash "tools" result)))
         (incf pages)
-        (when (vectorp page)
-          (loop for object across page
-                for tool = (and (hash-table-p object) (%tool-from-json object))
-                when tool do (push tool tools)))
+        ;; A page without a list of tools is not an empty page: a string is a vector too, and a
+        ;; missing member would make `:only :all' grant part of the server's tools without
+        ;; saying so (#547).
+        (unless (and (vectorp page) (not (stringp page)))
+          (%request-failed client "its tool listing had a page without a list of tools." '()
+                           :outcome :not-run))
+        (loop for object across page
+              for tool = (and (hash-table-p object) (%tool-from-json object))
+              when tool do (push tool tools))
         (setf cursor (gethash "nextCursor" result))
         (when (or (not (stringp cursor)) (zerop (length cursor)))
           (return))
