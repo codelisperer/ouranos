@@ -4240,21 +4240,22 @@ sees the same one, and a turn with no principal sees NIL."
 ;;; --- holding a call until the user decides (#531) --------------------------------------
 
 (defun %hold-agent (&key (name "spender") (spend-confirm t) (calls '(("s1" "spend") ("l1" "look")))
-                         (answers 1) (counts (list 0 0)) (extra-means nil))
+                         (answers 1) (counts (list 0 0)) (extra-means nil) (script nil))
   "An agent whose model calls CALLS in one step, then answers \"done\" ANSWERS times. spend is
 registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs look-runs)."
   (let ((ag (actor:make-agent
              :name name
              :provider (make-instance
                         'scripted
-                        :script (cons (llm:make-completion
+                        :script (or script
+                                    (cons (llm:make-completion
                                        :tool-calls (mapcar (lambda (c)
                                                              (llm:make-tool-call :id (first c) :name (second c)
                                                                                  :arguments (%args "q" (first c))))
                                                            calls)
                                        :stop-reason :tool-use)
                                       (loop repeat answers
-                                            collect (llm:make-completion :text "done" :stop-reason :end)))))))
+                                            collect (llm:make-completion :text "done" :stop-reason :end))))))))
     (actor:register-means ag "spend" "spends credits"
                           (lambda (a) (declare (ignore a)) (incf (first counts)) "spent")
                           :confirm spend-confirm :source '(:connection "svc" :tool "spend"))
@@ -4272,13 +4273,15 @@ registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs l
                        collect (list (getf p :tool-use-id) (getf p :content) (getf p :is-error)))))
 
 (defun %result-for (agent id) (second (find id (%results-of agent) :key #'first :test #'equal)))
+(defun %error-for (agent id) (third (find id (%results-of agent) :key #'first :test #'equal)))
 
 (test a-held-means-does-not-run-without-confirmation
   "No ON-HOLD: the held means is not run and the model is told; the ordinary call runs."
   (multiple-value-bind (ag counts) (%hold-agent)
     (is (equal "done" (actor:run-turn ag "go" :principal "u1")))
     (is (equal '(0 1) counts))
-    (is-true (search "no confirmation" (%result-for ag "s1")))))
+    (is-true (search "no confirmation" (%result-for ag "s1")))
+    (is-true (%error-for ag "s1") "the provider is told the call failed")))
 
 (test a-blocking-policy-approves-or-declines-on-the-spot
   (multiple-value-bind (ag counts) (%hold-agent)
@@ -4291,7 +4294,8 @@ registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs l
   (multiple-value-bind (ag counts) (%hold-agent)
     (actor:run-turn ag "go" :principal "u1" :on-hold (lambda (call) (declare (ignore call)) :decline))
     (is (equal '(0 1) counts))
-    (is-true (search "declined" (%result-for ag "s1")))))
+    (is-true (search "declined" (%result-for ag "s1")))
+    (is-true (%error-for ag "s1"))))
 
 (test a-held-call-runs-once-on-approval-even-when-approved-twice
   (multiple-value-bind (ag counts) (%hold-agent :answers 1)
@@ -4326,13 +4330,13 @@ registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs l
   ;; Written out and read back, given to a new agent object with the same history.
   (multiple-value-bind (ag counts) (%hold-agent)
     (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
-           (stored (prin1-to-string (actor:held-turn-to-plist held)))
+           (stored (actor:held-turn-to-json held))
            (history (actor:agent-history ag)))
       (multiple-value-bind (fresh fresh-counts) (%hold-agent :answers 1)
         (setf (actor:agent-history fresh) (copy-list history))
         (setf (scripted-script (actor:agent-provider fresh))
               (list (llm:make-completion :text "done" :stop-reason :end)))
-        (is (equal "done" (actor:continue-turn fresh (actor:held-turn-from-plist (read-from-string stored))
+        (is (equal "done" (actor:continue-turn fresh (actor:held-turn-from-json stored)
                                                :approve :principal "u1")))
         (is (equal '(1 0) fresh-counts) "the held call ran on the new agent; look did not run again")
         (is (equal "looked" (%result-for fresh "l1")))
@@ -4352,10 +4356,20 @@ registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs l
                                     (list :label "forty" :credits 40 :rate 1.5d0 :refundable t :final nil)))
     (declare (ignore counts))
     (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
-           (back (actor:held-turn-from-plist
-                  (read-from-string (prin1-to-string (actor:held-turn-to-plist held))))))
-      (is (equal (getf (first (actor:held-turn-calls held)) :estimate)
-                 (getf (first (actor:held-turn-calls back)) :estimate))))))
+           (text (actor:held-turn-to-json held))
+           (back (actor:held-turn-from-json text))
+           (estimate (getf (first (actor:held-turn-calls back)) :estimate)))
+      (is (equal "forty" (getf estimate :label)))
+      (is (eql 40 (getf estimate :credits)))
+      (is (eql 1.5d0 (getf estimate :rate)))
+      (is (eq t (getf estimate :refundable)))
+      (is (and (null (getf estimate :final)) (member :final estimate)) "NIL comes back as NIL")
+      (is-true (search "\"credits\":40" text) "an integer is a JSON number")
+      (is-true (search "\"final\":false" text) "NIL is JSON false")
+      (is (equal '(:connection "svc" :tool "spend")
+                 (let ((src (getf (first (actor:held-turn-calls back)) :source)))
+                   (list :connection (getf src :connection) :tool (getf src :tool))))
+          "a source is written and read back"))))
 
 (test moving-on-needs-the-held-turn-and-closes-it
   (multiple-value-bind (ag counts) (%hold-agent :answers 2)
@@ -4399,7 +4413,8 @@ same held turn at the same moment. The claim lets one of them run the call."
                                                 :claim (lambda (id d) (declare (ignore id d))
                                                          (values nil :approve))))))
       (is (equal '(0 1) counts))
-      (is-true (search "may have run" (%result-for ag "s1"))))))
+      (is-true (search "may have run" (%result-for ag "s1")))
+      (is-true (%error-for ag "s1")))))
 
 (test a-refused-claim-writes-the-recorded-decision-and-the-turn-can-go-on
   (multiple-value-bind (ag counts) (%hold-agent :answers 1)
@@ -4409,6 +4424,43 @@ same held turn at the same moment. The claim lets one of them run the call."
       (is-true (search "declined" (%result-for ag "s1")))
       (is (equal "done" (actor:run-turn ag "next" :principal "u1")) "no HELD-TURN-REQUIRED")
       (is (equal '(0 1) counts)))))
+
+(test a-refused-claim-closes-the-held-turn-when-the-user-moves-on
+  "Rule 2 agreed on #531, for RUN-TURN :HELD and ABANDON-HELD-TURN: a claim already recorded as a
+decline, with no results in the history, gives the declined text, and the turn goes on."
+  (flet ((refusing (id d) (declare (ignore id d)) (values nil :decline)))
+    (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+      (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+        (is (equal "done" (actor:run-turn ag "next" :principal "u1" :held held :claim #'refusing)))
+        (is-true (search "declined" (%result-for ag "s1")))
+        (is (equal "looked" (%result-for ag "l1")))
+        (is (equal '(0 1) counts))))
+    (multiple-value-bind (ag counts) (%hold-agent)
+      (declare (ignore counts))
+      (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+        (is (equal '(nil :already-decided :decline)
+                   (multiple-value-list
+                    (actor:abandon-held-turn ag held :principal "u1" :claim #'refusing))))
+        (is-true (search "declined" (%result-for ag "s1")))))))
+
+(test an-older-held-turn-does-not-close-a-newer-one
+  "Hold, approve, hold again: RUN-TURN given the first held turn signals HELD-TURN-REQUIRED and
+leaves the history as it was, because the newer calls still have no results."
+  (flet ((calls (&rest ids)
+           (llm:make-completion
+            :tool-calls (mapcar (lambda (id) (llm:make-tool-call :id id :name "spend" :arguments (%args "q" id)))
+                                ids)
+            :stop-reason :tool-use))
+         (done () (llm:make-completion :text "done" :stop-reason :end)))
+    (multiple-value-bind (ag counts) (%hold-agent :script (list (calls "s1") (done) (calls "s2") (done)))
+      (declare (ignore counts))
+      (let ((first-held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+        (is (equal "done" (actor:continue-turn ag first-held :approve :principal "u1")))
+        (is (eq :held (nth-value 1 (actor:run-turn ag "again" :principal "u1" :on-hold :hold))))
+        (let ((before (copy-list (actor:agent-history ag))))
+          (signals actor:held-turn-required
+            (actor:run-turn ag "third" :principal "u1" :held first-held))
+          (is (equal before (actor:agent-history ag)) "nothing was written"))))))
 
 (test an-answered-held-turn-is-already-decided-not-a-mismatch
   (multiple-value-bind (ag counts) (%hold-agent :answers 1)
@@ -4427,7 +4479,7 @@ same held turn at the same moment. The claim lets one of them run the call."
         ;; The same history, under another agent's name.
         (setf (actor:agent-history other) (copy-list (actor:agent-history ag)))
         (signals actor:held-turn-mismatch (actor:continue-turn other held :approve :principal "u1")))
-      (let ((changed (actor:held-turn-from-plist (actor:held-turn-to-plist held))))
+      (let ((changed (actor:held-turn-from-json (actor:held-turn-to-json held))))
         (setf (getf (first (actor:held-turn-calls changed)) :arguments) (%args "q" "something else"))
         (signals actor:held-turn-mismatch (actor:continue-turn ag changed :approve :principal "u1")))
       (let ((fresh (%hold-agent)))
@@ -4499,22 +4551,37 @@ held on that step does the same, rather than asking the model once more."
       (setf (actor:held-turn-expires-at held) (- (get-universal-time) 1))
       (actor:continue-turn ag held :approve :principal "u1")
       (is (equal '(0 1) counts))
-      (is-true (search "in time" (%result-for ag "s1"))))))
+      (is-true (search "in time" (%result-for ag "s1")))
+      (is-true (%error-for ag "s1")))))
 
 (test holding-and-deciding-are-events
-  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+  "Each event names its call under :ID, as :TOOL-CALL and :TOOL-RESULT do, and the held turn
+under :HELD, which is NIL for a call decided on the spot."
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend") ("s2" "spend") ("l1" "look")))
     (declare (ignore counts))
     (let* ((events '())
            (held (evt:with-observer ((lambda (e) (push e events)))
                    (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))))
       (evt:with-observer ((lambda (e) (push e events)))
-        (actor:continue-turn ag held :approve :principal "u1"))
-      (let ((h (find :tool-held events :key #'evt:event-type))
-            (d (find :tool-decided events :key #'evt:event-type)))
-        (is (equal (actor:held-turn-id held) (getf h :id)))
-        (is (equal "u1" (getf h :principal)))
-        (is (eq :approve (getf d :decision)))
-        (is (integerp (getf d :at)))))))
+        (actor:continue-turn ag held '(("s1" . :approve) ("s2" . :decline)) :principal "u1"))
+      (flet ((of (type id) (find-if (lambda (e) (and (eq type (evt:event-type e)) (equal id (getf e :id))))
+                                    events)))
+        (dolist (id '("s1" "s2"))
+          (is (equal (actor:held-turn-id held) (getf (of :tool-held id) :held)))
+          (is (equal "u1" (getf (of :tool-held id) :principal)))
+          (is (equal (actor:held-turn-id held) (getf (of :tool-decided id) :held)))
+          (is (integerp (getf (of :tool-decided id) :at))))
+        (is (eq :approve (getf (of :tool-decided "s1") :decision)))
+        (is (eq :decline (getf (of :tool-decided "s2") :decision))))))
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (declare (ignore counts))
+    (let ((events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (actor:run-turn ag "go"))
+      (let ((d (find :tool-decided events :key #'evt:event-type)))
+        (is (equal "s1" (getf d :id)))
+        (is (null (getf d :held)))
+        (is (eq :no-confirmation (getf d :decision)))))))
 
 (test a-delegated-turn-uses-a-blocking-policy-but-not-hold
   (flet ((coordinator (sub)
@@ -4559,6 +4626,8 @@ held on that step does the same, rather than asking the model once more."
     (declare (ignore counts))
     (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1)
     (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
-           (stored (getf (first (getf (actor:held-turn-to-plist held) :results)) :content)))
+           (stored (getf (first (actor::held-turn-results
+                                 (actor:held-turn-from-json (actor:held-turn-to-json held))))
+                         :content)))
       (is (not (equal "looked" stored)) "the stand-in, not the result")
       (is-true (search "read-result" stored)))))

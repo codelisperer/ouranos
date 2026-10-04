@@ -47,8 +47,8 @@ the turn cannot go on without it. Nothing is written."))
 ;;; --- the held turn --------------------------------------------------------------------
 
 (defstruct (held-turn (:constructor %make-held-turn))
-  "A turn that ended with calls held for the user's decision. The app stores it, as
-HELD-TURN-TO-PLIST gives it, next to the agent's history, and gives it to CONTINUE-TURN.
+  "A turn that ended with calls held for the user's decision. The app stores it, as the JSON
+text HELD-TURN-TO-JSON gives, next to the agent's history, and gives it to CONTINUE-TURN.
 
 ID identifies it for the app's claim. CALLS is one plist per held call: :ID (the tool-call id),
 :NAME, :SOURCE, :ARGUMENTS and :ESTIMATE. RESULTS are the tool-result parts of the step's other
@@ -80,7 +80,10 @@ estimate plist (a ratio included), means the call is not run."
       (values nil t)))
 
 (defun %held-event (type held-id call &rest more)
-  (apply #'evt:emit type :id held-id :principal *principal* :name (getf call :name)
+  "Emit TYPE for CALL. :ID is the tool-call id, as in :TOOL-CALL and :TOOL-RESULT, and :HELD
+the held turn's id, NIL for a call decided on the spot."
+  (apply #'evt:emit type :id (getf call :id) :held held-id :principal *principal*
+         :name (getf call :name)
          :source (getf call :source) :estimate (getf call :estimate)
          :at (get-universal-time) more))
 
@@ -181,56 +184,82 @@ order."
 
 ;;; --- writing a held turn out and reading it back ---------------------------------------
 
-(defun %plist-out (plist)
-  "PLIST with keyword keys, as an alist of lower-case names and values."
-  (loop for (k v) on plist by #'cddr collect (cons (string-downcase (symbol-name k)) v)))
+(defun %held-object (&rest kv)
+  (let ((h (make-hash-table :test #'equal)))
+    (loop for (k v) on kv by #'cddr do (setf (gethash k h) v))
+    h))
 
-(defun %plist-in (alist)
-  (loop for (name . v) in alist append (list (intern (string-upcase name) :keyword) v)))
+(defun %or-null (value) (if (null value) 'null value))
+(defun %from-null (value) (if (eq value 'null) nil value))
 
-(defun held-turn-to-plist (held)
-  "HELD as a plist of strings, numbers, booleans and lists of them, for the app to store. A
-call's arguments are their JSON text. An estimate's or a source's keys are lower-case names;
-their values are strings, integers, floats, T or NIL, and come back as they went."
-  (list :id (held-turn-id held) :principal (held-turn-principal held)
-        :agent (held-turn-agent held)
-        :calls (mapcar (lambda (c)
-                         (list :id (getf c :id) :name (getf c :name)
-                               :source (%plist-out (getf c :source))
-                               :arguments (and (getf c :arguments)
-                                               (com.inuoe.jzon:stringify (getf c :arguments)))
-                               :estimate (%plist-out (getf c :estimate))))
-                       (held-turn-calls held))
-        :results (mapcar (lambda (p) (list :id (getf p :tool-use-id) :content (getf p :content)
-                                           :is-error (and (getf p :is-error) t)))
-                         (held-turn-results held))
-        :order (held-turn-order held) :steps (held-turn-steps held)
-        :max-tokens (held-turn-max-tokens held) :created-at (held-turn-created-at held)
-        :expires-at (held-turn-expires-at held)))
+(defun %names-out (plist)
+  "PLIST with keyword keys as a JSON object of lower-case names. NIL is written as false and T as
+true, so an estimate's booleans come back as they went."
+  (let ((h (make-hash-table :test #'equal)))
+    (loop for (k v) on plist by #'cddr
+          do (setf (gethash (string-downcase (symbol-name k)) h) v))
+    h))
 
-(defun held-turn-from-plist (plist)
-  "The HELD-TURN that HELD-TURN-TO-PLIST gave PLIST for."
-  (%make-held-turn
-   :id (getf plist :id) :principal (getf plist :principal) :agent (getf plist :agent)
-   :calls (mapcar (lambda (c)
-                    (list :id (getf c :id) :name (getf c :name)
-                          :source (%plist-in (getf c :source))
-                          :arguments (let ((a (getf c :arguments)))
-                                       (and a (com.inuoe.jzon:parse a)))
-                          :estimate (%plist-in (getf c :estimate))))
-                  (getf plist :calls))
-   :results (mapcar (lambda (r) (llm:tool-result-part (getf r :id) (getf r :content)
-                                                      (getf r :is-error)))
-                    (getf plist :results))
-   :order (getf plist :order) :steps (getf plist :steps)
-   :max-tokens (getf plist :max-tokens) :created-at (getf plist :created-at)
-   :expires-at (getf plist :expires-at)))
+(defun %names-in (object)
+  (and (hash-table-p object)
+       (loop for name being the hash-keys of object using (hash-value v)
+             append (list (intern (string-upcase name) :keyword) v))))
+
+(defun held-turn-to-json (held)
+  "HELD as JSON text, for the app to store next to the agent's history. HELD-TURN-FROM-JSON reads
+it back. Each call's arguments are written as the JSON object the model sent. An estimate's and
+a source's keys are written as lower-case names. A value that is an integer or a float is a JSON
+number, and comes back as an integer or a double-float; T is true and NIL is false. The
+principal must be a string or an integer."
+  (let ((principal (held-turn-principal held)))
+    (unless (or (stringp principal) (integerp principal))
+      (error "held-turn-to-json: the principal ~S is not a string or an integer" principal))
+    (com.inuoe.jzon:stringify
+     (%held-object
+      "id" (held-turn-id held) "principal" principal "agent" (%or-null (held-turn-agent held))
+      "calls" (map 'vector (lambda (c)
+                             (%held-object "id" (getf c :id) "name" (getf c :name)
+                                           "source" (%names-out (getf c :source))
+                                           "arguments" (%or-null (getf c :arguments))
+                                           "estimate" (%names-out (getf c :estimate))))
+                   (held-turn-calls held))
+      "results" (map 'vector (lambda (p) (%held-object "id" (getf p :tool-use-id)
+                                                       "content" (getf p :content)
+                                                       "is_error" (and (getf p :is-error) t)))
+                     (held-turn-results held))
+      "order" (coerce (held-turn-order held) 'vector)
+      "steps" (%or-null (held-turn-steps held))
+      "max_tokens" (%or-null (held-turn-max-tokens held))
+      "created_at" (%or-null (held-turn-created-at held))
+      "expires_at" (%or-null (held-turn-expires-at held))))))
+
+(defun held-turn-from-json (text)
+  "The HELD-TURN that HELD-TURN-TO-JSON wrote as TEXT. Signals an error when TEXT is not such an
+object."
+  (let ((o (com.inuoe.jzon:parse text)))
+    (unless (and (hash-table-p o) (stringp (gethash "id" o)) (vectorp (gethash "calls" o)))
+      (error "held-turn-from-json: the text is not a held turn"))
+    (flet ((field (name) (%from-null (gethash name o))))
+      (%make-held-turn
+       :id (field "id") :principal (field "principal") :agent (field "agent")
+       :calls (map 'list (lambda (c)
+                           (list :id (gethash "id" c) :name (gethash "name" c)
+                                 :source (%names-in (gethash "source" c))
+                                 :arguments (%from-null (gethash "arguments" c))
+                                 :estimate (%names-in (gethash "estimate" c))))
+                   (field "calls"))
+       :results (map 'list (lambda (r) (llm:tool-result-part (gethash "id" r) (gethash "content" r)
+                                                             (gethash "is_error" r)))
+                     (field "results"))
+       :order (coerce (field "order") 'list) :steps (field "steps")
+       :max-tokens (field "max_tokens") :created-at (field "created_at")
+       :expires-at (field "expires_at")))))
 
 ;;; --- deciding once ---------------------------------------------------------------------
 
 (defvar *claims* (make-hash-table :test #'equal)
   "held-turn id -> the decision recorded for it, for the default claim, which covers one
-process only.")
+process only. Entries are never removed, so a long-running server supplies its own :CLAIM.")
 
 (defvar *claims-lock* (sb-thread:make-mutex :name "praxeon held-turn claims"))
 
@@ -381,7 +410,8 @@ Then the decision is recorded through CLAIM, a function of the held turn's id an
 that the app supplies. It must record the decision as one step, return true the first time,
 and after that return NIL and the decision recorded first (for a database, UPDATE ... WHERE
 decision IS NULL). Without CLAIM, a table in this process is used, which covers one process
-only. When the claim is refused, the results the recorded decision calls for are written and
+only and keeps one entry per held turn for the life of the process, so a long-running server
+supplies CLAIM. When the claim is refused, the results the recorded decision calls for are written and
 nothing runs; a recorded approval whose result is missing may have run, so the model is told
 the outcome is unknown and the call is never run again.
 
@@ -416,17 +446,17 @@ approved call whose means is no longer registered with the same :SOURCE is not r
 (defun abandon-held-turn (agent held &key principal claim)
   "Close HELD without a decision: its held calls get \"not run: the user did not confirm\", after
 :UNANSWERED is recorded through CLAIM, so a later approval runs nothing. The step's other results
-are written as they were. Returns true, or NIL and :ALREADY-DECIDED when the turn was decided
-before. Checked as CONTINUE-TURN checks."
+are written as they were. Returns true, or NIL, :ALREADY-DECIDED and the decision recorded
+first when the turn was decided before; when that decision has no results in the history yet,
+the results it calls for are written, and nothing runs. Checked as CONTINUE-TURN checks."
   (let* ((*principal* principal)
          (state (%check-held agent held principal)))
     (when (eq state :answered)
       (return-from abandon-held-turn (values nil :already-decided)))
     (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) :unanswered)
-      (if first
-          (%write-held-results agent held :unanswered nil)
-          (%write-held-results agent held recorded nil :recorded t)))
-    t))
+      (cond (first (%write-held-results agent held :unanswered nil) t)
+            (t (%write-held-results agent held recorded nil :recorded t)
+               (values nil :already-decided recorded))))))
 
 (defun %unanswered-ids (agent)
   "The ids of the tool calls in the history's last message, when it is a model message whose
@@ -440,6 +470,9 @@ calls have no results yet."
 HELD, or signal HELD-TURN-REQUIRED."
   (let ((ids (%unanswered-ids agent)))
     (when ids
-      (if held
-          (abandon-held-turn agent held :principal *principal* :claim claim)
-          (error 'held-turn-required :ids ids)))))
+      (unless held (error 'held-turn-required :ids ids))
+      (abandon-held-turn agent held :principal *principal* :claim claim)
+      ;; HELD may be an older held turn, already answered, while the history ends with a newer
+      ;; one: then nothing was written, and the calls still have no results.
+      (let ((left (%unanswered-ids agent)))
+        (when left (error 'held-turn-required :ids left))))))

@@ -302,7 +302,7 @@
    #:run-turn-through #:*principal*
    ;; holding a call until the user decides (#531)
    #:held-turn #:held-turn-id #:held-turn-principal #:held-turn-agent #:held-turn-calls
-   #:held-turn-expires-at #:held-turn-to-plist #:held-turn-from-plist
+   #:held-turn-expires-at #:held-turn-to-json #:held-turn-from-json
    #:continue-turn #:abandon-held-turn
    #:wrong-principal #:held-turn-mismatch #:held-turn-mismatch-reason
    #:held-turn-required #:held-turn-required-ids))

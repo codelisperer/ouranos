@@ -114,14 +114,16 @@ its tag.
   a means. `run-turn :on-hold` is the app's policy: NIL, the default, runs no held call and tells
   the model no confirmation was available; a function returns `:approve`, `:decline` or `:hold`;
   `:hold` ends the turn with `(values nil :held held-turn)`. The app stores the held turn
-  (`held-turn-to-plist`, `held-turn-from-plist`) and continues the turn with
+  as JSON text (`held-turn-to-json`, `held-turn-from-json`) and continues the turn with
   `continue-turn` and the user's decision, from any request or thread or after a restart. A
   decision is recorded once through the app's `:claim`, so an approved call runs once even when
   two decisions arrive together. `continue-turn` checks the principal (`wrong-principal`), the
   agent and the history (`held-turn-mismatch`). `run-turn` signals `held-turn-required` when the
   history ends with undecided held calls and no `:held` is given; `abandon-held-turn` closes one.
-  The events `:tool-held` and `:tool-decided` record what was asked and decided.
-  `run-turn-through` takes the same arguments and returns the held turn as a third value. A
+  The events `:tool-held` and `:tool-decided` record what was asked and decided, with the
+  tool-call id under `:id` and the held turn's id under `:held`. Without `:claim`, decisions
+  are kept in a table in the process that is never emptied, so a long-running server supplies
+  its own. `run-turn-through` takes the same arguments and returns the held turn as a third value. A
   delegated sub-turn inherits a blocking `:on-hold`, not `:hold`. A turn with no principal holds
   nothing. A turn continued after a call held on its last step runs the decided calls and then
   signals `deliberation-failure`, as an ordinary turn does after its last step, without asking
