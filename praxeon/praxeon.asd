@@ -42,6 +42,7 @@
                "aion/interceptor"  ; the typed pipeline a turn is threaded through (pre-publication issue 130)
                "aion/boundary"     ; RUN-TURN-THROUGH checks its CHAIN before it enters Coalton (#110)
                "aion/http-client"  ; the shared outbound client (pre-publication issue 202)
+               "aion/random"       ; a held turn's id (#531)
                "coalton"
                "alexandria"
                "cons"             ; config/env: the shared load-dotenv lives in cons
@@ -70,6 +71,7 @@
                              (:file "turn")         ; a turn as a value (interceptor context)
                              (:file "ceiling")      ; cost/rate ceiling as pipeline stages
                              (:file "actor")        ; the deliberate/act loop
+                             (:file "hold")         ; holding a call for the user (#531)
                              (:file "workflow")     ; deterministic multi-agent coordination
                              (:file "studio"))))    ; REPL introspection (studio DX)
   :in-order-to ((test-op (test-op "praxeon/tests"))))
@@ -270,7 +272,8 @@
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
-               "fiveam")
+               "fiveam"
+               "aion/test-threads")   ; the #531 tests continue a held turn on another thread
   :serial t
   :components ((:module "tests"
                 :serial t

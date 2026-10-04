@@ -559,7 +559,7 @@ may have been processed is never sent twice."
                     (%send client method params principal timeout extra-headers t))
              (values response id)))))))
 
-(defun %request (client method params &key principal timeout extra-headers)
+(defun %request (client method params &key principal timeout extra-headers no-resend)
   "Send METHOD with PARAMS for PRINCIPAL and return the result object."
   (let* ((*in-flight-method* nil)
          (connection (client-connection client))
@@ -584,6 +584,12 @@ may have been processed is never sent twice."
                                ;; kept, so this is not a reason to sign in again.
                                (%request-failed client "its token could not be refreshed." '()
                                                 :outcome :not-run))))))
+                (when (and fresh (not (equal fresh sent)) no-resend)
+                  ;; A tool held for the user's confirmation is not sent again after a refused
+                  ;; token (#531, the rule recorded for #539): the refresh is kept for the next
+                  ;; call, and this one fails without running.
+                  (%request-failed client "it refused the call before running it, because its token had expired. The token has been renewed; the user can ask again."
+                                   '() :outcome :not-run))
                 (if (and fresh (not (equal fresh sent)))
                     (let ((*token-override* (list client principal fresh)))
                       (%send client method params principal timeout extra-headers))
@@ -768,8 +774,9 @@ never included."
            (jzon:stringify (gethash "structuredContent" result)))
           (t ""))))
 
-(defun call-tool (client tool arguments &key principal)
+(defun call-tool (client tool arguments &key principal held)
   "Call TOOL, a TOOL from LIST-TOOLS, with ARGUMENTS (a hash table, or NIL), for PRINCIPAL.
+HELD is true for a tool granted with :CONFIRM: after a refused token it is not sent again (#531).
 Returns the result's text. A result with isError set signals TOOL-ERROR; a failed request
 signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the model."
   (let* ((connection (client-connection client))
@@ -783,7 +790,8 @@ signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the
                              (%object "name" (tool-name tool) "arguments" arguments)
                              :principal principal
                              :timeout (connection-call-timeout connection)
-                             :extra-headers headers)))
+                             :extra-headers headers
+                             :no-resend held)))
          ;; A content block the client cannot read, such as a number as an image's data, fails
          ;; the call like any reply it cannot read; the tool ran, so its outcome is unknown.
          (text (handler-case (result-text result)
@@ -812,7 +820,7 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
 (defun %clip (string limit)
   (if (> (length string) limit) (subseq string 0 limit) string))
 
-(defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability)
+(defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability confirm)
   "Register the tools of CLIENT's server that the app chooses as means of AGENT, and return the
 means names.
 
@@ -820,11 +828,19 @@ TOOLS is a list from LIST-TOOLS; when it is not given, the server is asked, with
 An empty list grants nothing and sends nothing. ONLY is
 required: a list of the server's tool names to grant, or :ALL. There is no default that grants
 every tool, so a grant is always a decision the app wrote down. CAPABILITY is passed to
-REGISTER-MEANS, so a caller without it does not see the tools.
+REGISTER-MEANS, so a caller without it does not see the tools. CONFIRM is a list of the server's
+tool names to hold for the user's confirmation, or :ALL (#531). Any other value, or a name that
+is not among the granted tools, signals an error and registers nothing. Each tool named is registered with :CONFIRM
+T, so a turn decides it through its ON-HOLD policy, and after a refused token it is not sent
+again. A tool's readOnlyHint or destructiveHint annotation is untrusted and never decides this;
+the app does.
 
 Each means calls its tool for the principal of the turn it runs in, ACTOR:*PRINCIPAL*. A name
 that clashes with a means AGENT already has, or with another tool in the grant, signals
 TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes the grant."
+  (unless (or (null confirm) (eq confirm :all)
+              (and (listp confirm) (every #'stringp confirm)))
+    (error "grant-tools: :confirm must be NIL, :all or a list of tool names, not ~S" confirm))
   (let* ((connection (client-connection client))
          (tools (if tools-p tools (list-tools client)))
          (chosen (if (eq only :all)
@@ -839,17 +855,27 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                                collect n))
                  :test #'string=)))
     (when taken (error 'tool-name-conflict :names taken))
+    ;; A name in :CONFIRM that is not granted is most likely a misspelling, and the tool it meant
+    ;; would then run without confirmation, so it is refused before anything is registered.
+    (let ((unknown (and (listp confirm)
+                        (set-difference confirm (mapcar #'tool-name chosen) :test #'string=))))
+      (when unknown
+        (error "grant-tools: :confirm names tools that are not in this grant: ~{~A~^, ~}" unknown)))
     (loop for tool in chosen
           for name in names
-          do (let ((tool tool))
+          do (let* ((tool tool)
+                    (held (or (eq confirm :all)
+                              (and (listp confirm)
+                                   (member (tool-name tool) confirm :test #'string=)))))
                (actor:register-means
                 agent name
                 (%clip (or (tool-description tool) (tool-title tool) (tool-name tool))
                        *max-description-characters*)
                 (lambda (arguments)
-                  (call-tool client tool arguments :principal actor:*principal*))
+                  (call-tool client tool arguments :principal actor:*principal* :held held))
                 :schema (tool-input-schema tool)
                 :capability capability
+                :confirm (and held t)
                 :source (list :connection (connection-name connection)
                               :tool (tool-name tool)
                               :per-user (and (connection-per-user connection) t)))
