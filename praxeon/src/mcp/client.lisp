@@ -83,8 +83,10 @@ has, or two tools under one name. Nothing was registered."))
   "An MCP server the app connects to, as data.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
-URL is the server's MCP endpoint. TOKEN-SOURCE is NIL, or a function of (CONNECTION PRINCIPAL)
-returning a bearer token string or NIL. PER-USER is true when the token belongs to a user: a
+URL is the server's MCP endpoint. TOKEN-SOURCE is where a request's bearer token comes from:
+NIL for none; a function of (CONNECTION PRINCIPAL) returning a token string or NIL; or an object
+with a TOKEN-FOR method, and optionally a TOKEN-REFUSED method that gives a new token after the
+server refuses one, such as the one OAUTH-TOKEN-SOURCE makes from an aion/oauth broker. PER-USER is true when the token belongs to a user: a
 call with no principal is then refused before anything is sent. TIMEOUT is the most seconds a
 request may take, and CALL-TIMEOUT the most a tool call may take. MAX-BODY-BYTES bounds a
 reply."

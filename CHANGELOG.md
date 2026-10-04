@@ -120,7 +120,8 @@ its tag.
     token for a connection, refreshing it when it has expired; `refresh` and `disconnect` do what
     they say, and both take `call-with-refresh-lock`, as does storing a new sign-in's tokens.
   - `discover`, `canonical-resource` and `parse-challenge` are exported for an app that needs
-    them. The conditions are `oauth-error`, and under it `unknown-sign-in`, `wrong-user`,
+    them. `parse-challenge` reads the Bearer challenge only where a challenge starts, so the
+    word bearer inside another challenge's quoted parameter is not taken for it. The conditions are `oauth-error`, and under it `unknown-sign-in`, `wrong-user`,
     `sign-in-failed`, `metadata-refused`, `url-refused`, `no-client` and `refresh-failed`.
   - The store protocol (`get-token`, `put-token`, `delete-token`, `get-client`, `put-client`,
     `delete-client`, `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by

@@ -236,11 +236,39 @@ pin a connection there."
 
 ;;; --- WWW-Authenticate ------------------------------------------------------------------
 
+(defun %bearer-start (header)
+  "Where the Bearer scheme's name starts in HEADER, a WWW-Authenticate value, or NIL. Only a
+scheme name counts: outside a quoted string, at the start of the value or after a comma, and
+followed by a space, a tab, a comma or the end. The word inside an earlier challenge's quoted
+parameter, or a parameter named bearer, is not the scheme (#547)."
+  (let ((n (length header)) (i 0) (at-start t))
+    (loop while (< i n)
+          do (let ((c (char header i)))
+               (cond
+                 ((char= c #\")
+                  ;; Skip the quoted string, with its backslash escapes.
+                  (incf i)
+                  (loop while (and (< i n) (char/= #\" (char header i)))
+                        do (when (char= #\\ (char header i)) (incf i))
+                           (incf i))
+                  (incf i)
+                  (setf at-start nil))
+                 ((member c '(#\Space #\Tab)) (incf i))
+                 ((char= c #\,) (setf at-start t) (incf i))
+                 ((and at-start
+                       (<= (+ i 6) n)
+                       (string-equal "bearer" header :start2 i :end2 (+ i 6))
+                       (or (= (+ i 6) n) (member (char header (+ i 6)) '(#\Space #\Tab #\,))))
+                  (return-from %bearer-start i))
+                 (t (setf at-start nil) (incf i)))))
+    nil))
+
 (defun parse-challenge (header)
   "The parameters of the Bearer challenge in HEADER, a WWW-Authenticate value, as an alist of
-lower-cased names to values, or NIL."
+lower-cased names to values, or NIL. The Bearer challenge is found by %BEARER-START, so the
+word bearer inside another challenge's quoted parameter does not count."
   (when (stringp header)
-    (let ((start (search "bearer" header :test #'char-equal)))
+    (let ((start (%bearer-start header)))
       (when start
         (let ((i (+ start 6)) (n (length header)) (params '()))
           (loop

@@ -445,6 +445,14 @@ second caller finds the first one's new token and does not refresh at all."
 
 ;;; --- pieces ----------------------------------------------------------------------------
 
+(test the-bearer-challenge-is-found-only-where-a-challenge-starts
+  "The word bearer inside an earlier challenge's quoted parameter is not the Bearer challenge
+(#547)."
+  (is (equal '(("error" . "insufficient_scope") ("scope" . "a b"))
+             (oauth:parse-challenge "Basic realm=\"the bearer zone\", Bearer error=\"insufficient_scope\", scope=\"a b\"")))
+  (is (null (oauth:parse-challenge "Basic realm=\"the bearer zone\"")))
+  (is (null (oauth:parse-challenge "Basic bearer=\"x\"")) "a parameter named bearer is not the scheme"))
+
 (test challenges-and-canonical-uris-are-read-as-specified
   (is (equal '(("error" . "insufficient_scope") ("scope" . "files:write a")
                ("resource_metadata" . "https://x.example/prm"))
