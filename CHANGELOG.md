@@ -66,6 +66,50 @@ its tag.
 
 ### Added
 
+- **aion/oauth: sign an app's users in to other services with OAuth 2.1** (#527, part 2). A new
+  opt-in system, in aion so that hermes can use it too.
+  - `make-broker` holds the app's settings and a store: `:redirect-uri`, `:client-name`,
+    `:application-type`, `:client-metadata-url`, `:pre-registered`, `:timeout`,
+    `:sign-in-lifetime`, `:metadata-lifetime` and `:metadata-grace`.
+  - `start-sign-in` returns the URL to send a user's browser to, and the scopes it requests.
+    `finish-sign-in` takes the parameters the browser came back with and the principal of the
+    session it came back in; both refuse a NIL principal. `access-token` returns a principal's
+    token for a connection, refreshing it when it has expired; `refresh` and `disconnect` do what
+    they say, and both take `call-with-refresh-lock`, as does storing a new sign-in's tokens.
+  - `discover`, `canonical-resource` and `parse-challenge` are exported for an app that needs
+    them. The conditions are `oauth-error`, and under it `unknown-sign-in`, `wrong-user`,
+    `sign-in-failed`, `metadata-refused`, `url-refused`, `no-client` and `refresh-failed`.
+  - The store protocol (`get-token`, `put-token`, `delete-token`, `get-client`, `put-client`,
+    `delete-client`, `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by
+    the app, over its own storage. `delete-client` takes the client id and deletes only on a
+    match, as one step. Every slot of `token-set` and `pending` is exported, with `make-token-set` and
+    `make-pending`, so a store can keep both as strings. `memory-store` is for tests and
+    one-process apps, and drops expired pending sign-ins.
+  - It follows the MCP authorization specification, revision 2026-07-28. Metadata is checked;
+    the resource URL and every URL from a server must be https, or http on a loopback host,
+    and are fetched through `fetch-public` with no redirects; the `iss` response parameter is checked; a token response
+    must say `token_type` Bearer; and the client id comes from a pre-registered client, a client
+    ID metadata document at an https URL (`client-metadata-document`), or a dynamic
+    registration. A token is sent only while the resource's metadata, cached for
+    `:metadata-lifetime`, still names the issuer that issued it; a failed fetch never renews the
+    cache. A refresh refused with `invalid_grant`, `invalid_client` or `unauthorized_client`
+    deletes the tokens, and `invalid_client` also forgets a client registered dynamically, when
+    it is the one those tokens were issued to, so the next sign-in registers a new one. See
+    `aion/docs/oauth.md`.
+  - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
+- **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
+  `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
+  `:principal-of` reads from the request's session. `client-metadata-handler` serves the app's
+  client ID metadata document.
+- **praxeon/mcp: MCP servers that require an OAuth sign-in** (#527, part 2).
+  - A token source is now anything that implements `token-for`, as functions already do. An
+    error from a token source, a plain function included, now fails the call with
+    `request-failed` and outcome `:not-run`; before, it reached the caller.
+  - A source may implement `token-refused`, so that a request the server refused with a 401
+    or 403, the legacy `initialize` included, is sent once more with the token it returns. A
+    `token-refused` that fails gives `:not-run`, not a request to sign in.
+  - `oauth-token-source` gives each principal's tokens from an `aion/oauth` broker, refreshing
+    them as needed.
 - **praxeon/mcp: agents can use the tools an MCP server offers** (#527, part 1). A new system,
   `praxeon/mcp`, talks to MCP servers over Streamable HTTP, in the current revision of the
   specification (2026-07-28) or, when a server does not understand it, in the legacy
@@ -164,6 +208,14 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: `fetch-public` returns the body of a 4xx or 5xx response, and an empty
+  response no longer fails** (#527). Over the pinned connection `fetch-public` uses, the
+  connection was closed before the body of a non-2xx response was read. The body came back
+  empty, and a response with no body at all, such as a 404, signalled
+  `sb-int:closed-stream-error` instead of returning. An app that read an error's details from
+  `fetch-public`'s response, or treated a closed-stream error from it as "not found", now gets
+  the response itself. Windows is unaffected, because `fetch-public` does not pin a connection
+  there.
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that
