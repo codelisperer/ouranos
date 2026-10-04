@@ -101,6 +101,14 @@ its tag.
 
 ### Added
 
+- **aion/fs: `make-temporary-directory` creates a new temporary directory that no other process
+  is given** (#515). It is named after a prefix, the process id and a counter of the process's
+  own, and it counts as made only when this call created it, so two processes started at the same
+  moment never share one. The prefix must be one plain name: one with a path separator, a colon,
+  a wildcard, or `.` or `..` alone is refused. The test fixtures in `hyperion/server-uv/tests`, `hyperion/tests` and
+  `klio/tests` that made a directory by deleting a file from `uiop:tmpize-pathname`, or named it
+  by the time and a counter, use it now; the first of those patterns failed when two suites
+  started together on one machine.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
@@ -164,6 +172,12 @@ its tag.
 
 ### Fixed
 
+- **klio: `watch-site` no longer publishes a file read while it is being written.** A file saved
+  in place is empty from the moment it is opened until the new text is written, and a poll that
+  landed in that moment reloaded the empty file: the page was served with no title until the
+  next poll. `watch-site` now reloads a change once two polls in a row have seen it, so an edit
+  is served one `:interval` later than before. A write held open for longer than an interval can
+  still be read while empty. (#534)
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that

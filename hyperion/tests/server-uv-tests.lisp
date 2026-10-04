@@ -1413,18 +1413,13 @@ if two of them disagree about who writes what."
 
 (defmacro %with-static-dir ((dir file content) &body forms)
   "A real directory holding a real FILE with CONTENT, deleted afterwards."
-  (let ((stamp (gensym "STAMP")))
-    `(let* ((,stamp (uiop:tmpize-pathname
-                     (merge-pathnames "uv-static" (uiop:temporary-directory))))
-            (,dir (uiop:ensure-directory-pathname ,stamp)))
-       (ignore-errors (delete-file ,stamp))
-       (ensure-directories-exist ,dir)
-       (let ((,file (merge-pathnames "hello.txt" ,dir)))
-         (with-open-file (out ,file :direction :output :if-exists :supersede)
-           (write-string ,content out))
-         (unwind-protect (progn ,@forms)
-           (ignore-errors (delete-file ,file))
-           (ignore-errors (uiop:delete-empty-directory ,dir)))))))
+  `(let ((,dir (aion/fs:make-temporary-directory "uv-static")))
+     (let ((,file (merge-pathnames "hello.txt" ,dir)))
+       (with-open-file (out ,file :direction :output :if-exists :supersede)
+         (write-string ,content out))
+       (unwind-protect (progn ,@forms)
+         (ignore-errors (delete-file ,file))
+         (ignore-errors (uiop:delete-empty-directory ,dir))))))
 
 (test a-static-file-is-served-with-its-bytes
   (let ((content "Hello from a real file on disk, served by the native server."))
@@ -1450,11 +1445,8 @@ backend does"))))))
   ;; The clause reads OCTETS. A text-mode read would mangle every byte above 127, and this
   ;; serves images -- where the corruption is invisible in a status code and obvious to a
   ;; browser. All 256 values, so no encoding can round-trip it by accident.
-  (let* ((stamp (uiop:tmpize-pathname (merge-pathnames "uv-bin" (uiop:temporary-directory))))
-         (dir (uiop:ensure-directory-pathname stamp))
+  (let* ((dir (aion/fs:make-temporary-directory "uv-bin"))
          (bytes (make-array 256 :element-type '(unsigned-byte 8))))
-    (ignore-errors (delete-file stamp))
-    (ensure-directories-exist dir)
     (dotimes (i 256) (setf (aref bytes i) i))
     (let ((file (merge-pathnames "blob.bin" dir)))
       (with-open-file (out file :direction :output :element-type '(unsigned-byte 8)
@@ -1509,12 +1501,10 @@ have passed against the defaults, which is the shape of a test that cannot fail.
 (defmacro with-file-of-size ((dir file size &key (name "big.bin")) &body forms)
   "A real directory holding a real FILE of SIZE octets, byte N being (mod N 251) -- a prime
 so no run of 256 repeats and a swapped or duplicated block is visible. Deleted afterwards."
-  (let ((stamp (gensym "STAMP")) (out (gensym "OUT")) (i (gensym "I")))
-    `(let* ((,stamp (uiop:tmpize-pathname
-                     (merge-pathnames "uv-bigfile" (uiop:temporary-directory))))
-            (,dir (uiop:ensure-directory-pathname ,stamp)))
-       (ignore-errors (delete-file ,stamp))
-       (ensure-directories-exist ,dir)
+  (let ((out (gensym "OUT")) (i (gensym "I")))
+    ;; A directory no other process can be given (#515). The file-then-directory pattern this
+    ;; replaced lost its name to a second suite starting at the same moment.
+    `(let ((,dir (aion/fs:make-temporary-directory "uv-bigfile")))
        (let ((,file (merge-pathnames ,name ,dir)))
          (declare (ignorable ,file))
          (with-open-file (,out ,file :direction :output :element-type '(unsigned-byte 8)
@@ -2715,13 +2705,10 @@ notice that says so is logged once, not on every start."
   "A fixture cgroup v2 tree: ROOT is its mount, SELF-FILE names the process's cgroup with
 SELF-LINE, and each (DIRECTORY TEXT) in CPU-MAX writes TEXT to DIRECTORY/cpu.max under ROOT
 (\"\" for ROOT itself). Deleted afterwards."
-  (let ((stamp (gensym "STAMP")) (base (gensym "BASE")))
-    `(let* ((,stamp (uiop:tmpize-pathname
-                     (merge-pathnames "uv-cgroup" (uiop:temporary-directory))))
-            (,base (uiop:ensure-directory-pathname ,stamp))
+  (let ((base (gensym "BASE")))
+    `(let* ((,base (aion/fs:make-temporary-directory "uv-cgroup"))
             (,root (merge-pathnames "fs/" ,base))
             (,self-file (merge-pathnames "proc-self-cgroup" ,base)))
-       (ignore-errors (delete-file ,stamp))
        (ensure-directories-exist ,root)
        (unwind-protect
             (progn
