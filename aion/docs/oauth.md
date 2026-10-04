@@ -18,7 +18,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
 
 - **A store.** The broker keeps three kinds of record behind generic functions, and the app implements them over its own storage, encrypted at rest:
   - `get-token`, `put-token` and `delete-token`, keyed by principal and connection name;
-  - `get-client` and `put-client`, for a client registered dynamically, keyed by issuer and redirect URI;
+  - `get-client`, `put-client` and `delete-client`, for a client registered dynamically, keyed by issuer and redirect URI. A store must implement all three: after `invalid_client`, `refresh` calls `delete-client` before it deletes the tokens;
   - `put-pending` and `take-pending`, for a sign-in in progress, keyed by its `state`. `take-pending` removes what it returns, so a `state` works once.
 
   `call-with-refresh-lock` serialises refreshes of one token. Its default method locks within the process; a store shared by several instances overrides it with a lock they share, such as a database row lock.
@@ -43,7 +43,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
    - the `iss` parameter does not match the expected issuer (`sign-in-failed`).
 
    Then it exchanges the code, with the verifier and `resource`, and stores the tokens.
-4. **Calls use the token.** `praxeon/mcp:oauth-token-source` returns each principal's own access token. It refreshes the token when it has expired, and once more when the server refuses it; the refreshed token is sent only after the issuer check below. A refresh the server refuses with `invalid_grant`, `invalid_client` or `unauthorized_client` deletes the tokens, and the next call asks the user to sign in. After `invalid_client` the registered client is forgotten as well (`delete-client`), so that sign-in registers a new one.
+4. **Calls use the token.** `praxeon/mcp:oauth-token-source` returns each principal's own access token. It refreshes the token when it has expired, and once more when the server refuses it; the refreshed token is sent only after the issuer check below. A refresh the server refuses with `invalid_grant`, `invalid_client` or `unauthorized_client` deletes the tokens, and the next call asks the user to sign in. After `invalid_client`, a client registered dynamically is forgotten as well (`delete-client`), when it is the client those tokens were issued to, so that sign-in registers a new one. A pre-registered client, or one identified by a client ID metadata document, is not stored and is not affected.
 5. **Disconnecting.** `(oauth:disconnect broker principal connection)` revokes the refresh token at the authorization server when it offers a revocation endpoint, and deletes the tokens either way.
 
 ## What is checked

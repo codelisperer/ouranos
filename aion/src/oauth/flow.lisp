@@ -516,8 +516,9 @@ and the tokens are stored."
 (defun refresh (broker principal connection resource-url &key rejected)
   "Refresh PRINCIPAL's tokens for CONNECTION and return the new access token, or NIL when there
 is nothing to refresh with or the server refused (invalid_grant, invalid_client or
-unauthorized_client, after which the tokens are deleted; after invalid_client the registered
-client is forgotten too, so the next sign-in registers a new one). REJECTED is an access token
+unauthorized_client, after which the tokens are deleted; after invalid_client a client
+registered dynamically is forgotten too, when it is the one these tokens were issued to, so the
+next sign-in registers a new one). REJECTED is an access token
 the resource server just refused: a token other than it, stored by a refresh that ran while
 this one waited for the lock, is returned without another refresh. Refreshes of one token run
 one at a time (CALL-WITH-REFRESH-LOCK). Signals REFRESH-FAILED when the server could not be
@@ -560,7 +561,12 @@ reached, or gave any other answer that was not a token."
                       ((member (%error-code-of response)
                                '("invalid_grant" "invalid_client" "unauthorized_client")
                                :test #'equal)
-                       (when (equal "invalid_client" (%error-code-of response))
+                       ;; Only the client these tokens were issued to: a client registered after
+                       ;; it, by another user's sign-in, stays.
+                       (when (and (equal "invalid_client" (%error-code-of response))
+                                  (equal (get-client store (token-set-issuer current)
+                                                     (broker-redirect-uri broker))
+                                         (token-set-client-id current)))
                          (delete-client store (token-set-issuer current) (broker-redirect-uri broker)))
                        (delete-token store principal connection)
                        (log:info "aion/oauth: refresh refused, tokens deleted" :connection connection)

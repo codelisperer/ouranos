@@ -137,8 +137,9 @@ its tag.
     registration. A token is sent only while the resource's metadata, cached for
     `:metadata-lifetime`, still names the issuer that issued it; a failed fetch never renews the
     cache. A refresh refused with `invalid_grant`, `invalid_client` or `unauthorized_client`
-    deletes the tokens, and `invalid_client` also forgets the registered client, so the next
-    sign-in registers a new one. See `aion/docs/oauth.md`.
+    deletes the tokens, and `invalid_client` also forgets a client registered dynamically, when
+    it is the one those tokens were issued to, so the next sign-in registers a new one. See
+    `aion/docs/oauth.md`.
   - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
 - **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
   `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
