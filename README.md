@@ -193,17 +193,17 @@ this page and the tree, stated rather than left to be discovered.
 | Framework | Where it is | Checks (linux) |
 |---|---|---|
 | **hyperion** | **alpha** — HTMX + Spinneret, i18n (incl. RTL), sessions, channels, static caching, typed interceptors, a native libuv HTTP server (opt-in via `HYPERION_SERVER=uv`; not yet the default), and a native-webview desktop app that builds and installs on three OSes | 3082 |
-| **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 1537 |
+| **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 1562 |
 | **cons** | **alpha** — the bootstrap seed and the per-project task runner work; the full `build/test/serve/run` CLI *(in progress)* | 779 |
 | **mnemosyne** | **alpha** — DDL-as-data, a CL-DBI shell over the typed backend, exercised against **both SQLite and a real Postgres**. Six design questions still open | 979 |
 | **hermes** | **alpha** — email + SMS with signature-verified inbound, a content-addressed blob store, and payments behind a neutral protocol with a Stripe backend | 460 |
 | **praxeon** | **alpha** — actor loop, provider-neutral LLM, translator, per-agent models, a web/REST surface, and cost/rate/auth ceilings (`budget-guard`, `meter`, `capability-guard`) | 1706 |
 | **elenchon** | **design only** — the typed CEG ADT and five ADRs exist; the reasoning engine *(in progress)* | 46 |
-| **klio** | **scaffold** *(in progress)* — a satellite the site program instantiates; the system loads and the suite guards that, and nothing else is built yet | 296 |
+| **klio** | **scaffold** *(in progress)* — a satellite the site program instantiates; the system loads and the suite guards that, and nothing else is built yet | 310 |
 | **hades** | **planned** *(in progress)* — a charter ADR and `hades/single-instance`, a lock that keeps a second copy of an app off the same data directory; the service facade is blocked on `aion/windows/service`, which does not exist yet | 20 |
 | **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 286 |
 
-Counts above are from the Linux CI leg at `e5a7c42`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `920a96f`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.
