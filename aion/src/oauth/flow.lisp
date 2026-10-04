@@ -561,13 +561,12 @@ reached, or gave any other answer that was not a token."
                       ((member (%error-code-of response)
                                '("invalid_grant" "invalid_client" "unauthorized_client")
                                :test #'equal)
-                       ;; Only the client these tokens were issued to: a client registered after
-                       ;; it, by another user's sign-in, stays.
-                       (when (and (equal "invalid_client" (%error-code-of response))
-                                  (equal (get-client store (token-set-issuer current)
-                                                     (broker-redirect-uri broker))
-                                         (token-set-client-id current)))
-                         (delete-client store (token-set-issuer current) (broker-redirect-uri broker)))
+                       ;; Only the client these tokens were issued to: DELETE-CLIENT compares the
+                       ;; id itself, so a client registered after it, by another user's sign-in,
+                       ;; stays.
+                       (when (equal "invalid_client" (%error-code-of response))
+                         (delete-client store (token-set-issuer current) (broker-redirect-uri broker)
+                                        (token-set-client-id current)))
                        (delete-token store principal connection)
                        (log:info "aion/oauth: refresh refused, tokens deleted" :connection connection)
                        nil)
