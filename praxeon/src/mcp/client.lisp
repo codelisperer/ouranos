@@ -183,9 +183,10 @@ which the user must sign in. The default gives up."))
 asking the source for another.")
 
 (defvar *token-override* nil
-  "The token TOKEN-REFUSED returned, which the one retry after a refused token sends. It is used
-as it is, so a source whose TOKEN-REFUSED returns a token that TOKEN-FOR does not yet return
-still gets its new token sent.")
+  "(CLIENT PRINCIPAL TOKEN) while the one retry after a refused token runs: TOKEN is what
+TOKEN-REFUSED returned, and %TOKEN returns it only for that client and principal. A request
+for another client or another principal made meanwhile, say by a handler of a condition the
+retry signals, gets its token from its own source.")
 
 (define-condition %handshake-refused (error)
   ((response :initarg :response :reader %handshake-refused-response))
@@ -196,8 +197,9 @@ response back to %REQUEST, so the refused-token retry applies to the handshake a
   (let ((connection (client-connection client)))
     (when (and (connection-per-user connection) (null principal))
       (%require-sign-in client nil nil))
-    (when *token-override*
-      (return-from %token *token-override*))
+    (when (and *token-override* (eq (first *token-override*) client)
+               (equal (second *token-override*) principal))
+      (return-from %token (third *token-override*)))
     (handler-case (token-for (connection-token-source connection) connection principal)
       (error ()
         ;; A token source that fails, say one that could not reach its authorization server to
@@ -581,7 +583,7 @@ may have been processed is never sent twice."
                                (%request-failed client "its token could not be refreshed." '()
                                                 :outcome :not-run))))))
                 (if (and fresh (not (equal fresh sent)))
-                    (let ((*token-override* fresh))
+                    (let ((*token-override* (list client principal fresh)))
                       (%send client method params principal timeout extra-headers))
                     (values response id))))))
       (%check-status client response principal)
@@ -642,8 +644,13 @@ uses it should be :PER-USER, so a call with no principal is refused before anyth
   ;; A 403 for insufficient scope needs a new sign-in with more scope, not a refresh.
   (unless (equal "insufficient_scope"
                  (cdr (assoc "error" (oauth:parse-challenge challenge) :test #'string=)))
-    (oauth:refresh (oauth-token-source-broker source) principal (connection-name connection)
-                   (connection-url connection) :rejected token)))
+    (let ((broker (oauth-token-source-broker source))
+          (name (connection-name connection))
+          (url (connection-url connection)))
+      ;; The new token is taken through ACCESS-TOKEN, so that it is sent only while the
+      ;; resource's metadata, read again after the refusal, still names its issuer.
+      (and (oauth:refresh broker principal name url :rejected token)
+           (oauth:access-token broker principal name url)))))
 
 ;;; --- tools -----------------------------------------------------------------------------
 

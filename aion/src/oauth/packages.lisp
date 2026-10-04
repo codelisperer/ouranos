@@ -34,7 +34,7 @@
    ;; the store protocol
    #:store #:memory-store #:make-memory-store
    #:get-token #:put-token #:delete-token
-   #:get-client #:put-client
+   #:get-client #:put-client #:delete-client
    #:put-pending #:take-pending
    #:call-with-refresh-lock
    #:token-set #:make-token-set #:token-set-access #:token-set-refresh #:token-set-expires-at

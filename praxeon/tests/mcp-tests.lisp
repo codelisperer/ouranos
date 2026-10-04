@@ -876,3 +876,47 @@ shared between them."))
       (handler-case (progn (mcp:list-tools client) (fail "no failure"))
         (mcp:sign-in-needed () (fail "a failed refresh asked for a sign-in"))
         (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e))))))))
+
+
+(test the-retry-after-a-refused-token-checks-the-issuer-again
+  "The server refuses the token, and the resource's metadata now names another authorization
+server. The refreshed token is not sent: the call asks for a sign-in, and the tool does not run."
+  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
+  #-os-windows
+  (with-oauth-mcp (as fake url) (:rotate t) (:tools (%tools "a"))
+    (let* ((client (%signed-in-oauth-client as url))
+           (tool (first (mcp:list-tools client :principal "u1"))))
+      (setf (aion/oauth/tests::as-other-issuer as) "https://other.example")
+      (clrhash (aion/oauth/tests::as-access as))
+      (setf (fake-calls fake) 0)
+      (signals mcp:sign-in-needed (mcp:call-tool client tool (%obj) :principal "u1"))
+      (is (= 0 (fake-calls fake))))))
+
+(test the-retry-token-goes-only-to-the-client-that-was-refused
+  "Client A's server refuses A's first token and answers the retry with a reply larger than A
+accepts, so REQUEST-FAILED is signalled while the retry runs. A handler of it makes a request
+with client B, to another server: B sends its own token, not the one A's retry carries."
+  (let ((fake-a (make-fake :tools (%tools "a" "b" "c") :require-token "new"))
+        (fake-b (make-fake :tools (%tools "z"))))
+    (with-fake (client-a fake-a :token-source (make-instance 'two-token-source) :max-body-bytes 40)
+      (th:with-server (server-b (%serve fake-b))
+        (let ((client-b (mcp:make-client
+                         (mcp:make-connection :name "other" :url (th:server-url server-b "/mcp")
+                                              :token-source (lambda (connection principal)
+                                                              (declare (ignore connection principal))
+                                                              "token-of-b"))))
+              (called nil))
+          (signals mcp:request-failed
+            (handler-bind ((mcp:request-failed
+                             (lambda (c)
+                               (declare (ignore c))
+                               (unless called
+                                 (setf called t)
+                                 (mcp:list-tools client-b)))))
+              (mcp:list-tools client-a)))
+          (is-true called)
+          (is (equal '("Bearer token-of-b")
+                     (remove-duplicates
+                      (mapcar (lambda (r) (th:request-header r "Authorization"))
+                              (th:server-requests server-b))
+                      :test #'equal))))))))
