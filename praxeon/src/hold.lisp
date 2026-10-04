@@ -94,6 +94,19 @@ the held turn's id, NIL for a call decided on the spot."
                        :source (%means-source agent name) :principal *principal*
                        :agent (agent-name agent) :conversation (agent-conversation agent)))
 
+(defvar *emitted* nil
+  "Inside a step or a held step being written: call id -> (TEXT . ERROR-P) of the :TOOL-RESULT
+event emitted for it. The cleanups of #546 write that text for the call, unstored, and emit
+nothing more for it, so each call has one :TOOL-RESULT event and the history says what it said.")
+
+(defun %note-emitted (id text error-p)
+  (when *emitted* (setf (gethash id *emitted*) (cons text (and error-p t)))))
+
+(defun %emitted-part (id)
+  "The tool-result part for ID made from its emitted :TOOL-RESULT event's text, or NIL."
+  (let ((e (and *emitted* (gethash id *emitted*))))
+    (and e (llm:tool-result-part id (car e) (cdr e)))))
+
 (defun %run-part (agent id name args permit)
   "Run the call as RUN-TURN always has, and return its tool-result part."
   (%part-event agent id name args)
@@ -102,6 +115,7 @@ the held turn's id, NIL for a call decided on the spot."
            :source (%means-source agent name) :principal *principal*
            :agent (agent-name agent) :conversation (agent-conversation agent)
            :outcome outcome :ms ms (when error-p (list :is-error t)))
+    (%note-emitted id result error-p)
     (llm:tool-result-part id (%store-result agent id name args result) error-p)))
 
 (defun %not-run-part (agent id name args text &key (outcome :not-run) (announce t))
@@ -111,6 +125,7 @@ the held turn's id, NIL for a call decided on the spot."
                          :source (%means-source agent name) :principal *principal*
                          :agent (agent-name agent) :conversation (agent-conversation agent)
                          :outcome outcome :ms 0 :is-error t)
+  (%note-emitted id text t)
   (llm:tool-result-part id (%store-result agent id name args text) t))
 
 (defun %callable-p (agent name permit)
@@ -166,6 +181,7 @@ event is emitted or any result stored."
                 (h (find id held :key (lambda (c) (getf c :id)) :test #'equal)))
             (cond
               (finished (cons finished nil))
+              ((%emitted-part id) (cons (%emitted-part id) nil))
               (h (not-run id name args +turn-ended+ :decided (list held-id h :turn-failed)))
               ((equal id (car current))
                (ecase (cdr current)
@@ -186,7 +202,8 @@ step's results are appended first, with %WRITE-INTERRUPTED-STEP (#546), and the 
 handler still sees the failure with ACT's restarts in place, because this happens only as the
 stack unwinds. The failure wins over a hold in the same step: no held turn is returned, and the
 calls held so far are written as not run."
-  (let ((parts '()) (held '()) (held-id nil) (current nil) (finished nil))
+  (let ((parts '()) (held '()) (held-id nil) (current nil) (finished nil)
+        (*emitted* (make-hash-table :test #'equal)))
     (flet ((run (id name args)
              (setf current (cons id (if (%callable-p agent name permit) :running :refused)))
              (push (%run-part agent id name args permit) parts)))
@@ -448,6 +465,18 @@ state of the history, :PENDING or :ANSWERED."
 (defun %decision-of (decision id)
   (if (listp decision) (cdr (assoc id decision :test #'equal)) decision))
 
+(defun %held-means-current-p (agent call)
+  "Whether the means CALL names is still registered with the source it was held with."
+  (let ((entry (gethash (getf call :name) (agent-means agent))))
+    (and entry (%same-source-p (means-entry-source entry) (getf call :source)))))
+
+(defun %decision-text (decision)
+  "What the model is told for a held call that was not run under DECISION."
+  (case decision
+    (:decline +declined+)
+    (:expired +expired+)
+    (t +unanswered+)))
+
 (defun %held-part (agent call decision permit recorded)
   "The tool-result part for the held CALL under DECISION. RECORDED is true when the decision was
 recorded by an earlier attempt: an approval then may have run, and nothing runs now."
@@ -456,14 +485,14 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
       (:approve
        (cond (recorded
               (%not-run-part agent id name args +may-have-run+ :outcome :unknown :announce nil))
-             ((let ((entry (gethash name (agent-means agent))))
-                (and entry (%same-source-p (means-entry-source entry) (getf call :source))))
+             ((%held-means-current-p agent call)
               ;; Its :TOOL-CALL event was emitted when it was held.
               (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
                 (apply #'evt:emit :tool-result :id id :name name :content result
                        :source (%means-source agent name) :principal *principal*
                        :agent (agent-name agent) :conversation (agent-conversation agent)
                        :outcome outcome :ms ms (when error-p (list :is-error t)))
+                (%note-emitted id result error-p)
                 (llm:tool-result-part id (%store-result agent id name args result) error-p)))
              (t (%not-run-part agent id name args +unavailable+ :announce nil))))
       (:decline (%not-run-part agent id name args +declined+ :announce nil))
@@ -476,7 +505,8 @@ and each held call's under DECISION. When an approved call fails inside its mean
 failure leaves, the results are appended first (#546): that call may have run, an approved call
 after it was not run, with a :TOOL-DECIDED event whose decision is :TURN-FAILED, and any other
 held call after it is written under its decision, with its own :TOOL-DECIDED event."
-  (let ((done '()) (current nil) (finished nil))
+  (let ((done '()) (current nil) (finished nil)
+        (*emitted* (make-hash-table :test #'equal)))
     (unwind-protect
          (let ((parts
                  (mapcar (lambda (id)
@@ -505,6 +535,7 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
             (let ((stored (or (find id (held-turn-results held) :key (lambda (p) (getf p :tool-use-id))
                                     :test #'equal)
                               (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal))))
+              (setf stored (or stored (%emitted-part id)))
               (if stored
                   (cons stored nil)
                   (let* ((call (find id (held-turn-calls held) :key (lambda (c) (getf c :id)) :test #'equal))
@@ -516,8 +547,14 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
                                  (apply #'%deferred-not-run agent id name args text keys)
                                (cons part thunk))))
                       (cond
-                        ;; Its :TOOL-DECIDED event was emitted before it ran.
-                        ((equal id current) (not-run +may-have-run+ :outcome :unknown))
+                        ;; Its :TOOL-DECIDED event was emitted before it became current. It may
+                        ;; have run only when %HELD-PART would have run its means or written
+                        ;; may-have-run; otherwise it is written as its decision says.
+                        ((equal id current)
+                         (cond ((and (eq d :approve) (or recorded (%held-means-current-p agent call)))
+                                (not-run +may-have-run+ :outcome :unknown))
+                               ((eq d :approve) (not-run +unavailable+))
+                               (t (not-run (%decision-text d)))))
                         ;; Not reached: each gets its own :TOOL-DECIDED event. An approval an
                         ;; earlier attempt recorded may have run then; an approval of this
                         ;; attempt did not run.
@@ -526,10 +563,7 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
                                                  :decided (list (held-turn-id held) call :may-have-run)))
                         ((eq d :approve)
                          (not-run +turn-ended+ :decided (list (held-turn-id held) call :turn-failed)))
-                        (t (not-run (case d
-                                      (:decline +declined+)
-                                      (:expired +expired+)
-                                      (t +unanswered+))
+                        (t (not-run (%decision-text d)
                                     :decided (list (held-turn-id held) call d)))))))))
           (held-turn-order held)))))))
 

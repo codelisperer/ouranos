@@ -4894,16 +4894,44 @@ cleanup's events fail the same way. The history is appended first, so it is comp
 
 (test a-result-store-that-fails-still-leaves-a-complete-history
   "The store accepts the first result and refuses every later one, so the step fails on its
-second call and the cleanup's store calls fail the same way."
-  (let ((ag (%step-agent '(("1" "a") ("2" "c") ("3" "a")))))
+second call, after that call's :TOOL-RESULT event. The history says what that event said, and
+each call has one :TOOL-RESULT event."
+  (let ((ag (%step-agent '(("1" "a") ("2" "c") ("3" "a"))))
+        (events '()))
     (actor:offload-tool-results ag (make-instance '%failing-store) :threshold 1000)
-    (signals simple-error (actor:run-turn ag "go"))
+    (evt:with-observer ((lambda (e) (push e events)))
+      (signals simple-error (actor:run-turn ag "go")))
     (is-true (%every-call-answered-p ag))
     (is (equal "a ran" (%result-for ag "1")))
-    (is-true (search "may have run" (%result-for ag "2")))
+    (is (equal "c ran" (%result-for ag "2")) "the history says what the event said")
     (is-true (search "turn ended" (%result-for ag "3")))
+    (dolist (id '("1" "2" "3"))
+      (is (= 1 (count-if (lambda (e) (and (eq :tool-result (evt:event-type e)) (equal id (getf e :id))))
+                         events))
+          "one :tool-result event for call ~A" id)
+      (is (= 1 (count-if (lambda (e) (and (eq :tool-call (evt:event-type e)) (equal id (getf e :id))))
+                         events))
+          "one :tool-call event for call ~A" id))
+    (is (equal "c ran" (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                       (equal "2" (getf e :id))))
+                                      events)
+                             :content)))
     (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1000)
     (is (equal "done" (actor:run-turn ag "again")))))
+
+(test a-declined-call-whose-result-fails-to-reach-the-observer-stays-declined
+  "One held call, continued with :DECLINE, and an observer that signals on :TOOL-RESULT. The
+call was declined, so it is written as declined, not as one that may have run."
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend")) :answers 1)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (evt:with-observer ((lambda (e) (when (eq :tool-result (evt:event-type e))
+                                        (error "the client's stream is closed"))))
+        (signals simple-error (actor:continue-turn ag held :decline :principal "u1")))
+      (is (equal "Not run: the user declined." (%result-for ag "s1")))
+      (is-true (%error-for ag "s1"))
+      (is (equal '(0 0) counts))
+      (is-true (%every-call-answered-p ag))
+      (is (equal "done" (actor:run-turn ag "next" :principal "u1"))))))
 
 (test a-recorded-approval-is-may-have-run-when-the-observer-fails
   "An earlier attempt recorded an approval of both held calls. This attempt finds the claim
