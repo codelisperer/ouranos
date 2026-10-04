@@ -118,34 +118,62 @@ the held turn's id, NIL for a call decided on the spot."
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-permitted-p entry permit))))
 
+(defun %deferred-not-run (agent id name args text &key (outcome :not-run) announce decided)
+  "A tool-result part for a call that was not run, made from TEXT alone, and a function that
+emits its events and keeps it in the result store. The cleanups of #546 append their parts
+first and call the functions after, because the observer or the store may be what failed, and
+would then fail again before the history was complete. ANNOUNCE emits :TOOL-CALL first.
+DECIDED, when given, is (HELD-ID CALL DECISION), for a :TOOL-DECIDED event first."
+  (values (llm:tool-result-part id text t)
+          (lambda ()
+            (when decided
+              (destructuring-bind (held-id call decision) decided
+                (%held-event :tool-decided held-id call :decision decision
+                             :agent (agent-name agent) :conversation (agent-conversation agent))))
+            (when announce (%part-event agent id name args))
+            (evt:emit :tool-result :id id :name name :content text
+                                   :source (%means-source agent name) :principal *principal*
+                                   :agent (agent-name agent) :conversation (agent-conversation agent)
+                                   :outcome outcome :ms 0 :is-error t)
+            (%store-result agent id name args text))))
+
+(defun %append-then (agent parts-and-thunks)
+  "Append one user message of the parts in PARTS-AND-THUNKS, a list of (PART . THUNK-OR-NIL),
+then call the thunks in order. A thunk that signals stops the rest; the history is already
+complete."
+  (%append-history agent (llm:msg "user" (mapcar #'car parts-and-thunks)))
+  (dolist (p parts-and-thunks)
+    (when (cdr p) (funcall (cdr p)))))
+
 (defun %write-interrupted-step (agent calls done held held-id current)
   "Append a result for every call of a step that a non-local exit is leaving (#546), in the
 model's order, so the history never ends with calls that have no results. DONE are the
 tool-result parts of the calls that finished, HELD the calls held so far, and CURRENT the call
 being worked on, as (ID . PHASE): :RUNNING inside its means, :REFUSED by ACT before it ran, or
-:DECIDING while the turn's ON-HOLD function was deciding it."
-  (let ((parts
-          (mapcar
-           (lambda (call)
-             (let ((id (llm:tool-call-id call))
-                   (name (llm:tool-call-name call))
-                   (args (llm:tool-call-arguments call)))
-               (or (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal)
-                   (let ((h (find id held :key (lambda (c) (getf c :id)) :test #'equal)))
-                     (when h
-                       (%held-event :tool-decided held-id h :decision :turn-failed
-                                    :agent (agent-name agent)
-                                    :conversation (agent-conversation agent))
-                       (%not-run-part agent id name args +turn-ended+ :announce nil)))
-                   (when (equal id (car current))
-                     (ecase (cdr current)
-                       (:running (%not-run-part agent id name args +may-have-run+
-                                                :outcome :unknown :announce nil))
-                       (:refused (%not-run-part agent id name args +no-such-tool+ :announce nil))
-                       (:deciding (%not-run-part agent id name args +turn-ended+))))
-                   (%not-run-part agent id name args +turn-ended+))))
-           calls)))
-    (%append-history agent (llm:msg "user" parts))))
+:DECIDING while the turn's ON-HOLD function was deciding it. The history is appended before any
+event is emitted or any result stored."
+  (flet ((not-run (id name args text &rest keys)
+           (multiple-value-bind (part thunk) (apply #'%deferred-not-run agent id name args text keys)
+             (cons part thunk))))
+    (%append-then
+     agent
+     (mapcar
+      (lambda (call)
+        (let ((id (llm:tool-call-id call))
+              (name (llm:tool-call-name call))
+              (args (llm:tool-call-arguments call)))
+          (let ((finished (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal))
+                (h (find id held :key (lambda (c) (getf c :id)) :test #'equal)))
+            (cond
+              (finished (cons finished nil))
+              (h (not-run id name args +turn-ended+ :decided (list held-id h :turn-failed)))
+              ((equal id (car current))
+               (ecase (cdr current)
+                 (:running (not-run id name args +may-have-run+ :outcome :unknown))
+                 (:refused (not-run id name args +no-such-tool+))
+                 (:deciding (not-run id name args +turn-ended+ :announce t))))
+              (t (not-run id name args +turn-ended+ :announce t))))))
+      calls))))
 
 (defun %tool-results-step (agent calls permit)
   "Apply a step's CALLS. Returns the tool-result message, or NIL and a description of the held
@@ -470,34 +498,40 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
            (setf finished t)
            (%append-history agent (llm:msg "user" parts)))
       (unless finished
-        (%append-history
+        (%append-then
          agent
-         (llm:msg "user"
-                  (mapcar (lambda (id)
-                            (or (find id (held-turn-results held) :key (lambda (p) (getf p :tool-use-id))
-                                      :test #'equal)
-                                (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal)
-                                (let ((call (find id (held-turn-calls held)
-                                                  :key (lambda (c) (getf c :id)) :test #'equal))
-                                      (d (%decision-of decision id)))
-                                  (cond
-                                    ((equal id current)
-                                     ;; Its :TOOL-DECIDED event was emitted before it ran.
-                                     (%not-run-part agent id (getf call :name) (getf call :arguments)
-                                                    +may-have-run+ :outcome :unknown :announce nil))
-                                    (t
-                                     ;; Not reached: each gets its own :TOOL-DECIDED event. A call
-                                     ;; the user approved did not run; any other decision is
-                                     ;; written as it would have been, which runs nothing.
-                                     (%held-event :tool-decided (held-turn-id held) call
-                                                  :decision (if (eq d :approve) :turn-failed d)
-                                                  :agent (agent-name agent)
-                                                  :conversation (agent-conversation agent))
-                                     (if (eq d :approve)
-                                         (%not-run-part agent id (getf call :name) (getf call :arguments)
-                                                        +turn-ended+ :announce nil)
-                                         (%held-part agent call d permit recorded)))))))
-                          (held-turn-order held))))))))
+         (mapcar
+          (lambda (id)
+            (let ((stored (or (find id (held-turn-results held) :key (lambda (p) (getf p :tool-use-id))
+                                    :test #'equal)
+                              (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal))))
+              (if stored
+                  (cons stored nil)
+                  (let* ((call (find id (held-turn-calls held) :key (lambda (c) (getf c :id)) :test #'equal))
+                         (name (getf call :name))
+                         (args (getf call :arguments))
+                         (d (%decision-of decision id)))
+                    (flet ((not-run (text &rest keys)
+                             (multiple-value-bind (part thunk)
+                                 (apply #'%deferred-not-run agent id name args text keys)
+                               (cons part thunk))))
+                      (cond
+                        ;; Its :TOOL-DECIDED event was emitted before it ran.
+                        ((equal id current) (not-run +may-have-run+ :outcome :unknown))
+                        ;; Not reached: each gets its own :TOOL-DECIDED event. An approval an
+                        ;; earlier attempt recorded may have run then; an approval of this
+                        ;; attempt did not run.
+                        ((and (eq d :approve) recorded)
+                         (not-run +may-have-run+ :outcome :unknown
+                                                 :decided (list (held-turn-id held) call :may-have-run)))
+                        ((eq d :approve)
+                         (not-run +turn-ended+ :decided (list (held-turn-id held) call :turn-failed)))
+                        (t (not-run (case d
+                                      (:decline +declined+)
+                                      (:expired +expired+)
+                                      (t +unanswered+))
+                                    :decided (list (held-turn-id held) call d)))))))))
+          (held-turn-order held)))))))
 
 (defun %valid-decision-p (decision held)
   (or (member decision '(:approve :decline))

@@ -305,7 +305,9 @@ its tag.
   "Not run: no such tool is available." The calls after it, and a call the app's `:on-hold`
   function signalled while deciding, get "Not run: the turn ended before this call was run."
   Each gets a `:tool-result` event. This happens whenever the failure leaves the step, including
-  when the app handles it with a `handler-case` around `run-turn`. Before this, the next turn sent tool
+  when the app handles it with a `handler-case` around `run-turn`, and when the observer or the
+  result store is what failed: the results are added to the history before their events are
+  emitted and before they are stored. Before this, the next turn sent tool
   calls without results, which the providers refuse, and with #545 it signalled
   `held-turn-required` with no held turn to pass. A failure in the same step as a call held
   under `:on-hold :hold` wins: no held turn is returned, and the held call is written as not

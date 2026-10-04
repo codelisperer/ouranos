@@ -4868,3 +4868,55 @@ that is not registered."
     (is-true (%error-for ag "1"))
     (is (eq :not-run (getf (find :tool-result events :key #'evt:event-type) :outcome)))
     (is (equal "done" (actor:run-turn ag "again")))))
+
+(defclass %failing-store (praxeon/results:memory-result-store)
+  ((calls :initform 0 :accessor %failing-store-calls))
+  (:documentation "A result store whose PUT-RESULT signals from its second call on, as one whose
+database has gone away."))
+
+(defmethod praxeon/results:put-result :around ((store %failing-store) conversation name arguments text)
+  (declare (ignore conversation name arguments text))
+  (if (> (incf (%failing-store-calls store)) 1)
+      (error "the result store is unreachable")
+      (call-next-method)))
+
+(test an-observer-that-fails-on-every-result-still-leaves-a-complete-history
+  "The observer signals on every :TOOL-RESULT, so the step fails on its first call and the
+cleanup's events fail the same way. The history is appended first, so it is complete."
+  (let ((ag (%step-agent '(("1" "a") ("2" "c") ("3" "a")))))
+    (evt:with-observer ((lambda (e) (when (eq :tool-result (evt:event-type e))
+                                      (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go")))
+    (is-true (%every-call-answered-p ag))
+    (is-true (search "may have run" (%result-for ag "1")))
+    (is-true (search "turn ended" (%result-for ag "3")))
+    (is (equal "done" (actor:run-turn ag "again")))))
+
+(test a-result-store-that-fails-still-leaves-a-complete-history
+  "The store accepts the first result and refuses every later one, so the step fails on its
+second call and the cleanup's store calls fail the same way."
+  (let ((ag (%step-agent '(("1" "a") ("2" "c") ("3" "a")))))
+    (actor:offload-tool-results ag (make-instance '%failing-store) :threshold 1000)
+    (signals simple-error (actor:run-turn ag "go"))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "a ran" (%result-for ag "1")))
+    (is-true (search "may have run" (%result-for ag "2")))
+    (is-true (search "turn ended" (%result-for ag "3")))
+    (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1000)
+    (is (equal "done" (actor:run-turn ag "again")))))
+
+(test a-recorded-approval-is-may-have-run-when-the-observer-fails
+  "An earlier attempt recorded an approval of both held calls. This attempt finds the claim
+taken, and its observer signals on the first :TOOL-DECIDED event. Both calls may have run in
+the earlier attempt, so neither is written as not run, and neither runs now."
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend") ("s2" "spend")))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (evt:with-observer ((lambda (e) (when (eq :tool-decided (evt:event-type e))
+                                        (error "the client's stream is closed"))))
+        (signals simple-error
+          (actor:continue-turn ag held :approve :principal "u1"
+                               :claim (lambda (id d) (declare (ignore id d)) (values nil :approve)))))
+      (is-true (search "may have run" (%result-for ag "s1")))
+      (is-true (search "may have run" (%result-for ag "s2")))
+      (is (equal '(0 0) counts))
+      (is-true (%every-call-answered-p ag)))))
