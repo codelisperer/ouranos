@@ -477,6 +477,23 @@
   :components ((:file "tests/session-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/session-db/tests :run-tests)))
 
+;;; The routes an app mounts for aion/oauth sign-ins (#527): the page the browser returns to, and
+;;; the app's client ID metadata document.
+(defsystem "hyperion/oauth"
+  :description "The routes an app mounts for aion/oauth sign-ins: the return page and the client metadata document (#527)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion" "aion/oauth")
+  :components ((:file "src/oauth"))
+  :in-order-to ((test-op (test-op "hyperion/oauth/tests"))))
+
+(defsystem "hyperion/oauth/tests"
+  :description "Tests for hyperion/oauth, against aion/oauth's test authorization server."
+  :depends-on ("hyperion/oauth" "hyperion" "aion/oauth" "aion/oauth/tests" "fiveam"
+               "com.inuoe.jzon" "quri")
+  :components ((:file "tests/oauth-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/oauth/tests :run-tests)))
+
 ;;; Lends each request a connection from a mnemosyne pool, bound to the app's own connection
 ;;; variable (#325), so an app written against one global connection can run under
 ;;; `start :workers'. Aux system so hyperion core keeps no DB dependency (same pattern as

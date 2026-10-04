@@ -83,8 +83,10 @@ has, or two tools under one name. Nothing was registered."))
   "An MCP server the app connects to, as data.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
-URL is the server's MCP endpoint. TOKEN-SOURCE is NIL, or a function of (CONNECTION PRINCIPAL)
-returning a bearer token string or NIL. PER-USER is true when the token belongs to a user: a
+URL is the server's MCP endpoint. TOKEN-SOURCE is where a request's bearer token comes from:
+NIL for none; a function of (CONNECTION PRINCIPAL) returning a token string or NIL; or an object
+with a TOKEN-FOR method, and optionally a TOKEN-REFUSED method that gives a new token after the
+server refuses one, such as the one OAUTH-TOKEN-SOURCE makes from an aion/oauth broker. PER-USER is true when the token belongs to a user: a
 call with no principal is then refused before anything is sent. TIMEOUT is the most seconds a
 request may take, and CALL-TIMEOUT the most a tool call may take. MAX-BODY-BYTES bounds a
 reply."
@@ -158,18 +160,59 @@ checking with the user."
            :text (format nil "The connection ~A needs the user to sign in before this tool can be used. Ask the user to sign in."
                          name))))
 
+(defgeneric token-for (source connection principal)
+  (:documentation "The bearer token SOURCE gives for PRINCIPAL's calls to CONNECTION, or NIL to
+send none. A function is a source: it is called with CONNECTION and PRINCIPAL."))
+
+(defgeneric token-refused (source connection principal token challenge)
+  (:documentation "The server refused TOKEN, with a 401 or 403 whose WWW-Authenticate value is
+CHALLENGE. Return a different token to retry the request with once, or NIL to give up, after
+which the user must sign in. The default gives up."))
+
+(defmethod token-for ((source null) connection principal)
+  (declare (ignore connection principal))
+  nil)
+
+(defmethod token-for ((source function) connection principal)
+  (funcall source connection principal))
+
+(defmethod token-refused (source connection principal token challenge)
+  (declare (ignore source connection principal token challenge))
+  nil)
+
+(defvar *sent-token* nil
+  "The token the last POST of the current request carried, so that a 401 can be answered by
+asking the source for another.")
+
+(defvar *token-override* nil
+  "(CLIENT PRINCIPAL TOKEN) while the one retry after a refused token runs: TOKEN is what
+TOKEN-REFUSED returned, and %TOKEN returns it only for that client and principal. A request
+for another client or another principal made meanwhile, say by a handler of a condition the
+retry signals, gets its token from its own source.")
+
+(define-condition %handshake-refused (error)
+  ((response :initarg :response :reader %handshake-refused-response))
+  (:documentation "Internal: the legacy `initialize' was answered 401 or 403. %SEND hands the
+response back to %REQUEST, so the refused-token retry applies to the handshake as well."))
+
 (defun %token (client principal)
-  (let* ((connection (client-connection client))
-         (source (connection-token-source connection)))
+  (let ((connection (client-connection client)))
     (when (and (connection-per-user connection) (null principal))
       (%require-sign-in client nil nil))
-    (and source (funcall source connection principal))))
+    (when (and *token-override* (eq (first *token-override*) client)
+               (equal (second *token-override*) principal))
+      (return-from %token (third *token-override*)))
+    (handler-case (token-for (connection-token-source connection) connection principal)
+      (error ()
+        ;; A token source that fails, say one that could not reach its authorization server to
+        ;; refresh, fails the call without running it rather than ending the turn.
+        (%request-failed client "its token could not be obtained." '() :outcome :not-run)))))
 
 (defun %post (client body headers principal timeout)
   "POST BODY, a JSON-RPC message as a hash table, with HEADERS and the token for PRINCIPAL.
 Returns the response. A failed connection or a timeout fails the call."
   (let* ((connection (client-connection client))
-         (token (%token client principal))
+         (token (setf *sent-token* (%token client principal)))
          (method (setf *in-flight-method* (gethash "method" body)))
          (request (http:make-request
                    :method :post :url (connection-url connection)
@@ -379,6 +422,8 @@ current revision uses to tell an unknown method apart from a server without the 
                           '() principal (connection-timeout connection))))
     (when (%modern-error-p response)
       (error '%current-revision-after-all))
+    (when (member (http:response-status response) '(401 403))
+      (error '%handshake-refused :response response))
     (%check-status client response principal)
     (let* ((reply (%reply-for client response id))
            (version (%get reply "result" "protocolVersion")))
@@ -452,6 +497,12 @@ Each fallback and retry here happens only on a reply that shows the request was 
 a current-revision request a legacy server could not read, a legacy request a current server
 answered with a current-revision error, or the legacy 404 for an ended session. A request that
 may have been processed is never sent twice."
+  (handler-case
+      (%send-in-era client method params principal timeout extra-headers reprobed)
+    (%handshake-refused (c) (values (%handshake-refused-response c) 0))))
+
+(defun %send-in-era (client method params principal timeout extra-headers reprobed)
+  "%SEND's work, in whichever era the server speaks."
   (flet ((probe ()
            (multiple-value-bind (response id)
                (%modern-request client method (and params (%copy params)) principal timeout
@@ -497,7 +548,7 @@ may have been processed is never sent twice."
                (if reprobed
                    (%request-failed client "it answered the legacy handshake with a current-revision error." '()
                                     :outcome :not-run)
-                   (return-from %send
+                   (return-from %send-in-era
                      (%send client method params principal timeout extra-headers t)))))
          (if (and (not reprobed) (= 400 (http:response-status response))
                   (%modern-error-p response))
@@ -515,7 +566,28 @@ may have been processed is never sent twice."
          (timeout (or timeout (connection-timeout connection)))
          (started (get-internal-real-time)))
     (multiple-value-bind (response id)
-        (%send client method params principal timeout extra-headers)
+        (let ((*sent-token* nil))
+          (multiple-value-bind (response id)
+              (%send client method params principal timeout extra-headers)
+            (let ((sent *sent-token*)
+                  (challenge (http:header-value (http:response-headers response) "www-authenticate")))
+              ;; A refused token: the server did not process the request, so it can be sent
+              ;; once more with another token, when the source has one.
+              (let ((fresh
+                      (and sent (member (http:response-status response) '(401 403))
+                           (handler-case
+                               (token-refused (connection-token-source connection)
+                                              connection principal sent challenge)
+                             (error ()
+                               ;; The source could not get a new token, say because the
+                               ;; authorization server could not be reached. Its tokens are
+                               ;; kept, so this is not a reason to sign in again.
+                               (%request-failed client "its token could not be refreshed." '()
+                                                :outcome :not-run))))))
+                (if (and fresh (not (equal fresh sent)))
+                    (let ((*token-override* (list client principal fresh)))
+                      (%send client method params principal timeout extra-headers))
+                    (values response id))))))
       (%check-status client response principal)
       (let ((reply (%reply-for client response id)))
         (log:info "praxeon/mcp: request" :connection (connection-name connection)
@@ -553,6 +625,34 @@ may have been processed is never sent twice."
   (let ((copy (make-hash-table :test #'equal)))
     (maphash (lambda (k v) (setf (gethash k copy) v)) table)
     copy))
+
+;;; --- tokens from an OAuth sign-in ------------------------------------------------------
+
+(defclass oauth-token-source ()
+  ((broker :initarg :broker :reader oauth-token-source-broker))
+  (:documentation "A token source over an AION/OAUTH broker: the token of each call's principal
+for the connection, refreshed when it has expired or the server refuses it. A connection that
+uses it should be :PER-USER, so a call with no principal is refused before anything is sent."))
+
+(defun oauth-token-source (broker)
+  "A token source that takes each principal's tokens from BROKER (#527, part 2)."
+  (make-instance 'oauth-token-source :broker broker))
+
+(defmethod token-for ((source oauth-token-source) connection principal)
+  (oauth:access-token (oauth-token-source-broker source) principal
+                      (connection-name connection) (connection-url connection)))
+
+(defmethod token-refused ((source oauth-token-source) connection principal token challenge)
+  ;; A 403 for insufficient scope needs a new sign-in with more scope, not a refresh.
+  (unless (equal "insufficient_scope"
+                 (cdr (assoc "error" (oauth:parse-challenge challenge) :test #'string=)))
+    (let ((broker (oauth-token-source-broker source))
+          (name (connection-name connection))
+          (url (connection-url connection)))
+      ;; The new token is taken through ACCESS-TOKEN, so that it is sent only while the
+      ;; resource's metadata, read again after the refusal, still names its issuer.
+      (and (oauth:refresh broker principal name url :rejected token)
+           (oauth:access-token broker principal name url)))))
 
 ;;; --- tools -----------------------------------------------------------------------------
 
@@ -684,7 +784,12 @@ signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the
                              :principal principal
                              :timeout (connection-call-timeout connection)
                              :extra-headers headers)))
-         (text (result-text result)))
+         ;; A content block the client cannot read, such as a number as an image's data, fails
+         ;; the call like any reply it cannot read; the tool ran, so its outcome is unknown.
+         (text (handler-case (result-text result)
+                 (error ()
+                   (%request-failed client "its result could not be read. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
+                                    '() :outcome :unknown)))))
     (when (eq t (gethash "isError" result))
       (log:info "praxeon/mcp: tool reported an error" :connection (connection-name connection)
                                                        :tool (tool-name tool))
@@ -707,11 +812,12 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
 (defun %clip (string limit)
   (if (> (length string) limit) (subseq string 0 limit) string))
 
-(defun grant-tools (agent client &key tools (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability)
+(defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability)
   "Register the tools of CLIENT's server that the app chooses as means of AGENT, and return the
 means names.
 
-TOOLS is a list from LIST-TOOLS; when it is NIL the server is asked, with no principal. ONLY is
+TOOLS is a list from LIST-TOOLS; when it is not given, the server is asked, with no principal.
+An empty list grants nothing and sends nothing. ONLY is
 required: a list of the server's tool names to grant, or :ALL. There is no default that grants
 every tool, so a grant is always a decision the app wrote down. CAPABILITY is passed to
 REGISTER-MEANS, so a caller without it does not see the tools.
@@ -720,7 +826,7 @@ Each means calls its tool for the principal of the turn it runs in, ACTOR:*PRINC
 that clashes with a means AGENT already has, or with another tool in the grant, signals
 TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes the grant."
   (let* ((connection (client-connection client))
-         (tools (or tools (list-tools client)))
+         (tools (if tools-p tools (list-tools client)))
          (chosen (if (eq only :all)
                      tools
                      (remove-if-not (lambda (tool) (member (tool-name tool) only :test #'string=))

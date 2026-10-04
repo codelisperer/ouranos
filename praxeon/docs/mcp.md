@@ -5,7 +5,7 @@ HTTP. It is part 1 of #527:
 - tools only;
 - a bearer token that the app supplies through a function.
 
-OAuth sign-in, resources and prompts, and local servers over stdio are parts 2, 4 and 5.
+Part 2 adds OAuth sign-in, through `aion/oauth` ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)). Resources and prompts, and local servers over stdio, are parts 4 and 5.
 
 ## Using it
 
@@ -38,10 +38,29 @@ OAuth sign-in, resources and prompts, and local servers over stdio are parts 2, 
   - `per-user` refuses a call that has no principal, before anything is sent.
   - `timeout` bounds every request, and `call-timeout` bounds a tool call.
   - `max-body-bytes` bounds a reply.
-- **The principal is chosen for each call.** `run-turn :principal` binds `actor:*principal*` for the turn, and each MCP means reads it when it is called. One agent can therefore serve several users, and each call uses the token of the user whose turn it is. A delegated sub-turn keeps the principal of the turn that delegated it.
+- **The principal is chosen for each call.** `run-turn :principal` binds `actor:*principal*` for the turn, and each MCP means reads it when it is called. Each call therefore uses the token of the user whose turn it is. The principal separates credentials, not conversations: an agent has one history, and every request is built from it, so each user needs an agent, or at least a history, of their own. A delegated sub-turn keeps the principal of the turn that delegated it.
 - **A grant names its tools.** `:only` is required: a list of the server's tool names, or `:all`. No default grants every tool on a server.
 - **A grant is fixed when the app makes it.** Nothing a server sends later changes which tools an agent has. A `notifications/tools/list_changed` from the server is not acted on. The app calls `grant-tools` or `revoke-tools` again.
 - **Names.** A tool's means name is the connection's name, two underscores, and the tool's name. Characters outside `A-Z a-z 0-9 _ -` become `_`, and the whole is cut to 64 characters. A name that clashes with a means the agent already has, or with another tool in the same grant, signals `tool-name-conflict`, and nothing is registered.
+
+## Tokens from an OAuth sign-in
+
+A token source is anything that implements `token-for`: a function, NIL for no token, or an object. A source may also implement `token-refused`, which is called when the server answers 401 or 403 to the token it gave. When `token-refused` returns a different token, the request is sent once more with it. The server did not process the refused request, so this is the one retry a tool call gets.
+
+`(mcp:oauth-token-source broker)` is the source for a server that requires an OAuth sign-in:
+- It gives each principal's own token from an `aion/oauth` broker.
+- It refreshes an expired token, and refreshes once more when the server refuses the token.
+- After an `insufficient_scope` 403 it does not refresh, because only a new sign-in with more scope can help.
+
+Sign-in is not available on Windows yet. `aion/oauth` fetches every URL a server supplies through `fetch-public`, which cannot pin a connection on Windows and refuses there (#295). A sign-in on Windows therefore signals `pinned-connect-unsupported`, until `aion/http-client` can pin a connection there (#536).
+
+When there is no usable token, the call fails with `sign-in-needed`. The app then starts a sign-in with `oauth:start-sign-in` from the challenge that `authorization-required` carried.
+
+```lisp
+(defparameter *docs*
+  (mcp:make-connection :name "docs" :url "https://example.com/mcp" :per-user t
+                       :token-source (mcp:oauth-token-source *broker*)))
+```
 
 ## What the model sees, and what the app sees
 
@@ -59,7 +78,8 @@ All of these let the turn go on. They are subclasses of `praxeon/conditions:tool
 - **No `tools/call` is sent twice.** The client retries a request only when the reply shows the server did not process it:
   - a current-revision request that a legacy server could not read;
   - a legacy request that a current server rejected with a current-revision error;
-  - the legacy 404 for an ended session.
+  - the legacy 404 for an ended session;
+  - a 401 or 403 to a token that the token source then replaces, once, including on the legacy `initialize`. The server refused the request before processing it. An app that marks tools as spending will be able to exclude them from this retry once #531 gives it a way to mark them; until then every refused token gets the one retry.
 - **Every request has a deadline of its own.** A request runs on its own thread and is given up one second after its timeout, whatever the transport does. Two cases need this:
   - On #530's Windows leg, dexador's WinHTTP backend let a request outlive its read timeout (#537).
   - On every platform, a server that sends a keep-alive line every so often keeps a read timeout from firing.
@@ -125,6 +145,10 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
   - On a `HeaderMismatch` (-32020), the specification says a client SHOULD list the tools again and retry. This client fails the call instead. A new listing could change a tool's schema without the app granting it again, and a grant is the app's decision. The app calls `revoke-tools`, then `grant-tools` again, since `grant-tools` refuses a name the agent already has.
   - `ttlMs` and `cacheScope` on list results are ignored, because a grant does not change by itself.
   - The deprecated HTTP+SSE transport from 2024-11-05 is not implemented.
+
+## Known limitations
+
+- **A reply stream left open fails at the read timeout.** `aion/http-client` reads a whole body. A server that leaves its event stream open after its final reply is therefore read until the read timeout, and the call fails then, with outcome `:unknown` for a tool call. The specification says the final response SHOULD end the stream, so a server that conforms does not do this. A test records the behaviour.
 
 ## Logging
 
