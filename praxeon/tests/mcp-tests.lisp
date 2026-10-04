@@ -969,6 +969,17 @@ with client B, to another server: B sends its own token, not the one A's retry c
         (is (eq t (actor::means-entry-confirm (gethash "docs__spend" (actor:agent-means agent)))))
         (is (null (actor::means-entry-confirm (gethash "docs__look" (actor:agent-means agent)))))))))
 
+(test a-confirm-list-that-is-not-a-list-of-granted-tools-registers-nothing
+  "A :CONFIRM value grant-tools cannot read, or a name that is not granted, would let a tool run
+without confirmation, so it is refused before anything is registered."
+  (let ((fake (make-fake :tools (%tools "spend" "look"))))
+    (with-fake (client fake)
+      (dolist (confirm (list t :yes '(spend) '("spnd")))
+        (let ((agent (actor:make-agent)))
+          (signals error (mcp:grant-tools agent client :only :all :confirm confirm))
+          (is (zerop (hash-table-count (actor:agent-means agent)))
+              "nothing registered for ~S" confirm))))))
+
 (test a-held-tool-is-not-sent-again-after-a-refused-token
   "A tool the app holds for confirmation may spend the user's credits, so after the server
 refuses its token it is not sent again. The token is refreshed for the next call, and this one

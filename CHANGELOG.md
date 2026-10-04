@@ -123,11 +123,15 @@ its tag.
   The events `:tool-held` and `:tool-decided` record what was asked and decided.
   `run-turn-through` takes the same arguments and returns the held turn as a third value. A
   delegated sub-turn inherits a blocking `:on-hold`, not `:hold`. A turn with no principal holds
-  nothing. See `praxeon/docs/confirm.md`.
+  nothing. A turn continued after a call held on its last step runs the decided calls and then
+  signals `deliberation-failure`, as an ordinary turn does after its last step, without asking
+  the model again. See `praxeon/docs/confirm.md`.
 - **praxeon/mcp: `grant-tools :confirm`** (#531), a list of the server's tool names to hold, or
   `:all`. Such a tool is registered with `:confirm t`, and after a refused token it is not sent
   again: the token is refreshed and the call fails as not run, telling the model the user can
-  ask again. `call-tool` takes `:held` for the same rule.
+  ask again. `call-tool` takes `:held` for the same rule. Any other `:confirm` value, or a name
+  that is not among the granted tools, signals an error and registers nothing, because a
+  misspelt name would let the tool it meant run without confirmation.
 - **aion/oauth: sign an app's users in to other services with OAuth 2.1** (#527, part 2). A new
   opt-in system, in aion so that hermes can use it too.
   - `make-broker` holds the app's settings and a store: `:redirect-uri`, `:client-name`,

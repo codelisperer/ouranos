@@ -4467,6 +4467,32 @@ same held turn at the same moment. The claim lets one of them run the call."
                  (mapcar #'first (%results-of ag)))
           "one message, in the model's order"))))
 
+(test results-for-only-some-held-calls-do-not-make-the-turn-decided
+  "The history counts as answered only when a result follows for every held call."
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend") ("s2" "spend")))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (setf (actor:agent-history ag)
+            (append (actor:agent-history ag)
+                    (list (llm:msg "user" (list (list :type :tool-result :tool-use-id "s1"
+                                                      :content "spent"))))))
+      (signals actor:held-turn-mismatch (actor:continue-turn ag held :approve :principal "u1"))
+      (is (equal '(0 0) counts)))))
+
+(test a-call-held-on-the-last-step-does-not-get-another-model-call
+  "With :MAX-STEPS 1 the ordinary path runs the step's calls and ends the turn; approving a call
+held on that step does the same, rather than asking the model once more."
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (signals cnd:deliberation-failure
+      (actor:run-turn ag "go" :principal "u1" :max-steps 1
+                      :on-hold (lambda (c) (declare (ignore c)) :approve)))
+    (is (equal '(1 1) counts)))
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :max-steps 1 :on-hold :hold))))
+      (is (= 0 (actor::held-turn-steps held)))
+      (signals cnd:deliberation-failure (actor:continue-turn ag held :approve :principal "u1"))
+      (is (equal '(1 1) counts))
+      (is (equal "spent" (%result-for ag "s1"))))))
+
 (test an-expired-held-turn-is-declined
   (multiple-value-bind (ag counts) (%hold-agent :answers 1)
     (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))

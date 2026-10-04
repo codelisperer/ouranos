@@ -21,7 +21,7 @@ LangGraph's `interrupt()` re-runs the interrupted node when it resumes, which a 
   - An estimate's values may be strings, integers, floats, `T` or NIL.
   - An estimate function that signals, or returns anything else (a ratio included), means the call is not run. It runs on arguments the model wrote.
 
-`praxeon/mcp:grant-tools` takes `:confirm`, a list of the server's tool names to hold, or `:all`. A tool's `readOnlyHint` or `destructiveHint` annotation is untrusted and never decides this; the app does.
+`praxeon/mcp:grant-tools` takes `:confirm`, a list of the server's tool names to hold, or `:all`. Any other value, or a name that is not among the granted tools, signals an error and registers nothing, because a misspelt name would let the tool it meant run without confirmation. A tool's `readOnlyHint` or `destructiveHint` annotation is untrusted and never decides this; the app does.
 
 ## What a turn does with a held call
 
@@ -56,7 +56,7 @@ LangGraph's `interrupt()` re-runs the interrupted node when it resumes, which a 
 1. **Principal:** it is the one the calls were held for. If not, it signals `wrong-principal` and changes nothing.
 2. **Agent:** it is the one that held them, by name (`held-turn-mismatch`).
 3. **History:** the agent's history has the model message that holds these calls.
-   - If the calls' results already follow it, the turn was decided before, and `:already-decided` is returned with the decision the claim recorded.
+   - If a result follows it for every held call, the turn was decided before, and `:already-decided` is returned with the decision the claim recorded.
    - If the message is missing, it signals `held-turn-mismatch`.
 4. **Arguments:** the arguments that run are the ones in the history, which the model wrote. If the held turn's copy, which is what the user was shown, differs, it signals `held-turn-mismatch`.
 
@@ -68,6 +68,7 @@ Then it records the decision through the claim, and runs what was approved:
   - a decline gives "the user declined";
   - an unanswered or expired turn gives that.
 - **Expiry.** A held turn past its `expires-at` is declined, as "not run: the user did not confirm in time".
+- **The last step.** If the call was held on the turn's last step (`:max-steps`), the decided calls run and the turn then signals `deliberation-failure`, as an ordinary turn does after its last step. The model is not asked again.
 - **A changed means.** An approved call whose means is no longer registered with the same `:source`, for example after `revoke-tools`, is not run.
 
 ## When the user moves on

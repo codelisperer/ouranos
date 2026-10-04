@@ -829,7 +829,8 @@ An empty list grants nothing and sends nothing. ONLY is
 required: a list of the server's tool names to grant, or :ALL. There is no default that grants
 every tool, so a grant is always a decision the app wrote down. CAPABILITY is passed to
 REGISTER-MEANS, so a caller without it does not see the tools. CONFIRM is a list of the server's
-tool names to hold for the user's confirmation, or :ALL (#531): each is registered with :CONFIRM
+tool names to hold for the user's confirmation, or :ALL (#531). Any other value, or a name that
+is not among the granted tools, signals an error and registers nothing. Each tool named is registered with :CONFIRM
 T, so a turn decides it through its ON-HOLD policy, and after a refused token it is not sent
 again. A tool's readOnlyHint or destructiveHint annotation is untrusted and never decides this;
 the app does.
@@ -837,6 +838,9 @@ the app does.
 Each means calls its tool for the principal of the turn it runs in, ACTOR:*PRINCIPAL*. A name
 that clashes with a means AGENT already has, or with another tool in the grant, signals
 TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes the grant."
+  (unless (or (null confirm) (eq confirm :all)
+              (and (listp confirm) (every #'stringp confirm)))
+    (error "grant-tools: :confirm must be NIL, :all or a list of tool names, not ~S" confirm))
   (let* ((connection (client-connection client))
          (tools (if tools-p tools (list-tools client)))
          (chosen (if (eq only :all)
@@ -851,6 +855,12 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                                collect n))
                  :test #'string=)))
     (when taken (error 'tool-name-conflict :names taken))
+    ;; A name in :CONFIRM that is not granted is most likely a misspelling, and the tool it meant
+    ;; would then run without confirmation, so it is refused before anything is registered.
+    (let ((unknown (and (listp confirm)
+                        (set-difference confirm (mapcar #'tool-name chosen) :test #'string=))))
+      (when unknown
+        (error "grant-tools: :confirm names tools that are not in this grant: ~{~A~^, ~}" unknown)))
     (loop for tool in chosen
           for name in names
           do (let* ((tool tool)

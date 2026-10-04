@@ -280,10 +280,14 @@ message holding the held calls, :ANSWERED when that message is followed by their
     (cond ((null tail) (values :missing nil))
           ((null (cdr tail)) (values :pending (car tail)))
           (t (let ((next (llm:content (cadr tail))))
+               ;; Answered only when a result follows for every held call; a message with some of
+               ;; them is not one this framework wrote, so it does not match.
                (if (and (listp next)
-                        (some (lambda (p) (and (eq :tool-result (getf p :type))
-                                               (member (getf p :tool-use-id) ids :test #'equal)))
-                              next))
+                        (every (lambda (id)
+                                 (some (lambda (p) (and (eq :tool-result (getf p :type))
+                                                        (equal id (getf p :tool-use-id))))
+                                       next))
+                               ids))
                    (values :answered (car tail))
                    (values :missing (car tail))))))))
 
@@ -401,7 +405,13 @@ approved call whose means is no longer registered with the same :SOURCE is not r
           (%write-held-results agent held recorded permit :recorded t)
           (return-from continue-turn (values nil :already-decided recorded)))
         (%write-held-results agent held decision permit)
-        (%turn-loop agent (max 1 (held-turn-steps held)) permit (held-turn-max-tokens held))))))
+        ;; The steps left after the step that held. With none left the turn ends as an ordinary
+        ;; turn does after its last step's calls, rather than asking the model once more.
+        (let ((steps (held-turn-steps held)))
+          (if (and (integerp steps) (plusp steps))
+              (%turn-loop agent steps permit (held-turn-max-tokens held))
+              (error 'cnd:deliberation-failure
+                     :detail "no final answer within the turn's steps: the decided calls were on its last step")))))))
 
 (defun abandon-held-turn (agent held &key principal claim)
   "Close HELD without a decision: its held calls get \"not run: the user did not confirm\", after
