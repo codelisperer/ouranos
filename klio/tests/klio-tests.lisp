@@ -1108,9 +1108,14 @@ reference is checked like the page's")
         finally (return value)))
 
 (defun %write-content (dir name text)
-  (with-open-file (out (merge-pathnames name dir) :direction :output :if-exists :supersede
-                                                  :if-does-not-exist :create)
-    (write-string text out)))
+  "Write TEXT to NAME in DIR whole: into a temporary file, renamed over NAME. Written in place,
+the file is empty from the open to the close, and a watcher poll in that window read it empty
+(#534)."
+  (let ((target (merge-pathnames name dir))
+        (temporary (merge-pathnames (format nil "~A.tmp" name) dir)))
+    (with-open-file (out temporary :direction :output :if-exists :supersede :if-does-not-exist :create)
+      (write-string text out))
+    (uiop:rename-file-overwriting-target temporary target)))
 
 (defun %served-title (site key)
   (let ((d (k:tree-document (k:site-tree site) key)))
@@ -1143,6 +1148,71 @@ reference is checked like the page's")
                  "fixing it publishes again, the watcher having kept running")
              (is (equal "Another" (%served-title site "two")) "a new file is picked up"))
         (when watcher (k:stop-watching watcher))))))
+
+(test the-watcher-reloads-a-change-only-once-two-polls-have-seen-it
+  ;; The decision, without the timing (#534). A, B and C stand for snapshots; NONE is the
+  ;; watcher's own value for "no change pending", taken from %WATCH-START so that a value that
+  ;; can also be a snapshot fails here.
+  (with-content-dir (dir ("one.md" . +good+))
+    (let ((none (nth-value 1 (klio::%watch-start dir))))
+      (flet ((decide (seen pending now) (multiple-value-list (klio::%watch-step seen pending now))))
+        (is (equal (list nil :a none) (decide :a none :a)) "nothing changed")
+        (is (equal (list nil :a :b) (decide :a none :b)) "a change seen once waits")
+        (is (equal (list t :b none) (decide :a :b :b)) "and is reloaded when the next poll sees it")
+        (is (equal (list nil :a :c) (decide :a :b :c)) "a file still changing waits again")
+        (is (equal (list nil :a none) (decide :a :b :a)) "a change undone before it settled is dropped")
+        ;; NIL is the snapshot of a directory with no content files (Copilot's review of #535).
+        (is (equal (list nil :a nil) (decide :a none nil)) "the first poll to see every file gone waits")
+        (is (equal (list nil :a none) (decide :a nil :a))
+            "and the files coming back at the next poll reload nothing")
+        (is (equal (list t nil none) (decide :a nil nil)) "two polls that see every file gone reload")))))
+
+(test a-directory-emptied-for-one-poll-is-not-published
+  ;; The only content file is gone for one poll and then back. The watcher reloads nothing, so
+  ;; the site never serves an empty tree (Copilot's review of #535).
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (seen nil) (pending nil) (reloads 0)
+           (path (merge-pathnames "one.md" dir))
+           (aside (merge-pathnames "one.md.aside" dir)))
+      (k:boot site)
+      ;; The watcher's own starting state, so a wrong one fails here too.
+      (multiple-value-setq (seen pending) (klio::%watch-start dir))
+      (flet ((poll ()
+               (multiple-value-bind (reload next-seen next-pending)
+                   (klio::%watch-step seen pending (k:content-snapshot dir))
+                 (setf seen next-seen pending next-pending)
+                 (when reload (incf reloads) (k:reload site)))))
+        (rename-file path aside)
+        (is (null (k:content-snapshot dir)) "control: the directory has no content file")
+        (poll)
+        (rename-file aside path)
+        (poll)
+        (is (= 0 reloads))
+        (is (%served-title site "one") "one.md is still served")))))
+
+(test a-file-truncated-for-one-poll-is-not-published
+  ;; The watcher sees one.md empty for exactly one poll, as a poll in the middle of an in-place
+  ;; save does, and then whole. The empty file is never reloaded (#534).
+  (with-content-dir (dir ("one.md" . +good+))
+    (let* ((site (k:make-site dir))
+           (seen nil) (pending nil) (reloads 0))
+      (k:boot site)
+      ;; The watcher's own starting state, so a wrong one fails here too.
+      (multiple-value-setq (seen pending) (klio::%watch-start dir))
+      (flet ((poll ()
+               (multiple-value-bind (reload next-seen next-pending)
+                   (klio::%watch-step seen pending (k:content-snapshot dir))
+                 (setf seen next-seen pending next-pending)
+                 (when reload (incf reloads) (k:reload site)))))
+        (with-open-file (out (merge-pathnames "one.md" dir) :direction :output :if-exists :supersede))
+        (poll)
+        (%write-content dir "one.md" (format nil "---~%title: \"Edited\"~%---~%~%x~%"))
+        (poll)
+        (is (= 0 reloads) "neither the empty file nor the first sight of the edit is reloaded")
+        (poll)
+        (is (= 1 reloads))
+        (is (equal "Edited" (%served-title site "one")))))))
 
 (test a-same-length-edit-in-the-same-second-is-still-seen
   ;; A write date can have one-second resolution, so the snapshot includes a hash of the text.
