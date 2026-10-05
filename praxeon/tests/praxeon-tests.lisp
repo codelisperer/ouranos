@@ -4901,8 +4901,9 @@ call's means returned before its event failed, so the history has its result."
 
 (test a-result-store-that-fails-still-leaves-a-complete-history
   "The store accepts the first result and refuses every later one, so the step fails on its
-second call, after that call's :TOOL-RESULT event. The history says what that event said, and
-each call has one :TOOL-RESULT event."
+second call, after its means ran and before its :TOOL-RESULT event, since a result is stored
+before its event. The history has the call's result, and its one :TOOL-RESULT event, sent by the
+cleanup, carries that result and outcome :OK."
   (let ((ag (%step-agent '(("1" "a") ("2" "c") ("3" "a"))))
         (events '()))
     (actor:offload-tool-results ag (make-instance '%failing-store) :threshold 1000)
@@ -4919,10 +4920,10 @@ each call has one :TOOL-RESULT event."
       (is (= 1 (count-if (lambda (e) (and (eq :tool-call (evt:event-type e)) (equal id (getf e :id))))
                          events))
           "one :tool-call event for call ~A" id))
-    (is (equal "c ran" (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
-                                                       (equal "2" (getf e :id))))
-                                      events)
-                             :content)))
+    (let ((e (find-if (lambda (e) (and (eq :tool-result (evt:event-type e)) (equal "2" (getf e :id))))
+                      events)))
+      (is (equal "c ran" (getf e :content)))
+      (is (eq :ok (getf e :outcome)) "the means ran"))
     (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1000)
     (is (equal "done" (actor:run-turn ag "again")))))
 
@@ -5105,3 +5106,22 @@ is offloaded."
     (is-true (search "read-result" (%result-for ag "1")) "the stand-in")
     (is-true (getf (gethash "1" (actor::agent-result-index ag)) :offloaded))
     (is-true (%every-call-answered-p ag))))
+
+(test a-held-approval-whose-result-the-store-refuses-keeps-outcome-ok
+  "The approved held call's means runs, and the store then refuses its result. The history has
+the result, the call's :TOOL-RESULT event says :OK, and the means ran once."
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    ;; The first put, look's result, succeeds; spend's, the second, is refused.
+    (actor:offload-tool-results ag (make-instance '%failing-store) :threshold 1000)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+          (events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (signals simple-error (actor:continue-turn ag held :approve :principal "u1")))
+      (is (equal "spent" (%result-for ag "s1")))
+      (is (eq :ok (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                  (equal "s1" (getf e :id))))
+                                 events)
+                        :outcome)))
+      (is (= 1 (%events-for events :tool-result "s1")))
+      (is (equal '(1 1) counts))
+      (is-true (%every-call-answered-p ag)))))

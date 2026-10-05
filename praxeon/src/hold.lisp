@@ -91,7 +91,8 @@ the held turn's id, NIL for a call decided on the spot."
 
 (defvar *call-records* nil
   "Inside a step, or a held step being written: call id -> a plist of what has happened to the
-call. :TEXT and :ERROR are the result it gets, noted as soon as it is decided or known.
+call. :TEXT and :ERROR are the result it gets, noted as soon as it is decided or known, with the
+:OUTCOME and :MS its :TOOL-RESULT event carries.
 :CALL-SENT and :RESULT-SENT say its :TOOL-CALL and :TOOL-RESULT events were sent, marked just
 before each is emitted, so an event an observer failed on is never sent again. :PHASE is
 :RUNNING or :REFUSED, noted just before an approved held call is applied. The cleanups of #546
@@ -115,7 +116,7 @@ read these: a call gets its decided text when it has one, and only the events no
   "Run the call as RUN-TURN always has, and return its tool-result part."
   (%part-event agent id name args)
   (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
-    (%record! id :text result :error (and error-p t))
+    (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
     ;; Stored before its event, so that when the observer fails on the event, the index already
     ;; has the result and the cleanup writes its stand-in.
     (let ((kept (%store-result agent id name args result)))
@@ -129,7 +130,7 @@ read these: a call gets its decided text when it has one, and only the events no
 (defun %not-run-part (agent id name args text &key (outcome :not-run) (announce t))
   "A tool-result part for a call that was not run, telling the model TEXT. TEXT is noted in
 *CALL-RECORDS* before any event, because what the call gets is already decided."
-  (%record! id :text text :error t)
+  (%record! id :text text :error t :outcome outcome :ms 0)
   (when announce (%part-event agent id name args))
   ;; Stored before its event, as in %RUN-PART.
   (let ((kept (%store-result agent id name args text)))
@@ -145,7 +146,7 @@ read these: a call gets its decided text when it has one, and only the events no
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-permitted-p entry permit))))
 
-(defun %cleanup-entry (agent id name args text &key (outcome :not-run) (error t) decided (store t))
+(defun %cleanup-entry (agent id name args text &key (outcome :not-run) (ms 0) (error t) decided (store t))
   "What a cleanup of #546 writes for a call: a tool-result part made from TEXT alone, and a
 function that sends what the call has not had. The cleanups append the parts first and call the
 functions after, because the observer or the store may be what failed, and would then fail again
@@ -170,7 +171,7 @@ it failed. Returns (PART . FUNCTION)."
               (apply #'evt:emit :tool-result :id id :name name :content text
                      :source (%means-source agent name) :principal *principal*
                      :agent (agent-name agent) :conversation (agent-conversation agent)
-                     :outcome outcome :ms 0 (when error (list :is-error t))))
+                     :outcome outcome :ms ms (when error (list :is-error t))))
             (when (and store (not index)) (%store-result agent id name args text))))))
 
 (defun %append-then (agent parts-and-thunks)
@@ -202,7 +203,8 @@ result stored, and no call gets an event it already had."
           (cond
             (finished (cons finished nil))
             (h (entry +turn-ended+ :decided (list held-id h :turn-failed)))
-            ((%record id :text) (entry (%record id :text) :error (%record id :error) :store nil))
+            ((%record id :text) (entry (%record id :text) :error (%record id :error) :store nil
+                    :outcome (or (%record id :outcome) :not-run) :ms (or (%record id :ms) 0)))
             ((equal id (car current))
              (ecase (cdr current)
                (:running (entry +may-have-run+ :outcome :unknown))
@@ -514,7 +516,7 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
               ;; means whatever the registry says by then.
               (%record! id :phase (if (%callable-p agent name permit) :running :refused))
               (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
-                (%record! id :text result :error (and error-p t))
+                (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
                 ;; Stored before its event, as in %RUN-PART.
                 (let ((kept (%store-result agent id name args result)))
                   (%record! id :result-sent t)
@@ -576,7 +578,8 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
                     (flet ((entry (text &rest keys) (apply #'%cleanup-entry agent id name args text keys)))
                       (cond
                         ;; Its result was decided or known before the failure.
-                        ((%record id :text) (entry (%record id :text) :error (%record id :error) :store nil))
+                        ((%record id :text) (entry (%record id :text) :error (%record id :error) :store nil
+                    :outcome (or (%record id :outcome) :not-run) :ms (or (%record id :ms) 0)))
                         ;; Its :TOOL-DECIDED event was emitted before it became current. Whether
                         ;; it reached its means is what %HELD-PART noted, not what the registry
                         ;; says now.
