@@ -246,8 +246,37 @@ what this can render."
     (with-output-to-string (s)
       (write-string *context-open* s)
       (dolist (i items)
-        (format s "~&[~(~A~)] ~A" (ctx:ctx-item-role i) (ctx:ctx-item-content i)))
+        (format s "~&[~(~A~)] ~A" (ctx:ctx-item-role i) (%item-text (ctx:ctx-item-content i))))
       (format s "~&~A" *context-close*))))
+
+(defun %context-tag-at-p (string i)
+  "Whether a context tag, <context or </context in any letter case, starts at I in STRING."
+  (let* ((j (if (and (< (1+ i) (length string)) (char= #\/ (char string (1+ i)))) (+ i 2) (1+ i)))
+         (end (+ j (length "context"))))
+    (and (<= end (length string))
+         (string-equal "context" string :start2 j :end2 end))))
+
+(defun %item-text (content)
+  "CONTENT as RENDER-ITEMS writes it inside the context block, so that no item's text can end
+the block or start another item (#527). Any <context or </context in the text, in any letter
+case, has its < written as &lt;, and every line after the first is indented by two spaces, so
+that no line of the text starts the way an item line does, with a role in brackets. Line breaks
+are LF, CR or CRLF; each becomes one LF. The text of an item can come from a third party, such
+as an MCP server's resource."
+  (with-output-to-string (out)
+    (let ((n (length content)) (i 0))
+      (loop while (< i n)
+            do (let ((c (char content i)))
+                 (cond ((or (char= c #\Newline) (char= c #\Return))
+                        (when (and (char= c #\Return) (< (1+ i) n)
+                                   (char= #\Newline (char content (1+ i))))
+                          (incf i))
+                        (write-char #\Newline out)
+                        (write-string "  " out))
+                       ((and (char= c #\<) (%context-tag-at-p content i))
+                        (write-string "&lt;" out))
+                       (t (write-char c out))))
+               (incf i)))))
 
 (defun attach-context (messages text)
   "MESSAGES with TEXT attached as a trailing text part of the last user message.

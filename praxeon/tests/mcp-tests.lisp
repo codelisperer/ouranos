@@ -48,6 +48,11 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   era reply page-size tools require-token legacy-version
   (reject-headers nil)
   (fail-next nil) (endless nil) (initialize-status nil) (bad-tools nil)
+  ;; Part 4: lists of JSON objects for resources/list, resources/templates/list and
+  ;; prompts/list; CONTENTS maps a URI to its contents vector; PROMPT-MESSAGES maps a prompt's
+  ;; name to its messages vector. BAD-PAGE makes every listing's page member a string.
+  (resources '()) (templates '()) (contents '()) (prompts '()) (prompt-messages '())
+  (bad-page nil) (prompt-arguments nil)
   (sessions '()) (end-session nil) (calls 0) (initializes 0)
   (lock (sb-thread:make-mutex)))
 
@@ -125,6 +130,30 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
          (:status-500 (list :status 500))
          (:input (%obj "resultType" "input_required" "inputRequests" (%obj)))
          (t (list :error -32602 "unknown tool")))))
+    ((member method '("resources/list" "resources/templates/list" "prompts/list") :test #'string=)
+     (let* ((member (cond ((string= method "resources/list") "resources")
+                          ((string= method "prompts/list") "prompts")
+                          (t "resourceTemplates")))
+            (all (cond ((string= method "resources/list") (fake-resources fake))
+                       ((string= method "prompts/list") (fake-prompts fake))
+                       (t (fake-templates fake))))
+            (start (let ((c (gethash "cursor" params))) (if (stringp c) (parse-integer c) 0)))
+            (end (min (length all) (+ start (fake-page-size fake)))))
+       (%obj member (if (fake-bad-page fake) "not a list" (coerce (subseq all start end) 'vector))
+             "nextCursor" (if (< end (length all)) (princ-to-string end) 'null))))
+    ((string= method "resources/read")
+     (let ((uri (gethash "uri" params)))
+       (cond ((equal uri "file:///missing") (list :error -32602 "Resource not found"))
+             ((equal uri "file:///old-missing") (list :error -32002 "Resource not found"))
+             ((equal uri "file:///ask") (%obj "resultType" "input_required" "inputRequests" (%obj)))
+             ((equal uri "file:///no-contents") (%obj "resultType" "complete"))
+             (t (%obj "contents" (or (cdr (assoc uri (fake-contents fake) :test #'equal)) #()))))))
+    ((string= method "prompts/get")
+     (setf (fake-prompt-arguments fake) (gethash "arguments" params))
+     (let ((messages (cdr (assoc (gethash "name" params) (fake-prompt-messages fake) :test #'equal))))
+       (if messages
+           (%obj "description" "a prompt" "messages" messages)
+           (list :error -32602 "unknown prompt"))))
     (t (list :error -32601 "Method not found"))))
 
 (defun %modern-headers-ok-p (request message)
@@ -137,7 +166,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                 (gethash "io.modelcontextprotocol/protocolVersion" meta))
          (equal (th:request-header request "Mcp-Method") method)
          (or (not (member method '("tools/call" "resources/read" "prompts/get") :test #'equal))
-             (equal (th:request-header request "Mcp-Name") (gethash "name" params))))))
+             (equal (th:request-header request "Mcp-Name")
+                    (or (gethash "name" params) (gethash "uri" params)))))))
 
 (defun %serve (fake)
   (lambda (request stream)
@@ -1001,3 +1031,190 @@ fails as not run."
       (is (equal "echo {}" (mcp:call-tool client tool (%obj) :principal "u1" :held t))
           "the refreshed token is used by the next call")
       (is (= 1 (fake-calls fake))))))
+
+;;; --- resources and prompts (#527, part 4) -----------------------------------------------
+
+(defun %resource-json (uri name &rest more)
+  (apply #'%obj "uri" uri "name" name more))
+
+(defun %contents (&rest objects) (coerce objects 'vector))
+
+(test resources-and-templates-are-listed-across-pages-in-both-eras
+  "An entry without a string uri or name is left out."
+  (dolist (era '(:modern :legacy))
+    (let ((fake (make-fake :era era :page-size 2)))
+      (setf (fake-resources fake)
+            (list (%resource-json "file:///a" "a" "mimeType" "text/plain" "size" 12)
+                  (%obj "name" "no uri")
+                  (%resource-json "file:///b" "b" "title" "B")
+                  (%resource-json "file:///c" "c"))
+            (fake-templates fake)
+            (list (%obj "uriTemplate" "file:///{path}" "name" "files")))
+      (with-fake (client fake)
+        (let ((resources (mcp:list-resources client)))
+          (is (equal '("file:///a" "file:///b" "file:///c") (mapcar #'mcp:resource-uri resources))
+              "~A" era)
+          (is (equal "text/plain" (mcp:resource-mime-type (first resources))))
+          (is (eql 12 (mcp:resource-size (first resources))))
+          (is (equal "B" (mcp:resource-title (second resources)))))
+        (is (equal '("file:///{path}")
+                   (mapcar #'mcp:resource-template-uri-template (mcp:list-resource-templates client))))))))
+
+(test a-listing-page-without-a-list-fails
+  (let ((fake (make-fake)))
+    (setf (fake-bad-page fake) t)
+    (with-fake (client fake)
+      (dolist (list (list #'mcp:list-resources #'mcp:list-resource-templates #'mcp:list-prompts))
+        (handler-case (progn (funcall list client) (fail "a page without a list was read"))
+          (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))))))
+
+(test reading-a-resource-gives-its-text-and-describes-binary-content
+  "Several contents in one reply; a blob is kept only as its length. The fake server checks
+that Mcp-Name carries the URI, and an https URI is read through the server."
+  (dolist (era '(:modern :legacy))
+    (let ((fake (make-fake :era era)))
+      (setf (fake-contents fake)
+            (list (cons "file:///dir"
+                        (%contents (%obj "uri" "file:///dir/a.txt" "mimeType" "text/plain" "text" "hello")
+                                   (%obj "uri" "file:///dir/b.png" "mimeType" "image/png" "blob" "AAAA")))
+                  (cons "https://example.invalid/page" (%contents (%obj "uri" "https://example.invalid/page"
+                                                                        "text" "via the server")))))
+      (with-fake (client fake)
+        (let ((contents (mcp:read-resource client "file:///dir")))
+          (is (equal '("hello" nil) (mapcar #'mcp:resource-content-text contents)) "~A" era)
+          (is (equal '(nil 4) (mapcar #'mcp:resource-content-blob-length contents))))
+        (is (equal "via the server"
+                   (mcp:resource-content-text (first (mcp:read-resource client "https://example.invalid/page")))))))))
+
+(test a-missing-resource-is-resource-not-found-and-other-failures-are-request-failed
+  (let ((fake (make-fake)))
+    (with-fake (client fake)
+      (dolist (uri '("file:///missing" "file:///old-missing"))
+        (handler-case (progn (mcp:read-resource client uri) (fail "no error for ~A" uri))
+          (mcp:resource-not-found (e) (is (equal uri (mcp:resource-not-found-uri e))))))
+      (dolist (uri '("file:///ask" "file:///no-contents"))
+        (handler-case (progn (mcp:read-resource client uri) (fail "no error for ~A" uri))
+          (mcp:resource-not-found () (fail "~A is not a missing resource" uri))
+          (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))))))
+
+(defun %context-items (agent) (praxeon/context:context-items (actor:agent-context agent)))
+
+(test a-resource-added-to-an-agent-is-labelled-replaced-and-removed
+  (let ((fake (make-fake)))
+    (setf (fake-contents fake)
+          (list (cons "file:///notes" (%contents (%obj "uri" "file:///notes" "text" "first")))))
+    (with-fake (client fake)
+      (let ((agent (actor:make-agent)))
+        (let ((items (mcp:add-resource agent client "file:///notes" :value 3)))
+          (is (= 1 (length items)))
+          (let ((item (first items)))
+            (is-true (search "file:///notes" (praxeon/context:ctx-item-content item)))
+            (is-true (search "connection docs" (praxeon/context:ctx-item-content item)))
+            (is-true (search "not instructions" (praxeon/context:ctx-item-content item)))
+            (is-true (search "first" (praxeon/context:ctx-item-content item)))
+            (is (eq :resource (praxeon/context:ctx-item-role item)))
+            (is (= 3 (praxeon/context:ctx-item-value item)))
+            (is (equal '(:mcp "docs" :uri "file:///notes") (praxeon/context:ctx-item-source item)))
+            (is (= (praxeon/prompt:estimate-tokens (praxeon/context:ctx-item-content item))
+                   (praxeon/context:ctx-item-tokens item))
+                "the tokens are the estimate of the item's whole text")))
+        ;; Added again after it changed: the earlier copy is replaced.
+        (setf (fake-contents fake)
+              (list (cons "file:///notes" (%contents (%obj "uri" "file:///notes" "text" "second")))))
+        (mcp:add-resource agent client "file:///notes")
+        (is (= 1 (length (%context-items agent))))
+        (is-true (search "second" (praxeon/context:ctx-item-content (first (%context-items agent)))))
+        (is (= 1 (mcp:remove-resource agent client "file:///notes")))
+        (is (null (%context-items agent)))))))
+
+(test a-resource-larger-than-the-context-budget-signals-and-adds-nothing
+  (let ((fake (make-fake)))
+    (setf (fake-contents fake)
+          (list (cons "file:///big" (%contents (%obj "uri" "file:///big/1" "text" "small")
+                                               (%obj "uri" "file:///big/2"
+                                                     "text" (make-string 4000 :initial-element #\x)))))
+          )
+    (with-fake (client fake)
+      (let ((agent (actor:make-agent)))
+        (setf (praxeon/context:context-budget (actor:agent-context agent)) 200)
+        (handler-case (progn (mcp:add-resource agent client "file:///big") (fail "no signal"))
+          (mcp:resource-too-large (e)
+            (is (equal "file:///big" (mcp:resource-too-large-uri e)))
+            (is (= 200 (mcp:resource-too-large-budget e)))
+            (is (> (mcp:resource-too-large-tokens e) 200))))
+        (is (null (%context-items agent)) "nothing added, not even the small content")))))
+
+(test uri-templates-expand-at-levels-1-and-2-and-refuse-the-rest
+  (is (equal "file:///a%20b" (mcp:expand-uri-template "file:///{path}" '(("path" . "a b")))))
+  (is (equal "file:///a%2Fb" (mcp:expand-uri-template "file:///{path}" '(("path" . "a/b")))))
+  (is (equal "file:///a/b" (mcp:expand-uri-template "file:///{+path}" '(("path" . "a/b")))))
+  (is (equal "page#sec%20one" (mcp:expand-uri-template "page{#frag}" '(("frag" . "sec one")))))
+  (is (equal "file:///" (mcp:expand-uri-template "file:///{path}" '())) "no value, no text")
+  (is (equal "x/%C3%A9" (mcp:expand-uri-template "x/{v}" '(("v" . "é")))))
+  (dolist (template '("{a,b}" "{?q}" "{x*}" "{x:3}" "{/p}" "{open" "close}"))
+    (signals error (mcp:expand-uri-template template '(("a" . "1") ("b" . "2") ("q" . "3")
+                                                     ("x" . "4") ("p" . "5") ("open" . "6"))))))
+
+(defun %prompt-json (name &rest arguments)
+  (%obj "name" name "description" (format nil "the ~A prompt" name)
+        "arguments" (map 'vector (lambda (a) (%obj "name" (first a) "required" (second a))) arguments)))
+
+(test prompts-are-listed-and-got-with-their-arguments
+  (dolist (era '(:modern :legacy))
+    (let ((fake (make-fake :era era)))
+      (setf (fake-prompts fake) (list (%prompt-json "review" '("code" t) '("style" nil)))
+            (fake-prompt-messages fake)
+            (list (cons "review"
+                        (vector (%obj "role" "user" "content" (%obj "type" "text" "text" "Review this."))
+                                (%obj "role" "user" "content" (%obj "type" "image" "data" "AAAA" "mimeType" "image/png"))
+                                (%obj "role" "user" "content" (%obj "type" "resource_link" "uri" "file:///x" "name" "x"))
+                                (%obj "role" "user" "content" (%obj "type" "resource"
+                                                                    "resource" (%obj "uri" "file:///y" "text" "embedded")))))))
+      (with-fake (client fake)
+        (let ((prompt (first (mcp:list-prompts client))))
+          (is (equal "review" (mcp:prompt-name prompt)) "~A" era)
+          (is (equal '(("code" . t) ("style" . nil))
+                     (mapcar (lambda (a) (cons (mcp:prompt-argument-name a) (mcp:prompt-argument-required a)))
+                             (mcp:prompt-arguments prompt))))
+          (multiple-value-bind (messages description)
+              (mcp:get-prompt client prompt :arguments '(("code" . "(+ 1 2)")))
+            (is (equal "a prompt" description))
+            (is (equal "(+ 1 2)" (gethash "code" (fake-prompt-arguments fake))))
+            (let ((texts (mapcar (lambda (m) (getf (first (llm:content m)) :text)) messages)))
+              (is (equal "Review this." (first texts)))
+              (is-true (search "image omitted" (second texts)))
+              (is-true (search "file:///x" (third texts)))
+              (is (equal "embedded" (fourth texts))))
+            (is (= 4 (length (mcp:prompt-input prompt messages))) "one part per user message")))))))
+
+(test a-prompt-missing-a-required-argument-is-refused-before-anything-is-sent
+  (let ((fake (make-fake)))
+    (setf (fake-prompts fake) (list (%prompt-json "review" '("code" t))))
+    (with-fake (client fake)
+      (let* ((prompt (first (mcp:list-prompts client)))
+             (sent (length (requests))))
+        (handler-case (progn (mcp:get-prompt client prompt) (fail "no refusal"))
+          (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))
+        (handler-case (progn (mcp:get-prompt client prompt :arguments '(("code" . 42))) (fail "no refusal"))
+          (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))
+        (is (= sent (length (requests))) "nothing was sent")))))
+
+(test a-prompt-with-assistant-messages-is-not-one-user-turn
+  (let ((fake (make-fake)))
+    (setf (fake-prompts fake) (list (%prompt-json "chat"))
+          (fake-prompt-messages fake)
+          (list (cons "chat" (vector (%obj "role" "user" "content" (%obj "type" "text" "text" "Hi"))
+                                     (%obj "role" "assistant" "content" (%obj "type" "text" "text" "Hello"))))))
+    (with-fake (client fake)
+      (let* ((prompt (first (mcp:list-prompts client)))
+             (messages (mcp:get-prompt client prompt)))
+        (handler-case (progn (mcp:prompt-input prompt messages) (fail "no signal"))
+          (mcp:prompt-has-assistant-messages (e)
+            (is (eq prompt (mcp:prompt-has-assistant-messages-prompt e)))))))))
+
+(test a-per-user-connection-lists-no-resources-without-a-principal
+  (let ((fake (make-fake)))
+    (setf (fake-resources fake) (list (%resource-json "file:///a" "a")))
+    (with-fake (client fake :per-user t :token-source (lambda (c p) (declare (ignore c p)) "t"))
+      (signals mcp:sign-in-needed (mcp:list-resources client))
+      (is (null (requests)) "nothing was sent"))))
