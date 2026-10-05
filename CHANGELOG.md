@@ -307,9 +307,10 @@ its tag.
   Each gets a `:tool-result` event. This happens whenever the failure leaves the step, including
   when the app handles it with a `handler-case` around `run-turn`, and when the observer or the
   result store is what failed: the results are added to the history before their events are
-  emitted and before they are stored. A call whose `:tool-result` event was already emitted,
-  or whose not-run text was already decided, keeps that text, or its stand-in when the store
-  already offloaded it, and gets no second event. Before this, the next turn sent tool
+  emitted and before they are stored. A call whose result was already known, or whose not-run
+  text was already decided, keeps that text, or its stand-in when the store already offloaded
+  it. Each call gets one `:tool-call` and one `:tool-result` event, even when the observer
+  failed on one of them. Before this, the next turn sent tool
   calls without results, which the providers refuse, and with #545 it signalled
   `held-turn-required` with no held turn to pass. A failure in the same step as a call held
   under `:on-hold :hold` wins: no held turn is returned, and the held call is written as not

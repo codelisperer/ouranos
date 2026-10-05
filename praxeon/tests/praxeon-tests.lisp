@@ -4882,13 +4882,14 @@ database has gone away."))
 
 (test an-observer-that-fails-on-every-result-still-leaves-a-complete-history
   "The observer signals on every :TOOL-RESULT, so the step fails on its first call and the
-cleanup's events fail the same way. The history is appended first, so it is complete."
+cleanup's events fail the same way. The history is appended first, so it is complete. The first
+call's means returned before its event failed, so the history has its result."
   (let ((ag (%step-agent '(("1" "a") ("2" "c") ("3" "a")))))
     (evt:with-observer ((lambda (e) (when (eq :tool-result (evt:event-type e))
                                       (error "the client's stream is closed"))))
       (signals simple-error (actor:run-turn ag "go")))
     (is-true (%every-call-answered-p ag))
-    (is-true (search "may have run" (%result-for ag "1")))
+    (is (equal "a ran" (%result-for ag "1")))
     (is-true (search "turn ended" (%result-for ag "3")))
     (is (equal "done" (actor:run-turn ag "again")))))
 
@@ -5001,4 +5002,82 @@ ACT refuses it before it runs. It is written as refused, not as one that may hav
                                       events)
                              :outcome)))
       (is (equal '(0 1) counts))
+      (is-true (%every-call-answered-p ag)))))
+
+(defun %events-for (events type id)
+  (count-if (lambda (e) (and (eq type (evt:event-type e)) (equal id (getf e :id)))) events))
+
+(test a-not-run-call-whose-tool-call-event-fails-still-gets-its-result-event
+  "The estimate function signals, so the call is written as not run, and the observer fails on
+that call's :TOOL-CALL event. The call keeps the estimate-failed text and gets one :TOOL-RESULT."
+  (let ((ag (%step-agent '(("1" "a") ("2" "s") ("3" "c"))))
+        (events '()))
+    (actor:register-means ag "s" "spends" (lambda (in) (declare (ignore in)) "spent")
+                          :confirm (lambda (args) (declare (ignore args)) (error "no estimate")))
+    (evt:with-observer ((lambda (e)
+                          (push e events)
+                          (when (and (eq :tool-call (evt:event-type e)) (equal "2" (getf e :id)))
+                            (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go" :principal "u1")))
+    (is-true (search "estimated" (%result-for ag "2")))
+    (is (= 1 (%events-for events :tool-result "2")))
+    (is (= 1 (%events-for events :tool-call "2")))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again" :principal "u1")))))
+
+(test a-held-call-whose-tool-held-event-fails-gets-one-call-and-one-result-event
+  (let ((ag (%step-agent '(("1" "a") ("2" "s") ("3" "c"))))
+        (events '()))
+    (actor:register-means ag "s" "spends" (lambda (in) (declare (ignore in)) "spent") :confirm t)
+    (evt:with-observer ((lambda (e)
+                          (push e events)
+                          (when (eq :tool-held (evt:event-type e))
+                            (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+    (is-true (search "turn ended" (%result-for ag "2")))
+    (is (= 1 (%events-for events :tool-call "2")))
+    (is (= 1 (%events-for events :tool-result "2")))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again" :principal "u1")))))
+
+(test a-decline-whose-tool-decided-event-fails-is-kept
+  "The ON-HOLD function declines, and the observer fails on the :TOOL-DECIDED event. The model is
+still told the user declined, so it does not call the tool again and ask the user twice."
+  (let ((ag (%step-agent '(("1" "a") ("2" "s") ("3" "c"))))
+        (events '()))
+    (actor:register-means ag "s" "spends" (lambda (in) (declare (ignore in)) "spent") :confirm t)
+    (evt:with-observer ((lambda (e)
+                          (push e events)
+                          (when (eq :tool-decided (evt:event-type e))
+                            (error "the client's stream is closed"))))
+      (signals simple-error
+        (actor:run-turn ag "go" :principal "u1" :on-hold (lambda (c) (declare (ignore c)) :decline))))
+    (is (equal "Not run: the user declined." (%result-for ag "2")))
+    (is (= 1 (%events-for events :tool-call "2")))
+    (is (= 1 (%events-for events :tool-result "2")))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again" :principal "u1")))))
+
+(test an-approved-call-whose-means-unregisters-itself-may-have-run
+  "The approved held call's means removes its own registration and then signals. It reached its
+means, so it may have run, whatever the registry says when the cleanup runs."
+  (multiple-value-bind (ag counts)
+      (%hold-agent :answers 1
+                   :extra-means (lambda (ag counts)
+                                  (actor:register-means ag "spend" "spends credits"
+                                                        (lambda (in) (declare (ignore in))
+                                                          (incf (first counts))
+                                                          (remhash "spend" (actor:agent-means ag))
+                                                          (error "the server went away"))
+                                                        :confirm t :source '(:connection "svc" :tool "spend"))))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+          (events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (signals cnd:means-failure (actor:continue-turn ag held :approve :principal "u1")))
+      (is-true (search "may have run" (%result-for ag "s1")))
+      (is (eq :unknown (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                       (equal "s1" (getf e :id))))
+                                      events)
+                             :outcome)))
+      (is (equal '(1 1) counts))
       (is-true (%every-call-answered-p ag)))))
