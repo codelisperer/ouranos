@@ -623,7 +623,7 @@ may have been processed is never sent twice."
           (unless (hash-table-p result)
             (%failed-in-flight client "its result was not a JSON object." '()))
           (when (equal "input_required" (%get result "resultType"))
-            (%request-failed client "the tool asked for input this client cannot provide."
+            (%request-failed client "the server asked for input this client cannot provide."
                              '() :outcome :not-run))
           result)))))
 

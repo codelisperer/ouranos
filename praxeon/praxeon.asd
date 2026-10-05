@@ -199,7 +199,9 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "wire")
-                             (:file "client"))))
+                             (:file "client")
+                             (:file "resources")
+                             (:file "prompts"))))
   :in-order-to ((test-op (test-op "praxeon/mcp/tests"))))
 
 (defsystem "praxeon/mcp/tests"

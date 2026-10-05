@@ -101,8 +101,9 @@ case praxeon left empty.
 
 **5. MCP, partly (#527).** `praxeon/mcp` gives agents the tools of MCP servers over Streamable HTTP, in
 the current revision of the specification and the legacy ones, and, for a server that requires
-OAuth, sends each user the token from their `aion/oauth` sign-in and refreshes it. Resources and prompts, and local servers over
-stdio, are later parts of #527.
+OAuth, sends each user the token from their `aion/oauth` sign-in and refreshes it. An app can
+add a server's resources to an agent's context and get its prompts. Local servers over stdio
+are a later part of #527.
 
 **6. Context offload.** The most on-thesis idea in DeepAgents, and praxeon has the disk for
 it (`hermes/blob`). See the DAG note below — the obvious implementation is illegal.

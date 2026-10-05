@@ -8,7 +8,10 @@
                     (#:actor #:praxeon/actor)
                     (#:cnd #:praxeon/conditions)
                     (#:evt #:praxeon/event)
-                    (#:oauth #:aion/oauth))
+                    (#:oauth #:aion/oauth)
+                    (#:ctx #:praxeon/context)
+                    (#:pr #:praxeon/prompt)
+                    (#:llm #:praxeon/llm))
   (:documentation
    "A client for MCP (Model Context Protocol) servers, and the bridge that gives their tools to
     Praxeon agents as means (#527).
@@ -42,6 +45,25 @@
    ;; tools
    #:tool #:tool-name #:tool-title #:tool-description #:tool-input-schema #:tool-annotations
    #:list-tools #:call-tool #:grant-tools #:revoke-tools #:means-name
+   ;; resources (#527, part 4)
+   #:resource #:resource-uri #:resource-name #:resource-title #:resource-description
+   #:resource-mime-type #:resource-size #:resource-annotations
+   #:resource-template #:resource-template-uri-template #:resource-template-name
+   #:resource-template-title #:resource-template-description #:resource-template-mime-type
+   #:resource-template-annotations
+   #:resource-content #:resource-content-uri #:resource-content-mime-type
+   #:resource-content-text #:resource-content-blob-length
+   #:list-resources #:list-resource-templates #:expand-uri-template #:read-resource
+   #:add-resource #:remove-resource
+   #:resource-not-found #:resource-not-found-uri
+   #:resource-too-large #:resource-too-large-uri #:resource-too-large-tokens
+   #:resource-too-large-budget
+   ;; prompts (#527, part 4)
+   #:prompt #:prompt-name #:prompt-title #:prompt-description #:prompt-arguments
+   #:prompt-argument #:prompt-argument-name #:prompt-argument-description
+   #:prompt-argument-required
+   #:list-prompts #:get-prompt #:prompt-input
+   #:prompt-has-assistant-messages #:prompt-has-assistant-messages-prompt
    ;; conditions
    #:mcp-error #:request-failed #:request-failed-code #:tool-error
    #:authorization-required #:authorization-required-connection
