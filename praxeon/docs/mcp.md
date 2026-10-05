@@ -173,7 +173,7 @@ Resources are chosen by the app. Nothing here gives the model a way to read a re
   - `value` is the item's importance. `ctx:assemble` sends the items with the highest value per token that fit the agent's context budget, so an item can be left out of a request when others fill the budget, and nothing says so. Every context item works this way.
   - Each content's tokens are estimated once, over the heading line and the text, and that number is the item's `tokens`. A content larger than the agent's context budget would never be sent, so `add-resource` signals `resource-too-large` and adds nothing. The check is made when the resource is added: a smaller budget set later can make an item too large to send.
   - **Per-user resources.** The items stay in the context for every later turn, whoever its principal is, as tool results in the history do. Add a resource read with one user's token only to an agent that serves that user alone, and remove it with `remove-resource` when the app forgets that user (#150).
-- Text from a server cannot end the context block or pose as another item: `prompt:render-items` escapes `<context>` and `</context>` in an item's text and indents its later lines.
+- Text from a server cannot end the context block or pose as another item. `prompt:render-items` escapes the block's tags in an item's text, taking their names from `prompt:*context-open*` and `prompt:*context-close*` when they have the form `<name>` and `</name>`. It indents every later line of the text, after any line break a model reads as one: LF, CR, CRLF, VT, FF, NEL, LS or PS.
 
 ### Prompts
 

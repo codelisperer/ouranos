@@ -249,34 +249,60 @@ what this can render."
         (format s "~&[~(~A~)] ~A" (ctx:ctx-item-role i) (%item-text (ctx:ctx-item-content i))))
       (format s "~&~A" *context-close*))))
 
-(defun %context-tag-at-p (string i)
-  "Whether a context tag, <context or </context in any letter case, starts at I in STRING."
-  (let* ((j (if (and (< (1+ i) (length string)) (char= #\/ (char string (1+ i)))) (+ i 2) (1+ i)))
-         (end (+ j (length "context"))))
-    (and (<= end (length string))
-         (string-equal "context" string :start2 j :end2 end))))
+(defun %tag-name (tag closing)
+  "The name in TAG when TAG is <name>, or </name> when CLOSING; otherwise NIL."
+  (let ((start (if closing 2 1)))
+    (and (stringp tag)
+         (> (length tag) (1+ start))
+         (string= (if closing "</" "<") tag :end2 start)
+         (char= #\> (char tag (1- (length tag))))
+         (let ((name (subseq tag start (1- (length tag)))))
+           (and (plusp (length name))
+                (notany (lambda (c) (find c "<>/ ")) name)
+                name)))))
+
+(defun %tag-at-p (string i names)
+  "Whether a tag named one of NAMES, <name or </name in any letter case, starts at I in STRING."
+  (let ((j (if (and (< (1+ i) (length string)) (char= #\/ (char string (1+ i)))) (+ i 2) (1+ i))))
+    (some (lambda (name)
+            (let ((end (+ j (length name))))
+              (and (<= end (length string))
+                   (string-equal name string :start2 j :end2 end))))
+          names)))
+
+(defparameter +line-breaks+
+  (coerce (mapcar #'code-char '(10 11 12 13 #x85 #x2028 #x2029)) 'string)
+  "The characters read as line breaks: LF, VT, FF, CR, NEL, LS and PS.")
 
 (defun %item-text (content)
   "CONTENT as RENDER-ITEMS writes it inside the context block, so that no item's text can end
-the block or start another item (#527). Any <context or </context in the text, in any letter
-case, has its < written as &lt;, and every line after the first is indented by two spaces, so
-that no line of the text starts the way an item line does, with a role in brackets. Line breaks
-are LF, CR or CRLF; each becomes one LF. The text of an item can come from a third party, such
-as an MCP server's resource."
-  (with-output-to-string (out)
-    (let ((n (length content)) (i 0))
-      (loop while (< i n)
-            do (let ((c (char content i)))
-                 (cond ((or (char= c #\Newline) (char= c #\Return))
-                        (when (and (char= c #\Return) (< (1+ i) n)
-                                   (char= #\Newline (char content (1+ i))))
-                          (incf i))
-                        (write-char #\Newline out)
-                        (write-string "  " out))
-                       ((and (char= c #\<) (%context-tag-at-p content i))
-                        (write-string "&lt;" out))
-                       (t (write-char c out))))
-               (incf i)))))
+the block or start another item (#527).
+
+The tag names come from *CONTEXT-OPEN* and *CONTEXT-CLOSE* when the block is rendered: when a
+tag is <name> or </name>, any <name or </name in the text, in any letter case, has its < written
+as &lt;. A tag of another form is not escaped; only the indentation below applies to it.
+
+Every line after the first is indented by two spaces, so that no line of the text starts the
+way an item line does, with a role in brackets, or with a tag. A line break is LF, VT, FF, CR,
+CRLF, NEL, LS or PS, since a model reads all of them as one; each is written as one LF. The text
+of an item can come from a third party, such as an MCP server's resource."
+  (let ((names (remove nil (remove-duplicates (list (%tag-name *context-open* nil)
+                                                    (%tag-name *context-close* t))
+                                              :test #'string-equal))))
+    (with-output-to-string (out)
+      (let ((n (length content)) (i 0))
+        (loop while (< i n)
+              do (let ((c (char content i)))
+                   (cond ((find c +line-breaks+)
+                          (when (and (char= c #\Return) (< (1+ i) n)
+                                     (char= #\Newline (char content (1+ i))))
+                            (incf i))
+                          (write-char #\Newline out)
+                          (write-string "  " out))
+                         ((and (char= c #\<) names (%tag-at-p content i names))
+                          (write-string "&lt;" out))
+                         (t (write-char c out))))
+                 (incf i))))))
 
 (defun attach-context (messages text)
   "MESSAGES with TEXT attached as a trailing text part of the last user message.
