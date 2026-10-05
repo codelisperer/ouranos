@@ -13,8 +13,20 @@
 ;;;;
 ;;;; The event vocabulary the actor loop emits:
 ;;;;   (:type :deliberating :step N)                       -- about to call the model
-;;;;   (:type :tool-call    :id .. :name .. :arguments ..) -- the model chose a means
-;;;;   (:type :tool-result  :id .. :name .. :content ..)   -- the means ran
+;;;;   (:type :tool-call    :id .. :name .. :arguments .. :source .. :principal .. :agent ..
+;;;;                        :conversation ..)
+;;;;                        -- the model chose a means
+;;;;   (:type :tool-result  :id .. :name .. :content .. :source .. :principal .. :agent ..
+;;;;                        :conversation .. :outcome .. :ms .. [:is-error t])
+;;;;                        -- the means ran. SOURCE is the plist the means was registered
+;;;;                           with, or NIL; PRINCIPAL the user the turn runs for; AGENT the
+;;;;                           agent's name; CONVERSATION its result-store conversation id, or
+;;;;                           NIL; OUTCOME :OK,
+;;;;                           :ERROR, :NOT-RUN or :UNKNOWN (see TOOL-ERROR-RESULT); MS the
+;;;;                           call's duration. Enough for a usage ledger to record the call
+;;;;                           (#527, until #493 settles the usage interface).
+;;;;   (:type :sign-in-required :connection .. :principal ..)
+;;;;                        -- an MCP tool needs the user to sign in (#527)
 ;;;;   (:type :truncated    :step N :max-tokens M :tool-calls (name ..))
 ;;;;                        -- step N stopped at the output limit M before the model had
 ;;;;                           finished; its text is not the answer and the named tool calls

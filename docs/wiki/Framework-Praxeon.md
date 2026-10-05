@@ -99,7 +99,7 @@ the CLI and as a web app.
 
 Growing the Coalton typed core; **Kairos** (the bitemporal context engine) and observational
 memory with semantic retrieval; LLM-layer hardening (streaming, retry/backoff, real token
-counting); **MCP** client support; model routing; a graphical studio; per-session agents for
+counting); model routing; a graphical studio; per-session agents for
 multi-user "as a service"; live-reload layer 3 (conditions with restart selection in the
 browser).
 
@@ -330,14 +330,17 @@ Coalton class) with interchangeable implementations — the way `provider`/`comp
 works. The first step is giving **means** and **memory** the treatment `provider` got: a
 documented protocol plus a registry, so a third party can add one without editing the loop.
 
-**MCP (Model Context Protocol) — planned, and it needs no new abstraction.** The means
-registry is the natural seam for consuming external tool servers: an MCP client discovers a
-server's tools and registers each as a Praxeon means (name + JSON schema + an effect that
-RPCs the server) — after which any MCP server's tools are available to the Actor with **no
-loop changes**, exactly as `register-means` gave us web search. MCP is the *transport*;
-`register-means` stays the *abstraction*, so it is provider-neutral by construction. That the
-web-search vendor already offers an MCP endpoint makes it the obvious first server to point
-a client at.
+**MCP (Model Context Protocol) — `praxeon/mcp`, part 1 of #527.** An MCP server's tools reach an
+agent as means, through `register-means`, as the plan here said. `list-tools` reads what a
+server offers and gives it to nobody; `grant-tools` gives an agent the tools the app chooses,
+named with the connection's name as a prefix. The client speaks the current revision of the
+specification, 2026-07-28, and falls back to the legacy revisions with their `initialize`
+handshake. The loop did need one change: a failed means used to end the turn, and a means can
+now report an error that the model sees as an error result while the turn goes on
+(`tool-error-result`). A server that requires an OAuth sign-in is reached through `aion/oauth`
+(#527, part 2): `oauth-token-source` gives each user's calls that user's token, and refreshes
+it. Details, and the parts still to come (resources and prompts, local servers over stdio):
+[`praxeon/docs/mcp.md`](../../praxeon/docs/mcp.md).
 
 #### Live-reload dev server — "Figwheel for Common Lisp"
 

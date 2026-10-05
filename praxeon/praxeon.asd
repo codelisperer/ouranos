@@ -42,6 +42,7 @@
                "aion/interceptor"  ; the typed pipeline a turn is threaded through (pre-publication issue 130)
                "aion/boundary"     ; RUN-TURN-THROUGH checks its CHAIN before it enters Coalton (#110)
                "aion/http-client"  ; the shared outbound client (pre-publication issue 202)
+               "aion/random"       ; a held turn's id (#531)
                "coalton"
                "alexandria"
                "cons"             ; config/env: the shared load-dotenv lives in cons
@@ -70,6 +71,7 @@
                              (:file "turn")         ; a turn as a value (interceptor context)
                              (:file "ceiling")      ; cost/rate ceiling as pipeline stages
                              (:file "actor")        ; the deliberate/act loop
+                             (:file "hold")         ; holding a call for the user (#531)
                              (:file "workflow")     ; deterministic multi-agent coordination
                              (:file "studio"))))    ; REPL introspection (studio DX)
   :in-order-to ((test-op (test-op "praxeon/tests"))))
@@ -185,6 +187,31 @@
                 :components ((:file "retrieval-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))
 
+(defsystem "praxeon/mcp"
+  :description "Agents that use the tools an MCP server offers, over Streamable HTTP (#527)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; cl-base64 for the specification's encoding of header values that are not plain ASCII.
+  ;; Everything here is already in the tree; see docs/dependencies.md.
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64")
+  :serial t
+  :components ((:module "src/mcp"
+                :serial t
+                :components ((:file "packages")
+                             (:file "wire")
+                             (:file "client"))))
+  :in-order-to ((test-op (test-op "praxeon/mcp/tests"))))
+
+(defsystem "praxeon/mcp/tests"
+  :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
+  ;; aion/oauth/tests for its test authorization server, which the OAuth path here runs against.
+  :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
+               "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret"
+               "com.inuoe.jzon" "cl-base64")
+  :serial t
+  :components ((:file "tests/mcp-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
+
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
   :author "Bob <eternal.recursion@proton.me>"
@@ -245,7 +272,8 @@
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
-               "fiveam")
+               "fiveam"
+               "aion/test-threads")   ; the #531 tests continue a held turn on another thread
   :serial t
   :components ((:module "tests"
                 :serial t

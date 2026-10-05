@@ -320,6 +320,7 @@
   ;; The transport tests run a small HTTP server in the test image (usocket, bordeaux-threads)
   ;; and, off Windows, a TLS one (cl+ssl) (#295).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
+               "aion/test-http"
                (:feature (:not :os-windows) "cl+ssl"))
   :serial t
   :components ((:module "tests"
@@ -662,6 +663,40 @@
   ;; No dependencies: sb-thread ships with SBCL. Used by the test systems of aion, hyperion
   ;; and praxeon (#178); aion is the one framework all of them may depend on.
   :components ((:file "tests/test-threads")))
+
+(defsystem "aion/oauth"
+  :description "An OAuth 2.1 client for an app that signs its users in to other services (#527)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; In aion so that hermes can use it as well as praxeon. Every dependency is already in the
+  ;; tree: ironclad for the PKCE digest, cl-base64 for its encoding, jzon for the metadata.
+  :depends-on ("aion/http-client" "aion/random" "aion/secret" "aion/log" "ironclad" "cl-base64"
+               "com.inuoe.jzon" "quri")
+  :serial t
+  :components ((:module "src/oauth"
+                :serial t
+                :components ((:file "packages")
+                             (:file "store")
+                             (:file "flow"))))
+  :in-order-to ((test-op (test-op "aion/oauth/tests"))))
+
+(defsystem "aion/oauth/tests"
+  :description "Tests for aion/oauth, against an authorization server run in the test image."
+  :depends-on ("aion/oauth" "aion/http-client" "aion/secret" "aion/test-http" "aion/test-threads"
+               "fiveam" "com.inuoe.jzon" "quri" "ironclad" "cl-base64")
+  :serial t
+  :components ((:file "tests/oauth"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/oauth/tests :run-tests)))
+
+(defsystem "aion/test-http"
+  :description "Test support: a small HTTP/1.1 server on 127.0.0.1 that a test drives with a handler."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; Moved out of aion/http-client's tests so the tests of aion/oauth and praxeon/mcp can run
+  ;; their own servers in the test image (#527). TLS is reached through cl+ssl when a test asks
+  ;; for it, and that test's system loads cl+ssl; this one does not, so it loads on Windows.
+  :depends-on ("usocket" "bordeaux-threads" "aion/test-threads")
+  :components ((:file "tests/test-http")))
 
 (defsystem "aion/test-threads/tests"
   :description "Tests for aion/test-threads: values, the timeout and abort paths, and JOIN-ALL's single group deadline."

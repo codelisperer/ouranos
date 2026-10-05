@@ -4141,3 +4141,546 @@ model, which is what the file's commentary is for."
             (llm:generate-structured p2 '((:role :user :content "b")) (%spec)))
         (is (string= "Ship" (gethash "headline" args)))
         (is (eq :truncated mark))))))
+
+;;; --- a means reports an error to the model, and the turn goes on (#527) -----------------
+
+(defun %tool-result-parts (agent)
+  "Every tool-result part in AGENT's history, oldest first."
+  (loop for m in (actor:agent-history agent)
+        for content = (llm:content m)
+        when (listp content)
+          append (remove-if-not (lambda (p) (eq :tool-result (getf p :type))) content)))
+
+(test a-tool-error-result-reaches-the-model-and-the-turn-goes-on
+  "A means that signals TOOL-ERROR-RESULT gives the model an error result with the condition's
+text, and the turn runs its next step instead of ending."
+  (let* ((call (llm:make-tool-call :id "t1" :name "lookup" :arguments (%args "city" "x")))
+         (provider (make-instance 'transcribing
+                                  :script (list (llm:make-completion :tool-calls (list call)
+                                                                     :stop-reason :tool-use)
+                                                (llm:make-completion :text "no such city"
+                                                                     :stop-reason :end))))
+         (ag (actor:make-agent :provider provider))
+         (events '()))
+    (actor:register-means ag "lookup" "looks a city up"
+                          (lambda (in) (declare (ignore in))
+                            (error 'cnd:tool-error-result :text "unknown city: x")))
+    (is (string= "no such city"
+                 (evt:with-observer ((lambda (e) (push e events)))
+                   (actor:run-turn ag "where is x"))))
+    (let ((part (first (%tool-result-parts ag))))
+      (is (equal "unknown city: x" (getf part :content)))
+      (is (eq t (getf part :is-error))))
+    (let ((event (find :tool-result events :key #'evt:event-type)))
+      (is (eq t (getf event :is-error))))
+    (is-true (search "unknown city: x" (prin1-to-string (transcribing-messages provider)))
+             "the second step's request carried the error result")))
+
+(test any-other-error-from-a-means-still-ends-the-turn
+  "Only TOOL-ERROR-RESULT is reported to the model. Any other error from a means ends the turn
+as before, as MEANS-FAILURE with its cause."
+  (let* ((call (llm:make-tool-call :id "t1" :name "boom" :arguments (%args)))
+         (ag (actor:make-agent
+              :provider (make-instance 'scripted
+                                       :script (list (llm:make-completion :tool-calls (list call)
+                                                                          :stop-reason :tool-use)
+                                                     (llm:make-completion :text "unreached"
+                                                                          :stop-reason :end))))))
+    (actor:register-means ag "boom" "fails" (lambda (in) (declare (ignore in)) (error "boom")))
+    (signals cnd:means-failure (actor:run-turn ag "go"))))
+
+(test an-error-result-is-marked-in-both-adapters-formats
+  "Anthropic's format marks an error result with is_error. OpenAI's has no such field, so the
+content says it."
+  (let ((part (llm:tool-result-part "t1" "unknown city" t)))
+    (is (eq t (gethash "is_error" (praxeon/llm::%part->json part))))
+    (let* ((msgs (praxeon/llm::%messages->openai (list (llm:msg "user" (list part))) nil))
+           (tool (find "tool" msgs :key (lambda (m) (gethash "role" m)) :test #'equal)))
+      (is (equal "Error: unknown city" (gethash "content" tool)))))
+  (let* ((part (llm:tool-result-part "t1" "fine"))
+         (msgs (praxeon/llm::%messages->openai (list (llm:msg "user" (list part))) nil))
+         (tool (find "tool" msgs :key (lambda (m) (gethash "role" m)) :test #'equal)))
+    (is (null (gethash "is_error" (praxeon/llm::%part->json part))))
+    (is (equal "fine" (gethash "content" tool)))))
+
+(test a-turn-runs-for-its-principal-and-a-delegated-turn-keeps-it
+  "RUN-TURN binds *PRINCIPAL* for the turn. A means sees it, a sub-agent's turn run by delegation
+sees the same one, and a turn with no principal sees NIL."
+  (flet ((agent-that-records (seen &optional (name "who"))
+           (let* ((call (llm:make-tool-call :id "t1" :name name :arguments (%args)))
+                  (ag (actor:make-agent
+                       :provider (make-instance
+                                  'scripted
+                                  :script (list (llm:make-completion :tool-calls (list call)
+                                                                     :stop-reason :tool-use)
+                                                (llm:make-completion :text "ok"
+                                                                     :stop-reason :end))))))
+             (actor:register-means ag name "records the principal"
+                                   (lambda (in) (declare (ignore in))
+                                     (push actor:*principal* (car seen)) "ok"))
+             ag)))
+    (let ((seen (list '())))
+      (actor:run-turn (agent-that-records seen) "go" :principal "user-a")
+      (actor:run-turn (agent-that-records seen) "go")
+      (is (equal '(nil "user-a") (car seen))))
+    (let* ((seen (list '()))
+           (sub (agent-that-records seen))
+           (call (llm:make-tool-call :id "d1" :name "sub" :arguments (%args "task" "t")))
+           (coordinator (actor:make-agent
+                         :provider (make-instance
+                                    'scripted
+                                    :script (list (llm:make-completion :tool-calls (list call)
+                                                                       :stop-reason :tool-use)
+                                                  (llm:make-completion :text "done"
+                                                                       :stop-reason :end))))))
+      (actor:register-agent-as-means coordinator sub :name "sub")
+      (actor:run-turn coordinator "go" :principal "user-b")
+      (is (equal '("user-b") (car seen))))))
+
+;;; --- holding a call until the user decides (#531) --------------------------------------
+
+(defun %hold-agent (&key (name "spender") (spend-confirm t) (calls '(("s1" "spend") ("l1" "look")))
+                         (answers 1) (counts (list 0 0)) (extra-means nil) (script nil))
+  "An agent whose model calls CALLS in one step, then answers \"done\" ANSWERS times. spend is
+registered with :CONFIRM SPEND-CONFIRM and look without; COUNTS is (spend-runs look-runs)."
+  (let ((ag (actor:make-agent
+             :name name
+             :provider (make-instance
+                        'scripted
+                        :script (or script
+                                    (cons (llm:make-completion
+                                       :tool-calls (mapcar (lambda (c)
+                                                             (llm:make-tool-call :id (first c) :name (second c)
+                                                                                 :arguments (%args "q" (first c))))
+                                                           calls)
+                                       :stop-reason :tool-use)
+                                      (loop repeat answers
+                                            collect (llm:make-completion :text "done" :stop-reason :end))))))))
+    (actor:register-means ag "spend" "spends credits"
+                          (lambda (a) (declare (ignore a)) (incf (first counts)) "spent")
+                          :confirm spend-confirm :source '(:connection "svc" :tool "spend"))
+    (actor:register-means ag "look" "looks"
+                          (lambda (a) (declare (ignore a)) (incf (second counts)) "looked"))
+    (when extra-means (funcall extra-means ag counts))
+    (values ag counts)))
+
+(defun %results-of (agent)
+  "The tool-result parts in AGENT's history, as (id content is-error)."
+  (loop for m in (actor:agent-history agent)
+        for c = (llm:content m)
+        when (listp c)
+          append (loop for p in c when (eq :tool-result (getf p :type))
+                       collect (list (getf p :tool-use-id) (getf p :content) (getf p :is-error)))))
+
+(defun %result-for (agent id) (second (find id (%results-of agent) :key #'first :test #'equal)))
+(defun %error-for (agent id) (third (find id (%results-of agent) :key #'first :test #'equal)))
+
+(test a-held-means-does-not-run-without-confirmation
+  "No ON-HOLD: the held means is not run and the model is told; the ordinary call runs."
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (is (equal "done" (actor:run-turn ag "go" :principal "u1")))
+    (is (equal '(0 1) counts))
+    (is-true (search "no confirmation" (%result-for ag "s1")))
+    (is-true (%error-for ag "s1") "the provider is told the call failed")))
+
+(test a-blocking-policy-approves-or-declines-on-the-spot
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let ((seen nil))
+      (actor:run-turn ag "go" :principal "u1"
+                      :on-hold (lambda (call) (setf seen call) :approve))
+      (is (equal '(1 1) counts))
+      (is (equal "u1" (getf seen :principal)))
+      (is (equal '(:connection "svc" :tool "spend") (getf seen :source)))))
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (actor:run-turn ag "go" :principal "u1" :on-hold (lambda (call) (declare (ignore call)) :decline))
+    (is (equal '(0 1) counts))
+    (is-true (search "declined" (%result-for ag "s1")))
+    (is-true (%error-for ag "s1"))))
+
+(test a-held-call-runs-once-on-approval-even-when-approved-twice
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (multiple-value-bind (text how held) (actor:run-turn ag "go" :principal "u1" :on-hold :hold)
+      (is (null text))
+      (is (eq :held how))
+      (is (equal '(0 1) counts) "the ordinary call ran before the hold, the held one did not")
+      (is (equal '("s1") (mapcar (lambda (c) (getf c :id)) (actor:held-turn-calls held))))
+      (is (equal "done" (actor:continue-turn ag held :approve :principal "u1")))
+      (is (equal '(1 1) counts))
+      (is (equal "spent" (%result-for ag "s1")))
+      (is (equal "looked" (%result-for ag "l1")) "the stored result was written unchanged")
+      (multiple-value-bind (text2 how2) (actor:continue-turn ag held :approve :principal "u1")
+        (is (null text2))
+        (is (eq :already-decided how2)))
+      (is (equal '(1 1) counts) "the second approval ran nothing"))))
+
+(test a-decision-from-another-principal-is-refused
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (signals actor:wrong-principal (actor:continue-turn ag held :approve :principal "u2"))
+      (signals actor:wrong-principal (actor:continue-turn ag held :approve :principal nil))
+      (is (equal '(0 1) counts)))))
+
+(test a-held-turn-continues-on-another-thread-and-after-a-restart
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (is (equal "done" (aion/test-threads:join
+                         (sb-thread:make-thread
+                          (lambda () (actor:continue-turn ag held :approve :principal "u1"))))))
+      (is (equal '(1 1) counts))))
+  ;; Written out and read back, given to a new agent object with the same history.
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+           (stored (actor:held-turn-to-json held))
+           (history (actor:agent-history ag)))
+      (multiple-value-bind (fresh fresh-counts) (%hold-agent :answers 1)
+        (setf (actor:agent-history fresh) (copy-list history))
+        (setf (scripted-script (actor:agent-provider fresh))
+              (list (llm:make-completion :text "done" :stop-reason :end)))
+        (is (equal "done" (actor:continue-turn fresh (actor:held-turn-from-json stored)
+                                               :approve :principal "u1")))
+        (is (equal '(1 0) fresh-counts) "the held call ran on the new agent; look did not run again")
+        (is (equal "looked" (%result-for fresh "l1")))
+        (is (equal '(0 1) counts))))))
+
+(test a-stored-held-call-whose-source-has-a-keyword-and-a-list-still-runs
+  "A source written to JSON comes back with a keyword as its name and a list as a vector. The
+approved call still runs on the means it was held for."
+  (flet ((with-source (ag counts)
+           (actor:register-means ag "spend" "spends credits"
+                                 (lambda (a) (declare (ignore a)) (incf (first counts)) "spent")
+                                 :confirm t :source '(:connection "svc" :kind :local :path ("a" "b")))))
+    (multiple-value-bind (ag counts) (%hold-agent :extra-means #'with-source)
+      (declare (ignore counts))
+      (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+             (stored (actor:held-turn-to-json held)))
+        (multiple-value-bind (fresh fresh-counts) (%hold-agent :answers 1 :extra-means #'with-source)
+          (setf (actor:agent-history fresh) (copy-list (actor:agent-history ag)))
+          (setf (scripted-script (actor:agent-provider fresh))
+                (list (llm:make-completion :text "done" :stop-reason :end)))
+          (actor:continue-turn fresh (actor:held-turn-from-json stored) :approve :principal "u1")
+          (is (equal "spent" (%result-for fresh "s1")))
+          (is (equal '(1 0) fresh-counts)))))))
+
+(test an-estimate-that-fails-means-the-call-is-not-run
+  (dolist (confirm (list (lambda (a) (declare (ignore a)) (error "bad arguments"))
+                         (lambda (a) (declare (ignore a)) (list :credits 1/3))))
+    (multiple-value-bind (ag counts) (%hold-agent :spend-confirm confirm)
+      (actor:run-turn ag "go" :principal "u1" :on-hold (lambda (c) (declare (ignore c)) :approve))
+      (is (equal '(0 1) counts))
+      (is-true (search "estimated" (%result-for ag "s1"))))))
+
+(test an-estimate-comes-back-as-it-went
+  (multiple-value-bind (ag counts)
+      (%hold-agent :spend-confirm (lambda (a) (declare (ignore a))
+                                    (list :label "forty" :credits 40 :rate 1.5d0 :refundable t :final nil)))
+    (declare (ignore counts))
+    (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+           (text (actor:held-turn-to-json held))
+           (back (actor:held-turn-from-json text))
+           (estimate (getf (first (actor:held-turn-calls back)) :estimate)))
+      (is (equal "forty" (getf estimate :label)))
+      (is (eql 40 (getf estimate :credits)))
+      (is (eql 1.5d0 (getf estimate :rate)))
+      (is (eq t (getf estimate :refundable)))
+      (is (and (null (getf estimate :final)) (member :final estimate)) "NIL comes back as NIL")
+      (is-true (search "\"credits\":40" text) "an integer is a JSON number")
+      (is-true (search "\"final\":false" text) "NIL is JSON false")
+      (is (equal '(:connection "svc" :tool "spend")
+                 (let ((src (getf (first (actor:held-turn-calls back)) :source)))
+                   (list :connection (getf src :connection) :tool (getf src :tool))))
+          "a source is written and read back"))))
+
+(test moving-on-needs-the-held-turn-and-closes-it
+  (multiple-value-bind (ag counts) (%hold-agent :answers 2)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (signals actor:held-turn-required (actor:run-turn ag "something else" :principal "u1"))
+      (is (equal "done" (actor:run-turn ag "something else" :principal "u1" :held held)))
+      (is (equal "looked" (%result-for ag "l1")) "the ordinary call's real result")
+      (is-true (search "did not confirm" (%result-for ag "s1")))
+      (is (eq :already-decided (nth-value 1 (actor:continue-turn ag held :approve :principal "u1"))))
+      (is (equal '(0 1) counts)))))
+
+(test two-decisions-at-once-run-the-call-once
+  "Two agent objects made from the same history, as two requests would load it, continue the
+same held turn at the same moment. The claim lets one of them run the call."
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (declare (ignore counts))
+    (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+           (shared (list 0 0))
+           (agents (loop repeat 2
+                         collect (let ((a (%hold-agent :answers 1 :counts shared)))
+                                   (setf (actor:agent-history a) (copy-list (actor:agent-history ag)))
+                                   (setf (scripted-script (actor:agent-provider a))
+                                         (list (llm:make-completion :text "done" :stop-reason :end)))
+                                   a)))
+           (go (sb-thread:make-semaphore)))
+      (let ((threads (mapcar (lambda (a)
+                               (sb-thread:make-thread
+                                (lambda () (sb-thread:wait-on-semaphore go)
+                                  (multiple-value-list (actor:continue-turn a held :approve :principal "u1")))))
+                             agents)))
+        (sb-thread:signal-semaphore go 2)
+        (let ((outcomes (aion/test-threads:join-all threads)))
+          (is (= 1 (first shared)) "spend ran ~D times" (first shared))
+          (is (= 1 (count :already-decided outcomes :key #'second))))))))
+
+(test an-approval-recorded-before-without-a-result-may-have-run
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (is (eq :already-decided
+              (nth-value 1 (actor:continue-turn ag held :approve :principal "u1"
+                                                :claim (lambda (id d) (declare (ignore id d))
+                                                         (values nil :approve))))))
+      (is (equal '(0 1) counts))
+      (is-true (search "may have run" (%result-for ag "s1")))
+      (is-true (%error-for ag "s1")))))
+
+(test a-refused-claim-writes-the-recorded-decision-and-the-turn-can-go-on
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (actor:continue-turn ag held :approve :principal "u1"
+                           :claim (lambda (id d) (declare (ignore id d)) (values nil :decline)))
+      (is-true (search "declined" (%result-for ag "s1")))
+      (is (equal "done" (actor:run-turn ag "next" :principal "u1")) "no HELD-TURN-REQUIRED")
+      (is (equal '(0 1) counts)))))
+
+(test a-refused-claim-closes-the-held-turn-when-the-user-moves-on
+  "Rule 2 agreed on #531, for RUN-TURN :HELD and ABANDON-HELD-TURN: a claim already recorded as a
+decline, with no results in the history, gives the declined text, and the turn goes on."
+  (flet ((refusing (id d) (declare (ignore id d)) (values nil :decline)))
+    (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+      (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+        (is (equal "done" (actor:run-turn ag "next" :principal "u1" :held held :claim #'refusing)))
+        (is-true (search "declined" (%result-for ag "s1")))
+        (is (equal "looked" (%result-for ag "l1")))
+        (is (equal '(0 1) counts))))
+    (multiple-value-bind (ag counts) (%hold-agent)
+      (declare (ignore counts))
+      (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+        (is (equal '(nil :already-decided :decline)
+                   (multiple-value-list
+                    (actor:abandon-held-turn ag held :principal "u1" :claim #'refusing))))
+        (is-true (search "declined" (%result-for ag "s1")))))))
+
+(test an-older-held-turn-does-not-close-a-newer-one
+  "Hold, approve, hold again: RUN-TURN given the first held turn signals HELD-TURN-REQUIRED and
+leaves the history as it was, because the newer calls still have no results."
+  (flet ((calls (&rest ids)
+           (llm:make-completion
+            :tool-calls (mapcar (lambda (id) (llm:make-tool-call :id id :name "spend" :arguments (%args "q" id)))
+                                ids)
+            :stop-reason :tool-use))
+         (done () (llm:make-completion :text "done" :stop-reason :end)))
+    (multiple-value-bind (ag counts) (%hold-agent :script (list (calls "s1") (done) (calls "s2") (done)))
+      (declare (ignore counts))
+      (let ((first-held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+        (is (equal "done" (actor:continue-turn ag first-held :approve :principal "u1")))
+        (is (eq :held (nth-value 1 (actor:run-turn ag "again" :principal "u1" :on-hold :hold))))
+        (let ((before (copy-list (actor:agent-history ag))))
+          (signals actor:held-turn-required
+            (actor:run-turn ag "third" :principal "u1" :held first-held))
+          (is (equal before (actor:agent-history ag)) "nothing was written"))))))
+
+(test an-answered-held-turn-is-already-decided-not-a-mismatch
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (declare (ignore counts))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (actor:continue-turn ag held :decline :principal "u1")
+      (multiple-value-bind (text how decision) (actor:continue-turn ag held :approve :principal "u1")
+        (is (null text))
+        (is (eq :already-decided how))
+        (is (eq :decline decision))))))
+
+(test a-held-turn-that-does-not-match-the-agent-is-refused
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (let ((other (%hold-agent :name "other")))
+        ;; The same history, under another agent's name.
+        (setf (actor:agent-history other) (copy-list (actor:agent-history ag)))
+        (signals actor:held-turn-mismatch (actor:continue-turn other held :approve :principal "u1")))
+      (let ((changed (actor:held-turn-from-json (actor:held-turn-to-json held))))
+        (setf (getf (first (actor:held-turn-calls changed)) :arguments) (%args "q" "something else"))
+        (signals actor:held-turn-mismatch (actor:continue-turn ag changed :approve :principal "u1")))
+      (let ((fresh (%hold-agent)))
+        (signals actor:held-turn-mismatch (actor:continue-turn fresh held :approve :principal "u1")))
+      (is (equal '(0 1) counts)))))
+
+(test a-held-turn-naming-another-means-or-repeating-a-call-is-refused
+  "The held turn says which means runs and in what order the results are written, so a held
+turn that names another registered means, with that means' source, or that repeats a call id,
+is refused before anything is recorded or run (#547)."
+  (let ((other-runs 0) (claims '()))
+    (flet ((claim (id d) (push (cons id d) claims) (values t d)))
+      (multiple-value-bind (ag counts)
+          (%hold-agent :extra-means (lambda (ag counts)
+                                      (declare (ignore counts))
+                                      (actor:register-means ag "other" "another means"
+                                                            (lambda (in) (declare (ignore in)) (incf other-runs) "other ran")
+                                                            :confirm t :source '(:connection "svc" :tool "other"))))
+        (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+               (before (copy-list (actor:agent-history ag)))
+               (renamed (actor:held-turn-from-json (actor:held-turn-to-json held)))
+               (repeated (actor:held-turn-from-json (actor:held-turn-to-json held))))
+          (setf (getf (first (actor:held-turn-calls renamed)) :name) "other"
+                (getf (first (actor:held-turn-calls renamed)) :source) '(:connection "svc" :tool "other"))
+          (setf (actor::held-turn-order repeated) '("s1" "s1" "l1"))
+          (signals actor:held-turn-mismatch (actor:continue-turn ag renamed :approve :principal "u1" :claim #'claim))
+          (signals actor:held-turn-mismatch (actor:continue-turn ag repeated :approve :principal "u1" :claim #'claim))
+          (is (= 0 other-runs))
+          (is (equal '(0 1) counts))
+          (is (null claims) "nothing recorded")
+          (is (equal before (actor:agent-history ag)) "nothing written"))))))
+
+(test abandoning-an-answered-held-turn-returns-the-decision-recorded-first
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (declare (ignore counts))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (actor:continue-turn ag held :decline :principal "u1")
+      (is (equal '(nil :already-decided :decline)
+                 (multiple-value-list (actor:abandon-held-turn ag held :principal "u1")))))))
+
+(test an-approved-call-whose-means-changed-is-not-run
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (actor:register-means ag "spend" "replaced" (lambda (a) (declare (ignore a)) (incf (first counts)) "x")
+                            :confirm t :source '(:connection "other" :tool "spend"))
+      (actor:continue-turn ag held :approve :principal "u1")
+      (is (equal '(0 1) counts))
+      (is-true (search "no longer available" (%result-for ag "s1"))))))
+
+(test a-turn-with-no-principal-holds-nothing-and-asks-no-one
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (let ((asked nil))
+      (multiple-value-bind (text how) (actor:run-turn ag "go" :on-hold (lambda (c) (declare (ignore c)) (setf asked t) :approve))
+        (is (equal "done" text))
+        (is (null how)))
+      (is (null asked))
+      (is (equal '(0 1) counts))
+      (is-true (search "no confirmation" (%result-for ag "s1"))))))
+
+(test several-held-calls-are-decided-together-each-on-its-own
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend") ("s2" "spend") ("l1" "look")))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (is (= 2 (length (actor:held-turn-calls held))))
+      (signals actor:held-turn-mismatch
+        (actor:continue-turn ag held '(("s1" . :approve)) :principal "u1"))
+      (actor:continue-turn ag held '(("s1" . :approve) ("s2" . :decline)) :principal "u1")
+      (is (equal '(1 1) counts))
+      (is (equal "spent" (%result-for ag "s1")))
+      (is-true (search "declined" (%result-for ag "s2")))
+      (is (equal '("s1" "s2" "l1")
+                 (mapcar #'first (%results-of ag)))
+          "one message, in the model's order"))))
+
+(test results-for-only-some-held-calls-do-not-make-the-turn-decided
+  "The history counts as answered only when a result follows for every held call."
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend") ("s2" "spend")))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (setf (actor:agent-history ag)
+            (append (actor:agent-history ag)
+                    (list (llm:msg "user" (list (list :type :tool-result :tool-use-id "s1"
+                                                      :content "spent"))))))
+      (signals actor:held-turn-mismatch (actor:continue-turn ag held :approve :principal "u1"))
+      (is (equal '(0 0) counts)))))
+
+(test a-call-held-on-the-last-step-does-not-get-another-model-call
+  "With :MAX-STEPS 1 the ordinary path runs the step's calls and ends the turn; approving a call
+held on that step does the same, rather than asking the model once more."
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (signals cnd:deliberation-failure
+      (actor:run-turn ag "go" :principal "u1" :max-steps 1
+                      :on-hold (lambda (c) (declare (ignore c)) :approve)))
+    (is (equal '(1 1) counts)))
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :max-steps 1 :on-hold :hold))))
+      (is (= 0 (actor::held-turn-steps held)))
+      (signals cnd:deliberation-failure (actor:continue-turn ag held :approve :principal "u1"))
+      (is (equal '(1 1) counts))
+      (is (equal "spent" (%result-for ag "s1"))))))
+
+(test an-expired-held-turn-is-declined
+  (multiple-value-bind (ag counts) (%hold-agent :answers 1)
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
+      (setf (actor:held-turn-expires-at held) (- (get-universal-time) 1))
+      (actor:continue-turn ag held :approve :principal "u1")
+      (is (equal '(0 1) counts))
+      (is-true (search "in time" (%result-for ag "s1")))
+      (is-true (%error-for ag "s1")))))
+
+(test holding-and-deciding-are-events
+  "Each event names its call under :ID, as :TOOL-CALL and :TOOL-RESULT do, and the held turn
+under :HELD, which is NIL for a call decided on the spot."
+  (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend") ("s2" "spend") ("l1" "look")))
+    (declare (ignore counts))
+    (let* ((events '())
+           (held (evt:with-observer ((lambda (e) (push e events)))
+                   (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (actor:continue-turn ag held '(("s1" . :approve) ("s2" . :decline)) :principal "u1"))
+      (flet ((of (type id) (find-if (lambda (e) (and (eq type (evt:event-type e)) (equal id (getf e :id))))
+                                    events)))
+        (dolist (id '("s1" "s2"))
+          (is (equal (actor:held-turn-id held) (getf (of :tool-held id) :held)))
+          (is (equal "u1" (getf (of :tool-held id) :principal)))
+          (is (equal (actor:held-turn-id held) (getf (of :tool-decided id) :held)))
+          (is (integerp (getf (of :tool-decided id) :at))))
+        (is (eq :approve (getf (of :tool-decided "s1") :decision)))
+        (is (eq :decline (getf (of :tool-decided "s2") :decision))))))
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (declare (ignore counts))
+    (let ((events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (actor:run-turn ag "go"))
+      (let ((d (find :tool-decided events :key #'evt:event-type)))
+        (is (equal "s1" (getf d :id)))
+        (is (null (getf d :held)))
+        (is (eq :no-confirmation (getf d :decision)))))))
+
+(test a-delegated-turn-uses-a-blocking-policy-but-not-hold
+  (flet ((coordinator (sub)
+           (let ((co (actor:make-agent
+                      :name "co"
+                      :provider (make-instance 'scripted
+                                               :script (list (llm:make-completion
+                                                              :tool-calls (list (llm:make-tool-call :id "d1" :name "sub"
+                                                                                                    :arguments (%args "task" "t")))
+                                                              :stop-reason :tool-use)
+                                                             (llm:make-completion :text "co done" :stop-reason :end))))))
+             (actor:register-agent-as-means co sub :name "sub")
+             co)))
+    (multiple-value-bind (sub counts) (%hold-agent :name "sub")
+      (let ((asked 0))
+        (actor:run-turn (coordinator sub) "go" :principal "u1"
+                        :on-hold (lambda (c) (declare (ignore c)) (incf asked) :approve))
+        (is (= 1 asked))
+        (is (equal '(1 1) counts))))
+    (multiple-value-bind (sub counts) (%hold-agent :name "sub")
+      (is (equal "co done" (actor:run-turn (coordinator sub) "go" :principal "u1" :on-hold :hold)))
+      (is (equal '(0 1) counts))
+      (is-true (search "no confirmation" (%result-for sub "s1"))))
+    ;; A blocking function that answers :HOLD inside the sub-turn: the sub-agent cannot end the
+    ;; coordinator's turn, so this too is no confirmation available.
+    (multiple-value-bind (sub counts) (%hold-agent :name "sub")
+      (is (equal "co done" (actor:run-turn (coordinator sub) "go" :principal "u1"
+                                           :on-hold (lambda (c) (declare (ignore c)) :hold))))
+      (is (equal '(0 1) counts))
+      (is-true (search "no confirmation" (%result-for sub "s1"))))))
+
+(test run-turn-through-returns-the-held-turn
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (declare (ignore counts))
+    (multiple-value-bind (tn how held) (actor:run-turn-through ag "go" :principal "u1" :on-hold :hold)
+      (is (equal "" (turn:turn-reply tn)))
+      (is (eq :held how))
+      (is (typep held 'actor:held-turn)))))
+
+(test a-held-turn-keeps-the-stand-in-of-an-offloaded-result
+  (multiple-value-bind (ag counts) (%hold-agent)
+    (declare (ignore counts))
+    (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1)
+    (let* ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+           (stored (getf (first (actor::held-turn-results
+                                 (actor:held-turn-from-json (actor:held-turn-to-json held))))
+                         :content)))
+      (is (not (equal "looked" stored)) "the stand-in, not the result")
+      (is-true (search "read-result" stored)))))

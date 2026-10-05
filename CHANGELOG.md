@@ -109,6 +109,130 @@ its tag.
   `klio/tests` that made a directory by deleting a file from `uiop:tmpize-pathname`, or named it
   by the time and a counter, use it now; the first of those patterns failed when two suites
   started together on one machine.
+- **praxeon: a means can require the user's confirmation before it runs** (#531, part of #64).
+  `register-means :confirm` (T, or a function of the arguments returning an estimate plist) marks
+  a means. `run-turn :on-hold` is the app's policy: NIL, the default, runs no held call and tells
+  the model no confirmation was available; a function returns `:approve`, `:decline` or `:hold`;
+  `:hold` ends the turn with `(values nil :held held-turn)`. The app stores the held turn
+  as JSON text (`held-turn-to-json`, `held-turn-from-json`) and continues the turn with
+  `continue-turn` and the user's decision, from any request or thread or after a restart. A
+  decision is recorded once through the app's `:claim`, so an approved call runs once even when
+  two decisions arrive together. `continue-turn` checks the principal (`wrong-principal`), the
+  agent, and that the held turn's calls, their means, their order and their arguments are the
+  ones in the history's model message (`held-turn-mismatch`). `run-turn` signals
+  `held-turn-required` when the history ends with undecided held calls and no `:held` is given;
+  `abandon-held-turn` closes one, and returns `(values nil :already-decided decision)` with the
+  decision recorded first when the turn was decided before.
+  The events `:tool-held` and `:tool-decided` record what was asked and decided, with the
+  tool-call id under `:id` and the held turn's id under `:held`. Without `:claim`, decisions
+  are kept in a table in the process that is never emptied, so a long-running server supplies
+  its own. `run-turn-through` takes the same arguments and returns the held turn as a third value. A
+  delegated sub-turn inherits a blocking `:on-hold`, not `:hold`. A turn with no principal holds
+  nothing. A turn continued after a call held on its last step runs the decided calls and then
+  signals `deliberation-failure`, as an ordinary turn does after its last step, without asking
+  the model again. See `praxeon/docs/confirm.md`.
+- **praxeon/mcp: `grant-tools :confirm`** (#531), a list of the server's tool names to hold, or
+  `:all`. Such a tool is registered with `:confirm t`, and after a refused token it is not sent
+  again: the token is refreshed and the call fails as not run, telling the model the user can
+  ask again. `call-tool` takes `:held` for the same rule. Any other `:confirm` value, or a name
+  that is not among the granted tools, signals an error and registers nothing, because a
+  misspelt name would let the tool it meant run without confirmation.
+- **aion/oauth: sign an app's users in to other services with OAuth 2.1** (#527, part 2). A new
+  opt-in system, in aion so that hermes can use it too.
+  - `make-broker` holds the app's settings and a store: `:redirect-uri`, `:client-name`,
+    `:application-type`, `:client-metadata-url`, `:pre-registered`, `:timeout`,
+    `:sign-in-lifetime`, `:metadata-lifetime` and `:metadata-grace`.
+  - `start-sign-in` returns the URL to send a user's browser to, and the scopes it requests.
+    `finish-sign-in` takes the parameters the browser came back with and the principal of the
+    session it came back in; both refuse a NIL principal. `access-token` returns a principal's
+    token for a connection, refreshing it when it has expired; `refresh` and `disconnect` do what
+    they say, and both take `call-with-refresh-lock`, as does storing a new sign-in's tokens.
+  - `discover`, `canonical-resource` and `parse-challenge` are exported for an app that needs
+    them. `parse-challenge` reads the Bearer challenge only where a challenge starts, so the
+    word bearer inside another challenge's quoted parameter is not taken for it. The conditions are `oauth-error`, and under it `unknown-sign-in`, `wrong-user`,
+    `sign-in-failed`, `metadata-refused`, `url-refused`, `no-client` and `refresh-failed`.
+  - The store protocol (`get-token`, `put-token`, `delete-token`, `get-client`, `put-client`,
+    `delete-client`, `put-pending`, `take-pending`, `call-with-refresh-lock`) is implemented by
+    the app, over its own storage. `delete-client` takes the client id and deletes only on a
+    match, as one step. Every slot of `token-set` and `pending` is exported, with `make-token-set` and
+    `make-pending`, so a store can keep both as strings. `memory-store` is for tests and
+    one-process apps, and drops expired pending sign-ins.
+  - It follows the MCP authorization specification, revision 2026-07-28. Metadata is checked;
+    the resource URL and every URL from a server must be https, or http on a loopback host,
+    and are fetched through `fetch-public` with no redirects; the `iss` response parameter is checked; a token response
+    must say `token_type` Bearer; and the client id comes from a pre-registered client, a client
+    ID metadata document at an https URL (`client-metadata-document`), or a dynamic
+    registration. A token is sent only while the resource's metadata, cached for
+    `:metadata-lifetime`, still names the issuer that issued it; a failed fetch never renews the
+    cache. A refresh refused with `invalid_grant`, `invalid_client` or `unauthorized_client`
+    deletes the tokens, and `invalid_client` also forgets a client registered dynamically, when
+    it is the one those tokens were issued to, so the next sign-in registers a new one. See
+    `aion/docs/oauth.md`.
+  - Every request has an overall deadline, one second past the broker's `:timeout`, so a server
+    that sends a byte now and then cannot hold a sign-in or a refresh, and its lock, for longer.
+    A request given up at its deadline keeps running until the server finishes; when
+    `aion/oauth::*max-abandoned-requests*` (8) of them are still running for one host, a new
+    request to that host signals `oauth-error` without being sent. Other hosts are not affected.
+  - Not on Windows yet: like `fetch-public`, it signals `pinned-connect-unsupported` there.
+- **hyperion/oauth: the routes an app mounts for aion/oauth** (#527, part 2).
+  `sign-in-return-handler` finishes a sign-in at the redirect URI, for the principal that
+  `:principal-of` reads from the request's session. `client-metadata-handler` serves the app's
+  client ID metadata document.
+- **praxeon/mcp: MCP servers that require an OAuth sign-in** (#527, part 2).
+  - A token source is now anything that implements `token-for`, as functions already do. An
+    error from a token source, a plain function included, now fails the call with
+    `request-failed` and outcome `:not-run`; before, it reached the caller.
+  - A source may implement `token-refused`, so that a request the server refused with a 401
+    or 403, the legacy `initialize` included, is sent once more with the token it returns. A
+    `token-refused` that fails gives `:not-run`, not a request to sign in.
+  - `oauth-token-source` gives each principal's tokens from an `aion/oauth` broker, refreshing
+    them as needed.
+- **praxeon/mcp: agents can use the tools an MCP server offers** (#527, part 1). A new system,
+  `praxeon/mcp`, talks to MCP servers over Streamable HTTP, in the current revision of the
+  specification (2026-07-28) or, when a server does not understand it, in the legacy
+  revisions with their `initialize` handshake. `make-connection` describes a server: its name,
+  URL, `:token-source` (a function of the connection and a principal that returns a bearer
+  token), `:per-user`, `:timeout` and `:call-timeout` (seconds, 30 and 120), and
+  `:max-body-bytes` (8 MiB). `make-client` makes the client that talks to it, and nothing is
+  sent until it is first used. `list-tools` reads a server's tools and gives them to no agent,
+  leaving out a tool whose `inputSchema` is not an object schema or is larger than
+  `*max-schema-characters*` (20000), and failing a listing that goes past `*max-list-pages*`
+  (1000) pages, or that has a page whose `tools` member is missing or is not a list. A tool's
+  description is clipped to `*max-description-characters*` (2000).
+  `call-tool` calls one directly. `means-name` gives the name a tool is granted under.
+  `grant-tools` registers the tools the app names in its required `:only` (a list, or `:all`)
+  as means named `<connection>__<tool>`, and
+  refuses with `tool-name-conflict`, registering nothing, when a name is taken. `revoke-tools`
+  removes them. Each call uses the token of the turn's principal. A failed call is reported
+  to the model and the turn goes on: `tool-error` for a result with `isError`,
+  `request-failed` for a failed request, and `sign-in-needed` when the user must sign in, which
+  also signals `authorization-required` and emits a `:sign-in-required` event. A tool call that
+  may have run is never sent twice. Every request has a deadline of its own, one second past its
+  timeout, whatever the transport does; a request given up at it keeps running on a
+  `praxeon/mcp request` thread until it ends, and logs how it ended. At
+  `*max-abandoned-requests*` (8) such threads on a client, the client refuses new requests until
+  some finish. See `praxeon/docs/mcp.md`. OAuth sign-in is part 2.
+- **praxeon: the `:tool-call` and `:tool-result` events carry `:source`, `:principal`, `:agent`
+  and `:conversation`, and `:tool-result` carries `:outcome` and `:ms`** (#527).
+  `register-means` takes a `:source` plist, such as `(:connection "docs" :tool "search"
+  :per-user t)` for an MCP tool, and `:outcome` is
+  `:ok`, `:error`, `:not-run` or `:unknown`, from `tool-error-result-outcome`. This is what a
+  usage ledger needs to record a call, until #493 settles the usage interface.
+- **aion/test-http: the HTTP server aion/http-client's tests ran, as its own system** (#527), so
+  other test suites can run a server in the test image. Test support only.
+- **praxeon: a means can report an error to the model, and the turn goes on** (#527). A means
+  that signals `praxeon/conditions:tool-error-result` with a `:text` gives the model a tool
+  result marked as an error, carrying that text, and `run-turn` runs its next step. Any other
+  error from a means still ends the turn as `means-failure`, with `act`'s restarts, as before.
+  The `:tool-result` event carries `:is-error t` for such a result. The Anthropic adapter
+  already sent `is_error`; the OpenAI-compatible adapter, whose format has no such field, now
+  starts the content with `Error: `.
+- **praxeon: `run-turn` and `run-turn-through` take a `:principal`, the user the turn runs for**
+  (#527). It is bound for the turn as `praxeon/actor:*principal*`, which a means reads when it
+  is called, so each call acts with that user's credentials. It does not separate
+  conversations: an agent has one history, from which every request is built, so each user needs an agent,
+  or at least a history, of their own. A turn without a principal keeps the principal of an
+  enclosing turn, so a delegated sub-turn runs for the same user.
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
@@ -178,6 +302,14 @@ its tag.
   next poll. `watch-site` now reloads a change once two polls in a row have seen it, so an edit
   is served one `:interval` later than before. A write held open for longer than an interval can
   still be read while empty. (#534)
+- **aion/http-client: `fetch-public` returns the body of a 4xx or 5xx response, and an empty
+  response no longer fails** (#527). Over the pinned connection `fetch-public` uses, the
+  connection was closed before the body of a non-2xx response was read. The body came back
+  empty, and a response with no body at all, such as a 404, signalled
+  `sb-int:closed-stream-error` instead of returning. An app that read an error's details from
+  `fetch-public`'s response, or treated a closed-stream error from it as "not found", now gets
+  the response itself. Windows is unaffected, because `fetch-public` does not pin a connection
+  there.
 - **aion/windows/com: a process that has started the STA apartment exits without waiting a
   minute.** The apartment thread waits in a foreign call SBCL cannot interrupt, so `sb-ext:exit`
   waited out the whole `sb-ext:*exit-timeout*` (60 s by default) for it, and a desktop app that

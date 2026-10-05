@@ -22,6 +22,24 @@
                      (means-failure-cause c))))
   (:documentation "Signalled when applying a means does not succeed."))
 
+(define-condition tool-error-result (praxeon-error)
+  ((text :initarg :text :reader tool-error-result-text)
+   (outcome :initarg :outcome :initform :error :reader tool-error-result-outcome))
+  (:report (lambda (c stream)
+             (format stream "The tool reported an error: ~A" (tool-error-result-text c))))
+  (:documentation "Signalled by a means to say that its call failed and that the model should
+be told TEXT as an error result, while the turn goes on (#527).
+
+RUN-TURN gives the model a tool result with :IS-ERROR set and TEXT as its content, and runs
+the turn's next step. Any other error from a means still ends the turn, as it always has; a
+means opts into this by signalling this condition, or a subclass of it. TEXT reaches the
+model, so it must hold nothing the model should not see, such as a secret or a URL meant for
+one user.
+
+OUTCOME says what happened, for a usage ledger reading the :TOOL-RESULT event: :ERROR when the
+tool ran and reported an error, :NOT-RUN when it was refused before it ran, and :UNKNOWN when
+it may have run, such as after a timeout."))
+
 (define-condition deliberation-failure (praxeon-error)
   ((detail :initarg :detail :initform nil :reader deliberation-failure-detail))
   (:report (lambda (c stream)
