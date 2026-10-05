@@ -326,9 +326,12 @@ its tag.
   `</context>`, so a text containing `</context>` ended the block early, and what followed read
   as the user's own words. A line starting with `[note]` or `[system]` read as another item.
   This mattered once part 4 let an MCP server's resource become an item. `render-items` now
-  writes `<context` and `</context` inside an item's text, in any letter case, with `&lt;`, and
-  indents every later line of the text by two spaces. A multi-line item's rendering changes for
-  every app: its continuation lines are indented.
+  writes the block's tags inside an item's text, in any letter case, with `&lt;`, taking their
+  names from `*context-open*` and `*context-close*` when the block is rendered, so a tag an app
+  sets is covered too; a tag not of the form `<name>` or `</name>` gets only the indentation.
+  Every later line of the text is indented by two spaces, after LF, CR, CRLF, VT, FF, NEL, LS or
+  PS, each written as one LF. A multi-line item's rendering changes for every app: its
+  continuation lines are indented.
 
 - **klio: `watch-site` no longer publishes a file read while it is being written.** A file saved
   in place is empty from the moment it is opened until the new text is written, and a poll that
