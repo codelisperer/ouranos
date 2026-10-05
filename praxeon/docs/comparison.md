@@ -100,8 +100,8 @@ different control flow from ReAct, not a refinement of it, and DeepAgents target
 case praxeon left empty.
 
 **5. MCP, partly (#527).** `praxeon/mcp` gives agents the tools of MCP servers over Streamable HTTP, in
-the current revision of the specification and the legacy ones, and signs each user in to a
-server that requires OAuth, through `aion/oauth`. Resources and prompts, and local servers over
+the current revision of the specification and the legacy ones, and, for a server that requires
+OAuth, sends each user the token from their `aion/oauth` sign-in and refreshes it. Resources and prompts, and local servers over
 stdio, are later parts of #527.
 
 **6. Context offload.** The most on-thesis idea in DeepAgents, and praxeon has the disk for
