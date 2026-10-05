@@ -93,7 +93,8 @@ the held turn's id, NIL for a call decided on the spot."
   "Inside a step, or a held step being written: call id -> a plist of what has happened to the
 call. :TEXT and :ERROR are the result it gets, noted as soon as it is decided or known, with the
 :OUTCOME and :MS its :TOOL-RESULT event carries. :STORE-TRIED says the result store was
-asked to keep its result, noted just before the store is called.
+asked to keep its result, noted just before the store is called. :APPLYING says %RUN-PART is
+about to apply the call's means, noted after its :TOOL-CALL event.
 :CALL-SENT and :RESULT-SENT say its :TOOL-CALL and :TOOL-RESULT events were sent, marked just
 before each is emitted, so an event an observer failed on is never sent again. :PHASE is
 :RUNNING or :REFUSED, noted just before an approved held call is applied. The cleanups of #546
@@ -116,6 +117,9 @@ read these: a call gets its decided text when it has one, and only the events no
 (defun %run-part (agent id name args permit)
   "Run the call as RUN-TURN always has, and return its tool-result part."
   (%part-event agent id name args)
+  ;; Noted after the :TOOL-CALL event and just before the means is applied, so that a cleanup
+  ;; tells a call whose means may have run from one whose event failed first (#553).
+  (%record! id :applying t)
   (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
     (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
     ;; Stored before its event, so that when the observer fails on the event, the index already
@@ -219,7 +223,11 @@ result stored, and no call gets an event it already had."
                     :outcome (or (%record id :outcome) :not-run) :ms (or (%record id :ms) 0)))
             ((equal id (car current))
              (ecase (cdr current)
-               (:running (entry +may-have-run+ :outcome :unknown))
+               ;; :RUNNING is set before the call's :TOOL-CALL event. Its means may have run
+               ;; only when %RUN-PART got as far as applying it (#553).
+               (:running (if (%record id :applying)
+                             (entry +may-have-run+ :outcome :unknown)
+                             (entry +turn-ended+)))
                (:refused (entry +no-such-tool+))
                (:deciding (entry +turn-ended+))))
             (t (entry +turn-ended+))))))
