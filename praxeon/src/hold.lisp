@@ -102,10 +102,16 @@ nothing more for it, so each call has one :TOOL-RESULT event and the history say
 (defun %note-emitted (id text error-p)
   (when *emitted* (setf (gethash id *emitted*) (cons text (and error-p t)))))
 
-(defun %emitted-part (id)
-  "The tool-result part for ID made from its emitted :TOOL-RESULT event's text, or NIL."
+(defun %emitted-part (agent id)
+  "The tool-result part for ID made from its emitted :TOOL-RESULT event's text, or NIL. When
+the result store already took the result and offloaded it, the part is its stand-in, as the
+normal path writes it, so that the history never holds a result the index says is kept out."
   (let ((e (and *emitted* (gethash id *emitted*))))
-    (and e (llm:tool-result-part id (car e) (cdr e)))))
+    (when e
+      (let ((index (gethash id (agent-result-index agent))))
+        (llm:tool-result-part id
+                              (if (getf index :offloaded) (%stand-in index :offloaded) (car e))
+                              (cdr e))))))
 
 (defun %run-part (agent id name args permit)
   "Run the call as RUN-TURN always has, and return its tool-result part."
@@ -119,13 +125,15 @@ nothing more for it, so each call has one :TOOL-RESULT event and the history say
     (llm:tool-result-part id (%store-result agent id name args result) error-p)))
 
 (defun %not-run-part (agent id name args text &key (outcome :not-run) (announce t))
-  "A tool-result part for a call that was not run, telling the model TEXT."
+  "A tool-result part for a call that was not run, telling the model TEXT. TEXT is noted in
+*EMITTED* before any event, because what the call gets is already decided: when an observer or
+the store fails while it is written, the cleanup writes TEXT and emits nothing more for it."
+  (%note-emitted id text t)
   (when announce (%part-event agent id name args))
   (evt:emit :tool-result :id id :name name :content text
                          :source (%means-source agent name) :principal *principal*
                          :agent (agent-name agent) :conversation (agent-conversation agent)
                          :outcome outcome :ms 0 :is-error t)
-  (%note-emitted id text t)
   (llm:tool-result-part id (%store-result agent id name args text) t))
 
 (defun %callable-p (agent name permit)
@@ -181,7 +189,7 @@ event is emitted or any result stored."
                 (h (find id held :key (lambda (c) (getf c :id)) :test #'equal)))
             (cond
               (finished (cons finished nil))
-              ((%emitted-part id) (cons (%emitted-part id) nil))
+              ((%emitted-part agent id) (cons (%emitted-part agent id) nil))
               (h (not-run id name args +turn-ended+ :decided (list held-id h :turn-failed)))
               ((equal id (car current))
                (ecase (cdr current)
@@ -535,7 +543,7 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
             (let ((stored (or (find id (held-turn-results held) :key (lambda (p) (getf p :tool-use-id))
                                     :test #'equal)
                               (find id done :key (lambda (p) (getf p :tool-use-id)) :test #'equal))))
-              (setf stored (or stored (%emitted-part id)))
+              (setf stored (or stored (%emitted-part agent id)))
               (if stored
                   (cons stored nil)
                   (let* ((call (find id (held-turn-calls held) :key (lambda (c) (getf c :id)) :test #'equal))
@@ -551,7 +559,13 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
                         ;; have run only when %HELD-PART would have run its means or written
                         ;; may-have-run; otherwise it is written as its decision says.
                         ((equal id current)
-                         (cond ((and (eq d :approve) (or recorded (%held-means-current-p agent call)))
+                         (cond ((and (eq d :approve) recorded)
+                                (not-run +may-have-run+ :outcome :unknown))
+                               ((and (eq d :approve) (%held-means-current-p agent call)
+                                     (not (%callable-p agent name permit)))
+                                ;; ACT refused it before it ran: the permit no longer allows it.
+                                (not-run +no-such-tool+))
+                               ((and (eq d :approve) (%held-means-current-p agent call))
                                 (not-run +may-have-run+ :outcome :unknown))
                                ((eq d :approve) (not-run +unavailable+))
                                (t (not-run (%decision-text d)))))

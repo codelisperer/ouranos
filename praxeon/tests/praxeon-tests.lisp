@@ -4948,3 +4948,57 @@ the earlier attempt, so neither is written as not run, and neither runs now."
       (is-true (search "may have run" (%result-for ag "s2")))
       (is (equal '(0 0) counts))
       (is-true (%every-call-answered-p ag)))))
+
+(test an-offloaded-result-stays-a-stand-in-when-the-observer-fails-after-storing-it
+  "The store keeps the result and offloads it, then the observer signals on :RESULT-STORED. The
+history holds the stand-in, as the index says, not the full result."
+  (let ((ag (%step-agent '(("1" "a")))))
+    (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1)
+    (evt:with-observer ((lambda (e) (when (eq :result-stored (evt:event-type e))
+                                      (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go")))
+    (is (not (equal "a ran" (%result-for ag "1"))) "not the full result")
+    (is-true (search "read-result" (%result-for ag "1")) "the stand-in")
+    (is-true (%every-call-answered-p ag))))
+
+(test a-call-the-policy-declined-stays-declined-when-its-result-event-fails
+  "The blocking ON-HOLD function declines the second call, and the observer signals on that
+call's :TOOL-RESULT. The decline is kept, and the call has one :TOOL-CALL event."
+  (let ((ag (%step-agent '(("1" "a") ("2" "s") ("3" "c"))))
+        (events '()))
+    (actor:register-means ag "s" "spends" (lambda (in) (declare (ignore in)) "spent") :confirm t)
+    (evt:with-observer ((lambda (e)
+                          (push e events)
+                          (when (and (eq :tool-result (evt:event-type e)) (equal "2" (getf e :id)))
+                            (error "the client's stream is closed"))))
+      (signals simple-error
+        (actor:run-turn ag "go" :principal "u1" :on-hold (lambda (c) (declare (ignore c)) :decline))))
+    (is (equal "Not run: the user declined." (%result-for ag "2")))
+    (is (= 1 (count-if (lambda (e) (and (eq :tool-call (evt:event-type e)) (equal "2" (getf e :id))))
+                       events)))
+    (is-true (search "turn ended" (%result-for ag "3")))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again" :principal "u1")))))
+
+(test an-approval-whose-permit-was-withdrawn-is-written-as-not-run
+  "The held call was approved, but CONTINUE-TURN's permit no longer allows its capability, so
+ACT refuses it before it runs. It is written as refused, not as one that may have run."
+  (multiple-value-bind (ag counts)
+      (%hold-agent :answers 1
+                   :extra-means (lambda (ag counts)
+                                  (actor:register-means ag "spend" "spends credits"
+                                                        (lambda (in) (declare (ignore in)) (incf (first counts)) "spent")
+                                                        :confirm t :capability "spend"
+                                                        :source '(:connection "svc" :tool "spend"))))
+    (let* ((allow (lambda (capability) (declare (ignore capability)) t))
+           (held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :permit allow :on-hold :hold)))
+           (events '()))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (signals cnd:means-failure (actor:continue-turn ag held :approve :principal "u1")))
+      (is (equal "Not run: no such tool is available." (%result-for ag "s1")))
+      (is (eq :not-run (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                       (equal "s1" (getf e :id))))
+                                      events)
+                             :outcome)))
+      (is (equal '(0 1) counts))
+      (is-true (%every-call-answered-p ag)))))
