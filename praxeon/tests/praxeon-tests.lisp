@@ -5175,3 +5175,26 @@ call 2. Call 2's :TOOL-RESULT event is still sent, with its outcome."
       (signals simple-error (actor:run-turn ag "go" :principal "u1")))
     (is-true (gethash "2" (actor::agent-result-index ag)) "the text is in the result store")
     (is (equal '(:tool-call :result-stored :tool-result) (%event-order events "2")))))
+
+(test a-call-whose-tool-call-event-fails-before-its-means-runs-is-not-run
+  "The observer fails on the :TOOL-CALL event of a call to a registered means, before the means
+is applied. The means never ran, so the call is written as not run, not as may-have-run (#553)."
+  (let ((ag (%step-agent '(("1" "a") ("2" "c"))))
+        (runs 0)
+        (events '()))
+    (actor:register-means ag "a" "a" (lambda (in) (declare (ignore in)) (incf runs) "a ran"))
+    (evt:with-observer ((lambda (e)
+                          (push e events)
+                          (when (and (eq :tool-call (evt:event-type e)) (equal "1" (getf e :id)))
+                            (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go")))
+    (is (= 0 runs) "the means never ran")
+    (is (equal "Not run: the turn ended before this call was run." (%result-for ag "1")))
+    (is (eq :not-run (getf (find-if (lambda (e) (and (eq :tool-result (evt:event-type e))
+                                                     (equal "1" (getf e :id))))
+                                    events)
+                           :outcome)))
+    (is (= 1 (%events-for events :tool-call "1")))
+    (is (= 1 (%events-for events :tool-result "1")))
+    (is-true (%every-call-answered-p ag))
+    (is (equal "done" (actor:run-turn ag "again")))))
