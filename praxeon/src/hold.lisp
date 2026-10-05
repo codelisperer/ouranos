@@ -92,7 +92,8 @@ the held turn's id, NIL for a call decided on the spot."
 (defvar *call-records* nil
   "Inside a step, or a held step being written: call id -> a plist of what has happened to the
 call. :TEXT and :ERROR are the result it gets, noted as soon as it is decided or known, with the
-:OUTCOME and :MS its :TOOL-RESULT event carries.
+:OUTCOME and :MS its :TOOL-RESULT event carries. :STORE-TRIED says the result store was
+asked to keep its result, noted just before the store is called.
 :CALL-SENT and :RESULT-SENT say its :TOOL-CALL and :TOOL-RESULT events were sent, marked just
 before each is emitted, so an event an observer failed on is never sent again. :PHASE is
 :RUNNING or :REFUSED, noted just before an approved held call is applied. The cleanups of #546
@@ -119,6 +120,7 @@ read these: a call gets its decided text when it has one, and only the events no
     (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
     ;; Stored before its event, so that when the observer fails on the event, the index already
     ;; has the result and the cleanup writes its stand-in.
+    (%record! id :store-tried t)
     (let ((kept (%store-result agent id name args result)))
       (%record! id :result-sent t)
       (apply #'evt:emit :tool-result :id id :name name :content result
@@ -133,6 +135,7 @@ read these: a call gets its decided text when it has one, and only the events no
   (%record! id :text text :error t :outcome outcome :ms 0)
   (when announce (%part-event agent id name args))
   ;; Stored before its event, as in %RUN-PART.
+  (%record! id :store-tried t)
   (let ((kept (%store-result agent id name args text)))
     (%record! id :result-sent t)
     (evt:emit :tool-result :id id :name name :content text
@@ -153,11 +156,13 @@ functions after, because the observer or the store may be what failed, and would
 before the history was complete. The part is the stored result's stand-in when the result store
 already took the result and offloaded it, as the normal path writes it. The function emits
 DECIDED's :TOOL-DECIDED event when DECIDED is given, as (HELD-ID CALL DECISION); the call's
-:TOOL-CALL and :TOOL-RESULT events, each only when it was not sent before; and, when STORE is
-true, keeps TEXT in the result store unless the store already has it. A result the call already
-had is written with STORE false: every result is stored before its :TOOL-RESULT event, so by
-then the store was tried and may be what failed, or it is about to be tried and an event before
-it failed. Returns (PART . FUNCTION)."
+:TOOL-CALL event when it was not sent before; then, when STORE is true and the call's store was
+not tried, keeps TEXT in the result store unless the store already has it; then the call's
+:TOOL-RESULT event when it was not sent before. So :RESULT-STORED comes before :TOOL-RESULT, as
+on the normal path. When the store signals, the :TOOL-RESULT event is still sent, and the
+store's error goes on after it. A result the call already had is written with STORE true only
+when its store was never tried, because an event before it failed: *CALL-RECORDS* notes
+:STORE-TRIED just before every store. Returns (PART . FUNCTION)."
   (let ((index (gethash id (agent-result-index agent))))
     (cons (llm:tool-result-part id (if (getf index :offloaded) (%stand-in index :offloaded) text) error)
           (lambda ()
@@ -166,13 +171,20 @@ it failed. Returns (PART . FUNCTION)."
                 (%held-event :tool-decided held-id call :decision decision
                              :agent (agent-name agent) :conversation (agent-conversation agent))))
             (unless (%record id :call-sent) (%part-event agent id name args))
-            (unless (%record id :result-sent)
-              (%record! id :result-sent t)
-              (apply #'evt:emit :tool-result :id id :name name :content text
-                     :source (%means-source agent name) :principal *principal*
-                     :agent (agent-name agent) :conversation (agent-conversation agent)
-                     :outcome outcome :ms ms (when error (list :is-error t))))
-            (when (and store (not index)) (%store-result agent id name args text))))))
+            ;; Stored before the :TOOL-RESULT event, as on the normal path. A store that fails
+            ;; does not keep the event from being sent; its error goes on after it.
+            (let ((store-error nil))
+              (when (and store (not index) (not (%record id :store-tried)))
+                (%record! id :store-tried t)
+                (handler-case (%store-result agent id name args text)
+                  (error (e) (setf store-error e))))
+              (unless (%record id :result-sent)
+                (%record! id :result-sent t)
+                (apply #'evt:emit :tool-result :id id :name name :content text
+                       :source (%means-source agent name) :principal *principal*
+                       :agent (agent-name agent) :conversation (agent-conversation agent)
+                       :outcome outcome :ms ms (when error (list :is-error t))))
+              (when store-error (error store-error)))))))
 
 (defun %append-then (agent parts-and-thunks)
   "Append one user message of the parts in PARTS-AND-THUNKS, a list of (PART . THUNK-OR-NIL),
@@ -203,7 +215,7 @@ result stored, and no call gets an event it already had."
           (cond
             (finished (cons finished nil))
             (h (entry +turn-ended+ :decided (list held-id h :turn-failed)))
-            ((%record id :text) (entry (%record id :text) :error (%record id :error) :store nil
+            ((%record id :text) (entry (%record id :text) :error (%record id :error) :store (not (%record id :store-tried))
                     :outcome (or (%record id :outcome) :not-run) :ms (or (%record id :ms) 0)))
             ((equal id (car current))
              (ecase (cdr current)
@@ -518,6 +530,7 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
               (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
                 (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
                 ;; Stored before its event, as in %RUN-PART.
+                (%record! id :store-tried t)
                 (let ((kept (%store-result agent id name args result)))
                   (%record! id :result-sent t)
                   (apply #'evt:emit :tool-result :id id :name name :content result
@@ -578,7 +591,7 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
                     (flet ((entry (text &rest keys) (apply #'%cleanup-entry agent id name args text keys)))
                       (cond
                         ;; Its result was decided or known before the failure.
-                        ((%record id :text) (entry (%record id :text) :error (%record id :error) :store nil
+                        ((%record id :text) (entry (%record id :text) :error (%record id :error) :store (not (%record id :store-tried))
                     :outcome (or (%record id :outcome) :not-run) :ms (or (%record id :ms) 0)))
                         ;; Its :TOOL-DECIDED event was emitted before it became current. Whether
                         ;; it reached its means is what %HELD-PART noted, not what the registry

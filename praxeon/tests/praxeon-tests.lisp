@@ -5125,3 +5125,53 @@ the result, the call's :TOOL-RESULT event says :OK, and the means ran once."
       (is (= 1 (%events-for events :tool-result "s1")))
       (is (equal '(1 1) counts))
       (is-true (%every-call-answered-p ag)))))
+
+(defun %event-order (events id)
+  "The types of ID's :TOOL-CALL, :RESULT-STORED and :TOOL-RESULT events, in the order sent."
+  (loop for e in (reverse events)
+        when (and (member (evt:event-type e) '(:tool-call :result-stored :tool-result))
+                  (equal id (getf e :id)))
+          collect (evt:event-type e)))
+
+(test results-the-cleanup-writes-are-stored-before-their-event
+  "On an agent with a result store, a step of a, b and c where b signals: every call's
+:RESULT-STORED comes before its :TOOL-RESULT, as on the normal path."
+  (let ((ag (%step-agent '(("1" "a") ("2" "b") ("3" "c"))))
+        (events '()))
+    (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1000)
+    (evt:with-observer ((lambda (e) (push e events)))
+      (signals cnd:means-failure (actor:run-turn ag "go")))
+    (dolist (id '("1" "2" "3"))
+      (is (equal '(:tool-call :result-stored :tool-result) (%event-order events id)) "call ~A" id))
+    (is-true (%every-call-answered-p ag))))
+
+(test a-store-that-fails-on-a-cleanup-result-still-gets-its-event-sent
+  "The store accepts call 1's result and refuses the may-have-run result the cleanup writes for
+call 2. Call 2's :TOOL-RESULT event is still sent, with its outcome."
+  (let ((ag (%step-agent '(("1" "a") ("2" "b") ("3" "c"))))
+        (events '()))
+    (actor:offload-tool-results ag (make-instance '%failing-store) :threshold 1000)
+    (evt:with-observer ((lambda (e) (push e events)))
+      (signals error (actor:run-turn ag "go")))
+    (let ((e (find-if (lambda (e) (and (eq :tool-result (evt:event-type e)) (equal "2" (getf e :id))))
+                      events)))
+      (is-true e "call 2's :tool-result was sent")
+      (is (eq :unknown (getf e :outcome))))
+    (is-true (%every-call-answered-p ag))))
+
+(test a-not-run-text-whose-tool-call-event-fails-is-still-stored
+  "The estimate fails, so %NOT-RUN-PART writes the call as not run, and the observer fails on its
+:TOOL-CALL event before the store was tried. The cleanup stores the text, before the call's
+:TOOL-RESULT event."
+  (let ((ag (%step-agent '(("1" "a") ("2" "s"))))
+        (events '()))
+    (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1000)
+    (actor:register-means ag "s" "spends" (lambda (in) (declare (ignore in)) "spent")
+                          :confirm (lambda (args) (declare (ignore args)) (error "no estimate")))
+    (evt:with-observer ((lambda (e)
+                          (push e events)
+                          (when (and (eq :tool-call (evt:event-type e)) (equal "2" (getf e :id)))
+                            (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go" :principal "u1")))
+    (is-true (gethash "2" (actor::agent-result-index ag)) "the text is in the result store")
+    (is (equal '(:tool-call :result-stored :tool-result) (%event-order events "2")))))
