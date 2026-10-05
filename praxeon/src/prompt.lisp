@@ -283,8 +283,9 @@ tag is <name> or </name>, any <name or </name in the text, in any letter case, h
 as &lt;. A tag of another form is not escaped; only the indentation below applies to it.
 
 Every line after the first is indented by two spaces, so that no line of the text starts the
-way an item line does, with a role in brackets, or with a tag. A line break is LF, VT, FF, CR,
-CRLF, NEL, LS or PS, since a model reads all of them as one; each is written as one LF. The text
+way an item line does, with a role in brackets, or with a tag. A line break is any of the
+characters Unicode defines as one: LF, VT, FF, CR, CRLF, NEL, LS or PS; each is written as one
+LF. The text
 of an item can come from a third party, such as an MCP server's resource."
   (let ((names (remove nil (remove-duplicates (list (%tag-name *context-open* nil)
                                                     (%tag-name *context-close* t))
