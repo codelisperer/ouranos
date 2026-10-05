@@ -4687,6 +4687,9 @@ under :HELD, which is NIL for a call decided on the spot."
 
 ;;; --- a failure in the middle of a step leaves a result for every call (#546) -------------
 
+(defun %events-for (events type id)
+  (count-if (lambda (e) (and (eq type (evt:event-type e)) (equal id (getf e :id)))) events))
+
 (defun %every-call-answered-p (agent)
   "Whether every tool call in AGENT's history is followed, in the next message, by its result."
   (loop for (m next) on (actor:agent-history agent)
@@ -4828,6 +4831,9 @@ one :TOOL-DECIDED event."
         (is (equal '(("s1" . :approve) ("s2" . :turn-failed) ("s3" . :decline))
                    (sort (mapcar (lambda (e) (cons (getf e :id) (getf e :decision))) decided)
                          #'string< :key #'car))))
+      (dolist (id '("s1" "s2" "s3"))
+        (is (= 0 (%events-for events :tool-call id)) "no second :tool-call for ~A" id)
+        (is (= 1 (%events-for events :tool-result id)) "one :tool-result for ~A" id))
       (is-true (%every-call-answered-p ag)))))
 
 (test an-on-hold-function-that-signals-leaves-its-call-not-run
@@ -4924,10 +4930,15 @@ each call has one :TOOL-RESULT event."
   "One held call, continued with :DECLINE, and an observer that signals on :TOOL-RESULT. The
 call was declined, so it is written as declined, not as one that may have run."
   (multiple-value-bind (ag counts) (%hold-agent :calls '(("s1" "spend")) :answers 1)
-    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold))))
-      (evt:with-observer ((lambda (e) (when (eq :tool-result (evt:event-type e))
-                                        (error "the client's stream is closed"))))
+    (let ((held (nth-value 2 (actor:run-turn ag "go" :principal "u1" :on-hold :hold)))
+          (events '()))
+      (evt:with-observer ((lambda (e)
+                            (push e events)
+                            (when (eq :tool-result (evt:event-type e))
+                              (error "the client's stream is closed"))))
         (signals simple-error (actor:continue-turn ag held :decline :principal "u1")))
+      (is (= 0 (%events-for events :tool-call "s1")) "its :tool-call was sent when it was held")
+      (is (= 1 (%events-for events :tool-result "s1")))
       (is (equal "Not run: the user declined." (%result-for ag "s1")))
       (is-true (%error-for ag "s1"))
       (is (equal '(0 0) counts))
@@ -5004,9 +5015,6 @@ ACT refuses it before it runs. It is written as refused, not as one that may hav
       (is (equal '(0 1) counts))
       (is-true (%every-call-answered-p ag)))))
 
-(defun %events-for (events type id)
-  (count-if (lambda (e) (and (eq type (evt:event-type e)) (equal id (getf e :id)))) events))
-
 (test a-not-run-call-whose-tool-call-event-fails-still-gets-its-result-event
   "The estimate function signals, so the call is written as not run, and the observer fails on
 that call's :TOOL-CALL event. The call keeps the estimate-failed text and gets one :TOOL-RESULT."
@@ -5079,5 +5087,21 @@ means, so it may have run, whatever the registry says when the cleanup runs."
                                                        (equal "s1" (getf e :id))))
                                       events)
                              :outcome)))
+      (is (= 0 (%events-for events :tool-call "s1")) "its :tool-call was sent when it was held")
+      (is (= 1 (%events-for events :tool-result "s1")))
       (is (equal '(1 1) counts))
       (is-true (%every-call-answered-p ag)))))
+
+(test a-large-result-whose-event-fails-is-kept-out-of-the-prompt
+  "The result is over the offload threshold, and the observer fails on its :TOOL-RESULT event.
+The result was stored before the event, so the history has its stand-in and the index says it
+is offloaded."
+  (let ((ag (%step-agent '(("1" "a") ("2" "c")))))
+    (actor:offload-tool-results ag (praxeon/results:make-memory-result-store) :threshold 1)
+    (evt:with-observer ((lambda (e) (when (and (eq :tool-result (evt:event-type e)) (equal "1" (getf e :id)))
+                                      (error "the client's stream is closed"))))
+      (signals simple-error (actor:run-turn ag "go")))
+    (is (not (equal "a ran" (%result-for ag "1"))) "not the full result")
+    (is-true (search "read-result" (%result-for ag "1")) "the stand-in")
+    (is-true (getf (gethash "1" (actor::agent-result-index ag)) :offloaded))
+    (is-true (%every-call-answered-p ag))))

@@ -310,7 +310,9 @@ its tag.
   emitted and before they are stored. A call whose result was already known, or whose not-run
   text was already decided, keeps that text, or its stand-in when the store already offloaded
   it. Each call gets one `:tool-call` and one `:tool-result` event, even when the observer
-  failed on one of them. Before this, the next turn sent tool
+  failed on one of them. A result is now kept in the agent's result store before its
+  `:tool-result` event is emitted, so for an agent with a result store, `:result-stored` comes
+  before `:tool-result` for the same call, where it used to come after. Before this, the next turn sent tool
   calls without results, which the providers refuse, and with #545 it signalled
   `held-turn-required` with no held turn to pass. A failure in the same step as a call held
   under `:on-hold :hold` wins: no held turn is returned, and the held call is written as not
