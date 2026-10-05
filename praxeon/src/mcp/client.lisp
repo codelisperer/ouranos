@@ -157,7 +157,7 @@ checking with the user."
     (log:info "praxeon/mcp: sign-in required" :connection name)
     (error 'sign-in-needed
            :connection name :outcome :not-run
-           :text (format nil "The connection ~A needs the user to sign in before this tool can be used. Ask the user to sign in."
+           :text (format nil "The connection ~A needs the user to sign in before its server can be used. Ask the user to sign in."
                          name))))
 
 (defgeneric token-for (source connection principal)

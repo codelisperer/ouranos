@@ -1151,6 +1151,12 @@ that Mcp-Name carries the URI, and an https URI is read through the server."
   (is (equal "page#sec%20one" (mcp:expand-uri-template "page{#frag}" '(("frag" . "sec one")))))
   (is (equal "file:///" (mcp:expand-uri-template "file:///{path}" '())) "no value, no text")
   (is (equal "x/%C3%A9" (mcp:expand-uri-template "x/{v}" '(("v" . "é")))))
+  ;; Variable names as RFC 6570 section 2.3 defines them: dotted segments and pct-encoded octets.
+  (is (equal "u/7" (mcp:expand-uri-template "u/{user.id}" '(("user.id" . "7")))))
+  (is (equal "u/8" (mcp:expand-uri-template "u/{%41b}" '(("%41b" . "8")))))
+  (is (equal "u/9" (mcp:expand-uri-template "u/{a.b.c}" '(("a.b.c" . "9")))))
+  (dolist (bad '("{.a}" "{a.}" "{a..b}" "{é}" "{%4}" "{a-b}"))
+    (signals error (mcp:expand-uri-template bad '(("a" . "1"))) "~A" bad))
   (dolist (template '("{a,b}" "{?q}" "{x*}" "{x:3}" "{/p}" "{open" "close}"))
     (signals error (mcp:expand-uri-template template '(("a" . "1") ("b" . "2") ("q" . "3")
                                                      ("x" . "4") ("p" . "5") ("open" . "6"))))))
@@ -1169,7 +1175,9 @@ that Mcp-Name carries the URI, and an https URI is read through the server."
                                 (%obj "role" "user" "content" (%obj "type" "image" "data" "AAAA" "mimeType" "image/png"))
                                 (%obj "role" "user" "content" (%obj "type" "resource_link" "uri" "file:///x" "name" "x"))
                                 (%obj "role" "user" "content" (%obj "type" "resource"
-                                                                    "resource" (%obj "uri" "file:///y" "text" "embedded")))))))
+                                                                    "resource" (%obj "uri" "file:///y" "text" "embedded")))
+                                (%obj "role" "user" "content" (%obj "type" "resource"
+                                                                    "resource" (%obj "uri" "file:///z" "blob" "AAAA")))))))
       (with-fake (client fake)
         (let ((prompt (first (mcp:list-prompts client))))
           (is (equal "review" (mcp:prompt-name prompt)) "~A" era)
@@ -1184,8 +1192,9 @@ that Mcp-Name carries the URI, and an https URI is read through the server."
               (is (equal "Review this." (first texts)))
               (is-true (search "image omitted" (second texts)))
               (is-true (search "file:///x" (third texts)))
-              (is (equal "embedded" (fourth texts))))
-            (is (= 4 (length (mcp:prompt-input prompt messages))) "one part per user message")))))))
+              (is (equal "embedded" (fourth texts)))
+              (is-true (search "binary" (fifth texts)) "a blob-only embedded resource is described"))
+            (is (= 5 (length (mcp:prompt-input prompt messages))) "one part per user message")))))))
 
 (test a-prompt-missing-a-required-argument-is-refused-before-anything-is-sent
   (let ((fake (make-fake)))
@@ -1216,5 +1225,39 @@ that Mcp-Name carries the URI, and an https URI is read through the server."
   (let ((fake (make-fake)))
     (setf (fake-resources fake) (list (%resource-json "file:///a" "a")))
     (with-fake (client fake :per-user t :token-source (lambda (c p) (declare (ignore c p)) "t"))
-      (signals mcp:sign-in-needed (mcp:list-resources client))
+      (handler-case (progn (mcp:list-resources client) (fail "no signal"))
+        (mcp:sign-in-needed (e)
+          (is-true (search "its server" (cnd:tool-error-result-text e)))
+          (is (null (search "tool" (cnd:tool-error-result-text e))) "the text does not call it a tool")))
       (is (null (requests)) "nothing was sent"))))
+
+(test a-malformed-prompt-message-fails-the-reply
+  "A message that is not an object, or whose content is not a content block, fails the reply
+rather than being left out: leaving it out could make a scripted exchange look user-only."
+  (dolist (messages (list (vector (%obj "role" "user" "content" (%obj "type" "text" "text" "Hi")) "assistant said hello")
+                          (vector (%obj "role" "user" "content" "not a block"))
+                          (vector (%obj "role" "user" "content" (vector (%obj "type" "text" "text" "a") 7)))))
+    (let ((fake (make-fake)))
+      (setf (fake-prompts fake) (list (%prompt-json "p"))
+            (fake-prompt-messages fake) (list (cons "p" messages)))
+      (with-fake (client fake)
+        (handler-case (progn (mcp:get-prompt client (first (mcp:list-prompts client))) (fail "no failure"))
+          (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))))))
+
+(test a-malformed-resource-content-fails-the-reply-and-keeps-the-earlier-copy
+  "A content that is not an object, or has no string uri, fails the reply rather than being left
+out, so ADD-RESOURCE never installs part of a resource, or replaces it with nothing."
+  (let ((fake (make-fake)))
+    (setf (fake-contents fake) (list (cons "file:///r" (%contents (%obj "uri" "file:///r" "text" "good")))))
+    (with-fake (client fake)
+      (let ((agent (actor:make-agent)))
+        (mcp:add-resource agent client "file:///r")
+        (dolist (contents (list (vector (%obj "uri" "file:///r" "text" "new") "junk")
+                                (vector (%obj "text" "no uri"))))
+          (setf (fake-contents fake) (list (cons "file:///r" contents)))
+          (handler-case (progn (mcp:read-resource client "file:///r") (fail "no failure"))
+            (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))
+          (signals mcp:request-failed (mcp:add-resource agent client "file:///r"))
+          (is (= 1 (length (%context-items agent))))
+          (is-true (search "good" (praxeon/context:ctx-item-content (first (%context-items agent))))
+                   "the earlier copy is kept"))))))

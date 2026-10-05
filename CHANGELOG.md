@@ -104,9 +104,13 @@ its tag.
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
   prompts** (#527, part 4).
   - `list-resources` and `list-resource-templates` follow pagination.
-  - `expand-uri-template` expands RFC 6570 templates at levels 1 and 2, and refuses the rest.
+  - `expand-uri-template` expands RFC 6570 templates at levels 1 and 2, with variable names as
+    section 2.3 defines them (dotted segments and percent-encoded octets), and refuses the rest.
+  - The text of `sign-in-needed` says the connection's server needs a sign-in, not "this tool",
+    since resources and prompts can need one too.
   - `read-resource` returns a resource's contents. Binary content is kept only as its length.
-    A missing resource signals `resource-not-found`. A resource is always read through its
+    A missing resource signals `resource-not-found`, and a reply with a malformed content fails
+    whole rather than returning part of the resource. A resource is always read through its
     server, even when its URI is `https://`.
   - `add-resource` adds one context item per content. Each item's text starts with a line
     naming the resource and its connection, and saying the text is data from that server, not
@@ -115,7 +119,8 @@ its tag.
     `resource-too-large`, and nothing is added. The items stay for every later turn whoever
     its principal is, so add a per-user resource only to an agent that serves that user.
   - `list-prompts` and `get-prompt` return a prompt's messages as `praxeon/llm` messages.
-    `get-prompt` refuses a missing required argument before sending anything.
+    `get-prompt` refuses a missing required argument before sending anything, and fails a reply
+    with a malformed message rather than leaving the message out.
   - `prompt-input` turns a prompt whose messages are all the user's into the input of
     `run-turn`, and signals `prompt-has-assistant-messages` for a scripted exchange.
   - Only the app adds resources; the model cannot read one itself. Subscriptions, completions
