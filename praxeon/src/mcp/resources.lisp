@@ -140,6 +140,27 @@ string uri and name is left out. A page without a list of resources signals REQU
 
 (defun %reserved-p (c) (find c ":/?#[]@!$&'()*+,;="))
 
+(defun %ascii-alphanumeric-p (c)
+  (or (char<= #\a c #\z) (char<= #\A c #\Z) (char<= #\0 c #\9)))
+
+(defun %varname-p (name)
+  "Whether NAME is an RFC 6570 varname: varchar *( \".\" varchar ), where varchar is an ASCII
+letter or digit, _, or a percent-encoded octet (section 2.3)."
+  (let ((n (length name)) (i 0) (after-dot t))
+    (and (plusp n)
+         (loop while (< i n)
+               do (let ((c (char name i)))
+                    (cond ((or (%ascii-alphanumeric-p c) (char= c #\_))
+                           (setf after-dot nil) (incf i))
+                          ((and (char= c #\%) (< (+ i 2) n)
+                                (digit-char-p (char name (1+ i)) 16)
+                                (digit-char-p (char name (+ i 2)) 16))
+                           (setf after-dot nil) (incf i 3))
+                          ((and (char= c #\.) (not after-dot))
+                           (setf after-dot t) (incf i))
+                          (t (return nil))))
+               finally (return (not after-dot))))))
+
 (defun %expand-value (value allow-reserved)
   "VALUE percent-encoded as UTF-8, keeping unreserved characters, and with ALLOW-RESERVED,
 reserved characters and existing %XX triplets as well (RFC 6570, sections 3.2.1 to 3.2.3)."
@@ -176,9 +197,7 @@ operator or a modifier, signals an error, rather than producing a wrong URI."
                                             (find (char expression 0) "+#")
                                             (char expression 0)))
                              (name (if operator (subseq expression 1) expression)))
-                        (unless (and (plusp (length name))
-                                     (every (lambda (ch) (or (alphanumericp ch) (char= ch #\_)))
-                                            name))
+                        (unless (%varname-p name)
                           (error "expand-uri-template: {~A} in ~S is not a level 1 or 2 expression"
                                  expression template))
                         (let ((value (cdr (assoc name bindings :test #'string=))))
@@ -205,8 +224,8 @@ operator or a modifier, signals an error, rather than producing a wrong URI."
 (defun read-resource (client uri &key principal)
   "The contents of the resource at URI, as RESOURCE-CONTENT structs, read through CLIENT's
 server, whatever URI's scheme. Signals RESOURCE-NOT-FOUND when the server says the resource does
-not exist, and REQUEST-FAILED for other failures, including a reply without a list of contents
-and an input_required result."
+not exist, and REQUEST-FAILED for other failures, including a reply without a list of contents,
+a content that is not an object or has no string uri, and an input_required result."
   (check-type uri string)
   (let ((result
           (handler-case (%request client "resources/read" (%object "uri" uri) :principal principal)
@@ -221,9 +240,14 @@ and an input_required result."
     (let ((contents (gethash "contents" result)))
       (unless (and (vectorp contents) (not (stringp contents)))
         (%request-failed client "its resource reply had no list of contents." '() :outcome :not-run))
+      ;; A malformed entry fails the reply rather than being left out, so that ADD-RESOURCE never
+      ;; installs part of a resource, or replaces it with nothing (#554).
       (let ((found (loop for object across contents
-                        for content = (and (hash-table-p object) (%content-from-json object))
-                        when content collect content)))
+                         for content = (and (hash-table-p object) (%content-from-json object))
+                         unless content
+                           do (%request-failed client "its resource reply had a content without a string uri." '()
+                                               :outcome :not-run)
+                         collect content)))
         (log:info "praxeon/mcp: resource read"
                   :connection (connection-name (client-connection client))
                   :resource (%uri-for-log uri) :contents (length found))

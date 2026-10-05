@@ -62,10 +62,13 @@ string name is left out. A page without a list of prompts signals REQUEST-FAILED
   (unless (member role '("user" "assistant") :test #'equal)
     (%request-failed client "its prompt had a message whose role is not user or assistant." '()
                      :outcome :not-run))
+  ;; A malformed message fails the reply rather than being left out: leaving one out could turn
+  ;; a scripted exchange into what looks like a user-only prompt (#554).
   (let ((blocks (cond ((hash-table-p block) (list block))
-                      ((and (vectorp block) (not (stringp block)))
-                       (remove-if-not #'hash-table-p (coerce block 'list)))
-                      (t '()))))
+                      ((and (vectorp block) (not (stringp block)) (every #'hash-table-p block))
+                       (coerce block 'list))
+                      (t (%request-failed client "its prompt had a message whose content is not a content block." '()
+                                          :outcome :not-run)))))
     (llm:msg role (mapcar (lambda (b) (llm:text-part (%content-text b))) blocks))))
 
 (defun get-prompt (client prompt &key arguments principal)
@@ -76,7 +79,8 @@ the prompt's description.
 A required argument that is missing, or a value that is not a string, signals REQUEST-FAILED
 before anything is sent. Text content becomes a text part. Image and audio content, a resource
 link and a binary embedded resource are described in a line, never included; an embedded text
-resource becomes its text. A message whose role is not user or assistant fails the call."
+resource becomes its text. A message that is not an object, whose content is not a content
+block, or whose role is not user or assistant fails the call, rather than being left out."
   (check-type prompt prompt)
   (dolist (argument (prompt-arguments prompt))
     (when (and (prompt-argument-required argument)
@@ -97,9 +101,10 @@ resource becomes its text. A message whose role is not user or assistant fails t
            (messages (gethash "messages" result)))
       (unless (and (vectorp messages) (not (stringp messages)))
         (%request-failed client "its prompt reply had no list of messages." '() :outcome :not-run))
+      (unless (every #'hash-table-p messages)
+        (%request-failed client "its prompt had a message that is not an object." '() :outcome :not-run))
       (let ((got (loop for m across messages
-                        when (hash-table-p m)
-                          collect (%prompt-message client (gethash "content" m) (gethash "role" m)))))
+                       collect (%prompt-message client (gethash "content" m) (gethash "role" m)))))
         (log:info "praxeon/mcp: prompt got"
                   :connection (connection-name (client-connection client)) :messages (length got))
         (values got (%string-or-nil (gethash "description" result)))))))
