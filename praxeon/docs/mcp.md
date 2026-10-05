@@ -1,11 +1,14 @@
 # praxeon/mcp: agents that use MCP servers' tools
 
 `praxeon/mcp` connects Praxeon agents to MCP (Model Context Protocol) servers over Streamable
-HTTP. It is part 1 of #527:
-- tools only;
-- a bearer token that the app supplies through a function.
+HTTP. It gives agents a server's tools. Resources and prompts are not supported yet.
 
-Part 2 adds OAuth sign-in, through `aion/oauth` ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)). Resources and prompts, and local servers over stdio, are parts 4 and 5.
+- **Tokens.** A request's bearer token comes from the connection's token source:
+  - a function the app supplies;
+  - for a server that requires a sign-in, `oauth-token-source`, which signs each user in through `aion/oauth` ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)) and refreshes their token.
+- **Confirmation.** `grant-tools :confirm` holds the tools the app names until the user confirms each call ([`confirm.md`](confirm.md), #531).
+
+This is parts 1 and 2 of #527. Resources and prompts, and local servers over stdio, are parts 4 and 5.
 
 ## Using it
 
@@ -34,7 +37,7 @@ Part 2 adds OAuth sign-in, through `aion/oauth` ([`aion/docs/oauth.md`](../../ai
 - **A connection is data:**
   - `name` prefixes the tool names an agent sees, and appears in logs.
   - `url` is the server's MCP endpoint.
-  - `token-source` is a function of the connection and a principal that returns a bearer token or NIL.
+  - `token-source` gives each request's bearer token. It is NIL for no token; a function of the connection and a principal that returns a token or NIL; or an object that implements `token-for`, such as `oauth-token-source`'s (see "Tokens from an OAuth sign-in" below).
   - `per-user` refuses a call that has no principal, before anything is sent.
   - `timeout` bounds every request, and `call-timeout` bounds a tool call.
   - `max-body-bytes` bounds a reply.
@@ -105,14 +108,17 @@ The `:tool-call` and `:tool-result` events carry what a ledger needs to record a
 `:outcome` is one of four values:
 - `:ok`: the means returned a result.
 - `:error`: the tool ran and reported an error. For MCP this is a result with `isError` set, or a JSON-RPC error answer from the server.
-- `:not-run`: the call was refused before the tool could run. Part 1 produces it in these cases:
+- `:not-run`: the call was refused before the tool could run. The client produces it in these cases:
   - a 401 or 403;
+  - no usable token (`sign-in-needed`), or a token source that could not give or refresh one;
+  - a tool held for confirmation whose token the server refused: it is not sent again (#531);
+  - too many earlier requests to the server still running after their deadline (`*max-abandoned-requests*`);
   - a per-user connection called with no principal;
   - a header argument that cannot be encoded;
   - an `UnsupportedProtocolVersionError` or a `HeaderMismatch`;
   - a 4xx reply the client could not read;
   - an `input_required` result.
-- `:unknown`: the tool may have run. This is a `tools/call` that timed out, lost its connection, got a 5xx, or got a reply that ended before answering.
+- `:unknown`: the tool may have run. This is a `tools/call` that timed out, lost its connection, got a 5xx, got a reply that ended before answering, or got a result whose content could not be read.
 
 This holds until #493 settles the usage interface.
 

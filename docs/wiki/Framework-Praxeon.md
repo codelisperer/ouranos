@@ -330,7 +330,7 @@ Coalton class) with interchangeable implementations — the way `provider`/`comp
 works. The first step is giving **means** and **memory** the treatment `provider` got: a
 documented protocol plus a registry, so a third party can add one without editing the loop.
 
-**MCP (Model Context Protocol) — `praxeon/mcp`, part 1 of #527.** An MCP server's tools reach an
+**MCP (Model Context Protocol) — `praxeon/mcp`, parts 1 and 2 of #527.** An MCP server's tools reach an
 agent as means, through `register-means`, as the plan here said. `list-tools` reads what a
 server offers and gives it to nobody; `grant-tools` gives an agent the tools the app chooses,
 named with the connection's name as a prefix. The client speaks the current revision of the
