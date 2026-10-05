@@ -5,7 +5,7 @@ HTTP. It gives agents a server's tools. Resources and prompts are not supported 
 
 - **Tokens.** A request's bearer token comes from the connection's token source:
   - a function the app supplies;
-  - for a server that requires a sign-in, `oauth-token-source`, which signs each user in through `aion/oauth` ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)) and refreshes their token.
+  - for a server that requires a sign-in, `oauth-token-source`, which gives each user the token from their `aion/oauth` sign-in ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)) and refreshes it. It does not sign anyone in: when a user has no usable token, the call fails with `sign-in-needed`, and the app starts the sign-in (see "Tokens from an OAuth sign-in" below).
 - **Confirmation.** `grant-tools :confirm` holds the tools the app names until the user confirms each call ([`confirm.md`](confirm.md), #531).
 
 This is parts 1 and 2 of #527. Resources and prompts, and local servers over stdio, are parts 4 and 5.
