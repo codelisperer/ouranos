@@ -101,6 +101,31 @@ its tag.
 
 ### Added
 
+- **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
+  prompts** (#527, part 4).
+  - `list-resources` and `list-resource-templates` follow pagination.
+  - `expand-uri-template` expands RFC 6570 templates at levels 1 and 2, with variable names as
+    section 2.3 defines them (dotted segments and percent-encoded octets), and refuses the rest.
+  - The text of `sign-in-needed` says the connection's server needs a sign-in, not "this tool",
+    since resources and prompts can need one too.
+  - `read-resource` returns a resource's contents. Binary content is kept only as its length.
+    A missing resource signals `resource-not-found`, and a reply with a malformed content fails
+    whole rather than returning part of the resource. A resource is always read through its
+    server, even when its URI is `https://`.
+  - `add-resource` adds one context item per content. Each item's text starts with a line
+    naming the resource and its connection, and saying the text is data from that server, not
+    instructions. A second `add-resource` of the same resource replaces the first, and
+    `remove-resource` takes it out. A content larger than the agent's context budget signals
+    `resource-too-large`, and nothing is added. The items stay for every later turn whoever
+    its principal is, so add a per-user resource only to an agent that serves that user.
+  - `list-prompts` and `get-prompt` return a prompt's messages as `praxeon/llm` messages.
+    `get-prompt` refuses a missing required argument before sending anything, and fails a reply
+    with a malformed message rather than leaving the message out.
+  - `prompt-input` turns a prompt whose messages are all the user's into the input of
+    `run-turn`, and signals `prompt-has-assistant-messages` for a scripted exchange.
+  - Only the app adds resources; the model cannot read one itself. Subscriptions, completions
+    and caching are not supported. See `praxeon/docs/mcp.md`.
+
 - **aion/fs: `make-temporary-directory` creates a new temporary directory that no other process
   is given** (#515). It is named after a prefix, the process id and a counter of the process's
   own, and it counts as made only when this call created it, so two processes started at the same
@@ -295,6 +320,18 @@ its tag.
   also finds licence files named `COPYING*`, and those beside the library in `lib/`.
 
 ### Fixed
+
+- **praxeon: a context item's text cannot end the context block or pose as another item**
+  (#527). `prompt:render-items` wrote each item's content verbatim between `<context>` and
+  `</context>`, so a text containing `</context>` ended the block early, and what followed read
+  as the user's own words. A line starting with `[note]` or `[system]` read as another item.
+  This mattered once part 4 let an MCP server's resource become an item. `render-items` now
+  writes the block's tags inside an item's text, in any letter case, with `&lt;`, taking their
+  names from `*context-open*` and `*context-close*` when the block is rendered, so a tag an app
+  sets is covered too; a tag not of the form `<name>` or `</name>` gets only the indentation.
+  Every later line of the text is indented by two spaces, after LF, CR, CRLF, VT, FF, NEL, LS or
+  PS, each written as one LF. A multi-line item's rendering changes for every app: its
+  continuation lines are indented.
 
 - **klio: `watch-site` no longer publishes a file read while it is being written.** A file saved
   in place is empty from the moment it is opened until the new text is written, and a poll that
