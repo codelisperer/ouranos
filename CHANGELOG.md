@@ -296,6 +296,13 @@ its tag.
 
 ### Fixed
 
+- **klio: a fenced block's language could close the class attribute and add attributes to the
+  page; now an invalid language renders with no class.** klio renders fenced blocks as
+  `<pre class="LANG">`, and the info string after the opening fence reached that attribute with
+  `<` and `>` escaped but not a double quote. `highlight-code-blocks` now keeps
+  the class only when the language is made of letters, digits and `+ - _ . #`; any other block is
+  written as plain `<pre><code>`, and is not highlighted. A block with a valid language, such as
+  `lisp`, `python` or `c++`, is unchanged.
 - **praxeon: after a means fails in the middle of a step, the agent's next turn starts**
   (#546). A step's calls are no longer left without results when a failure leaves the turn:
   `run-turn` writes a result for every call of the step before the failure goes on, and
