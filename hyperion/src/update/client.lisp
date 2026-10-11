@@ -259,9 +259,14 @@ looked up under exactly the name the URL will serve it as."
 
 ;;; An artifact is fetched through the same list, in the same order. Without this method a list
 ;;; could answer the check and then fail the apply, which calls FETCH-ARTIFACT on the list
-;;; (review of #568). The manifest names each artifact by an absolute URL, so the source that
-;;; answered the check would fetch the same URL; a source that cannot be reached is passed over
-;;; here as it is there.
+;;; (review of #568). A source that cannot be reached is passed over, as for the manifest.
+;;;
+;;; A 404 is NOT passed over, and that is deliberate. An HTTP source's FETCH-ARTIFACT ignores the
+;;; source and fetches the absolute URL the signed manifest names, so the next HTTP source in the
+;;; list would ask for the same URL and get the same 404. The URLs come from whichever manifest
+;;; answered the check: a payload missing from S3 is missing from the manifest S3 served, and
+;;; GitHub's manifest names GitHub's URLs, not S3's. A directory source signals an error for a
+;;; missing file rather than answering NIL, so it is passed over like an unreachable host.
 (defmethod fetch-artifact ((sources cons) url)
   (let ((last-error nil))
     (dolist (source sources (error last-error))

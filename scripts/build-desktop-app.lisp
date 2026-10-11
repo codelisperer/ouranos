@@ -12,7 +12,8 @@
 ;;;;
 ;;;; --product, --display-name, --public-key-file, --update-source, --default-channel and
 ;;;; --release set hyperion/update's settings in the dumped image: its product name, signing
-;;;; key, update sources and default channel. See scripts/release-settings.lisp (#408).
+;;;; key, update sources and default channel, each only when given. See
+;;;; scripts/release-settings.lisp (#408).
 ;;;;
 ;;;; --icon is used on Windows only: see "Windows: the executable's icon" below.
 ;;;; --window-icon is the icon for the app's window on every OS, carried in the bundle (#74).
@@ -933,12 +934,6 @@ nothing."
                      :direction :output :if-exists :supersede :if-does-not-exist :create)
   (format out "~A~%" *version*))
 
-;;; RELEASE names the product, its display name, the version and the default channel, one
-;;; "key value" line each, for the installer and the dmg script to read (#408).
-(with-open-file (out (merge-pathnames "RELEASE" *bundle*)
-                     :direction :output :if-exists :supersede :if-does-not-exist :create)
-  (write-string (ouranos-release-settings:release-file-text *release-settings* *version*) out))
-
 ;;; The window icon, beside the executable, under the name hyperion/desktop looks for (#74).
 (when *window-icon*
   (let ((target (merge-pathnames (format nil "window-icon.~(~A~)" (pathname-type *window-icon*))
@@ -986,17 +981,24 @@ Exits with code 3, naming the compiler's output, if it does not compile."
 ;;; hyperion/update's settings, from the release options (#408). Set here, in the image that is
 ;;; about to be dumped, for the same reason. An app that does not load hyperion/update gets
 ;;; none, and is refused if a release option was given.
-(handler-case
-    (ouranos-release-settings:apply-release-settings
-     *release-settings*
-     :given (ouranos-release-settings:settings-given-p (rest sb-ext:*posix-argv*)))
-  (ouranos-release-settings:release-settings-refused (e)
-    (format *error-output* "~&build-desktop-app: ~A~%" e)
-    (sb-ext:exit :code 3)))
-(when (find-package "HYPERION/UPDATE")
-  (format t "~&build-desktop-app: release settings: product ~A, channel ~A, ~:[no signing key~;signing key set~], ~D update source~:P~%"
-          (getf *release-settings* :product) (getf *release-settings* :channel)
-          (getf *release-settings* :public-key) (length (getf *release-settings* :sources))))
+(when (handler-case
+          (ouranos-release-settings:apply-release-settings
+           *release-settings*
+           :given (ouranos-release-settings:settings-given-p (rest sb-ext:*posix-argv*)))
+        (ouranos-release-settings:release-settings-refused (e)
+          (format *error-output* "~&build-desktop-app: ~A~%" e)
+          (sb-ext:exit :code 3)))
+  (format t "~&build-desktop-app: release settings: product ~A, channel ~A, ~:[no signing key~;signing key set~], ~D update source~:P (each left as the app set it where not given)~%"
+          (or (getf *release-settings* :product) "-") (or (getf *release-settings* :channel) "-")
+          (getf *release-settings* :public-key) (length (getf *release-settings* :sources)))
+  ;; RELEASE, after the settings are in the image and nothing can refuse them any more, and only
+  ;; for what was given: the product, its display name and the default channel, one "key value"
+  ;; line each, with the version, for the installer and the dmg script to read (#408).
+  (let ((text (ouranos-release-settings:release-file-text *release-settings* *version*)))
+    (when text
+      (with-open-file (out (merge-pathnames "RELEASE" *bundle*)
+                           :direction :output :if-exists :supersede :if-does-not-exist :create)
+        (write-string text out)))))
 
 (cond
   ((uiop:os-macosx-p)

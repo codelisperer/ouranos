@@ -127,12 +127,15 @@ its tag.
     and caching are not supported. See `praxeon/docs/mcp.md`.
 
 - **`build-desktop-app.lisp` sets the update settings in the image it dumps** (#408).
-  - New options, in `scripts/release-settings.lisp`:
-    - `--product NAME` sets `hyperion/update:*app-name*`. It defaults to `--name`, and for now
-      must equal it, because the installer still takes its name from the bundle directory.
-    - `--display-name TEXT` defaults to the product.
-    - `--public-key-file PATH` sets `*public-key*`. Without it, the `OURANOS_PUBLIC_KEY`
-      environment variable is read. The key is checked with `aion/signature` before it is set.
+  - New options, in `scripts/release-settings.lisp`. Each sets its variable only when it is
+    given, so a build without it keeps the value the app set in its own source:
+    - `--product NAME` sets `hyperion/update:*app-name*`. For now it must equal `--name`,
+      because the installer still takes its name from the bundle directory.
+    - `--display-name TEXT` is written to the `RELEASE` file.
+    - `--public-key-file PATH` sets `*public-key*`. With `--release` and no key file, the
+      `OURANOS_PUBLIC_KEY` environment variable is read; without `--release` it is not. The key
+      must have the form `scripts/update-manifest.lisp keygen` prints, and is checked with
+      `aion/signature` before it is set.
     - `--update-source github=URL` and `--update-source s3=URL` set `*update-source*`. Given
       more than once, they are tried in the order given. The URL must be https.
     - `--default-channel NAME` sets `*default-channel*`.
@@ -140,8 +143,9 @@ its tag.
   - A bad option stops the build with exit code 2 before anything is built.
   - A release option given for an app that does not load `hyperion/update` stops it with exit
     code 3.
-  - The bundle gets a `RELEASE` file with `product`, `display-name`, `version` and `channel`
-    lines.
+  - The bundle gets a `RELEASE` file with a `version` line and a `product`, `display-name` or
+    `channel` line for each of those options given, written after the settings are set in the
+    image. With none of those three given, there is no `RELEASE` file.
   - A key file may hold one key, until key rotation is decided.
   - New `hyperion/update:*default-channel*`, default "stable". `check-for-update` and
     `apply-update` use it when no `:channel` is given, and so does `update-router` when it is

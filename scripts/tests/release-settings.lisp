@@ -29,14 +29,12 @@ shape only. Not a key a signature would verify against."
   (handler-case (progn (apply #'%release argv keys) nil)
     (ouranos-release-settings:release-settings-refused (e) (princ-to-string e))))
 
-(test release-settings-default-to-the-build-s-name-and-stable
+(test with-no-option-every-release-setting-is-left-unset
+  ;; An app may set any of these in its own source; a build that gives no option must not
+  ;; replace them (hub's review of #568: --name used to replace an app's own *app-name*).
   (let ((s (%release '())))
-    (is (equal "probe" (getf s :product)))
-    (is (equal "probe" (getf s :display-name)) "the display name defaults to the product")
-    (is (null (getf s :public-key)))
-    (is (null (getf s :sources)))
-    (is (equal "stable" (getf s :channel)))
-    (is (null (getf s :release)))))
+    (dolist (key '(:product :display-name :public-key :sources :channel :release))
+      (is (null (getf s key)) "~S is ~S" key (getf s key)))))
 
 (test release-settings-read-every-option
   (let ((tree (%fresh-tree)))
@@ -58,12 +56,17 @@ shape only. Not a key a signature would verify against."
            (is-true (getf s :release)))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
 
-(test the-public-key-comes-from-the-environment-without-a-key-file
-  (is (equal (%shaped-key #\B)
-             (getf (%release '() :env `((,ouranos-release-settings:*public-key-variable*
-                                          . ,(format nil " ~A " (%shaped-key #\B)))))
-                   :public-key)))
-  (is (null (getf (%release '() :env `((,ouranos-release-settings:*public-key-variable* . ""))) :public-key))
+(test the-public-key-variable-is-read-only-for-a-release-build
+  (let ((env `((,ouranos-release-settings:*public-key-variable* . ,(format nil " ~A " (%shaped-key #\B))))))
+    (is (equal (%shaped-key #\B)
+               (getf (%release '("--release" "--update-source" "github=https://x.example/") :env env)
+                     :public-key))
+        "with --release, the variable's key, trimmed")
+    (is (null (getf (%release '() :env env) :public-key))
+        "without --release, the variable is not read, so a key the app set itself stays"))
+  (is (search "needs the public key"
+              (%refused '("--release" "--update-source" "github=https://x.example/")
+                        :env `((,ouranos-release-settings:*public-key-variable* . ""))))
       "an empty variable is no key"))
 
 (test release-settings-refuse-what-they-cannot-use
@@ -72,23 +75,32 @@ shape only. Not a key a signature would verify against."
          (let ((two-keys (%bytes-file (merge-pathnames "two.pub" tree)
                                       (format nil "~A~%~A~%" (%shaped-key #\A) (%shaped-key #\B))))
                (key-dir (ensure-directories-exist (merge-pathnames "keys/" tree))))
-           (dolist (case `((("--product" "has space") :name "has space")
-                           (("--product" "other"))
-                           (("--product" "probe" "--product" "probe"))
-                           (("--display-name" ,(format nil "two~%lines")))
-                           (("--default-channel" "Beta"))
-                           (("--update-source" "ftp=https://x.example/"))
-                           (("--update-source" "github=http://x.example/"))
-                           (("--update-source" "https://x.example/"))
-                           (("--public-key-file" ,(uiop:native-namestring two-keys)))
-                           (("--public-key-file" ,(uiop:native-namestring (merge-pathnames "absent.pub" tree))))
-                           (("--release" "--update-source" "github=https://x.example/"))
-                           (("--release") :env ((,ouranos-release-settings:*public-key-variable* . ,(%shaped-key #\A))))
-                           (() :env ((,ouranos-release-settings:*public-key-variable* . "not-a-key")))
-                           (() :env ((,ouranos-release-settings:*public-key-variable* . ,(subseq (%shaped-key #\A) 1))))
-                           (("--public-key-file" ,(uiop:native-namestring key-dir)))
-                           (("--product"))))
-             (is-true (apply #'%refused case) "refused: ~S" case)))
+           ;; Each case: (ARGV EXPECTED-PART-OF-THE-REASON . KEYS). The reason is checked, not only
+           ;; that something was refused (hub's review of #568).
+           (dolist (case `((("--product" "has space") "must be letters" :name "has space")
+                           (("--product" "other") "differs from --name")
+                           (("--product" "probe" "--product" "probe") "given more than once")
+                           (("--display-name" ,(format nil "two~%lines")) "--display-name must be")
+                           (("--default-channel" "Beta") "must be lowercase")
+                           (("--update-source" "ftp=https://x.example/") "is not one of")
+                           (("--update-source" "github=http://x.example/") "must start with https://")
+                           (("--update-source" "https://x.example/") "is not KIND=URL")
+                           (("--public-key-file" ,(uiop:native-namestring two-keys)) "holds 2 keys")
+                           (("--public-key-file" ,(uiop:native-namestring (merge-pathnames "absent.pub" tree)))
+                            "does not exist")
+                           (("--public-key-file" ,(uiop:native-namestring key-dir)) "is a directory")
+                           (("--release" "--update-source" "github=https://x.example/") "needs the public key")
+                           (("--release") "needs at least one --update-source"
+                            :env ((,ouranos-release-settings:*public-key-variable* . ,(%shaped-key #\A))))
+                           (("--release" "--update-source" "github=https://x.example/") "is not a public key"
+                            :env ((,ouranos-release-settings:*public-key-variable* . "not-a-key")))
+                           (("--release" "--update-source" "github=https://x.example/") "is not a public key"
+                            :env ((,ouranos-release-settings:*public-key-variable* . ,(subseq (%shaped-key #\A) 1))))
+                           (("--product") "needs a value")))
+             (destructuring-bind (argv expected &rest keys) case
+               (let ((reason (apply #'%refused argv keys)))
+                 (is (and reason (search expected reason))
+                     "~S: expected a refusal saying ~S, got ~S" argv expected reason)))))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
 
 (test product-and-display-name-count-as-release-options
@@ -106,10 +118,17 @@ shape only. Not a key a signature would verify against."
                 "--release" "--name" "probe" "--default-channel" "beta")))
       "the release options and their values, and nothing else"))
 
-(test the-release-file-names-the-product-and-the-channel
+(test the-release-file-names-only-what-was-given
   (is (equal (format nil "product probe~%display-name Probe App~%version 1.2.3~%channel beta~%")
              (ouranos-release-settings:release-file-text
-              (%release '("--display-name" "Probe App" "--default-channel" "beta")) "1.2.3"))))
+              (%release '("--product" "probe" "--display-name" "Probe App" "--default-channel" "beta"))
+              "1.2.3")))
+  (is (equal (format nil "version 1.2.3~%channel beta~%")
+             (ouranos-release-settings:release-file-text (%release '("--default-channel" "beta")) "1.2.3"))
+      "only the channel given: no product line")
+  (is (null (ouranos-release-settings:release-file-text
+             (%release '("--update-source" "github=https://x.example/")) "1.2.3"))
+      "no product, display name or channel: no file, so it never names what the image does not have"))
 
 ;;; --- a real build -------------------------------------------------------------------------
 
@@ -123,9 +142,9 @@ shape only. Not a key a signature would verify against."
                         (uiop:split-string out :separator '(#\Newline #\Return)))))
     (and line (string-trim " " (subseq line (1+ (position #\: line)))))))
 
-(defun %build-update-probe (tree app dist &rest options)
-  "Run build-desktop-app.lisp on the updprobe app in APP, into DIST, with OPTIONS added. Returns
-(values EXIT-CODE OUTPUT)."
+(defun %build-probe (name tree app dist &rest options)
+  "Run build-desktop-app.lisp on the app NAME in APP, whose entry is NAME:main, into DIST, with
+OPTIONS added. Returns (values EXIT-CODE OUTPUT)."
   (let ((out (make-string-output-stream)))
     (values
      (nth-value
@@ -133,7 +152,7 @@ shape only. Not a key a signature would verify against."
          (append (list (uiop:native-namestring sb-ext:*runtime-pathname*)
                        "--dynamic-space-size" "4096" "--script"
                        (uiop:native-namestring (merge-pathnames "build-desktop-app.lisp" *scripts*))
-                       "--system" "updprobe" "--entry" "updprobe:main" "--name" "updprobe"
+                       "--system" name "--entry" (format nil "~A:main" name) "--name" name
                        "--version" "0.0.1" "--out" (uiop:native-namestring dist))
                  options)
          :directory tree :input nil :output out :error-output out :ignore-error-status t
@@ -153,6 +172,45 @@ shape only. Not a key a signature would verify against."
                           (sb-ext:posix-environ)))))
      (get-output-stream-string out))))
 
+(defun %write-updprobe (app)
+  "Write the updprobe app into APP. It loads hyperion/update, sets *app-name* to \"updprobe-own\"
+in its own source, as an app may, and its main prints the four settings and exits."
+  (%write (merge-pathnames "updprobe.asd" app)
+          "(defsystem \"updprobe\" :depends-on (\"hyperion/update\") :components ((:file \"updprobe\")))")
+  (%write (merge-pathnames "updprobe.lisp" app)
+          (%lines "(defpackage #:updprobe (:use #:cl) (:export #:main))"
+                  "(in-package #:updprobe)"
+                  "(setf hyperion/update:*app-name* \"updprobe-own\")"
+                  "(defun main ()"
+                  "  (format t \"~&APP-NAME ~A~%CHANNEL ~A~%KEY ~A~%\""
+                  "          hyperion/update:*app-name* hyperion/update:*default-channel* hyperion/update:*public-key*)"
+                  "  (finish-output)"
+                  "  (let ((source hyperion/update:*update-source*))"
+                  "    (format t \"~&SOURCES~{ ~A~}~%\""
+                  "            (mapcar (lambda (s) (format nil \"~(~A~)~@[=~A~]\" (class-name (class-of s))"
+                  "                                        (ignore-errors (hyperion/update:source-base-url s))))"
+                  "                    (if (listp source) source (list source)))))"
+                  "  (finish-output)"
+                  "  (uiop:quit 0))")))
+
+(defun %probe-bundle (dist name)
+  "The bundle directory build-desktop-app.lisp made for NAME under DIST, or NIL."
+  (find-if (lambda (d) (uiop:string-prefix-p (concatenate 'string name "-")
+                                             (car (last (pathname-directory d)))))
+           (and (uiop:directory-exists-p dist) (uiop:subdirectories dist))))
+
+(defun %probe-report (bundle)
+  "Run the updprobe executable in BUNDLE. Returns a function of a field name giving that field's
+value, and the whole output."
+  (let* ((out (uiop:run-program (list (uiop:native-namestring
+                                       (merge-pathnames (if (uiop:os-windows-p) "updprobe.exe" "updprobe") bundle)))
+                                :output :string :error-output :output :ignore-error-status t))
+         (lines (uiop:split-string out :separator '(#\Newline #\Return))))
+    (values (lambda (name)
+              (let ((l (find-if (lambda (l) (uiop:string-prefix-p (format nil "~A " name) l)) lines)))
+                (and l (subseq l (1+ (length name))))))
+            out)))
+
 (test a-release-build-carries-its-settings-in-the-image
   "Built with the real build-desktop-app.lisp and every release option, the running app reports
 the product, the default channel, the key and the sources in order, and the bundle has a RELEASE
@@ -162,34 +220,19 @@ options reach it. CONTROL: --release without a key is refused before anything is
          (app (ensure-directories-exist (merge-pathnames "app/" tree)))
          (dist (merge-pathnames "dist/" tree))
          (key (%keygen-public-key)))
-    (%write (merge-pathnames "updprobe.asd" app)
-            "(defsystem \"updprobe\" :depends-on (\"hyperion/update\") :components ((:file \"updprobe\")))")
-    (%write (merge-pathnames "updprobe.lisp" app)
-            (%lines "(defpackage #:updprobe (:use #:cl) (:export #:main))"
-                    "(in-package #:updprobe)"
-                    "(defun main ()"
-                    "  (format t \"~&APP-NAME ~A~%CHANNEL ~A~%KEY ~A~%\""
-                    "          hyperion/update:*app-name* hyperion/update:*default-channel* hyperion/update:*public-key*)"
-                    "  (finish-output)"
-                    "  (let ((source hyperion/update:*update-source*))"
-                    "    (format t \"~&SOURCES~{ ~A~}~%\""
-                    "            (mapcar (lambda (s) (format nil \"~(~A~)~@[=~A~]\" (class-name (class-of s))"
-                    "                                        (ignore-errors (hyperion/update:source-base-url s))))"
-                    "                    (if (listp source) source (list source)))))"
-                    "  (finish-output)"
-                    "  (uiop:quit 0))"))
+    (%write-updprobe app)
     (unwind-protect
          (progn
            (is-true key "keygen gave a public key")
            (let ((key-file (%bytes-file (merge-pathnames "updater.pub" tree) (format nil "~A~%" key))))
              ;; The control first: refused at once, with no bundle made.
-             (multiple-value-bind (code out) (%build-update-probe tree app dist "--release"
+             (multiple-value-bind (code out) (%build-probe "updprobe" tree app dist "--release"
                                                                   "--update-source" "github=https://example.invalid/r/")
                (is (eql 2 code) "--release without a key exits 2, got ~S:~%~A" code out)
                (is (search "needs the public key" out) "and says so:~%~A" out)
                (is (null (uiop:directory-exists-p dist)) "and builds nothing"))
              (multiple-value-bind (code out)
-                 (%build-update-probe tree app dist
+                 (%build-probe "updprobe" tree app dist
                                       "--product" "updprobe" "--display-name" "Update Probe"
                                       "--public-key-file" (uiop:native-namestring key-file)
                                       "--update-source" "s3=https://bucket.example.invalid/updates/updprobe"
@@ -218,4 +261,49 @@ options reach it. CONTROL: --release without a key is refused before anything is
                      (is (equal "s3-source=https://bucket.example.invalid/updates/updprobe/ github-release-source=https://example.invalid/r/releases/download/updprobe-beta/"
                                 (field "SOURCES"))
                          "its *update-source*, in order:~%~A" out)))))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test a-build-with-no-release-option-keeps-what-the-app-set
+  "The same app, built with no release option: the running app still has the *app-name* it set in
+its own source, the stable channel and no key, and the bundle has no RELEASE file (hub's review of
+#568: the build used to set *app-name* from --name, replacing the app's own)."
+  (let* ((tree (%fresh-tree))
+         (app (ensure-directories-exist (merge-pathnames "app/" tree)))
+         (dist (merge-pathnames "dist/" tree)))
+    (%write-updprobe app)
+    (unwind-protect
+         (multiple-value-bind (code out) (%build-probe "updprobe" tree app dist)
+           (is (eql 0 code) "the build failed:~%~A" out)
+           (let ((bundle (%probe-bundle dist "updprobe")))
+             (is-true bundle "no bundle in ~A" dist)
+             (when bundle
+               (is-false (probe-file (merge-pathnames "RELEASE" bundle))
+                         "no RELEASE file, since no product, display name or channel was given")
+               (multiple-value-bind (field report) (%probe-report bundle)
+                 (is (equal "updprobe-own" (funcall field "APP-NAME"))
+                     "the app's own *app-name*, not --name:~%~A" report)
+                 (is (equal "stable" (funcall field "CHANNEL")) "the stable channel:~%~A" report)
+                 (is (equal "NIL" (funcall field "KEY")) "no key:~%~A" report)))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test a-release-option-for-an-app-without-the-updater-leaves-no-release-file
+  "An app that does not load hyperion/update, given --default-channel beta, is refused with exit
+code 3, and the bundle the refused build started has no RELEASE file saying channel beta (hub's
+review of #568: RELEASE was written before the refusal)."
+  (let* ((tree (%fresh-tree))
+         (app (ensure-directories-exist (merge-pathnames "app/" tree)))
+         (dist (merge-pathnames "dist/" tree)))
+    (%write (merge-pathnames "plainprobe.asd" app)
+            "(defsystem \"plainprobe\" :components ((:file \"plainprobe\")))")
+    (%write (merge-pathnames "plainprobe.lisp" app)
+            (%lines "(defpackage #:plainprobe (:use #:cl) (:export #:main))"
+                    "(in-package #:plainprobe)"
+                    "(defun main () (uiop:quit 0))"))
+    (unwind-protect
+         (multiple-value-bind (code out) (%build-probe "plainprobe" tree app dist "--default-channel" "beta")
+           (is (eql 3 code) "exit 3, got ~S:~%~A" code out)
+           (is (search "does not load hyperion/update" out) "and says why:~%~A" out)
+           (let ((bundle (%probe-bundle dist "plainprobe")))
+             (is-false (and bundle (probe-file (merge-pathnames "RELEASE" bundle)))
+                       "no RELEASE file in ~A" bundle)))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))

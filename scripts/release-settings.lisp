@@ -4,16 +4,20 @@
 ;;;; hyperion/update, and before this nothing set them outside the test drivers:
 ;;;;
 ;;;;   --product NAME          up:*app-name*: the installer's registry key and the manifest's
-;;;;                           product. Defaults to --name.
-;;;;   --display-name TEXT     what the user sees. Defaults to the product. Written to the
-;;;;                           bundle's RELEASE file; nothing in the image reads it yet.
-;;;;   --public-key-file PATH  up:*public-key*: the key releases are signed with. Without the
-;;;;                           option, the variable *PUBLIC-KEY-VARIABLE* names is read.
+;;;;                           product. Must equal --name for now.
+;;;;   --display-name TEXT     what the user sees. Written to the bundle's RELEASE file; nothing
+;;;;                           in the image reads it yet.
+;;;;   --public-key-file PATH  up:*public-key*: the key releases are signed with. With --release
+;;;;                           and no key file, the variable *PUBLIC-KEY-VARIABLE* names is read.
 ;;;;   --update-source K=URL   up:*update-source*: K is github or s3. Given more than once, the
 ;;;;                           sources are tried in the order given.
 ;;;;   --default-channel NAME  up:*default-channel*.
 ;;;;   --release               refuse to build without a key and a source, so a release cannot
 ;;;;                           ship a build that can never update.
+;;;;
+;;;; A setting is set in the image only when its option is given. An app may set any of these
+;;;; variables in its own source, and a build without the option keeps the app's value (hub's
+;;;; review of #568: --name used to overwrite an app's own *app-name*).
 ;;;;
 ;;;; Its own file, rather than part of build-desktop-app.lisp, because that script ends in a dump
 ;;;; and nothing can load it; scripts/tests/release-settings.lisp loads this one.
@@ -125,31 +129,37 @@ how rotation works (#408): change this, and hyperion/update's %trusted-key, to a
 
 (defun parse-release-settings (argv &key name (getenv #'uiop:getenv))
   "The release settings ARGV gives, as a plist: :PRODUCT :DISPLAY-NAME :PUBLIC-KEY :SOURCES
-:CHANNEL :RELEASE. NAME is the build's --name, which --product defaults to. GETENV reads the
-environment, so a test can give it one. Signals RELEASE-SETTINGS-REFUSED, with the reason, for
-anything it cannot use."
-  (let* ((product (or (%option-value argv "--product") name))
-         (display-name (or (%option-value argv "--display-name") product))
+:CHANNEL :RELEASE. Each is NIL when its option is not given, so the image keeps whatever the app
+set. NAME is the build's --name, which --product must equal. GETENV reads the environment, so a
+test can give it one; the key variable is read only with --release. Signals
+RELEASE-SETTINGS-REFUSED, with the reason, for anything it cannot use."
+  (let* ((product (%option-value argv "--product"))
+         (display-name (%option-value argv "--display-name"))
          (key-file (%option-value argv "--public-key-file"))
-         (keys (if key-file
-                   (%read-keys key-file)
-                   (let ((v (funcall getenv *public-key-variable*)))
-                     (and v (plusp (length (string-trim " " v))) (list (string-trim " " v))))))
-         (channel (or (%option-value argv "--default-channel") "stable"))
          (release (and (member "--release" argv :test #'string=) t))
+         (keys (cond (key-file (%read-keys key-file))
+                     ;; Only for a release build: a developer's machine with the variable set
+                     ;; must not replace a key an app set itself.
+                     (release
+                      (let ((v (funcall getenv *public-key-variable*)))
+                        (and v (plusp (length (string-trim " " v))) (list (string-trim " " v)))))))
+         (channel (%option-value argv "--default-channel"))
          (sources (%update-sources argv)))
-    (unless (and product (%product-name-p product))
-      (%refuse "--product ~S must be letters, digits, dot, dash or underscore, at most 64, starting with a letter or digit" product))
-    ;; The installer still takes its name from the bundle directory, which --name names. Until it
-    ;; reads the product, the two must agree, or the installer registers under one name and the
-    ;; app looks for itself under the other.
-    (when (and name (string/= product name))
-      (%refuse "--product ~A differs from --name ~A; the installer registers under --name, so they must be the same for now (#408)" product name))
-    (unless (and (plusp (length display-name)) (<= (length display-name) 128)
-                 (notany (lambda (c) (< (char-code c) 32)) display-name))
-      (%refuse "--display-name must be 1 to 128 characters with no control characters"))
-    (unless (%channel-name-p channel)
-      (%refuse "--default-channel ~S must be lowercase letters, digits and dashes" channel))
+    (when product
+      (unless (%product-name-p product)
+        (%refuse "--product ~S must be letters, digits, dot, dash or underscore, at most 64, starting with a letter or digit" product))
+      ;; The installer still takes its name from the bundle directory, which --name names. Until
+      ;; it reads the product, the two must agree, or the installer registers under one name and
+      ;; the app looks for itself under the other.
+      (when (and name (string/= product name))
+        (%refuse "--product ~A differs from --name ~A; the installer registers under --name, so they must be the same for now (#408)" product name)))
+    (when display-name
+      (unless (and (plusp (length display-name)) (<= (length display-name) 128)
+                   (notany (lambda (c) (< (char-code c) 32)) display-name))
+        (%refuse "--display-name must be 1 to 128 characters with no control characters")))
+    (when channel
+      (unless (%channel-name-p channel)
+        (%refuse "--default-channel ~S must be lowercase letters, digits and dashes" channel)))
     (when release
       (unless keys
         (%refuse "--release needs the public key: --public-key-file, or the variable ~A" *public-key-variable*))
@@ -177,28 +187,38 @@ without it is a mistake to report, not to accept (review of #568)."
           append (list option)))
 
 (defun release-file-text (settings version)
-  "The bundle's RELEASE file: one KEY VALUE line each, for the installer and the dmg script to
-read rather than parsing the bundle directory's name."
-  (format nil "product ~A~%display-name ~A~%version ~A~%channel ~A~%"
-          (getf settings :product) (getf settings :display-name) version (getf settings :channel)))
+  "The bundle's RELEASE file, one KEY VALUE line each, for the installer and the dmg script to read
+rather than parsing the bundle directory's name: version, and product, display-name and channel
+for each that was given. NIL when none of those three was given, and then no file is written, so
+the file never names a product or channel the image does not have."
+  (when (or (getf settings :product) (getf settings :display-name) (getf settings :channel))
+    (with-output-to-string (out)
+      (when (getf settings :product) (format out "product ~A~%" (getf settings :product)))
+      (when (getf settings :display-name) (format out "display-name ~A~%" (getf settings :display-name)))
+      (format out "version ~A~%" version)
+      (when (getf settings :channel) (format out "channel ~A~%" (getf settings :channel))))))
 
 (defun %update-symbol (name)
   (let ((package (find-package "HYPERION/UPDATE")))
     (and package (find-symbol name package))))
 
 (defun apply-release-settings (settings &key (given t))
-  "Set hyperion/update's variables in this image from SETTINGS, for the dump. When GIVEN, some
-release option was given, and an image without hyperion/update is refused. The key is checked
-with aion/signature before it is set, so a build carrying a key that cannot be decoded is
-refused rather than shipped."
+  "Set hyperion/update's variables in this image from SETTINGS, for the dump: only those whose
+option was given, so a variable the app set itself keeps its value. When GIVEN, some release
+option was given, and an image without hyperion/update is refused. The key is checked with
+aion/signature before it is set, so a build carrying a key that cannot be decoded is refused
+rather than shipped. Returns true when hyperion/update is in the image."
   (let ((app-name (%update-symbol "*APP-NAME*")))
     (cond
       ((null app-name)
        (when given
-         (%refuse "a release option was given, but this app does not load hyperion/update")))
+         (%refuse "a release option was given, but this app does not load hyperion/update"))
+       nil)
       (t
-       (setf (symbol-value app-name) (getf settings :product))
-       (setf (symbol-value (%update-symbol "*DEFAULT-CHANNEL*")) (getf settings :channel))
+       (when (getf settings :product)
+         (setf (symbol-value app-name) (getf settings :product)))
+       (when (getf settings :channel)
+         (setf (symbol-value (%update-symbol "*DEFAULT-CHANNEL*")) (getf settings :channel)))
        (let ((key (getf settings :public-key)))
          (when key
            (handler-case (uiop:symbol-call "AION/SIGNATURE" "DECODE-PUBLIC-KEY" key)
@@ -209,4 +229,5 @@ refused rather than shipped."
                                                    (intern "BASE-URL" "KEYWORD") url))))
          (when sources
            (setf (symbol-value (%update-symbol "*UPDATE-SOURCE*"))
-                 (if (rest sources) sources (first sources)))))))))
+                 (if (rest sources) sources (first sources)))))
+       t))))
