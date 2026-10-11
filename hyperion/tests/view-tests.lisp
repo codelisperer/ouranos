@@ -464,6 +464,25 @@ when it did not exit 0."
              (is (equal "ignore does-not-fit"
                         (decide "hyperion-view-placement 1 -7 0 967 1536 0" 0 0 2560 1528 7 0 7 7))
                  "nor one pixel further down")
+             ;; Snapped on a 150% monitor, where the frame is 12 pixels and the invisible border
+             ;; 11, and started from a 100% monitor, where they are 8 and 7. The borders are
+             ;; measured on the window at 100%, so they are converted to the other monitor's
+             ;; frame first (review of #521). The last two values are the two frame widths.
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -11 0 1431 1539 0" 0 0 3840 1528 7 0 7 7))
+                 "a window snapped at 150% does not fit with the borders measured at 100%")
+             (is (equal "use -11 0 1431 1539 0"
+                        (decide "hyperion-view-placement 1 -11 0 1431 1539 0" 0 0 3840 1528 7 0 7 7 8 12))
+                 "and fits once they are converted to the 150% frame")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -12 0 1431 1539 0" 0 0 3840 1528 7 0 7 7 8 12))
+                 "but not one pixel past the converted border")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 0 -1 1431 1528 0" 0 0 3840 1528 7 0 7 7 8 12))
+                 "and a side with no border, the top, gains none")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -8 0 967 1535 0" 0 0 2560 1528 11 0 11 11 12 8))
+                 "converted the other way, from 150% to 100%, the border shrinks to 7")
              (dolist (text (list "junk"
                              "hyperion-view-placement 2 100 50 1380 910 0"
                              "hyperion-view-placement 1 100 50 1380 910 2"
@@ -500,7 +519,11 @@ when it did not exit 0."
              (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "7" "101"))
                  "a border over 100 is refused")
              (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "-1" "7"))
-                 "a negative border is refused"))
+                 "a negative border is refused")
+             (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "7" "7" "8"))
+                 "nine numbers are refused")
+             (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "7" "7" "8" "1001"))
+                 "a frame width over 1000 is refused"))
         (aion/fs:delete-tree dir)))))
 
 (test placement-arguments-name-the-file-and-create-its-directory
@@ -609,6 +632,11 @@ the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (r
                      (is (= 4 (length moved)) "it reported where the move put the window: ~S" out)
                      (when (= 4 (length moved))
                        (is (not (equal moved start)) "and the move changed the rectangle: ~S" moved)
+                       ;; The move made two size changes inside the move loop. Saving on each
+                       ;; WM_SIZE there would write the same final rectangle, so only the count
+                       ;; of writes tells the two apart (review of #521).
+                       (is (equal "move-saves 1" (%report-line out "move-saves"))
+                           "the move wrote the file once, when the move loop ended: ~S" out)
                        (flet ((saved (maximized)
                                 (format nil "hyperion-view-placement 1 ~{~D~^ ~} ~D" moved maximized))
                               (after (step)

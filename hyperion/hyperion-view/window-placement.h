@@ -129,6 +129,22 @@ inline int format_saved_placement(const saved_placement &p, char *buf, size_t si
 // about 7 pixels at 100% scaling and 11 at 150%.
 const long kMaxInvisibleBorder = 100;
 
+// The largest window-frame width allowed for, in pixels, when converting a border from one
+// monitor's scaling to another's.
+const long kMaxFrameMetric = 1000;
+
+// An invisible border of BORDER pixels, measured on a monitor where the window's resizing frame
+// is FRAME_FROM pixels wide, as it is on a monitor where that frame is FRAME_TO pixels wide.
+// Windows draws the frame 1 pixel wide and leaves the rest invisible, so the invisible part
+// grows by as much as the frame does: 8 px of frame and 7 invisible at 100%, 12 and 11 at
+// 150%, 16 and 15 at 200%. A side with no invisible border (the top, on Windows 10 and 11)
+// stays at 0. Never negative (review of #521).
+inline long border_for_frame(long border, long frame_from, long frame_to) {
+  if (border <= 0) return 0;
+  long converted = border + (frame_to - frame_from);
+  return converted < 0 ? 0 : converted;
+}
+
 // Whether P can be restored into the work area WORK_LEFT..WORK_RIGHT x WORK_TOP..WORK_BOTTOM:
 // the whole rectangle is inside it, and it is at least the minimum size.
 //

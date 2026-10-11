@@ -262,12 +262,17 @@ its tag.
   drag ends, on a maximise or restore, and on close, as one line (`hyperion-view-placement 1
   LEFT TOP RIGHT BOTTOM MAXIMIZED`), and at the next start puts the window back there if that
   rectangle still lies inside a monitor's work area, allowing for the window's invisible resize
-  borders so that a snapped window counts as inside; otherwise it opens centred. A move made
+  borders so that a snapped window counts as inside; otherwise it opens centred. When the saved
+  rectangle is on a monitor with different scaling from the one the window opens on, the
+  borders are converted to that monitor's frame width, and the rectangle is set a second time
+  after Windows rescales the window; neither has been measured on two monitors yet. A move made
   without dragging or resizing, such as Win+Shift+Arrow, is saved only at the next of those.
   The default, NIL, keeps no file. `hyperion-view --saved-placement PATH WL WT WR WB [BL BT BR
-  BB]` prints whether a saved placement would be used, with optional border widths.
-  `hyperion-view --exercise-placement PATH` opens a window from the file, moves, maximises,
-  restores, minimises and closes it, and prints the file after each step; it is for CI. Rebuild `hyperion-view` to get it: an older build refuses `--placement-file` and exits 2.
+  BB [FROM TO]]` prints whether a saved placement would be used, with optional border widths
+  and the frame widths to convert them between. `hyperion-view --exercise-placement PATH` opens
+  a window from the file, moves, maximises, restores, minimises and closes it, and prints the
+  file after each step and how many times the move wrote it; it is for CI. Rebuild
+  `hyperion-view` to get it: an older build refuses `--placement-file` and exits 2.
   macOS and Linux accept the option and ignore it. With `HYPERION_VIEW_NO_WINDOW=1` in its
   environment, hyperion-view exits 3 instead of creating a window, on every OS; the view tests
   set it, so a test that reaches a window by mistake fails instead of opening one. (#485)

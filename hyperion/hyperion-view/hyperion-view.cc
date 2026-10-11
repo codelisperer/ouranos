@@ -407,6 +407,10 @@ static bool g_save_failure_reported = false;
 static RECT g_normal_rect;
 static bool g_have_normal_rect = false;
 static bool g_in_size_move = false;
+// How many times the file has been written in this run. --exercise-placement prints it, so the
+// test can tell a move saved once, at the end of the move loop, from one saved on every WM_SIZE
+// inside it (review of #521).
+static int g_save_count = 0;
 static WNDPROC g_previous_window_proc = nullptr;
 
 static void set_placement_path(const char *path) {
@@ -455,6 +459,7 @@ static bool save_placement(HWND hwnd) {
     _wremove(tmp.c_str());
     return save_failed("replacing the file");
   }
+  g_save_count++;
   return true;
 }
 
@@ -522,6 +527,28 @@ static RECT invisible_borders(HWND hwnd) {
   return b;
 }
 
+// The DPI of MONITOR, or 0 when Windows cannot say. shcore.dll is loaded when this runs, as
+// dwmapi.dll is above, so that neither build has to link another library.
+static long monitor_dpi(HMONITOR monitor) {
+  typedef HRESULT(WINAPI * get_dpi_fn)(HMONITOR, int, UINT *, UINT *);
+  HMODULE shcore = LoadLibraryW(L"shcore.dll");
+  if (shcore == nullptr) return 0;
+  get_dpi_fn get = reinterpret_cast<get_dpi_fn>(
+      reinterpret_cast<void *>(GetProcAddress(shcore, "GetDpiForMonitor")));
+  UINT x = 0, y = 0;
+  const int kEffectiveDpi = 0;  // MDT_EFFECTIVE_DPI, from shellscalingapi.h
+  if (get == nullptr || FAILED(get(monitor, kEffectiveDpi, &x, &y))) return 0;
+  return static_cast<long>(x);
+}
+
+// The width of a resizable window's frame at DPI, horizontally (left and right) or vertically
+// (top and bottom): the sizing frame plus the padded border, as Windows lays them out.
+static long frame_metric(long dpi, bool horizontal) {
+  UINT d = static_cast<UINT>(dpi);
+  return GetSystemMetricsForDpi(horizontal ? SM_CXSIZEFRAME : SM_CYSIZEFRAME, d) +
+         GetSystemMetricsForDpi(SM_CXPADDEDBORDER, d);
+}
+
 // Put the window of W where the file at PATH says, if that still fits the work area of the
 // monitor it is on. False when it was not used, and the caller places the window instead. With
 // REPORT, one line is printed there: "restored L T R B MAXIMIZED window L T R B", or
@@ -543,7 +570,21 @@ static bool restore_placement(webview_t w, const char *path, std::FILE *report, 
   MONITORINFO info;
   info.cbSize = sizeof info;
   if (!GetMonitorInfoW(monitor, &info)) return ignored("GetMonitorInfoW");
+  // The borders are measured on the window as it is now, on the monitor it was created on.
+  // When the saved rectangle is on a monitor with other scaling, they are converted to that
+  // monitor's frame size, so a window snapped on a 150% monitor and started from a 100% one
+  // is allowed the 11 pixels it has there, not the 7 it has here (review of #521).
   RECT border = invisible_borders(hwnd);
+  long from_dpi = static_cast<long>(GetDpiForWindow(hwnd));
+  long to_dpi = monitor_dpi(monitor);
+  if (from_dpi > 0 && to_dpi > 0 && from_dpi != to_dpi) {
+    long h_from = frame_metric(from_dpi, true), h_to = frame_metric(to_dpi, true);
+    long v_from = frame_metric(from_dpi, false), v_to = frame_metric(to_dpi, false);
+    border.left = border_for_frame(border.left, h_from, h_to);
+    border.right = border_for_frame(border.right, h_from, h_to);
+    border.top = border_for_frame(border.top, v_from, v_to);
+    border.bottom = border_for_frame(border.bottom, v_from, v_to);
+  }
   if (!saved_placement_fits(p, info.rcWork.left, info.rcWork.top, info.rcWork.right,
                             info.rcWork.bottom, border.left, border.top, border.right,
                             border.bottom))
@@ -610,10 +651,16 @@ static int exercise_placement(webview_t w, const char *path) {
     std::printf("placement-failed GetWindowRect\n");
     return 1;
   }
+  // Two size changes inside the loop, as a drag makes many. Each sends WM_SIZE, which must not
+  // save; the end of the loop saves once. "move-saves" is how many writes the move made.
+  int saves_before_move = g_save_count;
   SendMessageW(hwnd, WM_ENTERSIZEMOVE, 0, 0);
+  SetWindowPos(hwnd, nullptr, r.left + 20, r.top + 15, (r.right - r.left) - 10,
+               (r.bottom - r.top) - 5, SWP_NOZORDER | SWP_NOACTIVATE);
   SetWindowPos(hwnd, nullptr, r.left + 40, r.top + 30, (r.right - r.left) - 20,
                (r.bottom - r.top) - 10, SWP_NOZORDER | SWP_NOACTIVATE);
   SendMessageW(hwnd, WM_EXITSIZEMOVE, 0, 0);
+  std::printf("move-saves %d\n", g_save_count - saves_before_move);
   RECT moved;
   GetWindowRect(hwnd, &moved);
   std::printf("moved %ld %ld %ld %ld\n", static_cast<long>(moved.left),
@@ -695,11 +742,13 @@ static void print_usage(std::FILE *out) {
                "               print the work area, DPI, frame, placement and the window's\n"
                "               rectangle, then exit without running it. Start it hidden. With\n"
                "               PLACEMENT-FILE, restore from it first and save to it after.\n"
-               "  --saved-placement PATH WL WT WR WB [BL BT BR BB]\n"
+               "  --saved-placement PATH WL WT WR WB [BL BT BR BB [FROM TO]]\n"
                "               print \"use L T R B MAXIMIZED\" if the placement saved at PATH would\n"
                "               be restored into the work area WL,WT-WR,WB, else \"ignore REASON\".\n"
                "               BL BT BR BB are the window's invisible borders (default 0, at most\n"
-               "               100), by which the rectangle may pass the work area\n"
+               "               100), by which the rectangle may pass the work area. FROM\n"
+               "               and TO are the frame widths where the borders were measured\n"
+               "               and on the rectangle's monitor; each border grows by TO-FROM\n"
                "  --exercise-placement PATH\n"
                "               Windows, for CI: open the window as a launch with\n"
                "               --placement-file PATH does, then move, maximise, restore,\n"
@@ -845,19 +894,27 @@ int main(int argc, char **argv) {
 #endif
     } else if (std::strcmp(argv[i], "--saved-placement") == 0) {
       // The restore decision on its own, with no window, so the tests check it on every OS.
-      long work[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+      long work[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
       int count = argc - 3;
-      bool numbers = i == 1 && (count == 4 || count == 8);
+      bool numbers = i == 1 && (count == 4 || count == 8 || count == 10);
       for (int k = 0; numbers && k < count; k++) numbers = parse_long(argv[3 + k], &work[k]);
       for (int k = 4; numbers && k < 8; k++)
         numbers = work[k] >= 0 && work[k] <= kMaxInvisibleBorder;
+      for (int k = 8; numbers && k < 10; k++)
+        numbers = work[k] >= 0 && work[k] <= kMaxFrameMetric;
       if (!numbers) {
         std::fprintf(stderr,
                      "hyperion-view: --saved-placement takes a path and 4 integers, or 8 with "
-                     "the last 4 from 0 to %ld, and nothing else\n\n",
-                     kMaxInvisibleBorder);
+                     "the last 4 from 0 to %ld, or 10 with the last 2 from 0 to %ld, and "
+                     "nothing else\n\n",
+                     kMaxInvisibleBorder, kMaxFrameMetric);
         print_usage(stderr);
         return 2;
+      }
+      if (count == 10) {
+        // The borders were measured where the frame is FROM wide; the rectangle is on a
+        // monitor where it is TO wide. Both directions use the same widths here.
+        for (int k = 4; k < 8; k++) work[k] = border_for_frame(work[k], work[8], work[9]);
       }
       saved_placement p;
       const char *reason = nullptr;
