@@ -161,14 +161,17 @@ response, :EXITED, or NIL, OUTPUT is what the binary printed, and MAPPED is the 
 files the process had mapped when it answered (%MAPPED-LIBUV). The process is stopped before this
 returns.
 
-The working directory is the parent of EXE's directory, and on macOS DYLD_FALLBACK_LIBRARY_PATH
+The working directory is the parent of EXE's directory. On macOS DYLD_LIBRARY_PATH is cleared,
+because a libuv in a directory it names would be found first (Copilot's review of train 28), and
+DYLD_FALLBACK_LIBRARY_PATH
 is an empty directory. Otherwise the loader could find a libuv in the working directory or in
 Homebrew's lib directory, and the run would pass without using the copy beside EXE (review of
 #524, where the hub tested this on macOS)."
   (let* ((directory (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname exe)))
          (process (%with-environment
                    (append '(("AION_UV_LIBRARY" . nil) ("HYPERION_SERVER" . nil))
-                           (when (uiop:os-macosx-p) '(("DYLD_FALLBACK_LIBRARY_PATH" . "/var/empty"))))
+                           (when (uiop:os-macosx-p) '(("DYLD_LIBRARY_PATH" . nil)
+                                                      ("DYLD_FALLBACK_LIBRARY_PATH" . "/var/empty"))))
                    (lambda ()
                      (uiop:launch-program (list (uiop:native-namestring exe))
                                           :directory directory :output log :error-output :output

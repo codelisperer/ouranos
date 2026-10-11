@@ -110,6 +110,15 @@ own pin and tarball."
         for path = (probe-file (merge-pathnames (concatenate 'string "vendor/libgit2/lib/" name) td-root))
         when path return path))
 
+(defun %loaded-from-tree-p (output)
+  "Whether OUTPUT has a LOADED line naming a file under this tree's vendor/ directory: the copy a
+built app must never fall back to. A LOADED line naming a system libgit2 is not that."
+  (let* ((line (find-if (lambda (l) (uiop:string-prefix-p "LOADED " l))
+                        (uiop:split-string output :separator '(#\Newline))))
+         (file (and line (ignore-errors (truename (string-trim '(#\Return) (subseq line 7))))))
+         (vendor (ignore-errors (truename (merge-pathnames "vendor/" td-root)))))
+    (and file vendor (uiop:subpathp file vendor) t)))
+
 (test a-bundle-of-an-aion-libgit-app-carries-libgit2-with-its-source
   "Built with the real build-desktop-app.lisp: the bundle carries libgit2, its pinned source
 and its licence, and check-bundle-sources passes on it. Run, the app loads libgit2 from the
@@ -181,7 +190,11 @@ not search the tree it was built from (#472)."
                      (delete-file carried)
                      (multiple-value-bind (out code) (run-app)
                        (is (eql 0 code) "the app exited with ~A:~%~A" code out)
-                       (is (search "FAILED" out) "with its copy deleted the app still loaded libgit2:~%~A" out))))))
+                       ;; Not "FAILED": a host with a system libgit2 loads that one, which is
+                       ;; allowed. What must not happen is the tree's copy (Copilot's review of
+                       ;; train 28).
+                       (is (not (%loaded-from-tree-p out))
+                           "with its copy deleted the app loaded the tree's libgit2:~%~A" out))))))
           (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
 
 ;;; --- bin/ from the build script `cons bin' runs, for an app that uses aion/libgit -------
@@ -271,7 +284,8 @@ was built from (#524, ADR-0013's amendment of 2026-10-04)."
                      (delete-file carried)
                      (multiple-value-bind (out code) (run-binary)
                        (is (eql 0 code) "the binary exited with ~A:~%~A" code out)
-                       (is (search "FAILED" out) "with its copy deleted the binary still loaded libgit2:~%~A" out))))))
+                       (is (not (%loaded-from-tree-p out))
+                           "with its copy deleted the binary loaded the tree's libgit2:~%~A" out))))))
           (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
 
 (test the-digest-is-read-from-every-sha256-tool-s-output
