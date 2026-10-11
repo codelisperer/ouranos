@@ -17,18 +17,28 @@ specification lets a server use it as the bearer of the task's state. CONNECTION
 connection's name, PRINCIPAL the user the call ran for, TOOL the server's tool name, MEANS the
 means name, SOURCE the means' source plist, AGENT the agent's name and CONVERSATION its
 conversation id. CALL-ID is the model's id for the call that started it. STARTED is the universal
-time the call began. DEADLINE is the universal time after which the task is given up, or NIL for
-none. INTERVAL is the seconds between polls, and NEXT-POLL the universal time the next poll is
-due. STATUS is the status the server last gave."
+time the call began, which :TASK-FINISHED's :MS counts from. SEEN is the universal time the
+client received the task, which the time-to-live counts from. DEADLINE is the universal time
+after which a task that has not finished is given up, or NIL for none. INTERVAL is the seconds
+between polls, and NEXT-POLL the universal time the next poll is due. STATUS is the status the
+server last gave. OUTCOME and TEXT are NIL until the task finishes; then they are what POLL-TASKS
+returns for it, kept in the record until it is reported."
   (key "" :type string)
   (connection "" :type string)
   (id "" :type string)
   principal tool means source agent conversation call-id
   (started 0 :type integer)
+  (seen 0 :type integer)
   (deadline nil)
   (interval 5 :type integer)
   (next-poll 0 :type integer)
-  (status "working" :type string))
+  (status "working" :type string)
+  (outcome nil)
+  (text nil))
+
+(defparameter +task-outcomes+ '(("ok" . :ok) ("error" . :error) ("cancelled" . :cancelled)
+                                ("expired" . :expired) ("unknown" . :unknown))
+  "A finished task's outcomes, by the name TASK-TO-JSON writes.")
 
 ;;; --- JSON ------------------------------------------------------------------------------
 
@@ -56,7 +66,10 @@ for a held turn (#531)."
               "agent" (orn (task-agent task)) "conversation" (orn (task-conversation task))
               "call-id" (orn (task-call-id task)) "started" (task-started task)
               "deadline" (orn (task-deadline task)) "interval" (task-interval task)
-              "next-poll" (task-next-poll task) "status" (task-status task)))))
+              "seen" (task-seen task) "next-poll" (task-next-poll task)
+              "status" (task-status task)
+              "outcome" (orn (car (rassoc (task-outcome task) +task-outcomes+)))
+              "text" (orn (task-text task))))))
 
 (defun task-from-json (text)
   "The task TASK-TO-JSON wrote as TEXT. The text is parsed as JSON, never read by the Lisp
@@ -68,25 +81,43 @@ reader."
                   :source (%source-from-json (val "source")) :agent (val "agent")
                   :conversation (val "conversation") :call-id (val "call-id")
                   :started (val "started") :deadline (val "deadline")
-                  :interval (val "interval") :next-poll (val "next-poll")
-                  :status (val "status")))))
+                  :seen (val "seen") :interval (val "interval") :next-poll (val "next-poll")
+                  :status (val "status")
+                  :outcome (cdr (assoc (val "outcome") +task-outcomes+ :test #'equal))
+                  :text (val "text")))))
 
 ;;; --- the store protocol ----------------------------------------------------------------
+;;;
+;;; Several pollers may share a store. A record is written by SAVE-TASK once, when the task
+;;; starts; after that only UPDATE-TASK and FINISH-TASK change it, and each changes only a record
+;;; that is still there and not finished, so a poll that read the task before another poller
+;;; finished it cannot write it back.
 
 (defgeneric save-task (store task)
-  (:documentation "Keep TASK in STORE, replacing the record with the same TASK-KEY. Called when a
-task starts and after each poll that changes it. An error here fails the call that started the
-task, as one whose outcome is unknown."))
+  (:documentation "Keep TASK in STORE as a new record. Called once, when a task starts. An error
+here fails the call that started the task, as one whose outcome is unknown."))
+
+(defgeneric update-task (store task)
+  (:documentation "Replace the record with TASK's TASK-KEY by TASK, when the record is still in
+STORE and has no TASK-OUTCOME. Return true when it was replaced. Called after a poll that did not
+finish the task. For a database this is `UPDATE ... WHERE key = ? AND outcome IS NULL'."))
+
+(defgeneric finish-task (store task)
+  (:documentation "Replace the record with TASK's TASK-KEY by TASK, which has a TASK-OUTCOME, when
+the record is still in STORE and has none. Return true only for the call that replaced it. A task
+finishes once: when two pollers see it finish, only the one whose FINISH-TASK returned true
+reports it. For a database this is `UPDATE ... WHERE key = ? AND outcome IS NULL' and a check
+that one row changed."))
 
 (defgeneric due-tasks (store connection-name now)
   (:documentation "The tasks in STORE for the connection named CONNECTION-NAME whose
-TASK-NEXT-POLL is at or before NOW, a universal time."))
+TASK-NEXT-POLL is at or before NOW, a universal time. A finished task that was not yet reported
+is due at once. The tasks returned are copies: changing one does not change the store."))
 
 (defgeneric remove-task (store task)
   (:documentation "Remove TASK, by its TASK-KEY, from STORE. Return true only when this call
-removed it, and NIL when it was already gone. A task finishes once: when two pollers see it
-finish, only the one whose REMOVE-TASK returned true reports it. For a database this is
-`DELETE ... WHERE key = ?' and a check that one row was deleted."))
+removed it, and NIL when it was already gone. For a database this is `DELETE ... WHERE key = ?'
+and a check that one row was deleted."))
 
 (defclass memory-task-store ()
   ((tasks :initform (make-hash-table :test #'equal) :reader %memory-tasks)
@@ -100,14 +131,27 @@ app whose tasks must survive a restart supplies a store backed by its own storag
 
 (defmethod save-task ((store memory-task-store) task)
   (sb-thread:with-mutex ((%memory-lock store))
-    (setf (gethash (task-key task) (%memory-tasks store)) task)))
+    (setf (gethash (task-key task) (%memory-tasks store)) (copy-task task))))
+
+(defun %replace-unfinished (store task)
+  (sb-thread:with-mutex ((%memory-lock store))
+    (let ((stored (gethash (task-key task) (%memory-tasks store))))
+      (when (and stored (null (task-outcome stored)))
+        (setf (gethash (task-key task) (%memory-tasks store)) (copy-task task))
+        t))))
+
+(defmethod update-task ((store memory-task-store) task)
+  (%replace-unfinished store task))
+
+(defmethod finish-task ((store memory-task-store) task)
+  (%replace-unfinished store task))
 
 (defmethod due-tasks ((store memory-task-store) connection-name now)
   (sb-thread:with-mutex ((%memory-lock store))
     (loop for task being the hash-values of (%memory-tasks store)
           when (and (string= connection-name (task-connection task))
                     (<= (task-next-poll task) now))
-            collect task)))
+            collect (copy-task task))))
 
 (defmethod remove-task ((store memory-task-store) task)
   (sb-thread:with-mutex ((%memory-lock store))

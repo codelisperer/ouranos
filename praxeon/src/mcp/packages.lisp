@@ -67,9 +67,11 @@
    ;; tool calls that become tasks (#532)
    #:connection-tasks #:client-task-store #:*default-poll-seconds*
    #:task #:task-key #:task-connection #:task-principal #:task-tool #:task-means #:task-source
-   #:task-agent #:task-conversation #:task-call-id #:task-started #:task-deadline
-   #:task-interval #:task-next-poll #:task-status #:task-to-json #:task-from-json
-   #:save-task #:due-tasks #:remove-task #:memory-task-store #:make-memory-task-store
+   #:task-agent #:task-conversation #:task-call-id #:task-started #:task-seen #:task-deadline
+   #:task-interval #:task-next-poll #:task-status #:task-outcome #:task-text
+   #:task-to-json #:task-from-json
+   #:save-task #:update-task #:finish-task #:due-tasks #:remove-task
+   #:memory-task-store #:make-memory-task-store
    #:finished-task #:finished-task-task #:finished-task-outcome #:finished-task-text
    #:poll-tasks #:poll-task #:cancel-task #:task-report
    ;; conditions

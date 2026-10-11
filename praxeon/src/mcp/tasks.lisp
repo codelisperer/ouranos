@@ -7,9 +7,11 @@
 ;;;; instead of a result. The call then returns at once: the task is saved in the client's task
 ;;;; store, the model is told that the work has started, and the call's :TOOL-RESULT event has
 ;;;; outcome :STARTED. The app's job runner calls POLL-TASKS on a schedule. Each poll sends
-;;;; tasks/get for the task's own principal, with a token fetched at that moment, and a task that
-;;;; reaches a terminal state is removed from the store, reported with a :TASK-FINISHED event and
-;;;; returned to the caller, which decides how the result reaches the conversation.
+;;;; tasks/get for the task's own principal, with a token fetched at that moment. A task that
+;;;; reaches a terminal state is marked finished in the store with its outcome, reported with a
+;;;; :TASK-FINISHED event, removed, and returned to the caller, which decides how the result
+;;;; reaches the conversation. When an observer fails on the event, the finished record stays in
+;;;; the store, and the next POLL-TASKS returns it without sending the event again.
 
 (cl:in-package #:praxeon/mcp)
 
@@ -29,26 +31,47 @@ sentence saying why there is no result. TASK-REPORT frames it for a later turn."
 (defun %random-key ()
   (format nil "~(~32,'0x~)" (random (expt 2 128) (make-random-state t))))
 
-(defun %seconds-from-ms (value fallback)
-  "VALUE, a number of milliseconds from the server, as whole seconds of at least 1, or FALLBACK
-when VALUE is not a non-negative number."
+(defun %seconds-from-ms (value fallback &key (least 1))
+  "VALUE, a number of milliseconds from the server, as whole seconds of at least LEAST, or
+FALLBACK when VALUE is not a non-negative number."
   (if (and (realp value) (not (minusp value)))
-      (max 1 (ceiling value 1000))
+      (max least (ceiling value 1000))
       fallback))
 
 (defun %task-timing (task object now)
   "Take the poll interval and the time-to-live from OBJECT, a task as the server sent it, into
-TASK, and set its next poll. Both may change over a task's life. The time-to-live counts from the
-server's createdAt; this client counts it from when it first saw the task, which is later, and
-the server answers -32602 for a task it has discarded either way."
+TASK, and set its next poll. Both may change over a task's life.
+
+The specification counts the time-to-live from the server's createdAt. This client counts it
+from TASK-SEEN, when it received the task, which is later, so the client never gives a task up
+before the server may: createdAt is the server's clock, and comparing it with this one would
+add their difference. A server that discarded the task earlier answers -32602, which finishes it
+as :EXPIRED too. The next poll is due no later than the deadline, so a task past it is polled
+once more and then given up."
   (setf (task-interval task) (%seconds-from-ms (gethash "pollIntervalMs" object)
                                                *default-poll-seconds*))
   (multiple-value-bind (ttl present) (gethash "ttlMs" object)
     (when present
       (setf (task-deadline task)
             (and (realp ttl) (not (minusp ttl))
-                 (+ (task-started task) (%seconds-from-ms ttl 0))))))
-  (setf (task-next-poll task) (+ now (task-interval task))))
+                 (+ (task-seen task) (%seconds-from-ms ttl 0 :least 0))))))
+  (setf (task-next-poll task) (let ((next (+ now (task-interval task))))
+                                (if (task-deadline task) (min next (task-deadline task)) next))))
+
+(defun %task-shape-p (object)
+  "Whether OBJECT has what the specification requires of a task: a known status, createdAt and
+lastUpdatedAt, a ttlMs that is a non-negative number or null, and a pollIntervalMs, when given,
+that is a non-negative number."
+  (flet ((ms-p (v) (and (realp v) (not (minusp v)))))
+    (multiple-value-bind (ttl ttl-p) (gethash "ttlMs" object)
+      (multiple-value-bind (poll poll-p) (gethash "pollIntervalMs" object)
+        (and (member (gethash "status" object)
+                     '("working" "input_required" "completed" "cancelled" "failed")
+                     :test #'equal)
+             (stringp (gethash "createdAt" object))
+             (stringp (gethash "lastUpdatedAt" object))
+             ttl-p (or (eq ttl 'null) (ms-p ttl))
+             (or (not poll-p) (ms-p poll)))))))
 
 (defun %task-event (type task &rest more)
   (apply #'evt:emit type :id (task-call-id task) :key (task-key task)
@@ -63,17 +86,17 @@ call returns."
   (let* ((connection (client-connection client))
          (name (connection-name connection))
          (id (gethash "taskId" result)))
-    (unless (and (stringp id) (plusp (length id)))
-      (%request-failed client "it started a background task with no id. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
+    (unless (and (stringp id) (plusp (length id)) (%task-shape-p result))
+      (%request-failed client "it started a background task the client could not read. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
                        '() :outcome :unknown))
-    (let ((task (%make-task :key (%random-key) :connection name :id id :principal principal
-                            :tool (tool-name tool) :means (getf origin :means)
-                            :source (getf origin :source) :agent (getf origin :agent)
-                            :conversation (getf origin :conversation)
-                            :call-id actor:*tool-call-id* :started started
-                            :status (let ((s (gethash "status" result)))
-                                      (if (stringp s) s "working")))))
-      (%task-timing task result (get-universal-time))
+    (let* ((now (get-universal-time))
+           (task (%make-task :key (%random-key) :connection name :id id :principal principal
+                             :tool (tool-name tool) :means (getf origin :means)
+                             :source (getf origin :source) :agent (getf origin :agent)
+                             :conversation (getf origin :conversation)
+                             :call-id actor:*tool-call-id* :started started :seen now
+                             :status (gethash "status" result))))
+      (%task-timing task result now)
       (handler-case (save-task (client-task-store client) task)
         (error ()
           (%request-failed client "it started a background task, but the task could not be recorded, so its result will not be reported. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
@@ -85,21 +108,44 @@ call returns."
        (format nil "The tool started a background task on the connection ~A. Its result is not available yet; it will be reported when the task finishes. Do not call the tool again for this request."
                name)))))
 
-(defun %finish (client task outcome text now)
-  "Remove TASK from the store and report it finished, or return NIL when another poller removed
-it first."
-  (when (remove-task (client-task-store client) task)
+(defun %own-task (client task operation)
+  "Signal an error, before anything is sent, when TASK belongs to another connection than
+CLIENT's: its id and principal would go to a server that did not issue them."
+  (let ((name (connection-name (client-connection client))))
+    (unless (string= name (task-connection task))
+      (error "praxeon/mcp: ~A: the task ~A belongs to the connection ~A, not to this client's connection ~A; nothing was sent."
+             operation (task-key task) (task-connection task) name))))
+
+(defun %report-finished (client task now &key (announce t))
+  "Remove TASK, which FINISH-TASK has marked finished, and return its FINISHED-TASK, or NIL when
+another poller removed it first. With ANNOUNCE, emit :TASK-FINISHED first. When the observer
+signals, the record stays in the store, due at once, and the next poll returns it with ANNOUNCE
+false, so the event is not sent twice."
+  (when announce
     (log:info "praxeon/mcp: task finished" :connection (task-connection task)
-                                           :key (task-key task) :outcome outcome)
-    (%task-event :task-finished task :outcome outcome
-                                     :ms (* 1000 (max 0 (- now (task-started task)))))
-    (%make-finished-task task outcome text)))
+                                           :key (task-key task) :outcome (task-outcome task))
+    (%task-event :task-finished task :outcome (task-outcome task)
+                                     :ms (* 1000 (max 0 (- now (task-started task))))))
+  (when (remove-task (client-task-store client) task)
+    (%make-finished-task task (task-outcome task) (task-text task))))
+
+(defun %claim (client task outcome text now)
+  "Mark TASK finished with OUTCOME and TEXT in the store, and return true when this call did,
+or NIL when another poller finished it first."
+  (setf (task-outcome task) outcome (task-text task) text (task-next-poll task) now)
+  (finish-task (client-task-store client) task))
+
+(defun %finish (client task outcome text now)
+  "Finish TASK and report it, or return NIL when another poller finished it first."
+  (when (%claim client task outcome text now)
+    (%report-finished client task now)))
 
 (defun %refuse-input (client task object now)
   "Cancel TASK, which asks for input this client declared no capability for (see %META), and
 report it finished as :CANCELLED. An input request is answered with a result of the request's
 own kind, which has no error form, so cancelling is the one refusal the specification allows. It
-is not left waiting for an answer nobody will send."
+is not left waiting for an answer nobody will send. tasks/cancel is sent and the task marked
+finished before any event, so an observer that fails cannot leave the task waiting."
   (let* ((requests (gethash "inputRequests" object))
          (methods (and (hash-table-p requests)
                        (loop for request being the hash-values of requests
@@ -109,7 +155,6 @@ is not left waiting for an answer nobody will send."
     (log:warn "praxeon/mcp: task asked for input, cancelled" :connection (task-connection task)
                                                             :key (task-key task)
                                                             :count (length methods))
-    (%task-event :task-input-refused task :methods methods)
     (handler-case (%request client "tasks/cancel" (%object "taskId" (task-id task))
                             :principal (task-principal task))
       ;; The task is given up either way: nobody will answer it, and the server discards it at
@@ -117,89 +162,113 @@ is not left waiting for an answer nobody will send."
       (cnd:tool-error-result ()
         (log:info "praxeon/mcp: cancelling a task failed" :connection (task-connection task)
                                                           :key (task-key task))))
-    (%finish client task :cancelled
-             (format nil "The background task on the connection ~A was cancelled, because the server asked for input this client does not provide (~{~A~^, ~})."
-                     (task-connection task)
-                     (or (remove-duplicates
-                          (mapcar (lambda (m) (if (member m +input-kinds+ :test #'string=)
-                                                  m
-                                                  "an unknown kind"))
-                                  methods)
-                          :test #'string=)
-                         '("an unknown kind")))
-             now)))
+    (when (%claim client task :cancelled
+                  (format nil "The background task on the connection ~A was cancelled, because the server asked for input this client does not provide (~{~A~^, ~})."
+                          (task-connection task)
+                          (or (remove-duplicates
+                               (mapcar (lambda (m) (if (member m +input-kinds+ :test #'string=)
+                                                       m
+                                                       "an unknown kind"))
+                                       methods)
+                               :test #'string=)
+                              '("an unknown kind")))
+                  now)
+      (%task-event :task-input-refused task :methods methods)
+      (%report-finished client task now))))
+
+(defun %expire (client task gone now)
+  "Finish TASK as :EXPIRED: GONE true when the server no longer has it, and NIL when it did not
+finish by its deadline."
+  (%finish client task :expired
+           (if gone
+               (format nil "The server of the connection ~A no longer has the background task; its outcome is unknown."
+                       (task-connection task))
+               (format nil "The background task on the connection ~A did not finish in the time the server allowed it; its outcome is unknown."
+                       (task-connection task)))
+           now))
+
+(defun %past-deadline-p (task now)
+  (and (task-deadline task) (>= now (task-deadline task))))
 
 (defun poll-task (client task &key (now (get-universal-time)))
   "Poll TASK once with tasks/get, for its own principal, and return a FINISHED-TASK when it
-reached a terminal state, or NIL. A task past its deadline, or one the server no longer knows
-(-32602), finishes as :EXPIRED. A poll that fails leaves the task due again after its interval."
-  (let ((connection (task-connection task)))
-    (when (and (task-deadline task) (>= now (task-deadline task)))
-      (return-from poll-task
-        (%finish client task :expired
-                 (format nil "The background task on the connection ~A did not finish in the time the server allowed it; its outcome is unknown."
-                         connection)
-                 now)))
-    (let ((object (handler-case (%request client "tasks/get" (%object "taskId" (task-id task))
-                                          :principal (task-principal task))
-                    (cnd:tool-error-result (e)
-                      (when (and (typep e 'request-failed) (eql -32602 (request-failed-code e)))
-                        (return-from poll-task
-                          (%finish client task :expired
-                                   (format nil "The server of the connection ~A no longer has the background task; its outcome is unknown."
-                                           connection)
-                                   now)))
-                      (setf (task-next-poll task) (+ now (task-interval task)))
-                      (save-task (client-task-store client) task)
-                      (return-from poll-task nil)))))
-      (let ((status (gethash "status" object)))
-        (when (stringp status) (setf (task-status task) status))
-        (%task-timing task object now)
-        (cond
-          ((equal status "completed")
-           (let ((result (gethash "result" object)))
-             (multiple-value-bind (text readable)
-                 (if (hash-table-p result)
-                     (handler-case (values (result-text result) t) (error () (values nil nil)))
-                     (values nil nil))
-               (cond ((not readable)
-                      (%finish client task :unknown
-                               (format nil "The background task on the connection ~A finished, but its result could not be read; its outcome is unknown."
-                                       connection)
-                               now))
-                     ((eq t (gethash "isError" result)) (%finish client task :error text now))
-                     (t (%finish client task :ok text now))))))
-          ((equal status "failed")
-           (let ((code (%get object "error" "code")))
-             (%finish client task :error
-                      (format nil "The background task on the connection ~A failed~:[~; (code ~A)~]."
-                              connection (integerp code) code)
-                      now)))
-          ((equal status "cancelled")
-           (%finish client task :cancelled
-                    (format nil "The background task on the connection ~A was cancelled by the server."
-                            connection)
-                    now))
-          ((equal status "input_required") (%refuse-input client task object now))
-          (t
-           ;; working, or a status this client does not know: poll again later.
-           (save-task (client-task-store client) task)
-           nil))))))
+reached a terminal state, or NIL. A task that is still not finished at its deadline, or one the
+server no longer knows (-32602), finishes as :EXPIRED. A poll that fails leaves the task due
+again after its interval. A task already marked finished, whose :TASK-FINISHED event an observer
+failed on, is returned without a poll and without the event. TASK must belong to CLIENT's
+connection; otherwise this signals an error and sends nothing."
+  (%own-task client task "poll-task")
+  (when (task-outcome task)
+    (return-from poll-task (%report-finished client task now :announce nil)))
+  (let ((object (handler-case (%request client "tasks/get" (%object "taskId" (task-id task))
+                                        :principal (task-principal task))
+                  (cnd:tool-error-result (e)
+                    (cond ((and (typep e 'request-failed) (eql -32602 (request-failed-code e)))
+                           (return-from poll-task
+                             (%expire client task t now)))
+                          ((%past-deadline-p task now)
+                           (return-from poll-task
+                             (%expire client task nil now))))
+                    (setf (task-next-poll task)
+                          (let ((next (+ now (task-interval task))))
+                            (if (task-deadline task) (min next (task-deadline task)) next)))
+                    (update-task (client-task-store client) task)
+                    (return-from poll-task nil)))))
+    (let ((status (gethash "status" object))
+          (connection (task-connection task)))
+      (when (stringp status) (setf (task-status task) status))
+      (%task-timing task object now)
+      (cond
+        ((equal status "completed")
+         (let ((result (gethash "result" object)))
+           (multiple-value-bind (text readable)
+               (if (hash-table-p result)
+                   (handler-case (values (result-text result) t) (error () (values nil nil)))
+                   (values nil nil))
+             (cond ((not readable)
+                    (%finish client task :unknown
+                             (format nil "The background task on the connection ~A finished, but its result could not be read; its outcome is unknown."
+                                     connection)
+                             now))
+                   ((eq t (gethash "isError" result)) (%finish client task :error text now))
+                   (t (%finish client task :ok text now))))))
+        ((equal status "failed")
+         (let ((code (%get object "error" "code")))
+           (%finish client task :error
+                    (format nil "The background task on the connection ~A failed~:[~; (code ~A)~]."
+                            connection (integerp code) code)
+                    now)))
+        ((equal status "cancelled")
+         (%finish client task :cancelled
+                  (format nil "The background task on the connection ~A was cancelled by the server."
+                          connection)
+                  now))
+        ((equal status "input_required") (%refuse-input client task object now))
+        ((%past-deadline-p task now)
+         (%expire client task nil now))
+        (t
+         ;; working, or a status this client does not know: poll again later.
+         (update-task (client-task-store client) task)
+         nil)))))
 
 (defun poll-tasks (client &key (now (get-universal-time)))
   "Poll each task of CLIENT's connection that is due in its task store, once, and return the
 FINISHED-TASKs among them. The app's job runner calls this on a schedule; praxeon starts no
 thread for it. A task is due TASK-INTERVAL seconds after its last poll, as the server's
-pollIntervalMs sets it."
+pollIntervalMs sets it, and no later than its deadline."
   (loop for task in (due-tasks (client-task-store client)
                                (connection-name (client-connection client)) now)
         for finished = (poll-task client task :now now)
         when finished collect finished))
 
 (defun cancel-task (client task &key (now (get-universal-time)))
-  "Ask the server to stop TASK with tasks/cancel, then remove it from the store and report it
-finished as :CANCELLED. The server may finish the work anyway. A request that fails signals as a
-call does, and the task is kept."
+  "Ask the server to stop TASK with tasks/cancel, then report it finished as :CANCELLED. The
+server may finish the work anyway. A request that fails signals as a call does, and the task is
+kept. A task already marked finished is reported as it finished, with nothing sent. TASK must
+belong to CLIENT's connection; otherwise this signals an error and sends nothing."
+  (%own-task client task "cancel-task")
+  (when (task-outcome task)
+    (return-from cancel-task (%report-finished client task now :announce nil)))
   (%request client "tasks/cancel" (%object "taskId" (task-id task)) :principal (task-principal task))
   (%finish client task :cancelled
            (format nil "The background task on the connection ~A was cancelled by the app."

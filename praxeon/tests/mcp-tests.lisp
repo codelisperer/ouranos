@@ -190,6 +190,12 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                     (%create-task fake)
                     (list :error -32021 "Missing required client capability")))
          (:rogue-task (%create-task fake))
+         (:slow-task (sleep 2) (%create-task fake))
+         ;; A task missing the fields in :DROP, with the fields in :SET replaced.
+         (:bad-task (let ((h (%create-task fake)))
+                      (dolist (k (getf entry :drop)) (remhash k h))
+                      (loop for (k v) on (getf entry :set) by #'cddr do (setf (gethash k h) v))
+                      h))
          (t (list :error -32602 "unknown tool")))))
     ((member method '("resources/list" "resources/templates/list" "prompts/list") :test #'string=)
      (let* ((member (cond ((string= method "resources/list") "resources")
@@ -1458,16 +1464,131 @@ is the one refusal the specification allows, and finishes as :CANCELLED, naming 
                  (is (null (search "boom" (mcp:finished-task-text finished)))
                      "the server's error message is not repeated"))))))
 
-(test a-task-past-its-time-to-live-finishes-as-expired-without-a-poll
+(test a-task-past-its-time-to-live-is-polled-once-more-then-finishes-as-expired
+  "The deadline counts from when the client received the task, and the next poll is due no later
+than the deadline, even when the server's poll interval is longer. A task that is still working
+when polled at its deadline finishes as :EXPIRED."
   (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working)
                          :task-ttl-ms 3000)))
+    (setf (fake-task-poll-ms fake) 60000)
     (with-fake (client fake :tasks t)
       (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
-      (let* ((task (%only-task client))
-             (finished (mcp:poll-tasks client :now (mcp:task-deadline task))))
-        (is (= (+ 3 (mcp:task-started task)) (mcp:task-deadline task)))
-        (is (eq :expired (mcp:finished-task-outcome (first finished))))
-        (is (null (%by-method (requests) "tasks/get")))))))
+      (let ((task (%only-task client)))
+        (is (= (+ 3 (mcp:task-seen task)) (mcp:task-deadline task)))
+        (is (= (mcp:task-deadline task) (mcp:task-next-poll task))
+            "due at the deadline, not 60 seconds on")
+        (let ((finished (mcp:poll-tasks client :now (mcp:task-deadline task))))
+          (is (eq :expired (mcp:finished-task-outcome (first finished))))
+          (is-true (search "did not finish" (mcp:finished-task-text (first finished)))))
+        (is (= 1 (length (%by-method (requests) "tasks/get"))) "it was polled once more")))))
+
+(test the-time-to-live-counts-from-when-the-task-arrived-and-zero-is-not-rounded-up
+  "A tools/call can take a while before the server answers with a task, so the deadline counts
+from the answer, not from the start of the call. A ttlMs of 0 is a deadline of that moment, and
+the task is still polled once before it is given up, so one that finished is not lost."
+  (let ((fake (make-fake :tools (%tools '("long" :do :slow-task)) :task-ttl-ms 1000)))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((task (%only-task client)))
+        (is (> (mcp:task-seen task) (mcp:task-started task)))
+        (is (= (+ 1 (mcp:task-seen task)) (mcp:task-deadline task))))))
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:completed)
+                         :task-ttl-ms 0)))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((task (%only-task client)))
+        (is (= (mcp:task-seen task) (mcp:task-deadline task)))
+        (is (eq :ok (mcp:finished-task-outcome
+                     (first (mcp:poll-tasks client :now (mcp:task-deadline task))))))))))
+
+(test a-task-without-the-fields-the-specification-requires-fails-the-call-as-unknown
+  "A task must have a known status, createdAt, lastUpdatedAt and a ttlMs that is a number or
+null. One that does not is not polled forever: the call fails with outcome :UNKNOWN, because the
+work may have started, and nothing is recorded."
+  (loop for plist in '((:drop ("createdAt")) (:drop ("lastUpdatedAt")) (:drop ("ttlMs"))
+                       (:drop ("status")) (:set ("status" "running")) (:set ("ttlMs" -5))
+                       (:set ("pollIntervalMs" "soon")))
+        do (let ((fake (make-fake :tools (list (list* "long" :do :bad-task plist)))))
+             (with-fake (client fake :tasks t)
+               (handler-case (progn (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+                                    (fail "~S was taken as a task" plist))
+                 (mcp:request-failed (e)
+                   (is (eq :unknown (cnd:tool-error-result-outcome e)) "~S" plist)))
+               (is (null (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum))
+                   "~S" plist))))
+  (let ((fake (make-fake :tools (list (list "long" :do :bad-task :drop '("pollIntervalMs")
+                                            :set '("ttlMs" null))))))
+    (with-fake (client fake :tasks t)
+      (is (typep (mcp:call-tool client (first (mcp:list-tools client)) (%obj)) 'actor:started-result)
+          "pollIntervalMs is optional and ttlMs may be null"))))
+
+(test a-task-of-another-connection-is-neither-polled-nor-cancelled
+  "Its id and principal would go to a server that did not issue them, so nothing is sent."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working))))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((task (%only-task client)))
+        (setf (mcp:task-connection task) "other")
+        (signals error (mcp:poll-task client task))
+        (signals error (mcp:cancel-task client task))
+        (is (null (%by-method (requests) "tasks/get")))
+        (is (null (%by-method (requests) "tasks/cancel")))))))
+
+(test an-observer-that-fails-on-task-finished-does-not-lose-the-result
+  "The task is marked finished in the store before the event. When the observer signals, the
+next POLL-TASKS returns the result without polling the server and without the event."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:completed)))
+        (events '()))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((due (mcp:task-next-poll (%only-task client))))
+        (signals simple-error
+          (evt:with-observer ((lambda (e) (when (eq :task-finished (evt:event-type e))
+                                            (error "observer failed"))))
+            (mcp:poll-tasks client :now due)))
+        (let ((finished (evt:with-observer ((lambda (e) (push e events)))
+                          (mcp:poll-tasks client :now due))))
+          (is (= 1 (length finished)))
+          (is (eq :ok (mcp:finished-task-outcome (first finished))))
+          (is (equal "finished work" (mcp:finished-task-text (first finished)))))
+        (is (null events) "the event the observer failed on is not sent again")
+        (is (= 1 (length (%by-method (requests) "tasks/get"))))
+        (is (null (mcp:poll-tasks client :now most-positive-fixnum)) "it is reported once")))))
+
+(test an-observer-that-fails-on-the-refusal-does-not-stop-the-cancel
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:input))))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((due (mcp:task-next-poll (%only-task client))))
+        (signals simple-error
+          (evt:with-observer ((lambda (e) (when (eq :task-input-refused (evt:event-type e))
+                                            (error "observer failed"))))
+            (mcp:poll-tasks client :now due)))
+        (is (equal '("task-1") (fake-cancels fake)) "tasks/cancel was sent before the event")
+        (let ((finished (mcp:poll-tasks client :now due)))
+          (is (eq :cancelled (mcp:finished-task-outcome (first finished)))))
+        (is (= 1 (length (%by-method (requests) "tasks/get"))))))))
+
+(test a-poll-that-read-a-task-before-another-finished-it-cannot-bring-it-back
+  "Two pollers share the store. Once one has finished a task, the other's update, made from what
+it read before, changes nothing, and its own finish is refused, so the task is reported once."
+  (let* ((store (mcp:make-memory-task-store))
+         (task (praxeon/mcp::%make-task :key "k" :connection "docs" :id "task-9" :next-poll 0)))
+    (mcp:save-task store task)
+    (destructuring-bind (a) (mcp:due-tasks store "docs" 0)
+      (destructuring-bind (b) (mcp:due-tasks store "docs" 0)
+        (setf (mcp:task-status b) "changed by b")
+        (is (equal "working" (mcp:task-status (first (mcp:due-tasks store "docs" 0))))
+            "a task from DUE-TASKS is a copy")
+        (setf (mcp:task-outcome a) :ok (mcp:task-text a) "done")
+        (is-true (mcp:finish-task store a))
+        (is (null (mcp:update-task store b)) "a stale update is refused")
+        (setf (mcp:task-outcome b) :ok)
+        (is (null (mcp:finish-task store b)) "a second finish is refused")
+        (is (eq :ok (mcp:task-outcome (first (mcp:due-tasks store "docs" 0)))))
+        (is-true (mcp:remove-task store a))
+        (is (null (mcp:update-task store b)) "nor does a removed task come back")
+        (is (null (mcp:due-tasks store "docs" most-positive-fixnum)))))))
 
 (test a-cancelled-task-is-told-to-the-server-and-leaves-the-store
   (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working))))
@@ -1485,7 +1606,8 @@ is the one refusal the specification allows, and finishes as :CANCELLED, naming 
                                         :tool "long" :means "docs__long"
                                         :source '(:connection "docs" :tool "long" :per-user t)
                                         :agent "a" :conversation nil :call-id "c1" :started 100
-                                        :deadline nil :interval 5 :next-poll 105 :status "working"))
+                                        :seen 101 :deadline nil :interval 5 :next-poll 105
+                                        :status "working" :outcome :cancelled :text "gone"))
          (back (mcp:task-from-json (mcp:task-to-json task)))
          (store (mcp:make-memory-task-store)))
     (is (equalp task back))
