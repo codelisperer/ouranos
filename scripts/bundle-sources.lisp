@@ -8,8 +8,10 @@
 ;;;;   - LICENSES/libgit2-COPYING, the licence from that tarball.
 ;;;;
 ;;;; This file holds what both halves need, so they cannot disagree:
-;;;;   - scripts/build-desktop-app.lisp puts the tarball there, and refuses to build a bundle
-;;;;     whose tarball does not match the pin;
+;;;;   - scripts/tree-natives.lisp puts the tarball there, and refuses to build a bundle whose
+;;;;     tarball does not match the pin. build-desktop-app.lisp uses it for a desktop bundle, and
+;;;;     the build script `cons bin' runs uses it for bin/, which carries libgit2 under the same
+;;;;     rule (ADR-0013's amendment of 2026-10-04, #524);
 ;;;;   - scripts/check-bundle-sources.lisp checks a built bundle, and the verify-bundle scripts
 ;;;;     for all three platforms run it.
 ;;;;
@@ -97,8 +99,13 @@ Returns the copy's pathname."
          (to (merge-pathnames (concatenate 'string "SOURCES/" name) bundle)))
     (unless (probe-file from)
       (error 'source-refused
-             :reason (format nil "~A is missing; it is the source this bundle must carry with ~A. Run scripts/build-~A.lisp --force, which fetches it again even when the library is already built."
-                             (uiop:native-namestring from) (getf entry :package) (getf entry :package))))
+             :reason (format nil "~A is missing; it is the source that must be carried with ~A. Run \"sbcl --script ~A --force\", which fetches it again even when the library is already built."
+                             (uiop:native-namestring from) (getf entry :package)
+                             ;; The absolute path: `cons bin' runs this from an app's own
+                             ;; project, where a path relative to the tree is wrong (#524).
+                             (uiop:native-namestring
+                              (merge-pathnames (format nil "scripts/build-~A.lisp" (getf entry :package))
+                                               root)))))
     (let ((got (sha256-of from)))
       (unless (string-equal got want)
         (error 'source-refused
