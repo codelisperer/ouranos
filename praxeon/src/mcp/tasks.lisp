@@ -8,10 +8,12 @@
 ;;;; store, the model is told that the work has started, and the call's :TOOL-RESULT event has
 ;;;; outcome :STARTED. The app's job runner calls POLL-TASKS on a schedule. Each poll sends
 ;;;; tasks/get for the task's own principal, with a token fetched at that moment. A task that
-;;;; reaches a terminal state is marked finished in the store with its outcome, reported with a
-;;;; :TASK-FINISHED event, removed, and returned to the caller, which decides how the result
-;;;; reaches the conversation. When an observer fails on the event, the finished record stays in
-;;;; the store, and the next POLL-TASKS returns it without sending the event again.
+;;;; reaches a terminal state is marked finished in the store with its outcome, then marked
+;;;; announced and reported with a :TASK-FINISHED event, and returned to the caller, which decides
+;;;; how the result reaches the conversation. A finished record is removed from the store only
+;;;; when POLL-TASKS is about to return it. When an observer fails on any event, POLL-TASKS
+;;;; returns nothing, every finished record stays in the store, and the next POLL-TASKS returns
+;;;; them, sending :TASK-FINISHED only for a task it was not yet sent for.
 
 (cl:in-package #:praxeon/mcp)
 
@@ -38,9 +40,11 @@ FALLBACK when VALUE is not a non-negative number."
       (max least (ceiling value 1000))
       fallback))
 
-(defun %task-timing (task object now)
+(defun %task-timing (task object now lifetime)
   "Take the poll interval and the time-to-live from OBJECT, a task as the server sent it, into
-TASK, and set its next poll. Both may change over a task's life.
+TASK, and set its next poll. Both may change over a task's life. A ttlMs of null gives the task
+LIFETIME seconds, the connection's TASK-LIFETIME, because the server set no limit and a task
+that never finishes would otherwise be polled for as long as the process runs.
 
 The specification counts the time-to-live from the server's createdAt. This client counts it
 from TASK-SEEN, when it received the task, which is later, so the client never gives a task up
@@ -53,8 +57,10 @@ once more and then given up."
   (multiple-value-bind (ttl present) (gethash "ttlMs" object)
     (when present
       (setf (task-deadline task)
-            (and (realp ttl) (not (minusp ttl))
-                 (+ (task-seen task) (%seconds-from-ms ttl 0 :least 0))))))
+            (+ (task-seen task)
+               (if (and (realp ttl) (not (minusp ttl)))
+                   (%seconds-from-ms ttl 0 :least 0)
+                   lifetime)))))
   (setf (task-next-poll task) (let ((next (+ now (task-interval task))))
                                 (if (task-deadline task) (min next (task-deadline task)) next))))
 
@@ -96,7 +102,7 @@ call returns."
                              :conversation (getf origin :conversation)
                              :call-id actor:*tool-call-id* :started started :seen now
                              :status (gethash "status" result))))
-      (%task-timing task result now)
+      (%task-timing task result now (connection-task-lifetime connection))
       (handler-case (save-task (client-task-store client) task)
         (error ()
           (%request-failed client "it started a background task, but the task could not be recorded, so its result will not be reported. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
@@ -116,18 +122,26 @@ CLIENT's: its id and principal would go to a server that did not issue them."
       (error "praxeon/mcp: ~A: the task ~A belongs to the connection ~A, not to this client's connection ~A; nothing was sent."
              operation (task-key task) (task-connection task) name))))
 
-(defun %report-finished (client task now &key (announce t))
-  "Remove TASK, which FINISH-TASK has marked finished, and return its FINISHED-TASK, or NIL when
-another poller removed it first. With ANNOUNCE, emit :TASK-FINISHED first. When the observer
-signals, the record stays in the store, due at once, and the next poll returns it with ANNOUNCE
-false, so the event is not sent twice."
-  (when announce
+(defun %announce (client task now)
+  "Emit :TASK-FINISHED for TASK, which FINISH-TASK has marked finished, unless it was emitted
+already, and return TASK. The store records the announcement before the event, so when an
+observer signals on it, the event is not sent again."
+  (setf (task-announced-at task) now)
+  (when (announce-task (client-task-store client) task)
     (log:info "praxeon/mcp: task finished" :connection (task-connection task)
                                            :key (task-key task) :outcome (task-outcome task))
     (%task-event :task-finished task :outcome (task-outcome task)
                                      :ms (* 1000 (max 0 (- now (task-started task))))))
-  (when (remove-task (client-task-store client) task)
-    (%make-finished-task task (task-outcome task) (task-text task))))
+  task)
+
+(defun %deliver (client tasks)
+  "Remove each of TASKS, finished and announced, from the store, and return a FINISHED-TASK for
+each one this call removed. A task another poller removed first is left out, so each is returned
+once. This is the last step before a result is returned, so a failure before it leaves every
+finished task in the store for the next poll."
+  (loop for task in tasks
+        when (remove-task (client-task-store client) task)
+          collect (%make-finished-task task (task-outcome task) (task-text task))))
 
 (defun %claim (client task outcome text now)
   "Mark TASK finished with OUTCOME and TEXT in the store, and return true when this call did,
@@ -136,16 +150,17 @@ or NIL when another poller finished it first."
   (finish-task (client-task-store client) task))
 
 (defun %finish (client task outcome text now)
-  "Finish TASK and report it, or return NIL when another poller finished it first."
+  "Finish TASK and announce it, and return TASK, or NIL when another poller finished it first."
   (when (%claim client task outcome text now)
-    (%report-finished client task now)))
+    (%announce client task now)))
 
 (defun %refuse-input (client task object now)
   "Cancel TASK, which asks for input this client declared no capability for (see %META), and
 report it finished as :CANCELLED. An input request is answered with a result of the request's
 own kind, which has no error form, so cancelling is the one refusal the specification allows. It
 is not left waiting for an answer nobody will send. tasks/cancel is sent and the task marked
-finished before any event, so an observer that fails cannot leave the task waiting."
+finished before any event, so an observer that fails cannot leave the task waiting. When the
+observer fails on :TASK-INPUT-REFUSED, the next poll sends :TASK-FINISHED."
   (let* ((requests (gethash "inputRequests" object))
          (methods (and (hash-table-p requests)
                        (loop for request being the hash-values of requests
@@ -174,7 +189,7 @@ finished before any event, so an observer that fails cannot leave the task waiti
                               '("an unknown kind")))
                   now)
       (%task-event :task-input-refused task :methods methods)
-      (%report-finished client task now))))
+      (%announce client task now))))
 
 (defun %expire (client task gone now)
   "Finish TASK as :EXPIRED: GONE true when the server no longer has it, and NIL when it did not
@@ -183,41 +198,37 @@ finish by its deadline."
            (if gone
                (format nil "The server of the connection ~A no longer has the background task; its outcome is unknown."
                        (task-connection task))
-               (format nil "The background task on the connection ~A did not finish in the time the server allowed it; its outcome is unknown."
+               (format nil "The background task on the connection ~A did not finish in the time allowed for it; its outcome is unknown."
                        (task-connection task)))
            now))
 
 (defun %past-deadline-p (task now)
   (and (task-deadline task) (>= now (task-deadline task))))
 
-(defun poll-task (client task &key (now (get-universal-time)))
-  "Poll TASK once with tasks/get, for its own principal, and return a FINISHED-TASK when it
-reached a terminal state, or NIL. A task that is still not finished at its deadline, or one the
-server no longer knows (-32602), finishes as :EXPIRED. A poll that fails leaves the task due
-again after its interval. A task already marked finished, whose :TASK-FINISHED event an observer
-failed on, is returned without a poll and without the event. TASK must belong to CLIENT's
-connection; otherwise this signals an error and sends nothing."
-  (%own-task client task "poll-task")
+(defun %poll (client task now)
+  "Poll TASK once and return it when it is finished and announced, or NIL. The record stays in
+the store; %DELIVER removes it. A task already marked finished is announced, if it was not yet,
+and returned without a poll."
   (when (task-outcome task)
-    (return-from poll-task (%report-finished client task now :announce nil)))
+    (return-from %poll (%announce client task now)))
   (let ((object (handler-case (%request client "tasks/get" (%object "taskId" (task-id task))
                                         :principal (task-principal task))
                   (cnd:tool-error-result (e)
                     (cond ((and (typep e 'request-failed) (eql -32602 (request-failed-code e)))
-                           (return-from poll-task
+                           (return-from %poll
                              (%expire client task t now)))
                           ((%past-deadline-p task now)
-                           (return-from poll-task
+                           (return-from %poll
                              (%expire client task nil now))))
                     (setf (task-next-poll task)
                           (let ((next (+ now (task-interval task))))
                             (if (task-deadline task) (min next (task-deadline task)) next)))
                     (update-task (client-task-store client) task)
-                    (return-from poll-task nil)))))
+                    (return-from %poll nil)))))
     (let ((status (gethash "status" object))
           (connection (task-connection task)))
       (when (stringp status) (setf (task-status task) status))
-      (%task-timing task object now)
+      (%task-timing task object now (connection-task-lifetime (client-connection client)))
       (cond
         ((equal status "completed")
          (let ((result (gethash "result" object)))
@@ -251,29 +262,44 @@ connection; otherwise this signals an error and sends nothing."
          (update-task (client-task-store client) task)
          nil)))))
 
+(defun poll-task (client task &key (now (get-universal-time)))
+  "Poll TASK once with tasks/get, for its own principal, and return a FINISHED-TASK when it
+reached a terminal state, or NIL. A task that is still not finished at its deadline, or one the
+server no longer knows (-32602), finishes as :EXPIRED. A poll that fails leaves the task due
+again after its interval. A task already marked finished is returned without a poll, with
+:TASK-FINISHED only when it was not sent yet. TASK must belong to CLIENT's connection; otherwise
+this signals an error and sends nothing."
+  (%own-task client task "poll-task")
+  (let ((done (%poll client task now)))
+    (first (%deliver client (and done (list done))))))
+
 (defun poll-tasks (client &key (now (get-universal-time)))
   "Poll each task of CLIENT's connection that is due in its task store, once, and return the
 FINISHED-TASKs among them. The app's job runner calls this on a schedule; praxeon starts no
 thread for it. A task is due TASK-INTERVAL seconds after its last poll, as the server's
-pollIntervalMs sets it, and no later than its deadline."
-  (loop for task in (due-tasks (client-task-store client)
-                               (connection-name (client-connection client)) now)
-        for finished = (poll-task client task :now now)
-        when finished collect finished))
+pollIntervalMs sets it, and no later than its deadline. Finished tasks leave the store only as
+this returns them, so when an observer or a request signals partway, no finished task is lost:
+the next call returns each of them."
+  (%deliver client
+            (loop for task in (due-tasks (client-task-store client)
+                                         (connection-name (client-connection client)) now)
+                  for done = (%poll client task now)
+                  when done collect done)))
 
 (defun cancel-task (client task &key (now (get-universal-time)))
   "Ask the server to stop TASK with tasks/cancel, then report it finished as :CANCELLED. The
 server may finish the work anyway. A request that fails signals as a call does, and the task is
-kept. A task already marked finished is reported as it finished, with nothing sent. TASK must
-belong to CLIENT's connection; otherwise this signals an error and sends nothing."
+kept. A task already marked finished is returned as it finished, with nothing sent to the server.
+TASK must belong to CLIENT's connection; otherwise this signals an error and sends nothing."
   (%own-task client task "cancel-task")
   (when (task-outcome task)
-    (return-from cancel-task (%report-finished client task now :announce nil)))
+    (return-from cancel-task (first (%deliver client (list (%announce client task now))))))
   (%request client "tasks/cancel" (%object "taskId" (task-id task)) :principal (task-principal task))
-  (%finish client task :cancelled
-           (format nil "The background task on the connection ~A was cancelled by the app."
-                   (task-connection task))
-           now))
+  (let ((done (%finish client task :cancelled
+                       (format nil "The background task on the connection ~A was cancelled by the app."
+                               (task-connection task))
+                       now)))
+    (first (%deliver client (and done (list done))))))
 
 (defun task-report (finished)
   "Text for a later turn that gives the model FINISHED's result. It names the tool and says that

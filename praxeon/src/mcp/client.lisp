@@ -79,7 +79,8 @@ has, or two tools under one name. Nothing was registered."))
 
 (defstruct (connection (:constructor make-connection
                            (&key name url token-source per-user (timeout 30) (call-timeout 120)
-                                 (max-body-bytes (* 8 1024 1024)) tasks)))
+                                 (max-body-bytes (* 8 1024 1024)) tasks
+                                 (task-lifetime (* 24 60 60)))))
   "An MCP server the app connects to, as data.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
@@ -91,7 +92,9 @@ call with no principal is then refused before anything is sent. TIMEOUT is the m
 request may take, and CALL-TIMEOUT the most a tool call may take. MAX-BODY-BYTES bounds a
 reply. TASKS is true to declare the MCP Tasks extension, so the server may answer a tool call
 with a task that POLL-TASKS follows after the turn has ended (#532); it applies to servers on the
-current revision only."
+current revision only. TASK-LIFETIME is the most seconds the client follows a task whose server
+gives it no time-to-live (a ttlMs of null), counted from when the client received it; one day by
+default. A task still not finished then is polled once more and finishes as :EXPIRED."
   (name "" :type string)
   (url "" :type string)
   (token-source nil)
@@ -99,7 +102,8 @@ current revision only."
   (timeout 30)
   (call-timeout 120)
   (max-body-bytes (* 8 1024 1024))
-  (tasks nil))
+  (tasks nil)
+  (task-lifetime (* 24 60 60)))
 
 (defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN

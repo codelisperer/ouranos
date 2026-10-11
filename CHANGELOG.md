@@ -341,13 +341,16 @@ its tag.
   `:expired` or `:unknown`; `task-report` gives text for a later turn. `cancel-task` sends
   `tasks/cancel`; it and `poll-task` refuse a task of another connection before sending
   anything. An app with its own store implements `save-task`, `update-task`, `finish-task`,
-  `due-tasks` and `remove-task`; `update-task` and `finish-task` change only a record that is
-  still there and not finished, so a poller that read a task before another finished it cannot
-  write it back. A finished task is marked in the store before its `:task-finished` event, so
-  when an observer fails on the event, the next `poll-tasks` returns the result. A task is kept
+  `announce-task`, `due-tasks` and `remove-task`; `update-task` and `finish-task` change only a
+  record that is still there and not finished, so a poller that read a task before another
+  finished it cannot write it back, and `announce-task` marks a finished record once, so
+  `:task-finished` is sent once. A finished task stays in the store until `poll-tasks` returns
+  it, so when an observer fails on any event, no finished task is lost: the next `poll-tasks`
+  returns each one, and sends `:task-finished` for any it was not yet sent for. A task is kept
   as JSON with `task-to-json` and `task-from-json`. A task without the fields the specification
   requires fails the call with outcome `:unknown`. The time-to-live counts from when the client
-  received the task, and a task is polled once more at its deadline before it expires. The
+  received the task, and a task is polled once more at its deadline before it expires. A task
+  whose `ttlMs` is null expires after the connection's `:task-lifetime`, one day by default. The
   client declares no elicitation, sampling or roots, so a server must not ask a task for
   input; a task that does is cancelled, with a `:task-input-refused` event naming the request
   methods. Answering elicitations is #563. See `praxeon/docs/mcp.md`, "Long-running calls".

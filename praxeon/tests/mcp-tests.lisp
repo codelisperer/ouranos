@@ -1565,9 +1565,67 @@ next POLL-TASKS returns the result without polling the server and without the ev
                                             (error "observer failed"))))
             (mcp:poll-tasks client :now due)))
         (is (equal '("task-1") (fake-cancels fake)) "tasks/cancel was sent before the event")
-        (let ((finished (mcp:poll-tasks client :now due)))
-          (is (eq :cancelled (mcp:finished-task-outcome (first finished)))))
+        (let* ((events '())
+               (finished (evt:with-observer ((lambda (e) (push e events)))
+                           (mcp:poll-tasks client :now due))))
+          (is (eq :cancelled (mcp:finished-task-outcome (first finished))))
+          (is (equal '(:task-finished) (mapcar #'evt:event-type events))
+              ":task-finished is sent on the next poll, and the refusal is not sent again")
+          (is (eq :cancelled (getf (first events) :outcome))))
         (is (= 1 (length (%by-method (requests) "tasks/get"))))))))
+
+(test an-observer-that-fails-on-one-task-loses-no-other-tasks-result
+  "Two tasks finish in one POLL-TASKS, and the observer signals on the second :TASK-FINISHED. The
+call returns nothing, and both finished records stay in the store, so the next POLL-TASKS
+returns both results, with neither event sent again (#565 review)."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:completed)))
+        (seen 0) (events '()))
+    (with-fake (client fake :tasks t)
+      (let ((tool (first (mcp:list-tools client))))
+        (mcp:call-tool client tool (%obj))
+        (mcp:call-tool client tool (%obj)))
+      (let ((due (+ (get-universal-time) 60)))
+        (signals simple-error
+          (evt:with-observer ((lambda (e) (when (and (eq :task-finished (evt:event-type e))
+                                                     (= 2 (incf seen)))
+                                            (error "observer failed"))))
+            (mcp:poll-tasks client :now due)))
+        (is (= 2 seen) "the first task's event was sent before the second failed")
+        (let ((finished (evt:with-observer ((lambda (e) (push e events)))
+                          (mcp:poll-tasks client :now due))))
+          (is (= 2 (length finished)) "neither result is lost")
+          (is (every (lambda (f) (eq :ok (mcp:finished-task-outcome f))) finished))
+          (is (equal '("task-1" "task-2")
+                     (sort (mapcar (lambda (f) (praxeon/mcp::task-id (mcp:finished-task-task f))) finished)
+                           #'string<))))
+        (is (null events) "no :task-finished is sent twice")
+        (is (= 2 (length (%by-method (requests) "tasks/get"))) "each task was polled once")
+        (is (null (mcp:poll-tasks client :now most-positive-fixnum)) "each is returned once")))))
+
+(test a-task-without-a-time-to-live-is-given-up-after-the-connections-task-lifetime
+  "A server may give a task a ttlMs of null. The client then counts the connection's
+TASK-LIFETIME, one day by default, from when it received the task, so a task whose polls keep
+failing, as they do while a user has not signed in again, is not polled for ever (#565 review)."
+  (is (= (* 24 60 60) (mcp:connection-task-lifetime (mcp:make-connection :name "x" :url "http://x/"))))
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working))))
+    (with-fake (client fake :tasks t :task-lifetime 60)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((task (%only-task client)))
+        (is (= (+ 60 (mcp:task-seen task)) (mcp:task-deadline task)))
+        (setf (fake-fail-next fake) t)
+        (is (null (mcp:poll-tasks client :now (+ 10 (mcp:task-seen task)))) "a failed poll before the limit")
+        (is (<= (mcp:task-next-poll (%only-task client)) (mcp:task-deadline task)))
+        (setf (fake-fail-next fake) t)
+        (let ((finished (mcp:poll-tasks client :now (mcp:task-deadline task))))
+          (is (eq :expired (mcp:finished-task-outcome (first finished))) "a failed poll at the limit")
+          (is-true (search "did not finish" (mcp:finished-task-text (first finished))))))))
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working))))
+    (with-fake (client fake :tasks t :task-lifetime 60)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((task (%only-task client)))
+        (is (eq :expired (mcp:finished-task-outcome
+                          (first (mcp:poll-tasks client :now (mcp:task-deadline task)))))
+            "a task still working at the limit")))))
 
 (test a-poll-that-read-a-task-before-another-finished-it-cannot-bring-it-back
   "Two pollers share the store. Once one has finished a task, the other's update, made from what
@@ -1601,13 +1659,14 @@ it read before, changes nothing, and its own finish is refused, so the task is r
                                                 "Mcp-Name")))
         (is (null (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum)))))))
 
-(test a-task-record-survives-json-and-finishes-once
+(test a-task-record-survives-json-and-a-store-removes-it-once
   (let* ((task (praxeon/mcp::%make-task :key "k" :connection "docs" :id "task-9" :principal "u1"
                                         :tool "long" :means "docs__long"
                                         :source '(:connection "docs" :tool "long" :per-user t)
                                         :agent "a" :conversation nil :call-id "c1" :started 100
                                         :seen 101 :deadline nil :interval 5 :next-poll 105
-                                        :status "working" :outcome :cancelled :text "gone"))
+                                        :status "working" :outcome :cancelled :text "gone"
+                                        :announced-at 106))
          (back (mcp:task-from-json (mcp:task-to-json task)))
          (store (mcp:make-memory-task-store)))
     (is (equalp task back))
@@ -1615,6 +1674,24 @@ it read before, changes nothing, and its own finish is refused, so the task is r
     (mcp:save-task store back)
     (is-true (mcp:remove-task store back))
     (is (null (mcp:remove-task store back)) "a second remover is told it was already gone")))
+
+(test a-store-announces-a-finished-task-once
+  "ANNOUNCE-TASK marks a finished record as announced, and returns true only for the call that
+did, so :TASK-FINISHED is sent once even when two pollers both see the task finished. A task not
+yet finished, or no longer in the store, is not announced."
+  (let* ((store (mcp:make-memory-task-store))
+         (task (praxeon/mcp::%make-task :key "k" :connection "docs" :id "task-9" :next-poll 0)))
+    (mcp:save-task store task)
+    (setf (mcp:task-announced-at task) 5)
+    (is (null (mcp:announce-task store task)) "not finished yet")
+    (setf (mcp:task-outcome task) :ok (mcp:task-announced-at task) nil)
+    (is-true (mcp:finish-task store task))
+    (setf (mcp:task-announced-at task) 7)
+    (is-true (mcp:announce-task store task))
+    (is (null (mcp:announce-task store task)) "a second announcement is refused")
+    (is (= 7 (mcp:task-announced-at (first (mcp:due-tasks store "docs" 0)))))
+    (is-true (mcp:remove-task store task))
+    (is (null (mcp:announce-task store task)) "nor is a removed task announced")))
 
 (test a-ledger-written-for-ok-and-error-counts-a-started-call-only-when-it-finishes
   "A ledger an app wrote before #532 counts :OK and :ERROR results and puts anything else in
