@@ -9,7 +9,7 @@
 ;;;;
 ;;;; THE URLS ARE DEFAULTS A SITE CAN CHANGE, in SITE-OPTIONS: /tags/<tag>/, /page/2/,
 ;;;; /feed.xml, /atom.xml and /search.json. A listing's first page is its bare URL, and page N is
-;;;; that URL plus page/N/.
+;;;; that URL plus page/N/. A SEARCH-PATH of NIL means the site has no search.json (#556).
 ;;;;
 ;;;; FEEDS NEED A BASE URL. RSS and Atom require absolute links, and only the site knows its own
 ;;;; address, so a site without :BASE-URL has no feeds and no feed paths, rather than feeds with
@@ -179,10 +179,12 @@ the time the tree was loaded when there are none."
 (defun search-json (tree &key now)
   "Every readable document as a JSON array of objects with url, title, tags, date and text (the
 Markdown body), for a search box that fetches the file once and searches in the page. Readable
-only: a draft is not in it."
+only: a draft is not in it. A document whose front-matter says `search: false' is not in it
+either (#556)."
   (com.inuoe.jzon:stringify
    (coerce (loop for d in (tree-readable-documents tree :now now)
                  for meta = (document-meta d)
+                 when (content-meta-search meta)
                  collect (let ((h (make-hash-table :test #'equal)))
                            (setf (gethash "url" h) (concatenate 'string "/" (document-key d))
                                  (gethash "title" h) (or (content-meta-title meta) 'null)
@@ -232,7 +234,8 @@ of :HTML, :RSS, :ATOM or :JSON, or NIL when there is none. Reads *SITE-OPTIONS*.
        (values :rss (rss-feed tree :now now)))
       ((and (site-options-base-url o) (string= path (site-options-atom-path o)))
        (values :atom (atom-feed tree :now now)))
-      ((string= path (site-options-search-path o))
+      ;; Checked for NIL first: STRING= reads NIL as the string "NIL" (#556).
+      ((and (site-options-search-path o) (string= path (site-options-search-path o)))
        (values :json (search-json tree :now now)))
       (index-page
        (let ((html (%listing site readable index-page (site-options-index-theme o))))
@@ -267,5 +270,6 @@ of :HTML, :RSS, :ATOM or :JSON, or NIL when there is none. Reads *SITE-OPTIONS*.
                                                page)))
      (when (site-options-base-url o)
        (list (site-options-rss-path o) (site-options-atom-path o)))
-     (list (site-options-search-path o))
+     (when (site-options-search-path o)
+       (list (site-options-search-path o)))
      (mapcar #'document-key readable))))

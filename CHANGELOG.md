@@ -109,6 +109,32 @@ its tag.
   put raw HTML on the page, so that renderer must escape its input. The fixed entry for #559
   below describes the rest of the change.
 
+- **klio: HTML comments are removed from a page when it is loaded; `search.json` can be turned
+  off, and a page can stay out of search** (#556). klio renders Markdown with raw HTML escaped,
+  so an HTML comment (`<!-- ... -->`) in a page's body was shown on the page as visible text,
+  and `/search.json` and the search index carried it too. An author who kept private notes in
+  comments has been publishing them on any site exported or served this way. `load-document` now
+  removes every comment from the body before rendering or indexing it, so `document-body`,
+  `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment is
+  kept only when klio's renderer shows all of it, from `<!--` through `-->`, inside one `<code>`
+  element on the page, as in one code span, one fenced block or one indented block. klio decides
+  this by rendering a copy of the body, so a block quote, a `~~~` fence or a list item that
+  renders as text does not keep a comment, and neither does a comment that starts in code and
+  ends outside it. A body that contains one of the Unicode noncharacters U+FDD2 to U+FDD5 or
+  U+FDE0 to U+FDEF has every comment removed. `<!-->` and `<!--->` are whole comments, as
+  CommonMark 0.31.2 defines them, so the text after them is kept. A comment that is never closed
+  removes the rest of the body, and the load warns. HTML comments are removed from the body
+  only; use YAML `#` comments in front matter, where a `<!-- -->` in a value is kept and
+  published. `klio:strip-html-comments` does the removal; its `:render` argument names the
+  renderer, `render-markdown` by default. `make-site-options`, and so `site-app` and
+  `export-site`, take `:search-path nil` to have no `search.json`: the export does not write it
+  and the app does not serve it. A front-matter `search: false` leaves a page out of
+  `search.json` and the search index; only `search: true` or no `search` key keeps it in.
+  `search` is now a core key, read with `content-meta-search` or `(document-field d "search")`.
+  An app acts if a theme or a script relied on comments in `document-body`, or read `search`
+  with `(extra meta "search")`, which now returns NIL. An author who relied on comments being
+  hidden should check what was already published.
+
 ### Added
 
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its

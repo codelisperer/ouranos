@@ -893,6 +893,7 @@ included; a file whose name only begins with the collection's name is not a memb
       (is (equal "Alpha" (k:document-field d "title")))
       (is (equal "a" (k:document-field d "slug")) "the resolved slug")
       (is (equal "2019-03-01" (k:document-field d "start")) "an extra key")
+      (is (eq t (k:document-field d "search")) "search is T when the key is absent")
       (is (null (k:document-field d "nope"))))))
 
 (test a-theme-reads-its-collection-from-the-requests-tree-even-when-a-reload-lands
@@ -1427,6 +1428,267 @@ the collection are absent")
             (is (equal "Alpha" (gethash "title" e)))
             (is (equal '("Lisp") (coerce (gethash "tags" e) 'list)))
             (is (search "Body of Alpha" (gethash "text" e)))))))))
+
+;;; --- HTML comments, search: false and turning search.json off (#556) --------------------------
+
+(defun %doc (front body)
+  (format nil "---~%title: \"~A\"~%~A---~%~%~A" "Page" front body))
+
+(defun %loaded (body &key (front ""))
+  "BODY loaded as one document: (values DOCUMENT TREE)."
+  (with-content-dir (dir ("p.md" . (%doc front body)))
+    (let ((tree (k:load-tree dir)))
+      (values (k:tree-document tree "p") tree))))
+
+(defun %search-entries (site)
+  (coerce (com.inuoe.jzon:parse (nth-value 1 (%get (k:site-app site) "/search.json"))) 'list))
+
+(test an-html-comment-is-not-on-the-page-in-the-body-or-in-the-index
+  "Before #556 klio escaped a comment and showed it on the page as text, and search.json and the
+index carried it. A comment in a line of text is removed, and the text around it is kept."
+  (multiple-value-bind (d tree) (%loaded (format nil "Shown <!-- hidden note --> words.~%"))
+    (is (search "Shown" (k:document-html d)))
+    (is (search "words." (k:document-html d)))
+    (is (null (search "hidden" (k:document-html d))) "not on the page")
+    (is (null (search "hidden" (k:document-body d))) "not in the body search.json carries")
+    (is (null (search "&lt;!--" (k:document-html d))))
+    (is (null (%hits tree "hidden")) "not in the search index")
+    (is (equal '("p") (%hits tree "shown")))))
+
+(test a-comment-over-several-lines-is-removed-blank-lines-included
+  (let ((d (%loaded (format nil "Before.~%~%<!--~%first note~%~%second note~%-->~%~%After.~%"))))
+    (is (search "Before." (k:document-html d)))
+    (is (search "After." (k:document-html d)))
+    (is (null (search "note" (k:document-html d))))
+    (is (null (search "note" (k:document-body d))))))
+
+(test a-comment-never-closed-removes-the-rest-of-the-body-and-warns
+  "An author who opened a comment meant to hide what follows, so the rest of the body is left
+out rather than published, and the load warns so the author can see why the page is short."
+  (multiple-value-bind (d tree) (%loaded (format nil "Kept.~%~%<!-- forgot to close~%~%Lost text.~%"))
+    (is (search "Kept." (k:document-html d)))
+    (is (null (search "Lost" (k:document-html d))))
+    (is (null (search "forgot" (k:document-body d))))
+    (is (= 1 (count-if (lambda (w) (search "not closed" w)) (k:content-tree-warnings tree))))))
+
+(defun %only-in-code-p (html needle)
+  "Whether NEEDLE appears in HTML, and every time inside a <code> element."
+  (loop with found = nil
+        for p = (search needle html) then (search needle html :start2 (1+ p))
+        while p
+        do (setf found t)
+           (let ((open (search "<code" html :end2 p :from-end t))
+                 (close (search "</code>" html :end2 p :from-end t)))
+             (unless (and open (or (null close) (> open close))) (return nil)))
+        finally (return found)))
+
+(test a-comment-the-page-shows-as-code-is-kept
+  "What counts as code is what klio's renderer puts inside <code>: a code span, a fenced block,
+an indented block, and a Lisp block whose text the highlighter splits into spans. A comment in
+the text beside them is removed. A ``` pair in a block quote or on a list item's first line is a
+code span across lines to this renderer, not a fence, and a comment inside it is kept too."
+  (let* ((d (%loaded (format nil "Use `<!-- spannote -->` here <!-- gone-1 -->.~%~%```html~%<!-- fencenote -->~%```~%~%    <!-- indentnote -->~%~%```lisp~%(defun f () 1) ; <!-- lispnote -->~%```~%~%> ```~%> <!-- quotenote -->~%> ```~%~%- ```~%  <!-- itemnote -->~%  ```~%~%End <!-- gone-2 -->.~%")))
+         (html (k:document-html d)))
+    (dolist (note '("spannote" "fencenote" "indentnote" "lispnote" "quotenote" "itemnote"))
+      (is (%only-in-code-p html note) "~A is on the page, inside <code>: ~S" note html)
+      (is (search note (k:document-body d))))
+    (is (search "<span" html) "the Lisp block was highlighted, so the marker was read across spans")
+    (is (null (search "gone" (k:document-body d))))
+    (is (null (search "gone" html)))))
+
+(test a-comment-the-renderer-shows-as-text-is-removed-whatever-a-fence-looks-like
+  "Each input is one the CommonMark reading of fences took for code but klio's renderer shows as
+text: a longer fence closed by a shorter one, a closing fence with text after it, a fence never
+closed, indented code in a block quote, and ~~~ or unclosed fences in a quote or a list item.
+Each comment is removed from the body, the page and the index."
+  (loop for (name source) in '(("longer-fence" "````~%x~%```~%<!-- secret -->~%")
+                               ("closing-with-text" "```~%x~%``` y~%<!-- secret -->~%")
+                               ("unclosed-fence" "para~%~%```~%<!-- secret -->~%")
+                               ("quote-indented" "para~%~%>     <!-- secret -->~%")
+                               ("tilde-fence" "para~%~%~~~~~~~%<!-- secret -->~%~~~~~~~%")
+                               ("quoted-tilde" "> ~~~~~~~%> <!-- secret -->~%> ~~~~~~~%")
+                               ("after-deeper" "> ~~~~~~~%>~%> > ~~~~~~~%> <!-- secret -->~%> ~~~~~~~%")
+                               ("quoted-indented" "> Quoted text.~%>~%>     <!-- secret -->~%")
+                               ("unclosed-quoted" "> ```~%> <!-- secret -->~%~%After.~%")
+                               ("numbered" "1. ~~~~~~~%   <!-- secret -->~%   ~~~~~~~%")
+                               ("unclosed-item" "- ```~%  <!-- secret -->~%Left the item.~%")
+                               ("list-indented" "- item~%~%    <!-- secret -->~%"))
+        do (multiple-value-bind (d tree) (%loaded (format nil source))
+             (is (null (search "secret" (k:document-html d))) "~A: ~S" name (k:document-html d))
+             (is (null (search "secret" (k:document-body d))) "~A" name)
+             (is (null (%hits tree "secret")) "~A" name))))
+
+(defun %escape-lt (text)
+  "TEXT with each < written as &lt;, as the renderer writes it, so a stand-in renderer's output
+is read the way klio's is."
+  (with-output-to-string (out)
+    (loop for c across text
+          do (if (char= c #\<) (write-string "&lt;" out) (write-char c out)))))
+
+(test a-comment-is-kept-only-while-every-pass-of-the-renderer-shows-it-as-code
+  "Removing a comment can change how the text around it renders, so the body is rendered again
+until a pass removes nothing. Each pass removes at least one comment or ends the loop. A removal
+can also form a new comment, so the number of passes is not bounded by the comments in the body
+(see THE-LOOP-ENDS-WHEN-REMOVALS-KEEP-FORMING-NEW-COMMENTS). A comment is kept only when its open
+and close markers each appear once, in one <code> element, in that order. The renderers here are
+stand-ins that decide which markers are code."
+  (is (equal "a <!-- x --> b"
+             (k:strip-html-comments "a <!-- x --> b"
+                                    :render (lambda (text) (format nil "<pre><code>~A</code></pre>" (%escape-lt text)))))
+      "kept when the renderer shows it as code")
+  (let* ((calls 0)
+         (render (lambda (text)
+                   (incf calls)
+                   ;; The first pass shows the last comment as code and the others as text. Once
+                   ;; they are gone, the last is text too.
+                   (let ((last (position (code-char #xFDD2) text :from-end t)))
+                     (if (= calls 1)
+                         (format nil "<p>~A</p><pre><code>~A</code></pre>"
+                                 (%escape-lt (subseq text 0 last)) (%escape-lt (subseq text last)))
+                         (format nil "<p>~A</p>" (%escape-lt text)))))))
+    (is (equal "a  b  c" (k:strip-html-comments "a <!-- x --> b <!-- y --> c" :render render)))
+    (is (= 2 calls) "a second pass removed the comment the first pass kept"))
+  (let* ((calls 0)
+         (render (lambda (text)
+                   (incf calls)
+                   ;; Every pass shows the first comment left as text and the rest as code.
+                   (let ((second (position (code-char #xFDD2) text :start (1+ (position (code-char #xFDD2) text)))))
+                     (if second
+                         (format nil "<p>~A</p><pre><code>~A</code></pre>"
+                                 (%escape-lt (subseq text 0 second)) (%escape-lt (subseq text second)))
+                         (format nil "<p>~A</p>" (%escape-lt text)))))))
+    (is (equal "1 2 3 4 " (k:strip-html-comments "1 <!-- a -->2 <!-- b -->3 <!-- c -->4 <!-- d -->" :render render)))
+    (is (= 4 calls) "one pass for each comment removed: ~D" calls))
+  (is (equal "a  b" (k:strip-html-comments "a <!-- x --> b"
+                                           :render (lambda (text) (declare (ignore text)) "<code>dropped</code>")))
+      "a marker the renderer dropped is not code")
+  (is (equal "a  b" (k:strip-html-comments "a <!-- x --> b"
+                                           :render (lambda (text)
+                                                     (format nil "<code>~A</code><p>~A</p>" (%escape-lt text) (%escape-lt text)))))
+      "a marker shown once in code and once outside is not code")
+  (is (equal "a  b" (k:strip-html-comments "a <!-- x --> b"
+                                           :render (lambda (text)
+                                                     (format nil "<code>~A</code><code>~A</code>" (%escape-lt text) (%escape-lt text)))))
+      "markers shown twice, each time in code, are not kept")
+  (is (equal "a  b" (k:strip-html-comments "a <!-- x --> b"
+                                           :render (lambda (text) (declare (ignore text))
+                                                     (format nil "<code>~A~A</code>" (k::%marker :close 0) (k::%marker :open 0)))))
+      "a comment whose close marker comes before its open marker is not kept"))
+
+(test the-markers-reach-neither-the-page-nor-search-json-nor-the-index
+  "The markers are only in the copy given to the renderer. A body that already has one of the
+marker characters has every comment removed, code or not."
+  (flet ((markerless-p (string)
+           (notany (lambda (c) (<= #xFDD0 (char-code c) #xFDEF)) string)))
+    (with-content-dir (dir ("p.md" . (%doc "" (format nil "Text <!-- note -->.~%~%`<!-- kept -->`~%"))))
+      (let ((site (k:make-site dir)))
+        (k:boot site)
+        (let ((d (k:tree-document (k:site-tree site) "p")))
+          (is (search "kept" (k:document-html d)))
+          (is (markerless-p (k:document-html d)) "the page")
+          (is (markerless-p (k:document-body d)))
+          (is (markerless-p (nth-value 1 (%get (k:site-app site) "/search.json"))) "search.json")
+          (is (equal '("p") (%hits (k:site-tree site) "kept")))
+          (is (every #'markerless-p
+                     (loop for term being the hash-keys
+                             of (k::search-index-table (k:content-tree-index (k:site-tree site)))
+                           collect term))
+              "the index")))))
+  (let ((source (format nil "`<!-- code -->` ~C <!-- note -->" (code-char #xFDD2))))
+    (is (equal (format nil "`` ~C " (code-char #xFDD2)) (k:strip-html-comments source)))))
+
+(test a-comment-is-kept-only-when-it-is-code-from-its-opening-through-its-close
+  "A comment whose `<!--' is code but whose `-->' is not would show the text between them as
+text, so it is removed; the hub's review of #560 found these inputs. Each secret is absent from
+the page, the body and the index. A comment that is code from `<!--' through `-->' is kept."
+  (loop for (name source) in '(("span-then-text" "`<!--` secret1 -->~%")
+                               ("fence-then-text" "```~%<!--~%```~%secret2 -->~%")
+                               ("crlf" "```~C~%<!--~C~%```~C~%secret3 -->~C~%")
+                               ("highlighted" "```lisp~%<!--~%```~%secret4 -->~%")
+                               ("indented" "    <!--~%~%secret5 -->~%")
+                               ("four-backticks" "````~%<!--~%````~%secret6 -->~%")
+                               ("blank-before-close" "```~%<!--~%~%```~%secret7 -->~%")
+                               ("closing-fence-text" "```~%<!--~%``` trailing secret14 -->~%")
+                               ("list-item" "- item `<!--` secret22 -->~%")
+                               ("heading" "# `<!--` secret11 -->~%")
+                               ("quoted-fence" "> ```~%> <!--~%> ```~%~%secret15 -->~%")
+                               ("link-title" "[`<!--`](/x \"secret9 -->\")~%")
+                               ("nested" "`<!-- <!--` secret16 --> -->~%")
+                               ("two-spans" "`<!--` secret17 `-->`~%"))
+        do (let ((body (if (string= name "crlf")
+                           (format nil source #\Return #\Return #\Return #\Return)
+                           (format nil source))))
+             (multiple-value-bind (d tree) (%loaded body)
+               (is (null (search "secret" (k:document-html d))) "~A: ~S" name (k:document-html d))
+               (is (null (search "secret" (k:document-body d))) "~A" name)
+               (is (null (%hits tree "secret")) "~A" name))))
+  (let ((html (k:document-html (%loaded (format nil "```~%<!--~%a note~%-->~%```~%")))))
+    (is (%only-in-code-p html "a note") "a comment that is code throughout is kept: ~S" html)))
+
+(test the-loop-ends-when-removals-keep-forming-new-comments
+  "Removing a comment can join the text on either side into a new `<!--', so one comment can
+take a pass for each level. Each pass that continues removes a comment, so the text shortens and
+the loop ends. +MAX-PASSES+ bounds it anyway: after that many renders every comment left is
+removed."
+  (let ((d (%loaded (format nil "<!<!<!<!-- a -->-- b -->-- c -->-- secret -->~%"))))
+    (is (null (search "secret" (k:document-html d))))
+    (is (null (search "secret" (k:document-body d)))))
+  (let ((calls 0)
+        (source (let ((s "<!-- a -->")) (dotimes (i 70 s) (setf s (format nil "<!~A-- x -->" s))))))
+    (is (equal "" (k:strip-html-comments source
+                                         :render (lambda (text) (incf calls)
+                                                   (format nil "<p>~A</p>" (%escape-lt text))))))
+    (is (= k::+max-passes+ calls) "~D renders" calls)))
+
+(test a-comment-in-front-matter-is-kept-as-written
+  "Only the Markdown body is stripped. Front matter is YAML, whose comments start with `#', so a
+`<!-- -->' in a front-matter value is kept, and reaches the page's title and search.json."
+  (with-content-dir (dir ("p.md" . (format nil "---~%title: \"T <!-- fm-note -->\"~%---~%~%Body.~%")))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (let ((d (k:tree-document (k:site-tree site) "p")))
+        (is (equal "T <!-- fm-note -->" (k:content-meta-title (k:document-meta d))))
+        (is-true (search "fm-note" (nth-value 1 (%get (k:site-app site) "/search.json"))))))))
+
+(test a-comment-opened-as-less-than-bang-dash-dash-greater-than-is-already-closed
+  "CommonMark 0.31.2, section 6.6: an HTML comment is <!-->, <!---> or <!-- ... -->. So <!--> and
+<!---> are whole comments, and the text after them is ordinary text that stays on the page,
+including a --> later on the line."
+  (let ((d (%loaded (format nil "a <!-->private--> b~%~%c <!--->other--> d~%"))))
+    (is (search "a private--> b" (k:document-body d)))
+    (is (search "c other--> d" (k:document-body d)))
+    (is (search "private" (k:document-html d)) "the renderer shows the text after it")
+    (is (null (search "<!--" (k:document-body d))))))
+
+(test search-false-leaves-a-document-out-of-search-json-and-the-index
+  (with-content-dir (dir ("shown.md" . (%doc "" (format nil "Findable alpha.~%")))
+                         ("hidden.md" . (%doc (format nil "search: false~%") (format nil "Findable beta.~%")))
+                         ("typo.md" . (%doc (format nil "search: no~%") (format nil "Findable gamma.~%"))))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (is (equal '("/shown") (mapcar (lambda (e) (gethash "url" e)) (%search-entries site))))
+      (is (equal '("shown") (%hits (k:site-tree site) "findable")))
+      (is (= 200 (%get (k:site-app site) "/hidden")) "the page itself is still served"))))
+
+(test the-search-key-is-typed-and-only-true-keeps-a-document-in
+  "A mistyped value hides a page from search rather than publishing it there."
+  (is-true (k:content-meta-search (%meta "title: \"x\"")))
+  (is-true (k:content-meta-search (%meta "search: true")))
+  (is-false (k:content-meta-search (%meta "search: false")))
+  (is-false (k:content-meta-search (%meta "search: \"yes\"")))
+  (is (null (k:content-meta-warnings (%meta "search: false"))) "a core key, not an unknown one"))
+
+(test search-path-nil-turns-search-json-off
+  (with-content-dir (src ("a.md" . (%post "Alpha" "2024-01-01")))
+    (let ((site (k:make-site src)))
+      (k:boot site)
+      (let ((app (k:site-app site :search-path nil)))
+        (is (= 404 (%get app "/search.json")))
+        (is (= 404 (%get app "/NIL")) "STRING= reads NIL as \"NIL\"; the path is not served"))
+      (with-export-dir (out)
+        (is (equal '("404.html" "a.html" "index.html")
+                   (sort (copy-list (k:export-site site out :search-path nil)) #'string<))))
+      (signals type-error (k:make-site-options :search-path 3)))))
 
 ;;; --- the export writes the same pages (#353) ------------------------------------------------
 
