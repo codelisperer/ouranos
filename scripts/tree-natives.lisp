@@ -54,8 +54,9 @@ and the check passed a library that the copy then reported as a system library a
     (and truename (uiop:subpathp truename vendor) t)))
 
 (defvar *carried-list* nil
-  "While CARRY-TREE-NATIVES runs, the carried list each copied file is appended to; NIL
-otherwise, as in build-desktop-app.lisp, which writes into a new bundle and keeps no list.")
+  "While CARRY-TREE-NATIVES runs, the carried list each file is appended to just before it is
+copied; NIL otherwise, as in build-desktop-app.lisp, which writes into a new bundle and keeps no
+list.")
 
 (define-condition carried-list-refused (error)
   ((path :initarg :path :reader carried-list-refused-path))
@@ -76,7 +77,13 @@ copy, so the list names every file this build has started to write, even when th
 part-way (a full disk) or the process is killed during it, and even when the build stops later,
 for example when a library's source is refused after the library was copied. The next build then
 removes it. A listed file that was never written is :MISSING to that build and skipped (hub's
-reviews of #567)."
+reviews of #567).
+
+ONE CONSEQUENCE, accepted: a path is listed before its copy, so when the copy then fails without
+writing anything (for example because libgit2's tarball is missing or does not match the pin), a
+file that was already at that path stays listed and the next build deletes it. A copy that had
+succeeded would have replaced that file anyway, so nothing is lost that the build would have
+kept."
   (when *carried-list*
     (%check-carried-list *carried-list*)
     (with-open-file (out *carried-list* :direction :output :if-exists :append :if-does-not-exist :create)
@@ -492,8 +499,8 @@ link ends the process with exit code 3, naming it."
       (carried-list-refused (e)
         (format *error-output* "~&~A: ~A. Remove it and build again.~%" *label* e)
         (sb-ext:exit :code 3)))
-    ;; Each file is appended to the list as it is copied (%NOTE-CARRIED), so a build that stops
-    ;; part-way still names what it put in BUNDLE.
+    ;; Each file is appended to the list just before it is copied (%NOTE-CARRIED), so a build
+    ;; that stops part-way still names everything it started to put in BUNDLE.
     (setf *carried-list* (merge-pathnames +carried-list-name+ *bundle*))
     (wake-lazy-natives)
     (verify-natives-will-be-carried)
