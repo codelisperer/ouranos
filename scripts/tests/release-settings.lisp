@@ -193,13 +193,13 @@ in its own source, as an app may, and its main prints the four settings and exit
                   "  (finish-output)"
                   "  (uiop:quit 0))")))
 
-(defun %probe-bundle (dist name)
+(defun %updprobe-bundle (dist name)
   "The bundle directory build-desktop-app.lisp made for NAME under DIST, or NIL."
   (find-if (lambda (d) (uiop:string-prefix-p (concatenate 'string name "-")
                                              (car (last (pathname-directory d)))))
            (and (uiop:directory-exists-p dist) (uiop:subdirectories dist))))
 
-(defun %probe-report (bundle)
+(defun %updprobe-report (bundle)
   "Run the updprobe executable in BUNDLE. Returns a function of a field name giving that field's
 value, and the whole output."
   (let* ((out (uiop:run-program (list (uiop:native-namestring
@@ -274,12 +274,12 @@ its own source, the stable channel and no key, and the bundle has no RELEASE fil
     (unwind-protect
          (multiple-value-bind (code out) (%build-probe "updprobe" tree app dist)
            (is (eql 0 code) "the build failed:~%~A" out)
-           (let ((bundle (%probe-bundle dist "updprobe")))
+           (let ((bundle (%updprobe-bundle dist "updprobe")))
              (is-true bundle "no bundle in ~A" dist)
              (when bundle
                (is-false (probe-file (merge-pathnames "RELEASE" bundle))
                          "no RELEASE file, since no product, display name or channel was given")
-               (multiple-value-bind (field report) (%probe-report bundle)
+               (multiple-value-bind (field report) (%updprobe-report bundle)
                  (is (equal "updprobe-own" (funcall field "APP-NAME"))
                      "the app's own *app-name*, not --name:~%~A" report)
                  (is (equal "stable" (funcall field "CHANNEL")) "the stable channel:~%~A" report)
@@ -303,7 +303,7 @@ review of #568: RELEASE was written before the refusal)."
          (multiple-value-bind (code out) (%build-probe "plainprobe" tree app dist "--default-channel" "beta")
            (is (eql 3 code) "exit 3, got ~S:~%~A" code out)
            (is (search "does not load hyperion/update" out) "and says why:~%~A" out)
-           (let ((bundle (%probe-bundle dist "plainprobe")))
+           (let ((bundle (%updprobe-bundle dist "plainprobe")))
              (is-false (and bundle (probe-file (merge-pathnames "RELEASE" bundle)))
                        "no RELEASE file in ~A" bundle)))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
