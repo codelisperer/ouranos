@@ -22,6 +22,7 @@
 (load (merge-pathnames "lazy-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 (load (merge-pathnames "bundle-sources.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; a library that travels with its source (#429)
+(load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; aion/fs:link-p, for the carried list (#564)
 
 (defpackage #:ouranos-tree-natives
   (:use #:cl)
@@ -362,17 +363,42 @@ be missing from a step named for waking."
     (release-lazy-natives)))
 
 (defun %carried-list-entry (line bundle)
-  "The file under BUNDLE that LINE of the carried list names, or NIL when LINE is not a relative
-path inside BUNDLE. The list is a file in a directory an app owns, so a line naming anything
-outside it is not acted on."
+  "What to do with LINE of BUNDLE's carried list. Returns (values ACTION PATH REASON):
+- :BLANK for an empty line;
+- :REFUSE, with REASON, for a line that is not a relative path inside BUNDLE: absolute, with a
+  drive letter or a backslash, or with a .. component;
+- :REFUSE, with PATH and REASON, when a directory on the way to PATH inside BUNDLE is a link
+  (a symbolic link, or a Windows junction or other reparse point), when PATH itself is a link,
+  or when PATH is a directory;
+- :MISSING, with PATH, when there is nothing at PATH;
+- :DELETE, with PATH, otherwise: a file inside BUNDLE, reached without passing through a link.
+
+The list is a plain file in a directory the app owns, so anyone can edit it. Following a link,
+or deleting a directory, could remove something outside BUNDLE, and a line that would do that
+is refused rather than acted on (#564). Links are found with aion/fs:link-p, because SBCL's
+TRUENAME does not resolve a Windows junction."
   (let ((text (string-trim '(#\Space #\Tab #\Return) line)))
-    (unless (or (zerop (length text))
-                (find #\\ text)
-                (char= (char text 0) #\/)
-                (find #\: text)
-                (member ".." (uiop:split-string text :separator "/") :test #'string=))
-      (let ((path (merge-pathnames (uiop:parse-unix-namestring text) bundle)))
-        (and (uiop:subpathp path bundle) path)))))
+    (cond
+      ((zerop (length text)) (values :blank nil nil))
+      ((or (find #\\ text) (char= (char text 0) #\/) (find #\: text))
+       (values :refuse nil "not a relative path with /"))
+      ((member ".." (uiop:split-string text :separator "/") :test #'string=)
+       (values :refuse nil "it contains .."))
+      (t
+       (let* ((path (merge-pathnames (uiop:parse-unix-namestring text) bundle))
+              (dir bundle))
+         (unless (uiop:subpathp path bundle)
+           (return-from %carried-list-entry (values :refuse path "not inside the directory")))
+         (dolist (component (rest (pathname-directory (uiop:enough-pathname path bundle))))
+           (setf dir (merge-pathnames (make-pathname :directory (list :relative component)) dir))
+           (when (aion/fs:link-p dir)
+             (return-from %carried-list-entry
+               (values :refuse path (format nil "~A is a link" (uiop:native-namestring dir))))))
+         (cond ((aion/fs:link-p path) (values :refuse path "it is a link"))
+               ((uiop:directory-exists-p (uiop:ensure-directory-pathname path))
+                (values :refuse path "it is a directory"))
+               ((probe-file path) (values :delete path nil))
+               (t (values :missing path nil))))))))
 
 (defun %absolute-directory (directory)
   "DIRECTORY as an absolute directory pathname. A relative one, such as the \"bin/\" the template
@@ -386,22 +412,27 @@ it land."
 them, and the list. A library the app no longer loads, and its licence and source, would
 otherwise stay in BUNDLE and be shipped with it, because the docs say to ship bin/ as a whole
 (#564). Files the list does not name, such as anything else an app keeps there, are left.
-Returns the files deleted. A file that cannot be deleted, for example a library a running copy
-of the binary has open, ends the process with exit code 3 and says which."
+Returns the files deleted. A line that is refused (%CARRIED-LIST-ENTRY says which) is reported
+and left; a file that is missing is skipped. A file that cannot be deleted, for example a library
+a running copy of the binary has open, ends the process with exit code 3 and says which."
   (let* ((bundle (%absolute-directory bundle))
          (list-file (merge-pathnames +carried-list-name+ bundle))
          (deleted '()))
     (when (probe-file list-file)
       (dolist (line (uiop:read-file-lines list-file))
-        (let ((path (%carried-list-entry line bundle)))
-          (when (and path (probe-file path))
-            (handler-case (progn (delete-file path) (push path deleted))
-              (file-error (e)
-                (let ((*standard-output* *error-output*))
-                  (format t "~&~A: could not remove ~A, which an earlier build copied there: ~A~%"
-                          *label* (uiop:native-namestring path) e)
-                  (format t "If a copy of the binary is running, stop it and build again.~%"))
-                (sb-ext:exit :code 3))))))
+        (multiple-value-bind (action path reason) (%carried-list-entry line bundle)
+          (case action
+            (:refuse
+             (format t "~&~A: not removing ~S from ~A: ~A.~%"
+                     *label* (string-trim '(#\Space #\Tab #\Return) line) +carried-list-name+ reason))
+            (:delete
+             (handler-case (progn (delete-file path) (push path deleted))
+               (file-error (e)
+                 (let ((*standard-output* *error-output*))
+                   (format t "~&~A: could not remove ~A, which an earlier build copied there: ~A~%"
+                           *label* (uiop:native-namestring path) e)
+                   (format t "If a copy of the binary is running, stop it and build again.~%"))
+                 (sb-ext:exit :code 3)))))))
       (delete-file list-file))
     (nreverse deleted)))
 

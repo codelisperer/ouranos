@@ -81,6 +81,55 @@ with .., is not acted on (#564)."
                "with no list, nothing is deleted"))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
 
+;;; --- a list that leads outside bin/ ------------------------------------------------------------
+
+(defun %link-to-directory (link target)
+  "Make LINK point at the directory TARGET: a junction on Windows, a symbolic link elsewhere."
+  (let ((link (string-right-trim "/\\" (uiop:native-namestring link)))
+        (target (string-right-trim "/\\" (uiop:native-namestring target))))
+    (if (uiop:os-windows-p)
+        (uiop:run-program (list "cmd" "/c" "mklink" "/J" link target) :output nil)
+        (uiop:run-program (list "ln" "-s" target link)))))
+
+(test a-carried-list-line-that-leads-outside-bin-is-refused
+  "bin/.carried-natives is a plain file anyone can edit. A line naming a file through a directory
+in bin/ that is a link (a junction on Windows, a symbolic link elsewhere), a line naming a link,
+a line naming a directory, and a line with .. are each refused, and what they name is left. A
+line naming a missing file is skipped. A file inside bin/ is still deleted (#564)."
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (let* ((bin (ensure-directories-exist (merge-pathnames "bin/" tree)))
+                (outside (ensure-directories-exist (merge-pathnames "outside/" tree)))
+                (victim (%bytes-file (merge-pathnames "victim.txt" outside) "not bin's"))
+                (outside-file (%bytes-file (merge-pathnames "outside-file.txt" tree) "not bin's"))
+                (licence (%bytes-file (merge-pathnames "LICENSES/libx-LICENSE" bin) "licence"))
+                (inside (%bytes-file (merge-pathnames "libx.dll" bin) "library"))
+                (unix (not (uiop:os-windows-p))))
+           (%link-to-directory (merge-pathnames "linked" bin) outside)
+           (when unix
+             (uiop:run-program (list "ln" "-s" (uiop:native-namestring outside-file)
+                                     (uiop:native-namestring (merge-pathnames "filelink" bin)))))
+           (is-true (aion/fs:link-p (merge-pathnames "linked" bin)) "the fixture's link exists")
+           (%bytes-file (merge-pathnames ouranos-tree-natives:+carried-list-name+ bin)
+                        (format nil "linked/victim.txt~%LICENSES~%~:[~;filelink~%~]missing.dll~%../outside-file.txt~%libx.dll~%"
+                                unix))
+           (let* ((output (make-string-output-stream))
+                  (deleted (let ((*standard-output* output))
+                             (ouranos-tree-natives:remove-previously-carried bin)))
+                  (said (get-output-stream-string output)))
+             (is (equal (list (namestring inside)) (mapcar #'namestring deleted))
+                 "only the file inside bin/ was deleted: ~S" deleted)
+             (is-true (probe-file victim) "a file reached through a linked directory is left")
+             (is (search "linked/victim.txt" said) "and that line is reported as refused: ~A" said)
+             (is-true (probe-file licence) "a line naming a directory leaves the directory and its files")
+             (is-true (probe-file outside-file) "a line with .. leaves the file it names")
+             (when unix
+               (is-true (aion/fs:link-p (merge-pathnames "filelink" bin))
+                        "a line naming a symbolic link leaves the link")
+               (is (search "filelink" said) "and that line is reported as refused: ~A" said))
+             (is-false (probe-file inside) "the file inside bin/ is gone")))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
 ;;; --- two real builds --------------------------------------------------------------------------
 
 (defun %write-gitbin-app (project &key (libgit t))
