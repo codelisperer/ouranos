@@ -293,3 +293,51 @@ which shipped again once the app dropped it)."
                  (is (eql 0 code) "the second build failed:~%~A" out))
                (is-false (probe-file library) "the second build removed the library the failed build left"))
           (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
+
+(test a-copy-that-signals-is-still-listed
+  "The list names each file before it is copied, so a copy that signals part-way still leaves
+the file named, and the next build can remove what it wrote (hub's review of #567: the list was
+appended after each copy, so a copy that failed, or a kill during it, left a file no list named).
+Here libgit2's copy signals because its destination in bin/ is a directory."
+  (if (null (%built-libgit2))
+      (skip "vendor/libgit2 is not built here; run scripts/build-libgit2.lisp")
+      (let* ((tree (%fresh-tree))
+             (project (ensure-directories-exist (merge-pathnames "gitbin/" tree)))
+             (bin (ensure-directories-exist (merge-pathnames "bin/" project)))
+             (library (file-namestring (%built-libgit2)))
+             (list-file (merge-pathnames ouranos-tree-natives:+carried-list-name+ bin)))
+        (%write (merge-pathnames "scripts/build-gitbin.lisp" project)
+                (uiop:frob-substrings (uiop:read-file-string *cons-bin-build-script*)
+                                      '("{{name}}") "gitbin"))
+        (unwind-protect
+             (progn
+               (%write-gitbin-app project :libgit t)
+               (ensure-directories-exist (merge-pathnames (concatenate 'string library "/") bin))
+               (multiple-value-bind (code out) (%run-cons-bin-build project)
+                 (is (not (eql 0 code)) "the build fails at the library's copy, got ~S:~%~A" code out))
+               (let ((lines (and (probe-file list-file) (uiop:read-file-lines list-file))))
+                 (is (member library lines :test #'string=)
+                     "and the list names the library whose copy signalled: ~S" lines)))
+          (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
+
+(test a-cons-bin-build-with-a-linked-carried-list-exits-3
+  "A real build of a project whose bin/.carried-natives is a link to a directory outside bin/ (a
+junction on Windows, a symbolic link elsewhere) stops with exit code 3 and names the list, and
+writes nothing into the directory it points at (hub's review of #567). No library is needed."
+  (let* ((tree (%fresh-tree))
+         (project (ensure-directories-exist (merge-pathnames "gitbin/" tree)))
+         (bin (ensure-directories-exist (merge-pathnames "bin/" project)))
+         (outside (ensure-directories-exist (merge-pathnames "outside/" tree))))
+    (%write (merge-pathnames "scripts/build-gitbin.lisp" project)
+            (uiop:frob-substrings (uiop:read-file-string *cons-bin-build-script*)
+                                  '("{{name}}") "gitbin"))
+    (unwind-protect
+         (progn
+           (%write-gitbin-app project :libgit nil)
+           (%link-to-directory (merge-pathnames ouranos-tree-natives:+carried-list-name+ bin) outside)
+           (multiple-value-bind (code out) (%run-cons-bin-build project)
+             (is (eql 3 code) "exit 3, got ~S:~%~A" code out)
+             (is (and (search ouranos-tree-natives:+carried-list-name+ out) (search "is a link" out))
+                 "naming the list as a link:~%~A" out))
+           (is (null (uiop:directory-files outside)) "and nothing was written where the link points"))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))

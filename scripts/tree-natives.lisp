@@ -53,9 +53,6 @@ and the check passed a library that the copy then reported as a system library a
   (let ((vendor (or (ignore-errors (truename *vendor*)) *vendor*)))
     (and truename (uiop:subpathp truename vendor) t)))
 
-(defvar *carried-files* nil
-  "While CARRY-TREE-NATIVES runs, the files copied into *BUNDLE* so far, as pathnames.")
-
 (defvar *carried-list* nil
   "While CARRY-TREE-NATIVES runs, the carried list each copied file is appended to; NIL
 otherwise, as in build-desktop-app.lisp, which writes into a new bundle and keeps no list.")
@@ -74,11 +71,12 @@ write wherever it points (hub's review of #567)."
     (error 'carried-list-refused :path list-file)))
 
 (defun %note-carried (path)
-  "Record PATH, a file just copied into *BUNDLE*, and append it to the carried list at once. The
-list therefore names every file this build has put there even when the build stops part-way, for
-example when a library's source is refused after the library was copied, so the next build can
-still remove it (hub's review of #567)."
-  (push path *carried-files*)
+  "Append PATH, a file about to be copied into *BUNDLE*, to the carried list. Called BEFORE the
+copy, so the list names every file this build has started to write, even when the copy fails
+part-way (a full disk) or the process is killed during it, and even when the build stops later,
+for example when a library's source is refused after the library was copied. The next build then
+removes it. A listed file that was never written is :MISSING to that build and skipped (hub's
+reviews of #567)."
   (when *carried-list*
     (%check-carried-list *carried-list*)
     (with-open-file (out *carried-list* :direction :output :if-exists :append :if-does-not-exist :create)
@@ -344,8 +342,8 @@ be missing from a step named for waking."
                  ;; CARRY-RUNTIME-LINKED-LIBRARIES already names from the symlink because the
                  ;; load command does, and its docstring stops being an exception.
                  (let ((dst (merge-pathnames (file-namestring path) *bundle*)))
-                   (uiop:copy-file truename dst)
                    (%note-carried dst)
+                   (uiop:copy-file truename dst)
                    (unless (uiop:os-windows-p)
                      (ignore-errors (uiop:run-program (list "chmod" "+x" (namestring dst))
                                                       :ignore-error-status t)))
@@ -361,8 +359,8 @@ be missing from a step named for waking."
                                          (file-namestring license))
                                  *bundle*)))
                        (ensure-directories-exist dst)
-                       (uiop:copy-file license dst)
                        (%note-carried dst)
+                       (uiop:copy-file license dst)
                        (format t "~&            + LICENSES/~A~%" (file-namestring dst))))
                    ;; A library whose licence is not permissive travels with its source
                    ;; (ADR-0013's amendments of 2026-10-01 and 2026-10-04, #429, #524).
@@ -370,10 +368,10 @@ be missing from a step named for waking."
                                  (vendor-package-name truename))))
                      (when entry
                        (handler-case
-                           (let ((copy (ouranos-bundle-sources:carry-source
-                                        entry (uiop:pathname-parent-directory-pathname *vendor*) *bundle*)))
-                             (%note-carried copy)
-                             (format t "~&            + SOURCES/~A~%" (file-namestring copy)))
+                           (let ((root (uiop:pathname-parent-directory-pathname *vendor*)))
+                             (%note-carried (ouranos-bundle-sources:source-destination entry root *bundle*))
+                             (let ((copy (ouranos-bundle-sources:carry-source entry root *bundle*)))
+                               (format t "~&            + SOURCES/~A~%" (file-namestring copy))))
                          (ouranos-bundle-sources:source-refused (e)
                            (format *error-output* "~&~A: ~A~%~%The build would carry ~A into ~A without its source, which its licence requires (ADR-0013). Not building it.~%"
                                    *label* e (getf entry :package) (uiop:native-namestring *bundle*))
@@ -477,14 +475,13 @@ exit code 3, naming the problem, if the image loads one that cannot be carried. 
 before the dump.
 
 First it removes what the previous call copied into BUNDLE, as listed in BUNDLE's carried list
-(+CARRIED-LIST-NAME+), and then appends each file to a new list as it copies it, so the list names
-every file this call put in BUNDLE even if it stops part-way (#564). A carried list that is a
+(+CARRIED-LIST-NAME+), and then appends each file to a new list just before it copies it, so the
+list names every file this call started to put in BUNDLE even if it stops part-way (#564). A carried list that is a
 link ends the process with exit code 3, naming it."
   (let ((*bundle* (%absolute-directory bundle))
         (*label* label)
         (*product* "the binary")
         (*carry-option-p* nil)
-        (*carried-files* '())
         (*carried-list* nil))
     (ensure-directories-exist *bundle*)
     (handler-case

@@ -302,15 +302,21 @@ its tag.
   environment, hyperion-view exits 3 instead of creating a window, on every OS; the view tests
   set it, so a test that reaches a window by mistake fails instead of opening one. (#485)
 - **`cons bin` removes from `bin/` the libraries an earlier build copied there, before copying
-  this build's** (#564). `carry-tree-natives` in `scripts/tree-natives.lisp` writes the list of
-  files it copied into `bin/` to `bin/.carried-natives`, one path per line, relative to `bin/`.
-  The next build deletes the files on that list, then copies again. So a library the app no
+  this build's** (#564). `carry-tree-natives` in `scripts/tree-natives.lisp` keeps a list of
+  the files it copies into `bin/` in `bin/.carried-natives`, one path per line, relative to
+  `bin/`. Each file is added to the list just before it is copied, so a build that stops
+  part-way, or a copy that fails, still leaves named everything it started to write. The next
+  build deletes the files on that list, then copies again. So a library the app no
   longer loads, with its `bin/LICENSES/` file and, for libgit2, its `bin/SOURCES/` tarball, is
   no longer left in `bin/` and shipped. Files the list does not name, such as anything else an
   app keeps in `bin/`, are not touched. A `bin/` built before this change has no list, so its
   old copies stay until it is emptied once by hand. If a listed file cannot be deleted, for
   example because a copy of the binary is running, the build stops with exit code 3 and names
-  the file. The check that a library will be carried and the copy now decide whether it is under
+  the file. A line naming a path outside `bin/`, a link, a path through a linked directory, or a
+  directory is reported and left. A `bin/.carried-natives` that is itself a link, dangling or
+  not, is refused before it is read or written: `carry-tree-natives` signals
+  `carried-list-refused`, which `scripts/tree-natives.lisp` exports, and exits with code 3,
+  naming it. The check that a library will be carried and the copy now decide whether it is under
   the tree's `vendor/` with the same function, `vendored-library-p`. Before, through a tree
   reached by a symbolic link, the check could pass a library that the copy then left out as a
   system library. `scripts/build-desktop-app.lisp` uses the same function.
