@@ -196,9 +196,13 @@ noncharacter, so text does not use it; any found in the source is replaced first
   "Stands for `>' in the source while 3bmd parses it in the safe mode.")
 
 (defun %quote-markers (markdown)
-  "The positions in MARKDOWN of each `>' that marks a block quote: at the start of a line after
-up to three spaces, and again after such a marker, its optional space and up to three more
-spaces, for a nested quote (#574)."
+  "The positions in MARKDOWN of each `>' that may mark a block quote: at the start of a line, and
+again after such a marker and its optional space, for a nested quote (#574). A `>' after up to
+three spaces, at a line's start or after a marker, is marked too, as CommonMark allows, but 3bmd
+reads only a `>' in the first column of a line or straight after another marker as a quote
+marker. It reads the indented ones as text and escapes them once, as with :ALLOW-HTML T. Only
+physical line starts are looked at, so a quote inside a list item, which 3bmd finds by parsing
+the item's text again, stays text in the safe mode."
   (let ((n (length markdown))
         (markers '()))
     (flet ((skip-spaces (i most)
