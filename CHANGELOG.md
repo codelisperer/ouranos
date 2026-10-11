@@ -52,10 +52,11 @@ its tag.
 - **`cons init --template web` scaffolds an app on `hyperion/server-uv` instead of
   `clack-handler-hunchentoot`.** The generated `.asd` depends on `hyperion/server-uv`, and the
   generated `start` passes `:workers 2` to `hyperion/server:start` when the server is `:uv`, so a
-  slow handler does not hold up other requests. A project generated this way needs a built libuv:
-  run `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree, or install libuv on the
-  system. A `bin/<name>` dumped by `cons bin` looks for libuv beside itself, then in the tree
-  that built it, then on the system, so on another machine put libuv and its licence beside it.
+  slow handler does not hold up other requests. A project generated this way needs libuv: run
+  `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree. A libuv installed on the system
+  is enough to run the project from source, but `cons bin` needs the one the tree built: it
+  copies that libuv beside the `bin/<name>` it dumps, and stops with exit code 3 if the app
+  would load a system copy (#513, below).
   Projects generated before this are unchanged. To keep Hunchentoot in a new project, replace
   `hyperion/server-uv` with `clack-handler-hunchentoot` in its `.asd`. (#472)
 - **aion/pool: `pool-queued` is exact only when the pool is quiet** (#466). It is now
@@ -258,6 +259,48 @@ its tag.
   conversations: an agent has one history, from which every request is built, so each user needs an agent,
   or at least a history, of their own. A turn without a principal keeps the principal of an
   enclosing turn, so a delegated sub-turn runs for the same user.
+- **`cons bin` copies libuv, mbedTLS and libgit2 beside the binary it dumps, for each one the
+  app loads, and libgit2's source with it.** The build script a `cons init` project gets
+  (`scripts/build-<name>.lisp`, for the agent, cli and web templates) now loads the Ouranos
+  tree's `scripts/tree-natives.lisp` before the dump. For each of those libraries that the app's
+  image loads, it copies the library into `bin/` and its licence into `bin/LICENSES/`, and it
+  sets `aion/platform:*search-source-tree*` to NIL in the image, so the binary uses the copy
+  beside it rather than the tree's `vendor/`. For libgit2 (`aion/libgit`) it also copies the
+  source tarball that `libgit2.pin` names into `bin/SOURCES/`, and `COPYING` into
+  `bin/LICENSES/libgit2-COPYING`. **An app that distributes the binary has to ship
+  `bin/SOURCES/` and `bin/LICENSES/` with it**, because libgit2's licence, the GPL version 2 with
+  a linking exception, requires its source to be available wherever the binary is distributed
+  (ADR-0013, amendment of 2026-10-04). A `bin/<name>` from the web template runs on a machine
+  without the tree and without libuv; copy `bin/` as a whole. The build stops with exit code 3,
+  and says why, if one of these libraries was loaded from somewhere other than the tree's
+  `vendor/` (a system copy, or a path in `AION_UV_LIBRARY`, `AION_TLS_LIBRARY` or
+  `AION_LIBGIT_LIBRARY`), if this machine has no built copy of one the app loads, or if
+  libgit2's tarball is missing or its sha256 does not match `libgit2.pin`. Other libraries the
+  app loads from the system, such as OpenSSL for an app that uses it, are listed in the build's
+  output and not copied. A project generated before this change keeps its old build script:
+  replace it with the template's, or add the two forms after
+  `(ensure-directories-exist "bin/")`. `scripts/build-desktop-app.lisp` uses the same file.
+  (#513, #524)
+- **hyperion/desktop: `run-app :placement-file` reopens the window where it was last time, on
+  Windows.** Pass a path in the app's data directory. hyperion-view, given
+  `--placement-file PATH`, writes the window's position, size and maximised state there when a
+  drag ends, on a maximise or restore, and on close, as one line (`hyperion-view-placement 1
+  LEFT TOP RIGHT BOTTOM MAXIMIZED`), and at the next start puts the window back there if that
+  rectangle still lies inside a monitor's work area, allowing for the window's invisible resize
+  borders so that a snapped window counts as inside; otherwise it opens centred. When the saved
+  rectangle is on a monitor with different scaling from the one the window opens on, the
+  borders are converted to that monitor's frame width, and the rectangle is set a second time
+  after Windows rescales the window; neither has been measured on two monitors yet. A move made
+  without dragging or resizing, such as Win+Shift+Arrow, is saved only at the next of those.
+  The default, NIL, keeps no file. `hyperion-view --saved-placement PATH WL WT WR WB [BL BT BR
+  BB [FROM TO]]` prints whether a saved placement would be used, with optional border widths
+  and the frame widths to convert them between. `hyperion-view --exercise-placement PATH` opens
+  a window from the file, moves, maximises, restores, minimises and closes it, and prints the
+  file after each step and how many times the move wrote it; it is for CI. Rebuild
+  `hyperion-view` to get it: an older build refuses `--placement-file` and exits 2.
+  macOS and Linux accept the option and ignore it. With `HYPERION_VIEW_NO_WINDOW=1` in its
+  environment, hyperion-view exits 3 instead of creating a window, on every OS; the view tests
+  set it, so a test that reaches a window by mistake fails instead of opening one. (#485)
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.
@@ -434,6 +477,21 @@ its tag.
   still running the jobs queued behind it; it now joins every worker, so when it returns no job
   is running and none will start. `stop-pool`'s docstring now says that the calling job's
   worker runs the jobs queued behind it before it exits.
+- **hyperion/markdown: with `:allow-html nil`, inline code, indented code, colourised fenced
+  blocks and entities are escaped once** (#559). `render` escaped the whole source before 3bmd
+  parsed it, and 3bmd escaped code again, so `(< a b)` in inline code reached the reader as
+  `(&lt; a b)`, and the entity `&amp;` showed as the text `&amp;`. The safe mode now stands
+  placeholder characters in for `<` and `>` while 3bmd parses, so raw HTML, HTML blocks and
+  autolinks are still shown as text, and turns them back into `<` and `>` before printing, where
+  3bmd escapes them once. `&` is left as written, so an entity renders as its character.
+  `:allow-html t` is unchanged. In the safe mode, a fenced block's language that is not made of
+  letters, digits and `+ - _ . #` is dropped, because some 3bmd renderers write it into a class
+  attribute without escaping a double quote. The safe mode also turns off 3bmd's
+  `*smart-quotes*`, `*generate-header-ids*` and `*render-code-spans*` for the call, because each
+  makes 3bmd print text without escaping it; `:allow-html t` keeps an app's values. A fenced
+  block under the `:pygments` or `:chroma` renderer is left for that program to escape. Every
+  klio page changes the same way. An app that unescaped `render`'s output to work around this
+  should stop.
 
 ## v0.1.7 — 2026-09-30
 

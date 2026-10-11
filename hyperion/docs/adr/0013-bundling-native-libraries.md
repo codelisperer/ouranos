@@ -152,6 +152,23 @@ satisfying it is the packaging layer's job, not this mechanism's. Any other libr
 licence is not permissive needs its own decision by the maintainer, recorded here as an
 amendment like this one.
 
+## Amendment, 2026-10-04: libgit2 beside a binary that `cons bin` builds (#524)
+
+The 2026-10-01 amendment allows libgit2 in a desktop bundle. On 2026-10-04 the maintainer
+extended it to the directory that `cons bin` writes; the decision is recorded on #524. When an
+app loads `aion/libgit`, `bin/` carries libgit2 beside the binary and, as a desktop bundle does:
+
+- the tarball `libgit2.pin` names, under `bin/SOURCES/`, with the sha256 `libgit2.pin` records;
+- `COPYING` from that tarball, under `bin/LICENSES/`.
+
+`cons bin` stops with exit code 3 when the tarball is missing or its sha256 does not match the
+pin. An app that distributes the binary has to distribute `bin/SOURCES/` and `bin/LICENSES/`
+with it, because the binary alone does not meet the GPL's requirement that the source be
+available.
+
+This covers libgit2 only. Any other library whose licence is not permissive still needs its own
+decision by the maintainer, as the 2026-10-01 amendment says.
+
 ## Alternatives considered
 
 - **`$ORIGIN` in `DT_RUNPATH`** — the conventional Linux answer, and the initial lean here.

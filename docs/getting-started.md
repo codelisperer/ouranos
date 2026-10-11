@@ -89,8 +89,10 @@ question at any time.
 file watching) and `hyperion/server-uv`, the HTTP server built on it, need libuv, which
 `sbcl --script scripts/build-libuv.lisp` builds with **a C compiler — the one your OS already
 ships**: Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC on
-Windows. Not MSYS2, not cmake, not make. A libuv installed on the system also works. An app
-made with `cons init --template web` serves on `hyperion/server-uv`, so it needs this (#472).
+Windows. Not MSYS2, not cmake, not make. A libuv installed on the system is enough to run code
+from source. An app made with `cons init --template web` serves on `hyperion/server-uv`, and
+`cons bin` copies the tree's own libuv beside the binary it dumps, so building that binary needs
+the one this script builds (#472, #513).
 No C toolchain is ever required merely to *load* anything here.
 
 ## 2. Install the frameworks
