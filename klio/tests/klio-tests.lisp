@@ -1481,6 +1481,28 @@ indented block keep theirs; a comment in the text beside them is still removed."
     (is (null (search "gone" (k:document-body d))))
     (is (null (search "gone" (k:document-html d))))))
 
+(test a-comment-in-an-indented-list-line-is-kept-and-the-load-names-its-line
+  "hyperion/markdown reads a line indented by four spaces after a blank line inside a list item
+as the item's text, not code, so the comment shows on the page. The stripper keeps the line, as
+it keeps code, and the load warns with the line's number in the file. The first assertions pin
+the renderer's reading, so a renderer that changes it fails here."
+  (let ((html (k::render-markdown (format nil "- item~%~%    <!-- note -->~%"))))
+    (is (search "<li>" html))
+    (is (search "<p>&lt;!-- note --&gt;</p>" html) "read as the item's text, not as code")
+    (is (null (search "<pre>" html))))
+  (is (search "<pre><code>" (k::render-markdown (format nil "para~%~%    <!-- note -->~%")))
+      "outside a list, the same line is code")
+  ;; The file: ---, title, ---, blank, - item, blank, then the comment on line 7.
+  (multiple-value-bind (d tree) (%loaded (format nil "- item~%~%    <!-- note -->~%~%After <!-- gone -->.~%"))
+    (is (search "<!-- note -->" (k:document-body d)))
+    (is (null (search "gone" (k:document-body d))) "a comment in the text after the list is removed")
+    (is (equal '("p: line 7: an HTML comment in an indented line of a list item is kept, and the page shows it as text")
+               (remove-if-not (lambda (w) (search "list item" w)) (k:content-tree-warnings tree)))))
+  (multiple-value-bind (d tree) (%loaded (format nil "Para.~%~%    <!-- code -->~%"))
+    (is (search "<!-- code -->" (k:document-body d)))
+    (is (notany (lambda (w) (search "list item" w)) (k:content-tree-warnings tree))
+        "an indented code block is not warned about")))
+
 (test search-false-leaves-a-document-out-of-search-json-and-the-index
   (with-content-dir (dir ("shown.md" . (%doc "" (format nil "Findable alpha.~%")))
                          ("hidden.md" . (%doc (format nil "search: false~%") (format nil "Findable beta.~%")))

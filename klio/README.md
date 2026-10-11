@@ -51,7 +51,9 @@ file, or put `search: false` in a page's front-matter to leave that page out of 
 in-memory search index; any value other than `true` leaves the page out. HTML comments
 (`<!-- ... -->`) are removed from a page's body when it is loaded, so they reach neither the page,
 nor `/search.json`, nor the index. A comment inside a code span or a code block is kept, because
-it is part of the code. A comment that is never closed removes the rest of the body, and the load
+it is part of the code. In a list item, a line indented by four spaces after a blank line is kept
+the same way, but it is shown as the item's text, so a comment on it is visible; the load warns
+with its line number. A comment that is never closed removes the rest of the body, and the load
 warns about it. Before this, klio showed a comment on the page as escaped text.
 
 In development, `(klio:watch-site *site*)` reloads when a content file changes and keeps
