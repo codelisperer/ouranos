@@ -135,6 +135,17 @@ its tag.
   with `(extra meta "search")`, which now returns NIL. An author who relied on comments being
   hidden should check what was already published.
 
+- **praxeon: a `:tool-result` event can have the outcome `:started`, and `actor:*tool-call-id*`
+  is bound while a means runs** (#532). A means that starts work which finishes after the call
+  returns, such as an MCP task, returns `(actor:started-result text)`: the model is told `text`,
+  and the call's `:tool-result` event has outcome `:started`, not `:ok`, because the call has
+  not produced its result yet. The result comes later in an event of the means' own that
+  carries the same `:id`; for MCP that is `:task-finished`. `actor:*tool-call-id*` is the
+  model's id for the call while its means runs, and NIL otherwise. An app whose usage ledger
+  or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
+  connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
+  by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+
 ### Added
 
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
@@ -396,6 +407,38 @@ its tag.
   the three verify-bundle scripts run it. In a bundle, `aion/libgit` no longer looks in the source
   tree's `vendor/libgit2`, as `aion/uv` and `aion/tls` already did not (#472). The bundler now
   also finds licence files named `COPYING*`, and those beside the library in `lib/`.
+
+- **praxeon/mcp: a long-running tool call can finish after the turn that started it, through the
+  MCP Tasks extension** (#532). `make-connection :tasks t` declares the extension, so a server
+  on the current revision may answer `tools/call` with a task. The task is saved in the
+  client's task store (`make-client :task-store`; `make-memory-task-store` is the default and
+  keeps tasks in the process), the model is told the work has started, and a `:task-started`
+  event is emitted. The app's job runner calls `poll-tasks` on a schedule. It polls each due
+  task once, with a token fetched for the task's principal at that moment, and returns a
+  `finished-task` for each one that ended, with outcome `:ok`, `:error`, `:cancelled`,
+  `:expired` or `:unknown`; `task-report` gives text for a later turn. `cancel-task` sends
+  `tasks/cancel`; it and `poll-task` refuse a task of another connection before sending
+  anything. An app with its own store implements `save-task`, `update-task`, `finish-task`,
+  `announce-task`, `due-tasks` and `remove-task`; `update-task` and `finish-task` change only a
+  record that is still there and not finished, so a poller that read a task before another
+  finished it cannot write it back, and `announce-task` marks a finished record once, so
+  `:task-finished` is sent once. A finished task stays in the store until `poll-tasks` returns
+  it, so when an observer fails on any event, no finished task is lost: the next `poll-tasks`
+  returns each one, and sends `:task-finished` for any it was not yet sent for. A task is kept
+  as JSON with `task-to-json` and `task-from-json`. A task without the fields the specification
+  requires fails the call with outcome `:unknown`. The time-to-live counts from when the client
+  received the task, and a task is polled once more at its deadline before it expires. A task
+  whose `ttlMs` is null expires after the connection's `:task-lifetime`, one day by default.
+  After a failed poll the wait doubles with each failure in a row, from the poll interval up to
+  the connection's `:task-backoff-cap`, five minutes by default, and `:sign-in-required` is
+  emitted once for each run of sign-in failures, not on every poll. A failed poll is recorded
+  even when an observer of `:sign-in-required` signals or an app's handler of
+  `authorization-required` exits. `make-connection` refuses a `:task-lifetime` or
+  `:task-backoff-cap` that is not a positive integer, and `make-client` refuses a task store
+  that lacks a method for one of the six functions. The client declares no elicitation,
+  sampling or roots, so a server must not ask a task for input; a task that does is cancelled,
+  with a `:task-input-refused` event naming the request methods. Answering elicitations is
+  #563. See `praxeon/docs/mcp.md`, "Long-running calls".
 
 ### Fixed
 

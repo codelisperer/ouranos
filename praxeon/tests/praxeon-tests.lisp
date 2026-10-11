@@ -5260,3 +5260,43 @@ is applied. The means never ran, so the call is written as not run, not as may-h
     (is (= 1 (%events-for events :tool-result "1")))
     (is-true (%every-call-answered-p ag))
     (is (equal "done" (actor:run-turn ag "again")))))
+
+;;; --- work that finishes after the call that started it (#532) ------------------------------
+
+(defun %agent-calling-once (id means)
+  "An agent whose model calls MEANS once, as tool call ID, then answers \"ok\"."
+  (actor:make-agent
+   :provider (make-instance 'scripted
+                            :script (list (llm:make-completion
+                                           :tool-calls (list (llm:make-tool-call
+                                                              :id id :name means
+                                                              :arguments (make-hash-table :test #'equal)))
+                                           :stop-reason :tool-use)
+                                          (llm:make-completion :text "ok" :stop-reason :end)))))
+
+(test a-means-that-starts-work-reports-started-and-sees-its-call-id
+  "A means that returns STARTED-RESULT gives the model its text, and the call's :TOOL-RESULT event
+has outcome :STARTED, not :OK. While the means runs, *TOOL-CALL-ID* is the model's id for the
+call, on an ordinary call and on a held call that was approved."
+  (let ((seen '()) (events '()))
+    (flet ((job (args)
+             (declare (ignore args))
+             (push actor:*tool-call-id* seen)
+             (actor:started-result "The job started.")))
+      (let ((ag (%agent-calling-once "k1" "job")))
+        (actor:register-means ag "job" "Starts a job" #'job)
+        (evt:with-observer ((lambda (e) (push e events)))
+          (is (equal "ok" (actor:run-turn ag "go"))))
+        (let ((result (find :tool-result events :key #'evt:event-type)))
+          (is (eq :started (getf result :outcome)))
+          (is (equal "The job started." (getf result :content)))
+          (is (null (getf result :is-error)))))
+      (is (equal '("k1") seen))
+      (is (null actor:*tool-call-id*) "unbound outside a call")
+      (let ((ag (%agent-calling-once "h1" "job")))
+        (actor:register-means ag "job" "Starts a job" #'job :confirm t)
+        (multiple-value-bind (text how held) (actor:run-turn ag "go" :principal "u1" :on-hold :hold)
+          (is (null text))
+          (is (eq :held how))
+          (is (equal "ok" (actor:continue-turn ag held :approve :principal "u1"))))
+        (is (equal '("h1" "k1") seen))))))
