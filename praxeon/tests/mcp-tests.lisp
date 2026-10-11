@@ -60,6 +60,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   (task-script '(:completed)) (task-poll-ms 1000) (task-ttl-ms 'null)
   ;; An HTTP status every tasks/get is answered with instead of the task, or NIL.
   (get-status nil)
+  ;; A bearer token tasks/cancel must carry, or NIL; any other gets a 401, as a sign-in (#587).
+  (cancel-token nil)
   (tasks (make-hash-table :test #'equal)) (task-count 0) (cancels '())
   (lock (sb-thread:make-mutex)))
 
@@ -282,8 +284,10 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
            ;; One answer that is not the server's, as a proxy or a deploy can give.
            (setf (fake-fail-next fake) nil)
            (th:write-response stream 404 '(("Content-Type" . "text/html")) "<html>not here</html>"))
-          ((and (fake-require-token fake)
-                (not (equal auth (format nil "Bearer ~A" (fake-require-token fake)))))
+          ((or (and (fake-require-token fake)
+                    (not (equal auth (format nil "Bearer ~A" (fake-require-token fake)))))
+               (and (fake-cancel-token fake) (equal method "tasks/cancel")
+                    (not (equal auth (format nil "Bearer ~A" (fake-cancel-token fake))))))
            (th:write-response stream 401
                               '(("WWW-Authenticate" . "Bearer resource_metadata=\"http://127.0.0.1/.well-known/oauth-protected-resource\""))
                               ""))
@@ -1833,6 +1837,49 @@ record (#565 review)."
                        (error (e) (princ-to-string e)))))
         (is (equal "the observer failed" message) "~S" message))
       (is (= 0 (mcp:task-failures (%only-task client))) "the record is unchanged"))))
+
+(test a-refused-task-whose-cancel-is-left-for-sign-in-is-still-cancelled
+  "A task that asks for input is cancelled. When tasks/cancel needs a sign-in, and an observer
+of :SIGN-IN-REQUIRED signals or an app's handler of AUTHORIZATION-REQUIRED exits, the poll is
+left before the task is marked cancelled. It is marked anyway, so the next poll announces it once
+and does not send tasks/cancel again. When the store fails while marking it, the caller still
+gets the condition that left the poll (#587)."
+  (dolist (exit '(:observer :handler))
+    (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:input))))
+      (setf (fake-cancel-token fake) "for-cancel")
+      (with-fake (client fake :tasks t)
+        (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+        (let ((now (mcp:task-next-poll (%only-task client)))
+              (events '()))
+          (is (eq :left (%poll-leaving client exit now)) "~A" exit)
+          (is (eq :cancelled (mcp:task-outcome (%only-task client)))
+              "~A: finished after one poll" exit)
+          (let ((finished (evt:with-observer ((lambda (e) (push (evt:event-type e) events)))
+                            (mcp:poll-tasks client :now now))))
+            (is (eq :cancelled (and finished (mcp:finished-task-outcome (first finished))))
+                "~A: ~S" exit finished)
+            (is (search "asked for input" (mcp:finished-task-text (first finished))) "~A" exit))
+          (is (equal '(:task-finished) events) "~A: announced once: ~S" exit events)
+          (is (null (mcp:poll-tasks client :now now)) "~A: nothing left to poll" exit)
+          (is (= 1 (length (%by-method (requests) "tasks/cancel")))
+              "~A: tasks/cancel was not sent again" exit)))))
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:input)))
+        (store (make-instance '%store-failing-updates)))
+    (setf (fake-cancel-token fake) "for-cancel")
+    (with-fake (client fake :tasks t)
+      (setf (mcp:client-task-store client) store)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (setf (%store-fails store) t)
+      (let ((message (handler-case
+                         (evt:with-observer ((lambda (e)
+                                               (when (eq :sign-in-required (evt:event-type e))
+                                                 (error "the observer failed"))))
+                           (mcp:poll-tasks client :now (mcp:task-next-poll (%only-task client)))
+                           nil)
+                       (error (e) (princ-to-string e)))))
+        (is (equal "the observer failed" message) "the store's error does not replace it: ~S"
+            message))
+      (is (null (mcp:task-outcome (%only-task client))) "the record is unchanged"))))
 
 (defclass %store-without-announce () ()
   (:documentation "A task store with every task-store method but ANNOUNCE-TASK."))

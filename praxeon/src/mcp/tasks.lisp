@@ -160,36 +160,59 @@ report it finished as :CANCELLED. An input request is answered with a result of 
 own kind, which has no error form, so cancelling is the one refusal the specification allows. It
 is not left waiting for an answer nobody will send. tasks/cancel is sent and the task marked
 finished before any event, so an observer that fails cannot leave the task waiting. When the
-observer fails on :TASK-INPUT-REFUSED, the next poll sends :TASK-FINISHED."
+observer fails on :TASK-INPUT-REFUSED, the next poll sends :TASK-FINISHED.
+
+When something other than a tool error leaves tasks/cancel, such as an observer of
+:SIGN-IN-REQUIRED that signals or an app's handler of AUTHORIZATION-REQUIRED that exits, the task
+is still marked :CANCELLED, so the next poll announces it with :TASK-FINISHED instead of sending
+tasks/cancel again. :TASK-INPUT-REFUSED is not sent in that case; the reason is in the task's
+text and in the log. A store error while marking it is logged, and the condition that left the
+request is the one the caller sees (#587)."
   (let* ((requests (gethash "inputRequests" object))
          (methods (and (hash-table-p requests)
                        (loop for request being the hash-values of requests
                              collect (let ((m (and (hash-table-p request)
                                                    (gethash "method" request))))
-                                       (if (stringp m) (%clip-name m) "unknown"))))))
+                                       (if (stringp m) (%clip-name m) "unknown")))))
+         (text (format nil "The background task on the connection ~A was cancelled, because the server asked for input this client does not provide (~{~A~^, ~})."
+                       (task-connection task)
+                       (or (remove-duplicates
+                            (mapcar (lambda (m) (if (member m +input-kinds+ :test #'string=)
+                                                    m
+                                                    "an unknown kind"))
+                                    methods)
+                            :test #'string=)
+                           '("an unknown kind"))))
+         (returned nil))
     (log:warn "praxeon/mcp: task asked for input, cancelled" :connection (task-connection task)
                                                             :key (task-key task)
                                                             :count (length methods))
-    (handler-case (%request client "tasks/cancel" (%object "taskId" (task-id task))
-                            :principal (task-principal task))
-      ;; The task is given up either way: nobody will answer it, and the server discards it at
-      ;; its time-to-live.
-      (cnd:tool-error-result ()
-        (log:info "praxeon/mcp: cancelling a task failed" :connection (task-connection task)
-                                                          :key (task-key task))))
-    (when (%claim client task :cancelled
-                  (format nil "The background task on the connection ~A was cancelled, because the server asked for input this client does not provide (~{~A~^, ~})."
-                          (task-connection task)
-                          (or (remove-duplicates
-                               (mapcar (lambda (m) (if (member m +input-kinds+ :test #'string=)
-                                                       m
-                                                       "an unknown kind"))
-                                       methods)
-                               :test #'string=)
-                              '("an unknown kind")))
-                  now)
+    (unwind-protect
+         (progn
+           (handler-case (%request client "tasks/cancel" (%object "taskId" (task-id task))
+                                   :principal (task-principal task))
+             ;; The task is given up either way: nobody will answer it, and the server discards
+             ;; it at its time-to-live.
+             (cnd:tool-error-result ()
+               (log:info "praxeon/mcp: cancelling a task failed" :connection (task-connection task)
+                                                                 :key (task-key task))))
+           (setf returned t))
+      (unless returned
+        (%record-while-unwinding task "marking a refused task cancelled"
+                                 (lambda () (%claim client task :cancelled text now)))))
+    (when (%claim client task :cancelled text now)
       (%task-event :task-input-refused task :methods methods)
       (%announce client task now))))
+
+(defun %record-while-unwinding (task what record)
+  "Call RECORD, a function that writes TASK to the store while the stack unwinds for another
+reason. A store error would replace that reason, so it is logged, with WHAT, instead; the task
+keeps its last record."
+  (handler-case (funcall record)
+    (error (e)
+      (log:warn "praxeon/mcp: recording a task failed" :what what
+                :connection (task-connection task) :key (task-key task)
+                :condition (type-of e)))))
 
 (defun %expiry-text (task gone)
   (if gone
@@ -252,15 +275,11 @@ rather than signalled, so the caller sees the condition that left the request (#
            ;; poll; the task is polled again later, so nothing is lost but one poll.
            (setf returned t))
       (unless returned
-        ;; The stack is already unwinding for another reason. A store error here would replace
-        ;; that reason, so it is logged instead; the task keeps its last record and is polled again.
-        (handler-case (if (%past-deadline-p task now)
-                          (%claim client task :expired (%expiry-text task nil) now)
-                          (%failed-poll client task kind now))
-          (error (e)
-            (log:warn "praxeon/mcp: recording a failed poll failed"
-                      :connection (task-connection task) :key (task-key task)
-                      :condition (type-of e))))))))
+        (%record-while-unwinding task "recording a failed poll"
+                                 (lambda ()
+                                   (if (%past-deadline-p task now)
+                                       (%claim client task :expired (%expiry-text task nil) now)
+                                       (%failed-poll client task kind now))))))))
 
 (defun %poll (client task now)
   "Poll TASK once and return it when it is finished and announced, or NIL. The record stays in
