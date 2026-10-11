@@ -249,7 +249,7 @@ blob, and an input_required result."
       (let ((found (loop for object across contents
                          for content = (and (hash-table-p object) (%content-from-json object))
                          unless content
-                           do (%request-failed client "its resource reply had a content without a string uri, or with neither text nor blob." '()
+                           do (%request-failed client "its resource reply had a content without a string uri, or with neither a string text nor a string blob." '()
                                                :outcome :not-run)
                          collect content)))
         (log:info "praxeon/mcp: resource read"

@@ -1370,7 +1370,12 @@ resource, or replaces it with nothing."
                                 (vector (%obj "uri" "file:///r" "text" 42))))
           (setf (fake-contents fake) (list (cons "file:///r" contents)))
           (handler-case (progn (mcp:read-resource client "file:///r") (fail "no failure"))
-            (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))
+            (mcp:request-failed (e)
+              (is (eq :not-run (cnd:tool-error-result-outcome e)))
+              (when (eql 42 (gethash "text" (aref contents 0)))
+                ;; A text that is present but not a string is named as such (#581).
+                (is (search "neither a string text nor a string blob" (princ-to-string e))
+                    "~A" e))))
           (signals mcp:request-failed (mcp:add-resource agent client "file:///r"))
           (is (= 1 (length (%context-items agent))))
           (is-true (search "good" (praxeon/context:ctx-item-content (first (%context-items agent))))
