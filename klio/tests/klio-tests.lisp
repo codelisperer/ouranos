@@ -893,6 +893,7 @@ included; a file whose name only begins with the collection's name is not a memb
       (is (equal "Alpha" (k:document-field d "title")))
       (is (equal "a" (k:document-field d "slug")) "the resolved slug")
       (is (equal "2019-03-01" (k:document-field d "start")) "an extra key")
+      (is (eq t (k:document-field d "search")) "search is T when the key is absent")
       (is (null (k:document-field d "nope"))))))
 
 (test a-theme-reads-its-collection-from-the-requests-tree-even-when-a-reload-lands
@@ -1502,6 +1503,41 @@ the renderer's reading, so a renderer that changes it fails here."
     (is (search "<!-- code -->" (k:document-body d)))
     (is (notany (lambda (w) (search "list item" w)) (k:content-tree-warnings tree))
         "an indented code block is not warned about")))
+
+(test a-comment-in-a-fence-inside-a-block-quote-is-kept-and-one-after-the-quote-is-removed
+  "A fence or an indented block is found after a block quote's markers, so a comment in quoted
+code is kept.
+The block ends when a line has fewer markers than its fence, and a comment after it is removed."
+  (let ((d (%loaded (format nil "> ```html~%> <!-- quoted-tick -->~%> ```~%~%> ~~~~~~~%> <!-- quoted-tilde -->~%>~%> > ~~~~~~~%> <!-- after-deeper -->~%> ~~~~~~~%~%Text <!-- gone-1 -->.~%~%> Quoted text.~%>~%>     <!-- quoted-indented -->~%~%> ```~%> <!-- unclosed-quoted -->~%~%After the quote <!-- gone-2 -->.~%"))))
+    (is (search "<!-- quoted-tick -->" (k:document-body d)))
+    (is (search "<!-- quoted-tilde -->" (k:document-body d)))
+    (is (search "<!-- after-deeper -->" (k:document-body d))
+        "a deeper > ~~~ line is a line of the block, not its close")
+    (is (search "<!-- unclosed-quoted -->" (k:document-body d)))
+    (is (search "<!-- quoted-indented -->" (k:document-body d)) "indented code inside the quote")
+    (is (search "quoted-tick" (k:document-html d)) "the renderer shows it as code")
+    (is (null (search "gone" (k:document-body d))) "the blank line ended the quote and its fence")))
+
+(test a-comment-in-a-fence-on-a-list-items-first-line-is-kept
+  "A fence may open on a list item's first line. Its lines belong to the item while they are
+indented as far as the item's text, and a comment in the text after the list is removed."
+  (let ((d (%loaded (format nil "- ```html~%  <!-- dash -->~%  ```~%~%1. ~~~~~~~%   <!-- numbered -->~%   ~~~~~~~%~%- ```~%  <!-- unclosed-item -->~%Left the item <!-- gone -->.~%"))))
+    (is (search "<!-- dash -->" (k:document-body d)))
+    (is (search "<!-- numbered -->" (k:document-body d)))
+    (is (search "<!-- unclosed-item -->" (k:document-body d)))
+    (is (search "dash" (k:document-html d)) "the renderer shows it as code")
+    (is (null (search "gone" (k:document-body d)))
+        "a line indented less than the item's text ended the item and its fence")))
+
+(test a-comment-opened-as-less-than-bang-dash-dash-greater-than-is-already-closed
+  "CommonMark 0.31.2, section 6.6: an HTML comment is <!-->, <!---> or <!-- ... -->. So <!--> and
+<!---> are whole comments, and the text after them is ordinary text that stays on the page,
+including a --> later on the line."
+  (let ((d (%loaded (format nil "a <!-->private--> b~%~%c <!--->other--> d~%"))))
+    (is (search "a private--> b" (k:document-body d)))
+    (is (search "c other--> d" (k:document-body d)))
+    (is (search "private" (k:document-html d)) "the renderer shows the text after it")
+    (is (null (search "<!--" (k:document-body d))))))
 
 (test search-false-leaves-a-document-out-of-search-json-and-the-index
   (with-content-dir (dir ("shown.md" . (%doc "" (format nil "Findable alpha.~%")))

@@ -36,7 +36,8 @@ tree otherwise, as at a REPL or in a static export."
 
 (defun document-field (document name)
   "The value of the front-matter field NAME in DOCUMENT: one of klio's core fields (title,
-date, slug, tags, draft, publish-at, search) or else a top-level `extra' key. NIL when absent.
+date, slug, tags, draft, publish-at, search) or else a top-level `extra' key. NIL when absent,
+except SEARCH, which is T when the front matter has no `search' key, as CONTENT-META-SEARCH reads it.
 
 SLUG is the document's slug as klio resolved it, which is the front matter's `slug' or the
 last segment of its key, because that is the one a URL uses."

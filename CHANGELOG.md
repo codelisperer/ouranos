@@ -107,10 +107,12 @@ its tag.
   comments has been publishing them on any site exported or served this way. `load-document` now
   removes every comment from the body before rendering or indexing it, so `document-body`,
   `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment
-  inside a code span, a fenced block or an indented block is kept. Inside a list item, a line
-  indented by four to seven spaces after a blank line is kept as written too, but the renderer
-  reads it as the item's text, so a comment on it shows on the page; the load warns with the
-  document and the line number. A comment that is never closed removes the rest of the body, and
+  inside a code span, a fenced block or an indented block is kept, including a block inside a
+  block quote and a fence opened on a list item's first line. `<!-->` and `<!--->` are whole
+  comments, as CommonMark 0.31.2 defines them, so the text after them is kept. Inside a list
+  item, a line indented by four to seven spaces after a blank line is kept as written too, but
+  the renderer reads it as the item's text, so a comment on it shows on the page; the load warns
+  with the document and the line number. A comment that is never closed removes the rest of the body, and
   the load warns. `klio:strip-html-comments` does the
   removal. `make-site-options`, and so `site-app` and `export-site`, take `:search-path nil` to
   have no `search.json`: the export does not write it and the app does not serve it. A
