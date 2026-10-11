@@ -61,6 +61,14 @@ Set by the application; there is no default, for the same reason no source has o
 Ships INSIDE the bundle and is exactly as trusted as the installer that placed it. NIL
 disables updating entirely rather than disabling verification -- see `%trusted-key'.")
 
+(defvar *default-channel* "stable"
+  "The channel `check-for-update' and `apply-update' use when they are not given one.
+
+A release build may set another, for example \"beta\" for a build handed to testers, with
+build-desktop-app.lisp's --default-channel (#408). An application that lets the user choose a
+channel still passes :CHANNEL, which wins. Defined here, ahead of those two functions, because
+their argument lists read it.")
+
 (defvar *app-name* nil
   "The product's install name, as `windows.nsi' -DAPPNAME sees it. The application sets it.
 
@@ -247,6 +255,23 @@ looked up under exactly the name the URL will serve it as."
              (if last-error (error last-error) (values nil nil)))
       (handler-case
           (return (fetch-manifest source channel))
+        (update-source-error (e) (setf last-error e))))))
+
+;;; An artifact is fetched through the same list, in the same order. Without this method a list
+;;; could answer the check and then fail the apply, which calls FETCH-ARTIFACT on the list
+;;; (review of #568). A source that cannot be reached is passed over, as for the manifest.
+;;;
+;;; A 404 is NOT passed over, and that is deliberate. An HTTP source's FETCH-ARTIFACT ignores the
+;;; source and fetches the absolute URL the signed manifest names, so the next HTTP source in the
+;;; list would ask for the same URL and get the same 404. The URLs come from whichever manifest
+;;; answered the check: a payload missing from S3 is missing from the manifest S3 served, and
+;;; GitHub's manifest names GitHub's URLs, not S3's. A directory source signals an error for a
+;;; missing file rather than answering NIL, so it is passed over like an unreachable host.
+(defmethod fetch-artifact ((sources cons) url)
+  (let ((last-error nil))
+    (dolist (source sources (error last-error))
+      (handler-case
+          (return (fetch-artifact source url))
         (update-source-error (e) (setf last-error e))))))
 
 (defvar *update-source* (make-instance 'null-source)
@@ -463,7 +488,7 @@ Before any check it reports `unchecked' rather than inventing an answer -- notab
 `up-to-date', which would be a claim nothing has established."
   (or *update-state* (list :status "unchecked" :version "" :block "" :detail "")))
 
-(defun check-for-update (&key (source *update-source*) (channel "stable") (product *app-name*))
+(defun check-for-update (&key (source *update-source*) (channel *default-channel*) (product *app-name*))
   "Ask SOURCE whether a newer build exists. Updates and returns `update-status'.
 
 NEVER SIGNALS. A failed update check is background noise -- the network is down, the user
@@ -1544,7 +1569,7 @@ window between checking and applying is exactly where a channel gets a security 
                :detail "the manifest carries no artifact for this platform"))
       (values source entry))))
 
-(defun apply-update (&key (source *update-source*) (channel "stable") (product *app-name*))
+(defun apply-update (&key (source *update-source*) (channel *default-channel*) (product *app-name*))
   "Install the available update.
 
 WINDOWS AND LINUX. macOS refuses, because its apply strategy, `app-targz', is not written

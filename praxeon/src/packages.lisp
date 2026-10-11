@@ -300,6 +300,8 @@
    #:means-entry-name #:means-entry-description #:means-entry-capability #:agent-tool-specs #:register-agent-as-means
    #:deliberate #:act #:run-turn #:converse-repl
    #:run-turn-through #:*principal*
+   ;; work that finishes after the call that started it (#532)
+   #:started-result #:started-result-p #:started-result-text #:*tool-call-id*
    ;; holding a call until the user decides (#531)
    #:held-turn #:held-turn-id #:held-turn-principal #:held-turn-agent #:held-turn-calls
    #:held-turn-expires-at #:held-turn-to-json #:held-turn-from-json

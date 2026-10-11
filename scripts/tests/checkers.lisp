@@ -101,6 +101,20 @@ Two parents, not one: `system-relative-pathname' lands in `scripts/tests/', so o
 control errored on a missing file rather than reporting a wrong answer, which is the good
 failure to have.")
 
+(defun %source-registry-variable (&rest directories)
+  "\"CL_SOURCE_REGISTRY=...\" for a build a test runs in a child sbcl: this tree, then each of
+DIRECTORIES, each searched as a tree, then the rest of this machine's source registry.
+
+This tree comes first so its systems win over any other copy. The registry is inherited, by
+ending in the separator, so that what this tree does not hold comes from the machine's own
+install: Coalton above all, which setup pins outside the tree. Without it, a build that loads
+Coalton found an older one that does not read this tree's (A * B -> C) function types, and
+failed with \"unknown type *\" (#568)."
+  (let ((separator (if (uiop:os-windows-p) ";" ":")))
+    (format nil "CL_SOURCE_REGISTRY=~{~A//~A~}"
+            (loop for dir in (cons td-root directories)
+                  append (list (uiop:native-namestring dir) separator)))))
+
 (defparameter *scripts*
   (uiop:pathname-directory-pathname
    (uiop:pathname-parent-directory-pathname

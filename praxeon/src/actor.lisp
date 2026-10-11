@@ -587,10 +587,24 @@ part per requested call."
         (result (princ-to-string result))
         (t "(no result)")))
 
-(defun %apply-call (agent name args permit)
-  "Apply the means NAME to ARGS through ACT. Return its result as a string; a second value
-that is true when the means reported an error for the model to see (#527); the outcome, :OK or
-the condition's OUTCOME; and how many milliseconds the call took.
+(defvar *tool-call-id* nil
+  "The id of the tool call whose means is running, as the model gave it, or NIL outside a call.
+A means that starts work which finishes after the call returns, such as an MCP task (#532),
+keeps it, so the events it emits later carry the same :ID as the call's :TOOL-CALL and
+:TOOL-RESULT events.")
+
+(defstruct (started-result (:constructor started-result (text)))
+  "What a means returns when the call has started work that finishes later, such as an MCP task
+(#532). TEXT is what the model is told. The call's :TOOL-RESULT event has outcome :STARTED
+rather than :OK, because the call has not produced its result yet; the means reports the result
+later with an event of its own that carries the call's :ID."
+  (text "" :type string))
+
+(defun %apply-call (agent name args permit &key id)
+  "Apply the means NAME to ARGS through ACT, with *TOOL-CALL-ID* bound to ID. Return its result
+as a string; a second value that is true when the means reported an error for the model to see
+(#527); the outcome, :OK, :STARTED for a STARTED-RESULT (#532), or the condition's OUTCOME; and
+how many milliseconds the call took.
 
 A means reports such an error by signalling CND:TOOL-ERROR-RESULT. The handler here takes only
 that case, and gives the model the condition's text as an error result. Every other failure
@@ -607,38 +621,14 @@ and ends the turn when nothing handles it, as before."
                                (return-from call
                                  (values (cnd:tool-error-result-text cause) t
                                          (cnd:tool-error-result-outcome cause) (ms))))))))
-          (let ((result (%result-string (act agent name args :permit permit))))
-            (values result nil :ok (ms))))))))
+          (let ((result (let ((*tool-call-id* id)) (act agent name args :permit permit))))
+            (if (started-result-p result)
+                (values (started-result-text result) nil :started (ms))
+                (values (%result-string result) nil :ok (ms)))))))))
 
 (defun %means-source (agent name)
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-entry-source entry))))
-
-(defun %tool-results-message (agent calls &key permit)
-  "Apply each requested CALL via ACT and gather the results into a neutral user
-message of tool-result parts, emitting a :tool-call / :tool-result event around
-each so a client can report progress."
-  (llm:msg "user"
-           (mapcar
-            (lambda (call)
-              (let ((id (llm:tool-call-id call))
-                    (name (llm:tool-call-name call))
-                    (args (llm:tool-call-arguments call)))
-                (evt:emit :tool-call :id id :name name :arguments args
-                                     :source (%means-source agent name) :principal *principal*
-                                     :agent (agent-name agent)
-                                     :conversation (agent-conversation agent))
-                (multiple-value-bind (result error-p outcome ms)
-                    (%apply-call agent name args permit)
-                  (apply #'evt:emit :tool-result :id id :name name :content result
-                         :source (%means-source agent name) :principal *principal*
-                         :agent (agent-name agent) :conversation (agent-conversation agent)
-                         :outcome outcome :ms ms
-                         (when error-p (list :is-error t)))
-                  ;; What the history carries: the result, or its stand-in when it is kept
-                  ;; outside the conversation (#319).
-                  (llm:tool-result-part id (%store-result agent id name args result) error-p))))
-            calls)))
 
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))

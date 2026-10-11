@@ -120,7 +120,7 @@ read these: a call gets its decided text when it has one, and only the events no
   ;; Noted after the :TOOL-CALL event and just before the means is applied, so that a cleanup
   ;; tells a call whose means may have run from one whose event failed first (#553).
   (%record! id :applying t)
-  (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
+  (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit :id id)
     (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
     ;; Stored before its event, so that when the observer fails on the event, the index already
     ;; has the result and the cleanup writes its stand-in.
@@ -535,7 +535,7 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
               ;; is applied, as the step's RUN does, so a cleanup knows whether it reached its
               ;; means whatever the registry says by then.
               (%record! id :phase (if (%callable-p agent name permit) :running :refused))
-              (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit)
+              (multiple-value-bind (result error-p outcome ms) (%apply-call agent name args permit :id id)
                 (%record! id :text result :error (and error-p t) :outcome outcome :ms ms)
                 ;; Stored before its event, as in %RUN-PART.
                 (%record! id :store-tried t)

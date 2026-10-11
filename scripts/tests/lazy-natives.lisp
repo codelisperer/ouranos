@@ -183,10 +183,7 @@ something kills it. With no stdin it exits at once, and the exit code shows it."
                               "--version" "0.0.1" "--out" (uiop:native-namestring dist))
                         :input nil :output build-out :error-output build-out :ignore-error-status t
                         :environment
-                        (cons (format nil "CL_SOURCE_REGISTRY=~A//~A~A//"
-                                      (uiop:native-namestring td-root)
-                                      (if (uiop:os-windows-p) ";" ":")
-                                      (uiop:native-namestring app))
+                        (cons (%source-registry-variable app)
                               (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
                                          (sb-ext:posix-environ)))))))
           (is (eql 0 code) "the build failed:~%~A" (get-output-stream-string build-out)))

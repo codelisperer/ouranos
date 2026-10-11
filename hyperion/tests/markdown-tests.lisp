@@ -228,6 +228,44 @@ safe mode escapes & itself; a block in a language colorize knows is escaped by c
     (is (null (search "<a " html)) "an autolink stays text, as before")
     (is (search "&lt;script&gt;alert(1)&lt;/script&gt;" html))))
 
+(defun %count-of (needle haystack)
+  (loop for p = (search needle haystack) then (search needle haystack :start2 (1+ p))
+        while p count t))
+
+(test a-block-quote-renders-in-the-safe-mode-and-other-brackets-stay-text
+  "Before #574 the safe mode hid every > from 3bmd, so `> quoted' was a paragraph that began with
+&gt;. A > at the start of a line, and again after such a marker, now marks a block quote. Every
+other > and every < is escaped once, and raw HTML inside a quote is still text."
+  (let ((html (md:render (format nil "> quoted <b>x</b> & y~%"))))
+    (is (search "<blockquote>" html) "got ~S" html)
+    (is (search "<p>quoted &lt;b&gt;x&lt;/b&gt; &amp; y</p>" html) "got ~S" html)
+    (is (null (search "<b>" html))))
+  (let ((html (md:render (format nil "> outer~%>~%> > inner~%"))))
+    (is (= 2 (%count-of "<blockquote>" html)) "a nested quote: ~S" html)
+    (is (search "<p>inner</p>" html)))
+  (let ((html (md:render (format nil ">> close~%"))))
+    (is (= 2 (%count-of "<blockquote>" html)) "markers with no space between them: ~S" html))
+  ;; 3bmd does not read an indented > as a marker, in either mode; it shows it as text, escaped
+  ;; once.
+  (dolist (html (%safe-and-trusted (format nil "   > three spaces~%")))
+    (is (search "<p>&gt; three spaces</p>" html) "got ~S" html))
+  (let ((html (md:render (format nil "> ```~%> (< a b) & (> c d)~%> ```~%~%>     <x> > y~%"))))
+    (is (search "<blockquote>" html))
+    (is (search "<pre><code>(&lt; a b) &amp; (&gt; c d)</code></pre>" html)
+        "a fenced block in a quote is code, escaped once: ~S" html)
+    (is (search "<pre><code>&lt;x&gt; &gt; y" html) "an indented block in a quote: ~S" html))
+  (let ((html (md:render (format nil "a > b~%c >> d~%~%    > code~%"))))
+    (is (null (search "<blockquote>" html)) "a > inside a line, or in indented code, is text: ~S" html)
+    (is (search "<p>a &gt; b" html))
+    (is (search "c &gt;&gt; d</p>" html))
+    (is (search "<pre><code>&gt; code" html)))
+  (let ((html (md:render (format nil "```lisp~%> (foo)~%```~%~%```~%> <b> &~%```~%"))))
+    (is (null (search "<blockquote>" html)) "a > at the start of a line in a fence is code: ~S" html)
+    (is (search "<span class=\"code\">&gt; " html) "a colourised block escapes it once: ~S" html)
+    (is (search "<pre><code>&gt; &lt;b&gt; &amp;</code></pre>" html) "so does a plain block: ~S" html))
+  (let ((html (md:render (format nil "~C> not a quote~%" #\\))))
+    (is (null (search "<blockquote>" html)) "an escaped > is text: ~S" html)))
+
 (test a-placeholder-character-in-the-source-does-not-become-a-bracket
   "The safe mode stands U+FDD0 and U+FDD1 in for < and > while 3bmd parses. One already in the
 source is replaced with U+FFFD, so it cannot turn into a bracket."
