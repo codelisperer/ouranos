@@ -190,9 +190,16 @@ Finder.
 **Where the window opens (#485).** On Windows, hyperion-view opens the window centred in the
 work area of its monitor, shrunk to fit when the requested size is larger. `run-app
 :placement-file PATH` also keeps the window's last position, size and maximised state in PATH,
-one line written by hyperion-view after every move or resize, and opens the window there next
-time if that rectangle still lies inside a monitor's work area. A monitor that was unplugged or
-rearranged, or a file that is not that line, is not an error: the window opens centred. Put the
+one line written by hyperion-view when a move or resize made by dragging ends, when the window
+is maximised or restored, and when it is closed. It opens the window there next time if that
+rectangle still lies inside a monitor's work area, allowing for the window's invisible resize
+borders, so that a window snapped to half the screen reopens where it was. A monitor that was
+unplugged or rearranged, or a file that is not that line, is not an error: the window opens
+centred. A move made without dragging and without a change of size, such as Win+Shift+Arrow
+between two monitors at the same scaling, is saved only at the next of those events. When the
+saved rectangle is on a monitor with a different scaling from the one the window opens on,
+hyperion-view sets the rectangle a second time after Windows has rescaled the window, so it keeps
+its saved size; that case has not been measured, because CI has one monitor. Put the
 file in the app's data directory. macOS and Linux accept the option and ignore it for now.
 
 **What the bundle holds, by platform (#98).** On Linux the app is one dumped executable,

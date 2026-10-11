@@ -25,13 +25,6 @@ struct window_placement {
   long x, y, width, height;
 };
 
-// The frame rectangle for a window whose client area is CLIENT_WIDTH x CLIENT_HEIGHT logical
-// pixels (96 per inch), on a monitor of DPI dots per inch, whose frame adds FRAME_WIDTH x
-// FRAME_HEIGHT physical pixels, in the work area WORK_LEFT..WORK_RIGHT x WORK_TOP..WORK_BOTTOM
-// in physical pixels. The client size is scaled the way webview.h scales it
-// (scale_value_for_dpi: value * dpi / 96, rounding down), so the size computed here is the one
-// webview_set_size gave the window. Each dimension is cut to the work area's when it is larger,
-// and the result is centred, rounding down.
 // The values place_in_work_area is defined for, when they come from a command line rather than
 // from Windows (--placement, review of train 22). Within them the arithmetic cannot overflow a
 // long, which is 32 bits on Windows: the largest product, client size times DPI, is 10^9. A
@@ -53,6 +46,13 @@ inline bool placement_inputs_in_range(long work_left, long work_top, long work_r
          frame_height <= kMaxFrame;
 }
 
+// The frame rectangle for a window whose client area is CLIENT_WIDTH x CLIENT_HEIGHT logical
+// pixels (96 per inch), on a monitor of DPI dots per inch, whose frame adds FRAME_WIDTH x
+// FRAME_HEIGHT physical pixels, in the work area WORK_LEFT..WORK_RIGHT x WORK_TOP..WORK_BOTTOM
+// in physical pixels. The client size is scaled the way webview.h scales it
+// (scale_value_for_dpi: value * dpi / 96, rounding down), so the size computed here is the one
+// webview_set_size gave the window. Each dimension is cut to the work area's when it is larger,
+// and the result is centred, rounding down.
 inline window_placement place_in_work_area(long work_left, long work_top, long work_right,
                                            long work_bottom, long client_width,
                                            long client_height, long dpi, long frame_width,
@@ -125,11 +125,23 @@ inline int format_saved_placement(const saved_placement &p, char *buf, size_t si
                        p.top, p.right, p.bottom, p.maximized ? 1 : 0);
 }
 
+// The largest invisible border allowed for on one side of a window. Windows 10 and 11 add
+// about 7 pixels at 100% scaling and 11 at 150%.
+const long kMaxInvisibleBorder = 100;
+
 // Whether P can be restored into the work area WORK_LEFT..WORK_RIGHT x WORK_TOP..WORK_BOTTOM:
 // the whole rectangle is inside it, and it is at least the minimum size.
+//
+// BORDER_LEFT, BORDER_TOP, BORDER_RIGHT and BORDER_BOTTOM are the window's invisible resize
+// borders, which GetWindowRect includes and which are not drawn. The saved rectangle may extend
+// past the work area by that much on each side, so that a window snapped to half the screen, or
+// dragged until its visible edge touches the screen's edge, is restored where it was instead of
+// centred (review of #521). Each is from 0 to kMaxInvisibleBorder; the caller checks that.
 inline bool saved_placement_fits(const saved_placement &p, long work_left, long work_top,
-                                 long work_right, long work_bottom) {
+                                 long work_right, long work_bottom, long border_left = 0,
+                                 long border_top = 0, long border_right = 0,
+                                 long border_bottom = 0) {
   return p.right - p.left >= kMinSavedWidth && p.bottom - p.top >= kMinSavedHeight &&
-         p.left >= work_left && p.top >= work_top && p.right <= work_right &&
-         p.bottom <= work_bottom;
+         p.left >= work_left - border_left && p.top >= work_top - border_top &&
+         p.right <= work_right + border_right && p.bottom <= work_bottom + border_bottom;
 }

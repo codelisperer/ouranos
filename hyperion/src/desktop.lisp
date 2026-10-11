@@ -347,7 +347,8 @@ ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon 
 PLACEMENT-FILE -- a pathname for the file where the window's position, size and maximised state
   are kept between runs (#485). NIL, the default, keeps none, and the window opens centred in
   the work area each time. With a file, the window opens where it was last time if that still
-  fits a monitor, and centred otherwise; the file is rewritten after every move or resize. Put
+  fits a monitor, and centred otherwise; the file is rewritten when a drag ends, on a maximise
+  or restore, and on close (hyperion-view.cc says which moves that misses). Put
   it in the app's own data directory, for example (merge-pathnames \"window-placement\"
   data-dir). Its directory is created if needed. Windows only for now: elsewhere the launcher
   accepts it and ignores it. It needs a hyperion-view built with this change; an older one
