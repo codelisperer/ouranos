@@ -62,9 +62,12 @@ workers and answers GET / with 200 and its own page (#472)."
 ;;; The generated scripts/build-<name>.lisp, which `cons bin' runs, dumps bin/<name>. It now
 ;;; copies the libuv the image loads into bin/ and sets aion/platform:*search-source-tree* to NIL
 ;;; in the image. This test runs that script in a fresh sbcl, copies bin/ to a new temporary
-;;; directory, which is not under the tree, starts the binary there, and asks it for /. With
-;;; AION_UV_LIBRARY cleared and the tree not searched, the only libuv it can use is the one
-;;; beside it, or a system copy; this machine's CI runners have none.
+;;; directory, which is not under the tree, starts the binary there, and asks it for /. While it
+;;; runs, the test reads which libuv file the process has mapped, and checks that it is the copy
+;;; beside the binary. AION_UV_LIBRARY is cleared, and the tree is not searched. The Linux and
+;;; macOS CI runners have a system libuv and Windows runners do not, so the mapped-file check is
+;;; what shows the copy was used on every leg; the run without the copy is skipped where a system
+;;; libuv would be found (review of #524).
 
 (defun %with-environment (bindings thunk)
   "Call THUNK with each (NAME . VALUE) in BINDINGS set in this process's environment, which
@@ -88,42 +91,97 @@ sets the variable to the empty string, which the loaders here treat as unset."
   (or (probe-file (merge-pathnames (format nil "~A.exe" +template-project+) bin))
       (probe-file (merge-pathnames +template-project+ bin))))
 
-(defun %run-binary (exe directory port log)
-  "Start EXE in DIRECTORY with AION_UV_LIBRARY and HYPERION_SERVER cleared, and wait up to 60
-seconds for it to answer GET / on PORT or to exit. Returns (values RESPONSE OUTPUT), where
-RESPONSE is the response, :EXITED, or NIL, and OUTPUT is what the binary printed. The process is
-stopped before this returns."
-  (let ((process (%with-environment
-                  '(("AION_UV_LIBRARY" . nil) ("HYPERION_SERVER" . nil))
-                  (lambda ()
-                    (uiop:launch-program (list (uiop:native-namestring exe))
-                                         :directory directory :output log :error-output :output
-                                         :if-output-exists :supersede))))
-        (response nil))
+(defun %mapped-libuv (pid)
+  "The libuv files the process PID has mapped, as native namestrings: read from /proc/PID/maps
+on Linux, from lsof on macOS, and from the process's module list on Windows."
+  (flet ((libuv-p (path) (search "libuv" (file-namestring (uiop:parse-native-namestring path)))))
+    (remove-duplicates
+     (cond
+       ((uiop:os-windows-p)
+        (remove-if-not
+         #'libuv-p
+         (uiop:split-string
+          (uiop:run-program
+           (list "powershell" "-NoProfile" "-NonInteractive" "-Command"
+                 (format nil "(Get-Process -Id ~D).Modules | ForEach-Object { $_.FileName }" pid))
+           :output :string :ignore-error-status t)
+          :separator '(#\Newline #\Return))))
+       ((uiop:os-macosx-p)
+        (loop for line in (uiop:split-string
+                           (uiop:run-program (list "lsof" "-p" (princ-to-string pid) "-Fn")
+                                             :output :string :ignore-error-status t)
+                           :separator '(#\Newline))
+              when (and (uiop:string-prefix-p "n/" line) (libuv-p (subseq line 1)))
+                collect (subseq line 1)))
+       (t
+        (with-open-file (in (format nil "/proc/~D/maps" pid) :if-does-not-exist nil)
+          (when in
+            (loop for line = (read-line in nil) while line
+                  for slash = (position #\/ line)
+                  when (and slash (libuv-p (subseq line slash)))
+                    collect (subseq line slash))))))
+     :test #'string=)))
+
+(defun %run-binary (exe port log)
+  "Start EXE with AION_UV_LIBRARY and HYPERION_SERVER cleared, and wait up to 60 seconds for it to
+answer GET / on PORT or to exit. Returns (values RESPONSE OUTPUT MAPPED), where RESPONSE is the
+response, :EXITED, or NIL, OUTPUT is what the binary printed, and MAPPED is the list of libuv
+files the process had mapped when it answered (%MAPPED-LIBUV). The process is stopped before this
+returns.
+
+The working directory is the parent of EXE's directory, and on macOS DYLD_FALLBACK_LIBRARY_PATH
+is an empty directory. Otherwise the loader could find a libuv in the working directory or in
+Homebrew's lib directory, and the run would pass without using the copy beside EXE (review of
+#524, where the hub tested this on macOS)."
+  (let* ((directory (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname exe)))
+         (process (%with-environment
+                   (append '(("AION_UV_LIBRARY" . nil) ("HYPERION_SERVER" . nil))
+                           (when (uiop:os-macosx-p) '(("DYLD_FALLBACK_LIBRARY_PATH" . "/var/empty"))))
+                   (lambda ()
+                     (uiop:launch-program (list (uiop:native-namestring exe))
+                                          :directory directory :output log :error-output :output
+                                          :if-output-exists :supersede))))
+         (response nil)
+         (mapped nil))
     (unwind-protect
-         (setf response
-               (%wait-until (lambda ()
-                              (or (ignore-errors (get* port "GET / HTTP/1.1" "Host: x"))
-                                  (and (not (uiop:process-alive-p process)) :exited)))
-                            :seconds 60))
+         (progn
+           (setf response
+                 (%wait-until (lambda ()
+                                (or (ignore-errors (get* port "GET / HTTP/1.1" "Host: x"))
+                                    (and (not (uiop:process-alive-p process)) :exited)))
+                              :seconds 60))
+           (when (and response (not (eq response :exited)))
+             (setf mapped (ignore-errors (%mapped-libuv (uiop:process-info-pid process))))))
       (ignore-errors (uiop:terminate-process process :urgent t))
       (ignore-errors (uiop:wait-process process)))
-    (values response (if (probe-file log) (uiop:read-file-string log) ""))))
+    (values response (if (probe-file log) (uiop:read-file-string log) "") mapped)))
 
 (defun %system-libuv-p ()
-  "Whether this machine has a libuv the operating system's loader would find by name: on Linux
-one that ldconfig lists, on macOS one in Homebrew's or /usr/local's lib directory. Windows has no
-such place, so NIL there."
-  (cond ((uiop:os-windows-p) nil)
-        ((uiop:os-macosx-p)
-         (or (probe-file "/opt/homebrew/lib/libuv.1.dylib") (probe-file "/usr/local/lib/libuv.1.dylib")))
-        (t (let ((out (ignore-errors (uiop:run-program (list "ldconfig" "-p") :output :string
-                                                       :ignore-error-status t))))
-             (and out (search "libuv.so.1" out) t)))))
+  "Whether a binary without its own libuv could still find one, started as %RUN-BINARY starts
+it. On Linux: one that ldconfig lists, or one in a directory on LD_LIBRARY_PATH. On Windows: a
+libuv.dll in a directory on PATH. On macOS, NIL: %RUN-BINARY empties DYLD_FALLBACK_LIBRARY_PATH,
+which is where Homebrew's copy would be found. Where ldconfig cannot be run, T, so that the run
+is skipped rather than failed for a reason this test cannot see."
+  (flet ((on-path-p (variable name)
+           (some (lambda (dir)
+                   (and (plusp (length dir))
+                        (probe-file (merge-pathnames name (uiop:ensure-directory-pathname
+                                                           (uiop:parse-native-namestring dir))))))
+                 (uiop:split-string (or (uiop:getenv variable) "")
+                                    :separator (if (uiop:os-windows-p) ";" ":")))))
+    (cond ((uiop:os-windows-p) (and (on-path-p "PATH" "libuv.dll") t))
+          ((uiop:os-macosx-p) nil)
+          (t (let ((out (ignore-errors (uiop:run-program (list "ldconfig" "-p") :output :string
+                                                         :ignore-error-status t))))
+               (or (null out)
+                   (and (search "libuv.so.1" out) t)
+                   (and (on-path-p "LD_LIBRARY_PATH" "libuv.so.1") t)))))))
 
-(test cons-bin-carries-libuv-and-the-binary-serves-outside-the-tree
-  "The web template's build script copies libuv beside bin/<name>, and the binary, moved to a
-directory outside the tree, answers GET / with 200 and its page (#513)."
+(test the-cons-bin-build-script-carries-libuv-and-the-moved-binary-serves-with-that-copy
+  "The web template's build script, run as `cons bin' runs it, copies libuv beside bin/<name>.
+The binary, moved to a directory outside the tree, answers GET / with 200 and its page, and the
+libuv it has mapped is the copy beside it. Where no system libuv would be found, the binary
+without that copy stops with LIBUV-NOT-FOUND instead of using the tree's (#513, #524)."
   (cons/tempdir:with-temporary-directory (work "uvplate-bin")
     (cons/tempdir:with-temporary-directory (away "uvplate-away")
       (let* ((root (let ((*standard-output* (make-broadcast-stream)))
@@ -161,13 +219,26 @@ directory outside the tree, answers GET / with 200 and its page (#513)."
         (let ((exe (%bin-executable away))
               (port (cons/init::dev-port +template-project+))
               (log (merge-pathnames "run.log" work)))
+          ;; The binary always serves on its dev port. Another run of this suite, in another
+          ;; worktree on this machine, would answer there too, and this test would read its
+          ;; answer (review of #524).
+          (is (null (ignore-errors (get* port "GET / HTTP/1.1" "Host: x")))
+              "nothing answers on 127.0.0.1:~D before the binary starts; another run of this suite may be using the port" port)
           (when exe
-            (multiple-value-bind (response output) (%run-binary exe away port log)
+            (multiple-value-bind (response output mapped) (%run-binary exe port log)
               (is (and response (not (eq response :exited)) (= 200 (status-of response)))
                   "the moved binary answered GET / with 200: ~S~%~A" response output)
               (is (and response (not (eq response :exited))
                        (search (format nil "~A is running" +template-project+) (body-of response)))
-                  "with its page"))
+                  "with its page")
+              (is (search "path=/ status=200" output)
+                  "and the binary's own log has the request, so the answer came from it: ~A" output)
+              (is (and (= 1 (length mapped))
+                       (uiop:pathname-equal
+                        (uiop:pathname-directory-pathname (truename (uiop:parse-native-namestring (first mapped))))
+                        (truename away)))
+                  "the libuv the binary mapped is the copy beside it in ~A: ~S"
+                  (uiop:native-namestring away) mapped))
             ;; Without the carried copy it must not fall back to the tree's vendor/, which this
             ;; machine has: the image was dumped with *search-source-tree* NIL (review of #524).
             ;; Where a system libuv is installed, the binary may load that instead, and this run
@@ -180,7 +251,7 @@ directory outside the tree, answers GET / with 200 and its page (#513)."
                          "the carried ~A could be deleted for the second run" (file-namestring file))))
             (if (%system-libuv-p)
                 (skip "A system libuv is installed here, so a binary without its own copy can load that one")
-                (multiple-value-bind (response output) (%run-binary exe away port log)
+                (multiple-value-bind (response output) (%run-binary exe port log)
                   (is (eq :exited response)
                       "without the carried libuv the binary does not serve: ~S~%~A" response output)
                   (is (search "LIBUV-NOT-FOUND" output)
