@@ -50,14 +50,16 @@ anyone can fetch it. Pass `:search-path nil` to `site-app` and `export-site` to 
 file, or put `search: false` in a page's front-matter to leave that page out of it and out of the
 in-memory search index; any value other than `true` leaves the page out. HTML comments
 (`<!-- ... -->`) are removed from a page's body when it is loaded, so they reach neither the page,
-nor `/search.json`, nor the index. A comment is kept only when klio's own renderer shows it
-inside code on the page, such as in a code span, a fenced block or an indented block, because it
-is part of the code. klio decides this by rendering the body, not by reading the Markdown
-itself, so a fence or a block quote that looks like code but renders as text does not keep a
-comment. `<!-->` and `<!--->` are whole comments, as CommonMark defines them, so the text after
-them stays on the page. A comment that is never closed removes the rest of the body, and the load
-warns about it. Before this, klio showed a comment on the page as escaped
-text.
+nor `/search.json`, nor the index. A comment is kept only when klio's own renderer shows all of
+it, from `<!--` through `-->`, inside one code element on the page, such as one code span, one
+fenced block or one indented block, because it is then part of the code. klio decides this by
+rendering the body, not by reading the Markdown itself, so a fence or a block quote that looks
+like code but renders as text does not keep a comment, and neither does a comment that starts in
+code and ends outside it. `<!-->` and `<!--->` are whole comments, as CommonMark defines them, so
+the text after them stays on the page. A comment that is never closed removes the rest of the
+body, and the load warns about it. HTML comments are removed from the body only: front matter is
+YAML, so write a note there as a YAML `#` comment, because a `<!-- -->` in a front-matter value
+is kept and published. Before this, klio showed a comment on the page as escaped text.
 
 In development, `(klio:watch-site *site*)` reloads when a content file changes and keeps
 serving the last good content when an edit breaks a file; `stop-watching` stops it. How a

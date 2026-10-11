@@ -107,21 +107,24 @@ its tag.
   comments has been publishing them on any site exported or served this way. `load-document` now
   removes every comment from the body before rendering or indexing it, so `document-body`,
   `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment is
-  kept only when klio's renderer shows it inside `<code>` on the page, as in a code span, a
-  fenced block or an indented block. klio decides this by rendering a copy of the body, so a
-  block quote, a `~~~` fence or a list item that renders as text does not keep a comment, and a
-  body that contains one of the Unicode noncharacters U+FDD2, U+FDD3 or U+FDE0 to U+FDEF has
-  every comment removed. `<!-->` and `<!--->` are whole comments, as CommonMark 0.31.2 defines
-  them, so the text after them is kept. A comment that is never closed removes the rest of the
-  body, and the load warns. `klio:strip-html-comments` does the removal; its `:render` argument
-  names the renderer, `render-markdown` by default. `make-site-options`, and so `site-app` and `export-site`, take `:search-path nil` to
-  have no `search.json`: the export does not write it and the app does not serve it. A
-  front-matter `search: false` leaves a page out of `search.json` and the search index; only
-  `search: true` or no `search` key keeps it in. `search` is now a core key, read with
-  `content-meta-search` or `(document-field d "search")`. An app acts if a theme or a script
-  relied on comments in `document-body`, or read `search` with `(extra meta "search")`, which now
-  returns NIL. An author who relied on comments being hidden should check what was already
-  published.
+  kept only when klio's renderer shows all of it, from `<!--` through `-->`, inside one `<code>`
+  element on the page, as in one code span, one fenced block or one indented block. klio decides
+  this by rendering a copy of the body, so a block quote, a `~~~` fence or a list item that
+  renders as text does not keep a comment, and neither does a comment that starts in code and
+  ends outside it. A body that contains one of the Unicode noncharacters U+FDD2 to U+FDD5 or
+  U+FDE0 to U+FDEF has every comment removed. `<!-->` and `<!--->` are whole comments, as
+  CommonMark 0.31.2 defines them, so the text after them is kept. A comment that is never closed
+  removes the rest of the body, and the load warns. HTML comments are removed from the body
+  only; use YAML `#` comments in front matter, where a `<!-- -->` in a value is kept and
+  published. `klio:strip-html-comments` does the removal; its `:render` argument names the
+  renderer, `render-markdown` by default. `make-site-options`, and so `site-app` and
+  `export-site`, take `:search-path nil` to have no `search.json`: the export does not write it
+  and the app does not serve it. A front-matter `search: false` leaves a page out of
+  `search.json` and the search index; only `search: true` or no `search` key keeps it in.
+  `search` is now a core key, read with `content-meta-search` or `(document-field d "search")`.
+  An app acts if a theme or a script relied on comments in `document-body`, or read `search`
+  with `(extra meta "search")`, which now returns NIL. An author who relied on comments being
+  hidden should check what was already published.
 
 ### Added
 
