@@ -57,16 +57,18 @@ string name is left out. A page without a list of prompts signals REQUEST-FAILED
               :count (length prompts) :pages pages)
     prompts))
 
-(defun %content-block-p (block)
-  "Whether BLOCK is a ContentBlock: one of its five variants, with that variant's required fields
-as strings. text has text; image and audio have data and mimeType; resource_link has uri and
-name; resource has a resource object with a uri and a text or a blob."
+(defun %content-block-p (block version)
+  "Whether BLOCK is a ContentBlock of protocol VERSION: one of its variants, with that variant's
+required fields as strings. text has text; image and audio have data and mimeType; resource_link
+has uri and name; resource has a resource object with a uri and a text or a blob. resource_link
+was added in 2025-06-18, so a 2025-03-26 session has the other four."
   (and (hash-table-p block)
        (flet ((str (key &optional (object block)) (stringp (gethash key object))))
          (let ((type (gethash "type" block)))
            (cond ((equal type "text") (str "text"))
                  ((member type '("image" "audio") :test #'equal) (and (str "data") (str "mimeType")))
-                 ((equal type "resource_link") (and (str "uri") (str "name")))
+                 ((equal type "resource_link")
+                  (and (not (equal version "2025-03-26")) (str "uri") (str "name")))
                  ((equal type "resource")
                   (let ((resource (gethash "resource" block)))
                     (and (hash-table-p resource) (str "uri" resource)
@@ -81,7 +83,7 @@ name; resource has a resource object with a uri and a text or a blob."
   ;; A malformed message fails the reply rather than being left out: leaving one out could turn
   ;; a scripted exchange into what looks like a user-only prompt (#554). A PromptMessage's
   ;; content is one ContentBlock in every schema revision this client speaks, never a list (#569).
-  (unless (%content-block-p block)
+  (unless (%content-block-p block (client-protocol-version client))
     (%request-failed client "its prompt had a message whose content is not a content block." '()
                      :outcome :not-run))
   (llm:msg role (list (llm:text-part (%content-text block)))))

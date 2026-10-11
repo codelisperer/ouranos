@@ -497,7 +497,8 @@ its tag.
   content, which every schema revision defines as one block, and accepted any object as a
   block, so `{"type":"text","text":42}` gave a message whose text was the integer 42. A message's
   content must now be one block of a known type (`text`, `image`, `audio`, `resource_link` or
-  `resource`) with that type's required fields as strings. `read-resource`, and so
+  `resource`) with that type's required fields as strings; a session on protocol version
+  2025-03-26, whose schema has no `resource_link`, refuses that type. `read-resource`, and so
   `add-resource`, accepted a content with neither a `text` nor a `blob`, which the schema
   requires, and showed it as `[no content]`; the reply now fails, and an earlier copy added with
   `add-resource` is kept.

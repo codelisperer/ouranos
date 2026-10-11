@@ -1247,7 +1247,7 @@ rather than being left out: leaving it out could make a scripted exchange look u
 (test a-prompt-message-content-is-one-content-block-of-a-known-type-with-its-fields
   "Every schema revision defines a PromptMessage's content as one ContentBlock, so a list of blocks
 fails the reply, as does a block whose type is unknown or whose required fields are missing or
-not strings (#569)."
+not strings (#569). A resource link fails a 2025-03-26 reply, whose schema has no such block."
   (dolist (content (list (vector (%obj "type" "text" "text" "a"))
                          (%obj "type" "text" "text" 42)
                          (%obj "type" "text")
@@ -1264,7 +1264,20 @@ not strings (#569)."
         (handler-case (progn (mcp:get-prompt client (first (mcp:list-prompts client)))
                              (fail "~S was accepted" (jzon:stringify content)))
           (mcp:request-failed (e)
-            (is (eq :not-run (cnd:tool-error-result-outcome e)) "~S" (jzon:stringify content))))))))
+            (is (eq :not-run (cnd:tool-error-result-outcome e)) "~S" (jzon:stringify content)))))))
+  ;; resource_link was added in 2025-06-18: a 2025-03-26 session refuses it, a later one takes it.
+  (loop for (version accepted) in '(("2025-03-26" nil) ("2025-06-18" t))
+        do (let ((fake (make-fake :era :legacy :legacy-version version)))
+             (setf (fake-prompts fake) (list (%prompt-json "p"))
+                   (fake-prompt-messages fake)
+                   (list (cons "p" (vector (%obj "role" "user"
+                                                 "content" (%obj "type" "resource_link"
+                                                                 "uri" "file:///x" "name" "x"))))))
+             (with-fake (client fake)
+               (is (eq accepted (handler-case (progn (mcp:get-prompt client (first (mcp:list-prompts client))) t)
+                                  (mcp:request-failed () nil)))
+                   "~A" version)
+               (is (equal version (mcp:client-protocol-version client)))))))
 
 (test a-malformed-resource-content-fails-the-reply-and-keeps-the-earlier-copy
   "A content that is not an object, has no string uri, or has neither a string text nor a string
