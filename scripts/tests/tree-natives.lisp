@@ -130,6 +130,51 @@ line naming a missing file is skipped. A file inside bin/ is still deleted (#564
              (is-false (probe-file inside) "the file inside bin/ is gone")))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
 
+(test a-carried-list-that-is-a-link-is-neither-read-nor-written
+  "bin/.carried-natives as a link is refused with CARRIED-LIST-REFUSED before it is read, and before
+a copied file is appended to it, so nothing outside bin/ is read as the list or written through it
+(hub's review of #567). A link to a directory is a junction on Windows and a symbolic link
+elsewhere; on Unix a dangling link and a link to a file outside bin/ are checked too."
+  (let ((tree (%fresh-tree)))
+    (unwind-protect
+         (let* ((bin (ensure-directories-exist (merge-pathnames "bin/" tree)))
+                (outside (ensure-directories-exist (merge-pathnames "outside/" tree)))
+                (list-file (merge-pathnames ouranos-tree-natives:+carried-list-name+ bin)))
+           (flet ((refused-p (thunk)
+                    (handler-case (progn (funcall thunk) nil)
+                      (ouranos-tree-natives:carried-list-refused () t)))
+                  (unlink ()
+                    (if (uiop:os-windows-p)
+                        (aion/fs:delete-link list-file)
+                        (uiop:run-program (list "rm" "-f" (uiop:native-namestring list-file))))))
+             (%link-to-directory list-file outside)
+             (is-true (aion/fs:link-p list-file) "the fixture's link exists")
+             (is-true (refused-p (lambda () (ouranos-tree-natives:remove-previously-carried bin)))
+                      "a link to a directory is not read")
+             (is-true (refused-p (lambda ()
+                                   (let ((ouranos-tree-natives::*carried-list* list-file))
+                                     (ouranos-tree-natives::%note-carried (merge-pathnames "libx.dll" bin)))))
+                      "nor appended to")
+             (is (null (uiop:directory-files outside)) "and nothing was written into the directory it names")
+             (unlink)
+             (unless (uiop:os-windows-p)
+               (let ((target (%bytes-file (merge-pathnames "outside.txt" tree) "not bin's")))
+                 (uiop:run-program (list "ln" "-s" (uiop:native-namestring (merge-pathnames "absent" tree))
+                                         (uiop:native-namestring list-file)))
+                 (is-true (refused-p (lambda () (ouranos-tree-natives:remove-previously-carried bin)))
+                          "a dangling link is refused, not a backtrace")
+                 (unlink)
+                 (uiop:run-program (list "ln" "-s" (uiop:native-namestring target) (uiop:native-namestring list-file)))
+                 (is-true (refused-p (lambda () (ouranos-tree-natives:remove-previously-carried bin)))
+                          "a link to a file outside bin/ is not read")
+                 (is-true (refused-p (lambda ()
+                                       (let ((ouranos-tree-natives::*carried-list* list-file))
+                                         (ouranos-tree-natives::%note-carried (merge-pathnames "libx.so" bin)))))
+                          "nor appended to")
+                 (is (equal "not bin's" (uiop:read-file-string target)) "and the file it names is unchanged")
+                 (unlink)))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
 ;;; --- two real builds --------------------------------------------------------------------------
 
 (defun %write-gitbin-app (project &key (libgit t))
@@ -214,3 +259,37 @@ this, the second build left all three, and the docs say to ship bin/ as a whole.
                  (is-true (probe-file (merge-pathnames "app-data.txt" bin))
                           "and left the app's own file"))
             (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
+
+
+(test a-build-that-stops-after-a-copy-still-lists-what-it-copied
+  "The first build copies libgit2 into bin/ and then fails, because bin/LICENSES is a file, so the
+licence cannot be copied. The list still names libgit2, because each file is appended as it is
+copied. A good build of the app without aion/libgit then removes it (hub's review of #567: the
+list used to be written only after every copy, so a failed build left a library no list named,
+which shipped again once the app dropped it)."
+  (if (null (%built-libgit2))
+      (skip "vendor/libgit2 is not built here; run scripts/build-libgit2.lisp")
+      (let* ((tree (%fresh-tree))
+             (project (ensure-directories-exist (merge-pathnames "gitbin/" tree)))
+             (bin (ensure-directories-exist (merge-pathnames "bin/" project)))
+             (library (merge-pathnames (file-namestring (%built-libgit2)) bin))
+             (list-file (merge-pathnames ouranos-tree-natives:+carried-list-name+ bin)))
+        (%write (merge-pathnames "scripts/build-gitbin.lisp" project)
+                (uiop:frob-substrings (uiop:read-file-string *cons-bin-build-script*)
+                                      '("{{name}}") "gitbin"))
+        (unwind-protect
+             (progn
+               (%write-gitbin-app project :libgit t)
+               (%bytes-file (merge-pathnames "LICENSES" bin) "a file where the licence directory goes")
+               (multiple-value-bind (code out) (%run-cons-bin-build project)
+                 (is (not (eql 0 code)) "the first build fails at the licence, got ~S:~%~A" code out))
+               (is-true (probe-file library) "after copying the library")
+               (let ((lines (and (probe-file list-file) (uiop:read-file-lines list-file))))
+                 (is (member (file-namestring library) lines :test #'string=)
+                     "and the list names it: ~S" lines))
+               (delete-file (merge-pathnames "LICENSES" bin))
+               (%write-gitbin-app project :libgit nil)
+               (multiple-value-bind (code out) (%run-cons-bin-build project)
+                 (is (eql 0 code) "the second build failed:~%~A" out))
+               (is-false (probe-file library) "the second build removed the library the failed build left"))
+          (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))

@@ -30,7 +30,7 @@
            #:wake-lazy-natives #:verify-natives-will-be-carried #:carry-native-libraries
            #:release-lazy-natives #:lazy-native-sonames #:loaded-foreign-libraries
            #:carry-tree-natives #:vendored-library-p #:+carried-list-name+
-           #:remove-previously-carried))
+           #:remove-previously-carried #:carried-list-refused))
 
 (in-package #:ouranos-tree-natives)
 
@@ -56,8 +56,34 @@ and the check passed a library that the copy then reported as a system library a
 (defvar *carried-files* nil
   "While CARRY-TREE-NATIVES runs, the files copied into *BUNDLE* so far, as pathnames.")
 
+(defvar *carried-list* nil
+  "While CARRY-TREE-NATIVES runs, the carried list each copied file is appended to; NIL
+otherwise, as in build-desktop-app.lisp, which writes into a new bundle and keeps no list.")
+
+(define-condition carried-list-refused (error)
+  ((path :initarg :path :reader carried-list-refused-path))
+  (:report (lambda (c s)
+             (format s "~A is a link; the list of files an earlier build copied is not read or written through a link"
+                     (uiop:native-namestring (carried-list-refused-path c))))))
+
+(defun %check-carried-list (list-file)
+  "Signal CARRIED-LIST-REFUSED when LIST-FILE is a link, dangling or not, before it is read or
+written: reading through it could act on another directory's list, and writing through it would
+write wherever it points (hub's review of #567)."
+  (when (aion/fs:link-p list-file)
+    (error 'carried-list-refused :path list-file)))
+
 (defun %note-carried (path)
-  (push path *carried-files*))
+  "Record PATH, a file just copied into *BUNDLE*, and append it to the carried list at once. The
+list therefore names every file this build has put there even when the build stops part-way, for
+example when a library's source is refused after the library was copied, so the next build can
+still remove it (hub's review of #567)."
+  (push path *carried-files*)
+  (when *carried-list*
+    (%check-carried-list *carried-list*)
+    (with-open-file (out *carried-list* :direction :output :if-exists :append :if-does-not-exist :create)
+      (write-line (uiop:unix-namestring (uiop:enough-pathname path (uiop:pathname-directory-pathname *carried-list*)))
+                  out))))
 
 (defparameter +carried-list-name+ ".carried-natives"
   "The file in the build directory that lists, one relative path per line, what the last
@@ -414,10 +440,17 @@ otherwise stay in BUNDLE and be shipped with it, because the docs say to ship bi
 (#564). Files the list does not name, such as anything else an app keeps there, are left.
 Returns the files deleted. A line that is refused (%CARRIED-LIST-ENTRY says which) is reported
 and left; a file that is missing is skipped. A file that cannot be deleted, for example a library
-a running copy of the binary has open, ends the process with exit code 3 and says which."
+a running copy of the binary has open, ends the process with exit code 3 and says which. A list
+that is itself a link signals CARRIED-LIST-REFUSED before it is read.
+
+A LIMIT: a line is checked for links (%CARRIED-LIST-ENTRY) and then deleted, in two steps. A
+process that replaced a directory in BUNDLE with a link between those steps could redirect the
+delete. That needs something else writing to BUNDLE while the build runs, which a build does not
+guard against."
   (let* ((bundle (%absolute-directory bundle))
          (list-file (merge-pathnames +carried-list-name+ bundle))
          (deleted '()))
+    (%check-carried-list list-file)
     (when (probe-file list-file)
       (dolist (line (uiop:read-file-lines list-file))
         (multiple-value-bind (action path reason) (%carried-list-entry line bundle)
@@ -436,13 +469,6 @@ a running copy of the binary has open, ends the process with exit code 3 and say
       (delete-file list-file))
     (nreverse deleted)))
 
-(defun %write-carried-list (bundle files)
-  "Write FILES, which are under BUNDLE, to BUNDLE's carried list, relative and with /."
-  (with-open-file (out (merge-pathnames +carried-list-name+ bundle)
-                       :direction :output :if-exists :supersede)
-    (dolist (file (reverse files))
-      (write-line (uiop:unix-namestring (uiop:enough-pathname file bundle)) out))))
-
 (defun carry-tree-natives (bundle &key (label *label*))
   "Wake, check and carry this tree's lazily loaded libraries into BUNDLE, then close them, and
 set aion/platform:*search-source-tree* to NIL when aion/platform is loaded, so the dumped image
@@ -451,21 +477,33 @@ exit code 3, naming the problem, if the image loads one that cannot be carried. 
 before the dump.
 
 First it removes what the previous call copied into BUNDLE, as listed in BUNDLE's carried list
-(+CARRIED-LIST-NAME+), and afterwards it writes the list again for this call (#564)."
+(+CARRIED-LIST-NAME+), and then appends each file to a new list as it copies it, so the list names
+every file this call put in BUNDLE even if it stops part-way (#564). A carried list that is a
+link ends the process with exit code 3, naming it."
   (let ((*bundle* (%absolute-directory bundle))
         (*label* label)
         (*product* "the binary")
         (*carry-option-p* nil)
-        (*carried-files* '()))
+        (*carried-files* '())
+        (*carried-list* nil))
     (ensure-directories-exist *bundle*)
-    (let ((removed (remove-previously-carried *bundle*)))
-      (when removed
-        (format t "~&~A: removed ~D file~:P an earlier build copied into ~A.~%"
-                *label* (length removed) (uiop:native-namestring *bundle*))))
+    (handler-case
+        (let ((removed (remove-previously-carried *bundle*)))
+          (when removed
+            (format t "~&~A: removed ~D file~:P an earlier build copied into ~A.~%"
+                    *label* (length removed) (uiop:native-namestring *bundle*))))
+      (carried-list-refused (e)
+        (format *error-output* "~&~A: ~A. Remove it and build again.~%" *label* e)
+        (sb-ext:exit :code 3)))
+    ;; Each file is appended to the list as it is copied (%NOTE-CARRIED), so a build that stops
+    ;; part-way still names what it put in BUNDLE.
+    (setf *carried-list* (merge-pathnames +carried-list-name+ *bundle*))
     (wake-lazy-natives)
     (verify-natives-will-be-carried)
-    (carry-native-libraries)
-    (%write-carried-list *bundle* *carried-files*))
+    (handler-case (carry-native-libraries)
+      (carried-list-refused (e)
+        (format *error-output* "~&~A: ~A. Remove it and build again.~%" *label* e)
+        (sb-ext:exit :code 3))))
   (let ((search (and (find-package "AION/PLATFORM")
                      (find-symbol "*SEARCH-SOURCE-TREE*" "AION/PLATFORM"))))
     (when search (setf (symbol-value search) nil))))
