@@ -152,6 +152,15 @@ and let the rest of the URL become new attributes."
   (dolist (html (%safe-and-trusted "Use `(< a b) & (> c d)` here."))
     (is (search "<code>(&lt; a b) &amp; (&gt; c d)</code>" html) "got ~S" html)))
 
+(test an-inline-code-span-is-plain-code-when-the-app-turned-on-code-span-colouring
+  "With 3bmd's *RENDER-CODE-SPANS* true, 3bmd sends a code span to the code-block renderer, which
+under :nohighlight prints it unescaped. RENDER binds it to NIL, so a span stays <code>."
+  (let ((3bmd-code-blocks:*render-code-spans* t)
+        (3bmd-code-blocks:*render-code-spans-lang* :common-lisp)
+        (3bmd-code-blocks:*renderer* :nohighlight))
+    (dolist (html (%safe-and-trusted "Use `(< a b) & (> c d)` here."))
+      (is (search "<p>Use <code>(&lt; a b) &amp; (&gt; c d)</code> here.</p>" html) "got ~S" html))))
+
 (test an-entity-renders-as-its-character
   (dolist (html (%safe-and-trusted "Tom &amp; Jerry &copy; 2026."))
     (is (search "Tom &amp; Jerry &copy; 2026." html) "got ~S" html)
