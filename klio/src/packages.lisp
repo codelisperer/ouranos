@@ -17,12 +17,15 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:unterminated-front-matter #:unsupported-front-matter
            #:content-meta #:content-meta-title #:content-meta-date #:content-meta-slug
            #:content-meta-tags #:content-meta-draft #:content-meta-publish-at
+           #:content-meta-search
            #:content-meta-extra #:content-meta-warnings #:extra #:+core-keys+
            #:content-meta-timestamp
            ;; dates -- ISO 8601 in front matter, RFC 822 and 3339 in feeds (#353, #359)
            #:parse-iso-date #:date-universal-time #:invalid-date #:rfc-822-date #:rfc-3339-date
            ;; search -- tokenised, field-weighted, built at load
            #:tokenize #:make-search-index #:index-document #:search-index-query
+           ;; HTML comments are removed from a body at load (#556)
+           #:strip-html-comments
            #:*field-weights*
            ;; rendering -- one path into 3bmd, via hyperion/markdown
            #:render-markdown

@@ -76,10 +76,10 @@ exist, so a relative or aliased spelling is not a way around the check."
 SITE-APP takes (MAKE-SITE-OPTIONS). Returns the list of files written, relative to DIRECTORY.
 
 Writes 404.html and every page RESOLVE-PATH answers: the index and its pages, each tag's
-listing and its pages, the feeds when BASE-URL is given, the search index and one file per
-readable document. A listing at /tags/x/ is written to tags/x/index.html; see the file header
-for LAYOUT, which applies to documents. NOW is the time visibility is judged at, so a scheduled document is exported only once
-its time has come; NIL means now.
+listing and its pages, the feeds when BASE-URL is given, the search index unless SEARCH-PATH is
+NIL, and one file per readable document. A listing at /tags/x/ is written to tags/x/index.html;
+see the file header for LAYOUT, which applies to documents. NOW is the time visibility is judged
+at, so a scheduled document is exported only once its time has come; NIL means now.
 
 Nothing is written unless every page renders. DIRECTORY must be absent or empty, or CLEAN must
 be true, in which case its contents are deleted first; otherwise EXPORT-REFUSED is signalled.

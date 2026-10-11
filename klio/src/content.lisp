@@ -37,7 +37,8 @@
 KEY is the tree-relative path without its extension (`roles/2024-softcraft-solutions'), which
 is what the tree is addressed by and what a failure report names. SLUG is the front-matter's
 `slug' when it has one and KEY's last segment otherwise -- the URL-facing name, which is the
-one that must be unique. BODY is the markdown source and HTML is it rendered."
+one that must be unique. BODY is the markdown source with its HTML comments removed (#556), and
+HTML is it rendered."
   (key "" :type string)
   (path nil)
   (slug "" :type string)
@@ -180,10 +181,18 @@ belongs."
          (meta nil)
          (body ""))
     (multiple-value-bind (front rest) (split-front-matter text :file key)
-      (setf body (or rest ""))
       (setf meta (if front
                      (parse-front-matter front :file key :known-extra known-extra)
-                     (%make-content-meta))))
+                     (%make-content-meta)))
+      ;; Comments are removed before anything renders or indexes the body, so an author's note
+      ;; reaches neither the page nor search.json nor the search index (#556).
+      (multiple-value-bind (stripped unclosed) (strip-html-comments (or rest ""))
+        (setf body stripped)
+        (when unclosed
+          (setf (content-meta-warnings meta)
+                (append (content-meta-warnings meta)
+                        (list (format nil "~A: an HTML comment is not closed with `-->', so everything after its `<!--' is left out"
+                                      key)))))))
     (%make-document :key key :path path :slug (%slug-of key meta)
                     :meta meta :body body
                     ;; Rendered HERE, at load, not per request. Q3's highlighter runs at
@@ -257,17 +266,19 @@ write one."
 
 (defun %build-index (documents index-extra)
   "A search index over DOCUMENTS, built at load -- which is the only time the whole tree is
-in hand and the last time before anyone can ask it a question."
+in hand and the last time before anyone can ask it a question. A document whose front-matter
+says `search: false' is left out (#556)."
   (let ((index (make-search-index)))
     (dolist (d documents index)
       (let* ((meta (document-meta d))
              (extra (%extra-text (content-meta-extra meta) index-extra)))
-        (index-document index (document-key d)
-                        :title (content-meta-title meta)
-                        :tags (content-meta-tags meta)
-                        :body (if (plusp (length extra))
-                                  (concatenate 'string (document-body d) " " extra)
-                                  (document-body d)))))))
+        (when (content-meta-search meta)
+          (index-document index (document-key d)
+                          :title (content-meta-title meta)
+                          :tags (content-meta-tags meta)
+                          :body (if (plusp (length extra))
+                                    (concatenate 'string (document-body d) " " extra)
+                                    (document-body d))))))))
 
 (defun %vocabulary-pass (vocabularies documents)
   "Check DOCUMENTS against VOCABULARIES. Returns the LOAD-FAILUREs, and as a second value an

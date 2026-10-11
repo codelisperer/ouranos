@@ -36,7 +36,7 @@ tree otherwise, as at a REPL or in a static export."
 
 (defun document-field (document name)
   "The value of the front-matter field NAME in DOCUMENT: one of klio's core fields (title,
-date, slug, tags, draft, publish-at) or else a top-level `extra' key. NIL when absent.
+date, slug, tags, draft, publish-at, search) or else a top-level `extra' key. NIL when absent.
 
 SLUG is the document's slug as klio resolved it, which is the front matter's `slug' or the
 last segment of its key, because that is the one a URL uses."
@@ -47,6 +47,7 @@ last segment of its key, because that is the one a URL uses."
           ((string= name "tags") (content-meta-tags meta))
           ((string= name "draft") (content-meta-draft meta))
           ((string= name "publish-at") (content-meta-publish-at meta))
+          ((string= name "search") (content-meta-search meta))
           (t (extra meta name)))))
 
 (defun %field-before-p (a b)

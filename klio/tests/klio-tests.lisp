@@ -1428,6 +1428,89 @@ the collection are absent")
             (is (equal '("Lisp") (coerce (gethash "tags" e) 'list)))
             (is (search "Body of Alpha" (gethash "text" e)))))))))
 
+;;; --- HTML comments, search: false and turning search.json off (#556) --------------------------
+
+(defun %doc (front body)
+  (format nil "---~%title: \"~A\"~%~A---~%~%~A" "Page" front body))
+
+(defun %loaded (body &key (front ""))
+  "BODY loaded as one document: (values DOCUMENT TREE)."
+  (with-content-dir (dir ("p.md" . (%doc front body)))
+    (let ((tree (k:load-tree dir)))
+      (values (k:tree-document tree "p") tree))))
+
+(defun %search-entries (site)
+  (coerce (com.inuoe.jzon:parse (nth-value 1 (%get (k:site-app site) "/search.json"))) 'list))
+
+(test an-html-comment-is-not-on-the-page-in-the-body-or-in-the-index
+  "Before #556 klio escaped a comment and showed it on the page as text, and search.json and the
+index carried it. A comment in a line of text is removed, and the text around it is kept."
+  (multiple-value-bind (d tree) (%loaded (format nil "Shown <!-- hidden note --> words.~%"))
+    (is (search "Shown" (k:document-html d)))
+    (is (search "words." (k:document-html d)))
+    (is (null (search "hidden" (k:document-html d))) "not on the page")
+    (is (null (search "hidden" (k:document-body d))) "not in the body search.json carries")
+    (is (null (search "&lt;!--" (k:document-html d))))
+    (is (null (%hits tree "hidden")) "not in the search index")
+    (is (equal '("p") (%hits tree "shown")))))
+
+(test a-comment-over-several-lines-is-removed-blank-lines-included
+  (let ((d (%loaded (format nil "Before.~%~%<!--~%first note~%~%second note~%-->~%~%After.~%"))))
+    (is (search "Before." (k:document-html d)))
+    (is (search "After." (k:document-html d)))
+    (is (null (search "note" (k:document-html d))))
+    (is (null (search "note" (k:document-body d))))))
+
+(test a-comment-never-closed-removes-the-rest-of-the-body-and-warns
+  "An author who opened a comment meant to hide what follows, so the rest of the body is left
+out rather than published, and the load warns so the author can see why the page is short."
+  (multiple-value-bind (d tree) (%loaded (format nil "Kept.~%~%<!-- forgot to close~%~%Lost text.~%"))
+    (is (search "Kept." (k:document-html d)))
+    (is (null (search "Lost" (k:document-html d))))
+    (is (null (search "forgot" (k:document-body d))))
+    (is (= 1 (count-if (lambda (w) (search "not closed" w)) (k:content-tree-warnings tree))))))
+
+(test a-comment-inside-code-is-kept
+  "A comment written in code is something the code shows. A code span, a fenced block and an
+indented block keep theirs; a comment in the text beside them is still removed."
+  (let ((d (%loaded (format nil "Use `<!-- span -->` here <!-- gone-1 -->.~%~%```html~%<!-- fenced -->~%```~%~%    <!-- indented -->~%~%End <!-- gone-2 -->.~%"))))
+    (is (search "<!-- span -->" (k:document-body d)))
+    (is (search "<!-- fenced -->" (k:document-body d)))
+    (is (search "<!-- indented -->" (k:document-body d)))
+    (is (search "fenced" (k:document-html d)) "the fenced comment is on the page, as code")
+    (is (null (search "gone" (k:document-body d))))
+    (is (null (search "gone" (k:document-html d))))))
+
+(test search-false-leaves-a-document-out-of-search-json-and-the-index
+  (with-content-dir (dir ("shown.md" . (%doc "" (format nil "Findable alpha.~%")))
+                         ("hidden.md" . (%doc (format nil "search: false~%") (format nil "Findable beta.~%")))
+                         ("typo.md" . (%doc (format nil "search: no~%") (format nil "Findable gamma.~%"))))
+    (let ((site (k:make-site dir)))
+      (k:boot site)
+      (is (equal '("/shown") (mapcar (lambda (e) (gethash "url" e)) (%search-entries site))))
+      (is (equal '("shown") (%hits (k:site-tree site) "findable")))
+      (is (= 200 (%get (k:site-app site) "/hidden")) "the page itself is still served"))))
+
+(test the-search-key-is-typed-and-only-true-keeps-a-document-in
+  "A mistyped value hides a page from search rather than publishing it there."
+  (is-true (k:content-meta-search (%meta "title: \"x\"")))
+  (is-true (k:content-meta-search (%meta "search: true")))
+  (is-false (k:content-meta-search (%meta "search: false")))
+  (is-false (k:content-meta-search (%meta "search: \"yes\"")))
+  (is (null (k:content-meta-warnings (%meta "search: false"))) "a core key, not an unknown one"))
+
+(test search-path-nil-turns-search-json-off
+  (with-content-dir (src ("a.md" . (%post "Alpha" "2024-01-01")))
+    (let ((site (k:make-site src)))
+      (k:boot site)
+      (let ((app (k:site-app site :search-path nil)))
+        (is (= 404 (%get app "/search.json")))
+        (is (= 404 (%get app "/NIL")) "STRING= reads NIL as \"NIL\"; the path is not served"))
+      (with-export-dir (out)
+        (is (equal '("404.html" "a.html" "index.html")
+                   (sort (copy-list (k:export-site site out :search-path nil)) #'string<))))
+      (signals type-error (k:make-site-options :search-path 3)))))
+
 ;;; --- the export writes the same pages (#353) ------------------------------------------------
 
 (test the-export-writes-tag-pages-listing-pages-feeds-and-the-index

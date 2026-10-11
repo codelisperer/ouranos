@@ -45,6 +45,15 @@ of every readable page for a search box. A tag's URL is its slug (`C#` is `/tags
 listing theme gets `*page-number*` and `*page-count*`, and `page-url` and `tag-url` for links.
 `publish-at` takes an ISO 8601 date, and a scheduled page appears when its time comes.
 
+`/search.json` holds, for every readable page, its URL, title, tags, date and Markdown body, and
+anyone can fetch it. Pass `:search-path nil` to `site-app` and `export-site` to have no search
+file, or put `search: false` in a page's front-matter to leave that page out of it and out of the
+in-memory search index; any value other than `true` leaves the page out. HTML comments
+(`<!-- ... -->`) are removed from a page's body when it is loaded, so they reach neither the page,
+nor `/search.json`, nor the index. A comment inside a code span or a code block is kept, because
+it is part of the code. A comment that is never closed removes the rest of the body, and the load
+warns about it. Before this, klio showed a comment on the page as escaped text.
+
 In development, `(klio:watch-site *site*)` reloads when a content file changes and keeps
 serving the last good content when an edit breaks a file; `stop-watching` stops it. How a
 production server is told to reload is recorded, not yet built, in

@@ -121,8 +121,11 @@ links, so without it there are no feeds. FEED-COLLECTION limits them to one coll
 \"posts\"; FEED-LIMIT caps the entries, newest first; FEED-TITLE names the feed.
 
 TAGS-PREFIX, RSS-PATH, ATOM-PATH and SEARCH-PATH are the defaults /tags/<tag>/, /feed.xml,
-/atom.xml and /search.json, without their leading slash."
+/atom.xml and /search.json, without their leading slash. SEARCH-PATH NIL turns search.json off:
+the export does not write it and SITE-APP does not serve it (#556). search.json carries each
+readable document's Markdown body; front-matter `search: false' leaves a document out."
   (check-type per-page (or null (integer 1)))
+  (check-type search-path (or null string))
   (check-type feed-limit (integer 1))
   (%make-site-options :page-theme page-theme :index-theme index-theme :not-found not-found
                       :tag-theme tag-theme :per-page per-page :base-url base-url

@@ -1,7 +1,7 @@
 ;;;; frontmatter.lisp --- parse a content file's front-matter (pre-publication issue 359 Q1: answer B).
 ;;;;
-;;;; TYPED CORE PLUS A NAMED `extra'. The core is title, date, slug, tags, draft and
-;;;; publish-at. Everything else lands in `extra', named as such, so a reader can see exactly
+;;;; TYPED CORE PLUS A NAMED `extra'. The core is title, date, slug, tags, draft, publish-at
+;;;; and search. Everything else lands in `extra', named as such, so a reader can see exactly
 ;;;; where the engine's knowledge of a document stops.
 ;;;;
 ;;;; `extra' CARRIES NESTED VALUES, which is not a refinement -- it is what the first real
@@ -287,14 +287,16 @@ which is what it always meant."
 
 ;;; --- the typed core, and `extra' (pre-publication issue 359 Q1: answer B) ------------------------
 
-(defparameter +core-keys+ '("title" "date" "slug" "tags" "draft" "publish-at")
+(defparameter +core-keys+ '("title" "date" "slug" "tags" "draft" "publish-at" "search")
   "The keys klio types. Everything else goes to `extra', named so a reader can see where the
 engine's knowledge of a document stops.")
 
 (defstruct (content-meta (:constructor %make-content-meta))
   ;; DATE is as written, for display and sorting; TIMESTAMP is it parsed, or NIL when it is
   ;; absent or not an ISO date. PUBLISH-AT is always parsed: a universal time or NIL (#359).
+  ;; SEARCH is NIL when the document is left out of search.json and the search index (#556).
   (title nil) (date nil) (timestamp nil) (slug nil) (tags '()) (draft nil) (publish-at nil)
+  (search t)
   (extra '() :type list)
   (warnings '() :type list))
 
@@ -331,6 +333,9 @@ instead of stopping at the first."
                ((string= key "slug") (setf (content-meta-slug meta) value))
                ((string= key "tags") (setf (content-meta-tags meta) (%as-list value)))
                ((string= key "draft") (setf (content-meta-draft meta) (eq value t)))
+               ;; Only `search: true' keeps a document in; any other value leaves it out, so a
+               ;; mistyped value hides a page from search rather than publishing it there (#556).
+               ((string= key "search") (setf (content-meta-search meta) (eq value t)))
                ;; Parsed here, and a bad one SIGNALS, which makes it a load failure: a typo in a
                ;; scheduled date must not publish the document early (#359).
                ((string= key "publish-at")

@@ -100,6 +100,24 @@ its tag.
   carries its own strict-build script to catch this case can use `cons --strict build` instead.
   (#525)
 
+- **klio: HTML comments are removed from a page when it is loaded; `search.json` can be turned
+  off, and a page can stay out of search** (#556). klio renders Markdown with raw HTML escaped,
+  so an HTML comment (`<!-- ... -->`) in a page's body was shown on the page as visible text,
+  and `/search.json` and the search index carried it too. An author who kept private notes in
+  comments has been publishing them on any site exported or served this way. `load-document` now
+  removes every comment from the body before rendering or indexing it, so `document-body`,
+  `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment
+  inside a code span, a fenced block or an indented block is kept. A comment that is never
+  closed removes the rest of the body, and the load warns. `klio:strip-html-comments` does the
+  removal. `make-site-options`, and so `site-app` and `export-site`, take `:search-path nil` to
+  have no `search.json`: the export does not write it and the app does not serve it. A
+  front-matter `search: false` leaves a page out of `search.json` and the search index; only
+  `search: true` or no `search` key keeps it in. `search` is now a core key, read with
+  `content-meta-search` or `(document-field d "search")`. An app acts if a theme or a script
+  relied on comments in `document-body`, or read `search` with `(extra meta "search")`, which now
+  returns NIL. An author who relied on comments being hidden should check what was already
+  published.
+
 ### Added
 
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
