@@ -340,6 +340,34 @@ taskkill's exit code and output, and every installer process still running after
              (return (list :outcome :finished :pid pid :image image))))
       (sleep 0.005))))
 
+(defun %swap-stop-at-pause (installer format dir pause-dir)
+  "Start INSTALLER, compiled with OURANOS_TEST_PAUSE_DIR=PAUSE-DIR, into DIR. Wait for it to
+create PAUSE-DIR/paused, which it does once it has written its first staged file and then waits
+(windows.iss, #575), and stop it with its children there. Returns a plist like
+%SWAP-STOP-MID-COPY's: :OUTCOME is :STOPPED, :FINISHED if it ended without pausing, or :TIMED-OUT
+after +SWAP-STOP-DEADLINE-SECONDS+, in which case it was stopped. There is no race: the installer
+waits until it is stopped."
+  (let* ((staged (%swap-sibling dir ".new"))
+         (paused (merge-pathnames "paused" pause-dir))
+         (process (%swap-run (%swap-install-argv installer format dir)))
+         (pid (uiop:process-info-pid process))
+         (deadline (+ (get-internal-real-time)
+                      (* +swap-stop-deadline-seconds+ internal-time-units-per-second))))
+    (loop
+      (cond ((probe-file paused)
+             (let ((staged-files (mapcar #'file-namestring (ignore-errors (uiop:directory-files staged)))))
+               (multiple-value-bind (killed output) (%swap-kill-tree process installer)
+                 (return (list :outcome :stopped :pid pid :staged-at-kill staged-files
+                               :killed killed :taskkill-output output
+                               :alive (uiop:process-alive-p process)
+                               :still-running (%swap-running installer))))))
+            ((not (uiop:process-alive-p process))
+             (return (list :outcome :finished :pid pid)))
+            ((> (get-internal-real-time) deadline)
+             (multiple-value-bind (killed output) (%swap-kill-tree process installer)
+               (return (list :outcome :timed-out :pid pid :killed killed :taskkill-output output)))))
+      (sleep 0.05))))
+
 (defmacro %with-temp-in ((dir) &body body)
   "Run BODY with TEMP and TMP set to DIR, and set them back afterwards. The installers and
 uninstallers run in BODY inherit them, so the is-*.tmp directories Inno's Setup and uninstaller
@@ -354,6 +382,9 @@ them out of %TEMP% instead could not tell them from another program's (review of
                    ,@body)
          (setf (uiop:getenv "TEMP") ,temp
                (uiop:getenv "TMP") ,tmp)))))
+
+(defvar *swap-v2-bundle* nil
+  "Inside %WITH-SWAP-FIXTURE, the bundle version 2's installer was built from.")
 
 (defmacro %with-swap-fixture ((format tree v1 v1-sha v2 v2-sha) &body body)
   "Bind TREE to a fresh directory and V1/V2 to FORMAT's installers for a small version 0.0.1
@@ -376,8 +407,9 @@ and a large 0.0.2, with their cores' hashes. Skips when a tool is missing; alway
                              (,v2 (and ,b2 (%swap-installer ,b2 ,format))))
                          (is-true (and ,v1 ,v2) "both installers were built")
                          (when (and ,v1 ,v2)
-                           (%with-temp-in ((merge-pathnames "temp/" ,tree))
-                             ,@body)))))))))
+                           (let ((*swap-v2-bundle* ,b2))
+                             (%with-temp-in ((merge-pathnames "temp/" ,tree))
+                               ,@body))))))))))
          (%with-temp-in ((merge-pathnames "temp/" ,tree))
            (%swap-uninstall (merge-pathnames "app/" ,tree) ,format))
          (aion/fs:delete-tree ,tree :if-does-not-exist :ignore)))))
@@ -422,12 +454,33 @@ the first rename having happened."
       (is-true (%swap-wait-started dir) "and the silent install started the app")
       (is-true (%swap-wait-gone old) "the relaunched app removed what the swap left")
 
-      ;; An update stopped while it writes the new core leaves version 1 whole.
+      ;; An update stopped part-way through staging leaves version 1 whole.
       ;; The kill is checked before the directory is: a kill that did not happen fails here as
       ;; "not stopped", not below as a swap that went wrong.
-      (let ((stop (%swap-stop-mid-copy v2 format dir +swap-big-core-bytes+)))
+      ;;
+      ;; Inno stops at a test-only pause after its first staged file (windows.iss,
+      ;; OURANOS_TEST_PAUSE_DIR), so the test does not race a copy that takes under a second.
+      ;; Racing it failed under the full suite's load (#575). NSIS still stops while the core is
+      ;; being written.
+      (let ((stop (ecase format
+                    (:inno
+                     (let* ((pause-dir (ensure-directories-exist (merge-pathnames "pause/" tree)))
+                            (paused-installer
+                              (%swap-installer-direct
+                               *swap-v2-bundle* :inno (merge-pathnames "paused/setup-paused.exe" tree)
+                               :defines (list (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
+                                                      (string-right-trim "\\" (uiop:native-namestring pause-dir)))))))
+                       (is-true paused-installer "the paused installer was built")
+                       (and paused-installer
+                            (%swap-stop-at-pause paused-installer format dir pause-dir))))
+                    (:nsis (%swap-stop-mid-copy v2 format dir +swap-big-core-bytes+)))))
         (is (eq :stopped (getf stop :outcome))
-            "the update was stopped part-way through the copy, not after it: ~S" stop)
+            "the update was stopped part-way through staging, not after it: ~S" stop)
+        (when (eq format :inno)
+          (is (< 0 (length (getf stop :staged-at-kill))
+                 (length (uiop:directory-files *swap-v2-bundle*)))
+              "with some, but not all, of version 2 staged: ~S of ~S"
+              (getf stop :staged-at-kill) (mapcar #'file-namestring (uiop:directory-files *swap-v2-bundle*))))
         (is (and (getf stop :killed) (not (getf stop :alive))
                  (null (getf stop :still-running)))
             "and nothing of the installer is still running: ~S" stop))
@@ -540,25 +593,27 @@ the first rename having happened."
         (uiop:copy-file f (merge-pathnames (file-namestring f) copy))))
     copy))
 
-(defun %swap-installer-direct (bundle format out &key (exe (format nil "~A.exe" +swap-app+)))
+(defun %swap-installer-direct (bundle format out &key (exe (format nil "~A.exe" +swap-app+)) defines)
   "Compile FORMAT's installer for BUNDLE to OUT with the packager directly, with the defines
-build-installer.ps1 passes, and no WebView2 bootstrapper. EXE is the program it starts after a
-silent install. Returns OUT, or NIL."
+build-installer.ps1 passes and DEFINES, a list of /DNAME=VALUE arguments, and no WebView2
+bootstrapper. EXE is the program it starts after a silent install. Returns OUT, or NIL."
   (let* ((tool (%swap-tool-path format))
          (src (string-right-trim "\\" (uiop:native-namestring bundle)))
          (argv (ecase format
-                 (:nsis (list tool "/NOCD" (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
+                 (:nsis (list* tool "/NOCD" (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
                               "/DVIVERSION=0.0.3.0" (format nil "/DSRCDIR=~A" src)
                               (format nil "/DOUTFILE=~A" (uiop:native-namestring out))
                               (format nil "/DEXENAME=~A" exe)
-                              (uiop:native-namestring (merge-pathnames "installers/windows.nsi" *scripts*))))
-                 (:inno (list tool (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
+                              (append defines
+                                      (list (uiop:native-namestring (merge-pathnames "installers/windows.nsi" *scripts*))))))
+                 (:inno (list* tool (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.3"
                               (format nil "/DSRCDIR=~A" src)
                               (format nil "/DOUTDIR=~A" (string-right-trim "\\" (uiop:native-namestring
                                                                                   (uiop:pathname-directory-pathname out))))
                               (format nil "/DOUTBASE=~A" (pathname-name out))
                               (format nil "/DEXENAME=~A" exe)
-                              (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*)))))))
+                              (append defines
+                                      (list (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*)))))))))
     (when tool
       (%swap-run argv :wait t)
       (and (probe-file out) out))))
@@ -745,3 +800,64 @@ a function that stops the thread and returns true when the directory was made."
 (test an-inno-update-fails-before-the-swap-without-its-uninstaller-and-exits-3-when-the-app-cannot-start
   #-win32 (skip "The Windows installers are built and run on Windows only")
   #+win32 (%swap-failure-paths :inno))
+
+(test a-release-inno-installer-has-no-test-pause
+  "windows.iss pauses after the first staged file only when OURANOS_TEST_PAUSE_DIR is defined
+(#575). Preprocessed by ISCC with the defines build-installer.ps1 passes, the script has neither
+the pause procedure nor its AfterInstall hook, so a release installer cannot contain them. The
+check is on ISCC's preprocessed output, not on the flags. CONTROL: with the define, both appear.
+
+The preprocessed text is written by a wrapper script that includes windows.iss and calls ISPP's
+SaveToFile, compiled with /O-. ISCC --preprocess would be simpler, but it is new in Inno Setup 7,
+and the CI runner has Inno Setup 6, where it printed only the banner (run 38172743814)."
+  #-win32 (skip "Inno Setup runs on Windows only")
+  #+win32
+  (let ((tool (%swap-tool-path :inno)))
+    (if (null tool)
+        (skip "build-installer.ps1 -Check finds no ISCC")
+        (let ((tree (%fresh-tree)))
+          (unwind-protect
+               (flet ((preprocessed (name &rest extra)
+                        (let* ((src (ensure-directories-exist (merge-pathnames "src/" tree)))
+                               (out (merge-pathnames (concatenate 'string name ".iss") tree))
+                               (wrapper (merge-pathnames (concatenate 'string "wrap-" name ".iss") tree)))
+                          (%bytes-file (merge-pathnames "probe.exe" src) "probe")
+                          (%write wrapper
+                                  (%lines (format nil "#include \"~A\""
+                                                  (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*)))
+                                          (format nil "#expr SaveToFile(\"~A\")" (uiop:native-namestring out))))
+                          (multiple-value-bind (output error-output code)
+                          (uiop:run-program
+                           (append (list tool "/O-" "/Q"
+                                         (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.1"
+                                         (format nil "/DSRCDIR=~A" (string-right-trim "\\" (uiop:native-namestring src)))
+                                         (format nil "/DOUTDIR=~A" (string-right-trim "\\" (uiop:native-namestring tree)))
+                                         "/DOUTBASE=setup" (format nil "/DEXENAME=~A.exe" +swap-app+))
+                                   extra
+                                   (list (uiop:native-namestring wrapper)))
+                           :output :string :error-output :string :ignore-error-status t)
+                            (declare (ignore output error-output))
+                            (values (if (probe-file out) (uiop:read-file-string out) "") code)))))
+                 (let ((release (preprocessed "release"))
+                       (test (preprocessed "test" (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
+                                                          (string-right-trim "\\" (uiop:native-namestring tree))))))
+                   (is (search "[Files]" release) "the release script was preprocessed: ~S"
+                       (subseq release 0 (min 400 (length release))))
+                   (is (not (search "OuranosTestPause" release))
+                       "the release script has no pause procedure or hook")
+                   (is (search "AfterInstall: OuranosTestPauseAfterStage" test)
+                       "with the define, the hook is there")
+                   (is (search "procedure OuranosTestPauseAfterStage" test)
+                       "and so is the procedure"))
+                 ;; A pause directory with an apostrophe, as under a profile named O'Brien: the
+                 ;; path goes into Pascal string literals, so each ' must be doubled, or the
+                 ;; installer does not compile (Copilot's review of #585).
+                 (let ((apostrophe (ensure-directories-exist (merge-pathnames "O'Brien/" tree))))
+                   (multiple-value-bind (text code)
+                       (preprocessed "apostrophe"
+                                     (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
+                                             (string-right-trim "\\" (uiop:native-namestring apostrophe))))
+                     (is (eql 0 code) "with an apostrophe in the pause directory, it compiles: exit ~S" code)
+                     (is (search "O''Brien\\paused" text)
+                         "and the apostrophe is doubled in the literal"))))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))

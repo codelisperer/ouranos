@@ -67,6 +67,21 @@
   #error "windows.iss: -DEXENAME is required"
 #endif
 
+; TEST ONLY (#575). With -DOURANOS_TEST_PAUSE_DIR=<dir>, Setup pauses after it has written the
+; first staged file into {app}.new: it creates <dir>\paused and waits for <dir>\resume. The
+; installer swap test passes it so that it can stop an update part-way through staging at a known
+; point, rather than by racing a copy that takes under a second. build-installer.ps1 never passes
+; it, so a release installer has neither the hook nor the procedure, and
+; scripts/tests/windows-installer-swap.lisp checks that in the preprocessed script.
+#ifdef OURANOS_TEST_PAUSE_DIR
+  #define TestPauseHook "; AfterInstall: OuranosTestPauseAfterStage"
+  ; The directory goes into Pascal single-quoted literals below, where a ' would end the literal,
+  ; so each ' is doubled here: a temporary directory under a profile such as O'Brien is legal.
+  #define TestPauseDirLiteral StringChange(OURANOS_TEST_PAUSE_DIR, "'", "''")
+#else
+  #define TestPauseHook ""
+#endif
+
 [Setup]
 ; AppId identifies the product across versions and drives the uninstall entry. The app
 ; name rather than a GUID: it is already unique per product in this tree, and a literal
@@ -104,7 +119,7 @@ UninstallDisplayIcon={app}\{#APPNAME}.ico
 #endif
 
 [Files]
-Source: "{#SRCDIR}\*"; DestDir: "{app}.new"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#SRCDIR}\*"; DestDir: "{app}.new"; Flags: recursesubdirs createallsubdirs ignoreversion{#TestPauseHook}
 #ifdef WV2BOOTSTRAPPER
 Source: "{#WV2BOOTSTRAPPER}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebview2Setup.exe"; \
   Flags: deleteafterinstall
@@ -173,6 +188,23 @@ Type: filesandordirs; Name: "{app}.old"
 Type: filesandordirs; Name: "{app}.new"
 
 [Code]
+#ifdef OURANOS_TEST_PAUSE_DIR
+var
+  OuranosTestPaused: Boolean;
+
+{ TEST ONLY (#575): see OURANOS_TEST_PAUSE_DIR at the top. Runs after each staged file; pauses
+  once, after the first. }
+procedure OuranosTestPauseAfterStage();
+begin
+  if OuranosTestPaused then
+    exit;
+  OuranosTestPaused := True;
+  SaveStringToFile('{#TestPauseDirLiteral}\paused', 'OURANOS-TEST-PAUSE', False);
+  while not FileExists('{#TestPauseDirLiteral}\resume') do
+    Sleep(50);
+end;
+#endif
+
 const
   WV2_CLIENT = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   UNINSTALL_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#APPNAME}_is1';
