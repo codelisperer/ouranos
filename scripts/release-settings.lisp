@@ -113,6 +113,72 @@ how rotation works (#408): change this, and hyperion/update's %trusted-key, to a
                   (length keys)))
         (t (first keys))))
 
+(defun %https-url-problem (url)
+  "Why URL cannot be an update source, or NIL when it can (#588).
+
+- It must start with https://.
+- It must not contain a space, a control character (at or below space) or DEL anywhere. A
+  percent-encoding such as %00 is accepted: it is not decoded here, and the client sends it as
+  written.
+- It must not have a query (?) or a fragment (#): the client appends <channel>.json to it, after
+  a /, so either would leave a base URL that names something else.
+- The host is the part after https:// up to the first /, less a :port. It must be a DNS name: at
+  most 253 characters, made of labels of 1 to 63 letters, digits and dashes, separated by single
+  dots, no label starting or ending with a dash. A dotted IPv4 address is such a name and is
+  accepted. An IP literal in brackets, such as [::1], is not accepted: give a host name.
+- Credentials before an @ are refused: they would be built into the image.
+- A port, when given, must be a number from 1 to 65535.
+
+\"https://\" alone used to pass, and satisfied --release's need for a source."
+  (flet ((bad-char-p (c) (or (<= (char-code c) 32) (= (char-code c) 127))))
+    (cond
+      ((not (uiop:string-prefix-p "https://" url)) "the URL must start with https://")
+      ((find-if #'bad-char-p url) "the URL contains a space or a control character")
+      ((find-if (lambda (c) (find c "?#")) url)
+       "the URL must not have a query (?) or a fragment (#)")
+      (t
+       (let* ((rest (subseq url (length "https://")))
+              (authority (subseq rest 0 (or (position #\/ rest) (length rest)))))
+         (cond
+           ((find #\@ authority) "the URL must not carry credentials before an @")
+           ((and (plusp (length authority)) (char= (char authority 0) #\[))
+            "an IP address in brackets is not accepted; give a host name")
+           (t
+            (let* ((colon (position #\: authority))
+                   (host (subseq authority 0 (or colon (length authority))))
+                   (port (and colon (subseq authority (1+ colon))))
+                   (parts (uiop:split-string host :separator ".")))
+              (cond
+                ((zerop (length host)) "the URL has no host after https://")
+                ((> (length host) 253)
+                 (format nil "the host is ~D characters, longer than the 253 a DNS name may have"
+                         (length host)))
+                ((some (lambda (l) (zerop (length l))) parts)
+                 (format nil "the host ~S has an empty label (two dots together, or a dot at an end)" host))
+                ((some (lambda (l) (> (length l) 63)) parts)
+                 (format nil "the host ~S has a label longer than 63 characters" host))
+                ((notevery (lambda (l)
+                             (and (every (lambda (c) (and (< (char-code c) 128)
+                                                          (or (alphanumericp c) (char= c #\-))))
+                                         l)
+                                  (char/= (char l 0) #\-)
+                                  (char/= (char l (1- (length l))) #\-)))
+                           parts)
+                 (format nil "the host ~S is not a DNS name" host))
+                ((and port (not (and (plusp (length port)) (<= (length port) 5)
+                                     (every #'digit-char-p port)
+                                     (<= 1 (parse-integer port) 65535))))
+                 (format nil "the port ~S is not a number from 1 to 65535" port)))))))))))
+
+(defun %shown-source (value)
+  "VALUE as an --update-source refusal may print it. One that contains an @ may carry a password,
+so only its kind is printed: the message goes to standard error and from there into CI logs
+(hub's review of #591)."
+  (if (find #\@ value)
+      (let ((split (position #\= value)))
+        (format nil "~A=<a URL with an @, not shown>" (if split (subseq value 0 split) "?")))
+      value))
+
 (defun %update-sources (argv)
   "((class-name . url) ...) from each --update-source, in order."
   (loop for value in (%option-values argv "--update-source")
@@ -120,11 +186,11 @@ how rotation works (#408): change this, and hyperion/update's %trusted-key, to a
         for kind = (and split (subseq value 0 split))
         for url = (and split (subseq value (1+ split)))
         for class = (cdr (assoc kind *source-kinds* :test #'string=))
-        do (cond ((null split) (%refuse "--update-source ~A is not KIND=URL" value))
+        do (cond ((null split) (%refuse "--update-source ~A is not KIND=URL" (%shown-source value)))
                  ((null class) (%refuse "--update-source kind ~S is not one of ~{~A~^, ~}"
                                         kind (mapcar #'car *source-kinds*)))
-                 ((not (uiop:string-prefix-p "https://" url))
-                  (%refuse "--update-source ~A: the URL must start with https://" value)))
+                 ((%https-url-problem url)
+                  (%refuse "--update-source ~A: ~A" (%shown-source value) (%https-url-problem url))))
         collect (cons class (if (uiop:string-suffix-p url "/") url (concatenate 'string url "/")))))
 
 (defun parse-release-settings (argv &key name (getenv #'uiop:getenv))

@@ -495,6 +495,20 @@ its tag.
   and the next `poll-tasks` returns it with one `:task-finished`; `:task-input-refused` is not
   sent in that case. A store error while marking it is logged, and the app gets the condition
   that left the poll.
+- **`build-desktop-app.lisp --update-source` refuses a URL with no host** (#588). The URL had
+  only to start with `https://`, so `--update-source github=https://` was accepted, and it
+  satisfied `--release`'s need for a source, giving a build that can never reach one. Now a URL
+  is refused, and the build stops with exit code 2 naming the reason, when:
+  - its host is empty, is longer than 253 characters, or is not a DNS name made of labels of 1
+    to 63 letters, digits and dashes separated by single dots. A dotted IPv4 address is
+    accepted; an IP address in brackets, such as `[::1]`, is not;
+  - its port, when given, is not a number from 1 to 65535;
+  - it has a query (`?`) or a fragment (`#`), which would have ended up in front of the `/` the
+    build appends;
+  - it contains a space, a control character or DEL anywhere. A percent-encoding such as `%00`
+    is accepted and not decoded;
+  - it carries credentials before an `@`, which would be built into the image. Such a URL is not
+    printed in the refusal, only its kind, because the message goes to CI logs.
 - **hyperion/update: an update can be applied when `*update-source*` is a list of sources**
   (#408). `fetch-manifest` already tried a list in order, but `fetch-artifact` had no method for
   one. So an app that set `*update-source*` to a list could report an update as available, and
