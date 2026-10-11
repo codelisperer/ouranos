@@ -630,32 +630,6 @@ and ends the turn when nothing handles it, as before."
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-entry-source entry))))
 
-(defun %tool-results-message (agent calls &key permit)
-  "Apply each requested CALL via ACT and gather the results into a neutral user
-message of tool-result parts, emitting a :tool-call / :tool-result event around
-each so a client can report progress."
-  (llm:msg "user"
-           (mapcar
-            (lambda (call)
-              (let ((id (llm:tool-call-id call))
-                    (name (llm:tool-call-name call))
-                    (args (llm:tool-call-arguments call)))
-                (evt:emit :tool-call :id id :name name :arguments args
-                                     :source (%means-source agent name) :principal *principal*
-                                     :agent (agent-name agent)
-                                     :conversation (agent-conversation agent))
-                (multiple-value-bind (result error-p outcome ms)
-                    (%apply-call agent name args permit :id id)
-                  (apply #'evt:emit :tool-result :id id :name name :content result
-                         :source (%means-source agent name) :principal *principal*
-                         :agent (agent-name agent) :conversation (agent-conversation agent)
-                         :outcome outcome :ms ms
-                         (when error-p (list :is-error t)))
-                  ;; What the history carries: the result, or its stand-in when it is kept
-                  ;; outside the conversation (#319).
-                  (llm:tool-result-part id (%store-result agent id name args result) error-p))))
-            calls)))
-
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
