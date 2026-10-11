@@ -43,14 +43,24 @@
 (defun %build-command (build-script)
   "The command that builds the library BUILD-SCRIPT names, with the script's absolute path in
 this tree. A path relative to the tree would be wrong when the build runs from an app's own
-project, as `cons bin' does (review of #524)."
-  (format nil "sbcl --script ~A"
+project, as `cons bin' does (review of #524). Quoted, so that it still works when pasted if
+the path has a space in it."
+  (format nil "sbcl --script \"~A\""
           (uiop:native-namestring
            (merge-pathnames (format nil "scripts/~A" build-script)
                             (uiop:pathname-parent-directory-pathname *vendor*)))))
 
 (defvar *label* "build-desktop-app"
   "The name every message here starts with: the script that is running.")
+
+(defvar *product* "the bundle"
+  "What messages here call the thing being built: \"the bundle\" for build-desktop-app, and
+\"the binary\" for the build script `cons bin' runs (CARRY-TREE-NATIVES).")
+
+(defvar *carry-option-p* t
+  "Whether the caller takes --carry PATH for a library the app loads from outside this tree.
+build-desktop-app does. The build script `cons bin' runs reads no arguments, so a message
+telling its user to pass one would be advice they cannot follow (review of #524).")
 
 (defparameter *lazy-natives* ouranos-lazy-natives:*lazy-natives*
   "The tree's lazily loaded libraries, from scripts/lazy-natives.lisp, which says what each
@@ -92,7 +102,7 @@ be built. Those are two different right answers and they shared a code path."
                    (format t "~&~A: ~A:~A FAILED -- ~A~%~%" *label* package loader
                            (substitute #\Space #\Newline (princ-to-string e)))
                    (format t "This image LOADS ~A, so the app calls into that library at run~%" package)
-                   (format t "time -- and the bundle cannot carry what will not resolve here.~%")
+                   (format t "time -- and ~A cannot carry what will not resolve here.~%" *product*)
                    (format t "Shipping it would produce an artifact that works on every build~%")
                    (format t "machine and fails on every user's (ADR-0011, #72, #78).~%~%")
                    (format t "Build the library first:  ~A~%" (%build-command build-script))
@@ -166,7 +176,7 @@ shows up as an app that cannot start on a machine without its own copy."
         (format t "  searched for: ~{~A~^, ~}~%~%" expected)
         (format t "The shipped app looks beside its own executable for those names. A file~%")
         (format t "under any other name is not found, the search falls through to the OS~%")
-        (format t "loader, and the bundle runs only on a machine that already has its own~%")
+        (format t "loader, and ~A runs only on a machine that already has its own~%" *product*)
         (format t "copy -- which is every developer's and no user's (pre-publication issue 329, ADR-0011).~%"))
       (sb-ext:exit :code 3))))
 
@@ -175,8 +185,9 @@ shows up as an app that cannot start on a machine without its own copy."
 
 A SEPARATE PASS FROM WAKE-LAZY-NATIVES, and the separation is the fix rather than tidiness.
 Waking asks \"does this resolve on the build machine\". Shipping asks \"will the bundle carry
-it\". Those are the same question only on a host with no system copy installed -- which is
-every Windows box and every CI runner we verify on, and is exactly why this hole survived
+it\". Those are the same question only on a host with no system copy installed. Every Windows
+machine is such a host. The Linux and macOS CI runners are not: both have a system libuv (review
+of #524, run 36958189233). Treating the two questions as one is the hole that survived
 pre-publication PR 310's three-direction check and shipped (pre-publication issue 325).
 
 What it cost: with vendor/libuv absent and Homebrew's libuv present, the waker fell through
@@ -203,7 +214,7 @@ natives, so they never reach this pass."
              ;; refusing is the safe reading, since we cannot show the library will travel.
              (let ((*standard-output* *error-output*))
                (format t "~&~A: ~A woke but recorded no library path.~%" *label* package)
-               (format t "Cannot show the bundle will carry it, so refusing (pre-publication issue 325).~%"))
+               (format t "Cannot show ~A will carry it, so refusing (pre-publication issue 325).~%" *product*))
              (sb-ext:exit :code 3))
             ((and resolved (uiop:subpathp resolved vendor))
              (format t "~&  will carry  ~A  <- ~A~%" package (human-path:human-path path)))
@@ -214,7 +225,7 @@ natives, so they never reach this pass."
                (if resolved
                    (format t "That path is outside vendor/, so CARRY-NATIVE-LIBRARIES will not copy it.~%")
                    (format t "That is a bare soname: the OS loader found a copy of its own and never~%said where, so CARRY-NATIVE-LIBRARIES has no path to copy.~%"))
-               (format t "~%The bundle would ship without the library and run only on machines~%")
+               (format t "~%~@(~A~) would ship without the library and run only on machines~%" *product*)
                (format t "that happen to have their own copy. It works on this build machine~%")
                (format t "and fails on every user's (ADR-0011, #72, #78).~%~%")
                (format t "Build the vendored library first:~%")
@@ -317,11 +328,13 @@ be missing from a step named for waking."
                                    *label* e (getf entry :package) (uiop:native-namestring *bundle*))
                            (sb-ext:exit :code 3)))))))
                 (truename
-                 (format t "~&  system    ~A (~A) -- not carried; if the app ships it, pass --carry with that path~%" name (human-path:human-path truename)))
+                 (if *carry-option-p*
+                     (format t "~&  system    ~A (~A) -- not carried; if the app ships it, pass --carry with that path~%" name (human-path:human-path truename))
+                     (format t "~&  system    ~A (~A) -- not carried; the machine the binary runs on needs its own copy~%" name (human-path:human-path truename))))
                 (t
                  (format t "~&  system    ~A -- resolved by the OS loader, not carried~%"
                          name)))))))
-    (format t "~&~A: ~D of this tree's native librar~:@P carried into the bundle.~%" *label* carried)
+    (format t "~&~A: ~D of this tree's native librar~:@P carried into ~A.~%" *label* carried *product*)
     (release-lazy-natives)))
 
 (defun carry-tree-natives (bundle &key (label *label*))
@@ -331,7 +344,9 @@ looks for them beside itself and not in the tree it was built from (#499). Ends 
 exit code 3, naming the problem, if the image loads one that cannot be carried. Call it last
 before the dump."
   (let ((*bundle* (uiop:ensure-directory-pathname bundle))
-        (*label* label))
+        (*label* label)
+        (*product* "the binary")
+        (*carry-option-p* nil))
     (ensure-directories-exist *bundle*)
     (wake-lazy-natives)
     (verify-natives-will-be-carried)
