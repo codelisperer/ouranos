@@ -58,6 +58,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   ;; Tasks (#532): each new task gets a copy of TASK-SCRIPT, the statuses its polls answer in
   ;; order, the last repeated. TASKS maps a task id to what is left of its script.
   (task-script '(:completed)) (task-poll-ms 1000) (task-ttl-ms 'null)
+  ;; An HTTP status every tasks/get is answered with instead of the task, or NIL.
+  (get-status nil)
   (tasks (make-hash-table :test #'equal)) (task-count 0) (cancels '())
   (lock (sb-thread:make-mutex)))
 
@@ -148,7 +150,10 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
 (defun %result (fake method params)
   "The result for METHOD, or (:ERROR code text), or (:STATUS n)."
   (cond
-    ((string= method "tasks/get") (%task-poll fake (gethash "taskId" params)))
+    ((string= method "tasks/get")
+     (if (fake-get-status fake)
+         (list :status (fake-get-status fake))
+         (%task-poll fake (gethash "taskId" params))))
     ((string= method "tasks/cancel")
      (sb-thread:with-mutex ((fake-lock fake))
        (push (gethash "taskId" params) (fake-cancels fake))
@@ -1666,7 +1671,7 @@ it read before, changes nothing, and its own finish is refused, so the task is r
                                         :agent "a" :conversation nil :call-id "c1" :started 100
                                         :seen 101 :deadline nil :interval 5 :next-poll 105
                                         :status "working" :outcome :cancelled :text "gone"
-                                        :announced-at 106))
+                                        :announced-at 106 :failures 3 :failure :sign-in))
          (back (mcp:task-from-json (mcp:task-to-json task)))
          (store (mcp:make-memory-task-store)))
     (is (equalp task back))
@@ -1674,6 +1679,65 @@ it read before, changes nothing, and its own finish is refused, so the task is r
     (mcp:save-task store back)
     (is-true (mcp:remove-task store back))
     (is (null (mcp:remove-task store back)) "a second remover is told it was already gone")))
+
+(test polls-that-keep-failing-wait-twice-as-long-each-time-up-to-the-cap
+  "After each failed poll in a row the wait doubles, from the task's poll interval up to the
+connection's TASK-BACKOFF-CAP, five minutes by default. A poll that succeeds goes back to the
+interval (#565 review)."
+  (is (= 300 (mcp:connection-task-backoff-cap (mcp:make-connection :name "x" :url "http://x/"))))
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working))))
+    (with-fake (client fake :tasks t :task-backoff-cap 8)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (is (= 1 (mcp:task-interval (%only-task client))))
+      (let ((waits '()))
+        (dotimes (i 5)
+          (let ((now (mcp:task-next-poll (%only-task client))))
+            (setf (fake-get-status fake) 503)
+            (is (null (mcp:poll-tasks client :now now)))
+            (push (- (mcp:task-next-poll (%only-task client)) now) waits)))
+        (is (equal '(1 2 4 8 8) (reverse waits)) "~S" (reverse waits))
+        (is (= 5 (mcp:task-failures (%only-task client))))
+        (let ((now (mcp:task-next-poll (%only-task client))))
+          (setf (fake-get-status fake) nil)
+          (mcp:poll-tasks client :now now)
+          (is (= 1 (- (mcp:task-next-poll (%only-task client)) now)) "a success resets the wait")
+          (is (= 0 (mcp:task-failures (%only-task client)))))))))
+
+(test sign-in-required-is-emitted-once-for-each-run-of-failed-polls
+  "While a task's principal has to sign in, each poll fails. The app is told once, with
+:SIGN-IN-REQUIRED and AUTHORIZATION-REQUIRED, when the run of failures starts, not on every
+poll. A poll that succeeds, or that fails for another reason, ends the run, and the next sign-in
+failure tells the app again (#565 review)."
+  (let* ((token "good")
+         (fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working)
+                          :require-token "good"))
+         (events 0) (signalled 0))
+    (with-fake (client fake :tasks t :token-source (lambda (c p) (declare (ignore c p)) token))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (flet ((poll (&key fail)
+               (setf (fake-get-status fake) (and fail 503))
+               (handler-bind ((mcp:authorization-required (lambda (c) (declare (ignore c)) (incf signalled))))
+                 (evt:with-observer ((lambda (e) (when (eq :sign-in-required (evt:event-type e))
+                                                   (incf events))))
+                   (mcp:poll-tasks client :now (mcp:task-next-poll (%only-task client)))))))
+        (setf token "expired")
+        (poll) (poll) (poll)
+        (is (= 1 events) "three failed polls, one event")
+        (is (= 1 signalled))
+        (is (eq :sign-in (mcp:task-failure (%only-task client))))
+        (setf token "good")
+        (poll)
+        (is (null (mcp:task-failure (%only-task client))) "a success ends the run")
+        (setf token "expired")
+        (poll) (poll)
+        (is (= 2 events) "a new run after a success")
+        (setf token "good")
+        (poll :fail t)
+        (is (eq :error (mcp:task-failure (%only-task client))) "the server failed the poll")
+        (setf token "expired")
+        (poll)
+        (is (= 3 events) "a new run after another kind of failure")
+        (is (= 3 signalled))))))
 
 (test a-store-announces-a-finished-task-once
   "ANNOUNCE-TASK marks a finished record as announced, and returns true only for the call that

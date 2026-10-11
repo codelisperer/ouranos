@@ -23,7 +23,10 @@ after which a task that has not finished is given up, or NIL for none. INTERVAL 
 between polls, and NEXT-POLL the universal time the next poll is due. STATUS is the status the
 server last gave. OUTCOME and TEXT are NIL until the task finishes; then they are what POLL-TASKS
 returns for it, kept in the record until POLL-TASKS has returned it. ANNOUNCED-AT is NIL until
-:TASK-FINISHED is sent for the finished task, and then the universal time it was sent."
+:TASK-FINISHED is sent for the finished task, and then the universal time it was sent. FAILURES
+is how many polls in a row have failed, which sets how long the next one waits, and FAILURE the
+kind of the last of them: :SIGN-IN when its principal had to sign in, :ERROR for any other
+failure, or NIL after a poll that succeeded."
   (key "" :type string)
   (connection "" :type string)
   (id "" :type string)
@@ -36,11 +39,16 @@ returns for it, kept in the record until POLL-TASKS has returned it. ANNOUNCED-A
   (status "working" :type string)
   (outcome nil)
   (text nil)
-  (announced-at nil))
+  (announced-at nil)
+  (failures 0 :type integer)
+  (failure nil))
 
 (defparameter +task-outcomes+ '(("ok" . :ok) ("error" . :error) ("cancelled" . :cancelled)
                                 ("expired" . :expired) ("unknown" . :unknown))
   "A finished task's outcomes, by the name TASK-TO-JSON writes.")
+
+(defparameter +task-failures+ '(("sign-in" . :sign-in) ("error" . :error))
+  "The kinds of failed poll, by the name TASK-TO-JSON writes.")
 
 ;;; --- JSON ------------------------------------------------------------------------------
 
@@ -71,7 +79,9 @@ for a held turn (#531)."
               "seen" (task-seen task) "next-poll" (task-next-poll task)
               "status" (task-status task)
               "outcome" (orn (car (rassoc (task-outcome task) +task-outcomes+)))
-              "text" (orn (task-text task)) "announced-at" (orn (task-announced-at task))))))
+              "text" (orn (task-text task)) "announced-at" (orn (task-announced-at task))
+              "failures" (task-failures task)
+              "failure" (orn (car (rassoc (task-failure task) +task-failures+)))))))
 
 (defun task-from-json (text)
   "The task TASK-TO-JSON wrote as TEXT. The text is parsed as JSON, never read by the Lisp
@@ -86,7 +96,9 @@ reader."
                   :seen (val "seen") :interval (val "interval") :next-poll (val "next-poll")
                   :status (val "status")
                   :outcome (cdr (assoc (val "outcome") +task-outcomes+ :test #'equal))
-                  :text (val "text") :announced-at (val "announced-at")))))
+                  :text (val "text") :announced-at (val "announced-at")
+                  :failures (or (val "failures") 0)
+                  :failure (cdr (assoc (val "failure") +task-failures+ :test #'equal))))))
 
 ;;; --- the store protocol ----------------------------------------------------------------
 ;;;

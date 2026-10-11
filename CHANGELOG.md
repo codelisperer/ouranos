@@ -350,7 +350,10 @@ its tag.
   as JSON with `task-to-json` and `task-from-json`. A task without the fields the specification
   requires fails the call with outcome `:unknown`. The time-to-live counts from when the client
   received the task, and a task is polled once more at its deadline before it expires. A task
-  whose `ttlMs` is null expires after the connection's `:task-lifetime`, one day by default. The
+  whose `ttlMs` is null expires after the connection's `:task-lifetime`, one day by default.
+  After a failed poll the wait doubles with each failure in a row, from the poll interval up to
+  the connection's `:task-backoff-cap`, five minutes by default, and `:sign-in-required` is
+  emitted once for each run of sign-in failures, not on every poll. The
   client declares no elicitation, sampling or roots, so a server must not ask a task for
   input; a task that does is cancelled, with a `:task-input-refused` event naming the request
   methods. Answering elicitations is #563. See `praxeon/docs/mcp.md`, "Long-running calls".

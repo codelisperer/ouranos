@@ -80,7 +80,7 @@ has, or two tools under one name. Nothing was registered."))
 (defstruct (connection (:constructor make-connection
                            (&key name url token-source per-user (timeout 30) (call-timeout 120)
                                  (max-body-bytes (* 8 1024 1024)) tasks
-                                 (task-lifetime (* 24 60 60)))))
+                                 (task-lifetime (* 24 60 60)) (task-backoff-cap (* 5 60)))))
   "An MCP server the app connects to, as data.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
@@ -94,7 +94,10 @@ reply. TASKS is true to declare the MCP Tasks extension, so the server may answe
 with a task that POLL-TASKS follows after the turn has ended (#532); it applies to servers on the
 current revision only. TASK-LIFETIME is the most seconds the client follows a task whose server
 gives it no time-to-live (a ttlMs of null), counted from when the client received it; one day by
-default. A task still not finished then is polled once more and finishes as :EXPIRED."
+default. A task still not finished then is polled once more and finishes as :EXPIRED.
+TASK-BACKOFF-CAP is the most seconds between polls of a task whose polls keep failing; five
+minutes by default. The wait after a failed poll doubles with each consecutive failure, from the
+task's poll interval up to this cap, and a poll that succeeds resets it."
   (name "" :type string)
   (url "" :type string)
   (token-source nil)
@@ -103,7 +106,8 @@ default. A task still not finished then is polled once more and finishes as :EXP
   (call-timeout 120)
   (max-body-bytes (* 8 1024 1024))
   (tasks nil)
-  (task-lifetime (* 24 60 60)))
+  (task-lifetime (* 24 60 60))
+  (task-backoff-cap (* 5 60)))
 
 (defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN
@@ -159,12 +163,18 @@ checking with the user."
                        (list control arguments) :outcome :unknown)
       (%request-failed client control arguments)))
 
+(defvar *sign-in-told* nil
+  "True while polling a task whose previous poll already told the app that its principal must
+sign in. %REQUIRE-SIGN-IN then fails the request without signalling AUTHORIZATION-REQUIRED or
+emitting :SIGN-IN-REQUIRED again, so the app hears once per run of failed polls (#565).")
+
 (defun %require-sign-in (client principal challenge)
-  "Let the app know that PRINCIPAL must sign in, then fail the call."
+  "Let the app know that PRINCIPAL must sign in, unless *SIGN-IN-TOLD*, then fail the call."
   (let ((name (connection-name (client-connection client))))
-    (signal 'authorization-required :connection name :principal principal :challenge challenge)
-    (evt:emit :sign-in-required :connection name :principal principal)
-    (log:info "praxeon/mcp: sign-in required" :connection name)
+    (unless *sign-in-told*
+      (signal 'authorization-required :connection name :principal principal :challenge challenge)
+      (evt:emit :sign-in-required :connection name :principal principal)
+      (log:info "praxeon/mcp: sign-in required" :connection name))
     (error 'sign-in-needed
            :connection name :outcome :not-run
            :text (format nil "The connection ~A needs the user to sign in before its server can be used. Ask the user to sign in."
