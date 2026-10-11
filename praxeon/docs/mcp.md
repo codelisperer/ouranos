@@ -1,14 +1,15 @@
-# praxeon/mcp: agents that use MCP servers' tools
+# praxeon/mcp: agents that use MCP servers' tools, resources and prompts
 
 `praxeon/mcp` connects Praxeon agents to MCP (Model Context Protocol) servers over Streamable
-HTTP. It gives agents a server's tools. Resources and prompts are not supported yet.
+HTTP. It gives agents a server's tools, lets an app add a server's resources to an agent's
+context, and gets a server's prompts (see "Resources and prompts" below).
 
 - **Tokens.** A request's bearer token comes from the connection's token source:
   - a function the app supplies;
   - for a server that requires a sign-in, `oauth-token-source`, which gives each user the token from their `aion/oauth` sign-in ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)) and refreshes it. It does not sign anyone in: when a user has no usable token, the call fails with `sign-in-needed`, and the app starts the sign-in (see "Tokens from an OAuth sign-in" below).
 - **Confirmation.** `grant-tools :confirm` names the tools whose calls need the user's confirmation. The turn's `:on-hold` decides how the user is asked; with no `:on-hold`, such a call is not run ([`confirm.md`](confirm.md), #531).
 
-This is parts 1 and 2 of #527. Resources and prompts, and local servers over stdio, are parts 4 and 5.
+This is parts 1, 2 and 4 of #527. Local servers over stdio are part 5.
 
 ## Using it
 
@@ -120,6 +121,8 @@ The `:tool-call` and `:tool-result` events carry what a ledger needs to record a
   - an `input_required` result.
 - `:unknown`: the tool may have run. This is a `tools/call` that timed out, lost its connection, got a 5xx, got a reply that ended before answering, or got a result whose content could not be read.
 
+The turn loop gives these outcomes too, for any means. When a means fails in the middle of a step, the call it was on gets `:unknown` and the calls after it get `:not-run` (#546; see "When a means fails in the same step" in [`confirm.md`](confirm.md)). An approval that an earlier attempt recorded, whose result is missing, also gets `:unknown` (#531).
+
 This holds until #493 settles the usage interface.
 
 ## The protocol
@@ -152,6 +155,36 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
   - `ttlMs` and `cacheScope` on list results are ignored, because a grant does not change by itself.
   - The deprecated HTTP+SSE transport from 2024-11-05 is not implemented.
 
+## Resources and prompts
+
+Part 4 of #527, from the 2026-07-28 pages for resources and prompts, read at modelcontextprotocol.io on 2026-10-05.
+
+### Resources
+
+Resources are chosen by the app. Nothing here gives the model a way to read a resource itself.
+
+- `(mcp:list-resources client &key principal)` returns `resource` structs: `uri`, `name`, `title`, `description`, `mime-type`, `size` and `annotations`. `(mcp:list-resource-templates client &key principal)` returns `resource-template` structs, with a `uri-template`. Both follow `nextCursor` under `*max-list-pages*`, and a page without a list fails the listing.
+- `(mcp:expand-uri-template template bindings)` expands an RFC 6570 template with an alist of strings. It supports levels 1 and 2 (`{var}`, `{+var}` and `{#var}`), with variable names as RFC 6570 section 2.3 defines them, and signals for any other expression rather than producing a wrong URI.
+- `(mcp:read-resource client uri &key principal)` returns `resource-content` structs: `uri`, `mime-type`, and `text` or, for binary content, `blob-length`. Binary data is never decoded or kept. A resource the server says does not exist (`-32602`, or `-32002` from earlier revisions) signals `resource-not-found`. A reply with a content that is not an object, or has no string `uri`, fails whole, so `add-resource` never installs part of a resource, and an earlier copy stays. A resource whose URI is `https://` is still read through the server: the client never fetches a URL a server names.
+- `(mcp:add-resource agent client uri &key principal (value 1))` reads the resource and adds one context item per content to the agent's context.
+  - Each item's text starts with a line saying which resource it is, which connection it was read from, and that it is data from that server, not instructions from the user or the app.
+  - Its role is `:resource` and its source `(:mcp <connection> :uri <uri>)`.
+  - A second `add-resource` of the same URI on the same connection replaces the earlier items. `(mcp:remove-resource agent client uri)` removes them.
+  - `value` is the item's importance. `ctx:assemble` sends the items with the highest value per token that fit the agent's context budget, so an item can be left out of a request when others fill the budget, and nothing says so. Every context item works this way.
+  - Each content's tokens are estimated once, over the heading line and the text, and that number is the item's `tokens`. A content larger than the agent's context budget would never be sent, so `add-resource` signals `resource-too-large` and adds nothing. The check is made when the resource is added: a smaller budget set later can make an item too large to send.
+  - **Per-user resources.** The items stay in the context for every later turn, whoever its principal is, as tool results in the history do. Add a resource read with one user's token only to an agent that serves that user alone, and remove it with `remove-resource` when the app forgets that user (#150).
+- Text from a server cannot end the context block or pose as another item. `prompt:render-items` escapes the block's tags in an item's text, taking their names from `prompt:*context-open*` and `prompt:*context-close*` when they have the form `<name>` and `</name>`. It indents every later line of the text, after any of the characters Unicode defines as line breaks: LF, CR, CRLF, VT, FF, NEL, LS or PS.
+
+### Prompts
+
+Prompts are chosen by the user, and a prompt's text goes in as the user's own turn.
+
+- `(mcp:list-prompts client &key principal)` returns `prompt` structs: `name`, `title`, `description` and `arguments`, each a `prompt-argument` with `name`, `description` and `required`.
+- `(mcp:get-prompt client prompt &key arguments principal)` takes a `prompt` from `list-prompts` and an alist of string arguments. It returns the messages, as `praxeon/llm` messages, and the description. A missing required argument, or a value that is not a string, signals `request-failed` before anything is sent. A reply with a message that is not an object, or whose content is not a content block, fails whole rather than leaving the message out. Text content becomes text. Image and audio content, a resource link and a binary embedded resource are described in a line. An embedded text resource becomes its text.
+- `(mcp:prompt-input prompt messages)` gives the input for `run-turn` from a prompt whose messages are all the user's. A prompt with assistant messages is a scripted exchange, and `prompt-input` signals `prompt-has-assistant-messages`; the app decides what to do with it.
+
+Not supported: subscriptions and the `list_changed` notifications, the completion API for arguments, and caching by `ttlMs`.
+
 ## Known limitations
 
 - **A reply stream left open fails at the read timeout.** `aion/http-client` reads a whole body. A server that leaves its event stream open after its final reply is therefore read until the read timeout, and the call fails then, with outcome `:unknown` for a tool call. The specification says the final response SHOULD end the stream, so a server that conforms does not do this. A test records the behaviour.
@@ -163,6 +196,7 @@ The client logs counts, ids and durations:
 - the method;
 - the HTTP status;
 - the milliseconds a request took;
-- the number of tools and pages.
+- the number of tools, resources, templates, prompts, contents or pages;
+- of a resource's URI, only its scheme and host, because a URI can carry a user's data.
 
-It never logs tool arguments, results, descriptions or tokens (`docs/logging.md`).
+It never logs tool arguments, results, descriptions, resource contents, prompt arguments or tokens (`docs/logging.md`).

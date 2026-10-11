@@ -230,8 +230,20 @@ this shape in its suite rather than trusting it: a library upgrade that changed 
 otherwise stop highlighting silently, and an unhighlighted page looks exactly like a page
 with no Lisp on it.")
 
+(defun %language-name-p (lang)
+  "Whether LANG, a fenced block's info string as the renderer wrote it into the class
+attribute, is a language name: letters, digits and + - _ . # only, and not empty."
+  (and (plusp (length lang))
+       (every (lambda (c) (or (alphanumericp c) (find c "+-_.#"))) lang)))
+
 (defun highlight-code-blocks (html)
-  "HTML with every Lisp code block re-marked, and everything else untouched."
+  "HTML with every Lisp code block re-marked, and everything else untouched, except that a
+fenced block whose info string is not a language name loses its class attribute.
+
+3bmd writes the info string into the attribute with < and > escaped but not a double quote, so
+an info string with a quote in it closed the attribute and added attributes of its own to the
+page. A block keeps its class only when the attribute holds a language name (%LANGUAGE-NAME-P)
+and the tag ends right after it; any other opening tag is written as plain <pre><code>."
   (with-output-to-string (out)
     (loop with start = 0
           for open = (search +pre-open+ html :start2 start)
@@ -252,11 +264,13 @@ with no Lisp on it.")
                     ;; An unlabelled fence reaches the :nohighlight renderer with LANG "" and
                     ;; comes out as `<pre class="">'. Writing the attribute back empty would
                     ;; make klio's HTML for a plain block differ from every other renderer's
-                    ;; for no reason, so it is dropped.
-                    (if (zerop (length lang))
+                    ;; for no reason, so it is dropped. So is one that is not a language name,
+                    ;; or that has anything between it and `><code>' (see the docstring).
+                    (if (and (%language-name-p lang) (= code-open (1+ lang-end)))
+                        (write-string html out :start start :end body-start)
                         (progn (write-string html out :start start :end open)
-                               (write-string "<pre><code>" out))
-                        (write-string html out :start start :end body-start))
+                               (write-string "<pre><code>" out)
+                               (setf lang "")))
                     (if (member lang *lisp-languages* :test #'string-equal)
                         (write-string (highlight-lisp (%unescape (subseq html body-start body-end)))
                                       out)

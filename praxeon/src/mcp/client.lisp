@@ -157,7 +157,7 @@ checking with the user."
     (log:info "praxeon/mcp: sign-in required" :connection name)
     (error 'sign-in-needed
            :connection name :outcome :not-run
-           :text (format nil "The connection ~A needs the user to sign in before this tool can be used. Ask the user to sign in."
+           :text (format nil "The connection ~A needs the user to sign in before its server can be used. Ask the user to sign in."
                          name))))
 
 (defgeneric token-for (source connection principal)
@@ -623,7 +623,7 @@ may have been processed is never sent twice."
           (unless (hash-table-p result)
             (%failed-in-flight client "its result was not a JSON object." '()))
           (when (equal "input_required" (%get result "resultType"))
-            (%request-failed client "the tool asked for input this client cannot provide."
+            (%request-failed client "the server asked for input this client cannot provide."
                              '() :outcome :not-run))
           result)))))
 
