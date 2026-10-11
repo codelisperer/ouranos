@@ -69,15 +69,47 @@ workers and answers GET / with 200 and its own page (#472)."
 ;;; what shows the copy was used on every leg; the run without the copy is skipped where a system
 ;;; libuv would be found (review of #524).
 
+(defun %unsetenv (name)
+  "Remove NAME from this process's environment. Through sb-posix, which UIOP's own (SETF GETENV)
+already requires on SBCL, on Windows too; a child process then sees NAME as not defined."
+  (uiop:symbol-call :sb-posix :unsetenv name))
+
 (defun %with-environment (bindings thunk)
   "Call THUNK with each (NAME . VALUE) in BINDINGS set in this process's environment, which
 the processes it starts inherit, and put the previous values back afterwards. A VALUE of NIL
-sets the variable to the empty string, which the loaders here treat as unset."
+sets the variable to the empty string, which the loaders here treat as unset. A variable that
+was not set before is unset again afterwards, not left as the empty string (#564)."
   (let ((previous (mapcar (lambda (b) (cons (car b) (uiop:getenv (car b)))) bindings)))
     (unwind-protect
          (progn (dolist (b bindings) (setf (uiop:getenv (car b)) (or (cdr b) "")))
                 (funcall thunk))
-      (dolist (b previous) (setf (uiop:getenv (car b)) (or (cdr b) ""))))))
+      (dolist (b previous)
+        (if (cdr b)
+            (setf (uiop:getenv (car b)) (cdr b))
+            (%unsetenv (car b)))))))
+
+(test with-environment-unsets-a-variable-that-was-not-set
+  "%WITH-ENVIRONMENT puts back each variable as it found it: a value that was set is restored,
+and a variable that was not set is removed, so a later test that asks whether it is set at all
+gets the true answer (#564). This tells the fix from the old code only on Linux and macOS: on
+Windows, setting a variable to the empty string removes it, so the old code's empty string
+already left it unset there."
+  (let ((unset "OURANOS_TEST_564_UNSET")
+        (set "OURANOS_TEST_564_SET"))
+    (%unsetenv unset)
+    (setf (uiop:getenv set) "before")
+    (unwind-protect
+         (progn
+           (%with-environment `((,unset . "during") (,set . nil))
+                              (lambda ()
+                                (is (equal "during" (uiop:getenv unset)))
+                                ;; Windows removes a variable that is set to the empty
+                                ;; string, so there it reads as unset.
+                                (is (member (uiop:getenv set) '(nil "") :test #'equal))))
+           (is (null (uiop:getenv unset)) "a variable that was not set is not set afterwards")
+           (is (equal "before" (uiop:getenv set)) "a variable that was set has its value back"))
+      (%unsetenv unset)
+      (%unsetenv set))))
 
 (defun %copy-directory (from to)
   "Copy FROM's files, and those of its subdirectories, into TO."
