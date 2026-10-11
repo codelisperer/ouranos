@@ -1244,16 +1244,42 @@ rather than being left out: leaving it out could make a scripted exchange look u
         (handler-case (progn (mcp:get-prompt client (first (mcp:list-prompts client))) (fail "no failure"))
           (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))))))
 
+(test a-prompt-message-content-is-one-content-block-of-a-known-type-with-its-fields
+  "Every schema revision defines a PromptMessage's content as one ContentBlock, so a list of blocks
+fails the reply, as does a block whose type is unknown or whose required fields are missing or
+not strings (#569)."
+  (dolist (content (list (vector (%obj "type" "text" "text" "a"))
+                         (%obj "type" "text" "text" 42)
+                         (%obj "type" "text")
+                         (%obj "type" "image" "data" 42 "mimeType" "image/png")
+                         (%obj "type" "audio" "data" "AAAA")
+                         (%obj "type" "resource_link" "uri" "file:///x")
+                         (%obj "type" "resource" "resource" (%obj "uri" "file:///y"))
+                         (%obj "type" "resource" "resource" "file:///y")
+                         (%obj "type" "video" "data" "AAAA" "mimeType" "video/mp4")))
+    (let ((fake (make-fake)))
+      (setf (fake-prompts fake) (list (%prompt-json "p"))
+            (fake-prompt-messages fake) (list (cons "p" (vector (%obj "role" "user" "content" content)))))
+      (with-fake (client fake)
+        (handler-case (progn (mcp:get-prompt client (first (mcp:list-prompts client)))
+                             (fail "~S was accepted" (jzon:stringify content)))
+          (mcp:request-failed (e)
+            (is (eq :not-run (cnd:tool-error-result-outcome e)) "~S" (jzon:stringify content))))))))
+
 (test a-malformed-resource-content-fails-the-reply-and-keeps-the-earlier-copy
-  "A content that is not an object, or has no string uri, fails the reply rather than being left
-out, so ADD-RESOURCE never installs part of a resource, or replaces it with nothing."
+  "A content that is not an object, has no string uri, or has neither a string text nor a string
+blob fails the reply rather than being left out, so ADD-RESOURCE never installs part of a
+resource, or replaces it with nothing."
   (let ((fake (make-fake)))
     (setf (fake-contents fake) (list (cons "file:///r" (%contents (%obj "uri" "file:///r" "text" "good")))))
     (with-fake (client fake)
       (let ((agent (actor:make-agent)))
         (mcp:add-resource agent client "file:///r")
         (dolist (contents (list (vector (%obj "uri" "file:///r" "text" "new") "junk")
-                                (vector (%obj "text" "no uri"))))
+                                (vector (%obj "text" "no uri"))
+                                ;; The schema requires a text or a blob (#569).
+                                (vector (%obj "uri" "file:///r"))
+                                (vector (%obj "uri" "file:///r" "text" 42))))
           (setf (fake-contents fake) (list (cons "file:///r" contents)))
           (handler-case (progn (mcp:read-resource client "file:///r") (fail "no failure"))
             (mcp:request-failed (e) (is (eq :not-run (cnd:tool-error-result-outcome e)))))

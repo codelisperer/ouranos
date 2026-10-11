@@ -213,8 +213,11 @@ operator or a modifier, signals an error, rather than producing a wrong URI."
 ;;; --- reading ---------------------------------------------------------------------------
 
 (defun %content-from-json (object)
+  "OBJECT as a RESOURCE-CONTENT, or NIL when it has no string uri, or neither a string text nor a
+string blob, one of which the schema requires (#569)."
   (let ((uri (gethash "uri" object)))
     (and (stringp uri)
+         (or (stringp (gethash "text" object)) (stringp (gethash "blob" object)))
          (%make-resource-content :uri uri
                                  :mime-type (%string-or-nil (gethash "mimeType" object))
                                  :text (%string-or-nil (gethash "text" object))
@@ -225,7 +228,8 @@ operator or a modifier, signals an error, rather than producing a wrong URI."
   "The contents of the resource at URI, as RESOURCE-CONTENT structs, read through CLIENT's
 server, whatever URI's scheme. Signals RESOURCE-NOT-FOUND when the server says the resource does
 not exist, and REQUEST-FAILED for other failures, including a reply without a list of contents,
-a content that is not an object or has no string uri, and an input_required result."
+a content that is not an object, has no string uri, or has neither a string text nor a string
+blob, and an input_required result."
   (check-type uri string)
   (let ((result
           (handler-case (%request client "resources/read" (%object "uri" uri) :principal principal)
@@ -245,7 +249,7 @@ a content that is not an object or has no string uri, and an input_required resu
       (let ((found (loop for object across contents
                          for content = (and (hash-table-p object) (%content-from-json object))
                          unless content
-                           do (%request-failed client "its resource reply had a content without a string uri." '()
+                           do (%request-failed client "its resource reply had a content without a string uri, or with neither text nor blob." '()
                                                :outcome :not-run)
                          collect content)))
         (log:info "praxeon/mcp: resource read"

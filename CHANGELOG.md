@@ -492,6 +492,15 @@ its tag.
   block under the `:pygments` or `:chroma` renderer is left for that program to escape. Every
   klio page changes the same way. An app that unescaped `render`'s output to work around this
   should stop.
+- **praxeon/mcp: `get-prompt` and `read-resource` refuse malformed content with
+  `request-failed`** (#569). `get-prompt` accepted a list of content blocks as a message's
+  content, which every schema revision defines as one block, and accepted any object as a
+  block, so `{"type":"text","text":42}` gave a message whose text was the integer 42. A message's
+  content must now be one block of a known type (`text`, `image`, `audio`, `resource_link` or
+  `resource`) with that type's required fields as strings. `read-resource`, and so
+  `add-resource`, accepted a content with neither a `text` nor a `blob`, which the schema
+  requires, and showed it as `[no content]`; the reply now fails, and an earlier copy added with
+  `add-resource` is kept.
 
 ## v0.1.7 — 2026-09-30
 
