@@ -389,6 +389,17 @@ its tag.
   still running the jobs queued behind it; it now joins every worker, so when it returns no job
   is running and none will start. `stop-pool`'s docstring now says that the calling job's
   worker runs the jobs queued behind it before it exits.
+- **hyperion/markdown: with `:allow-html nil`, inline code, indented code, colourised fenced
+  blocks and entities are escaped once** (#559). `render` escaped the whole source before 3bmd
+  parsed it, and 3bmd escaped code again, so `(< a b)` in inline code reached the reader as
+  `(&lt; a b)`, and the entity `&amp;` showed as the text `&amp;`. The safe mode now stands
+  placeholder characters in for `<` and `>` while 3bmd parses, so raw HTML, HTML blocks and
+  autolinks are still shown as text, and turns them back into `<` and `>` before printing, where
+  3bmd escapes them once. `&` is left as written, so an entity renders as its character.
+  `:allow-html t` is unchanged. In the safe mode, a fenced block's language that is not made of
+  letters, digits and `+ - _ . #` is dropped, because some 3bmd renderers write it into a class
+  attribute without escaping a double quote. Every klio page changes the same way. An app that
+  unescaped `render`'s output to work around this should stop.
 
 ## v0.1.7 — 2026-09-30
 

@@ -138,3 +138,67 @@ and let the rest of the URL become new attributes."
   (is (equal '("https://example.com")
              (%attribute-values (md:render (format nil "[r][1]~%~%[1]: https://example.com"))
                                 "href"))))
+
+;;; --- code and entities are escaped once (#559) ----------------------------------------------
+;;;
+;;; Until #559 the safe mode escaped the whole source before 3bmd parsed it, and 3bmd escaped
+;;; code spans, indented code and colourised fenced blocks again, so the reader saw `&lt;' where
+;;; the author wrote `<'. Each case is checked in both modes, with <, > and & in it.
+
+(defun %safe-and-trusted (src)
+  (list (md:render src) (md:render src :allow-html t)))
+
+(test an-inline-code-span-is-escaped-once
+  (dolist (html (%safe-and-trusted "Use `(< a b) & (> c d)` here."))
+    (is (search "<code>(&lt; a b) &amp; (&gt; c d)</code>" html) "got ~S" html)))
+
+(test an-entity-renders-as-its-character
+  (dolist (html (%safe-and-trusted "Tom &amp; Jerry &copy; 2026."))
+    (is (search "Tom &amp; Jerry &copy; 2026." html) "got ~S" html)
+    (is (null (search "&amp;amp;" html)))))
+
+(test a-bare-ampersand-and-brackets-in-text-are-escaped-once-in-the-safe-mode
+  (is (search "<p>a &amp; b &lt; c &gt; d</p>" (md:render "a & b < c > d"))))
+
+(test an-indented-code-block-is-escaped-once
+  (dolist (html (%safe-and-trusted (format nil "Text.~%~%    (< a b) & (> c d)~%")))
+    (is (search "<pre><code>(&lt; a b) &amp; (&gt; c d)" html) "got ~S" html)))
+
+(test a-fenced-block-is-escaped-once-whether-or-not-it-is-colourised
+  "An unlabelled block goes through 3bmd's ESCAPE-PRE-STRING, which escapes only < and >, so the
+safe mode escapes & itself; a block in a language colorize knows is escaped by colorize. An
+`&lt;' the author wrote in the code is code, and shows as `&lt;'."
+  (let ((plain (md:render (format nil "```~%(< a b) & (> c d) &lt;~%```~%")))
+        (coloured (md:render (format nil "```python~%a < b & c > d &lt;~%```~%"))))
+    (is (search "<pre><code>(&lt; a b) &amp; (&gt; c d) &amp;lt;</code></pre>" plain) "got ~S" plain)
+    ;; With :allow-html t the source reaches ESCAPE-PRE-STRING as written: < and > are escaped
+    ;; once, and & is left as written, as before #559.
+    (is (search "<pre><code>(&lt; a b) & (&gt; c d) &lt;</code></pre>"
+                (md:render (format nil "```~%(< a b) & (> c d) &lt;~%```~%") :allow-html t)))
+    (is (search "a &lt; b &amp; c &gt; d &amp;lt;" coloured) "got ~S" coloured)
+    (is (search "<span class=\"code\">" coloured) "python is colourised, so this is the other path")
+    (is (search "a &lt; b &amp; c &gt; d &amp;lt;"
+                (md:render (format nil "```python~%a < b & c > d &lt;~%```~%") :allow-html t)))))
+
+(test raw-html-is-still-text-in-the-safe-mode
+  (let ((html (md:render (format nil "<script>alert(1)</script> <b>x</b> <http://x.org>~%~%<div>~%y~%</div>~%"))))
+    (is (null (search "<script" html)))
+    (is (null (search "<b>" html)))
+    (is (null (search "<div" html)))
+    (is (null (search "<a " html)) "an autolink stays text, as before")
+    (is (search "&lt;script&gt;alert(1)&lt;/script&gt;" html))))
+
+(test a-placeholder-character-in-the-source-does-not-become-a-bracket
+  "The safe mode stands U+FDD0 and U+FDD1 in for < and > while 3bmd parses. One already in the
+source is replaced with U+FFFD, so it cannot turn into a bracket."
+  (let ((html (md:render (format nil "a~Cb~Cc" (code-char #xFDD0) (code-char #xFDD1)))))
+    (is (search (format nil "a~Cb~Cc" (code-char #xFFFD) (code-char #xFFFD)) html) "got ~S" html)))
+
+(test a-fenced-language-that-is-not-a-name-is-dropped-in-the-safe-mode
+  "Under 3bmd's :nohighlight renderer the language is written into a class attribute without
+escaping a double quote, so the safe mode keeps it only when it is a name."
+  (let ((3bmd-code-blocks:*renderer* :nohighlight))
+    (is (search "<pre><code>code</code></pre>"
+                (md:render (format nil "```x\" onclick=\"a~%code~%```~%"))))
+    (is (search "<pre class=\"c++\"><code>code</code></pre>"
+                (md:render (format nil "```c++~%code~%```~%"))))))
