@@ -106,15 +106,15 @@ its tag.
   and `/search.json` and the search index carried it too. An author who kept private notes in
   comments has been publishing them on any site exported or served this way. `load-document` now
   removes every comment from the body before rendering or indexing it, so `document-body`,
-  `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment
-  inside a code span, a fenced block or an indented block is kept, including a block inside a
-  block quote and a fence opened on a list item's first line. `<!-->` and `<!--->` are whole
-  comments, as CommonMark 0.31.2 defines them, so the text after them is kept. Inside a list
-  item, a line indented by four to seven spaces after a blank line is kept as written too, but
-  the renderer reads it as the item's text, so a comment on it shows on the page; the load warns
-  with the document and the line number. A comment that is never closed removes the rest of the body, and
-  the load warns. `klio:strip-html-comments` does the
-  removal. `make-site-options`, and so `site-app` and `export-site`, take `:search-path nil` to
+  `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment is
+  kept only when klio's renderer shows it inside `<code>` on the page, as in a code span, a
+  fenced block or an indented block. klio decides this by rendering a copy of the body, so a
+  block quote, a `~~~` fence or a list item that renders as text does not keep a comment, and a
+  body that contains one of the Unicode noncharacters U+FDD2, U+FDD3 or U+FDE0 to U+FDEF has
+  every comment removed. `<!-->` and `<!--->` are whole comments, as CommonMark 0.31.2 defines
+  them, so the text after them is kept. A comment that is never closed removes the rest of the
+  body, and the load warns. `klio:strip-html-comments` does the removal; its `:render` argument
+  names the renderer, `render-markdown` by default. `make-site-options`, and so `site-app` and `export-site`, take `:search-path nil` to
   have no `search.json`: the export does not write it and the app does not serve it. A
   front-matter `search: false` leaves a page out of `search.json` and the search index; only
   `search: true` or no `search` key keeps it in. `search` is now a core key, read with

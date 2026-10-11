@@ -186,17 +186,13 @@ belongs."
                      (%make-content-meta)))
       ;; Comments are removed before anything renders or indexes the body, so an author's note
       ;; reaches neither the page nor search.json nor the search index (#556).
-      (multiple-value-bind (stripped unclosed shown) (strip-html-comments (or rest ""))
-        (let ((offset (count #\Newline text :end (- (length text) (length (or rest ""))))))
-          (setf body stripped)
+      (multiple-value-bind (stripped unclosed) (strip-html-comments (or rest ""))
+        (setf body stripped)
+        (when unclosed
           (setf (content-meta-warnings meta)
                 (append (content-meta-warnings meta)
-                        (and unclosed
-                             (list (format nil "~A: an HTML comment is not closed with `-->', so everything after its `<!--' is left out"
-                                           key)))
-                        (loop for line in shown
-                              collect (format nil "~A: line ~D: an HTML comment in an indented line of a list item is kept, and the page shows it as text"
-                                              key (+ offset line))))))))
+                        (list (format nil "~A: an HTML comment is not closed with `-->', so everything after its `<!--' is left out"
+                                      key)))))))
     (%make-document :key key :path path :slug (%slug-of key meta)
                     :meta meta :body body
                     ;; Rendered HERE, at load, not per request. Q3's highlighter runs at

@@ -1471,63 +1471,122 @@ out rather than published, and the load warns so the author can see why the page
     (is (null (search "forgot" (k:document-body d))))
     (is (= 1 (count-if (lambda (w) (search "not closed" w)) (k:content-tree-warnings tree))))))
 
-(test a-comment-inside-code-is-kept
-  "A comment written in code is something the code shows. A code span, a fenced block and an
-indented block keep theirs; a comment in the text beside them is still removed."
-  (let ((d (%loaded (format nil "Use `<!-- span -->` here <!-- gone-1 -->.~%~%```html~%<!-- fenced -->~%```~%~%    <!-- indented -->~%~%End <!-- gone-2 -->.~%"))))
-    (is (search "<!-- span -->" (k:document-body d)))
-    (is (search "<!-- fenced -->" (k:document-body d)))
-    (is (search "<!-- indented -->" (k:document-body d)))
-    (is (search "fenced" (k:document-html d)) "the fenced comment is on the page, as code")
+(defun %only-in-code-p (html needle)
+  "Whether NEEDLE appears in HTML, and every time inside a <code> element."
+  (loop with found = nil
+        for p = (search needle html) then (search needle html :start2 (1+ p))
+        while p
+        do (setf found t)
+           (let ((open (search "<code" html :end2 p :from-end t))
+                 (close (search "</code>" html :end2 p :from-end t)))
+             (unless (and open (or (null close) (> open close))) (return nil)))
+        finally (return found)))
+
+(test a-comment-the-page-shows-as-code-is-kept
+  "What counts as code is what klio's renderer puts inside <code>: a code span, a fenced block,
+an indented block, and a Lisp block whose text the highlighter splits into spans. A comment in
+the text beside them is removed. A ``` pair in a block quote or on a list item's first line is a
+code span across lines to this renderer, not a fence, and a comment inside it is kept too."
+  (let* ((d (%loaded (format nil "Use `<!-- spannote -->` here <!-- gone-1 -->.~%~%```html~%<!-- fencenote -->~%```~%~%    <!-- indentnote -->~%~%```lisp~%(defun f () 1) ; <!-- lispnote -->~%```~%~%> ```~%> <!-- quotenote -->~%> ```~%~%- ```~%  <!-- itemnote -->~%  ```~%~%End <!-- gone-2 -->.~%")))
+         (html (k:document-html d)))
+    (dolist (note '("spannote" "fencenote" "indentnote" "lispnote" "quotenote" "itemnote"))
+      (is (%only-in-code-p html note) "~A is on the page, inside <code>: ~S" note html)
+      (is (search note (k:document-body d))))
+    (is (search "<span" html) "the Lisp block was highlighted, so the marker was read across spans")
     (is (null (search "gone" (k:document-body d))))
-    (is (null (search "gone" (k:document-html d))))))
+    (is (null (search "gone" html)))))
 
-(test a-comment-in-an-indented-list-line-is-kept-and-the-load-names-its-line
-  "hyperion/markdown reads a line indented by four spaces after a blank line inside a list item
-as the item's text, not code, so the comment shows on the page. The stripper keeps the line, as
-it keeps code, and the load warns with the line's number in the file. The first assertions pin
-the renderer's reading, so a renderer that changes it fails here."
-  (let ((html (k::render-markdown (format nil "- item~%~%    <!-- note -->~%"))))
-    (is (search "<li>" html))
-    (is (search "<p>&lt;!-- note --&gt;</p>" html) "read as the item's text, not as code")
-    (is (null (search "<pre>" html))))
-  (is (search "<pre><code>" (k::render-markdown (format nil "para~%~%    <!-- note -->~%")))
-      "outside a list, the same line is code")
-  ;; The file: ---, title, ---, blank, - item, blank, then the comment on line 7.
-  (multiple-value-bind (d tree) (%loaded (format nil "- item~%~%    <!-- note -->~%~%After <!-- gone -->.~%"))
-    (is (search "<!-- note -->" (k:document-body d)))
-    (is (null (search "gone" (k:document-body d))) "a comment in the text after the list is removed")
-    (is (equal '("p: line 7: an HTML comment in an indented line of a list item is kept, and the page shows it as text")
-               (remove-if-not (lambda (w) (search "list item" w)) (k:content-tree-warnings tree)))))
-  (multiple-value-bind (d tree) (%loaded (format nil "Para.~%~%    <!-- code -->~%"))
-    (is (search "<!-- code -->" (k:document-body d)))
-    (is (notany (lambda (w) (search "list item" w)) (k:content-tree-warnings tree))
-        "an indented code block is not warned about")))
+(test a-comment-the-renderer-shows-as-text-is-removed-whatever-a-fence-looks-like
+  "Each input is one the CommonMark reading of fences took for code but klio's renderer shows as
+text: a longer fence closed by a shorter one, a closing fence with text after it, a fence never
+closed, indented code in a block quote, and ~~~ or unclosed fences in a quote or a list item.
+Each comment is removed from the body, the page and the index."
+  (loop for (name source) in '(("longer-fence" "````~%x~%```~%<!-- secret -->~%")
+                               ("closing-with-text" "```~%x~%``` y~%<!-- secret -->~%")
+                               ("unclosed-fence" "para~%~%```~%<!-- secret -->~%")
+                               ("quote-indented" "para~%~%>     <!-- secret -->~%")
+                               ("tilde-fence" "para~%~%~~~~~~~%<!-- secret -->~%~~~~~~~%")
+                               ("quoted-tilde" "> ~~~~~~~%> <!-- secret -->~%> ~~~~~~~%")
+                               ("after-deeper" "> ~~~~~~~%>~%> > ~~~~~~~%> <!-- secret -->~%> ~~~~~~~%")
+                               ("quoted-indented" "> Quoted text.~%>~%>     <!-- secret -->~%")
+                               ("unclosed-quoted" "> ```~%> <!-- secret -->~%~%After.~%")
+                               ("numbered" "1. ~~~~~~~%   <!-- secret -->~%   ~~~~~~~%")
+                               ("unclosed-item" "- ```~%  <!-- secret -->~%Left the item.~%")
+                               ("list-indented" "- item~%~%    <!-- secret -->~%"))
+        do (multiple-value-bind (d tree) (%loaded (format nil source))
+             (is (null (search "secret" (k:document-html d))) "~A: ~S" name (k:document-html d))
+             (is (null (search "secret" (k:document-body d))) "~A" name)
+             (is (null (%hits tree "secret")) "~A" name))))
 
-(test a-comment-in-a-fence-inside-a-block-quote-is-kept-and-one-after-the-quote-is-removed
-  "A fence or an indented block is found after a block quote's markers, so a comment in quoted
-code is kept.
-The block ends when a line has fewer markers than its fence, and a comment after it is removed."
-  (let ((d (%loaded (format nil "> ```html~%> <!-- quoted-tick -->~%> ```~%~%> ~~~~~~~%> <!-- quoted-tilde -->~%>~%> > ~~~~~~~%> <!-- after-deeper -->~%> ~~~~~~~%~%Text <!-- gone-1 -->.~%~%> Quoted text.~%>~%>     <!-- quoted-indented -->~%~%> ```~%> <!-- unclosed-quoted -->~%~%After the quote <!-- gone-2 -->.~%"))))
-    (is (search "<!-- quoted-tick -->" (k:document-body d)))
-    (is (search "<!-- quoted-tilde -->" (k:document-body d)))
-    (is (search "<!-- after-deeper -->" (k:document-body d))
-        "a deeper > ~~~ line is a line of the block, not its close")
-    (is (search "<!-- unclosed-quoted -->" (k:document-body d)))
-    (is (search "<!-- quoted-indented -->" (k:document-body d)) "indented code inside the quote")
-    (is (search "quoted-tick" (k:document-html d)) "the renderer shows it as code")
-    (is (null (search "gone" (k:document-body d))) "the blank line ended the quote and its fence")))
+(defun %escape-lt (text)
+  "TEXT with each < written as &lt;, as the renderer writes it, so a stand-in renderer's output
+is read the way klio's is."
+  (with-output-to-string (out)
+    (loop for c across text
+          do (if (char= c #\<) (write-string "&lt;" out) (write-char c out)))))
 
-(test a-comment-in-a-fence-on-a-list-items-first-line-is-kept
-  "A fence may open on a list item's first line. Its lines belong to the item while they are
-indented as far as the item's text, and a comment in the text after the list is removed."
-  (let ((d (%loaded (format nil "- ```html~%  <!-- dash -->~%  ```~%~%1. ~~~~~~~%   <!-- numbered -->~%   ~~~~~~~%~%- ```~%  <!-- unclosed-item -->~%Left the item <!-- gone -->.~%"))))
-    (is (search "<!-- dash -->" (k:document-body d)))
-    (is (search "<!-- numbered -->" (k:document-body d)))
-    (is (search "<!-- unclosed-item -->" (k:document-body d)))
-    (is (search "dash" (k:document-html d)) "the renderer shows it as code")
-    (is (null (search "gone" (k:document-body d)))
-        "a line indented less than the item's text ended the item and its fence")))
+(test a-comment-is-kept-only-while-every-pass-of-the-renderer-shows-it-as-code
+  "Removing a comment can change how the text around it renders, so the body is rendered again
+until a pass removes nothing. Each pass removes at least one comment or ends the loop, so there
+is at most one pass more than there are comments. A comment whose marker the renderer drops, or
+shows anywhere outside <code>, is removed. The renderers here are stand-ins that decide which
+markers are code."
+  (is (equal "a <!-- x --> b"
+             (k:strip-html-comments "a <!-- x --> b"
+                                    :render (lambda (text) (format nil "<pre><code>~A</code></pre>" (%escape-lt text)))))
+      "kept when the renderer shows it as code")
+  (let* ((calls 0)
+         (render (lambda (text)
+                   (incf calls)
+                   ;; The first pass shows the last comment as code and the others as text. Once
+                   ;; they are gone, the last is text too.
+                   (let ((last (position (code-char #xFDD2) text :from-end t)))
+                     (if (= calls 1)
+                         (format nil "<p>~A</p><pre><code>~A</code></pre>"
+                                 (%escape-lt (subseq text 0 last)) (%escape-lt (subseq text last)))
+                         (format nil "<p>~A</p>" (%escape-lt text)))))))
+    (is (equal "a  b  c" (k:strip-html-comments "a <!-- x --> b <!-- y --> c" :render render)))
+    (is (= 2 calls) "a second pass removed the comment the first pass kept"))
+  (let* ((calls 0)
+         (render (lambda (text)
+                   (incf calls)
+                   ;; Every pass shows the first comment left as text and the rest as code.
+                   (let ((second (position (code-char #xFDD2) text :start (1+ (position (code-char #xFDD2) text)))))
+                     (if second
+                         (format nil "<p>~A</p><pre><code>~A</code></pre>"
+                                 (%escape-lt (subseq text 0 second)) (%escape-lt (subseq text second)))
+                         (format nil "<p>~A</p>" (%escape-lt text)))))))
+    (is (equal "1 2 3 4 " (k:strip-html-comments "1 <!-- a -->2 <!-- b -->3 <!-- c -->4 <!-- d -->" :render render)))
+    (is (<= calls 5) "no more passes than comments plus one: ~D" calls))
+  (is (equal "a  b" (k:strip-html-comments "a <!-- x --> b"
+                                           :render (lambda (text) (declare (ignore text)) "<code>dropped</code>")))
+      "a marker the renderer dropped is not code")
+  (is (equal "a  b" (k:strip-html-comments "a <!-- x --> b"
+                                           :render (lambda (text)
+                                                     (format nil "<code>~A</code><p>~A</p>" (%escape-lt text) (%escape-lt text)))))
+      "a marker shown once in code and once outside is not code"))
+
+(test the-markers-reach-neither-the-page-nor-search-json-nor-the-index
+  "The markers are only in the copy given to the renderer. A body that already has one of the
+marker characters has every comment removed, code or not."
+  (flet ((markerless-p (string)
+           (notany (lambda (c) (<= #xFDD0 (char-code c) #xFDEF)) string)))
+    (with-content-dir (dir ("p.md" . (%doc "" (format nil "Text <!-- note -->.~%~%`<!-- kept -->`~%"))))
+      (let ((site (k:make-site dir)))
+        (k:boot site)
+        (let ((d (k:tree-document (k:site-tree site) "p")))
+          (is (search "kept" (k:document-html d)))
+          (is (markerless-p (k:document-html d)) "the page")
+          (is (markerless-p (k:document-body d)))
+          (is (markerless-p (nth-value 1 (%get (k:site-app site) "/search.json"))) "search.json")
+          (is (equal '("p") (%hits (k:site-tree site) "kept")))
+          (is (every #'markerless-p
+                     (loop for term being the hash-keys
+                             of (k::search-index-table (k:content-tree-index (k:site-tree site)))
+                           collect term))
+              "the index")))))
+  (let ((source (format nil "`<!-- code -->` ~C <!-- note -->" (code-char #xFDD2))))
+    (is (equal (format nil "`` ~C " (code-char #xFDD2)) (k:strip-html-comments source)))))
 
 (test a-comment-opened-as-less-than-bang-dash-dash-greater-than-is-already-closed
   "CommonMark 0.31.2, section 6.6: an HTML comment is <!-->, <!---> or <!-- ... -->. So <!--> and
