@@ -99,6 +99,17 @@ its tag.
   carries its own strict-build script to catch this case can use `cons --strict build` instead.
   (#525)
 
+- **praxeon: a `:tool-result` event can have the outcome `:started`, and `actor:*tool-call-id*`
+  is bound while a means runs** (#532). A means that starts work which finishes after the call
+  returns, such as an MCP task, returns `(actor:started-result text)`: the model is told `text`,
+  and the call's `:tool-result` event has outcome `:started`, not `:ok`, because the call has
+  not produced its result yet. The result comes later in an event of the means' own that
+  carries the same `:id`; for MCP that is `:task-finished`. `actor:*tool-call-id*` is the
+  model's id for the call while its means runs, and NIL otherwise. An app whose usage ledger
+  or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
+  connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
+  by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+
 ### Added
 
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
@@ -318,6 +329,21 @@ its tag.
   the three verify-bundle scripts run it. In a bundle, `aion/libgit` no longer looks in the source
   tree's `vendor/libgit2`, as `aion/uv` and `aion/tls` already did not (#472). The bundler now
   also finds licence files named `COPYING*`, and those beside the library in `lib/`.
+
+- **praxeon/mcp: a long-running tool call can finish after the turn that started it, through the
+  MCP Tasks extension** (#532). `make-connection :tasks t` declares the extension, so a server
+  on the current revision may answer `tools/call` with a task. The task is saved in the
+  client's task store (`make-client :task-store`; `make-memory-task-store` is the default and
+  keeps tasks in the process), the model is told the work has started, and a `:task-started`
+  event is emitted. The app's job runner calls `poll-tasks` on a schedule. It polls each due
+  task once, with a token fetched for the task's principal at that moment, and returns a
+  `finished-task` for each one that ended, with outcome `:ok`, `:error`, `:cancelled`,
+  `:expired` or `:unknown`; `task-report` gives text for a later turn. `cancel-task` sends
+  `tasks/cancel`. An app with its own store implements `save-task`, `due-tasks` and
+  `remove-task`, and can keep a task as JSON with `task-to-json` and `task-from-json`. The
+  client declares no elicitation, sampling or roots, so a server must not ask a task for
+  input; a task that does is cancelled, with a `:task-input-refused` event naming the request
+  methods. Answering elicitations is #563. See `praxeon/docs/mcp.md`, "Long-running calls".
 
 ### Fixed
 

@@ -22,11 +22,20 @@
 ;;;;                           with, or NIL; PRINCIPAL the user the turn runs for; AGENT the
 ;;;;                           agent's name; CONVERSATION its result-store conversation id, or
 ;;;;                           NIL; OUTCOME :OK,
-;;;;                           :ERROR, :NOT-RUN or :UNKNOWN (see TOOL-ERROR-RESULT); MS the
+;;;;                           :ERROR, :NOT-RUN or :UNKNOWN (see TOOL-ERROR-RESULT), or
+;;;;                           :STARTED for a call whose work finishes later (#532); MS the
 ;;;;                           call's duration. Enough for a usage ledger to record the call
 ;;;;                           (#527, until #493 settles the usage interface).
 ;;;;   (:type :sign-in-required :connection .. :principal ..)
 ;;;;                        -- an MCP tool needs the user to sign in (#527)
+;;;;   (:type :task-started :id .. :key .. :connection .. :tool .. :source .. :principal ..
+;;;;                        :agent .. :conversation ..)
+;;;;                        -- an MCP tool call became a task (#532); ID is the tool call's id
+;;;;   (:type :task-input-refused .. :methods (..))
+;;;;                        -- a task asked for input this client does not provide, and is
+;;;;                           cancelled (#532)
+;;;;   (:type :task-finished .. :outcome .. :ms ..)
+;;;;                        -- a task ended: :OK, :ERROR, :CANCELLED, :EXPIRED or :UNKNOWN
 ;;;;   (:type :truncated    :step N :max-tokens M :tool-calls (name ..))
 ;;;;                        -- step N stopped at the output limit M before the model had
 ;;;;                           finished; its text is not the answer and the named tool calls

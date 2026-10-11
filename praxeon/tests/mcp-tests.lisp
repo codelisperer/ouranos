@@ -40,7 +40,8 @@
 
 (defstruct (fake (:constructor make-fake
                      (&key (era :modern) (reply :json) (page-size 100) tools
-                           require-token (legacy-version "2025-11-25"))))
+                           require-token (legacy-version "2025-11-25")
+                           (task-script '(:completed)) (task-ttl-ms 'null))))
   "What the test server does. ERA is :MODERN, :LEGACY or :DUAL. REPLY is :JSON or :SSE (an
 event stream with a notification before the reply). TOOLS is a list of (NAME . PLIST): the
 plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500, :INPUT or
@@ -54,6 +55,10 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   (resources '()) (templates '()) (contents '()) (prompts '()) (prompt-messages '())
   (bad-page nil) (prompt-arguments nil)
   (sessions '()) (end-session nil) (calls 0) (initializes 0)
+  ;; Tasks (#532): each new task gets a copy of TASK-SCRIPT, the statuses its polls answer in
+  ;; order, the last repeated. TASKS maps a task id to what is left of its script.
+  (task-script '(:completed)) (task-poll-ms 1000) (task-ttl-ms 'null)
+  (tasks (make-hash-table :test #'equal)) (task-count 0) (cancels '())
   (lock (sb-thread:make-mutex)))
 
 (defun %obj (&rest kv)
@@ -96,9 +101,59 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   (%obj "name" name "description" (format nil "the ~A tool" name)
         "inputSchema" (if (member :schema plist) (getf plist :schema) (%obj "type" "object"))))
 
+(defun %declares-tasks-p (params)
+  "Whether PARAMS's _meta declares the Tasks extension."
+  (let ((caps (gethash "io.modelcontextprotocol/clientCapabilities" (or (gethash "_meta" params) (%obj)))))
+    (and (hash-table-p caps) (hash-table-p (gethash "extensions" caps))
+         (nth-value 1 (gethash "io.modelcontextprotocol/tasks" (gethash "extensions" caps))))))
+
+(defun %task-object (fake id status &rest more)
+  (apply #'%obj "taskId" id "status" status
+         "createdAt" "2026-10-11T00:00:00Z" "lastUpdatedAt" "2026-10-11T00:00:00Z"
+         "ttlMs" (fake-task-ttl-ms fake) "pollIntervalMs" (fake-task-poll-ms fake)
+         more))
+
+(defun %create-task (fake)
+  (let ((id (sb-thread:with-mutex ((fake-lock fake))
+              (let ((id (format nil "task-~D" (incf (fake-task-count fake)))))
+                (setf (gethash id (fake-tasks fake)) (copy-list (fake-task-script fake)))
+                id))))
+    (let ((h (%task-object fake id "working")))
+      (setf (gethash "resultType" h) "task")
+      h)))
+
+(defun %task-poll (fake id)
+  "What tasks/get answers for ID: the next status in its script."
+  (let ((step (sb-thread:with-mutex ((fake-lock fake))
+                (multiple-value-bind (script present) (gethash id (fake-tasks fake))
+                  (cond ((not present) :gone)
+                        ((cdr script) (pop (gethash id (fake-tasks fake))))
+                        (t (car script)))))))
+    (flet ((done (h) (setf (gethash "resultType" h) "complete") h))
+      (ecase step
+        (:gone (remhash id (fake-tasks fake)) (list :error -32602 "Task not found"))
+        (:working (done (%task-object fake id "working")))
+        (:completed (done (%task-object fake id "completed"
+                                        "result" (%obj "content" (vector (%obj "type" "text" "text" "finished work"))))))
+        (:error-result (done (%task-object fake id "completed"
+                                           "result" (%obj "content" (vector (%obj "type" "text" "text" "bad input"))
+                                                          "isError" t))))
+        (:failed (done (%task-object fake id "failed" "error" (%obj "code" -32603 "message" "boom"))))
+        (:cancelled (done (%task-object fake id "cancelled")))
+        (:input (done (%task-object fake id "input_required"
+                                    "inputRequests" (%obj "q" (%obj "method" "sampling/createMessage"
+                                                                    "params" (%obj "maxTokens" 10))
+                                                          "r" (%obj "method" "made/up" "params" (%obj))))))))))
+
 (defun %result (fake method params)
   "The result for METHOD, or (:ERROR code text), or (:STATUS n)."
   (cond
+    ((string= method "tasks/get") (%task-poll fake (gethash "taskId" params)))
+    ((string= method "tasks/cancel")
+     (sb-thread:with-mutex ((fake-lock fake))
+       (push (gethash "taskId" params) (fake-cancels fake))
+       (remhash (gethash "taskId" params) (fake-tasks fake)))
+     (%obj "resultType" "complete"))
     ((string= method "tools/list")
      (let* ((all (fake-tools fake))
             (start (let ((c (gethash "cursor" params))) (if (stringp c) (parse-integer c) 0)))
@@ -129,6 +184,12 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
          (:slow (sleep 3) (%obj "content" #()))
          (:status-500 (list :status 500))
          (:input (%obj "resultType" "input_required" "inputRequests" (%obj)))
+         ;; A compliant server makes a task only for a client that declared the extension, and
+         ;; otherwise answers -32021 (Missing Required Client Capability).
+         (:task (if (%declares-tasks-p params)
+                    (%create-task fake)
+                    (list :error -32021 "Missing required client capability")))
+         (:rogue-task (%create-task fake))
          (t (list :error -32602 "unknown tool")))))
     ((member method '("resources/list" "resources/templates/list" "prompts/list") :test #'string=)
      (let* ((member (cond ((string= method "resources/list") "resources")
@@ -167,7 +228,10 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
          (equal (th:request-header request "Mcp-Method") method)
          (or (not (member method '("tools/call" "resources/read" "prompts/get") :test #'equal))
              (equal (th:request-header request "Mcp-Name")
-                    (or (gethash "name" params) (gethash "uri" params)))))))
+                    (or (gethash "name" params) (gethash "uri" params))))
+         ;; The Tasks extension routes tasks/* by the task id in Mcp-Name.
+         (or (not (member method '("tasks/get" "tasks/update" "tasks/cancel") :test #'equal))
+             (equal (th:request-header request "Mcp-Name") (gethash "taskId" params))))))
 
 (defun %serve (fake)
   (lambda (request stream)
@@ -1261,3 +1325,200 @@ out, so ADD-RESOURCE never installs part of a resource, or replaces it with noth
           (is (= 1 (length (%context-items agent))))
           (is-true (search "good" (praxeon/context:ctx-item-content (first (%context-items agent))))
                    "the earlier copy is kept"))))))
+
+;;; --- tool calls that become tasks (#532) ---------------------------------------------------
+
+(defun %by-method (requests method)
+  (remove-if-not (lambda (r) (equal method (th:request-header r "Mcp-Method"))) requests))
+
+(defun %request-params (request)
+  (gethash "params" (jzon:parse (th:request-body-string request))))
+
+(defun %only-task (client)
+  "The one task in CLIENT's store, whatever its next poll."
+  (let ((tasks (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum)))
+    (is (= 1 (length tasks)))
+    (first tasks)))
+
+(defun %poll-when-due (client)
+  "Poll CLIENT's tasks at the moment the one stored task is next due."
+  (mcp:poll-tasks client :now (mcp:task-next-poll (%only-task client))))
+
+(test a-call-that-becomes-a-task-reports-started-and-is-polled-to-its-result
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working :completed)))
+        (events '()))
+    (with-fake (client fake :tasks t :per-user t
+                            :token-source (lambda (c p) (declare (ignore c)) (format nil "token-~A" p)))
+      (let ((agent (%agent-calling "docs__long")))
+        (mcp:grant-tools agent client :only :all :tools (mcp:list-tools client :principal "u1"))
+        (evt:with-observer ((lambda (e) (push e events)))
+          (is (equal "done" (actor:run-turn agent "go" :principal "u1")))
+          (let ((result (find :tool-result events :key #'evt:event-type))
+                (started (find :task-started events :key #'evt:event-type))
+                (task (%only-task client)))
+            (is (eq :started (getf result :outcome)) "a started task is not a result")
+            (is-true (search "background task" (getf result :content)))
+            (is (null (search "task-1" (getf result :content))) "the task id does not reach the model")
+            (is (null (search "task-1" (format nil "~S" started))) "nor an event")
+            (is (equal "c1" (getf started :id)))
+            (is (equal "c1" (mcp:task-call-id task)))
+            (is (equal "docs__long" (mcp:task-means task)))
+            (is (null (mcp:poll-tasks client :now (1- (mcp:task-next-poll task))))
+                "nothing is polled before it is due")
+            (is (null (%poll-when-due client)) "the first poll answers working")
+            (let ((finished (%poll-when-due client)))
+              (is (= 1 (length finished)))
+              (is (eq :ok (mcp:finished-task-outcome (first finished))))
+              (is (equal "finished work" (mcp:finished-task-text (first finished))))
+              (is-true (search "not a message from the user" (mcp:task-report (first finished))))
+              (is-true (search "docs__long" (mcp:task-report (first finished)))))
+            (is (null (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum))
+                "a finished task leaves the store")
+            (let ((done (find :task-finished events :key #'evt:event-type)))
+              (is (equal "c1" (getf done :id)) "the ledger joins it to the call by its id")
+              (is (eq :ok (getf done :outcome)))
+              (is (equal "u1" (getf done :principal)))
+              (is (equal (actor:agent-name agent) (getf done :agent)))
+              (is (equal '(:connection "docs" :tool "long" :per-user t) (getf done :source)))))))
+      (let* ((rs (requests))
+             (gets (%by-method rs "tasks/get"))
+             (call (first (%by-method rs "tools/call"))))
+        (is-true (%declares-tasks-p (%request-params call)))
+        (is (= 2 (length gets)) "two polls, none before it was due")
+        (is (every (lambda (r) (equal "task-1" (th:request-header r "Mcp-Name"))) gets))
+        (is (every (lambda (r) (equal "Bearer token-u1" (th:request-header r "Authorization"))) gets))))))
+
+(test each-poll-fetches-the-token-of-the-tasks-principal-at-that-moment
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working :working :completed)))
+        (n 0))
+    (with-fake (client fake :tasks t :per-user t
+                            :token-source (lambda (c p) (declare (ignore c))
+                                            (format nil "token-~A-~D" p (incf n))))
+      (let ((tool (first (mcp:list-tools client :principal "u1"))))
+        (is (typep (mcp:call-tool client tool (%obj) :principal "u7") 'actor:started-result))
+        (let ((actor:*principal* "someone-else"))
+          (dotimes (i 3) (%poll-when-due client))))
+      (is (equal '("Bearer token-u7-3" "Bearer token-u7-4" "Bearer token-u7-5")
+                 (mapcar (lambda (r) (th:request-header r "Authorization"))
+                         (%by-method (requests) "tasks/get")))))))
+
+(test without-the-option-no-task-is-declared-and-an-unasked-task-is-not-a-result
+  "A connection without :TASKS declares no extension, so a compliant server answers -32021. A
+server that sends a task anyway gets an invalid answer: the work may have started, so the
+outcome is unknown, and nothing is recorded."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task) '("rogue" :do :rogue-task)))))
+    (with-fake (client fake)
+      (let ((tools (mcp:list-tools client)))
+        (handler-case (progn (mcp:call-tool client (find "long" tools :key #'mcp:tool-name :test #'equal) (%obj))
+                             (fail "no error"))
+          (mcp:request-failed (e) (is (eql -32021 (mcp:request-failed-code e)))))
+        (handler-case (progn (mcp:call-tool client (find "rogue" tools :key #'mcp:tool-name :test #'equal) (%obj))
+                             (fail "an unasked task was taken"))
+          (mcp:request-failed (e) (is (eq :unknown (cnd:tool-error-result-outcome e))))))
+      (is (null (%declares-tasks-p (%request-params (first (%by-method (requests) "tools/call"))))))
+      (is (null (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum))))))
+
+(test a-task-that-asks-for-input-is-cancelled-and-does-not-wait
+  "The client declares no elicitation, sampling or roots, so under MRTR server requirement 7 a
+server sends it no input request. A task that asks anyway is cancelled with tasks/cancel, which
+is the one refusal the specification allows, and finishes as :CANCELLED, naming the kinds."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:input)))
+        (events '()))
+    (with-fake (client fake :tasks t)
+      (let ((tool (first (mcp:list-tools client))))
+        (mcp:call-tool client tool (%obj))
+        (let ((finished (evt:with-observer ((lambda (e) (push e events)))
+                          (%poll-when-due client))))
+          (is (= 1 (length finished)))
+          (is (eq :cancelled (mcp:finished-task-outcome (first finished))))
+          (is-true (search "sampling/createMessage" (mcp:finished-task-text (first finished))))
+          (is-true (search "an unknown kind" (mcp:finished-task-text (first finished))))
+          (is (null (search "made/up" (mcp:finished-task-text (first finished))))
+              "a method the specification does not define is not repeated to the model"))
+        (let ((refused (find :task-input-refused events :key #'evt:event-type)))
+          (is (equal '("made/up" "sampling/createMessage")
+                     (sort (copy-list (getf refused :methods)) #'string<))))
+        (is (eq :cancelled (getf (find :task-finished events :key #'evt:event-type) :outcome)))
+        (is (equal '("task-1") (fake-cancels fake)))
+        (is (null (mcp:poll-tasks client :now most-positive-fixnum)) "nothing is left to poll")
+        (is (= 1 (length (%by-method (requests) "tasks/get"))))))))
+
+(test each-terminal-status-finishes-the-task-with-its-outcome
+  (loop for (script outcome text) in '(((:error-result) :error "bad input")
+                                       ((:failed) :error "(code -32603)")
+                                       ((:cancelled) :cancelled "cancelled by the server")
+                                       ((:gone) :expired "no longer has"))
+        do (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script script)))
+             (with-fake (client fake :tasks t)
+               (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+               (let ((finished (first (%poll-when-due client))))
+                 (is (eq outcome (mcp:finished-task-outcome finished)) "~S" script)
+                 (is-true (search text (mcp:finished-task-text finished)) "~S: ~A" script
+                          (mcp:finished-task-text finished))
+                 (is (null (search "boom" (mcp:finished-task-text finished)))
+                     "the server's error message is not repeated"))))))
+
+(test a-task-past-its-time-to-live-finishes-as-expired-without-a-poll
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working)
+                         :task-ttl-ms 3000)))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let* ((task (%only-task client))
+             (finished (mcp:poll-tasks client :now (mcp:task-deadline task))))
+        (is (= (+ 3 (mcp:task-started task)) (mcp:task-deadline task)))
+        (is (eq :expired (mcp:finished-task-outcome (first finished))))
+        (is (null (%by-method (requests) "tasks/get")))))))
+
+(test a-cancelled-task-is-told-to-the-server-and-leaves-the-store
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working))))
+    (with-fake (client fake :tasks t)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (let ((finished (mcp:cancel-task client (%only-task client))))
+        (is (eq :cancelled (mcp:finished-task-outcome finished)))
+        (is (equal '("task-1") (fake-cancels fake)))
+        (is (equal "task-1" (th:request-header (first (%by-method (requests) "tasks/cancel"))
+                                                "Mcp-Name")))
+        (is (null (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum)))))))
+
+(test a-task-record-survives-json-and-finishes-once
+  (let* ((task (praxeon/mcp::%make-task :key "k" :connection "docs" :id "task-9" :principal "u1"
+                                        :tool "long" :means "docs__long"
+                                        :source '(:connection "docs" :tool "long" :per-user t)
+                                        :agent "a" :conversation nil :call-id "c1" :started 100
+                                        :deadline nil :interval 5 :next-poll 105 :status "working"))
+         (back (mcp:task-from-json (mcp:task-to-json task)))
+         (store (mcp:make-memory-task-store)))
+    (is (equalp task back))
+    (signals error (mcp:task-to-json (praxeon/mcp::%make-task :key "k" :principal :keyword)))
+    (mcp:save-task store back)
+    (is-true (mcp:remove-task store back))
+    (is (null (mcp:remove-task store back)) "a second remover is told it was already gone")))
+
+(test a-ledger-written-for-ok-and-error-counts-a-started-call-only-when-it-finishes
+  "A ledger an app wrote before #532 counts :OK and :ERROR results and puts anything else in
+OTHER. It sees the started call's :STARTED outcome as other, not as a result, and the
+:TASK-FINISHED event, joined by the call's id, gives it the result when the task ends."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:completed)))
+        (ledger (list :ok 0 :error 0 :other 0)) (started-ids '()))
+    (flet ((record (event)
+             (case (evt:event-type event)
+               (:tool-result
+                (case (getf event :outcome)
+                  (:ok (incf (getf ledger :ok)))
+                  (:error (incf (getf ledger :error)))
+                  (t (incf (getf ledger :other))
+                     (push (getf event :id) started-ids))))
+               (:task-finished
+                (when (member (getf event :id) started-ids :test #'equal)
+                  (case (getf event :outcome)
+                    (:ok (incf (getf ledger :ok)))
+                    (:error (incf (getf ledger :error)))
+                    (t (incf (getf ledger :other)))))))))
+      (with-fake (client fake :tasks t)
+        (let ((agent (%agent-calling "docs__long")))
+          (mcp:grant-tools agent client :only :all)
+          (evt:with-observer (#'record)
+            (actor:run-turn agent "go")
+            (is (equal '(:ok 0 :error 0 :other 1) ledger) "the start is not counted as a result")
+            (%poll-when-due client)
+            (is (equal '(:ok 1 :error 0 :other 1) ledger))))))))

@@ -79,7 +79,7 @@ has, or two tools under one name. Nothing was registered."))
 
 (defstruct (connection (:constructor make-connection
                            (&key name url token-source per-user (timeout 30) (call-timeout 120)
-                                 (max-body-bytes (* 8 1024 1024)))))
+                                 (max-body-bytes (* 8 1024 1024)) tasks)))
   "An MCP server the app connects to, as data.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
@@ -89,20 +89,24 @@ with a TOKEN-FOR method, and optionally a TOKEN-REFUSED method that gives a new 
 server refuses one, such as the one OAUTH-TOKEN-SOURCE makes from an aion/oauth broker. PER-USER is true when the token belongs to a user: a
 call with no principal is then refused before anything is sent. TIMEOUT is the most seconds a
 request may take, and CALL-TIMEOUT the most a tool call may take. MAX-BODY-BYTES bounds a
-reply."
+reply. TASKS is true to declare the MCP Tasks extension, so the server may answer a tool call
+with a task that POLL-TASKS follows after the turn has ended (#532); it applies to servers on the
+current revision only."
   (name "" :type string)
   (url "" :type string)
   (token-source nil)
   (per-user nil)
   (timeout 30)
   (call-timeout 120)
-  (max-body-bytes (* 8 1024 1024)))
+  (max-body-bytes (* 8 1024 1024))
+  (tasks nil))
 
-(defstruct (client (:constructor %make-client (connection)))
+(defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN
 or :LEGACY. PROTOCOL-VERSION is the version in use. SESSIONS maps a principal to its legacy
-session: (SESSION-ID . VERSION)."
+session: (SESSION-ID . VERSION). TASK-STORE keeps the tasks the server started (#532)."
   connection
+  task-store
   (era nil)
   (protocol-version nil)
   (sessions (make-hash-table :test #'equal))
@@ -114,10 +118,12 @@ session: (SESSION-ID . VERSION)."
   ;; REVOKE-TOOLS. Weak on the agent, so a client does not keep an agent alive.
   (grants (make-hash-table :test #'eq :weakness :key :synchronized t)))
 
-(defun make-client (connection)
-  "A client for CONNECTION. It sends nothing until it is first used."
+(defun make-client (connection &key (task-store (make-memory-task-store)))
+  "A client for CONNECTION. It sends nothing until it is first used. TASK-STORE keeps the tasks
+the server starts when the connection declares :TASKS (#532); the default keeps them in this
+process, so an app whose tasks must survive a restart passes its own store."
   (check-type connection connection)
-  (%make-client connection))
+  (%make-client connection task-store))
 
 ;;; --- one HTTP exchange -----------------------------------------------------------------
 
@@ -376,23 +382,37 @@ current revision uses to tell an unknown method apart from a server without the 
 
 ;;; --- the current revision: no handshake ------------------------------------------------
 
-(defun %meta ()
+(defparameter +tasks-extension+ "io.modelcontextprotocol/tasks"
+  "The identifier of the MCP Tasks extension (#532).")
+
+(defun %meta (client)
+  "The `_meta' every current-revision request carries. The client capabilities declare the
+Tasks extension when the connection asks for it, and nothing else. In particular they declare
+no elicitation, sampling or roots, so under the 2026-07-28 revision's \"Multi Round-Trip
+Requests\", server requirement 7, a server sends this client no input request: \"Servers MUST
+NOT send an inputRequests that the client has not declared support for in its capabilities.\"
+A task that asks for input anyway is cancelled (%REFUSE-INPUT)."
   (%object "io.modelcontextprotocol/protocolVersion" +protocol-version+
            "io.modelcontextprotocol/clientInfo" (%object "name" *client-name*
                                                          "version" *client-version*)
-           "io.modelcontextprotocol/clientCapabilities" (%object)))
+           "io.modelcontextprotocol/clientCapabilities"
+           (if (connection-tasks (client-connection client))
+               (%object "extensions" (%object +tasks-extension+ (%object)))
+               (%object))))
 
 (defun %modern-request (client method params principal timeout extra-headers)
   "Send METHOD in the 2026-07-28 form. Returns the response and the request's id."
   (let* ((id (%next-id client))
          (params (or params (%object)))
-         (name (or (gethash "name" params) (gethash "uri" params))))
-    (setf (gethash "_meta" params) (%meta))
+         (name (or (gethash "name" params) (gethash "uri" params) (gethash "taskId" params))))
+    (setf (gethash "_meta" params) (%meta client))
     (values (%post client (%object "jsonrpc" "2.0" "id" id "method" method "params" params)
                    (append (list (cons "MCP-Protocol-Version" +protocol-version+)
                                  (cons "Mcp-Method" method))
+                           ;; The Tasks extension routes tasks/* by the task id in Mcp-Name.
                            (when (and name (member method '("tools/call" "resources/read"
-                                                            "prompts/get")
+                                                            "prompts/get" "tasks/get"
+                                                            "tasks/update" "tasks/cancel")
                                                    :test #'string=))
                              (list (cons "Mcp-Name" (encode-header-value name))))
                            extra-headers)
@@ -625,6 +645,15 @@ may have been processed is never sent twice."
           (when (equal "input_required" (%get result "resultType"))
             (%request-failed client "the server asked for input this client cannot provide."
                              '() :outcome :not-run))
+          ;; A task is a valid answer only to a tools/call that declared the extension, which
+          ;; only a current-revision request does. The specification says a client that gets
+          ;; one otherwise treats it as an invalid response; for a tool call the server may
+          ;; have started the work, so the outcome is unknown.
+          (when (and (equal "task" (%get result "resultType"))
+                     (not (and (equal method "tools/call")
+                               (connection-tasks connection)
+                               (eq (client-era client) :modern))))
+            (%failed-in-flight client "it answered with a task, which this client did not ask for." '()))
           result)))))
 
 (defun %copy (table)
@@ -774,12 +803,17 @@ never included."
            (jzon:stringify (gethash "structuredContent" result)))
           (t ""))))
 
-(defun call-tool (client tool arguments &key principal held)
+(defun call-tool (client tool arguments &key principal held origin)
   "Call TOOL, a TOOL from LIST-TOOLS, with ARGUMENTS (a hash table, or NIL), for PRINCIPAL.
 HELD is true for a tool granted with :CONFIRM: after a refused token it is not sent again (#531).
 Returns the result's text. A result with isError set signals TOOL-ERROR; a failed request
-signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the model."
+signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the model.
+
+When the server answers with a task (#532), the task is saved in the client's task store and an
+ACTOR:STARTED-RESULT is returned instead. ORIGIN is a plist of :AGENT, :CONVERSATION, :MEANS and
+:SOURCE that GRANT-TOOLS passes, for the task's record."
   (let* ((connection (client-connection client))
+         (started (get-universal-time))
          (arguments (if (hash-table-p arguments) arguments (%object)))
          (headers (handler-case (header-params (tool-header-paths tool) arguments)
                     (header-value-refused (e)
@@ -792,12 +826,15 @@ signals REQUEST-FAILED; both are TOOL-ERROR-RESULTs, which a turn reports to the
                              :timeout (connection-call-timeout connection)
                              :extra-headers headers
                              :no-resend held)))
+         (task-p (equal "task" (%get result "resultType")))
          ;; A content block the client cannot read, such as a number as an image's data, fails
          ;; the call like any reply it cannot read; the tool ran, so its outcome is unknown.
-         (text (handler-case (result-text result)
+         (text (handler-case (if task-p "" (result-text result))
                  (error ()
                    (%request-failed client "its result could not be read. The tool may have run; its outcome is unknown. Do not call it again before checking with the user."
                                     '() :outcome :unknown)))))
+    (when task-p
+      (return-from call-tool (%start-task client tool result principal origin started)))
     (when (eq t (gethash "isError" result))
       (log:info "praxeon/mcp: tool reported an error" :connection (connection-name connection)
                                                        :tool (tool-name tool))
@@ -816,6 +853,11 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
                                            #\_))
                    (format nil "~A__~A" (connection-name connection) tool-name))))
     (subseq name 0 (min 64 (length name)))))
+
+(defun %means-source-plist (connection tool)
+  "The :SOURCE a granted tool's means is registered with."
+  (list :connection (connection-name connection) :tool (tool-name tool)
+        :per-user (and (connection-per-user connection) t)))
 
 (defun %clip (string limit)
   (if (> (length string) limit) (subseq string 0 limit) string))
@@ -864,6 +906,7 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
     (loop for tool in chosen
           for name in names
           do (let* ((tool tool)
+                    (name name)
                     (held (or (eq confirm :all)
                               (and (listp confirm)
                                    (member (tool-name tool) confirm :test #'string=)))))
@@ -872,13 +915,15 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                 (%clip (or (tool-description tool) (tool-title tool) (tool-name tool))
                        *max-description-characters*)
                 (lambda (arguments)
-                  (call-tool client tool arguments :principal actor:*principal* :held held))
+                  (call-tool client tool arguments :principal actor:*principal* :held held
+                                                   :origin (list :agent (actor:agent-name agent)
+                                                                 :conversation (actor:agent-conversation agent)
+                                                                 :means name
+                                                                 :source (%means-source-plist connection tool))))
                 :schema (tool-input-schema tool)
                 :capability capability
                 :confirm (and held t)
-                :source (list :connection (connection-name connection)
-                              :tool (tool-name tool)
-                              :per-user (and (connection-per-user connection) t)))
+                :source (%means-source-plist connection tool))
                ;; Remember the entry itself, so REVOKE-TOOLS removes this registration and
                ;; nothing the app registered under a name or a :SOURCE that looks the same.
                (push (cons name (gethash name (actor:agent-means agent)))

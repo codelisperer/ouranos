@@ -7,6 +7,7 @@ context, and gets a server's prompts (see "Resources and prompts" below).
 - **Tokens.** A request's bearer token comes from the connection's token source:
   - a function the app supplies;
   - for a server that requires a sign-in, `oauth-token-source`, which gives each user the token from their `aion/oauth` sign-in ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)) and refreshes it. It does not sign anyone in: when a user has no usable token, the call fails with `sign-in-needed`, and the app starts the sign-in (see "Tokens from an OAuth sign-in" below).
+- **Long-running calls.** On a connection made with `:tasks t`, a server may answer a tool call with a task that finishes later. The app polls it with `poll-tasks` (see "Long-running calls" below, #532).
 - **Confirmation.** `grant-tools :confirm` names the tools whose calls need the user's confirmation. The turn's `:on-hold` decides how the user is asked; with no `:on-hold`, such a call is not run ([`confirm.md`](confirm.md), #531).
 
 This is parts 1, 2 and 4 of #527. Local servers over stdio are part 5.
@@ -106,7 +107,7 @@ The `:tool-call` and `:tool-result` events carry what a ledger needs to record a
 - `:outcome` on the result;
 - `:ms`, the call's duration, on the result.
 
-`:outcome` is one of four values:
+`:outcome` is one of five values:
 - `:ok`: the means returned a result.
 - `:error`: the tool ran and reported an error. For MCP this is a result with `isError` set, or a JSON-RPC error answer from the server.
 - `:not-run`: the call was refused before the tool could run. The client produces it in these cases:
@@ -119,7 +120,8 @@ The `:tool-call` and `:tool-result` events carry what a ledger needs to record a
   - an `UnsupportedProtocolVersionError` or a `HeaderMismatch`;
   - a 4xx reply the client could not read;
   - an `input_required` result.
-- `:unknown`: the tool may have run. This is a `tools/call` that timed out, lost its connection, got a 5xx, got a reply that ended before answering, or got a result whose content could not be read.
+- `:unknown`: the tool may have run. This is a `tools/call` that timed out, lost its connection, got a 5xx, got a reply that ended before answering, or got a result whose content could not be read. It is also a task the client did not ask for, or one it could not record.
+- `:started`: the server answered with a task (#532). The call has no result yet. The `:task-finished` event with the same `:id` carries the outcome when the task ends; record the call's result from that.
 
 The turn loop gives these outcomes too, for any means. When a means fails in the middle of a step, the call it was on gets `:unknown` and the calls after it get `:not-run` (#546; see "When a means fails in the same step" in [`confirm.md`](confirm.md)). An approval that an earlier attempt recorded, whose result is missing, also gets `:unknown` (#531).
 
@@ -149,7 +151,7 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
   - So is a tool whose schema is longer than `*max-schema-characters*` (20000) as JSON, since the schema is sent with every request.
   - A listing that goes past `*max-list-pages*` (1000) pages without ending fails, so `:only :all` never grants part of a server's tools as though it were all of them.
 - **Header arguments follow the declared type.** An `x-mcp-header` argument must have the type its property declares: a string, an integer, or a boolean. One that does not is refused before the call is sent, so the model gets an error it can correct. Header names must be ASCII HTTP tokens.
-- **`resultType: "input_required"`.** This client offers no client capabilities, so it cannot answer an input request. Such a result fails the call without running it.
+- **`resultType: "input_required"`.** This client declares no elicitation, sampling or roots, so it cannot answer an input request. Such a result fails the call without running it.
 - **Where this client departs from the specification.**
   - On a `HeaderMismatch` (-32020), the specification says a client SHOULD list the tools again and retry. This client fails the call instead. A new listing could change a tool's schema without the app granting it again, and a grant is the app's decision. The app calls `revoke-tools`, then `grant-tools` again, since `grant-tools` refuses a name the agent already has.
   - `ttlMs` and `cacheScope` on list results are ignored, because a grant does not change by itself.
@@ -184,6 +186,48 @@ Prompts are chosen by the user, and a prompt's text goes in as the user's own tu
 - `(mcp:prompt-input prompt messages)` gives the input for `run-turn` from a prompt whose messages are all the user's. A prompt with assistant messages is a scripted exchange, and `prompt-input` signals `prompt-has-assistant-messages`; the app decides what to do with it.
 
 Not supported: subscriptions and the `list_changed` notifications, the completion API for arguments, and caching by `ttlMs`.
+
+## Long-running calls
+
+A tool call that takes minutes can finish after the turn that started it, through the MCP Tasks extension, `io.modelcontextprotocol/tasks` (#532). This client follows the extension's specification for revision 2026-07-28, read in modelcontextprotocol/ext-tasks at commit 899c1bb.
+
+```lisp
+(defparameter *jobs*
+  (mcp:make-connection :name "jobs" :url "https://example.com/mcp" :per-user t :tasks t
+                       :token-source (mcp:oauth-token-source *broker*)))
+
+(defparameter *jobs-client* (mcp:make-client *jobs* :task-store (my-app:task-store)))
+
+;; In the app's job runner, every few seconds:
+(dolist (finished (mcp:poll-tasks *jobs-client*))
+  (my-app:deliver finished))   ; for example, a later run-turn with (mcp:task-report finished)
+```
+
+- **Opting in.** `:tasks t` declares the extension in every current-revision request. The server then decides, call by call, whether to answer with a task. Without the option nothing is declared; a server that sends a task anyway has broken the specification, and the call fails with outcome `:unknown`, because the work may have started. Legacy sessions declare nothing.
+- **When a call becomes a task.** The task is saved in the client's task store before the call returns. The model is told that the tool started a background task whose result will be reported when it finishes, and not to call the tool again for this request. The call's `:tool-result` event has outcome `:started`, and a `:task-started` event is emitted. If the store cannot save it, the call fails with outcome `:unknown`.
+- **The task id stays between the client and the server.** The specification lets a server use it as the bearer of the task's state, so it is sent only to the server, in `params.taskId` and the `Mcp-Name` header. The model, events and logs see `task-key`, the client's own id for the record.
+- **The task store.** It is a protocol of three generic functions: `save-task`, `due-tasks` and `remove-task`. `make-memory-task-store`, the default, keeps tasks in the process, so they are lost when it ends. An app whose tasks must survive a restart supplies a store backed by its database, and can keep each task as JSON text with `task-to-json` and `task-from-json`. `remove-task` returns true only for the call that removed the task, so when two pollers see a task finish, only one reports it.
+- **Polling.** `poll-tasks` polls each task of the client's connection whose next poll is due, once, and returns the tasks that finished. praxeon starts no thread for this; the app's job runner calls it. Each poll sends `tasks/get` for the task's own principal, with a token fetched at that moment, so an OAuth token is refreshed when it needs to be. The next poll is due after the server's latest `pollIntervalMs`, rounded up to whole seconds and never less than 1, or `*default-poll-seconds*` (5) when the server gives none. A poll that fails, through a timeout, a 5xx or a missing sign-in, leaves the task due again after its interval.
+- **When a task ends.** It is removed from the store, a `:task-finished` event is emitted, and `poll-tasks` returns a `finished-task` with an outcome and text:
+  - `:ok`: completed. The text is the result's text, as for a call that answered at once.
+  - `:error`: completed with `isError`, or failed with a JSON-RPC error. The text names the error code and never repeats the server's message.
+  - `:cancelled`: cancelled by the server, by `cancel-task`, or because it asked for input (below).
+  - `:expired`: past `ttlMs`, counted from when this client first saw the task, or no longer known to the server (-32602).
+  - `:unknown`: completed with a result the client could not read.
+- **Getting the result to the conversation is the app's decision**, because it depends on whether the user is present. `task-report` gives text for a later turn that names the tool and says that what follows is the tool's output, not something the user said. The output comes from the server and is untrusted, as any tool result is.
+- **Input requests are refused.** The 2026-07-28 revision's "Multi Round-Trip Requests" page, server requirement 7, says: "Servers **MUST NOT** send an `inputRequests` that the client has not declared support for in its capabilities." This client declares no elicitation, sampling or roots, so a server should never ask a task for input. A task that asks anyway is cancelled with `tasks/cancel`. That is the only refusal the specification allows, because an input response is the result of the request's own kind and has no error form. A `:task-input-refused` event names each request's method, and the task finishes as `:cancelled`, with text naming the kinds the specification defines. Answering elicitations is #563.
+- **Cancelling.** `cancel-task` sends `tasks/cancel`, then removes the task and reports it as `:cancelled`. The server may finish the work anyway.
+- **Not supported.** Task status notifications on a `subscriptions/listen` stream (polling is the default), and the legacy revisions' experimental tasks.
+
+### Events
+
+| Event | When | Fields |
+|---|---|---|
+| `:task-started` | a call became a task | `:id` (the tool call's id), `:key`, `:connection`, `:tool`, `:source`, `:principal`, `:agent`, `:conversation` |
+| `:task-input-refused` | a task asked for input and is being cancelled | the same, and `:methods` |
+| `:task-finished` | a task ended | the same, and `:outcome`, and `:ms`, the milliseconds since the call started, measured to the second |
+
+`:id` is `actor:*tool-call-id*` at the time of the call, so a ledger joins a task's events to the call's `:tool-call` and `:tool-result` events.
 
 ## Known limitations
 
