@@ -1485,30 +1485,38 @@ out rather than published, and the load warns so the author can see why the page
 (test a-comment-the-page-shows-as-code-is-kept
   "What counts as code is what klio's renderer puts inside <code>: a code span, a fenced block,
 an indented block, and a Lisp block whose text the highlighter splits into spans. A comment in
-the text beside them is removed. A ``` pair in a block quote or on a list item's first line is a
-code span across lines to this renderer, not a fence, and a comment inside it is kept too."
+the text beside them is removed. Since #574 a ``` fence in a block quote is a fenced block, and
+indented code in a block quote is an indented block. A ``` pair on a list item's first line is a
+code span across lines to this renderer, not a fence. A comment inside any of them is kept."
   (let* ((d (%loaded (format nil "Use `<!-- spannote -->` here <!-- gone-1 -->.~%~%```html~%<!-- fencenote -->~%```~%~%    <!-- indentnote -->~%~%```lisp~%(defun f () 1) ; <!-- lispnote -->~%```~%~%> ```~%> <!-- quotenote -->~%> ```~%~%- ```~%  <!-- itemnote -->~%  ```~%~%End <!-- gone-2 -->.~%")))
          (html (k:document-html d)))
     (dolist (note '("spannote" "fencenote" "indentnote" "lispnote" "quotenote" "itemnote"))
       (is (%only-in-code-p html note) "~A is on the page, inside <code>: ~S" note html)
       (is (search note (k:document-body d))))
+    (is (search "<blockquote>" html) "the quoted fence is in a block quote: ~S" html)
     (is (search "<span" html) "the Lisp block was highlighted, so the marker was read across spans")
     (is (null (search "gone" (k:document-body d))))
-    (is (null (search "gone" html)))))
+    (is (null (search "gone" html))))
+  (loop for (name source) in '(("quote-indented" "para~%~%>     <!-- quotecode -->~%")
+                               ("quoted-indented" "> Quoted text.~%>~%>     <!-- quotecode -->~%"))
+        do (let* ((d (%loaded (format nil source)))
+                  (html (k:document-html d)))
+             (is (search "<blockquote>" html) "~A: ~S" name html)
+             (is (%only-in-code-p html "quotecode") "~A: indented code in a quote: ~S" name html)
+             (is (search "quotecode" (k:document-body d)) "~A" name))))
 
 (test a-comment-the-renderer-shows-as-text-is-removed-whatever-a-fence-looks-like
   "Each input is one the CommonMark reading of fences took for code but klio's renderer shows as
 text: a longer fence closed by a shorter one, a closing fence with text after it, a fence never
-closed, indented code in a block quote, and ~~~ or unclosed fences in a quote or a list item.
-Each comment is removed from the body, the page and the index."
+closed, and ~~~ or unclosed fences in a quote or a list item. Each comment is removed from the
+body, the page and the index. Indented code in a block quote was here until #574 made the safe
+mode render block quotes; it is code now, and the test above keeps its comment."
   (loop for (name source) in '(("longer-fence" "````~%x~%```~%<!-- secret -->~%")
                                ("closing-with-text" "```~%x~%``` y~%<!-- secret -->~%")
                                ("unclosed-fence" "para~%~%```~%<!-- secret -->~%")
-                               ("quote-indented" "para~%~%>     <!-- secret -->~%")
                                ("tilde-fence" "para~%~%~~~~~~~%<!-- secret -->~%~~~~~~~%")
                                ("quoted-tilde" "> ~~~~~~~%> <!-- secret -->~%> ~~~~~~~%")
                                ("after-deeper" "> ~~~~~~~%>~%> > ~~~~~~~%> <!-- secret -->~%> ~~~~~~~%")
-                               ("quoted-indented" "> Quoted text.~%>~%>     <!-- secret -->~%")
                                ("unclosed-quoted" "> ```~%> <!-- secret -->~%~%After.~%")
                                ("numbered" "1. ~~~~~~~%   <!-- secret -->~%   ~~~~~~~%")
                                ("unclosed-item" "- ```~%  <!-- secret -->~%Left the item.~%")

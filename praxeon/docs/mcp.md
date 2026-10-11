@@ -72,6 +72,7 @@ When there is no usable token, the call fails with `sign-in-needed`. The app the
 |---|---|---|---|
 | The tool answered | the result's text | `:ok` | |
 | The tool answered with `isError` | the result's text, as an error result | `:error` | `tool-error` is the cause |
+| The server answered with a task, on a connection made with `:tasks t` | that the tool started a background task whose result will be reported when it finishes, and not to call the tool again for this request | `:started` | `:task-started` is emitted; the result arrives later with `:task-finished` (see "Long-running calls") |
 | The server answered a JSON-RPC error, or refused the version | that the connection failed, with the code | `:error` or `:not-run` | `request-failed` |
 | A 401 or 403, or no principal for a per-user connection | that the user must sign in, with no URL | `:not-run` | `authorization-required` is signalled, and a `:sign-in-required` event is emitted |
 | A timeout, a dropped connection, a 5xx, a reply that ends early, or a result that is not a JSON object, during `tools/call` | that the outcome is unknown, the tool may have run, and it should not be called again before checking with the user | `:unknown` | `request-failed` |
