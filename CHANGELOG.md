@@ -173,6 +173,30 @@ its tag.
   - Only the app adds resources; the model cannot read one itself. Subscriptions, completions
     and caching are not supported. See `praxeon/docs/mcp.md`.
 
+- **`build-desktop-app.lisp` sets the update settings in the image it dumps** (#408).
+  - New options, in `scripts/release-settings.lisp`. Each sets its variable only when it is
+    given, so a build without it keeps the value the app set in its own source:
+    - `--product NAME` sets `hyperion/update:*app-name*`. For now it must equal `--name`,
+      because the installer still takes its name from the bundle directory.
+    - `--display-name TEXT` is written to the `RELEASE` file.
+    - `--public-key-file PATH` sets `*public-key*`. With `--release` and no key file, the
+      `OURANOS_PUBLIC_KEY` environment variable is read; without `--release` it is not. The key
+      must have the form `scripts/update-manifest.lisp keygen` prints, and is checked with
+      `aion/signature` before it is set.
+    - `--update-source github=URL` and `--update-source s3=URL` set `*update-source*`. Given
+      more than once, they are tried in the order given. The URL must be https.
+    - `--default-channel NAME` sets `*default-channel*`.
+    - `--release` refuses to build without a key and a source.
+  - A bad option stops the build with exit code 2 before anything is built.
+  - A release option given for an app that does not load `hyperion/update` stops it with exit
+    code 3.
+  - The bundle gets a `RELEASE` file with a `version` line and a `product`, `display-name` or
+    `channel` line for each of those options given, written after the settings are set in the
+    image. With none of those three given, there is no `RELEASE` file.
+  - A key file may hold one key, until key rotation is decided.
+  - New `hyperion/update:*default-channel*`, default "stable". `check-for-update` and
+    `apply-update` use it when no `:channel` is given, and so does `update-router` when it is
+    given no channel.
 - **aion/fs: `make-temporary-directory` creates a new temporary directory that no other process
   is given** (#515). It is named after a prefix, the process id and a counter of the process's
   own, and it counts as made only when this call created it, so two processes started at the same
@@ -461,6 +485,12 @@ its tag.
 
 ### Fixed
 
+- **hyperion/update: an update can be applied when `*update-source*` is a list of sources**
+  (#408). `fetch-manifest` already tried a list in order, but `fetch-artifact` had no method for
+  one. So an app that set `*update-source*` to a list could report an update as available, and
+  then fail with `NO-APPLICABLE-METHOD-ERROR` when the user applied it. `fetch-artifact` now
+  tries the list in order, and passes over a source that cannot be reached, as `fetch-manifest`
+  does.
 - **klio: a fenced block's language could close the class attribute and add attributes to the
   page; now an invalid language renders with no class.** klio renders fenced blocks as
   `<pre class="LANG">`, and the info string after the opening fence reached that attribute with

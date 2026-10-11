@@ -62,6 +62,18 @@
   (declare (ignore channel))
   (error 'up:update-source-error :detail "host is down"))
 
+(defmethod up:fetch-artifact ((source broken-source) url)
+  (declare (ignore url))
+  (error 'up:update-source-error :detail "host is down"))
+
+(defclass channel-recording-source ()
+  ((channels :initform '() :accessor recorded-channels))
+  (:documentation "Records each channel it is asked for, then answers as an unreachable host."))
+
+(defmethod up:fetch-manifest ((source channel-recording-source) channel)
+  (push channel (recorded-channels source))
+  (error 'up:update-source-error :detail "recorded"))
+
 ;;; --- fixtures ---------------------------------------------------------------
 
 (defvar *private-key* nil)
@@ -376,6 +388,42 @@ the artifact lookup is the real one rather than a hard-coded guess."
       (let ((status (up:check-for-update :source source :channel "stable" :product "testapp")))
         (is (string= "up-to-date" (getf status :status))
             "a channel with no manifest should be quiet, not an error")))))
+
+(test without-a-channel-the-check-uses-the-default-channel-the-build-set
+  ;; A release build sets *DEFAULT-CHANNEL* with --default-channel (#408). A check given no
+  ;; channel reads that one's manifest; a check given a channel still reads the one it names.
+  (with-published-directory (dist :channel "beta")
+    (let ((source (make-instance 'up:directory-source :path dist)))
+      (is (string= "up-to-date" (getf (up:check-for-update :source source :product "testapp") :status))
+          "with the default of stable, the beta manifest is not read")
+      (let ((up:*default-channel* "beta"))
+        (is (string= "available" (getf (up:check-for-update :source source :product "testapp") :status))
+            "with the default set to beta, it is")
+        (is (string= "up-to-date"
+                     (getf (up:check-for-update :source source :channel "stable" :product "testapp") :status))
+            "and a channel passed by the caller still wins")))))
+
+(test an-artifact-is-fetched-through-a-list-of-sources
+  ;; A list answers the check through FETCH-MANIFEST; the apply then calls FETCH-ARTIFACT on the
+  ;; same list, which had no method (review of #568). An unreachable source is passed over, as
+  ;; it is for the manifest, and when every source is unreachable the last error is signalled.
+  (let* ((url "https://example.test/app-2.0.0-setup.exe")
+         (good (make-instance 'fixed-source :body nil :signature nil)))
+    (setf (gethash url (source-artifacts good)) (payload-bytes))
+    (is (equalp (payload-bytes)
+                (up:fetch-artifact (list (make-instance 'broken-source) good) url)))
+    (signals up:update-source-error
+      (up:fetch-artifact (list (make-instance 'broken-source) (make-instance 'broken-source)) url))))
+
+(test without-a-channel-apply-update-uses-the-default-channel-the-build-set
+  ;; APPLY-UPDATE re-checks first, on its :CHANNEL. Given none, that is *DEFAULT-CHANNEL*, as
+  ;; for CHECK-FOR-UPDATE; the update-ui Apply route relies on it (review of #568).
+  (let ((source (make-instance 'channel-recording-source))
+        (up:*default-channel* "beta"))
+    (handler-case (up:apply-update :source source :product "testapp")
+      (error () nil))
+    (is (equal '("beta") (recorded-channels source))
+        "the apply's check asked for the default channel: ~S" (recorded-channels source))))
 
 (test an-artifact-is-found-by-the-name-the-url-would-have-served-it-as
   (with-published-directory (dist)
