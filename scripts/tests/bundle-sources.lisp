@@ -4,7 +4,8 @@
 ;;;; The rules live in scripts/bundle-sources.lisp, which the bundler and
 ;;;; scripts/check-bundle-sources.lisp both load. These tests run them against fixture trees and
 ;;;; bundles made here, with a pin and a tarball of their own, so they need no built libgit2.
-;;;; The last test builds a real bundle for an app that loads aion/libgit and runs it.
+;;;; Two tests build for a real app that loads aion/libgit and run it: one builds a desktop
+;;;; bundle, and one runs the build script `cons bin' runs.
 
 (in-package #:checkers/tests)
 
@@ -184,6 +185,99 @@ not search the tree it was built from (#472)."
                      (multiple-value-bind (out code) (run-app)
                        (is (eql 0 code) "the app exited with ~A:~%~A" code out)
                        (is (search "FAILED" out) "with its copy deleted the app still loaded libgit2:~%~A" out))))))
+          (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
+
+;;; --- bin/ from the build script `cons bin' runs, for an app that uses aion/libgit -------
+
+(defparameter *cons-bin-build-script*
+  (merge-pathnames "cons/templates/cli/files/scripts/build-{{name}}.lisp" td-root)
+  "The build script `cons init' gives a cli project, which `cons bin' runs. The test below
+writes this file into its project with the name filled in, so it tests the file a project gets,
+not a copy of it.")
+
+(test a-cons-bin-build-of-an-aion-libgit-app-carries-libgit2-with-its-source
+  "The cli template's build script, run in a project whose app loads aion/libgit, copies libgit2
+into bin/, its licence into bin/LICENSES/ and its pinned source into bin/SOURCES/, and
+check-bundle-sources passes on bin/. Run, the binary loads libgit2 from bin/. CONTROL: with the
+copy in bin/ deleted the binary does not load libgit2, because it does not search the tree it
+was built from (#524, ADR-0013's amendment of 2026-10-04)."
+  (if (null (%built-libgit2))
+      (skip "vendor/libgit2 is not built here; run scripts/build-libgit2.lisp")
+      (let* ((tree (%fresh-tree))
+             (project (ensure-directories-exist (merge-pathnames "gitbin/" tree)))
+             (bin (merge-pathnames "bin/" project))
+             (build-out (make-string-output-stream)))
+        (%write (merge-pathnames "gitbin.asd" project)
+                "(defsystem \"gitbin\" :depends-on (\"aion/libgit\") :components ((:file \"gitbin\")))")
+        (%write (merge-pathnames "gitbin.lisp" project)
+                (%lines "(defpackage #:gitbin (:use #:cl) (:export #:main))"
+                        "(in-package #:gitbin)"
+                        "(defun main ()"
+                        "  (handler-case (format t \"~&LOADED ~A~%VERSION ~A~%\" (aion/libgit:ensure-loaded) (aion/libgit:libgit2-version))"
+                        "    (error (e) (format t \"~&FAILED ~A~%\" (type-of e))))"
+                        "  (finish-output)"
+                        "  (uiop:quit 0))"))
+        (%write (merge-pathnames "scripts/build-gitbin.lisp" project)
+                (uiop:frob-substrings (uiop:read-file-string *cons-bin-build-script*)
+                                      '("{{name}}") "gitbin"))
+        (unwind-protect
+             (progn
+               ;; As `cons bin' runs it: a fresh sbcl, in the project's directory.
+               (let ((code (nth-value
+                            2 (uiop:run-program
+                               (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                                     "--dynamic-space-size" "4096" "--non-interactive"
+                                     "--no-sysinit" "--no-userinit" "--load"
+                                     (uiop:native-namestring (merge-pathnames "scripts/build-gitbin.lisp" project)))
+                               :directory project
+                               :input nil :output build-out :error-output build-out :ignore-error-status t
+                               :environment
+                               (cons (format nil "CL_SOURCE_REGISTRY=~A//~A~A//"
+                                             (uiop:native-namestring td-root)
+                                             (if (uiop:os-windows-p) ";" ":")
+                                             (uiop:native-namestring project))
+                                     (remove-if (lambda (e) (or (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e)
+                                                                (uiop:string-prefix-p "AION_LIBGIT_LIBRARY=" e)))
+                                                (sb-ext:posix-environ)))))))
+                 (is (eql 0 code) "the build failed:~%~A" (get-output-stream-string build-out)))
+               ;; The template dumps bin/gitbin, with no .exe added on Windows.
+               (let ((executable (or (probe-file (merge-pathnames "gitbin.exe" bin))
+                                     (probe-file (merge-pathnames "gitbin" bin))))
+                     (carried (merge-pathnames (file-namestring (%built-libgit2)) bin)))
+                 (is-true executable "no executable in ~A" bin)
+                 (when executable
+                   (is (probe-file carried) "~A was not carried into bin/" (file-namestring carried))
+                   (is (probe-file (merge-pathnames "LICENSES/libgit2-COPYING" bin))
+                       "libgit2's COPYING is not in bin/LICENSES/")
+                   (is (directory (merge-pathnames "SOURCES/libgit2-*.tar.gz" bin))
+                       "libgit2's source is not in bin/SOURCES/")
+                   (is (null (ouranos-bundle-sources:check-bundle bin td-root))
+                       "check-bundle on bin/: ~S" (ouranos-bundle-sources:check-bundle bin td-root))
+                   (flet ((run-binary ()
+                            (let ((out (make-string-output-stream)))
+                              (let ((code (nth-value 2 (uiop:run-program
+                                                        (list (uiop:native-namestring executable))
+                                                        :input nil :output out :error-output out
+                                                        :ignore-error-status t
+                                                        :environment
+                                                        (remove-if (lambda (e) (uiop:string-prefix-p "AION_LIBGIT_LIBRARY=" e))
+                                                                   (sb-ext:posix-environ))))))
+                                (values (get-output-stream-string out) code))))
+                          (loaded-from-bin-p (output)
+                            (let* ((line (find-if (lambda (l) (uiop:string-prefix-p "LOADED " l))
+                                                  (uiop:split-string output :separator '(#\Newline))))
+                                   (file (and line (ignore-errors
+                                                    (truename (string-trim '(#\Return) (subseq line 7)))))))
+                              (and file (uiop:pathname-equal (uiop:pathname-directory-pathname file)
+                                                             (truename bin))))))
+                     (multiple-value-bind (out code) (run-binary)
+                       (is (eql 0 code) "the binary exited with ~A:~%~A" code out)
+                       (is (loaded-from-bin-p out) "libgit2 was not loaded from bin/:~%~A" out))
+                     ;; The control.
+                     (delete-file carried)
+                     (multiple-value-bind (out code) (run-binary)
+                       (is (eql 0 code) "the binary exited with ~A:~%~A" code out)
+                       (is (search "FAILED" out) "with its copy deleted the binary still loaded libgit2:~%~A" out))))))
           (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))
 
 (test the-digest-is-read-from-every-sha256-tool-s-output

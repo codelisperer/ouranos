@@ -52,9 +52,11 @@ its tag.
 - **`cons init --template web` scaffolds an app on `hyperion/server-uv` instead of
   `clack-handler-hunchentoot`.** The generated `.asd` depends on `hyperion/server-uv`, and the
   generated `start` passes `:workers 2` to `hyperion/server:start` when the server is `:uv`, so a
-  slow handler does not hold up other requests. A project generated this way needs a built libuv:
-  run `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree, or install libuv on the
-  system. `cons bin` copies libuv beside the `bin/<name>` it dumps (#513, below).
+  slow handler does not hold up other requests. A project generated this way needs libuv: run
+  `sbcl --script scripts/build-libuv.lisp` in the Ouranos tree. A libuv installed on the system
+  is enough to run the project from source, but `cons bin` needs the one the tree built: it
+  copies that libuv beside the `bin/<name>` it dumps, and stops with exit code 3 if the app
+  would load a system copy (#513, below).
   Projects generated before this are unchanged. To keep Hunchentoot in a new project, replace
   `hyperion/server-uv` with `clack-handler-hunchentoot` in its `.asd`. (#472)
 - **aion/pool: `pool-queued` is exact only when the pool is quiet** (#466). It is now
@@ -232,17 +234,28 @@ its tag.
   conversations: an agent has one history, from which every request is built, so each user needs an agent,
   or at least a history, of their own. A turn without a principal keeps the principal of an
   enclosing turn, so a delegated sub-turn runs for the same user.
-- **`cons bin` copies libuv and mbedTLS beside the binary it dumps, when the app loads them.**
-  The build script a `cons init` project gets (`scripts/build-<name>.lisp`, for the agent, cli
-  and web templates) now loads the Ouranos tree's `scripts/tree-natives.lisp` before the dump.
-  For each library the tree builds that the app's image loads, it copies the library into
-  `bin/` and its license into `bin/LICENSES/`, and sets `aion/platform:*search-source-tree*` to
-  NIL in the image, so the binary uses the copy beside it rather than the tree's `vendor/`. A
-  `bin/<name>` from the web template therefore runs on a machine without the tree and without
-  libuv; copy `bin/` as a whole. The build stops with exit code 3 if the app loads a library
-  this machine has no built copy of. A project generated before this change keeps its old build
-  script: replace it with the template's, or add the two forms after
-  `(ensure-directories-exist "bin/")`. `scripts/build-desktop-app.lisp` uses the same file. (#513)
+- **`cons bin` copies libuv, mbedTLS and libgit2 beside the binary it dumps, for each one the
+  app loads, and libgit2's source with it.** The build script a `cons init` project gets
+  (`scripts/build-<name>.lisp`, for the agent, cli and web templates) now loads the Ouranos
+  tree's `scripts/tree-natives.lisp` before the dump. For each of those libraries that the app's
+  image loads, it copies the library into `bin/` and its licence into `bin/LICENSES/`, and it
+  sets `aion/platform:*search-source-tree*` to NIL in the image, so the binary uses the copy
+  beside it rather than the tree's `vendor/`. For libgit2 (`aion/libgit`) it also copies the
+  source tarball that `libgit2.pin` names into `bin/SOURCES/`, and `COPYING` into
+  `bin/LICENSES/libgit2-COPYING`. **An app that distributes the binary has to ship
+  `bin/SOURCES/` and `bin/LICENSES/` with it**, because libgit2's licence, the GPL version 2 with
+  a linking exception, requires its source to be available wherever the binary is distributed
+  (ADR-0013, amendment of 2026-10-04). A `bin/<name>` from the web template runs on a machine
+  without the tree and without libuv; copy `bin/` as a whole. The build stops with exit code 3,
+  and says why, if one of these libraries was loaded from somewhere other than the tree's
+  `vendor/` (a system copy, or a path in `AION_UV_LIBRARY`, `AION_TLS_LIBRARY` or
+  `AION_LIBGIT_LIBRARY`), if this machine has no built copy of one the app loads, or if
+  libgit2's tarball is missing or its sha256 does not match `libgit2.pin`. Other libraries the
+  app loads from the system, such as OpenSSL for an app that uses it, are listed in the build's
+  output and not copied. A project generated before this change keeps its old build script:
+  replace it with the template's, or add the two forms after
+  `(ensure-directories-exist "bin/")`. `scripts/build-desktop-app.lisp` uses the same file.
+  (#513, #524)
 - **aion/libgit: local git repositories, over a libgit2 this tree builds from source** (#429).
   A new opt-in system. `init-repository` and `open-repository` return a repository, and
   `with-repository` closes it. `stage` adds changed files to the index and removes deleted ones.

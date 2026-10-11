@@ -11,12 +11,17 @@
 
 (ensure-directories-exist "bin/")
 ;; The native libraries the Ouranos tree builds and the app may load lazily -- libuv, for a
-;; server on :uv, and mbedTLS, for TLS -- are copied beside bin/{{name}}, where the binary looks
-;; for them first, and the binary is set not to look in the tree it was built from (#513).
-;; Without that, a binary that loads one runs on this machine, which has the tree, and fails on
-;; any other. tree-natives.lisp is the code a desktop bundle is built with; for an app that loads
-;; neither library it copies nothing. It stops the build, with exit code 3 and the reason, if
-;; the app loads one this machine has no built copy of.
+;; server on :uv, mbedTLS, for TLS, and libgit2, for aion/libgit -- are copied beside
+;; bin/{{name}}, where the binary looks for them first, with their licences under bin/LICENSES/,
+;; and the binary is set not to look in the tree it was built from (#513). Without that, a
+;; binary that loads one runs on this machine, which has the tree, and fails on any other.
+;; libgit2's licence, the GPL version 2 with a linking exception, requires its source to be
+;; available wherever the binary goes, so its pinned source tarball is copied under
+;; bin/SOURCES/ as well (ADR-0013, #524). Distribute bin/ as a whole.
+;; tree-natives.lisp is the code a desktop bundle is built with; for an app that loads none of
+;; these libraries it copies nothing. It stops the build with exit code 3, and says why, if the
+;; app loads one of them from somewhere other than the tree's vendor/ directory, if this machine
+;; has no built copy of one, or if libgit2's tarball is missing or does not match libgit2.pin.
 (load (merge-pathnames "scripts/tree-natives.lisp"
                        (uiop:pathname-parent-directory-pathname
                         (asdf:system-source-directory "cons/env"))))
