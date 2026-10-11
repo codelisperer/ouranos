@@ -20,8 +20,8 @@
 
 (defpackage #:ouranos-bundle-sources
   (:use #:cl)
-  (:export #:*carried-sources* #:source-for-package #:carry-source #:check-bundle
-           #:source-refused #:sha256-of))
+  (:export #:*carried-sources* #:source-for-package #:carry-source #:source-destination
+           #:check-bundle #:source-refused #:sha256-of))
 
 (in-package #:ouranos-bundle-sources)
 
@@ -89,6 +89,11 @@ computes it."
       (error 'source-refused :reason (format nil "~A records no version" (getf entry :pin))))
     (format nil (getf entry :tarball) version)))
 
+(defun source-destination (entry root bundle)
+  "Where CARRY-SOURCE writes ENTRY's tarball in BUNDLE, known before it is written, so a caller can
+record it first (#564). Signals SOURCE-REFUSED when the pin under ROOT records no version."
+  (merge-pathnames (concatenate 'string "SOURCES/" (%tarball-name entry root)) bundle))
+
 (defun carry-source (entry root bundle)
   "Copy ENTRY's pinned tarball from vendor/ under ROOT into BUNDLE/SOURCES/, after checking its
 sha256 against the pin. Signals SOURCE-REFUSED when the tarball is missing or does not match.
@@ -96,7 +101,7 @@ Returns the copy's pathname."
   (let* ((name (%tarball-name entry root))
          (want (%pin-field root (getf entry :pin) "sha256"))
          (from (merge-pathnames (format nil "vendor/~A/src/~A" (getf entry :package) name) root))
-         (to (merge-pathnames (concatenate 'string "SOURCES/" name) bundle)))
+         (to (source-destination entry root bundle)))
     (unless (probe-file from)
       (error 'source-refused
              :reason (format nil "~A is missing; it is the source that must be carried with ~A. Run \"sbcl --script ~A --force\", which fetches it again even when the library is already built."

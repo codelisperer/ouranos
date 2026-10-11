@@ -22,13 +22,15 @@
 (load (merge-pathnames "lazy-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 (load (merge-pathnames "bundle-sources.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; a library that travels with its source (#429)
+(load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; aion/fs:link-p, for the carried list (#564)
 
 (defpackage #:ouranos-tree-natives
   (:use #:cl)
   (:export #:*bundle* #:*vendor* #:*label*
            #:wake-lazy-natives #:verify-natives-will-be-carried #:carry-native-libraries
            #:release-lazy-natives #:lazy-native-sonames #:loaded-foreign-libraries
-           #:carry-tree-natives))
+           #:carry-tree-natives #:vendored-library-p #:+carried-list-name+
+           #:remove-previously-carried #:carried-list-refused))
 
 (in-package #:ouranos-tree-natives)
 
@@ -39,6 +41,51 @@
   (merge-pathnames "vendor/" (uiop:pathname-parent-directory-pathname
                               (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
   "This tree's vendor/ directory: a library under it is one this tree built, and is carried.")
+
+(defun vendored-library-p (truename)
+  "Whether TRUENAME, a library's resolved path, is under this tree's vendor/ directory.
+
+Both the check that a library will be carried and the copy ask this, so they cannot disagree.
+They used to compare against different forms of *VENDOR*: the check against its truename, the
+copy against it as written. Through a tree reached by a symbolic link or a junction those differ,
+and the check passed a library that the copy then reported as a system library and left out
+(#564)."
+  (let ((vendor (or (ignore-errors (truename *vendor*)) *vendor*)))
+    (and truename (uiop:subpathp truename vendor) t)))
+
+(defvar *carried-list* nil
+  "While CARRY-TREE-NATIVES runs, the carried list each copied file is appended to; NIL
+otherwise, as in build-desktop-app.lisp, which writes into a new bundle and keeps no list.")
+
+(define-condition carried-list-refused (error)
+  ((path :initarg :path :reader carried-list-refused-path))
+  (:report (lambda (c s)
+             (format s "~A is a link; the list of files an earlier build copied is not read or written through a link"
+                     (uiop:native-namestring (carried-list-refused-path c))))))
+
+(defun %check-carried-list (list-file)
+  "Signal CARRIED-LIST-REFUSED when LIST-FILE is a link, dangling or not, before it is read or
+written: reading through it could act on another directory's list, and writing through it would
+write wherever it points (hub's review of #567)."
+  (when (aion/fs:link-p list-file)
+    (error 'carried-list-refused :path list-file)))
+
+(defun %note-carried (path)
+  "Append PATH, a file about to be copied into *BUNDLE*, to the carried list. Called BEFORE the
+copy, so the list names every file this build has started to write, even when the copy fails
+part-way (a full disk) or the process is killed during it, and even when the build stops later,
+for example when a library's source is refused after the library was copied. The next build then
+removes it. A listed file that was never written is :MISSING to that build and skipped (hub's
+reviews of #567)."
+  (when *carried-list*
+    (%check-carried-list *carried-list*)
+    (with-open-file (out *carried-list* :direction :output :if-exists :append :if-does-not-exist :create)
+      (write-line (uiop:unix-namestring (uiop:enough-pathname path (uiop:pathname-directory-pathname *carried-list*)))
+                  out))))
+
+(defparameter +carried-list-name+ ".carried-natives"
+  "The file in the build directory that lists, one relative path per line, what the last
+CARRY-TREE-NATIVES copied there, so the next one can remove it first (#564).")
 
 (defun %build-command (build-script)
   "The command that builds the library BUILD-SCRIPT names, with the script's absolute path in
@@ -202,8 +249,7 @@ path), unresolvable (refused earlier by the waker).
 Only *LAZY-NATIVES* entries are subject, and that is what makes the check safe: libssl and
 libcrypto are legitimate system dependencies that are never carried, and they are not lazy
 natives, so they never reach this pass."
-  (loop with vendor = (or (ignore-errors (truename *vendor*)) *vendor*)
-        for (package loader nil path-var nil build-script) in *lazy-natives*
+  (loop for (package loader nil path-var nil build-script) in *lazy-natives*
         for present = (and (find-package package) (%fn package loader))
         for path = (and present path-var (%var package path-var))
         for resolved = (and path (%resolved-library-path path))
@@ -216,7 +262,7 @@ natives, so they never reach this pass."
                (format t "~&~A: ~A woke but recorded no library path.~%" *label* package)
                (format t "Cannot show ~A will carry it, so refusing (pre-publication issue 325).~%" *product*))
              (sb-ext:exit :code 3))
-            ((and resolved (uiop:subpathp resolved vendor))
+            ((vendored-library-p resolved)
              (format t "~&  will carry  ~A  <- ~A~%" package (human-path:human-path path)))
             (t
              (let ((*standard-output* *error-output*))
@@ -282,7 +328,7 @@ be missing from a step named for waking."
           (destructuring-bind (name . path) lib
             (let ((truename (and path (probe-file path))))
               (cond
-                ((and truename (uiop:subpathp truename *vendor*))
+                ((vendored-library-p truename)
                  ;; NAME FROM `path', NOT `truename' (pre-publication issue 329). PATH is what the tree's own
                  ;; search order accepted -- the name the consumer will ask for. TRUENAME is
                  ;; where the bytes live, which on a conventional install is a versioned file
@@ -296,6 +342,7 @@ be missing from a step named for waking."
                  ;; CARRY-RUNTIME-LINKED-LIBRARIES already names from the symlink because the
                  ;; load command does, and its docstring stops being an exception.
                  (let ((dst (merge-pathnames (file-namestring path) *bundle*)))
+                   (%note-carried dst)
                    (uiop:copy-file truename dst)
                    (unless (uiop:os-windows-p)
                      (ignore-errors (uiop:run-program (list "chmod" "+x" (namestring dst))
@@ -312,6 +359,7 @@ be missing from a step named for waking."
                                          (file-namestring license))
                                  *bundle*)))
                        (ensure-directories-exist dst)
+                       (%note-carried dst)
                        (uiop:copy-file license dst)
                        (format t "~&            + LICENSES/~A~%" (file-namestring dst))))
                    ;; A library whose licence is not permissive travels with its source
@@ -320,9 +368,10 @@ be missing from a step named for waking."
                                  (vendor-package-name truename))))
                      (when entry
                        (handler-case
-                           (let ((copy (ouranos-bundle-sources:carry-source
-                                        entry (uiop:pathname-parent-directory-pathname *vendor*) *bundle*)))
-                             (format t "~&            + SOURCES/~A~%" (file-namestring copy)))
+                           (let ((root (uiop:pathname-parent-directory-pathname *vendor*)))
+                             (%note-carried (ouranos-bundle-sources:source-destination entry root *bundle*))
+                             (let ((copy (ouranos-bundle-sources:carry-source entry root *bundle*)))
+                               (format t "~&            + SOURCES/~A~%" (file-namestring copy))))
                          (ouranos-bundle-sources:source-refused (e)
                            (format *error-output* "~&~A: ~A~%~%The build would carry ~A into ~A without its source, which its licence requires (ADR-0013). Not building it.~%"
                                    *label* e (getf entry :package) (uiop:native-namestring *bundle*))
@@ -337,20 +386,121 @@ be missing from a step named for waking."
     (format t "~&~A: ~D of this tree's native librar~:@P carried into ~A.~%" *label* carried *product*)
     (release-lazy-natives)))
 
+(defun %carried-list-entry (line bundle)
+  "What to do with LINE of BUNDLE's carried list. Returns (values ACTION PATH REASON):
+- :BLANK for an empty line;
+- :REFUSE, with REASON, for a line that is not a relative path inside BUNDLE: absolute, with a
+  drive letter or a backslash, or with a .. component;
+- :REFUSE, with PATH and REASON, when a directory on the way to PATH inside BUNDLE is a link
+  (a symbolic link, or a Windows junction or other reparse point), when PATH itself is a link,
+  or when PATH is a directory;
+- :MISSING, with PATH, when there is nothing at PATH;
+- :DELETE, with PATH, otherwise: a file inside BUNDLE, reached without passing through a link.
+
+The list is a plain file in a directory the app owns, so anyone can edit it. Following a link,
+or deleting a directory, could remove something outside BUNDLE, and a line that would do that
+is refused rather than acted on (#564). Links are found with aion/fs:link-p, because SBCL's
+TRUENAME does not resolve a Windows junction."
+  (let ((text (string-trim '(#\Space #\Tab #\Return) line)))
+    (cond
+      ((zerop (length text)) (values :blank nil nil))
+      ((or (find #\\ text) (char= (char text 0) #\/) (find #\: text))
+       (values :refuse nil "not a relative path with /"))
+      ((member ".." (uiop:split-string text :separator "/") :test #'string=)
+       (values :refuse nil "it contains .."))
+      (t
+       (let* ((path (merge-pathnames (uiop:parse-unix-namestring text) bundle))
+              (dir bundle))
+         (unless (uiop:subpathp path bundle)
+           (return-from %carried-list-entry (values :refuse path "not inside the directory")))
+         (dolist (component (rest (pathname-directory (uiop:enough-pathname path bundle))))
+           (setf dir (merge-pathnames (make-pathname :directory (list :relative component)) dir))
+           (when (aion/fs:link-p dir)
+             (return-from %carried-list-entry
+               (values :refuse path (format nil "~A is a link" (uiop:native-namestring dir))))))
+         (cond ((aion/fs:link-p path) (values :refuse path "it is a link"))
+               ((uiop:directory-exists-p (uiop:ensure-directory-pathname path))
+                (values :refuse path "it is a directory"))
+               ((probe-file path) (values :delete path nil))
+               (t (values :missing path nil))))))))
+
+(defun %absolute-directory (directory)
+  "DIRECTORY as an absolute directory pathname. A relative one, such as the \"bin/\" the template
+scripts pass, is taken against the process's current directory, which is where the copies into
+it land."
+  (uiop:ensure-directory-pathname
+   (uiop:ensure-absolute-pathname (uiop:ensure-directory-pathname directory) (uiop:getcwd))))
+
+(defun remove-previously-carried (bundle)
+  "Delete the files the last CARRY-TREE-NATIVES copied into BUNDLE, as its carried list names
+them, and the list. A library the app no longer loads, and its licence and source, would
+otherwise stay in BUNDLE and be shipped with it, because the docs say to ship bin/ as a whole
+(#564). Files the list does not name, such as anything else an app keeps there, are left.
+Returns the files deleted. A line that is refused (%CARRIED-LIST-ENTRY says which) is reported
+and left; a file that is missing is skipped. A file that cannot be deleted, for example a library
+a running copy of the binary has open, ends the process with exit code 3 and says which. A list
+that is itself a link signals CARRIED-LIST-REFUSED before it is read.
+
+A LIMIT: a line is checked for links (%CARRIED-LIST-ENTRY) and then deleted, in two steps. A
+process that replaced a directory in BUNDLE with a link between those steps could redirect the
+delete. That needs something else writing to BUNDLE while the build runs, which a build does not
+guard against."
+  (let* ((bundle (%absolute-directory bundle))
+         (list-file (merge-pathnames +carried-list-name+ bundle))
+         (deleted '()))
+    (%check-carried-list list-file)
+    (when (probe-file list-file)
+      (dolist (line (uiop:read-file-lines list-file))
+        (multiple-value-bind (action path reason) (%carried-list-entry line bundle)
+          (case action
+            (:refuse
+             (format t "~&~A: not removing ~S from ~A: ~A.~%"
+                     *label* (string-trim '(#\Space #\Tab #\Return) line) +carried-list-name+ reason))
+            (:delete
+             (handler-case (progn (delete-file path) (push path deleted))
+               (file-error (e)
+                 (let ((*standard-output* *error-output*))
+                   (format t "~&~A: could not remove ~A, which an earlier build copied there: ~A~%"
+                           *label* (uiop:native-namestring path) e)
+                   (format t "If a copy of the binary is running, stop it and build again.~%"))
+                 (sb-ext:exit :code 3)))))))
+      (delete-file list-file))
+    (nreverse deleted)))
+
 (defun carry-tree-natives (bundle &key (label *label*))
   "Wake, check and carry this tree's lazily loaded libraries into BUNDLE, then close them, and
 set aion/platform:*search-source-tree* to NIL when aion/platform is loaded, so the dumped image
 looks for them beside itself and not in the tree it was built from (#499). Ends the process with
 exit code 3, naming the problem, if the image loads one that cannot be carried. Call it last
-before the dump."
-  (let ((*bundle* (uiop:ensure-directory-pathname bundle))
+before the dump.
+
+First it removes what the previous call copied into BUNDLE, as listed in BUNDLE's carried list
+(+CARRIED-LIST-NAME+), and then appends each file to a new list just before it copies it, so the
+list names every file this call started to put in BUNDLE even if it stops part-way (#564). A carried list that is a
+link ends the process with exit code 3, naming it."
+  (let ((*bundle* (%absolute-directory bundle))
         (*label* label)
         (*product* "the binary")
-        (*carry-option-p* nil))
+        (*carry-option-p* nil)
+        (*carried-list* nil))
     (ensure-directories-exist *bundle*)
+    (handler-case
+        (let ((removed (remove-previously-carried *bundle*)))
+          (when removed
+            (format t "~&~A: removed ~D file~:P an earlier build copied into ~A.~%"
+                    *label* (length removed) (uiop:native-namestring *bundle*))))
+      (carried-list-refused (e)
+        (format *error-output* "~&~A: ~A. Remove it and build again.~%" *label* e)
+        (sb-ext:exit :code 3)))
+    ;; Each file is appended to the list as it is copied (%NOTE-CARRIED), so a build that stops
+    ;; part-way still names what it put in BUNDLE.
+    (setf *carried-list* (merge-pathnames +carried-list-name+ *bundle*))
     (wake-lazy-natives)
     (verify-natives-will-be-carried)
-    (carry-native-libraries))
+    (handler-case (carry-native-libraries)
+      (carried-list-refused (e)
+        (format *error-output* "~&~A: ~A. Remove it and build again.~%" *label* e)
+        (sb-ext:exit :code 3))))
   (let ((search (and (find-package "AION/PLATFORM")
                      (find-symbol "*SEARCH-SOURCE-TREE*" "AION/PLATFORM"))))
     (when search (setf (symbol-value search) nil))))
