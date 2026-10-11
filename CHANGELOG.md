@@ -341,6 +341,12 @@ its tag.
 
 ### Fixed
 
+- **hyperion/update: an update can be applied when `*update-source*` is a list of sources**
+  (#408). `fetch-manifest` already tried a list in order, but `fetch-artifact` had no method for
+  one. So an app that set `*update-source*` to a list could report an update as available, and
+  then fail with `NO-APPLICABLE-METHOD-ERROR` when the user applied it. `fetch-artifact` now
+  tries the list in order, and passes over a source that cannot be reached, as `fetch-manifest`
+  does.
 - **klio: a fenced block's language could close the class attribute and add attributes to the
   page; now an invalid language renders with no class.** klio renders fenced blocks as
   `<pre class="LANG">`, and the info string after the opening fence reached that attribute with
