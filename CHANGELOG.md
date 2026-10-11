@@ -375,7 +375,9 @@ its tag.
   this build's** (#564). `carry-tree-natives` in `scripts/tree-natives.lisp` keeps a list of
   the files it copies into `bin/` in `bin/.carried-natives`, one path per line, relative to
   `bin/`. Each file is added to the list just before it is copied, so a build that stops
-  part-way, or a copy that fails, still leaves named everything it started to write. The next
+  part-way, or a copy that fails, still names everything it started to write. If such a copy
+  fails without writing anything, a file that was already at that path in `bin/` is deleted by
+  the next build; a copy that succeeded would have replaced it anyway. The next
   build deletes the files on that list, then copies again. So a library the app no
   longer loads, with its `bin/LICENSES/` file and, for libgit2, its `bin/SOURCES/` tarball, is
   no longer left in `bin/` and shipped. Files the list does not name, such as anything else an
