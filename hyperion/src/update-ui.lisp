@@ -323,7 +323,8 @@ inserts a new element, so a `load' in a reply re-requests itself forever."
 (defun %update-args (channel product env)
   "The :CHANNEL and :PRODUCT keywords for CHECK-FOR-UPDATE and APPLY-UPDATE, from
 UPDATE-ROUTER's arguments. Each is a string or a function of ENV, resolved per request. A
-NIL value is left out, so the client's own default applies: stable, and *APP-NAME*."
+NIL value is left out, so the client's own default applies: *DEFAULT-CHANNEL* (stable unless
+the build set another), and *APP-NAME*."
   (flet ((resolve (v) (if (functionp v) (funcall v env) v)))
     (let ((ch (resolve channel))
           (pr (resolve product)))
@@ -343,9 +344,10 @@ reach the network.
 
 CHANNEL and PRODUCT are passed to both the check and the apply (#301). Each is a string, or
 a function of the request env for a per-user setting such as a beta opt-in. Left NIL, the
-client's defaults apply: the stable channel, and *APP-NAME* as the product. They matter even
-with CHECK NIL, because applying re-checks: an app that checked on beta itself and mounts
-this router without its channel would have Apply re-check against stable.
+client's defaults apply: *DEFAULT-CHANNEL*, which is stable unless the build set another, and
+*APP-NAME* as the product. They matter even with CHECK NIL, because applying re-checks: an app
+that checked on beta itself and mounts this router without its channel would have Apply
+re-check against the default channel.
 
 CSRF-TOKEN is a string or a thunk of no arguments; a thunk is re-called per request, which
 is what a per-session token requires."

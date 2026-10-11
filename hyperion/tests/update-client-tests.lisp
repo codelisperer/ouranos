@@ -377,6 +377,20 @@ the artifact lookup is the real one rather than a hard-coded guess."
         (is (string= "up-to-date" (getf status :status))
             "a channel with no manifest should be quiet, not an error")))))
 
+(test without-a-channel-the-check-uses-the-default-channel-the-build-set
+  ;; A release build sets *DEFAULT-CHANNEL* with --default-channel (#408). A check given no
+  ;; channel reads that one's manifest; a check given a channel still reads the one it names.
+  (with-published-directory (dist :channel "beta")
+    (let ((source (make-instance 'up:directory-source :path dist)))
+      (is (string= "up-to-date" (getf (up:check-for-update :source source :product "testapp") :status))
+          "with the default of stable, the beta manifest is not read")
+      (let ((up:*default-channel* "beta"))
+        (is (string= "available" (getf (up:check-for-update :source source :product "testapp") :status))
+            "with the default set to beta, it is")
+        (is (string= "up-to-date"
+                     (getf (up:check-for-update :source source :channel "stable" :product "testapp") :status))
+            "and a channel passed by the caller still wins")))))
+
 (test an-artifact-is-found-by-the-name-the-url-would-have-served-it-as
   (with-published-directory (dist)
     (let* ((source (make-instance 'up:directory-source :path dist))

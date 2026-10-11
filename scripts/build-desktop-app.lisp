@@ -7,6 +7,12 @@
 ;;;;          --version 0.1.0 \
 ;;;;          [--out dist] [--icon path/to/app.ico] [--window-icon path/to/window.png]
 ;;;;          [--carry path/to/lib [--carry-license path/to/license] ...]
+;;;;          [--product NAME] [--display-name TEXT] [--public-key-file PATH]
+;;;;          [--update-source github=URL|s3=URL ...] [--default-channel NAME] [--release]
+;;;;
+;;;; --product, --display-name, --public-key-file, --update-source, --default-channel and
+;;;; --release set hyperion/update's settings in the dumped image: its product name, signing
+;;;; key, update sources and default channel. See scripts/release-settings.lisp (#408).
 ;;;;
 ;;;; --icon is used on Windows only: see "Windows: the executable's icon" below.
 ;;;; --window-icon is the icon for the app's window on every OS, carried in the bundle (#74).
@@ -49,6 +55,19 @@
 (defparameter *name*    (or (argv-value "--name")    (error "build-desktop-app: --name is required")))
 (defparameter *version* (or (argv-value "--version") "0.0.0"))
 (defparameter *out*     (argv-value "--out" "dist"))
+
+;;; The release settings (#408), parsed and checked here, before anything is built, so a bad one
+;;; stops the build at once. They are set in the image just before the dump.
+(load (merge-pathnames "release-settings.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+(defparameter *release-settings*
+  (handler-case (ouranos-release-settings:parse-release-settings (rest sb-ext:*posix-argv*) :name *name*)
+    (ouranos-release-settings:release-settings-refused (e)
+      (format *error-output* "~&build-desktop-app: ~A~%" e)
+      (sb-ext:exit :code 2))))
+
+(defun release-args ()
+  "The release options, for a re-run of this build to see the same ones."
+  (ouranos-release-settings:release-settings-argv (rest sb-ext:*posix-argv*)))
 (defparameter *carry*
   (handler-case (ouranos-carry:declared-carries (rest sb-ext:*posix-argv*))
     (ouranos-carry:carry-refused (e)
@@ -254,7 +273,8 @@ itself already finished, and its exit code is what the caller returns."
                                 (list "--system" *system* "--entry" *entry*
                                       "--name" *name* "--version" *version* "--out" *out*)
                                 (%window-icon-args)
-                                (carry-args))
+                                (carry-args)
+                                (release-args))
                         :output t :error-output t :ignore-error-status t
                         ;; The child's own runtime now says @executable_path, so it cannot
                         ;; rediscover which files to carry -- it is told.
@@ -337,7 +357,8 @@ Returns the child's exit code."
                "--system" *system* "--entry" *entry*
                "--name" *name* "--version" *version* "--out" *out*)
          (%window-icon-args)
-         (carry-args))
+         (carry-args)
+         (release-args))
         :output t :error-output t :ignore-error-status t
         ;; A copied runtime sits in <out>/.runtime, away from SBCL's own directory, so it is
         ;; told where its contribs are. OURANOS_PATCHED_RUNTIME marks the child, which then
@@ -912,6 +933,12 @@ nothing."
                      :direction :output :if-exists :supersede :if-does-not-exist :create)
   (format out "~A~%" *version*))
 
+;;; RELEASE names the product, its display name, the version and the default channel, one
+;;; "key value" line each, for the installer and the dmg script to read (#408).
+(with-open-file (out (merge-pathnames "RELEASE" *bundle*)
+                     :direction :output :if-exists :supersede :if-does-not-exist :create)
+  (write-string (ouranos-release-settings:release-file-text *release-settings* *version*) out))
+
 ;;; The window icon, beside the executable, under the name hyperion/desktop looks for (#74).
 (when *window-icon*
   (let ((target (merge-pathnames (format nil "window-icon.~(~A~)" (pathname-type *window-icon*))
@@ -955,6 +982,21 @@ Exits with code 3, naming the compiler's output, if it does not compile."
 ;;; loaders still honour AION_*_LIBRARY and the operating system's own search. Set in the image
 ;;; just before it is dumped, so the dumped image keeps it.
 (setf aion/platform:*search-source-tree* nil)
+
+;;; hyperion/update's settings, from the release options (#408). Set here, in the image that is
+;;; about to be dumped, for the same reason. An app that does not load hyperion/update gets
+;;; none, and is refused if a release option was given.
+(handler-case
+    (ouranos-release-settings:apply-release-settings
+     *release-settings*
+     :given (ouranos-release-settings:settings-given-p (rest sb-ext:*posix-argv*)))
+  (ouranos-release-settings:release-settings-refused (e)
+    (format *error-output* "~&build-desktop-app: ~A~%" e)
+    (sb-ext:exit :code 3)))
+(when (find-package "HYPERION/UPDATE")
+  (format t "~&build-desktop-app: release settings: product ~A, channel ~A, ~:[no signing key~;signing key set~], ~D update source~:P~%"
+          (getf *release-settings* :product) (getf *release-settings* :channel)
+          (getf *release-settings* :public-key) (length (getf *release-settings* :sources))))
 
 (cond
   ((uiop:os-macosx-p)

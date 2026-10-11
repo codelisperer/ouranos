@@ -61,6 +61,14 @@ Set by the application; there is no default, for the same reason no source has o
 Ships INSIDE the bundle and is exactly as trusted as the installer that placed it. NIL
 disables updating entirely rather than disabling verification -- see `%trusted-key'.")
 
+(defvar *default-channel* "stable"
+  "The channel `check-for-update' and `apply-update' use when they are not given one.
+
+A release build may set another, for example \"beta\" for a build handed to testers, with
+build-desktop-app.lisp's --default-channel (#408). An application that lets the user choose a
+channel still passes :CHANNEL, which wins. Defined here, ahead of those two functions, because
+their argument lists read it.")
+
 (defvar *app-name* nil
   "The product's install name, as `windows.nsi' -DAPPNAME sees it. The application sets it.
 
@@ -463,7 +471,7 @@ Before any check it reports `unchecked' rather than inventing an answer -- notab
 `up-to-date', which would be a claim nothing has established."
   (or *update-state* (list :status "unchecked" :version "" :block "" :detail "")))
 
-(defun check-for-update (&key (source *update-source*) (channel "stable") (product *app-name*))
+(defun check-for-update (&key (source *update-source*) (channel *default-channel*) (product *app-name*))
   "Ask SOURCE whether a newer build exists. Updates and returns `update-status'.
 
 NEVER SIGNALS. A failed update check is background noise -- the network is down, the user
@@ -1544,7 +1552,7 @@ window between checking and applying is exactly where a channel gets a security 
                :detail "the manifest carries no artifact for this platform"))
       (values source entry))))
 
-(defun apply-update (&key (source *update-source*) (channel "stable") (product *app-name*))
+(defun apply-update (&key (source *update-source*) (channel *default-channel*) (product *app-name*))
   "Install the available update.
 
 WINDOWS AND LINUX. macOS refuses, because its apply strategy, `app-targz', is not written

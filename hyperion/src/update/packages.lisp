@@ -130,7 +130,8 @@
    ;; what the application supplies
    #:*installed-version* #:*installed-published* #:*public-key* #:*update-source*
    #:*download-url*
-   #:*before-apply* #:*app-name* #:*install-directory* #:*launch-installer* #:*exit-after-handoff*
+   #:*before-apply* #:*app-name* #:*default-channel* #:*install-directory* #:*launch-installer*
+   #:*exit-after-handoff*
    ;; the source protocol and its backends
    #:fetch-manifest #:fetch-artifact
    #:null-source #:http-source #:github-release-source #:s3-source #:source-base-url

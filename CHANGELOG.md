@@ -126,6 +126,26 @@ its tag.
   - Only the app adds resources; the model cannot read one itself. Subscriptions, completions
     and caching are not supported. See `praxeon/docs/mcp.md`.
 
+- **`build-desktop-app.lisp` sets the update settings in the image it dumps** (#408).
+  - New options, in `scripts/release-settings.lisp`:
+    - `--product NAME` sets `hyperion/update:*app-name*`. It defaults to `--name`, and for now
+      must equal it, because the installer still takes its name from the bundle directory.
+    - `--display-name TEXT` defaults to the product.
+    - `--public-key-file PATH` sets `*public-key*`. Without it, the `OURANOS_PUBLIC_KEY`
+      environment variable is read. The key is checked with `aion/signature` before it is set.
+    - `--update-source github=URL` and `--update-source s3=URL` set `*update-source*`. Given
+      more than once, they are tried in the order given. The URL must be https.
+    - `--default-channel NAME` sets `*default-channel*`.
+    - `--release` refuses to build without a key and a source.
+  - A bad option stops the build with exit code 2 before anything is built.
+  - A release option given for an app that does not load `hyperion/update` stops it with exit
+    code 3.
+  - The bundle gets a `RELEASE` file with `product`, `display-name`, `version` and `channel`
+    lines.
+  - A key file may hold one key, until key rotation is decided.
+  - New `hyperion/update:*default-channel*`, default "stable". `check-for-update` and
+    `apply-update` use it when no `:channel` is given, and so does `update-router` when it is
+    given no channel.
 - **aion/fs: `make-temporary-directory` creates a new temporary directory that no other process
   is given** (#515). It is named after a prefix, the process id and a counter of the process's
   own, and it counts as made only when this call created it, so two processes started at the same
