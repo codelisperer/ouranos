@@ -487,6 +487,14 @@ its tag.
 
 ### Fixed
 
+- **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a
+  sign-in** (#587). When `tasks/cancel` needed a sign-in and an observer of `:sign-in-required`
+  signalled, or an app's handler of `authorization-required` exited, the task was never marked
+  cancelled. Each later `poll-tasks` sent `tasks/cancel` again, told the app to sign in again,
+  and stopped before the tasks due after it. The task is now marked `:cancelled` on the way out,
+  and the next `poll-tasks` returns it with one `:task-finished`; `:task-input-refused` is not
+  sent in that case. A store error while marking it is logged, and the app gets the condition
+  that left the poll.
 - **hyperion/update: an update can be applied when `*update-source*` is a list of sources**
   (#408). `fetch-manifest` already tried a list in order, but `fetch-artifact` had no method for
   one. So an app that set `*update-source*` to a list could report an update as available, and
