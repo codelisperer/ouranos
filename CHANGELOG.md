@@ -99,6 +99,15 @@ its tag.
   fasl loads. An app acts if its code has such a warning, which now fails its build. An app that
   carries its own strict-build script to catch this case can use `cons --strict build` instead.
   (#525)
+- **hyperion/markdown: with `:allow-html nil`, an app's own 3bmd code-block renderer receives a
+  fenced block's text unescaped, so it must escape `<`, `>` and `&` itself** (#559). `render`
+  used to escape the whole source before 3bmd parsed it, so a renderer an app registered for
+  `3bmd-code-blocks:*renderer*` was handed text that was already escaped. The safe mode now
+  hands every renderer other than `:nohighlight` and `:colorize` the block's text as the author
+  wrote it, as `:pygments` and `:chroma` expect, and prints that renderer's output unchanged. An
+  app whose renderer writes its input into the page without escaping it now lets a fenced block
+  put raw HTML on the page, so that renderer must escape its input. The fixed entry for #559
+  below describes the rest of the change.
 
 ### Added
 
