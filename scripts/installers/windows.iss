@@ -75,6 +75,9 @@
 ; scripts/tests/windows-installer-swap.lisp checks that in the preprocessed script.
 #ifdef OURANOS_TEST_PAUSE_DIR
   #define TestPauseHook "; AfterInstall: OuranosTestPauseAfterStage"
+  ; The directory goes into Pascal single-quoted literals below, where a ' would end the literal,
+  ; so each ' is doubled here: a temporary directory under a profile such as O'Brien is legal.
+  #define TestPauseDirLiteral StringChange(OURANOS_TEST_PAUSE_DIR, "'", "''")
 #else
   #define TestPauseHook ""
 #endif
@@ -196,8 +199,8 @@ begin
   if OuranosTestPaused then
     exit;
   OuranosTestPaused := True;
-  SaveStringToFile('{#OURANOS_TEST_PAUSE_DIR}\paused', 'OURANOS-TEST-PAUSE', False);
-  while not FileExists('{#OURANOS_TEST_PAUSE_DIR}\resume') do
+  SaveStringToFile('{#TestPauseDirLiteral}\paused', 'OURANOS-TEST-PAUSE', False);
+  while not FileExists('{#TestPauseDirLiteral}\resume') do
     Sleep(50);
 end;
 #endif

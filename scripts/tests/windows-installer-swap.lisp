@@ -826,6 +826,7 @@ and the CI runner has Inno Setup 6, where it printed only the banner (run 381727
                                   (%lines (format nil "#include \"~A\""
                                                   (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*)))
                                           (format nil "#expr SaveToFile(\"~A\")" (uiop:native-namestring out))))
+                          (multiple-value-bind (output error-output code)
                           (uiop:run-program
                            (append (list tool "/O-" "/Q"
                                          (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.1"
@@ -834,8 +835,9 @@ and the CI runner has Inno Setup 6, where it printed only the banner (run 381727
                                          "/DOUTBASE=setup" (format nil "/DEXENAME=~A.exe" +swap-app+))
                                    extra
                                    (list (uiop:native-namestring wrapper)))
-                           :output nil :error-output nil :ignore-error-status t)
-                          (if (probe-file out) (uiop:read-file-string out) ""))))
+                           :output :string :error-output :string :ignore-error-status t)
+                            (declare (ignore output error-output))
+                            (values (if (probe-file out) (uiop:read-file-string out) "") code)))))
                  (let ((release (preprocessed "release"))
                        (test (preprocessed "test" (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
                                                           (string-right-trim "\\" (uiop:native-namestring tree))))))
@@ -846,5 +848,16 @@ and the CI runner has Inno Setup 6, where it printed only the banner (run 381727
                    (is (search "AfterInstall: OuranosTestPauseAfterStage" test)
                        "with the define, the hook is there")
                    (is (search "procedure OuranosTestPauseAfterStage" test)
-                       "and so is the procedure")))
+                       "and so is the procedure"))
+                 ;; A pause directory with an apostrophe, as under a profile named O'Brien: the
+                 ;; path goes into Pascal string literals, so each ' must be doubled, or the
+                 ;; installer does not compile (Copilot's review of #585).
+                 (let ((apostrophe (ensure-directories-exist (merge-pathnames "O'Brien/" tree))))
+                   (multiple-value-bind (text code)
+                       (preprocessed "apostrophe"
+                                     (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
+                                             (string-right-trim "\\" (uiop:native-namestring apostrophe))))
+                     (is (eql 0 code) "with an apostrophe in the pause directory, it compiles: exit ~S" code)
+                     (is (search "O''Brien\\paused" text)
+                         "and the apostrophe is doubled in the literal"))))
             (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
