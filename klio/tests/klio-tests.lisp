@@ -743,6 +743,29 @@ not use, and the control is that this block contains the word `defun' and is sti
              "no empty class attribute: klio's HTML for a plain block should not differ from
 every other renderer's for no reason; got ~S" html)))
 
+(test a-fence-language-that-is-not-a-name-renders-with-no-class
+  "3bmd writes a fence's info string into the class attribute with < and > escaped but not a
+double quote, so a quote in it closed the attribute and added attributes to the page. Only a
+language name made of letters, digits and + - _ . # keeps its class."
+  (flet ((opening (info)
+           (let* ((html (k:render-markdown (%md (concatenate 'string "```" info) "body" "```")))
+                  (end (search "<code>" html)))
+             (and end (subseq html (search "<pre" html) (+ end (length "<code>")))))))
+    (is (equal "<pre><code>" (opening "x\" onmouseover=\"alert(1)"))
+        "a quote: the attribute is not closed early and nothing is added")
+    (is (equal "<pre><code>" (opening "x y")) "a space")
+    (is (equal "<pre><code>" (opening "a<b")) "a <")
+    (is (equal "<pre><code>" (opening "a>b")) "a >")
+    (is (equal "<pre><code>" (opening "")) "no info string")
+    (is (equal "<pre class=\"python\"><code>" (opening "python")) "a language keeps its class")
+    (is (equal "<pre class=\"c++\"><code>" (opening "c++")))
+    (is (equal "<pre class=\"objective-c.v2_x#\"><code>" (opening "objective-c.v2_x#"))
+        "every allowed punctuation character")
+    (is (search "code-operator" (k:render-markdown (%md "```lisp" "(list 1)" "```")))
+        "a valid Lisp block is still highlighted")
+    (is (null (search "code-operator" (k:render-markdown (%md "```lisp\" x=\"1" "(list 1)" "```"))))
+        "a block whose language was refused is not highlighted either")))
+
 (test the-lexical-classes-are-the-ones-a-reader-needs
   (let ((html (k:highlight-lisp
                (format nil "(defparameter *x* 42 #\\a :key \"text\") ; trailing~%"))))
