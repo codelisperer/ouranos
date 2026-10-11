@@ -113,6 +113,33 @@ how rotation works (#408): change this, and hyperion/update's %trusted-key, to a
                   (length keys)))
         (t (first keys))))
 
+(defun %https-url-problem (url)
+  "Why URL cannot be an update source, or NIL when it can: it must be https, with a host. The
+host is the part after https:// up to the first /, ? or #, less a :port. It must be a DNS name
+(letters, digits, dots and dashes, not starting or ending with a dot or dash), and a port, when
+given, 1 to 65535. Credentials before an @ are refused: they would be built into the image.
+\"https://\" alone used to pass, and satisfied --release's need for a source (#588)."
+  (if (not (uiop:string-prefix-p "https://" url))
+      "the URL must start with https://"
+      (let* ((rest (subseq url (length "https://")))
+             (end (or (position-if (lambda (c) (find c "/?#")) rest) (length rest)))
+             (authority (subseq rest 0 end))
+             (colon (position #\: authority))
+             (host (subseq authority 0 (or colon (length authority))))
+             (port (and colon (subseq authority (1+ colon)))))
+        (cond ((find #\@ authority) "the URL must not carry credentials before an @")
+              ((zerop (length host)) "the URL has no host after https://")
+              ((not (and (every (lambda (c) (and (< (char-code c) 128)
+                                                 (or (alphanumericp c) (find c ".-"))))
+                                host)
+                         (not (find (char host 0) ".-"))
+                         (not (find (char host (1- (length host))) ".-"))))
+               (format nil "the host ~S is not a DNS name" host))
+              ((and port (not (and (plusp (length port)) (<= (length port) 5)
+                                   (every #'digit-char-p port)
+                                   (<= 1 (parse-integer port) 65535))))
+               (format nil "the port ~S is not a number from 1 to 65535" port))))))
+
 (defun %update-sources (argv)
   "((class-name . url) ...) from each --update-source, in order."
   (loop for value in (%option-values argv "--update-source")
@@ -123,8 +150,8 @@ how rotation works (#408): change this, and hyperion/update's %trusted-key, to a
         do (cond ((null split) (%refuse "--update-source ~A is not KIND=URL" value))
                  ((null class) (%refuse "--update-source kind ~S is not one of ~{~A~^, ~}"
                                         kind (mapcar #'car *source-kinds*)))
-                 ((not (uiop:string-prefix-p "https://" url))
-                  (%refuse "--update-source ~A: the URL must start with https://" value)))
+                 ((%https-url-problem url)
+                  (%refuse "--update-source ~A: ~A" value (%https-url-problem url))))
         collect (cons class (if (uiop:string-suffix-p url "/") url (concatenate 'string url "/")))))
 
 (defun parse-release-settings (argv &key name (getenv #'uiop:getenv))

@@ -85,6 +85,15 @@ shape only. Not a key a signature would verify against."
                            (("--update-source" "ftp=https://x.example/") "is not one of")
                            (("--update-source" "github=http://x.example/") "must start with https://")
                            (("--update-source" "https://x.example/") "is not KIND=URL")
+                           ;; A URL with no host, or one a DNS name cannot be (#588).
+                           (("--update-source" "github=https://") "has no host")
+                           (("--update-source" "github=https:///releases/") "has no host")
+                           (("--update-source" "s3=https://user:pass@bucket.example/") "credentials")
+                           (("--update-source" "s3=https://bucket example/") "is not a DNS name")
+                           (("--update-source" "s3=https://.bucket.example/") "is not a DNS name")
+                           (("--update-source" "s3=https://bucket.example:0/") "is not a number from 1 to 65535")
+                           (("--update-source" "s3=https://bucket.example:x/") "is not a number from 1 to 65535")
+                           (("--update-source" "s3=https://bucket.example:65536/") "is not a number from 1 to 65535")
                            (("--public-key-file" ,(uiop:native-namestring two-keys)) "holds 2 keys")
                            (("--public-key-file" ,(uiop:native-namestring (merge-pathnames "absent.pub" tree)))
                             "does not exist")
@@ -102,6 +111,15 @@ shape only. Not a key a signature would verify against."
                  (is (and reason (search expected reason))
                      "~S: expected a refusal saying ~S, got ~S" argv expected reason)))))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test an-update-source-with-a-host-port-and-path-is-accepted
+  ;; The other side of #588's refusals: an https URL with a host is accepted, with or without a
+  ;; port and a path, and gets its trailing /.
+  (is (equal '(("S3-SOURCE" . "https://bucket.example:8443/updates/app/")
+               ("GITHUB-RELEASE-SOURCE" . "https://github.com/"))
+             (getf (%release '("--update-source" "s3=https://bucket.example:8443/updates/app"
+                               "--update-source" "github=https://github.com"))
+                   :sources))))
 
 (test product-and-display-name-count-as-release-options
   ;; Each names something hyperion/update holds, so an app without it is refused when given

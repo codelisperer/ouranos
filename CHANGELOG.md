@@ -485,6 +485,13 @@ its tag.
 
 ### Fixed
 
+- **`build-desktop-app.lisp --update-source` refuses a URL with no host** (#588). The URL had
+  only to start with `https://`, so `--update-source github=https://` was accepted, and it
+  satisfied `--release`'s need for a source, giving a build that can never reach one. Now the
+  part after `https://` must have a host that is a DNS name (letters, digits, dots and dashes),
+  and a port, when given, from 1 to 65535. A URL with credentials before an `@` is refused too,
+  because they would be built into the image. A refused URL stops the build with exit code 2,
+  naming what is wrong.
 - **hyperion/update: an update can be applied when `*update-source*` is a list of sources**
   (#408). `fetch-manifest` already tried a list in order, but `fetch-artifact` had no method for
   one. So an app that set `*update-source*` to a list could report an update as available, and
