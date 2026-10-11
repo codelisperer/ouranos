@@ -1806,14 +1806,16 @@ review)."
               (is (equal '(:task-finished) events) "~A: announced, with no poll: ~S" exit events))))))))
 
 (defclass %store-failing-updates (praxeon/mcp::memory-task-store)
-  ((fail :initform nil :accessor %store-fails))
+  ((fail :initform nil :accessor %store-fails)
+   (finishes :initform 0 :accessor %store-finishes))
   (:documentation "A memory task store whose UPDATE-TASK and FINISH-TASK signal while FAIL is
-true."))
+true. FINISHES counts the calls to FINISH-TASK, failed or not."))
 (defmethod mcp:update-task :before ((store %store-failing-updates) task)
   (declare (ignore task))
   (when (%store-fails store) (error "the store failed")))
 (defmethod mcp:finish-task :before ((store %store-failing-updates) task)
   (declare (ignore task))
+  (incf (%store-finishes store))
   (when (%store-fails store) (error "the store failed")))
 
 (test a-store-error-while-recording-a-left-poll-does-not-replace-the-callers-error
@@ -1879,6 +1881,7 @@ gets the condition that left the poll (#587)."
                        (error (e) (princ-to-string e)))))
         (is (equal "the observer failed" message) "the store's error does not replace it: ~S"
             message))
+      (is (= 1 (%store-finishes store)) "the cleanup tried to mark the task cancelled")
       (is (null (mcp:task-outcome (%only-task client))) "the record is unchanged"))))
 
 (defclass %store-without-announce () ()
