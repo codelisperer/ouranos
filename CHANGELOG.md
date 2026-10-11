@@ -398,8 +398,12 @@ its tag.
   3bmd escapes them once. `&` is left as written, so an entity renders as its character.
   `:allow-html t` is unchanged. In the safe mode, a fenced block's language that is not made of
   letters, digits and `+ - _ . #` is dropped, because some 3bmd renderers write it into a class
-  attribute without escaping a double quote. Every klio page changes the same way. An app that
-  unescaped `render`'s output to work around this should stop.
+  attribute without escaping a double quote. The safe mode also turns off 3bmd's
+  `*smart-quotes*`, `*generate-header-ids*` and `*render-code-spans*` for the call, because each
+  makes 3bmd print text without escaping it; `:allow-html t` keeps an app's values. A fenced
+  block under the `:pygments` or `:chroma` renderer is left for that program to escape. Every
+  klio page changes the same way. An app that unescaped `render`'s output to work around this
+  should stop.
 
 ## v0.1.7 — 2026-09-30
 

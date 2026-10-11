@@ -154,12 +154,43 @@ and let the rest of the URL become new attributes."
 
 (test an-inline-code-span-is-plain-code-when-the-app-turned-on-code-span-colouring
   "With 3bmd's *RENDER-CODE-SPANS* true, 3bmd sends a code span to the code-block renderer, which
-under :nohighlight prints it unescaped. RENDER binds it to NIL, so a span stays <code>."
+under :nohighlight prints it unescaped. The safe mode binds it to NIL, so a span stays <code>.
+:ALLOW-HTML T keeps the app's value, as before #559, and so prints the span as 3bmd does."
   (let ((3bmd-code-blocks:*render-code-spans* t)
         (3bmd-code-blocks:*render-code-spans-lang* :common-lisp)
         (3bmd-code-blocks:*renderer* :nohighlight))
-    (dolist (html (%safe-and-trusted "Use `(< a b) & (> c d)` here."))
-      (is (search "<p>Use <code>(&lt; a b) &amp; (&gt; c d)</code> here.</p>" html) "got ~S" html))))
+    (let ((safe (md:render "Use `(< a b) & (> c d)` here."))
+          (trusted (md:render "Use `(< a b) & (> c d)` here." :allow-html t)))
+      (is (search "<p>Use <code>(&lt; a b) &amp; (&gt; c d)</code> here.</p>" safe) "got ~S" safe)
+      (is (search "<code>(< a b) & (> c d)</code>" trusted) "got ~S" trusted))))
+
+(test the-safe-mode-turns-off-3bmd-settings-that-print-unescaped-text-and-trusted-keeps-them
+  "Smart quotes and generated header ids make 3bmd print text it does not escape, so the safe mode
+turns them off. :ALLOW-HTML T keeps the app's values, as it did before #559."
+  (let ((3bmd:*generate-header-ids* t)
+        (3bmd:*smart-quotes* t)
+        (src (format nil "# A head~%~%\"quoted\" text~%")))
+    (let ((safe (md:render src))
+          (trusted (md:render src :allow-html t)))
+      (is (search "<h1>A head</h1>" safe) "got ~S" safe)
+      (is (search "<p>&quot;quoted&quot; text</p>" safe) "got ~S" safe)
+      (is (search "<h1 id=\"a_head\">A head</h1>" trusted) "got ~S" trusted)
+      (is (search "&ldquo;quoted&rdquo;" trusted) "got ~S" trusted))))
+
+(test a-fenced-block-is-escaped-for-ampersand-only-under-a-renderer-that-does-not
+  ":PYGMENTS and :CHROMA hand the code to an external program that writes escaped HTML, so the
+safe mode leaves & for them to escape. This checks the rewrite of the parsed block for each
+renderer; it does not run pygments or chroma."
+  (flet ((content (renderer lang)
+           (let ((3bmd-code-blocks:*renderer* renderer)
+                 (3bmd-code-blocks:*code-blocks-default-colorize* nil))
+             (getf (md::%restore-code-block (list :lang lang :content "a & b")) :content))))
+    (is (equal "a &amp; b" (content :nohighlight "python")))
+    (is (equal "a &amp; b" (content :colorize nil)) "colorize leaves an unlabelled block plain")
+    (is (equal "a & b" (content :colorize "python")) "colorize escapes a block it colours")
+    (is (equal "a & b" (content :pygments "python")))
+    (is (equal "a & b" (content :chroma "python")))
+    (is (equal "a & b" (content :chroma nil)))))
 
 (test an-entity-renders-as-its-character
   (dolist (html (%safe-and-trusted "Tom &amp; Jerry &copy; 2026."))

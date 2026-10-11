@@ -218,13 +218,18 @@ without escaping it under some renderers, so any other info string is dropped (#
 
 (defun %escaping-renderer-p (lang)
   "Whether the current 3bmd code-block renderer escapes `&' in a fenced block named LANG.
-:COLORIZE does when it colours the block. Otherwise the block goes through 3bmd's
-ESCAPE-PRE-STRING, which escapes only < and >. This follows RENDER-CODE-BLOCK's own choice,
-and the markdown suite checks both paths."
-  (and (eq 3bmd-code-blocks::*renderer* :colorize)
-       (or (and lang (3bmd-code-blocks::find-coloring-type lang))
-           (and (zerop (length (or lang "")))
-                3bmd-code-blocks:*code-blocks-default-colorize*))))
+:NOHIGHLIGHT does not: it uses 3bmd's ESCAPE-PRE-STRING, which escapes only < and >. :COLORIZE
+escapes a block it colours, and sends any other block through ESCAPE-PRE-STRING. :PYGMENTS and
+:CHROMA hand the code to an external program that writes escaped HTML, so they do. A renderer an
+app defines is assumed to escape its output, as those two do. This follows RENDER-CODE-BLOCK's
+own choice, and the markdown suite checks each case."
+  (case 3bmd-code-blocks::*renderer*
+    (:nohighlight nil)
+    (:colorize (and (or (and lang (3bmd-code-blocks::find-coloring-type lang))
+                        (and (zerop (length (or lang "")))
+                             3bmd-code-blocks:*code-blocks-default-colorize*))
+                    t))
+    (t t)))
 
 (defun %restore-code-block (rest)
   "A fenced block's plist REST with its brackets restored, its language dropped unless it is a
@@ -270,11 +275,13 @@ refused image as its alt text. An allowed URL is written into its attribute esca
 3bmd does not do itself."
   (if (and markdown (plusp (length markdown)))
       (let ((3bmd-code-blocks:*code-blocks* t)
-            ;; Bound here, not inherited: each of these makes 3bmd print some text without
-            ;; escaping it, which the safe mode's escaping relies on not happening (#559).
-            (3bmd:*smart-quotes* nil)
-            (3bmd:*generate-header-ids* nil)
-            (3bmd-code-blocks:*render-code-spans* nil)
+            ;; NIL in the safe mode: each of these makes 3bmd print some text without escaping
+            ;; it, which the safe mode's escaping relies on not happening (#559). :ALLOW-HTML T
+            ;; keeps the app's values, as it did before #559.
+            (3bmd:*smart-quotes* (and allow-html 3bmd:*smart-quotes*))
+            (3bmd:*generate-header-ids* (and allow-html 3bmd:*generate-header-ids*))
+            (3bmd-code-blocks:*render-code-spans*
+              (and allow-html 3bmd-code-blocks:*render-code-spans*))
             ;; Emit plain <pre><code> (no server-side colorize) -- avoids the
             ;; colorize/HyperSpec console noise; client-side highlighting can be
             ;; layered on later if wanted.
