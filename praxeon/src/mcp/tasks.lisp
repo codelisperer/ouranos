@@ -159,8 +159,9 @@ or NIL when another poller finished it first."
 report it finished as :CANCELLED. An input request is answered with a result of the request's
 own kind, which has no error form, so cancelling is the one refusal the specification allows. It
 is not left waiting for an answer nobody will send. tasks/cancel is sent and the task marked
-finished before any event, so an observer that fails cannot leave the task waiting. When the
-observer fails on :TASK-INPUT-REFUSED, the next poll sends :TASK-FINISHED.
+finished before :TASK-INPUT-REFUSED and :TASK-FINISHED, so an observer that fails on either cannot
+leave the task waiting. When the observer fails on :TASK-INPUT-REFUSED, the next poll sends
+:TASK-FINISHED.
 
 When something other than a tool error leaves tasks/cancel, such as an observer of
 :SIGN-IN-REQUIRED that signals or an app's handler of AUTHORIZATION-REQUIRED that exits, the task
