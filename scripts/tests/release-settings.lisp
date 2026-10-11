@@ -85,7 +85,7 @@ shape only. Not a key a signature would verify against."
                            (("--update-source" "ftp=https://x.example/") "is not one of")
                            (("--update-source" "github=http://x.example/") "must start with https://")
                            (("--update-source" "https://x.example/") "is not KIND=URL")
-                           ;; A URL with no host, or one a DNS name cannot be (#588).
+                           ;; A URL with no host, or a URL whose host cannot be a DNS name (#588).
                            (("--update-source" "github=https://") "has no host")
                            (("--update-source" "github=https:///releases/") "has no host")
                            (("--update-source" "s3=https://user:pass@bucket.example/") "credentials")
