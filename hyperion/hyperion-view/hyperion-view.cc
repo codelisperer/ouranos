@@ -1,6 +1,6 @@
 // hyperion-view.cc --- a tiny native window hosting the OS webview at a URL.
 //
-//   usage:  hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]
+//   usage:  hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH] [--placement-file PATH]
 //
 // The native half of Hyperion's desktop capability (ADR-0008). The CL side
 // (hyperion/desktop:run-app) starts a Hyperion server on localhost, then launches THIS
@@ -324,6 +324,384 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
 #endif
 }
 
+// --- the last placement (#485, part 2) -------------------------------------------------
+//
+// --placement-file PATH puts the window back where it was last time, and keeps PATH up to date
+// while it is open. The line's format and the rule for when a saved rectangle is used are in
+// window-placement.h. Windows only for now: on macOS and Linux the option is accepted and does
+// nothing.
+//
+// The file is written when a move or resize made by dragging ends, when the window is
+// maximised or restored, and when it is closed, not only at the end: hyperion/desktop:run-app
+// ends this process with TerminateProcess when the app closes the window itself, and a save left
+// for the end would then never happen. A move made without dragging and without a change of
+// size, such as Win+Shift+Arrow between two monitors at the same scaling, or a move made by
+// another program, is saved at the next of those, or not at all if the process is ended first. Each write goes to PATH.tmp and is renamed over PATH, so a process ended
+// part-way through leaves the previous line, not half of a new one.
+
+#if defined(_WIN32)
+// TEXT (UTF-8) as UTF-16, in *OUT. False when it does not convert. The buffer has room for the
+// terminator MultiByteToWideChar writes, which is removed afterwards (review of #521).
+static bool widen_utf8(const char *text, std::wstring *out) {
+  int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, nullptr, 0);
+  if (len <= 0) return false;
+  std::wstring wide(static_cast<size_t>(len), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, &wide[0], len) != len)
+    return false;
+  wide.resize(static_cast<size_t>(len - 1));
+  *out = wide;
+  return true;
+}
+#endif
+
+// The longest placement file read. A placement line is about 60 bytes.
+const size_t kMaxPlacementFile = 256;
+
+// The file at PATH (UTF-8), up to one byte more than kMaxPlacementFile so that a longer file
+// can be told from one that fits, or "" if it cannot be read.
+static std::string read_small_file(const char *path) {
+  std::string out;
+#if defined(_WIN32)
+  std::wstring wide;
+  if (!widen_utf8(path, &wide)) return out;
+  std::FILE *f = _wfopen(wide.c_str(), L"rb");
+#else
+  std::FILE *f = std::fopen(path, "rb");
+#endif
+  if (f == nullptr) return out;
+  char buf[kMaxPlacementFile + 1];
+  size_t n = std::fread(buf, 1, sizeof buf, f);
+  std::fclose(f);
+  return std::string(buf, n);
+}
+
+// The placement saved at PATH, in *OUT. False, with *REASON, when the file cannot be read or is
+// not one placement line.
+static bool load_saved_placement(const char *path, saved_placement *out, const char **reason) {
+  std::string text = read_small_file(path);
+  if (text.empty()) {
+    *reason = "unreadable";
+    return false;
+  }
+  // Validation covers the whole file, so a valid line followed by anything else is refused
+  // rather than read as its first 256 bytes (review of #521).
+  if (text.size() > kMaxPlacementFile) {
+    *reason = "too-long";
+    return false;
+  }
+  if (text.find('\0') != std::string::npos || !parse_saved_placement(text.c_str(), out)) {
+    *reason = "malformed";
+    return false;
+  }
+  return true;
+}
+
+#if defined(_WIN32)
+static std::wstring g_placement_path;
+static std::string g_placement_path_utf8;
+// A save that fails is reported on stderr once per run, so an app that asked for the placement
+// to be kept learns that it is not, without a line for every move (review of #521).
+static bool g_save_failure_reported = false;
+// The window's rectangle when it was last neither maximised nor minimised: what is saved while
+// it is maximised, so that restoring it un-maximises to the right place.
+static RECT g_normal_rect;
+static bool g_have_normal_rect = false;
+static bool g_in_size_move = false;
+// How many times the file has been written in this run. --exercise-placement prints it, so the
+// test can tell a move saved once, at the end of the move loop, from one saved on every WM_SIZE
+// inside it (review of #521).
+static int g_save_count = 0;
+static WNDPROC g_previous_window_proc = nullptr;
+
+static void set_placement_path(const char *path) {
+  g_placement_path_utf8 = path;
+  if (!widen_utf8(path, &g_placement_path)) g_placement_path.clear();
+}
+
+static bool save_failed(const char *step) {
+  if (!g_save_failure_reported) {
+    g_save_failure_reported = true;
+    std::fprintf(stderr, "hyperion-view: could not save the window placement to %s (%s)\n",
+                 g_placement_path_utf8.c_str(), step);
+    std::fflush(stderr);
+  }
+  return false;
+}
+
+// Write where HWND is to the placement file. False when there is no file, the window is
+// minimised, or the write failed.
+static bool save_placement(HWND hwnd) {
+  if (g_placement_path_utf8.empty() || IsIconic(hwnd)) return false;
+  if (g_placement_path.empty()) return save_failed("the path is not valid UTF-8");
+  bool maximized = IsZoomed(hwnd) != 0;
+  if (!maximized) {
+    RECT r;
+    if (!GetWindowRect(hwnd, &r)) return save_failed("GetWindowRect");
+    g_normal_rect = r;
+    g_have_normal_rect = true;
+  }
+  if (!g_have_normal_rect) return false;
+  saved_placement p = {g_normal_rect.left, g_normal_rect.top, g_normal_rect.right,
+                       g_normal_rect.bottom, maximized};
+  char line[128];
+  int n = format_saved_placement(p, line, sizeof line);
+  if (n <= 0 || n >= static_cast<int>(sizeof line)) return save_failed("format");
+  std::wstring tmp = g_placement_path + L".tmp";
+  std::FILE *f = _wfopen(tmp.c_str(), L"wb");
+  if (f == nullptr) return save_failed("opening the temporary file");
+  bool ok = std::fwrite(line, 1, static_cast<size_t>(n), f) == static_cast<size_t>(n);
+  ok = (std::fclose(f) == 0) && ok;
+  if (!ok) {
+    _wremove(tmp.c_str());
+    return save_failed("writing the temporary file");
+  }
+  if (MoveFileExW(tmp.c_str(), g_placement_path.c_str(), MOVEFILE_REPLACE_EXISTING) == 0) {
+    _wremove(tmp.c_str());
+    return save_failed("replacing the file");
+  }
+  g_save_count++;
+  return true;
+}
+
+// Ahead of webview.h's own window procedure: saves the placement when a move or resize ends,
+// when the window is maximised or restored, and when it is closed. WM_SIZE during a drag is
+// left to WM_EXITSIZEMOVE, so a resize writes the file once.
+static LRESULT CALLBACK placement_window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  switch (msg) {
+  case WM_ENTERSIZEMOVE:
+    g_in_size_move = true;
+    break;
+  case WM_EXITSIZEMOVE:
+    g_in_size_move = false;
+    save_placement(hwnd);
+    break;
+  case WM_SIZE:
+    if (!g_in_size_move && (wp == SIZE_MAXIMIZED || wp == SIZE_RESTORED)) save_placement(hwnd);
+    break;
+  case WM_CLOSE:
+    save_placement(hwnd);
+    break;
+  default:
+    break;
+  }
+  return CallWindowProcW(g_previous_window_proc, hwnd, msg, wp, lp);
+}
+
+// Keep PATH up to date while the window of W is open.
+static void watch_placement(webview_t w, const char *path) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd == nullptr) return;
+  set_placement_path(path);
+  // Not from a minimised window, whose rectangle is about -32000: a process started minimised
+  // and then maximised from the taskbar would save that, and open centred next time (review of
+  // #521).
+  if (!g_have_normal_rect && !IsZoomed(hwnd) && !IsIconic(hwnd) &&
+      GetWindowRect(hwnd, &g_normal_rect))
+    g_have_normal_rect = true;
+  g_previous_window_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+      hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(placement_window_proc)));
+}
+
+// The invisible resize borders of HWND on each side: GetWindowRect includes them, and the
+// visible frame DWM reports (DWMWA_EXTENDED_FRAME_BOUNDS) does not. All zero when DWM cannot say,
+// which leaves the fit rule as strict as it was. dwmapi.dll is loaded when this runs, so that
+// neither build has to link another library.
+static RECT invisible_borders(HWND hwnd) {
+  RECT none = {0, 0, 0, 0};
+  typedef HRESULT(WINAPI * get_attribute_fn)(HWND, DWORD, PVOID, DWORD);
+  HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+  if (dwm == nullptr) return none;
+  get_attribute_fn get = reinterpret_cast<get_attribute_fn>(
+      reinterpret_cast<void *>(GetProcAddress(dwm, "DwmGetWindowAttribute")));
+  RECT outer, frame;
+  const DWORD kExtendedFrameBounds = 9;  // DWMWA_EXTENDED_FRAME_BOUNDS, from dwmapi.h
+  if (get == nullptr || !GetWindowRect(hwnd, &outer) ||
+      FAILED(get(hwnd, kExtendedFrameBounds, &frame, sizeof frame)))
+    return none;
+  RECT b = {frame.left - outer.left, frame.top - outer.top, outer.right - frame.right,
+            outer.bottom - frame.bottom};
+  if (b.left < 0 || b.top < 0 || b.right < 0 || b.bottom < 0 || b.left > kMaxInvisibleBorder ||
+      b.top > kMaxInvisibleBorder || b.right > kMaxInvisibleBorder ||
+      b.bottom > kMaxInvisibleBorder)
+    return none;
+  return b;
+}
+
+// The DPI of MONITOR, or 0 when Windows cannot say. shcore.dll is loaded when this runs, as
+// dwmapi.dll is above, so that neither build has to link another library.
+static long monitor_dpi(HMONITOR monitor) {
+  typedef HRESULT(WINAPI * get_dpi_fn)(HMONITOR, int, UINT *, UINT *);
+  HMODULE shcore = LoadLibraryW(L"shcore.dll");
+  if (shcore == nullptr) return 0;
+  get_dpi_fn get = reinterpret_cast<get_dpi_fn>(
+      reinterpret_cast<void *>(GetProcAddress(shcore, "GetDpiForMonitor")));
+  UINT x = 0, y = 0;
+  const int kEffectiveDpi = 0;  // MDT_EFFECTIVE_DPI, from shellscalingapi.h
+  if (get == nullptr || FAILED(get(monitor, kEffectiveDpi, &x, &y))) return 0;
+  return static_cast<long>(x);
+}
+
+// The width of a resizable window's frame at DPI, horizontally (left and right) or vertically
+// (top and bottom): the sizing frame plus the padded border, as Windows lays them out.
+static long frame_metric(long dpi, bool horizontal) {
+  UINT d = static_cast<UINT>(dpi);
+  return GetSystemMetricsForDpi(horizontal ? SM_CXSIZEFRAME : SM_CYSIZEFRAME, d) +
+         GetSystemMetricsForDpi(SM_CXPADDEDBORDER, d);
+}
+
+// Put the window of W where the file at PATH says, if that still fits the work area of the
+// monitor it is on. False when it was not used, and the caller places the window instead. With
+// REPORT, one line is printed there: "restored L T R B MAXIMIZED window L T R B", or
+// "restore-ignored REASON". MAXIMIZE false leaves a saved maximised window unmaximised, for
+// --report-placement, whose window must stay hidden.
+static bool restore_placement(webview_t w, const char *path, std::FILE *report, bool maximize) {
+  auto ignored = [report](const char *why) {
+    if (report != nullptr) std::fprintf(report, "restore-ignored %s\n", why);
+    return false;
+  };
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd == nullptr) return ignored("webview_get_window");
+  saved_placement p;
+  const char *reason = nullptr;
+  if (!load_saved_placement(path, &p, &reason)) return ignored(reason);
+  RECT r = {p.left, p.top, p.right, p.bottom};
+  HMONITOR monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONULL);
+  if (monitor == nullptr) return ignored("off-screen");
+  MONITORINFO info;
+  info.cbSize = sizeof info;
+  if (!GetMonitorInfoW(monitor, &info)) return ignored("GetMonitorInfoW");
+  // The borders are measured on the window as it is now, on the monitor it was created on.
+  // When the saved rectangle is on a monitor with other scaling, they are converted to that
+  // monitor's frame size, so a window snapped on a 150% monitor and started from a 100% one
+  // is allowed the 11 pixels it has there, not the 7 it has here (review of #521).
+  RECT border = invisible_borders(hwnd);
+  long from_dpi = static_cast<long>(GetDpiForWindow(hwnd));
+  long to_dpi = monitor_dpi(monitor);
+  if (from_dpi > 0 && to_dpi > 0 && from_dpi != to_dpi) {
+    long h_from = frame_metric(from_dpi, true), h_to = frame_metric(to_dpi, true);
+    long v_from = frame_metric(from_dpi, false), v_to = frame_metric(to_dpi, false);
+    border.left = border_for_frame(border.left, h_from, h_to);
+    border.right = border_for_frame(border.right, h_from, h_to);
+    border.top = border_for_frame(border.top, v_from, v_to);
+    border.bottom = border_for_frame(border.bottom, v_from, v_to);
+  }
+  if (!saved_placement_fits(p, info.rcWork.left, info.rcWork.top, info.rcWork.right,
+                            info.rcWork.bottom, border.left, border.top, border.right,
+                            border.bottom))
+    return ignored("does-not-fit");
+  if (!SetWindowPos(hwnd, nullptr, p.left, p.top, p.right - p.left, p.bottom - p.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE))
+    return ignored("SetWindowPos");
+  // When the saved rectangle is on a monitor whose scaling differs from the one the window was
+  // created on, Windows sends WM_DPICHANGED during that call. webview.h's handler then scales
+  // the window's size by the ratio of the two DPIs and keeps its position, so the window would
+  // open larger or smaller than it was saved, and be saved that way. The second call is made on
+  // the monitor the window is now on, so it causes no further DPI change and the saved size
+  // stands (review of #521). Not measured: CI has one monitor.
+  RECT first;
+  if (GetWindowRect(hwnd, &first) &&
+      (first.left != r.left || first.top != r.top || first.right != r.right ||
+       first.bottom != r.bottom) &&
+      !SetWindowPos(hwnd, nullptr, p.left, p.top, p.right - p.left, p.bottom - p.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE))
+    return ignored("SetWindowPos");
+  g_normal_rect = r;
+  g_have_normal_rect = true;
+  if (p.maximized && maximize) ShowWindow(hwnd, SW_MAXIMIZE);
+  if (report != nullptr) {
+    RECT placed;
+    if (!GetWindowRect(hwnd, &placed)) return ignored("GetWindowRect after SetWindowPos");
+    std::fprintf(report, "restored %ld %ld %ld %ld %d window %ld %ld %ld %ld\n", p.left, p.top,
+                 p.right, p.bottom, p.maximized ? 1 : 0, static_cast<long>(placed.left),
+                 static_cast<long>(placed.top), static_cast<long>(placed.right),
+                 static_cast<long>(placed.bottom));
+  }
+  return true;
+}
+
+// Print STEP and the placement file's line, without its newline.
+static void print_placement_file(const char *step) {
+  std::string text = read_small_file(g_placement_path_utf8.c_str());
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+  std::printf("%s %s\n", step, text.c_str());
+}
+
+// --exercise-placement: what a launch does with a placement file, on the window W, with the
+// window procedure that saves it, driven through a move, a maximise, a restore, a minimise and a
+// close, printing the file after each. For the CI-only test: until this mode, the saves made
+// while the window is open and the maximise at start had never run (review of #521). The
+// window may be shown while this runs, because a maximised window is shown.
+static int exercise_placement(webview_t w, const char *path) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd == nullptr) {
+    std::printf("placement-failed webview_get_window\n");
+    return 1;
+  }
+  // The launch path: restore, maximising if the file says so, and watch.
+  if (!restore_placement(w, path, stdout, true)) place_window(w, 800, 600);
+  watch_placement(w, path);
+  std::printf("start-zoomed %d\n", IsZoomed(hwnd) ? 1 : 0);
+  if (IsZoomed(hwnd)) {
+    std::fflush(stdout);
+    return 0;
+  }
+  // A move and resize made with the move loop, as a drag makes it.
+  RECT r;
+  if (!GetWindowRect(hwnd, &r)) {
+    std::printf("placement-failed GetWindowRect\n");
+    return 1;
+  }
+  // Two size changes inside the loop, as a drag makes many. Each sends WM_SIZE, which must not
+  // save; the end of the loop saves once. "move-saves" is how many writes the move made.
+  int saves_before_move = g_save_count;
+  SendMessageW(hwnd, WM_ENTERSIZEMOVE, 0, 0);
+  SetWindowPos(hwnd, nullptr, r.left + 20, r.top + 15, (r.right - r.left) - 10,
+               (r.bottom - r.top) - 5, SWP_NOZORDER | SWP_NOACTIVATE);
+  SetWindowPos(hwnd, nullptr, r.left + 40, r.top + 30, (r.right - r.left) - 20,
+               (r.bottom - r.top) - 10, SWP_NOZORDER | SWP_NOACTIVATE);
+  SendMessageW(hwnd, WM_EXITSIZEMOVE, 0, 0);
+  std::printf("move-saves %d\n", g_save_count - saves_before_move);
+  RECT moved;
+  GetWindowRect(hwnd, &moved);
+  std::printf("moved %ld %ld %ld %ld\n", static_cast<long>(moved.left),
+              static_cast<long>(moved.top), static_cast<long>(moved.right),
+              static_cast<long>(moved.bottom));
+  print_placement_file("after-move");
+  ShowWindow(hwnd, SW_MAXIMIZE);
+  print_placement_file("after-maximize");
+  ShowWindow(hwnd, SW_RESTORE);
+  print_placement_file("after-restore");
+  ShowWindow(hwnd, SW_MINIMIZE);
+  // webview.h destroys the window on WM_CLOSE, so W is not used after this.
+  SendMessageW(hwnd, WM_CLOSE, 0, 0);
+  print_placement_file("after-minimize-and-close");
+  std::fflush(stdout);
+  return 0;
+}
+#endif
+
+// HYPERION_VIEW_NO_WINDOW=1 stops hyperion-view just before it would create a window, with exit
+// code 3 and a line on stderr. The view tests set it for every run they make on a developer's
+// machine, so a test that reaches webview_create by mistake fails there instead of opening a
+// window on someone's screen; only the CI-only real-window tests clear it (#521). The modes that
+// never create a window (--help, --placement, --saved-placement, and every refusal) ignore it.
+static bool window_forbidden() {
+  const char *value = std::getenv("HYPERION_VIEW_NO_WINDOW");
+  if (value == nullptr || std::strcmp(value, "1") != 0) return false;
+  std::fprintf(stderr, "hyperion-view: HYPERION_VIEW_NO_WINDOW=1 is set, so no window is created\n");
+  return true;
+}
+
+// TEXT as a long, in *OUT. False unless all of TEXT is a decimal number that fits.
+static bool parse_long(const char *text, long *out) {
+  errno = 0;
+  char *end = nullptr;
+  long value = std::strtol(text, &end, 10);
+  if (end == text || *end != '\0' || errno == ERANGE) return false;
+  *out = value;
+  return true;
+}
+
 // TEXT as a positive int, in *OUT. False unless all of TEXT is a decimal number from 1 to
 // INT_MAX: std::atoi reads "1280px" as 1280 and "x" as 0, and says nothing about either.
 static bool parse_positive_int(const char *text, int *out) {
@@ -339,22 +717,42 @@ static bool parse_positive_int(const char *text, int *out) {
 static void print_usage(std::FILE *out) {
   std::fprintf(out,
                "usage: hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]\n"
+               "                     [--placement-file PATH]\n"
                "\n"
                "  URL      the address to open      (default http://127.0.0.1:8080/)\n"
                "  TITLE    the window title         (default \"App\")\n"
                "  WIDTH    window width in pixels   (default 1200)\n"
                "  HEIGHT   window height in pixels  (default 800)\n"
                "  --icon   path to a window icon    (optional, may appear anywhere)\n"
+               "  --placement-file PATH\n"
+               "           Windows: open the window where it was last time, if that still fits\n"
+               "           a monitor, and keep PATH up to date (optional, may appear anywhere)\n"
                "\n"
                "  --help, -h   print this and exit\n"
+               "\n"
+               "  With HYPERION_VIEW_NO_WINDOW=1 in the environment, it exits 3 instead of\n"
+               "  creating a window.\n"
+               "\n"
                "  --placement WL WT WR WB CW CH DPI FW FH\n"
                "               print, as X Y WIDTH HEIGHT, where a window with a client area of\n"
                "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
                "               put in the work area WL,WT-WR,WB; then exit (#485)\n"
-               "  --report-placement WIDTH HEIGHT\n"
+               "  --report-placement WIDTH HEIGHT [PLACEMENT-FILE]\n"
                "               Windows: create the window, size and place it as a launch does,\n"
                "               print the work area, DPI, frame, placement and the window's\n"
-               "               rectangle, then exit without running it. Start it hidden.\n"
+               "               rectangle, then exit without running it. Start it hidden. With\n"
+               "               PLACEMENT-FILE, restore from it first and save to it after.\n"
+               "  --saved-placement PATH WL WT WR WB [BL BT BR BB [FROM TO]]\n"
+               "               print \"use L T R B MAXIMIZED\" if the placement saved at PATH would\n"
+               "               be restored into the work area WL,WT-WR,WB, else \"ignore REASON\".\n"
+               "               BL BT BR BB are the window's invisible borders (default 0, at most\n"
+               "               100), by which the rectangle may pass the work area. FROM\n"
+               "               and TO are the frame widths where the borders were measured\n"
+               "               and on the rectangle's monitor; each border grows by TO-FROM\n"
+               "  --exercise-placement PATH\n"
+               "               Windows, for CI: open the window as a launch with\n"
+               "               --placement-file PATH does, then move, maximise, restore,\n"
+               "               minimise and close it, printing the file after each step\n"
                "\n"
                "Hyperion's native webview launcher. hyperion/desktop:run-app starts a\n"
                "server on localhost and launches this pointed at it.\n");
@@ -408,6 +806,7 @@ int main(int argc, char **argv) {
   }
 #endif
   const char *icon = nullptr;
+  const char *placement_file = nullptr;
   const char *positional[4] = {nullptr, nullptr, nullptr, nullptr};
   int n = 0;
 
@@ -430,9 +829,9 @@ int main(int argc, char **argv) {
       // starts this with a hidden show state (STARTF_USESHOWWINDOW, SW_HIDE) keeps it hidden,
       // because Windows applies that to a process's first ShowWindow. Exactly WIDTH and
       // HEIGHT, and nothing else, for the reason given for --placement below.
-      if (i != 1 || argc != 4) {
-        std::fprintf(stderr,
-                     "hyperion-view: --report-placement takes WIDTH and HEIGHT and nothing else\n\n");
+      if (i != 1 || (argc != 4 && argc != 5)) {
+        std::fprintf(stderr, "hyperion-view: --report-placement takes WIDTH and HEIGHT, and "
+                             "optionally a placement file, and nothing else\n\n");
         print_usage(stderr);
         return 2;
       }
@@ -444,6 +843,7 @@ int main(int argc, char **argv) {
         print_usage(stderr);
         return 2;
       }
+      if (window_forbidden()) return 3;
       webview_t rv = webview_create(0, nullptr);
       if (rv == nullptr) {
         // No window was created (no display, or no WebView2), so there is nothing to place.
@@ -452,10 +852,82 @@ int main(int argc, char **argv) {
         return 1;
       }
       webview_set_size(rv, rw, rh, WEBVIEW_HINT_NONE);
-      bool ok = place_window(rv, rw, rh, stdout);
+      const char *file = argc == 5 ? argv[4] : nullptr;
+      bool ok = true;
+#if defined(_WIN32)
+      if (file == nullptr || !restore_placement(rv, file, stdout, false))
+        ok = place_window(rv, rw, rh, stdout);
+      if (ok && file != nullptr) {
+        set_placement_path(file);
+        bool saved = save_placement(static_cast<HWND>(webview_get_window(rv)));
+        std::printf(saved ? "saved\n" : "save-failed\n");
+        ok = saved;
+      }
+#else
+      (void)file;
+      ok = place_window(rv, rw, rh, stdout);
+#endif
       std::fflush(stdout);
       webview_destroy(rv);
       return ok ? 0 : 1;
+    } else if (std::strcmp(argv[i], "--exercise-placement") == 0) {
+      if (i != 1 || argc != 3) {
+        std::fprintf(stderr,
+                     "hyperion-view: --exercise-placement takes a path and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+#if defined(_WIN32)
+      if (window_forbidden()) return 3;
+      webview_t ev = webview_create(0, nullptr);
+      if (ev == nullptr) {
+        std::printf("placement-failed webview_create\n");
+        std::fflush(stdout);
+        return 1;
+      }
+      webview_set_size(ev, 800, 600, WEBVIEW_HINT_NONE);
+      // The process ends here without webview_destroy: the last step closed the window.
+      return exercise_placement(ev, argv[2]);
+#else
+      std::printf("placement-unsupported\n");
+      return 1;
+#endif
+    } else if (std::strcmp(argv[i], "--saved-placement") == 0) {
+      // The restore decision on its own, with no window, so the tests check it on every OS.
+      long work[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+      int count = argc - 3;
+      bool numbers = i == 1 && (count == 4 || count == 8 || count == 10);
+      for (int k = 0; numbers && k < count; k++) numbers = parse_long(argv[3 + k], &work[k]);
+      for (int k = 4; numbers && k < 8; k++)
+        numbers = work[k] >= 0 && work[k] <= kMaxInvisibleBorder;
+      for (int k = 8; numbers && k < 10; k++)
+        numbers = work[k] >= 0 && work[k] <= kMaxFrameMetric;
+      if (!numbers) {
+        std::fprintf(stderr,
+                     "hyperion-view: --saved-placement takes a path and 4 integers, or 8 with "
+                     "the last 4 from 0 to %ld, or 10 with the last 2 from 0 to %ld, and "
+                     "nothing else\n\n",
+                     kMaxInvisibleBorder, kMaxFrameMetric);
+        print_usage(stderr);
+        return 2;
+      }
+      if (count == 10) {
+        // The borders were measured where the frame is FROM wide; the rectangle is on a
+        // monitor where it is TO wide. Both directions use the same widths here.
+        for (int k = 4; k < 8; k++) work[k] = border_for_frame(work[k], work[8], work[9]);
+      }
+      saved_placement p;
+      const char *reason = nullptr;
+      if (!load_saved_placement(argv[2], &p, &reason)) {
+        std::printf("ignore %s\n", reason);
+      } else if (!saved_placement_fits(p, work[0], work[1], work[2], work[3], work[4], work[5],
+                                       work[6], work[7])) {
+        std::printf("ignore does-not-fit\n");
+      } else {
+        std::printf("use %ld %ld %ld %ld %d\n", p.left, p.top, p.right, p.bottom,
+                    p.maximized ? 1 : 0);
+      }
+      return 0;
     } else if (std::strcmp(argv[i], "--placement") == 0) {
       // The placement arithmetic on its own, with no window: for the tests, which check it on
       // every OS, and for anyone asking why a window opened where it did. It is a mode of its
@@ -469,14 +941,20 @@ int main(int argc, char **argv) {
       }
       long v[9];
       for (int k = 0; k < 9; k++) {
-        char *end = nullptr;
-        v[k] = std::strtol(argv[i + 1 + k], &end, 10);
-        if (end == argv[i + 1 + k] || *end != '\0') {
-          std::fprintf(stderr, "hyperion-view: --placement: not an integer: %s\n\n",
+        if (!parse_long(argv[i + 1 + k], &v[k])) {
+          std::fprintf(stderr, "hyperion-view: --placement: not an integer a long holds: %s\n\n",
                        argv[i + 1 + k]);
           print_usage(stderr);
           return 2;
         }
+      }
+      if (!placement_inputs_in_range(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8])) {
+        std::fprintf(stderr,
+                     "hyperion-view: --placement: a value is out of range (coordinates within "
+                     "%ld of 0, client size 1 to %ld, DPI 1 to %ld, frame 0 to %ld)\n\n",
+                     kMaxCoordinate, kMaxClientSize, kMaxDpi, kMaxFrame);
+        print_usage(stderr);
+        return 2;
       }
       window_placement p =
           place_in_work_area(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
@@ -489,6 +967,13 @@ int main(int argc, char **argv) {
         return 2;
       }
       icon = argv[++i];
+    } else if (std::strcmp(argv[i], "--placement-file") == 0) {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "hyperion-view: --placement-file needs a path\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      placement_file = argv[++i];
     } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
       std::fprintf(stderr, "hyperion-view: unknown option %s\n\n", argv[i]);
       print_usage(stderr);
@@ -511,10 +996,18 @@ int main(int argc, char **argv) {
   // the application name once, early.
   set_app_name(title);
 
+  if (window_forbidden()) return 3;
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
   webview_set_size(w, width, height, WEBVIEW_HINT_NONE);
+#if defined(_WIN32)
+  if (placement_file == nullptr || !restore_placement(w, placement_file, nullptr, true))
+    place_window(w, width, height);
+  if (placement_file != nullptr) watch_placement(w, placement_file);
+#else
+  (void)placement_file;
   place_window(w, width, height);
+#endif
   set_window_icon(w, icon);
   // After webview_create (NSApp exists), before webview_run ([NSApp run]).
   install_main_menu(title);
