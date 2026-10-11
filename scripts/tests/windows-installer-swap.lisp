@@ -805,7 +805,11 @@ a function that stops the thread and returns true when the directory was made."
   "windows.iss pauses after the first staged file only when OURANOS_TEST_PAUSE_DIR is defined
 (#575). Preprocessed by ISCC with the defines build-installer.ps1 passes, the script has neither
 the pause procedure nor its AfterInstall hook, so a release installer cannot contain them. The
-check is on ISCC's preprocessed output, not on the flags. CONTROL: with the define, both appear."
+check is on ISCC's preprocessed output, not on the flags. CONTROL: with the define, both appear.
+
+The preprocessed text is written by a wrapper script that includes windows.iss and calls ISPP's
+SaveToFile, compiled with /O-. ISCC --preprocess would be simpler, but it is new in Inno Setup 7,
+and the CI runner has Inno Setup 6, where it printed only the banner (run 38172743814)."
   #-win32 (skip "Inno Setup runs on Windows only")
   #+win32
   (let ((tool (%swap-tool-path :inno)))
@@ -813,20 +817,29 @@ check is on ISCC's preprocessed output, not on the flags. CONTROL: with the defi
         (skip "build-installer.ps1 -Check finds no ISCC")
         (let ((tree (%fresh-tree)))
           (unwind-protect
-               (flet ((preprocessed (&rest extra)
-                        (uiop:run-program
-                         (append (list tool "--preprocess"
-                                       (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.1"
-                                       (format nil "/DSRCDIR=~A" (string-right-trim "\\" (uiop:native-namestring tree)))
-                                       (format nil "/DOUTDIR=~A" (string-right-trim "\\" (uiop:native-namestring tree)))
-                                       "/DOUTBASE=setup" (format nil "/DEXENAME=~A.exe" +swap-app+))
-                                 extra
-                                 (list (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*))))
-                         :output :string :error-output :string :ignore-error-status t)))
-                 (let ((release (preprocessed))
-                       (test (preprocessed (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
-                                                   (string-right-trim "\\" (uiop:native-namestring tree))))))
-                   (is (search "[Files]" release) "the release script was preprocessed: ~A"
+               (flet ((preprocessed (name &rest extra)
+                        (let* ((src (ensure-directories-exist (merge-pathnames "src/" tree)))
+                               (out (merge-pathnames (concatenate 'string name ".iss") tree))
+                               (wrapper (merge-pathnames (concatenate 'string "wrap-" name ".iss") tree)))
+                          (%bytes-file (merge-pathnames "probe.exe" src) "probe")
+                          (%write wrapper
+                                  (%lines (format nil "#include \"~A\""
+                                                  (uiop:native-namestring (merge-pathnames "installers/windows.iss" *scripts*)))
+                                          (format nil "#expr SaveToFile(\"~A\")" (uiop:native-namestring out))))
+                          (uiop:run-program
+                           (append (list tool "/O-" "/Q"
+                                         (format nil "/DAPPNAME=~A" +swap-app+) "/DVERSION=0.0.1"
+                                         (format nil "/DSRCDIR=~A" (string-right-trim "\\" (uiop:native-namestring src)))
+                                         (format nil "/DOUTDIR=~A" (string-right-trim "\\" (uiop:native-namestring tree)))
+                                         "/DOUTBASE=setup" (format nil "/DEXENAME=~A.exe" +swap-app+))
+                                   extra
+                                   (list (uiop:native-namestring wrapper)))
+                           :output nil :error-output nil :ignore-error-status t)
+                          (if (probe-file out) (uiop:read-file-string out) ""))))
+                 (let ((release (preprocessed "release"))
+                       (test (preprocessed "test" (format nil "/DOURANOS_TEST_PAUSE_DIR=~A"
+                                                          (string-right-trim "\\" (uiop:native-namestring tree))))))
+                   (is (search "[Files]" release) "the release script was preprocessed: ~S"
                        (subseq release 0 (min 400 (length release))))
                    (is (not (search "OuranosTestPause" release))
                        "the release script has no pause procedure or hook")
