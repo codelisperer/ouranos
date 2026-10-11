@@ -225,6 +225,16 @@ code when it did not exit 0."
       ;; refused before one is made.
       (is (eql 2 (code "1280" "860" "placement" "extra")) "four values"))))
 
+(test exercise-placement-takes-one-path
+  ;; Refused before webview_create, so no window is made on any OS. With one path it would make
+  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3 on Windows; elsewhere the mode is
+  ;; not supported and exits 1 before making one.
+  (with-launcher
+    (is (eql 2 (run-launcher "--exercise-placement")) "no path")
+    (is (eql 2 (run-launcher "--exercise-placement" "a" "b")) "two paths")
+    (is (eql #+win32 3 #-win32 1 (run-launcher "--exercise-placement" "a"))
+        "one path: no window here")))
+
 ;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
 ;;;
 ;;; --placement checks the arithmetic, but returns before a window exists. --report-placement
@@ -234,25 +244,32 @@ code when it did not exit 0."
 ;;; real window, so it runs only where the CI environment variable is set, on a runner, and not
 ;;; on a developer's machine.
 
-(defun %report-placement (width height &optional placement-file)
-  "Run `hyperion-view --report-placement WIDTH HEIGHT [PLACEMENT-FILE]' hidden, through
-PowerShell's Start-Process -WindowStyle Hidden. Returns (values EXIT-CODE OUTPUT)."
+(defun %run-hidden-launcher (&rest args)
+  "Run `hyperion-view ARGS' started hidden, through PowerShell's Start-Process -WindowStyle
+Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT)."
   (let* ((dir (uiop:ensure-directory-pathname
                (merge-pathnames (format nil "hyperion-view-report-~36R/" (random (expt 2 40)))
                                 (uiop:temporary-directory))))
          (out (merge-pathnames "out.txt" dir)))
-    (ensure-directories-exist dir)
-    (unwind-protect
-         (let ((code (nth-value
-                      2 (uiop:run-program
-                         (list "pwsh" "-NoProfile" "-NonInteractive" "-Command"
-                               (format nil "Remove-Item Env:HYPERION_VIEW_NO_WINDOW -ErrorAction SilentlyContinue; $p = Start-Process -FilePath '~A' -ArgumentList '--report-placement','~D','~D'~@[,'~A'~] -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput '~A'; exit $p.ExitCode"
-                                       (uiop:native-namestring (launcher)) width height
-                                       (and placement-file (uiop:native-namestring placement-file))
-                                       (uiop:native-namestring out)))
-                         :output nil :error-output nil :ignore-error-status t))))
-           (values code (if (probe-file out) (uiop:read-file-string out) "")))
-      (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+    (flet ((quoted (text) (format nil "'~A'" (uiop:frob-substrings text '("'") "''"))))
+      (ensure-directories-exist dir)
+      (unwind-protect
+           (let ((code (nth-value
+                        2 (uiop:run-program
+                           (list "pwsh" "-NoProfile" "-NonInteractive" "-Command"
+                                 (format nil "Remove-Item Env:HYPERION_VIEW_NO_WINDOW -ErrorAction SilentlyContinue; $p = Start-Process -FilePath ~A -ArgumentList ~{~A~^,~} -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput ~A; exit $p.ExitCode"
+                                         (quoted (uiop:native-namestring (launcher)))
+                                         (mapcar #'quoted args)
+                                         (quoted (uiop:native-namestring out))))
+                           :output nil :error-output nil :ignore-error-status t))))
+             (values code (if (probe-file out) (uiop:read-file-string out) "")))
+        (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))))
+
+(defun %report-placement (width height &optional placement-file)
+  "Run `hyperion-view --report-placement WIDTH HEIGHT [PLACEMENT-FILE]' hidden. Returns
+(values EXIT-CODE OUTPUT)."
+  (apply #'%run-hidden-launcher "--report-placement" (princ-to-string width) (princ-to-string height)
+         (and placement-file (list (uiop:native-namestring placement-file)))))
 
 (test the-window-is-placed-in-the-work-area-on-a-real-window
   "On a CI Windows runner, a real window is placed where --placement says, inside the work area,
@@ -405,6 +422,48 @@ when it did not exit 0."
              (is (equal "ignore does-not-fit"
                         (decide "hyperion-view-placement 1 100 50 250 150 0" 0 0 2560 1528))
                  "not smaller than 200 by 150")
+             ;; Each edge and each minimum on its own, so that removing any one check fails a
+             ;; line here (review of #521: the bottom edge, the top edge and both minimums
+             ;; could each be removed without a failure).
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 50 1380 1529 0" 0 0 2560 1528))
+                 "not one pixel below the work area: the edge #485 is about")
+             (is (equal "use 100 50 1380 1528 0"
+                        (decide "hyperion-view-placement 1 100 50 1380 1528 0" 0 0 2560 1528))
+                 "but touching the bottom edge is inside")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 -1 1380 910 0" 0 0 2560 1528))
+                 "not one pixel above the work area")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -1 50 1380 910 0" 0 0 2560 1528))
+                 "not one pixel left of the work area")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 50 2561 910 0" 0 0 2560 1528))
+                 "not one pixel right of the work area")
+             (is (equal "use 100 50 300 200 0"
+                        (decide "hyperion-view-placement 1 100 50 300 200 0" 0 0 2560 1528))
+                 "200 by 150 is large enough")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 50 299 200 0" 0 0 2560 1528))
+                 "199 by 150 is not")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 100 50 300 199 0" 0 0 2560 1528))
+                 "200 by 149 is not")
+             ;; A window snapped to the left half: its rectangle includes invisible borders of 7
+             ;; pixels left, right and below, so it passes the work area by that much (review of
+             ;; #521). The borders are the last four values.
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -7 0 967 1535 0" 0 0 2560 1528))
+                 "a snapped window is outside the work area when no borders are allowed for")
+             (is (equal "use -7 0 967 1535 0"
+                        (decide "hyperion-view-placement 1 -7 0 967 1535 0" 0 0 2560 1528 7 0 7 7))
+                 "and inside it when its invisible borders are")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -8 0 967 1535 0" 0 0 2560 1528 7 0 7 7))
+                 "but not one pixel further left than the border")
+             (is (equal "ignore does-not-fit"
+                        (decide "hyperion-view-placement 1 -7 0 967 1536 0" 0 0 2560 1528 7 0 7 7))
+                 "nor one pixel further down")
              (dolist (text (list "junk"
                              "hyperion-view-placement 2 100 50 1380 910 0"
                              "hyperion-view-placement 1 100 50 1380 910 2"
@@ -421,6 +480,11 @@ when it did not exit 0."
                              "hyperion-view-placement 1 +100 50 1380 910 0"))
                (is (equal "ignore malformed" (decide text 0 0 2560 1528))
                    "not a malformed line: ~S" text))
+             (is (equal "ignore malformed"
+                        (decide (format nil "hyperion-view-placement 1 100 50 1380 910 0~%~Cjunk"
+                                        (code-char 0))
+                                0 0 2560 1528))
+                 "not a valid line followed by a NUL and other bytes")
              (is (equal "ignore too-long"
                         (decide (format nil "hyperion-view-placement 1 100 50 1380 910 0~A junk"
                                         (make-string 300 :initial-element #\Space))
@@ -430,10 +494,17 @@ when it did not exit 0."
                         (%saved-placement (merge-pathnames "absent" dir) 0 0 2560 1528))
                  "not a file that is not there")
              (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560"))
-                 "three numbers are refused"))
+                 "three numbers are refused")
+             (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "7"))
+                 "seven numbers are refused")
+             (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "7" "101"))
+                 "a border over 100 is refused")
+             (is (eql 2 (run-launcher "--saved-placement" "x" "0" "0" "2560" "1528" "7" "0" "-1" "7"))
+                 "a negative border is refused"))
         (aion/fs:delete-tree dir)))))
 
-(test run-app-passes-a-placement-file-and-creates-its-directory
+(test placement-arguments-name-the-file-and-create-its-directory
+  ;; %PLACEMENT-ARGUMENTS builds what run-app passes the launcher. This does not call run-app.
   (is (null (hyperion/desktop::%placement-arguments nil)) "no file, no arguments")
   (let* ((dir (%fresh-dir))
          (file (merge-pathnames "data/sub/window-placement" dir)))
@@ -509,6 +580,56 @@ opens centred when the saved placement is on no monitor."
                            (%report-placement 1280 860 (merge-pathnames "no-such-dir/window-placement" dir))
                          (is (eql 1 code) "a placement file that cannot be written fails the mode: ~S ~A" code out)
                          (is-true (%report-line out "save-failed") "and says so: ~S" out)))))))
+            (aion/fs:delete-tree dir))))))
+
+(test the-placement-is-saved-while-the-window-is-open-and-a-maximised-start-is-maximised
+  "On a CI Windows runner, through --exercise-placement, which installs the window procedure a
+launch installs: a move made with the move loop is saved with MAXIMIZED 0; maximising saves the
+same rectangle with MAXIMIZED 1; restoring saves MAXIMIZED 0; minimising and then closing leaves
+the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (review of #521)."
+  #-win32 (skip "The placement calls are Windows only")
+  #+win32
+  (with-launcher
+    (if (null (uiop:getenvp "CI"))
+        (skip "Runs only on CI (CI is not set here): it creates a window, and shows it maximised")
+        (let* ((dir (%fresh-dir))
+               (file (merge-pathnames "window-placement" dir))
+               (start '(50 50 650 500)))
+          (unwind-protect
+               (progn
+                 (%write-placement dir "window-placement"
+                                   (format nil "hyperion-view-placement 1 ~{~D~^ ~} 0~%" start))
+                 (multiple-value-bind (code out)
+                     (%run-hidden-launcher "--exercise-placement" (uiop:native-namestring file))
+                   (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                   (is (equal "start-zoomed 0" (%report-line out "start-zoomed"))
+                       "it started unmaximised: ~S" out)
+                   (let* ((line (%report-line out "moved "))
+                          (moved (and line (%report-numbers line))))
+                     (is (= 4 (length moved)) "it reported where the move put the window: ~S" out)
+                     (when (= 4 (length moved))
+                       (is (not (equal moved start)) "and the move changed the rectangle: ~S" moved)
+                       (flet ((saved (maximized)
+                                (format nil "hyperion-view-placement 1 ~{~D~^ ~} ~D" moved maximized))
+                              (after (step)
+                                (let ((l (%report-line out (format nil "~A " step))))
+                                  (and l (subseq l (1+ (length step)))))))
+                         (is (equal (saved 0) (after "after-move"))
+                             "the move was saved when the move loop ended: ~S" out)
+                         (is (equal (saved 1) (after "after-maximize"))
+                             "maximising saved the same rectangle, maximised: ~S" out)
+                         (is (equal (saved 0) (after "after-restore"))
+                             "restoring saved it unmaximised: ~S" out)
+                         (is (equal (saved 0) (after "after-minimize-and-close"))
+                             "minimising and closing left the file as it was: ~S" out)))))
+                 (%write-placement dir "window-placement"
+                                   (format nil "hyperion-view-placement 1 ~{~D~^ ~} 1~%" start))
+                 (multiple-value-bind (code out)
+                     (%run-hidden-launcher "--exercise-placement" (uiop:native-namestring file))
+                   (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                   (is-true (%report-line out "restored ") "the saved placement was restored: ~S" out)
+                   (is (equal "start-zoomed 1" (%report-line out "start-zoomed"))
+                       "and a file saying MAXIMIZED 1 opened maximised: ~S" out)))
             (aion/fs:delete-tree dir))))))
 
 (defun run-tests ()
