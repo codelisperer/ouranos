@@ -57,19 +57,36 @@ string name is left out. A page without a list of prompts signals REQUEST-FAILED
               :count (length prompts) :pages pages)
     prompts))
 
+(defun %content-block-p (block version)
+  "Whether BLOCK is a ContentBlock of protocol VERSION: one of its variants, with that variant's
+required fields as strings. text has text; image and audio have data and mimeType; resource_link
+has uri and name; resource has a resource object with a uri and a text or a blob. resource_link
+was added in 2025-06-18, so a 2025-03-26 session has the other four."
+  (and (hash-table-p block)
+       (flet ((str (key &optional (object block)) (stringp (gethash key object))))
+         (let ((type (gethash "type" block)))
+           (cond ((equal type "text") (str "text"))
+                 ((member type '("image" "audio") :test #'equal) (and (str "data") (str "mimeType")))
+                 ((equal type "resource_link")
+                  (and (not (equal version "2025-03-26")) (str "uri") (str "name")))
+                 ((equal type "resource")
+                  (let ((resource (gethash "resource" block)))
+                    (and (hash-table-p resource) (str "uri" resource)
+                         (or (str "text" resource) (str "blob" resource)))))
+                 (t nil))))))
+
 (defun %prompt-message (client block role)
   "One message of a prompts/get result as a PRAXEON/LLM message, or a failed request."
   (unless (member role '("user" "assistant") :test #'equal)
     (%request-failed client "its prompt had a message whose role is not user or assistant." '()
                      :outcome :not-run))
   ;; A malformed message fails the reply rather than being left out: leaving one out could turn
-  ;; a scripted exchange into what looks like a user-only prompt (#554).
-  (let ((blocks (cond ((hash-table-p block) (list block))
-                      ((and (vectorp block) (not (stringp block)) (every #'hash-table-p block))
-                       (coerce block 'list))
-                      (t (%request-failed client "its prompt had a message whose content is not a content block." '()
-                                          :outcome :not-run)))))
-    (llm:msg role (mapcar (lambda (b) (llm:text-part (%content-text b))) blocks))))
+  ;; a scripted exchange into what looks like a user-only prompt (#554). A PromptMessage's
+  ;; content is one ContentBlock in every schema revision this client speaks, never a list (#569).
+  (unless (%content-block-p block (client-protocol-version client))
+    (%request-failed client "its prompt had a message whose content is not a content block." '()
+                     :outcome :not-run))
+  (llm:msg role (list (llm:text-part (%content-text block)))))
 
 (defun get-prompt (client prompt &key arguments principal)
   "The messages of PROMPT, a PROMPT struct from LIST-PROMPTS, from CLIENT's server, filled in
@@ -79,8 +96,9 @@ the prompt's description.
 A required argument that is missing, or a value that is not a string, signals REQUEST-FAILED
 before anything is sent. Text content becomes a text part. Image and audio content, a resource
 link and a binary embedded resource are described in a line, never included; an embedded text
-resource becomes its text. A message that is not an object, whose content is not a content
-block, or whose role is not user or assistant fails the call, rather than being left out."
+resource becomes its text. A message that is not an object, whose content is not one content
+block of a known type with that type's required fields, or whose role is not user or assistant
+fails the call, rather than being left out."
   (check-type prompt prompt)
   (dolist (argument (prompt-arguments prompt))
     (when (and (prompt-argument-required argument)

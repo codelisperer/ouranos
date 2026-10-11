@@ -99,6 +99,15 @@ its tag.
   fasl loads. An app acts if its code has such a warning, which now fails its build. An app that
   carries its own strict-build script to catch this case can use `cons --strict build` instead.
   (#525)
+- **hyperion/markdown: with `:allow-html nil`, an app's own 3bmd code-block renderer receives a
+  fenced block's text unescaped, so it must escape `<`, `>` and `&` itself** (#559). `render`
+  used to escape the whole source before 3bmd parsed it, so a renderer an app registered for
+  `3bmd-code-blocks:*renderer*` was handed text that was already escaped. The safe mode now
+  hands every renderer other than `:nohighlight` and `:colorize` the block's text as the author
+  wrote it, as `:pygments` and `:chroma` expect, and prints that renderer's output unchanged. An
+  app whose renderer writes its input into the page without escaping it now lets a fenced block
+  put raw HTML on the page, so that renderer must escape its input. The fixed entry for #559
+  below describes the rest of the change.
 
 ### Added
 
@@ -492,6 +501,16 @@ its tag.
   block under the `:pygments` or `:chroma` renderer is left for that program to escape. Every
   klio page changes the same way. An app that unescaped `render`'s output to work around this
   should stop.
+- **praxeon/mcp: `get-prompt` and `read-resource` refuse malformed content with
+  `request-failed`** (#569). `get-prompt` accepted a list of content blocks as a message's
+  content, which every schema revision defines as one block, and accepted any object as a
+  block, so `{"type":"text","text":42}` gave a message whose text was the integer 42. A message's
+  content must now be one block of a known type (`text`, `image`, `audio`, `resource_link` or
+  `resource`) with that type's required fields as strings; a session on protocol version
+  2025-03-26, whose schema has no `resource_link`, refuses that type. `read-resource`, and so
+  `add-resource`, accepted a content with neither a `text` nor a `blob`, which the schema
+  requires, and showed it as `[no content]`; the reply now fails, and an earlier copy added with
+  `add-resource` is kept.
 
 ## v0.1.7 — 2026-09-30
 
