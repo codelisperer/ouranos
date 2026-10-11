@@ -134,18 +134,26 @@ line naming a missing file is skipped. A file inside bin/ is still deleted (#564
 
 (defun %write-gitbin-app (project &key (libgit t))
   "Write the gitbin app into PROJECT: one that loads aion/libgit when LIBGIT, and one that does
-not otherwise."
-  (%write (merge-pathnames "gitbin.asd" project)
-          (format nil "(defsystem \"gitbin\" :depends-on (~:[~;\"aion/libgit\"~]) :components ((:file \"gitbin\")))"
-                  libgit))
-  (%write (merge-pathnames "gitbin.lisp" project)
-          (if libgit
-              (%lines "(defpackage #:gitbin (:use #:cl) (:export #:main))"
-                      "(in-package #:gitbin)"
-                      "(defun main () (format t \"~&LOADED ~A~%\" (aion/libgit:ensure-loaded)) (finish-output) (uiop:quit 0))")
-              (%lines "(defpackage #:gitbin (:use #:cl) (:export #:main))"
-                      "(in-package #:gitbin)"
-                      "(defun main () (format t \"~&NO LIBGIT~%\") (finish-output) (uiop:quit 0))"))))
+not otherwise.
+
+The two versions are in source files with different names, gitbin.lisp and gitbin-plain.lisp.
+With one name, the release-mode CI leg's second build loaded the fasl compiled from the first
+version, which names AION/LIBGIT, and failed with a package error (run 38152773865). ASDF keeps
+a fasl whose write date equals its source's, and dates have one-second resolution: the first
+build wrote the fasl about a second before this test rewrote the source, so the two can fall in
+the same second (#573). With two names, no earlier fasl can stand in for the second version."
+  (let ((file (if libgit "gitbin" "gitbin-plain")))
+    (%write (merge-pathnames "gitbin.asd" project)
+            (format nil "(defsystem \"gitbin\" :depends-on (~:[~;\"aion/libgit\"~]) :components ((:file \"~A\")))"
+                    libgit file))
+    (%write (merge-pathnames (concatenate 'string file ".lisp") project)
+            (if libgit
+                (%lines "(defpackage #:gitbin (:use #:cl) (:export #:main))"
+                        "(in-package #:gitbin)"
+                        "(defun main () (format t \"~&LOADED ~A~%\" (aion/libgit:ensure-loaded)) (finish-output) (uiop:quit 0))")
+                (%lines "(defpackage #:gitbin (:use #:cl) (:export #:main))"
+                        "(in-package #:gitbin)"
+                        "(defun main () (format t \"~&NO LIBGIT~%\") (finish-output) (uiop:quit 0))")))))
 
 (defun %run-cons-bin-build (project)
   "Run PROJECT's scripts/build-gitbin.lisp in a fresh sbcl, in PROJECT's directory, as `cons bin'
