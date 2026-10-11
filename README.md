@@ -83,7 +83,7 @@ Plus two **satellite leaf-libs**, outside the linear core DAG:
 | Dir | Framework | Role |
 |---|---|---|
 | [`hermes/`](hermes) | **hermes** | external integrations — neutral email + SMS (SendGrid/Twilio + a dev transport, signature-verified inbound SMS), a content-addressed blob store, and payments behind a neutral protocol (Stripe backend) |
-| [`klio/`](klio) | **Klio** | git-backed content engine — markdown in version control, rendered live by hyperion; sits between a static generator and a database-backed app *(in progress — scaffold and a design doc, no engine yet)* |
+| [`klio/`](klio) | **Klio** | git-backed content engine — markdown in version control, rendered live by hyperion; sits between a static generator and a database-backed app; reloading a production server *(in progress)* |
 | [`hades/`](hades) | **Hades** | the OS ergonomics layer over aion's raw bindings — portable facades only where every OS has a real counterpart, platform-scoped packages elsewhere *(in progress — a [charter](hades/docs/adr/0001-charter.md) and one facade, the single-instance lock)* |
 
 Both are **leaves**: they depend only on `aion` plus external libs, never on
@@ -199,7 +199,7 @@ this page and the tree, stated rather than left to be discovered.
 | **hermes** | **alpha** — email + SMS with signature-verified inbound, a content-addressed blob store, and payments behind a neutral protocol with a Stripe backend | 460 |
 | **praxeon** | **alpha** — actor loop, provider-neutral LLM, translator, per-agent models, a web/REST surface, and cost/rate/auth ceilings (`budget-guard`, `meter`, `capability-guard`) | 2624 |
 | **elenchon** | **design only** — the typed CEG ADT and five ADRs exist; the reasoning engine *(in progress)* | 46 |
-| **klio** | **scaffold** *(in progress)* — a satellite the site program instantiates; the system loads and the suite guards that, and nothing else is built yet | 469 |
+| **klio** | **alpha** — a content tree loaded from Markdown files with front matter and published all at once, served live through a hyperion site or exported to static files; collections, controlled vocabularies, tags, pagination, RSS and Atom feeds, drafts and scheduled pages, a search index, HTML comments removed on load, and reload on change in development. Telling a production server to reload *(in progress)* | 469 |
 | **hades** | **planned** *(in progress)* — a charter ADR and `hades/single-instance`, a lock that keeps a second copy of an app off the same data directory; the service facade is blocked on `aion/windows/service`, which does not exist yet | 20 |
 | **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 398 |
 
