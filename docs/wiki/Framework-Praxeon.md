@@ -330,7 +330,7 @@ Coalton class) with interchangeable implementations — the way `provider`/`comp
 works. The first step is giving **means** and **memory** the treatment `provider` got: a
 documented protocol plus a registry, so a third party can add one without editing the loop.
 
-**MCP (Model Context Protocol) — `praxeon/mcp`, parts 1 and 2 of #527.** An MCP server's tools reach an
+**MCP (Model Context Protocol) — `praxeon/mcp`, parts 1, 2 and 4 of #527.** An MCP server's tools reach an
 agent as means, through `register-means`, as the plan here said. `list-tools` reads what a
 server offers and gives it to nobody; `grant-tools` gives an agent the tools the app chooses,
 named with the connection's name as a prefix. The client speaks the current revision of the
@@ -339,7 +339,8 @@ handshake. The loop did need one change: a failed means used to end the turn, an
 now report an error that the model sees as an error result while the turn goes on
 (`tool-error-result`). A server that requires an OAuth sign-in is reached through `aion/oauth`
 (#527, part 2): `oauth-token-source` gives each user's calls that user's token, and refreshes
-it. Details, and the parts still to come (resources and prompts, local servers over stdio):
+it. Part 4 lets an app add a server's resources to an agent's context and get its prompts.
+Details, and the part still to come (local servers over stdio):
 [`praxeon/docs/mcp.md`](../../praxeon/docs/mcp.md).
 
 #### Live-reload dev server — "Figwheel for Common Lisp"
