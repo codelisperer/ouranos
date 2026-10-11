@@ -1701,7 +1701,92 @@ interval (#565 review)."
           (setf (fake-get-status fake) nil)
           (mcp:poll-tasks client :now now)
           (is (= 1 (- (mcp:task-next-poll (%only-task client)) now)) "a success resets the wait")
-          (is (= 0 (mcp:task-failures (%only-task client)))))))))
+          (is (= 0 (mcp:task-failures (%only-task client))))))))
+  (is (= 300 (praxeon/mcp::%backoff 1 1000000 300)) "a long run of failures stops at the cap"))
+
+(defun %poll-leaving (client exit now)
+  "POLL-TASKS for CLIENT at NOW, where EXIT says how a sign-in failure leaves it: :OBSERVER, an
+observer of :SIGN-IN-REQUIRED that signals, or :HANDLER, a HANDLER-CASE for
+AUTHORIZATION-REQUIRED. Returns :LEFT when the poll was left that way."
+  (ecase exit
+    (:observer
+     (handler-case (evt:with-observer ((lambda (e) (when (eq :sign-in-required (evt:event-type e))
+                                                     (error "the observer failed"))))
+                     (mcp:poll-tasks client :now now))
+       (simple-error () :left)))
+    (:handler
+     (handler-case (mcp:poll-tasks client :now now)
+       (mcp:authorization-required () :left)))))
+
+(test a-poll-left-when-the-app-is-told-to-sign-in-is-recorded-and-the-task-still-expires
+  "When an observer of :SIGN-IN-REQUIRED signals, or an app's handler of AUTHORIZATION-REQUIRED
+exits, the poll is left before it can record its failure. It is recorded anyway: the task waits
+before its next poll, later polls do not tell the app again, and the task expires at its deadline.
+A poll left that way at the deadline marks the task expired, and the next poll reports it (#565
+review)."
+  (dolist (exit '(:observer :handler))
+    (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working)
+                           :require-token "good" :task-ttl-ms 20000))
+          (token "good"))
+      (with-fake (client fake :tasks t :token-source (lambda (c p) (declare (ignore c p)) token))
+        (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+        (setf token "expired")
+        (let* ((now (mcp:task-next-poll (%only-task client)))
+               (deadline (mcp:task-deadline (%only-task client))))
+          (is (eq :left (%poll-leaving client exit now)) "~A" exit)
+          (let ((task (%only-task client)))
+            (is (= 1 (mcp:task-failures task)) "~A: the failure is recorded" exit)
+            (is (eq :sign-in (mcp:task-failure task)) "~A" exit)
+            (is (< now (mcp:task-next-poll task)) "~A: not due again at once" exit))
+          (is (null (mcp:poll-tasks client :now now)) "~A: not polled again before its wait" exit)
+          (loop for next = (mcp:task-next-poll (%only-task client))
+                repeat 20
+                while (< next deadline)
+                do (is (null (%poll-leaving client exit next)) "~A: later polls are not left" exit))
+          (let ((finished (%poll-leaving client exit deadline)))
+            (is (eq :expired (and (consp finished) (mcp:finished-task-outcome (first finished))))
+                "~A: expired at the deadline: ~S" exit finished)))))
+    (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working)
+                           :require-token "good" :task-ttl-ms 20000))
+          (token "good"))
+      (with-fake (client fake :tasks t :token-source (lambda (c p) (declare (ignore c p)) token))
+        (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+        (setf token "expired")
+        (let ((deadline (mcp:task-deadline (%only-task client))))
+          (is (eq :left (%poll-leaving client exit deadline)) "~A, at the deadline" exit)
+          (is (eq :expired (mcp:task-outcome (%only-task client))) "~A: marked expired" exit)
+          (let ((events '()))
+            (let ((finished (evt:with-observer ((lambda (e) (push (evt:event-type e) events)))
+                              (mcp:poll-tasks client :now deadline))))
+              (is (eq :expired (mcp:finished-task-outcome (first finished))) "~A" exit)
+              (is (equal '(:task-finished) events) "~A: announced, with no poll: ~S" exit events))))))))
+
+(defclass %store-without-announce () ()
+  (:documentation "A task store with every task-store method but ANNOUNCE-TASK."))
+(defmethod mcp:save-task ((store %store-without-announce) task) (declare (ignore task)) t)
+(defmethod mcp:update-task ((store %store-without-announce) task) (declare (ignore task)) t)
+(defmethod mcp:finish-task ((store %store-without-announce) task) (declare (ignore task)) t)
+(defmethod mcp:due-tasks ((store %store-without-announce) name now) (declare (ignore name now)) '())
+(defmethod mcp:remove-task ((store %store-without-announce) task) (declare (ignore task)) t)
+
+(test settings-a-poll-would-fail-on-are-refused-when-the-connection-and-client-are-made
+  "TASK-LIFETIME and TASK-BACKOFF-CAP must be positive integers, and a task store needs a method
+for each task-store function. Otherwise a task could start and then fail on its first poll
+(#565 review)."
+  (dolist (args '((:task-lifetime nil) (:task-lifetime 0) (:task-lifetime 1.5)
+                  (:task-backoff-cap nil) (:task-backoff-cap -1)))
+    (signals type-error (apply #'mcp:make-connection :name "x" :url "http://x/" args)))
+  (let ((connection (mcp:make-connection :name "x" :url "http://x/" :task-lifetime 60
+                                         :task-backoff-cap 10)))
+    (is (= 60 (mcp:connection-task-lifetime connection)))
+    (is-true (mcp:make-client connection))
+    (let ((message (handler-case (progn (mcp:make-client connection
+                                                         :task-store (make-instance '%store-without-announce))
+                                        nil)
+                     (error (e) (princ-to-string e)))))
+      (is (search "announce-task" message) "~S" message)
+      (is (null (search "save-task" message)) "only the missing one is named: ~S" message))
+    (signals error (mcp:make-client connection :task-store nil))))
 
 (test sign-in-required-is-emitted-once-for-each-run-of-failed-polls
   "While a task's principal has to sign in, each poll fails. The app is told once, with
@@ -1739,10 +1824,10 @@ failure tells the app again (#565 review)."
         (is (= 3 events) "a new run after another kind of failure")
         (is (= 3 signalled))))))
 
-(test a-store-announces-a-finished-task-once
-  "ANNOUNCE-TASK marks a finished record as announced, and returns true only for the call that
-did, so :TASK-FINISHED is sent once even when two pollers both see the task finished. A task not
-yet finished, or no longer in the store, is not announced."
+(test a-store-announces-a-finished-task-only-on-the-first-call
+  "ANNOUNCE-TASK marks a finished record as announced, and returns true only for the first call,
+so :TASK-FINISHED is sent once. The calls here are made one after the other. A task not yet
+finished, or no longer in the store, is not announced."
   (let* ((store (mcp:make-memory-task-store))
          (task (praxeon/mcp::%make-task :key "k" :connection "docs" :id "task-9" :next-poll 0)))
     (mcp:save-task store task)

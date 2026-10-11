@@ -191,21 +191,27 @@ observer fails on :TASK-INPUT-REFUSED, the next poll sends :TASK-FINISHED."
       (%task-event :task-input-refused task :methods methods)
       (%announce client task now))))
 
+(defun %expiry-text (task gone)
+  (if gone
+      (format nil "The server of the connection ~A no longer has the background task; its outcome is unknown."
+              (task-connection task))
+      (format nil "The background task on the connection ~A did not finish in the time allowed for it; its outcome is unknown."
+              (task-connection task))))
+
 (defun %expire (client task gone now)
   "Finish TASK as :EXPIRED: GONE true when the server no longer has it, and NIL when it did not
 finish by its deadline."
-  (%finish client task :expired
-           (if gone
-               (format nil "The server of the connection ~A no longer has the background task; its outcome is unknown."
-                       (task-connection task))
-               (format nil "The background task on the connection ~A did not finish in the time allowed for it; its outcome is unknown."
-                       (task-connection task)))
-           now))
+  (%finish client task :expired (%expiry-text task gone) now))
 
 (defun %backoff (interval failures cap)
   "The seconds to wait after the FAILURESth failed poll in a row: INTERVAL, doubled for each
 failure after the first, and no more than CAP, unless INTERVAL itself is more."
-  (max interval (min cap (* interval (expt 2 (1- failures))))))
+  (let ((wait interval))
+    ;; Doubling stops at CAP, so a long run of failures does not compute a large power of two.
+    (loop repeat (1- failures)
+          while (and (plusp wait) (< wait cap))
+          do (setf wait (* 2 wait)))
+    (max interval (min cap wait))))
 
 (defun %failed-poll (client task kind now)
   "Record a failed poll of TASK, of KIND :SIGN-IN or :ERROR, and set its next poll by %BACKOFF,
@@ -222,24 +228,45 @@ sign-in event: *SIGN-IN-TOLD* is true for the next poll only after a :SIGN-IN fa
 (defun %past-deadline-p (task now)
   (and (task-deadline task) (>= now (task-deadline task))))
 
+(defun %get-task (client task now)
+  "Send tasks/get for TASK, as (values OBJECT NIL), or (values NIL CONDITION) when the request
+failed with a tool error. When something else leaves the request, such as an observer of
+:SIGN-IN-REQUIRED that signals or an app's handler of AUTHORIZATION-REQUIRED that exits, the poll
+is still recorded as failed, so the task waits by %BACKOFF and is not polled again at once. A
+task past its deadline is marked :EXPIRED instead, and the next poll announces it. Nothing is
+emitted here, because the stack is already unwinding (#565 review)."
+  (let ((returned nil)
+        (kind :error))
+    (unwind-protect
+         (multiple-value-prog1
+             (handler-bind ((authorization-required
+                              (lambda (c) (declare (ignore c)) (setf kind :sign-in))))
+               (handler-case (let ((*sign-in-told* (eq :sign-in (task-failure task))))
+                               (values (%request client "tasks/get"
+                                                 (%object "taskId" (task-id task))
+                                                 :principal (task-principal task))
+                                       nil))
+                 (cnd:tool-error-result (e) (values nil e))))
+           (setf returned t))
+      (unless returned
+        (if (%past-deadline-p task now)
+            (%claim client task :expired (%expiry-text task nil) now)
+            (%failed-poll client task kind now))))))
+
 (defun %poll (client task now)
   "Poll TASK once and return it when it is finished and announced, or NIL. The record stays in
 the store; %DELIVER removes it. A task already marked finished is announced, if it was not yet,
 and returned without a poll."
   (when (task-outcome task)
     (return-from %poll (%announce client task now)))
-  (let ((object (handler-case (let ((*sign-in-told* (eq :sign-in (task-failure task))))
-                                (%request client "tasks/get" (%object "taskId" (task-id task))
-                                          :principal (task-principal task)))
-                  (cnd:tool-error-result (e)
-                    (cond ((and (typep e 'request-failed) (eql -32602 (request-failed-code e)))
-                           (return-from %poll
-                             (%expire client task t now)))
-                          ((%past-deadline-p task now)
-                           (return-from %poll
-                             (%expire client task nil now))))
-                    (%failed-poll client task (if (typep e 'sign-in-needed) :sign-in :error) now)
-                    (return-from %poll nil)))))
+  (multiple-value-bind (object e) (%get-task client task now)
+    (when e
+      (cond ((and (typep e 'request-failed) (eql -32602 (request-failed-code e)))
+             (return-from %poll (%expire client task t now)))
+            ((%past-deadline-p task now)
+             (return-from %poll (%expire client task nil now))))
+      (%failed-poll client task (if (typep e 'sign-in-needed) :sign-in :error) now)
+      (return-from %poll nil))
     (let ((status (gethash "status" object))
           (connection (task-connection task)))
       (setf (task-failures task) 0 (task-failure task) nil)

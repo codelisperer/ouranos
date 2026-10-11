@@ -353,10 +353,14 @@ its tag.
   whose `ttlMs` is null expires after the connection's `:task-lifetime`, one day by default.
   After a failed poll the wait doubles with each failure in a row, from the poll interval up to
   the connection's `:task-backoff-cap`, five minutes by default, and `:sign-in-required` is
-  emitted once for each run of sign-in failures, not on every poll. The
-  client declares no elicitation, sampling or roots, so a server must not ask a task for
-  input; a task that does is cancelled, with a `:task-input-refused` event naming the request
-  methods. Answering elicitations is #563. See `praxeon/docs/mcp.md`, "Long-running calls".
+  emitted once for each run of sign-in failures, not on every poll. A failed poll is recorded
+  even when an observer of `:sign-in-required` signals or an app's handler of
+  `authorization-required` exits. `make-connection` refuses a `:task-lifetime` or
+  `:task-backoff-cap` that is not a positive integer, and `make-client` refuses a task store
+  that lacks a method for one of the six functions. The client declares no elicitation,
+  sampling or roots, so a server must not ask a task for input; a task that does is cancelled,
+  with a `:task-input-refused` event naming the request methods. Answering elicitations is
+  #563. See `praxeon/docs/mcp.md`, "Long-running calls".
 
 ### Fixed
 

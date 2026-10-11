@@ -97,7 +97,8 @@ gives it no time-to-live (a ttlMs of null), counted from when the client receive
 default. A task still not finished then is polled once more and finishes as :EXPIRED.
 TASK-BACKOFF-CAP is the most seconds between polls of a task whose polls keep failing; five
 minutes by default. The wait after a failed poll doubles with each consecutive failure, from the
-task's poll interval up to this cap, and a poll that succeeds resets it."
+task's poll interval up to this cap, and a poll that succeeds resets it. Both are positive
+integers; anything else is refused here, before a task can start."
   (name "" :type string)
   (url "" :type string)
   (token-source nil)
@@ -106,8 +107,8 @@ task's poll interval up to this cap, and a poll that succeeds resets it."
   (call-timeout 120)
   (max-body-bytes (* 8 1024 1024))
   (tasks nil)
-  (task-lifetime (* 24 60 60))
-  (task-backoff-cap (* 5 60)))
+  (task-lifetime (* 24 60 60) :type (integer 1))
+  (task-backoff-cap (* 5 60) :type (integer 1)))
 
 (defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN
@@ -129,9 +130,26 @@ session: (SESSION-ID . VERSION). TASK-STORE keeps the tasks the server started (
 (defun make-client (connection &key (task-store (make-memory-task-store)))
   "A client for CONNECTION. It sends nothing until it is first used. TASK-STORE keeps the tasks
 the server starts when the connection declares :TASKS (#532); the default keeps them in this
-process, so an app whose tasks must survive a restart passes its own store."
+process, so an app whose tasks must survive a restart passes its own store. A store that lacks
+a method for any of the six task-store functions is refused here, so a missing method cannot
+fail a poll after the store has recorded part of it."
   (check-type connection connection)
+  (let ((missing (%store-lacks task-store)))
+    (when missing
+      (error "praxeon/mcp: the task store ~S has no method for ~{~(~A~)~^, ~}." task-store missing)))
   (%make-client connection task-store))
+
+(defun %store-lacks (store)
+  "The names of the task-store functions that have no method applicable to STORE as their first
+argument."
+  (remove-if (lambda (name)
+               (some (lambda (method)
+                       (let ((specializer (first (sb-mop:method-specializers method))))
+                         (if (typep specializer 'sb-mop:eql-specializer)
+                             (eql store (sb-mop:eql-specializer-object specializer))
+                             (typep store specializer))))
+                     (sb-mop:generic-function-methods (fdefinition name))))
+             '(save-task update-task finish-task announce-task due-tasks remove-task)))
 
 ;;; --- one HTTP exchange -----------------------------------------------------------------
 
