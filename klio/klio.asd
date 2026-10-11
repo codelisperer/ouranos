@@ -26,6 +26,7 @@
                              (:file "search")         ; in-memory index, built at load
                              (:file "highlight")     ; a small CL highlighter (pre-publication issue 359 Q3)
                              (:file "render")        ; markdown, via hyperion/markdown
+                             (:file "comments")      ; HTML comments removed at load (#556)
                              (:file "mode")          ; dev mode: preview is a flag
                              (:file "content")       ; the tree, and the all-or-nothing swap
                              (:file "collection")    ; collections and lookups for themes (#353)

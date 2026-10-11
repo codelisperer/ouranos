@@ -99,6 +99,41 @@ its tag.
   fasl loads. An app acts if its code has such a warning, which now fails its build. An app that
   carries its own strict-build script to catch this case can use `cons --strict build` instead.
   (#525)
+- **hyperion/markdown: with `:allow-html nil`, an app's own 3bmd code-block renderer receives a
+  fenced block's text unescaped, so it must escape `<`, `>` and `&` itself** (#559). `render`
+  used to escape the whole source before 3bmd parsed it, so a renderer an app registered for
+  `3bmd-code-blocks:*renderer*` was handed text that was already escaped. The safe mode now
+  hands every renderer other than `:nohighlight` and `:colorize` the block's text as the author
+  wrote it, as `:pygments` and `:chroma` expect, and prints that renderer's output unchanged. An
+  app whose renderer writes its input into the page without escaping it now lets a fenced block
+  put raw HTML on the page, so that renderer must escape its input. The fixed entry for #559
+  below describes the rest of the change.
+
+- **klio: HTML comments are removed from a page when it is loaded; `search.json` can be turned
+  off, and a page can stay out of search** (#556). klio renders Markdown with raw HTML escaped,
+  so an HTML comment (`<!-- ... -->`) in a page's body was shown on the page as visible text,
+  and `/search.json` and the search index carried it too. An author who kept private notes in
+  comments has been publishing them on any site exported or served this way. `load-document` now
+  removes every comment from the body before rendering or indexing it, so `document-body`,
+  `document-html`, `search-json` and `content-tree-index` no longer contain them. A comment is
+  kept only when klio's renderer shows all of it, from `<!--` through `-->`, inside one `<code>`
+  element on the page, as in one code span, one fenced block or one indented block. klio decides
+  this by rendering a copy of the body, so a block quote, a `~~~` fence or a list item that
+  renders as text does not keep a comment, and neither does a comment that starts in code and
+  ends outside it. A body that contains one of the Unicode noncharacters U+FDD2 to U+FDD5 or
+  U+FDE0 to U+FDEF has every comment removed. `<!-->` and `<!--->` are whole comments, as
+  CommonMark 0.31.2 defines them, so the text after them is kept. A comment that is never closed
+  removes the rest of the body, and the load warns. HTML comments are removed from the body
+  only; use YAML `#` comments in front matter, where a `<!-- -->` in a value is kept and
+  published. `klio:strip-html-comments` does the removal; its `:render` argument names the
+  renderer, `render-markdown` by default. `make-site-options`, and so `site-app` and
+  `export-site`, take `:search-path nil` to have no `search.json`: the export does not write it
+  and the app does not serve it. A front-matter `search: false` leaves a page out of
+  `search.json` and the search index; only `search: true` or no `search` key keeps it in.
+  `search` is now a core key, read with `content-meta-search` or `(document-field d "search")`.
+  An app acts if a theme or a script relied on comments in `document-body`, or read `search`
+  with `(extra meta "search")`, which now returns NIL. An author who relied on comments being
+  hidden should check what was already published.
 
 ### Added
 
@@ -492,6 +527,16 @@ its tag.
   block under the `:pygments` or `:chroma` renderer is left for that program to escape. Every
   klio page changes the same way. An app that unescaped `render`'s output to work around this
   should stop.
+- **praxeon/mcp: `get-prompt` and `read-resource` refuse malformed content with
+  `request-failed`** (#569). `get-prompt` accepted a list of content blocks as a message's
+  content, which every schema revision defines as one block, and accepted any object as a
+  block, so `{"type":"text","text":42}` gave a message whose text was the integer 42. A message's
+  content must now be one block of a known type (`text`, `image`, `audio`, `resource_link` or
+  `resource`) with that type's required fields as strings; a session on protocol version
+  2025-03-26, whose schema has no `resource_link`, refuses that type. `read-resource`, and so
+  `add-resource`, accepted a content with neither a `text` nor a `blob`, which the schema
+  requires, and showed it as `[no content]`; the reply now fails, and an earlier copy added with
+  `add-resource` is kept.
 
 ## v0.1.7 — 2026-09-30
 
