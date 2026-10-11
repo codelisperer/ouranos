@@ -159,10 +159,7 @@ does. Returns (values EXIT-CODE OUTPUT)."
                (uiop:native-namestring (merge-pathnames "scripts/build-gitbin.lisp" project)))
          :directory project :input nil :output out :error-output out :ignore-error-status t
          :environment
-         (cons (format nil "CL_SOURCE_REGISTRY=~A//~A~A//"
-                       (uiop:native-namestring td-root)
-                       (if (uiop:os-windows-p) ";" ":")
-                       (uiop:native-namestring project))
+         (cons (%source-registry-variable project)
                (remove-if (lambda (e) (or (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e)
                                           (uiop:string-prefix-p "AION_LIBGIT_LIBRARY=" e)))
                           (sb-ext:posix-environ)))))

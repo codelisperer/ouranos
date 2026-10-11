@@ -142,10 +142,7 @@ not search the tree it was built from (#472)."
                                      "--version" "0.0.1" "--out" (uiop:native-namestring dist))
                                :input nil :output build-out :error-output build-out :ignore-error-status t
                                :environment
-                               (cons (format nil "CL_SOURCE_REGISTRY=~A//~A~A//"
-                                             (uiop:native-namestring td-root)
-                                             (if (uiop:os-windows-p) ";" ":")
-                                             (uiop:native-namestring app))
+                               (cons (%source-registry-variable app)
                                      (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
                                                 (sb-ext:posix-environ)))))))
                  (is (eql 0 code) "the build failed:~%~A" (get-output-stream-string build-out)))
@@ -232,10 +229,7 @@ was built from (#524, ADR-0013's amendment of 2026-10-04)."
                                :directory project
                                :input nil :output build-out :error-output build-out :ignore-error-status t
                                :environment
-                               (cons (format nil "CL_SOURCE_REGISTRY=~A//~A~A//"
-                                             (uiop:native-namestring td-root)
-                                             (if (uiop:os-windows-p) ";" ":")
-                                             (uiop:native-namestring project))
+                               (cons (%source-registry-variable project)
                                      (remove-if (lambda (e) (or (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e)
                                                                 (uiop:string-prefix-p "AION_LIBGIT_LIBRARY=" e)))
                                                 (sb-ext:posix-environ)))))))
