@@ -537,6 +537,13 @@ its tag.
   `add-resource`, accepted a content with neither a `text` nor a `blob`, which the schema
   requires, and showed it as `[no content]`; the reply now fails, and an earlier copy added with
   `add-resource` is kept.
+- **hyperion/markdown: with `:allow-html nil`, `>` at the start of a line renders a block
+  quote** (#574). Since #559 the safe mode hid every `>` from 3bmd, so `> quoted` rendered as a
+  paragraph beginning with `&gt;`. A `>` at the start of a line, and again after such a `>` for a
+  nested quote, is now left for 3bmd to read, so the safe mode renders a block quote wherever
+  `:allow-html t` does. 3bmd does not treat an indented `>` as a quote in either mode, so `   > x`
+  is still a paragraph. Raw HTML inside a quote is still shown as text, and a `>` in code is still
+  escaped once. Every klio page changes the same way.
 
 ## v0.1.7 — 2026-09-30
 

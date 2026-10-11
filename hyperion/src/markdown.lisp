@@ -195,16 +195,42 @@ noncharacter, so text does not use it; any found in the source is replaced first
 (defparameter +greater-than+ (code-char #xFDD1)
   "Stands for `>' in the source while 3bmd parses it in the safe mode.")
 
+(defun %quote-markers (markdown)
+  "The positions in MARKDOWN of each `>' that marks a block quote: at the start of a line after
+up to three spaces, and again after such a marker, its optional space and up to three more
+spaces, for a nested quote (#574)."
+  (let ((n (length markdown))
+        (markers '()))
+    (flet ((skip-spaces (i most)
+             (loop while (and (< i n) (< 0 most) (char= #\Space (char markdown i)))
+                   do (incf i) (decf most))
+             i))
+      (loop with line = 0
+            while (< line n)
+            do (loop with i = (skip-spaces line 3)
+                     while (and (< i n) (char= #\> (char markdown i)))
+                     do (push i markers)
+                        (setf i (skip-spaces (1+ i) 4)))
+               (setf line (let ((newline (position #\Newline markdown :start line)))
+                            (if newline (1+ newline) n)))))
+    (nreverse markers)))
+
 (defun %hide-brackets (markdown)
   "MARKDOWN with each < and > replaced by its placeholder, and each placeholder character
-already in it replaced by U+FFFD, so that only this function's placeholders become brackets."
-  (map 'string (lambda (c)
-                 (cond ((char= c #\<) +less-than+)
-                       ((char= c #\>) +greater-than+)
-                       ((or (char= c +less-than+) (char= c +greater-than+))
-                        (code-char #xFFFD))
-                       (t c)))
-       markdown))
+already in it replaced by U+FFFD, so that only this function's placeholders become brackets. A
+`>' that marks a block quote is left for 3bmd to read (#574). It cannot form HTML, because every
+`<' is hidden, and 3bmd escapes a `>' wherever it prints one as text or code."
+  (let ((markers (%quote-markers markdown)))
+    (with-output-to-string (out)
+      (loop for c across markdown
+            for i from 0
+            do (write-char (cond ((and markers (= i (first markers))) (pop markers) c)
+                                 ((char= c #\<) +less-than+)
+                                 ((char= c #\>) +greater-than+)
+                                 ((or (char= c +less-than+) (char= c +greater-than+))
+                                  (code-char #xFFFD))
+                                 (t c))
+                           out)))))
 
 (defun %restore-brackets (string)
   (substitute #\> +greater-than+ (substitute #\< +less-than+ string)))
