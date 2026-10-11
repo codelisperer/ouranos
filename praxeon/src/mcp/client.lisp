@@ -140,14 +140,17 @@ fail a poll after the store has recorded part of it."
   (%make-client connection task-store))
 
 (defun %store-lacks (store)
-  "The names of the task-store functions that have no method applicable to STORE as their first
-argument."
+  "The names of the task-store functions that have no primary method for STORE as their first
+argument. A method on T does not count, nor does an :AROUND, :BEFORE or :AFTER method, because
+none of them is a store's implementation of the function."
   (remove-if (lambda (name)
                (some (lambda (method)
                        (let ((specializer (first (sb-mop:method-specializers method))))
-                         (if (typep specializer 'sb-mop:eql-specializer)
-                             (eql store (sb-mop:eql-specializer-object specializer))
-                             (typep store specializer))))
+                         (and (null (method-qualifiers method))
+                              (not (eq specializer (find-class t)))
+                              (if (typep specializer 'sb-mop:eql-specializer)
+                                  (eql store (sb-mop:eql-specializer-object specializer))
+                                  (typep store specializer)))))
                      (sb-mop:generic-function-methods (fdefinition name))))
              '(save-task update-task finish-task announce-task due-tasks remove-task)))
 

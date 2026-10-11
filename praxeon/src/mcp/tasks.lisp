@@ -234,7 +234,8 @@ failed with a tool error. When something else leaves the request, such as an obs
 :SIGN-IN-REQUIRED that signals or an app's handler of AUTHORIZATION-REQUIRED that exits, the poll
 is still recorded as failed, so the task waits by %BACKOFF and is not polled again at once. A
 task past its deadline is marked :EXPIRED instead, and the next poll announces it. Nothing is
-emitted here, because the stack is already unwinding (#565 review)."
+emitted here, because the stack is already unwinding, and a store error while recording is logged
+rather than signalled, so the caller sees the condition that left the request (#565 review)."
   (let ((returned nil)
         (kind :error))
     (unwind-protect
@@ -247,11 +248,19 @@ emitted here, because the stack is already unwinding (#565 review)."
                                                  :principal (task-principal task))
                                        nil))
                  (cnd:tool-error-result (e) (values nil e))))
+           ;; An interrupt between the reply and this SETF drops the reply and records a failed
+           ;; poll; the task is polled again later, so nothing is lost but one poll.
            (setf returned t))
       (unless returned
-        (if (%past-deadline-p task now)
-            (%claim client task :expired (%expiry-text task nil) now)
-            (%failed-poll client task kind now))))))
+        ;; The stack is already unwinding for another reason. A store error here would replace
+        ;; that reason, so it is logged instead; the task keeps its last record and is polled again.
+        (handler-case (if (%past-deadline-p task now)
+                          (%claim client task :expired (%expiry-text task nil) now)
+                          (%failed-poll client task kind now))
+          (error (e)
+            (log:warn "praxeon/mcp: recording a failed poll failed"
+                      :connection (task-connection task) :key (task-key task)
+                      :condition (type-of e))))))))
 
 (defun %poll (client task now)
   "Poll TASK once and return it when it is finished and announced, or NIL. The record stays in

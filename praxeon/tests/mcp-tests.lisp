@@ -1702,6 +1702,7 @@ interval (#565 review)."
           (mcp:poll-tasks client :now now)
           (is (= 1 (- (mcp:task-next-poll (%only-task client)) now)) "a success resets the wait")
           (is (= 0 (mcp:task-failures (%only-task client))))))))
+  (is (= 20 (praxeon/mcp::%backoff 5 3 300)) "the third failure in a row waits four intervals")
   (is (= 300 (praxeon/mcp::%backoff 1 1000000 300)) "a long run of failures stops at the cap"))
 
 (defun %poll-leaving (client exit now)
@@ -1761,6 +1762,39 @@ review)."
               (is (eq :expired (mcp:finished-task-outcome (first finished))) "~A" exit)
               (is (equal '(:task-finished) events) "~A: announced, with no poll: ~S" exit events))))))))
 
+(defclass %store-failing-updates (praxeon/mcp::memory-task-store)
+  ((fail :initform nil :accessor %store-fails))
+  (:documentation "A memory task store whose UPDATE-TASK and FINISH-TASK signal while FAIL is
+true."))
+(defmethod mcp:update-task :before ((store %store-failing-updates) task)
+  (declare (ignore task))
+  (when (%store-fails store) (error "the store failed")))
+(defmethod mcp:finish-task :before ((store %store-failing-updates) task)
+  (declare (ignore task))
+  (when (%store-fails store) (error "the store failed")))
+
+(test a-store-error-while-recording-a-left-poll-does-not-replace-the-callers-error
+  "When a poll is left by an observer's error and the store then fails to record the failed poll,
+the store's error is logged, and the caller gets the observer's error. The task keeps its last
+record (#565 review)."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script '(:working)
+                         :require-token "good"))
+        (store (make-instance '%store-failing-updates))
+        (token "good"))
+    (with-fake (client fake :tasks t :token-source (lambda (c p) (declare (ignore c p)) token))
+      (setf (mcp:client-task-store client) store)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (setf token "expired" (%store-fails store) t)
+      (let ((message (handler-case
+                         (evt:with-observer ((lambda (e)
+                                               (when (eq :sign-in-required (evt:event-type e))
+                                                 (error "the observer failed"))))
+                           (mcp:poll-tasks client :now (mcp:task-next-poll (%only-task client)))
+                           nil)
+                       (error (e) (princ-to-string e)))))
+        (is (equal "the observer failed" message) "~S" message))
+      (is (= 0 (mcp:task-failures (%only-task client))) "the record is unchanged"))))
+
 (defclass %store-without-announce () ()
   (:documentation "A task store with every task-store method but ANNOUNCE-TASK."))
 (defmethod mcp:save-task ((store %store-without-announce) task) (declare (ignore task)) t)
@@ -1768,6 +1802,11 @@ review)."
 (defmethod mcp:finish-task ((store %store-without-announce) task) (declare (ignore task)) t)
 (defmethod mcp:due-tasks ((store %store-without-announce) name now) (declare (ignore name now)) '())
 (defmethod mcp:remove-task ((store %store-without-announce) task) (declare (ignore task)) t)
+(defclass %store-with-around-announce (%store-without-announce) ()
+  (:documentation "A store whose only ANNOUNCE-TASK method is an :AROUND method."))
+(defmethod mcp:announce-task :around ((store %store-with-around-announce) task)
+  (declare (ignore task))
+  (call-next-method))
 
 (test settings-a-poll-would-fail-on-are-refused-when-the-connection-and-client-are-made
   "TASK-LIFETIME and TASK-BACKOFF-CAP must be positive integers, and a task store needs a method
@@ -1786,6 +1825,16 @@ for each task-store function. Otherwise a task could start and then fail on its 
                      (error (e) (princ-to-string e)))))
       (is (search "announce-task" message) "~S" message)
       (is (null (search "save-task" message)) "only the missing one is named: ~S" message))
+    (let ((method (eval '(defmethod mcp:announce-task ((store t) task)
+                          (declare (ignore store task))
+                          nil))))
+      (unwind-protect
+           (signals error (mcp:make-client connection
+                                           :task-store (make-instance '%store-without-announce)))
+        (remove-method #'mcp:announce-task method)))
+    (signals error (mcp:make-client connection
+                                    :task-store (make-instance '%store-with-around-announce))
+      "an :around method is not an implementation")
     (signals error (mcp:make-client connection :task-store nil))))
 
 (test sign-in-required-is-emitted-once-for-each-run-of-failed-polls
