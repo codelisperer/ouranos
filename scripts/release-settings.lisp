@@ -73,16 +73,36 @@ safe as a Windows registry key, a file name and a manifest product."
               text)))
 
 (defun %read-keys (path)
-  "The non-blank, non-comment lines of the key file at PATH."
-  (unless (probe-file path) (%refuse "--public-key-file ~A does not exist" path))
-  (loop for line in (uiop:read-file-lines path)
-        for text = (string-trim '(#\Space #\Tab #\Return) line)
-        unless (or (zerop (length text)) (char= (char text 0) #\#))
-          collect text))
+  "The non-blank, non-comment lines of the key file at PATH. A path that is missing, a
+directory, or a file that cannot be read is refused, with exit code 2 like any bad option
+(review of #568)."
+  (cond ((uiop:directory-exists-p (uiop:ensure-directory-pathname path))
+         (%refuse "--public-key-file ~A is a directory" path))
+        ((not (probe-file path))
+         (%refuse "--public-key-file ~A does not exist" path)))
+  (let ((lines (handler-case (uiop:read-file-lines path)
+                 (error (e) (%refuse "--public-key-file ~A cannot be read: ~A" path e)))))
+    (loop for line in lines
+          for text = (string-trim '(#\Space #\Tab #\Return) line)
+          unless (or (zerop (length text)) (char= (char text 0) #\#))
+            collect text)))
+
+(defun %public-key-text-p (text)
+  "Whether TEXT has the form aion/signature:encode-key gives a public key: 32 bytes as standard
+base64, which is 43 characters of the base64 alphabet and one = (44 in all). Checked when the
+options are parsed, so a key that is not one stops the build with exit code 2 before anything
+is built (review of #568). The image decodes it again before the dump."
+  (and (= 44 (length text))
+       (char= #\= (char text 43))
+       (every (lambda (c) (and (< (char-code c) 128) (or (alphanumericp c) (find c "+/"))))
+              (subseq text 0 43))))
 
 (defun %keys-for-image (keys)
   "The value up:*public-key* is set to, from the keys given. ONE KEY, until the maintainer decides
 how rotation works (#408): change this, and hyperion/update's %trusted-key, to accept a list."
+  (dolist (key keys)
+    (unless (%public-key-text-p key)
+      (%refuse "~S is not a public key: one is 44 characters of base64, as scripts/update-manifest.lisp keygen prints it" key)))
   (cond ((null keys) nil)
         ((rest keys)
          (%refuse "the key file holds ~D keys; this build trusts one key until rotation is decided (#408)"
@@ -139,9 +159,12 @@ anything it cannot use."
           :sources sources :channel channel :release release)))
 
 (defun settings-given-p (argv)
-  "Whether ARGV gives any release setting, so the app must load hyperion/update."
+  "Whether ARGV gives any release setting, so the app must load hyperion/update. --product and
+--display-name count: each names something hyperion/update holds, so giving one for an app
+without it is a mistake to report, not to accept (review of #568)."
   (some (lambda (option) (member option argv :test #'string=))
-        '("--public-key-file" "--update-source" "--default-channel" "--release")))
+        '("--product" "--display-name" "--public-key-file" "--update-source" "--default-channel"
+          "--release")))
 
 (defun release-settings-argv (argv)
   "The release options in ARGV, to pass on to the Windows child build unchanged."

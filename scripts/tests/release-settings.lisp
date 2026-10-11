@@ -14,6 +14,11 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (load (merge-pathnames "release-settings.lisp" *scripts*)))
 
+(defun %shaped-key (char)
+  "Text with a public key's shape (43 base64 characters and =), for the parser, which checks the
+shape only. Not a key a signature would verify against."
+  (concatenate 'string (make-string 43 :initial-element char) "="))
+
 (defun %release (argv &key (name "probe") env)
   "Parse ARGV with --name NAME, and an environment holding only ENV, an alist."
   (ouranos-release-settings:parse-release-settings
@@ -37,14 +42,14 @@
   (let ((tree (%fresh-tree)))
     (unwind-protect
          (let* ((key-file (%bytes-file (merge-pathnames "updater.pub" tree)
-                                       (format nil "# the release key~%~%KEY-ONE~%")))
+                                       (format nil "# the release key~%~%~A~%" (%shaped-key #\A))))
                 (s (%release (list "--product" "probe" "--display-name" "Probe App"
                                    "--public-key-file" (uiop:native-namestring key-file)
                                    "--update-source" "s3=https://bucket.example/updates/probe"
                                    "--update-source" "github=https://github.com/o/r/releases/download/probe-beta/"
                                    "--default-channel" "beta" "--release"))))
            (is (equal "Probe App" (getf s :display-name)))
-           (is (equal "KEY-ONE" (getf s :public-key)) "the key file's one key, without the comment")
+           (is (equal (%shaped-key #\A) (getf s :public-key)) "the key file's one key, without the comment")
            (is (equal '(("S3-SOURCE" . "https://bucket.example/updates/probe/")
                         ("GITHUB-RELEASE-SOURCE" . "https://github.com/o/r/releases/download/probe-beta/"))
                       (getf s :sources))
@@ -54,8 +59,9 @@
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
 
 (test the-public-key-comes-from-the-environment-without-a-key-file
-  (is (equal "KEY-FROM-ENV"
-             (getf (%release '() :env `((,ouranos-release-settings:*public-key-variable* . " KEY-FROM-ENV ")))
+  (is (equal (%shaped-key #\B)
+             (getf (%release '() :env `((,ouranos-release-settings:*public-key-variable*
+                                          . ,(format nil " ~A " (%shaped-key #\B)))))
                    :public-key)))
   (is (null (getf (%release '() :env `((,ouranos-release-settings:*public-key-variable* . ""))) :public-key))
       "an empty variable is no key"))
@@ -63,7 +69,9 @@
 (test release-settings-refuse-what-they-cannot-use
   (let ((tree (%fresh-tree)))
     (unwind-protect
-         (let ((two-keys (%bytes-file (merge-pathnames "two.pub" tree) (format nil "KEY-ONE~%KEY-TWO~%"))))
+         (let ((two-keys (%bytes-file (merge-pathnames "two.pub" tree)
+                                      (format nil "~A~%~A~%" (%shaped-key #\A) (%shaped-key #\B))))
+               (key-dir (ensure-directories-exist (merge-pathnames "keys/" tree))))
            (dolist (case `((("--product" "has space") :name "has space")
                            (("--product" "other"))
                            (("--product" "probe" "--product" "probe"))
@@ -75,10 +83,20 @@
                            (("--public-key-file" ,(uiop:native-namestring two-keys)))
                            (("--public-key-file" ,(uiop:native-namestring (merge-pathnames "absent.pub" tree))))
                            (("--release" "--update-source" "github=https://x.example/"))
-                           (("--release") :env ((,ouranos-release-settings:*public-key-variable* . "KEY")))
+                           (("--release") :env ((,ouranos-release-settings:*public-key-variable* . ,(%shaped-key #\A))))
+                           (() :env ((,ouranos-release-settings:*public-key-variable* . "not-a-key")))
+                           (() :env ((,ouranos-release-settings:*public-key-variable* . ,(subseq (%shaped-key #\A) 1))))
+                           (("--public-key-file" ,(uiop:native-namestring key-dir)))
                            (("--product"))))
              (is-true (apply #'%refused case) "refused: ~S" case)))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test product-and-display-name-count-as-release-options
+  ;; Each names something hyperion/update holds, so an app without it is refused when given
+  ;; either (review of #568).
+  (is-true (ouranos-release-settings:settings-given-p '("--product" "probe")))
+  (is-true (ouranos-release-settings:settings-given-p '("--display-name" "Probe")))
+  (is-false (ouranos-release-settings:settings-given-p '("--name" "probe" "--version" "1.0.0"))))
 
 (test release-settings-are-passed-on-to-a-re-run-unchanged
   (is (equal '("--product" "probe" "--update-source" "github=https://x.example/" "--release"

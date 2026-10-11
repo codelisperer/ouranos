@@ -257,6 +257,18 @@ looked up under exactly the name the URL will serve it as."
           (return (fetch-manifest source channel))
         (update-source-error (e) (setf last-error e))))))
 
+;;; An artifact is fetched through the same list, in the same order. Without this method a list
+;;; could answer the check and then fail the apply, which calls FETCH-ARTIFACT on the list
+;;; (review of #568). The manifest names each artifact by an absolute URL, so the source that
+;;; answered the check would fetch the same URL; a source that cannot be reached is passed over
+;;; here as it is there.
+(defmethod fetch-artifact ((sources cons) url)
+  (let ((last-error nil))
+    (dolist (source sources (error last-error))
+      (handler-case
+          (return (fetch-artifact source url))
+        (update-source-error (e) (setf last-error e))))))
+
 (defvar *update-source* (make-instance 'null-source)
   "Where this build looks for updates: one source, or a list tried in order.
 
