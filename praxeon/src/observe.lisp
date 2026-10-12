@@ -158,6 +158,11 @@ window, Mastra's step.")
    (last-error :initform nil :accessor observer-last-error)
    (worker :initform nil :accessor observer-worker)
    (started :initform nil :accessor observer-started)
+   ;; When the current window attempt began; NIL before a run's first attempt; :BETWEEN after an
+   ;; attempt ended and before the next began (#632).
+   (attempt-started :initform nil :accessor observer-attempt-started)
+   ;; The time source, in universal time. A test replaces it to measure without waiting.
+   (clock :initform #'get-universal-time :accessor observer-clock)
    (stopping :initform nil :accessor observer-stopping)
    (lock :initform (bt:make-lock "praxeon-observer") :reader observer-lock))
   (:documentation "Distils one thread's messages into the thread's observations, a window at a time."))
@@ -199,7 +204,7 @@ Called after the process-wide lock is released (#508)."
              (format stream "Cannot forget ~A: an observer of thread ~A is running. Stop it (stop-observer on running-observer) and try again."
                      (observer-running-subject c) (observer-running-thread c))))
   (:documentation "FORGET-SUBJECT was called while an observer of the subject is running in this
-process. A slot of its own for the thread, since PRAXEON-ERROR carries no detail (#505)."))
+process. THREAD is the thread whose observer is running."))
 
 (defmethod mem:forget-subject :before ((store mem:memory-store) subject)
   "Refuse to erase SUBJECT while an observer of it is running in this process: that run could
@@ -293,13 +298,30 @@ every window later."
   (let ((w (observer-worker observer)))
     (and w (bt:thread-alive-p w))))
 
+(defun %now (observer) (funcall (observer-clock observer)))
+
+(defun %stuck-seconds (observer)
+  "How long the current window attempt has run, or, before a run's first attempt, the run. NIL
+between attempts, including the pause before a retry, and when nothing has started."
+  (let ((attempt (observer-attempt-started observer)))
+    (cond ((numberp attempt) (- (%now observer) attempt))
+          ((eq attempt :between) nil)
+          ((observer-started observer) (- (%now observer) (observer-started observer)))
+          (t nil))))
+
 (defun observer-stuck-p (observer)
-  "Whether a distillation has been running longer than OBSERVER-WINDOW-TIMEOUT seconds: a
-provider call that does not return. While it is, OBSERVE-TURN starts nothing, and says so in
-the log."
-  (and (observer-busy-p observer)
-       (observer-started observer)
-       (> (- (get-universal-time) (observer-started observer)) (observer-window-timeout observer))))
+  "Whether the current window attempt of a running distillation has run longer than
+OBSERVER-WINDOW-TIMEOUT seconds: a provider call that does not return. While it is, OBSERVE-TURN
+starts nothing, and says so in the log.
+
+MEASURED FROM THE START OF THE ATTEMPT, NOT OF THE RUN (#632). A run that works through several
+windows, or waits between retries, can take longer than the timeout in all while each call is
+quick; measured from the run's start it was reported stuck. Between attempts, during the pause
+before a retry or the work between windows, nothing is measured and it is not stuck."
+  (let ((seconds (%stuck-seconds observer)))
+    (and (observer-busy-p observer)
+         seconds
+         (> seconds (observer-window-timeout observer)))))
 
 (defun %window-end (history start step)
   "The end (exclusive) of the window from START in HISTORY: whole exchanges until they reach
@@ -345,7 +367,7 @@ deferred and the observer's lock held, so it should not block."
       (cond
         ((observer-stuck-p observer)
          (log:warn "memory observer stuck" :thread (observer-thread observer)
-                                           :seconds (- (get-universal-time) (observer-started observer)))
+                                           :seconds (%stuck-seconds observer))
          nil)
         ((observer-busy-p observer) nil)
         ((or (let ((window (unobserved observer snapshot)))
@@ -372,7 +394,8 @@ deferred and the observer's lock held, so it should not block."
                  (if other
                      (values nil other)
                      (let ((worker nil))
-                       (setf (observer-started observer) (get-universal-time)
+                       (setf (observer-started observer) (%now observer)
+                             (observer-attempt-started observer) nil
                              (observer-stopping observer) nil)
                        (unwind-protect (setf worker (%start-worker observer snapshot flush today))
                          (unless worker (%release observer)))
@@ -696,14 +719,20 @@ record it closed, so it would never be written. Never raises: this runs on a thr
              (when (observer-stopping observer)
                (setf outcome :stopped)
                (return))
-             (handler-case
-                 (progn (setf written (%distil-and-write observer window start end today))
-                        (setf outcome :written)
-                        (return))
-               (closing-not-saved () (setf outcome :unsaved) (return))
-               (error (e)
-                 (incf (observer-failures observer))
-                 (setf (observer-last-error observer) e))))
+             (setf (observer-attempt-started observer) (%now observer))
+             ;; :BETWEEN once the attempt ends, however it ends, so the pause before a retry and
+             ;; the work between windows are not measured as the attempt (Copilot's review of
+             ;; #634).
+             (unwind-protect
+                  (handler-case
+                      (progn (setf written (%distil-and-write observer window start end today))
+                             (setf outcome :written)
+                             (return))
+                    (closing-not-saved () (setf outcome :unsaved) (return))
+                    (error (e)
+                      (incf (observer-failures observer))
+                      (setf (observer-last-error observer) e)))
+               (setf (observer-attempt-started observer) :between)))
     (log:info "memory observer window" :thread (observer-thread observer)
                                        :from (1+ start) :through end :outcome outcome :written written
                                        :failures (observer-failures observer)

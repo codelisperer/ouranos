@@ -37,6 +37,10 @@
 ;;;;                    it to its end, stops reading stdin for 1 second, then exits with status 3
 ;;;;   orphan           modern, with a sixth tool, exit-leaving-child, which starts /bin/sleep 6
 ;;;;                    with this process's stdout, then exits with status 3
+;;;;   hold-both        modern, with a sixth tool, exit-holding-both, which starts bash with this
+;;;;                    process's stdin and stdout; it reads nothing for 6 seconds, then reads
+;;;;                    stdin until its end, giving up when a line takes more than 20 seconds;
+;;;;                    this process stops reading stdin for 1 second, then exits with status 3
 ;;;;
 ;;;; Every request also writes a line to stderr. Tools: echo, fail (isError), slow (30 s),
 ;;;; slow-a (0.5 s) and exit (the process exits with status 3), two per tools/list page.
@@ -97,7 +101,8 @@
   (append '("echo" "fail" "slow" "slow-a" "exit")
           (cond ((equal *mode* "stall") '("stall"))
                 ((equal *mode* "orphan") '("exit-leaving-child"))
-                ((equal *mode* "hold-stdin") '("exit-holding-stdin")))))
+                ((equal *mode* "hold-stdin") '("exit-holding-stdin"))
+                ((equal *mode* "hold-both") '("exit-holding-both")))))
 
 (defun send-bytes (octets)
   "Write OCTETS to stdout as they are, after what the character stream holds."
@@ -207,6 +212,17 @@
               ;; after this exits, and then the rest of what it writes is read and discarded.
               (sb-ext:run-program "/bin/sh" '("-c" "sleep 6; exec cat >/dev/null")
                                   :input t :output nil :error nil :wait nil)
+              (sleep 1)
+              (record "exiting")
+              (sb-ext:exit :code 3 :abort t))
+             ((and (equal method "tools/call") (equal (gethash "name" params) "exit-holding-both"))
+              ;; As exit-holding-stdin, but the shell also holds stdout, so the client's reader
+              ;; does not reach the end of it until the shell exits, and the shell exits when
+              ;; its stdin ends. The 20-second limit on each read bounds how long the shell can
+              ;; outlive a client that never closes its stdin.
+              (sb-ext:run-program "/bin/bash"
+                                  '("-c" "sleep 6; while IFS= read -r -t 20 line; do :; done")
+                                  :input t :output t :error nil :wait nil)
               (sleep 1)
               (record "exiting")
               (sb-ext:exit :code 3 :abort t))

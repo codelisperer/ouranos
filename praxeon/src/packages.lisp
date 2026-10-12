@@ -47,7 +47,7 @@
 (defpackage #:praxeon/conditions
   (:use #:cl)
   (:export
-   #:praxeon-error
+   #:praxeon-error #:praxeon-error-detail
    #:means-failure #:means-failure-means #:means-failure-cause
    #:tool-error-result #:tool-error-result-text #:tool-error-result-outcome
    #:deliberation-failure

@@ -201,6 +201,13 @@ its tag.
 
 ### Added
 
+- **klio: a collection name may not end in `.` or be a Windows device name** (#631).
+  `make-site-options` refuses a `:collections` name with a segment that ends in `.`
+  (Windows strips it, so `roles.` and `roles` would be one directory) or whose name before
+  its first `.` is `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9`
+  (`nul.txt`, `com1`), compared without regard to case. The rule applies on every operating
+  system, so a site behaves the same everywhere. A space was already refused.
+
 - **klio: a site can give a collection its own listing page, with `:collections`** (#557). Each
   collection named there gets a listing at `/<name>/`, paginated with `:per-page`, in the order
   the entry gives (`("roles" :sort-by "start" :order :descending :then-by "title")`), rendered by
@@ -443,7 +450,9 @@ its tag.
   - A server's pipes are closed only once its reader thread, its writer thread and the client's
     cleanup are all done. A writer still blocked 2 seconds after the server is finished,
     because a process the server started holds its stdin and does not read it, is ended, and
-    that process is not signalled (#601).
+    that process is not signalled (#601). Ending the writer closes the server's stdin, so a
+    process that also holds the server's stdout and waits for the end of stdin exits, and the
+    reader thread ends with it (#628).
   - `list-tools`, `call-tool`, `grant-tools`, resources, prompts and tasks work over stdio
     unchanged. `praxeon/docs/mcp.md`, "Local servers over stdio".
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
@@ -786,6 +795,17 @@ its tag.
 
 ### Fixed
 
+- **praxeon/conditions: `praxeon-error` keeps its `:detail` and prints it** (#505). Code
+  throughout praxeon signals `praxeon-error` with `:detail` saying what went wrong, such as
+  `make-observer`'s refusal of a bad `:step` or a `supersede` of an observation already
+  superseded, but the condition had no slot, so the detail was dropped and the report read only
+  "Condition PRAXEON-ERROR was signalled". It now has a `detail` slot, read with the new export
+  `praxeon-error-detail`, and its report prints the type and the detail, for example
+  `praxeon-error: :step must be a positive integer, not 0`. `praxeon/observe`'s
+  `window-not-distilled` and `closing-not-saved` print their detail the same way.
+  `deliberation-failure` keeps its own report, and `deliberation-failure-detail` reads the same
+  slot. Every subclass is still a `praxeon-error`, so existing handlers catch the same conditions.
+
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).
   pgvector's HNSW scan took the nearest `hnsw.ef_search` rows of the whole table (40 by
@@ -803,6 +823,15 @@ its tag.
   was afterwards, so the app's later queries in its transaction run with its own settings.
   `ensure-schema` also creates an index on `subject`, `<table>_subject_idx`, which that second
   query reads.
+
+- **praxeon/observe: `observer-stuck-p` measures from the start of the current window attempt,
+  not of the whole run** (#632). It compared the time with the start of the run, so a run that
+  worked through several windows, or waited between retries, was reported stuck once its total
+  time passed `:window-timeout`, even while the current model call was new, and `observe-turn`
+  logged "memory observer stuck". Now each attempt, including a retry of a skipped window,
+  records its start, and `observer-stuck-p` and that log line's `:seconds` measure from it.
+  Between attempts, during the pause before a retry or the work between windows, the observer
+  is not stuck.
 
 - **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a
   sign-in** (#587). When `tasks/cancel` needed a sign-in and an observer of `:sign-in-required`
