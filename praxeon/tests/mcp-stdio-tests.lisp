@@ -643,8 +643,8 @@ CLOSE-CLIENT both are NIL (#601)."
 
 (test a-local-server-that-ignores-its-closed-stdin-is-ended
   "A server still running *STDIO-CLOSE-SECONDS* after its stdin closed is sent SIGTERM, to its
-own process group, which the client checks it leads first; on Windows it is ended with
-TerminateProcess."
+own process group, which the client checks it leads first; on Windows its job object is
+terminated, which ends it (#599)."
   (let ((mcp:*stdio-close-seconds* 1))
     (with-stdio-client (client record "ignore-eof")
       (mcp:list-tools client)

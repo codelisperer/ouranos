@@ -300,22 +300,27 @@ environment for :INHERIT."
     (let ((pid (sb-ext:process-pid process)))
       ;; SBCL holds the process's handle until the process is closed, so the pid cannot have
       ;; been given to another process yet.
-      (handler-case (progn
-                      (setf (child-job child) (funcall *child-job-function* pid))
-                      (setf (child-job-watcher child)
-                            ;; THREAD-LIFETIME: scoped -- it polls this child's process and ends
-                            ;; once the process has exited or the job is closed; %FINISH-CHILD
-                            ;; joins it.
-                            (sb-thread:make-thread (lambda () (%watch-job child))
-                                                   :name "praxeon/mcp stdio job watcher")))
-        ;; Any error, so that a server already started is not left running without a CHILD.
+      ;; Any error in either step, so that a server already started is not left running without
+      ;; a CHILD.
+      (handler-case (setf (child-job child) (funcall *child-job-function* pid))
         (error (e)
           (log:warn "praxeon/mcp: local server is not in a job object, so a process it starts can outlive it"
                     :connection name :pid pid :error (type-of e)
                     :operation (and (typep e 'aion/windows:windows-error)
                                     (aion/windows:windows-error-operation e))
                     :code (and (typep e 'aion/windows:windows-error)
-                               (aion/windows:windows-error-code e))))))
+                               (aion/windows:windows-error-code e)))))
+      (when (child-job child)
+        (handler-case
+            (setf (child-job-watcher child)
+                  ;; THREAD-LIFETIME: scoped -- it polls this child's process and ends once the
+                  ;; process has exited or the job is closed; %FINISH-CHILD joins it.
+                  (sb-thread:make-thread (lambda () (%watch-job child))
+                                         :name "praxeon/mcp stdio job watcher"))
+          (error (e)
+            ;; The server is in its job, which %FINISH-CHILD and the image's exit still close.
+            (log:warn "praxeon/mcp: local server's job watcher could not be started, so if the server exits by itself its job is closed only when the client next finishes it"
+                      :connection name :pid pid :error (type-of e))))))
     (setf (child-reader child)
           ;; THREAD-LIFETIME: scoped -- it reads this child's stdout until the stream ends,
           ;; needs none of the caller's bindings, and %FINISH-CHILD joins it.
