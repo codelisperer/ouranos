@@ -153,7 +153,12 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                                        "params" (%obj "mode" "url" "message" "Sign the form"
                                                       "url" "https://example.org/form")))
                            (:sampling (%obj "method" "sampling/createMessage"
-                                            "params" (%obj "maxTokens" 10))))))
+                                            "params" (%obj "maxTokens" 10)))
+                           ;; Malformed: the field the mode requires is missing.
+                           (:form-bare (%obj "method" "elicitation/create"
+                                             "params" (%obj "mode" "form" "message" "No schema")))
+                           (:url-bare (%obj "method" "elicitation/create"
+                                            "params" (%obj "mode" "url" "message" "No URL"))))))
           (return-from %task-poll
             (done (%task-object fake id "input_required" "inputRequests" requests)))))
       (ecase step
@@ -2074,7 +2079,8 @@ OTHER. It sees the started call's :STARTED outcome as other, not as a result, an
 
 (test a-task-asking-a-declared-elicitation-tells-the-app-once-and-sends-its-answer
   (let ((fake (make-fake :tools (%tools '("long" :do :task))
-                         :task-script '((:elicit ("k1" :form)) (:elicit ("k1" :form)) :completed)))
+                         :task-script '((:elicit ("k1" :form)) (:elicit ("k1" :form))
+                                        (:elicit ("k1" :form)) :completed)))
         (events '()))
     (with-fake (client fake :tasks t :elicitation '(:form))
       (let ((tool (first (mcp:list-tools client))))
@@ -2145,7 +2151,10 @@ OTHER. It sees the started call's :STARTED outcome as other, not as a result, an
 form elicitation, is a request server requirement 7 forbids; the task is cancelled as before."
   (dolist (case '(((:elicit ("k1" :url)) . (:form))
                   ((:elicit ("k1" :form) ("k2" :sampling)) . (:form))
-                  ((:elicit ("k1" :form)) . nil)))
+                  ((:elicit ("k1" :form)) . nil)
+                  ;; Malformed (Copilot's review of #627): no schema, or no URL.
+                  ((:elicit ("k1" :form-bare)) . (:form))
+                  ((:elicit ("k1" :url-bare)) . (:url))))
     (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script (list (car case))))
           (events '()))
       (with-fake (client fake :tasks t :elicitation (cdr case))
@@ -2166,3 +2175,74 @@ form elicitation, is a request server requirement 7 forbids; the task is cancell
       (remhash "inputs" old)
       (is (null (mcp:task-inputs (mcp:task-from-json (jzon:stringify old))))
           "a record written before #563 has no inputs"))))
+
+(test an-observer-can-answer-from-inside-the-event
+  "Copilot's review of #627: the key is recorded on the event's task before the event, so an app
+that answers at once, from its observer, is not refused."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (answered nil))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e)
+                            (when (eq :task-input-required (evt:event-type e))
+                              (setf answered (mcp:answer-task-input client (getf e :task)
+                                                                    (getf e :input-key) :decline)))))
+        (%poll-when-due client))
+      (is-true answered "the answer from inside the event was sent")
+      (is (= 1 (length (fake-updates fake)))))))
+
+(test an-answer-for-a-task-the-server-has-finished-is-not-sent
+  "Copilot's review of #627: the event's task is a copy from when the key was shown. When the
+server has since finished the task, the answer is refused and no tasks/update is sent."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)) :completed)))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let ((task (getf (find :task-input-required events :key #'evt:event-type) :task)))
+        (is (typep (nth-value 1 (ignore-errors
+                                 (mcp:answer-task-input client task "k1" :accept
+                                                        :content (%obj "name" "x"))))
+                   'error))
+        (is (null (fake-updates fake)) "nothing was sent")))))
+
+(test an-answer-to-a-url-request-carries-no-content
+  "Copilot's review of #627: an ElicitResult for a url-mode request omits content."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :url)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:url))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let* ((e (find :task-input-required events :key #'evt:event-type))
+             (task (getf e :task)))
+        (is (eq :url (getf e :mode)))
+        (is (equal "https://example.org/form" (getf e :url)))
+        (is (typep (nth-value 1 (ignore-errors
+                                 (mcp:answer-task-input client task "k1" :accept
+                                                        :content (%obj "name" "x"))))
+                   'error)
+            "content for a url request is refused")
+        (is (null (fake-updates fake)) "and nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :accept))
+        (is (null (gethash "content" (gethash "k1" (cdr (first (fake-updates fake)))))))))))
+
+(test answering-does-not-change-the-stored-task
+  "Copilot's review of #627: the memory store's copies of a task share their input entries, so
+answering must not change an entry in place. The stored record keeps the key as shown and not
+answered; the server dropping the key is what ends it."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (mcp:answer-task-input client (getf (find :task-input-required events :key #'evt:event-type) :task)
+                             "k1" :decline)
+      (is (equal '(nil) (mapcar #'third (mcp:task-inputs (%only-task client))))
+          "the stored record is as the poll saved it: ~S" (mcp:task-inputs (%only-task client))))))

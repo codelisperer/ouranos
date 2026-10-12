@@ -157,8 +157,8 @@ its tag.
 
 - **praxeon/mcp: a task can ask the user for input, and the app answers it** (#563).
   - `make-connection` takes `:elicitation`, a list of the modes `:form` and `:url`. It declares the elicitation client capability for them; sampling and roots are never declared. Without it nothing changes.
-  - A task whose `tasks/get` says `input_required` with elicitation requests in declared modes sends a `:task-input-required` event per key not shown before, with `:input-key`, `:mode`, `:message`, `:schema` or `:url`, and `:task`. A request this client did not declare still cancels the task with `:task-input-refused`.
-  - `answer-task-input` sends the app's answer (`:accept` with content, `:decline` or `:cancel`) with `tasks/update`, taking the task object the event carried. After an app restart, an unanswered key is not asked again; it is answered cancel when `:input-timeout` (ten minutes by default) passes, with a `:task-input-expired` event.
+  - A task whose `tasks/get` says `input_required` with elicitation requests in declared modes sends a `:task-input-required` event per key not shown before, with `:input-key`, `:mode`, `:message`, `:schema` or `:url`, and `:task`. A request this client did not declare, or a malformed one (a form request without `requestedSchema`, a url request without `url`), still cancels the task with `:task-input-refused`.
+  - `answer-task-input` sends the app's answer (`:accept` with content for a form-mode request, `:decline` or `:cancel`) with `tasks/update`, taking the task object the event carried. It checks with `tasks/get` that the key is still outstanding on the server first, and sends no answer otherwise. After an app restart, an unanswered key is not asked again; it is answered cancel when `:input-timeout` (ten minutes by default) passes, with a `:task-input-expired` event.
   - The task record has a new field, `task-inputs`, written by `task-to-json`; a record written before reads as having none.
   - An ordinary call that answers `input_required` still fails as not run; an `:on-elicitation` handler for it is #626.
 
