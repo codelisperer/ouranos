@@ -568,10 +568,11 @@ its tag.
   even when an observer of `:sign-in-required` signals or an app's handler of
   `authorization-required` exits. `make-connection` refuses a `:task-lifetime` or
   `:task-backoff-cap` that is not a positive integer, and `make-client` refuses a task store
-  that lacks a method for one of the six functions. The client declares no elicitation,
-  sampling or roots, so a server must not ask a task for input; a task that does is cancelled,
-  with a `:task-input-refused` event naming the request methods. Answering elicitations is
-  #563. See `praxeon/docs/mcp.md`, "Long-running calls".
+  that lacks a method for one of the six functions. The client declares no sampling or roots,
+  and declares elicitation only when the app passes `:elicitation` to `make-connection` (#563),
+  so a server must not ask a task for any other input; a task that does is cancelled, with a
+  `:task-input-refused` event naming the request methods. See `praxeon/docs/mcp.md`,
+  "Long-running calls".
 
 ### Fixed
 

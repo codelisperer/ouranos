@@ -2246,3 +2246,62 @@ answered; the server dropping the key is what ends it."
                              "k1" :decline)
       (is (equal '(nil) (mapcar #'third (mcp:task-inputs (%only-task client))))
           "the stored record is as the poll saved it: ~S" (mcp:task-inputs (%only-task client))))))
+
+(test an-answer-after-the-input-timeout-is-refused-before-anything-is-sent
+  "The hub's review of #627: a key shown INPUT-TIMEOUT ago or more is one POLL-TASKS answers
+cancel, so the app's late answer is refused here rather than racing the cancel."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form) :input-timeout 60)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let* ((task (getf (find :task-input-required events :key #'evt:event-type) :task))
+             (seen (second (first (mcp:task-inputs task)))))
+        (is (typep (nth-value 1 (ignore-errors
+                                 (mcp:answer-task-input client task "k1" :decline :now (+ seen 60))))
+                   'error)
+            "an answer at the time limit is refused")
+        (is (null (%by-method (requests) "tasks/update")) "and nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :decline :now (+ seen 59))
+                 "the control: one second earlier it is sent")))))
+
+(test an-accept-to-a-form-request-must-carry-its-content
+  "The hub's review of #627: a form-mode accept submits the form's data."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let ((task (getf (find :task-input-required events :key #'evt:event-type) :task)))
+        (is (typep (nth-value 1 (ignore-errors (mcp:answer-task-input client task "k1" :accept)))
+                   'error))
+        (is (null (fake-updates fake)) "nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :accept :content (%obj "name" "x"))
+                 "the control: with content it is sent")))))
+
+(test a-key-is-shown-again-when-the-observer-signals
+  "The events for new keys come before the record is saved, so an observer that signals leaves
+the key unsaved, and the next poll shows it again: at least once, not at most once."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (shown 0))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (is (typep (nth-value 1 (ignore-errors
+                               (evt:with-observer ((lambda (e)
+                                                     (when (eq :task-input-required (evt:event-type e))
+                                                       (incf shown)
+                                                       (error "the app's observer failed"))))
+                                 (%poll-when-due client))))
+                 'error)
+          "the observer's error leaves the poll")
+      (is (null (mcp:task-inputs (%only-task client))) "the key was not saved")
+      (evt:with-observer ((lambda (e) (when (eq :task-input-required (evt:event-type e)) (incf shown))))
+        (%poll-when-due client))
+      (is (= 2 shown) "the key was shown again at the next poll")
+      (is (equal '("k1") (mapcar #'first (mcp:task-inputs (%only-task client))))
+          "and saved this time"))))

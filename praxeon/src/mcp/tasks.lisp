@@ -273,7 +273,10 @@ waiting. Otherwise the request is one this client did not declare, and the task 
 as before (%REFUSE-INPUT). A task past its deadline expires.
 
 The events for new keys are sent before the record is saved, so an observer that signals leaves
-the keys unrecorded and the next poll tells the app again: a question is shown at least once.
+the keys unrecorded and the next poll tells the app again: a question is shown at least once. The
+key's first-seen time is then the time of that next poll, so an observer that signals on every
+poll resets it each time, and the key's INPUT-TIMEOUT never passes: only the task's deadline
+bounds the wait (the hub's review of #627).
 The message, schema and URL in the event come from the server and are untrusted (#563)."
   (let* ((connection (client-connection client))
          (entries (%input-entries object)))
@@ -489,11 +492,12 @@ TASK must belong to CLIENT's connection; otherwise this signals an error and sen
                        now)))
     (first (%deliver client (and done (list done))))))
 
-(defun answer-task-input (client task input-key action &key content)
+(defun answer-task-input (client task input-key action &key content (now (get-universal-time)))
   "Answer the input request INPUT-KEY of TASK, which a :TASK-INPUT-REQUIRED event named, with
 ACTION: :ACCEPT, :DECLINE or :CANCEL (2026-07-28, \"Elicitation\", Response Actions). CONTENT is
-the submitted data, a JSON object as a hash table, for :ACCEPT to a form-mode request only; an
-answer to a url-mode request carries none. Returns T.
+the submitted data, a JSON object as a hash table: an :ACCEPT to a form-mode request must carry
+it, and an answer to a url-mode request carries none. Returns T. NOW is the time, by default the
+current one.
 
 It asks the server first, with tasks/get, whether INPUT-KEY is still outstanding: the event's
 TASK is a copy taken when the key was shown, and since then the task may have finished, or the
@@ -504,6 +508,12 @@ it twice. The task store is not written: the server dropping the key is what end
 and writing TASK, an older copy, could undo what later polls recorded (Copilot's review of #627).
 A request that fails signals as a call does, and nothing more is sent.
 
+THE TIME LIMIT. A key shown at least the connection's INPUT-TIMEOUT ago is refused here, before
+anything is sent, because POLL-TASKS answers such a key cancel. The tasks/get check narrows the
+window in which the two cross, but does not close it: a poll can answer cancel between this
+function's tasks/get and its tasks/update, and the server then takes whichever arrives first. An
+app that answers close to the limit can lose the answer to the cancel (the hub's review of #627).
+
 TASK is the task object the event carried: the task store has no lookup by key, so the app keeps
 it until it answers. AFTER AN APP RESTART an unanswered key is not asked again, because it is
 recorded as shown; it is answered cancel when the connection's INPUT-TIMEOUT passes. Answering
@@ -511,9 +521,10 @@ across a restart would need a lookup by key, which an optional task-store generi
 method returns NIL could add later, so that stores written by apps keep working (#563).
 
 Signals an error, and sends no answer, when TASK belongs to another connection, is finished, or
-has no outstanding request INPUT-KEY, here or on the server, when ACTION is not one of the three,
-or when CONTENT is not a hash table, is given with another action than :ACCEPT, or is given for a
-url-mode request. The server checks CONTENT against its requestedSchema."
+has no outstanding request INPUT-KEY, here or on the server, when the key was shown at least
+INPUT-TIMEOUT ago, when ACTION is not one of the three, or when CONTENT is not a hash table, is
+given with another action than :ACCEPT, is given for a url-mode request, or is missing from an
+:ACCEPT to a form-mode request. The server checks CONTENT against its requestedSchema."
   (%own-task client task "answer-task-input")
   (flet ((refuse (control arguments)
            (error "praxeon/mcp: answer-task-input: ~?; no answer was sent." control arguments)))
@@ -523,6 +534,11 @@ url-mode request. The server checks CONTENT against its requestedSchema."
       (unless (and input (not (third input)))
         (refuse "~S is not an outstanding input request of the task ~A"
                 (list input-key (task-key task))))
+      (when (>= (- now (second input))
+                (connection-input-timeout (client-connection client)))
+        (refuse "~S was shown ~D seconds ago, and a poll answers it cancel after ~D"
+                (list input-key (- now (second input))
+                      (connection-input-timeout (client-connection client)))))
       (unless (member action '(:accept :decline :cancel))
         (refuse "the action is :accept, :decline or :cancel, not ~S" (list action)))
       (when (and content (not (eq action :accept)))
@@ -538,7 +554,10 @@ url-mode request. The server checks CONTENT against its requestedSchema."
         (refuse "~S is no longer outstanding on the server for the task ~A"
                 (list input-key (task-key task))))
       (when (and content (eq :url (%elicitation-mode (third entry))))
-        (refuse "an answer to the url-mode request ~S carries no content" (list input-key))))
+        (refuse "an answer to the url-mode request ~S carries no content" (list input-key)))
+      (when (and (eq action :accept) (null content) (eq :form (%elicitation-mode (third entry))))
+        (refuse "an :accept to the form-mode request ~S carries the submitted content"
+                (list input-key))))
     (%send-input-responses client task (%object input-key (%elicit-result action content)))
     (setf (task-inputs task) (%with-input-answered (task-inputs task) input-key))
     (log:info "praxeon/mcp: task input answered" :connection (task-connection task)
