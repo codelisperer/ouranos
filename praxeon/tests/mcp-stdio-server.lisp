@@ -19,11 +19,14 @@
 ;;;;   unsupported      a current-era server that refuses 2026-07-28 with -32022, supporting
 ;;;;                    only 2099-01-01
 ;;;;   unsupported-list a current-era server whose DiscoverResult lists only 2099-01-01
+;;;;   no-versions      a current-era server whose DiscoverResult has no supportedVersions
 ;;;;   crash            exits with status 1 as soon as it starts
 ;;;;   garbage          modern, and before each tool result it writes a line that is not JSON, a
-;;;;                    line of 10000 characters, and a line with a byte that is not UTF-8
+;;;;                    line of 10000 characters, a JSON line of 1500 three-octet characters,
+;;;;                    and a line with a byte that is not UTF-8
 ;;;;   ping             legacy, and it sends a ping request before it answers tools/list
 ;;;;   ignore-eof       modern, and it keeps running after its stdin ends, until a signal
+;;;;   ignore-term      ignore-eof, and SIGTERM is recorded but does not end it
 ;;;;   stall            modern, with a sixth tool, stall, which stops reading stdin for 5 seconds
 ;;;;                    and then answers
 ;;;;   orphan           modern, with a sixth tool, exit-leaving-child, which starts /bin/sleep 6
@@ -106,6 +109,8 @@
     (when (equal *mode* "garbage")
       (send-raw "this line is not JSON")
       (send-raw (make-string 10000 :initial-element #\x))
+      ;; 1500 characters, 4500 octets: under a limit of 4096 only when characters are counted.
+      (send-raw (format nil "{\"x\": \"~A\"}" (make-string 1500 :initial-element (code-char #x20AC))))
       ;; {"x": "<FF>"} and a newline: valid JSON but for one byte that is not UTF-8.
       (send-bytes (concatenate '(vector (unsigned-byte 8))
                                (map 'vector #'char-code "{\"x\": \"") #(255)
@@ -140,6 +145,8 @@
             (fail id -32601 "Method not found"))
            ((equal *mode* "legacy-invalid") (fail id -32600 "Invalid Request"))
            ((equal *mode* "legacy-silent"))   ; no answer at all
+           ((equal *mode* "no-versions")
+            (reply id (obj "capabilities" (obj "tools" (obj)) "ttlMs" 0)))
            ((equal *mode* "unsupported-list")
             (reply id (obj "supportedVersions" (vector "2099-01-01")
                            "capabilities" (obj "tools" (obj)) "ttlMs" 0)))
@@ -201,13 +208,14 @@
                          (lambda (&rest arguments)
                            (declare (ignore arguments))
                            (record "SIGTERM")
-                           (sb-ext:exit :code 0 :abort t)))
+                           (unless (equal *mode* "ignore-term")
+                             (sb-ext:exit :code 0 :abort t))))
 (when (equal *mode* "crash")
   (sb-ext:exit :code 1 :abort t))
 (loop for line = (read-line *standard-input* nil)
       while line
       do (handle line))
 (record "eof")
-(when (equal *mode* "ignore-eof")
+(when (member *mode* '("ignore-eof" "ignore-term") :test #'equal)
   (loop (sleep 1)))
 (sb-ext:exit :code 0 :abort t)

@@ -239,6 +239,14 @@ run, naming what the server supports, and the server gets no other request."
     (is (null (%received-method record "initialize")))
     (is (null (%received-method record "tools/list")))))
 
+(test a-discover-result-without-supported-versions-is-not-taken-for-a-legacy-server
+  "Any DiscoverResult means the current era, so one with no supportedVersions is refused as
+unsupported, and the server gets no initialize."
+  (with-stdio-client (client record "no-versions")
+    (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
+      (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
+    (is (null (%received-method record "initialize")))))
+
 (test a-legacy-local-server-gets-an-answer-to-its-ping
   "A legacy server may ping the client, which answers with an empty result."
   (with-stdio-client (client record "ping")
@@ -343,7 +351,8 @@ the reader nor fail the call, and the dropped lines are counted in the log by re
         (is (equal "kept" (mcp:call-tool client (%tool-named client "echo") (%text "kept"))))))
     (let ((logged (get-output-stream-string log)))
       (is-true (search "not-json=1" logged) "the log said ~S" logged)
-      (is-true (search "too-long=1" logged)))))
+      ;; The line of 10000 characters, and the one of 1500 characters in 4500 octets.
+      (is-true (search "too-long=2" logged)))))
 
 (test a-local-server-s-stderr-is-discarded-or-written-to-its-file-and-never-logged
   "The server writes to stderr on every request. That neither fails a call nor reaches the log;
@@ -438,3 +447,20 @@ TerminateProcess."
         (is-false (sb-ext:process-alive-p process))
         (is (= 1 (%recorded-count record "eof")))
         #-win32 (is (= 1 (%recorded-count record "SIGTERM")))))))
+
+#-win32
+(test a-local-server-that-ignores-sigterm-is-killed
+  "A server still running *STDIO-TERM-SECONDS* after SIGTERM is sent SIGKILL, to its own process
+group, which the client checks it leads first."
+  (let ((mcp:*stdio-close-seconds* 0.5)
+        (mcp:*stdio-term-seconds* 0.5))
+    (with-stdio-client (client record "ignore-term")
+      (mcp:list-tools client)
+      (let* ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client)))
+             (pid (sb-ext:process-pid process)))
+        (is (eql pid (praxeon/mcp::%getpgid pid)) "the server does not lead its own process group")
+        (mcp:close-client client)
+        (is-false (sb-ext:process-alive-p process))
+        (is (= 1 (%recorded-count record "SIGTERM")))
+        (is (eq :signaled (sb-ext:process-status process)))
+        (is (eql 9 (sb-ext:process-exit-code process)))))))

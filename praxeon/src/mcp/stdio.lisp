@@ -111,8 +111,8 @@ fails because the server is gone."
 
 (defun %read-line-within (stream limit)
   "The next line of STREAM, without its newline or a carriage return before it, and :LINE; NIL
-and :TOO-LONG for a line of more than LIMIT characters, which is read to its end and dropped; NIL
-and :EOF at the end."
+and :TOO-LONG for a line of more than LIMIT octets of UTF-8, which is read to its end and
+dropped; NIL and :EOF at the end."
   (let ((buffer (make-string-output-stream))
         (count 0)
         (over nil))
@@ -129,8 +129,13 @@ and :EOF at the end."
                            (values (string-right-trim '(#\Return) (get-output-stream-string buffer))
                                    :line))))
               (over)
-              ((>= count limit) (setf over t))
-              (t (incf count) (write-char c buffer)))))))
+              (t (let ((octets (let ((code (char-code c)))
+                                 (cond ((< code #x80) 1) ((< code #x800) 2)
+                                       ((< code #x10000) 3) (t 4)))))
+                   ;; Counted in octets, as MAX-BODY-BYTES is over HTTP, not in characters.
+                   (if (> (+ count octets) limit)
+                       (setf over t)
+                       (progn (incf count octets) (write-char c buffer))))))))))
 
 (defun %answer-server-request (child message)
   "A request from the server. The current revision has none, so one is dropped. A legacy
@@ -420,7 +425,9 @@ fall back to the `initialize' handshake for a legacy server."
              (setf (child-era child) :modern
                    (client-era client) :modern
                    (client-protocol-version client) +protocol-version+))
-            ((vectorp versions)
+            ((hash-table-p result)
+             ;; A DiscoverResult means the current era, even when its list is missing or does
+             ;; not hold 2026-07-28.
              (unsupported versions))
             ((and reply (member (%error-code reply) +modern-error-codes+))
              (unsupported (%get reply "error" "data" "supported")))
