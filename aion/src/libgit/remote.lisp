@@ -217,6 +217,23 @@ so its URLs are the ones it will connect to."
          (unwind-protect (progn ,@body)
            (%remote-free ,var))))))
 
+(defun %call-in-config-transaction (repo thunk)
+  "Call THUNK with REPO's own configuration file locked, and write what THUNK set to the file only
+when THUNK returns. libgit2 keeps the writes made under git_config_lock in memory, and
+git_transaction_free without a commit discards them, so when THUNK signals, the file is as it
+was."
+  (cffi:with-foreign-objects ((config :pointer) (transaction :pointer))
+    (%check "git_repository_config" (%repository-config config repo))
+    (unwind-protect
+         (progn
+           (%check "git_config_lock" (%config-lock transaction (cffi:mem-ref config :pointer)))
+           (unwind-protect
+                (progn (funcall thunk)
+                       (%check "git_transaction_commit"
+                               (%transaction-commit (cffi:mem-ref transaction :pointer))))
+             (%transaction-free (cffi:mem-ref transaction :pointer))))
+      (%config-free (cffi:mem-ref config :pointer)))))
+
 (defun set-remote (repository name url)
   "Make NAME a remote of REPOSITORY that fetches from and pushes to URL, and return NAME. A new
 remote gets git's default fetch refspec, +refs/heads/*:refs/remotes/NAME/*. For a remote that
@@ -229,21 +246,27 @@ place, and PUSH-BRANCH would go on sending commits and credentials to that host 
 it, rather than deleting it, also covers a push URL from the user's or the system's git
 configuration, which the repository's own value overrides. Because the push URL is set,
 url.<base>.insteadOf still rewrites it but url.<base>.pushInsteadOf does not, which is how git
-treats any remote with a push URL. When the repository's configuration holds more than one
-remote.NAME.pushurl, or takes it from a file it includes, libgit2 refuses to set it, and
-SET-REMOTE signals GIT-ERROR without changing anything."
+treats any remote with a push URL.
+
+The two keys are written together or not at all. libgit2 refuses to set a key that has more
+than one value in the repository's configuration, or that comes from a file it includes; when
+it refuses either remote.NAME.url or remote.NAME.pushurl, SET-REMOTE signals GIT-ERROR and the
+configuration file is unchanged."
   (%with-repository-pointer (repo repository)
     (cffi:with-foreign-object (out :pointer)
       (let ((code (%remote-lookup out repo name)))
         (cond ((zerop code)
                (%remote-free (cffi:mem-ref out :pointer))
-               ;; The push URL first: if libgit2 refuses it, the URL is still the old one too.
-               (%check "git_remote_set_pushurl" (%remote-set-pushurl repo name url))
-               (%check "git_remote_set_url" (%remote-set-url repo name url)))
+               (%call-in-config-transaction
+                repo (lambda ()
+                       (%check "git_remote_set_url" (%remote-set-url repo name url))
+                       (%check "git_remote_set_pushurl" (%remote-set-pushurl repo name url)))))
               ((= code +git-enotfound+)
-               (%check "git_remote_create" (%remote-create out repo name url))
-               (%remote-free (cffi:mem-ref out :pointer))
-               (%check "git_remote_set_pushurl" (%remote-set-pushurl repo name url)))
+               (%call-in-config-transaction
+                repo (lambda ()
+                       (%check "git_remote_create" (%remote-create out repo name url))
+                       (%remote-free (cffi:mem-ref out :pointer))
+                       (%check "git_remote_set_pushurl" (%remote-set-pushurl repo name url)))))
               (t (%check "git_remote_lookup" code))))))
   name)
 

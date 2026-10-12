@@ -793,9 +793,12 @@ its tag.
   sets `remote.<name>.pushurl` to the same URL, in the repository's own configuration, for new
   and existing remotes. A push URL set in the user's or the system's git configuration is
   overridden by it. Because the remote now has a push URL, a `url.<base>.pushInsteadOf` rule
-  no longer rewrites its pushes; `url.<base>.insteadOf` still does. When the repository's
-  configuration has more than one `remote.<name>.pushurl`, `set-remote` signals `git-error`
-  and changes nothing.
+  no longer rewrites its pushes; `url.<base>.insteadOf` still does. The two keys are written
+  together under libgit2's configuration lock, so either both change or neither does. libgit2
+  refuses to set `remote.<name>.url` or `remote.<name>.pushurl` when the repository's
+  configuration has more than one value for it, or takes it from a file named by
+  `include.path` or `includeIf`; `set-remote` then signals `git-error` and the configuration
+  file is unchanged.
 
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).
