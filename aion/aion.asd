@@ -165,25 +165,29 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/tls/tests :run-tests)))
 
 (defsystem "aion/libgit"
-  :description "Local git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, and a diff between two revisions."
+  :description "Git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, a diff between two revisions, and fetch, fast-forward pull and push."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi"
-               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/platform"   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/secret")    ; a credential's token may be a secret (#429)
   :serial t
   :components ((:module "src/libgit"
                 :serial t
                 :components ((:file "packages")
                              (:file "ffi")
                              (:file "library")
-                             (:file "repository"))))
+                             (:file "repository")
+                             (:file "remote"))))
   :in-order-to ((test-op (test-op "aion/libgit/tests"))))
 
 (defsystem "aion/libgit/tests"
   :description "Tests for aion/libgit. Requires a built libgit2 (scripts/build-libgit2.lisp), and the git command, which checks what libgit2 wrote."
   :depends-on ("aion/libgit" "aion/fs" "fiveam" (:feature :unix (:require :sb-posix))
-               "aion/platform")   ; the tests bind *search-source-tree* (#429, #472)
+               "aion/platform"   ; the tests bind *search-source-tree* (#429, #472)
+               "aion/secret"     ; a credential whose token is a secret
+               "aion/test-http")   ; the server on 127.0.0.1 the remote tests talk to
   :serial t
   :components ((:module "tests"
                 :serial t

@@ -31,23 +31,23 @@
 ;;;; every open skipped window before it is closed, whatever its tries, and the progress saved.
 ;;;; The progress is saved there too while the observer is unsaved and a closed skipped window
 ;;;; lies before the later window, because the store may lack that closure. When that save fails,
-;;;; the model's answer for the later window is discarded and nothing of it is written. Its
-;;;; attempt ends as a stop does: no try is counted, the mark stays where it was, and the next
-;;;; run asks the model again (#533's first and second reviews). So while progress writes keep
-;;;; failing and such a skipped window lies before the next window, each turn makes model calls
-;;;; whose answers are discarded, and no later window is written until a progress write
-;;;; succeeds. A closed window is marked :CLOSED in OBSERVER-SKIPPED, never retried, and its
-;;;; messages stay raw in the prompt (#317, step C). A window is closed this way even when the
-;;;; later window's write then fails. Whether a window is closed is read from the progress record
-;;;; alone, never worked out from the thread's observations (#508): an observation the app writes
-;;;; into the thread closes nothing, and an app that erases a later window's observations reopens
-;;;; nothing. A window whose tries are spent, with no later window written, stays open and is not
-;;;; tried again. So within one thread nothing older is written over or beside anything newer,
-;;;; and a window with nothing after it keeps its facts, with one exception: a progress write that
-;;;; fails lets a later run, or another observer of the thread, distil older windows after newer
-;;;; ones (see the store being behind, below; #462's eighth and ninth reviews). Across a
-;;;; subject's threads it does not hold: see the case of several current facts under WHAT IT
-;;;; WRITES.
+;;;; the model's answer for the later window is discarded and nothing of it is written. No try
+;;;; is counted, the mark stays where it was, and the run ends there, so no later retry or window
+;;;; in the same run can close the window that was not written; the next run asks the model again
+;;;; (#533's first and second reviews, #622). So while progress writes keep failing and such a
+;;;; skipped window lies before the next window, each turn makes one model call whose answer is
+;;;; discarded, and no later window is written until a progress write succeeds. A closed window
+;;;; is marked :CLOSED in OBSERVER-SKIPPED, never retried, and its messages stay raw in the prompt
+;;;; (#317, step C). A window is closed this way even when the later window's write then fails.
+;;;; Whether a window is closed is read from the progress record alone, never worked out from the
+;;;; thread's observations (#508): an observation the app writes into the thread closes nothing, and
+;;;; an app that erases a later window's observations reopens nothing. A window whose tries are
+;;;; spent, with no later window written, stays open and is not tried again. So within one thread
+;;;; nothing older is written over or beside anything newer, and a window with nothing after it
+;;;; keeps its facts, with one exception: a progress write that fails lets a later run, or another
+;;;; observer of the thread, distil older windows after newer ones (see the store being behind,
+;;;; below; #462's eighth and ninth reviews). Across a subject's threads it does not hold: see the
+;;;; case of several current facts under WHAT IT WRITES.
 ;;;;
 ;;;; THE MARK AND THE SKIPPED WINDOWS ARE KEPT IN THE STORE (`praxeon/memory:thread-progress'),
 ;;;; written after each window, and a new observer starts from them. So an app that makes an
@@ -440,14 +440,15 @@ written and before its progress was: then the next observer of the thread distil
 
 (defun %run (observer history flush today)
   "Try again the skipped windows still due, then distil HISTORY past the mark, one window at a
-time, until what is left is below a step (or, with FLUSH, nothing is left), or the observer is
-stopped. An error here is recorded and logged, never raised: an error no handler takes in this
-thread would end the process."
+time, until what is left is below a step (or, with FLUSH, nothing is left), the observer is
+stopped, or a window's closing save fails (:UNSAVED, #622), which ends the run before any later
+retry or window. An error here is recorded and logged, never raised: an error no handler takes
+in this thread would end the process."
   (unwind-protect
        (handler-case
            (progn (%reconcile-progress observer)
-                  (%retry-skipped observer history today)
-                  (%run-windows observer history flush today))
+                  (unless (eq (%retry-skipped observer history today) :unsaved)
+                    (%run-windows observer history flush today)))
          (error (e)
            (incf (observer-failures observer))
            (setf (observer-last-error observer) e)
@@ -579,8 +580,9 @@ mark the store may have passed."
 
 (define-condition closing-not-saved (praxeon/conditions:praxeon-error) ()
   (:documentation "The progress write that closes the skipped windows before a window failed, so
-that window's observations were not written. %OBSERVE-WINDOW ends the window's attempts as a stop:
-the model's answer is discarded, no try is counted, and the next run asks the model again."))
+that window's observations were not written. %OBSERVE-WINDOW returns :UNSAVED, which ends the
+run: the model's answer is discarded, no try is counted, and the next run asks the model again
+(#622)."))
 
 (defun %close-open-windows-before (observer start)
   "Before the first thread write of the window from START: when a skipped window ending at or
@@ -599,9 +601,9 @@ showing it open. With no skipped window before START nothing is saved here, so a
 progress writes keep failing still receives observations (the second review of #533).
 
 THE COST, WHILE PROGRESS WRITES KEEP FAILING AND A SKIPPED WINDOW LIES BEFORE START: the model's
-answer for the window is discarded and its attempts end as a stop (%OBSERVE-WINDOW), so nothing
-more is written until a progress write succeeds, and each such turn makes model calls whose
-answers are thrown away. Counting the failed save as a failed attempt instead spent the window's
+answer for the window is discarded and the run ends (%OBSERVE-WINDOW's :UNSAVED), so nothing
+more is written until a progress write succeeds, and each such turn makes one model call whose
+answer is thrown away. Counting the failed save as a failed attempt instead spent the window's
 tries, and the next window then closed it unwritten (the second review of #533). A window is
 also closed when a later window is about to be written, even if that write then fails."
   (when (some (lambda (e) (and (<= (second e) start)
@@ -628,13 +630,14 @@ also closed when a later window is about to be written, even if that write then 
                             (append (observer-skipped observer) (list (list (1+ start) end 1))))
                       (setf (observer-mark observer) (max (observer-mark observer) end)))
             (:written (setf (observer-mark observer) (max (observer-mark observer) end)))))
-        (when (eq outcome :stopped) (return))
+        (when (member outcome '(:stopped :unsaved)) (return))
         (%save-progress observer)))))
 
 (defun %retry-skipped (observer history today)
   "Try once more each open skipped window of HISTORY that fewer than MAX-ATTEMPTS runs have tried,
 distilled and promoted as any window is. A window written now leaves OBSERVER-SKIPPED; one that
-fails again counts the try.
+fails again counts the try. Returns :UNSAVED when a window's closing save failed, which ends the
+run (#622), and NIL otherwise.
 
 WHETHER A WINDOW IS STILL OPEN COMES FROM THE PROGRESS RECORD ALONE, never from the thread's
 observations (#508). A window closes the open ones before it, and saves that, before its
@@ -649,6 +652,10 @@ later window's observations reopen one."
                  (< tries (observer-max-attempts observer)))
         (let ((outcome (%observe-window observer (subseq history (1- from) through)
                                         (1- from) through today)))
+          ;; A FAILED CLOSING SAVE ENDS THE RUN (#622), before the next retry or any new window
+          ;; can close this one.
+          (when (eq outcome :unsaved)
+            (return-from %retry-skipped :unsaved))
           (unless (eq outcome :stopped)
             (bt:with-lock-held ((observer-lock observer))
               (setf (observer-skipped observer)
@@ -662,9 +669,8 @@ later window's observations reopen one."
   "Record OBSERVER's progress in its store, merged with what is there (%SYNC-PROGRESS). A failure
 is counted and logged, and marks the progress unsaved. The next save carries the same state
 again: the one after the next window, or, when a skipped window lies before the next window, the
-one before that window's first write, whose failure ends that window's attempts as a stop
-(%CLOSE-OPEN-WINDOWS-BEFORE). When there is no next window, OBSERVE-TURN starts a run at the next
-turn to make the write."
+one before that window's first write, whose failure ends the run (%CLOSE-OPEN-WINDOWS-BEFORE).
+When there is no next window, OBSERVE-TURN starts a run at the next turn to make the write."
   (%sync-progress observer :read-failure :record))
 
 (defun %pause (observer seconds)
@@ -677,10 +683,12 @@ turn to make the write."
   "Distil WINDOW, the messages from position START (from 0) to END, and write what it yields,
 trying up to OBSERVER-MAX-ATTEMPTS times with a pause before each retry. Returns :WRITTEN,
 :SKIPPED when every attempt failed, or :STOPPED when the observer was stopped before the window
-was written, or when the progress write that closes the skipped windows before it failed
-(CLOSING-NOT-SAVED). That save's failure is counted once, where it is made, and not again as a
-failed attempt; the model's answer is discarded and the window is asked about again at the next
-run (the second review of #533). Never raises: this runs on a thread of its own."
+was written, or :UNSAVED when the progress write that closes the skipped windows before it
+failed (CLOSING-NOT-SAVED). That save's failure is counted once, where it is made, and not again
+as a failed attempt; the model's answer is discarded and the window is asked about again at the
+next run (the second review of #533). :UNSAVED ENDS THE RUN (#622): a later window's closing step
+would otherwise close this window, which was never written, and a save that succeeded would
+record it closed, so it would never be written. Never raises: this runs on a thread of its own."
   (let ((began (get-internal-real-time)) (written 0) (outcome :skipped))
     (loop for attempt from 1 to (observer-max-attempts observer)
           do (when (> attempt 1)
@@ -692,7 +700,7 @@ run (the second review of #533). Never raises: this runs on a thread of its own.
                  (progn (setf written (%distil-and-write observer window start end today))
                         (setf outcome :written)
                         (return))
-               (closing-not-saved () (setf outcome :stopped) (return))
+               (closing-not-saved () (setf outcome :unsaved) (return))
                (error (e)
                  (incf (observer-failures observer))
                  (setf (observer-last-error observer) e))))
