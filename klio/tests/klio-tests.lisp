@@ -347,6 +347,14 @@ with `_' or `.' is skipped, with everything under the directory, at any depth."
           "only one.md and roles/four.md are content: ~S"
           (mapcar #'k:document-key (k:tree-documents tree))))))
 
+(test a-content-directory-whose-own-name-starts-with-underscore-is-read
+  "The rule is about names under the content directory, not the content directory's own name."
+  (with-content-dir (dir ("_content/one.md" . +good+))
+    (multiple-value-bind (tree failures) (k:load-tree (merge-pathnames "_content/" dir))
+      (is (null failures))
+      (is-true (and tree (k:tree-document tree "one"))
+               "a.md under a content directory named _content was not loaded"))))
+
 (test a-readme-without-the-prefix-is-still-content
   "The rule is the prefix alone, not the name README: a site may publish a page called readme.
 An author who wants a README kept out names it _README.md."
