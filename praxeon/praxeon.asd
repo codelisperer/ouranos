@@ -218,7 +218,9 @@
   ;; server those tests start as a child process; it is never loaded here.
   :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
                "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret" "aion/log"
-               "log4cl" "com.inuoe.jzon" "cl-base64")
+               "log4cl" "com.inuoe.jzon" "cl-base64"
+               ;; On Windows, for WIN32-ERROR, which the job-object tests signal (#599).
+               (:feature :win32 "aion/windows"))
   :serial t
   :components ((:file "tests/mcp-tests")
                (:file "tests/mcp-stdio-tests")
