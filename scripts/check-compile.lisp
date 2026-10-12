@@ -40,6 +40,7 @@
 (load (merge-pathnames "tree-root.lisp" *scripts*))
 (load (merge-pathnames "fs.lisp" *scripts*))   ; aion/fs:delete-tree (#347)
 (load (merge-pathnames "compile-warnings.lisp" *scripts*))
+(load (merge-pathnames "redefinitions.lisp" *scripts*))   ; a function defined in two files (#577)
 (load (merge-pathnames "caught-errors.lisp" *scripts*))
 
 (defparameter *root* (tree-root:resolve-or-die *script* "check-compile"))
@@ -130,12 +131,15 @@
          ;; `system/' sent klio/src/packages.lisp and mnemosyne/src/packages.lisp to one fasl,
          ;; so checking mnemosyne after klio loaded klio's package definition, and failed with
          ;; "SPINNERET does not designate any package" (found on #347, whose change touched both).
-         (form (format nil "(let ((d (asdf:system-source-directory ~S))) (asdf:initialize-output-translations `(:output-translations ((,d :**/ :*.*.*) (~S :**/ :*.*.*)) ((~S :**/ :*.*.*) (~S :**/ :*.*.*)) :inherit-configuration)) (asdf:load-system ~S))"
-                       name
-                       (namestring (merge-pathnames (format nil "system-~A/" (substitute #\- #\/ name))
-                                                    fasls))
-                       (namestring *root*) (namestring (merge-pathnames "tree/" fasls))
-                       name))
+         (form (ouranos-redefinitions:wrap-form
+                (format nil "(let ((d (asdf:system-source-directory ~S))) (asdf:initialize-output-translations `(:output-translations ((,d :**/ :*.*.*) (~S :**/ :*.*.*)) ((~S :**/ :*.*.*) (~S :**/ :*.*.*)) :inherit-configuration)) (asdf:load-system ~S))"
+                        name
+                        (namestring (merge-pathnames (format nil "system-~A/" (substitute #\- #\/ name))
+                                                     fasls))
+                        (namestring *root*) (namestring (merge-pathnames "tree/" fasls))
+                        name)
+                ;; This tree, and the checked system's own directory, which may lie outside it.
+                (format nil "(list ~S (asdf:system-source-directory ~S))" (namestring *root*) name)))
          (out (make-string-output-stream))
          (code (nth-value 2 (uiop:run-program
                              (list (uiop:native-namestring sb-ext:*runtime-pathname*)
@@ -151,6 +155,7 @@
          (text (get-output-stream-string out))
          (warned (ouranos-compile-warnings:warnings-in text))
          (errors (ouranos-caught-errors:errors-in text))
+         (redefined (ouranos-redefinitions:redefinitions-in text))
          (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second))
          (lines '()))
     (unless (zerop code)
@@ -170,7 +175,11 @@
     (when errors
       (push (format nil "~D caught ERROR~:P:" (length errors)) lines)
       (dolist (e errors) (dolist (l e) (push (format nil "  | ~A" l) lines))))
-    (values (and (zerop code) (null warned) (null errors)) (nreverse lines) seconds)))
+    (when redefined
+      (push (format nil "~D function~:P defined a second time in another file (#577):" (length redefined))
+            lines)
+      (dolist (r redefined) (push (format nil "  | ~A" r) lines)))
+    (values (and (zerop code) (null warned) (null errors) (null redefined)) (nreverse lines) seconds)))
 
 ;;; --- main ---------------------------------------------------------------------------
 

@@ -88,3 +88,61 @@ sends this tree's fasls to a new directory every run, so the second run must fai
           (second (%run-check-compile dir)))
       (is (= 1 first) "the first run exited ~D" first)
       (is (= 1 second) "the second run exited ~D: a cache hid the warning" second))))
+
+;;; --- a function defined in two files (#577) -------------------------------------------------
+;;;
+;;; #568 defined %PROBE-REPORT in scripts/tests/release-settings.lisp, which replaced the one in
+;;; windows-launcher.lisp loaded before it; SBCL's redefinition warning is a style-warning, so
+;;; nothing failed until four tests did on Windows. check-compile.lisp now fails such a system,
+;;; through scripts/redefinitions.lisp, as the gate does.
+
+(defparameter +two-file-asd+
+  "(defsystem \"check-compile-fixture\" :serial t :components ((:file \"a\") (:file \"b\")))
+")
+
+(defmacro %with-two-file-fixture ((dir a-source b-source) &body body)
+  "A fresh DIR holding the two-file fixture system, its files a.lisp and b.lisp holding
+A-SOURCE and B-SOURCE after a shared package definition."
+  `(tempdir:with-temporary-directory (,dir "check-compile-redef")
+     (with-open-file (out (merge-pathnames "check-compile-fixture.asd" ,dir) :direction :output)
+       (write-string +two-file-asd+ out))
+     (with-open-file (out (merge-pathnames "a.lisp" ,dir) :direction :output)
+       (format out "(defpackage #:check-compile-fixture (:use #:cl))~%(in-package #:check-compile-fixture)~%~A~%" ,a-source))
+     (with-open-file (out (merge-pathnames "b.lisp" ,dir) :direction :output)
+       (format out "(in-package #:check-compile-fixture)~%~A~%" ,b-source))
+     ,@body))
+
+(test a-function-defined-in-two-files-fails-the-system
+  "%PROBE-REPORT's case: b.lisp defines a function a.lisp already defined, with other arguments.
+The system compiles and loads, and the script fails it, naming the function and both files."
+  (%with-two-file-fixture (dir "(defun helper (program args) (list program args))"
+                               "(defun helper (bundle) (list bundle))")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "FAIL    check-compile-fixture" output) "no FAIL line for the fixture:~%~A" output)
+      (is (search "CHECK-COMPILE-FIXTURE::HELPER" output) "the report does not name the function:~%~A" output)
+      (is (and (search "a.lisp" output) (search "b.lisp" output))
+          "the report does not name both files:~%~A" output))))
+
+(test the-same-two-files-with-different-names-pass
+  "The control for the test above: the same two files, with b.lisp's function renamed."
+  (%with-two-file-fixture (dir "(defun helper (program args) (list program args))"
+                               "(defun other-helper (bundle) (list bundle))")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output))))
+
+(test a-function-defined-twice-in-one-file-is-left-to-the-compiler
+  "Within one file SBCL's compiler already fails the system: compiling a file that defines a
+function twice gives the WARNING \"Duplicate definition for HELPER found in one file\", which
+the gate fails on. So #577 reports only definitions in two different files, and a duplicate in
+one file is reported once, by the compiler, not again as a redefinition."
+  (%with-two-file-fixture (dir "(defun helper () 1)
+(defun helper () 2)"
+                               "(defun other-helper () 3)")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "Duplicate definition for HELPER found in one file" output)
+          "the compiler's warning is the reason:~%~A" output)
+      (is (not (search "defined a second time in another file" output))
+          "and it is not also reported as a redefinition:~%~A" output))))

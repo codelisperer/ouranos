@@ -116,6 +116,12 @@
 (load (merge-pathnames "compile-warnings.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; A function defined in one file and again in another (#577): the child's form runs inside
+;;; ouranos-redefinitions:call-reporting-redefinitions, which prints a line for each, and the
+;;; system fails. Split out so scripts/check-compile.lisp applies the same rule.
+(load (merge-pathnames "redefinitions.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; Each `caught ERROR' in a child's output (#263). Split out for the same reason, so the
 ;;; control in cons/tests/caught-errors-tests.lisp exercises the function the gate calls.
 (load (merge-pathnames "caught-errors.lisp"
@@ -1076,13 +1082,20 @@ let this run claim `view' while the five assertions skipped."
     ;; variable matches constructor name" warning that quickload passed and a consuming
     ;; app's plain ASDF build rejected. See docs/coalton-patterns.md 8a/8b.
     (multiple-value-bind (code out)
-        (run-checked (format nil "(asdf:load-system :~(~a~))" s) s)
-      (let ((warned (ouranos-compile-warnings:warnings-in out)))
+        (run-checked (ouranos-redefinitions:wrap-form (format nil "(asdf:load-system :~(~a~))" s)
+                                                      (format nil "(list ~S)" (namestring *root*)))
+                     s)
+      (let ((warned (ouranos-compile-warnings:warnings-in out))
+            (redefined (ouranos-redefinitions:redefinitions-in out)))
         (cond
           ((not (zerop code))
            (format t "  FAIL    ~a~%~a~%" s (failure-excerpt out 6))
            (fail "~a" (or (ouranos-failure-origin:report-origin out s *root*)
                           (format nil "~a failed to load in a clean image" s))))
+          (redefined
+           (format t "  REDEF   ~a~%~{          ~a~%~}" s redefined)
+           (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
+                 s (length redefined) redefined))
           (warned
            (format t "  WARN    ~a~%~{          ~a~%~}" s warned)
            (fail "~a compiled with ~D warning~:P" s (length warned)))
@@ -1094,14 +1107,21 @@ let this run claim `view' while the five assertions skipped."
   (let ((grand 0))
     (dolist (s (all-test-systems))
       (multiple-value-bind (code text)
-          (run-checked (format nil "(asdf:test-system :~(~a~))" s) s)
+          (run-checked (ouranos-redefinitions:wrap-form (format nil "(asdf:test-system :~(~a~))" s)
+                                                        (format nil "(list ~S)" (namestring *root*)))
+                       s)
         (let ((n (count-checks text))
-              (empty-reason (cdr (assoc s +known-empty+))))
+              (empty-reason (cdr (assoc s +known-empty+)))
+              (redefined (ouranos-redefinitions:redefinitions-in text)))
           (cond
             ((not (zerop code))
              (format t "  FAIL    ~a  (child exited ~a)~%~a~%" s code (failure-excerpt text 6))
              (fail "~a" (or (ouranos-failure-origin:report-origin text s *root*)
                             (format nil "~a errored in a clean image" s))))
+            (redefined
+             (format t "  REDEF   ~a~%~{          ~a~%~}" s redefined)
+             (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
+                   s (length redefined) redefined))
             ((null n)
              (format t "  NO-RUN  ~a  -- exited 0 but emitted no check count~%" s)
              (fail "~a ran ZERO checks (missing :perform, or an empty suite)" s))
