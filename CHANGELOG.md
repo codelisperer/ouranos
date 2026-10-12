@@ -148,6 +148,55 @@ its tag.
 
 ### Added
 
+- **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
+  which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
+  `--default-channel`** (#408).
+  - Both refuse a bundle whose `RELEASE` names a product or version other than the one the
+    bundle gives: the bundle directory's name for the installer, and the launcher's name and
+    the `VERSION` file for the dmg script. An app packaged under another name registers under a
+    key its updater does not read, so rebuild rather than rename a bundle directory.
+  - `build-dmg.sh` names the `.app` after `RELEASE`'s `display-name` when `--display-name` is
+    not given. A `--display-name` on the command line still wins. Either way, it refuses a
+    display name that contains a slash or starts with a dot or a dash, which would name a
+    directory outside `--out` or a hidden one, or reach `tar` as an option. It applies
+    `build-desktop-app.lisp`'s rule for `--display-name` (1 to 128 characters, no control
+    characters) to a name given on its own command line, and it XML-escapes the name in
+    `Info.plist`, which a name with `&` or `<` used to make malformed. A `RELEASE` file saved
+    with CRLF line endings is read correctly.
+  - On Windows one name is still both the `HKCU\Software\<name>` key and every name the user
+    sees. `RELEASE`'s `display-name` is not used there.
+  - `build-installer.ps1 -Describe` and `build-dmg.sh --describe` check a bundle and print the
+    product, version and executable or display name they would build with, without building
+    anything. Neither needs a packager, and `--describe` does not need macOS.
+  - A bundle without `RELEASE` is packaged as before.
+- **praxeon/mcp: agents can use the tools of a local MCP server that the app starts as a child
+  process and talks to over stdio** (#527, part 5).
+  - `make-connection` is now a function, not only the structure's constructor, and takes
+    `:command` (a list of strings: the program and its arguments) in place of `:url`, with
+    `:directory`, `:environment`, `:stderr` and `:restart`. It refuses `:url` and `:command`
+    together, and refuses `:token-source` and `:per-user` with `:command`, because a server over
+    stdio takes its credentials from its environment. The accessors `connection-command`,
+    `connection-directory`, `connection-environment`, `connection-stderr` and
+    `connection-restart` are exported.
+  - The server's process gets only `PATH`, `HOME`, `LANG` and `TMPDIR` from the app's
+    environment (on Windows `PATH`, `SystemRoot`, `TEMP`, `USERPROFILE` and `APPDATA`), listed
+    in `+stdio-environment+`, plus the connection's `:environment` alist. `:environment
+    :inherit` passes the whole environment.
+  - The client finds the server's era with `server/discover` and falls back to `initialize` for
+    a legacy server. A request that times out after it was written gets
+    `notifications/cancelled`; one that times out while still queued fails as not run and is
+    never sent. The server's stderr is discarded, or appended to the `:stderr` file, and never
+    logged.
+  - With `:restart t`, the default, a server that exits is started again at the next request,
+    at most 3 times in any 60 seconds. With `:restart nil`, every later request fails as not
+    run until the app closes the client and makes another.
+  - `close-client` (new) closes the server's stdin, waits `*stdio-close-seconds*` (5), sends
+    SIGTERM, waits `*stdio-term-seconds*` (2), then sends SIGKILL, to the server's process
+    group. Running servers are closed the same way when the image exits, so a client stays
+    reachable until `close-client`. On Windows the server
+    is ended with `TerminateProcess`, and a process it started can outlive it (#599).
+  - `list-tools`, `call-tool`, `grant-tools`, resources, prompts and tasks work over stdio
+    unchanged. `praxeon/docs/mcp.md`, "Local servers over stdio".
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
   prompts** (#527, part 4).
   - `list-resources` and `list-resource-templates` follow pagination.
