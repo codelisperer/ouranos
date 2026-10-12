@@ -29,14 +29,35 @@
 
 ;;; --- the harness: Clack's TESTING-APP, and its fixtures ---------------------
 
-(defun %free-port ()
-  "A port nothing is listening on, from Clack's range for its tests."
-  (loop for port = (+ 50000 (random 10000))
+(defvar *port-random* (make-random-state t)
+  "The random state ports are drawn from, seeded when the image loads this file. SBCL starts every
+image in the same default random state, so drawing from that one gave the same ports in the same
+order in every run (#519).")
+
+(defun %candidate-port ()
+  "A loopback port from 20000 to 32767 that nothing was bound to a moment ago.
+
+The range is below the range Linux (32768-60999), macOS and Windows (49152-65535) take local
+ports for outgoing connections from by default, so no client socket on the machine can be using
+the port. That matters because a client socket using port P stops a server binding P, even with
+SO_REUSEADDR, while it is open and for a minute after it closes. On Linux a connection to a port
+nothing listens on can even get that same port as its own local port and connect to itself; the
+polls that wait for the server to listen did that before #519. Measured in a Linux container: 5
+self-connections in 282,320 connections to ports nothing listened on, each one leaving the port
+unbindable."
+  (loop for port = (+ 20000 (random 12768 *port-random*))
         when (handler-case (let ((s (usocket:socket-listen "127.0.0.1" port :reuse-address t)))
                              (usocket:socket-close s)
                              t)
                (error () nil))
           return port))
+
+(defvar *candidate-port* '%candidate-port
+  "The function %CLACKUP calls for each port it tries. A test that needs a port to be taken
+binds it.")
+
+(defparameter +port-attempts+ 5
+  "How many ports %CLACKUP tries when the server finds its port taken.")
 
 (defun %listening-p (port)
   (handler-case (let ((s (usocket:socket-connect "127.0.0.1" port)))
@@ -44,17 +65,78 @@
                   t)
     (error () nil)))
 
+(defun %server-thread-hook (failure)
+  "An *INVOKE-DEBUGGER-HOOK* for the threads a server started by %CLACKUP runs. In clack's own
+thread, which it names clack-handler-uv and in which the handler listens, an unhandled error is
+stored in (CAR FAILURE) and ends that thread, so that %CLACKUP can report it in the test. With the
+gate's debugger disabled, it used to end the whole test image (#519). The server's other threads
+inherit the hook too, and in them it calls the hook that was in place before, so an error there
+behaves as it did."
+  (let ((previous sb-ext:*invoke-debugger-hook*))
+    (lambda (condition hook)
+      (if (equal "clack-handler-uv" (sb-thread:thread-name sb-thread:*current-thread*))
+          (progn (setf (car failure) condition)
+                 (sb-thread:abort-thread))
+          (when previous (funcall previous condition hook))))))
+
+(defvar *started* nil
+  "When not NIL, a cons whose car the encapsulation of SRV:START below sets to the server it
+started. %CLACKUP binds it in clack's thread, through the thread's special bindings.")
+
+;; %CLACKUP learns that the server is up from this, not from something accepting a connection
+;; on the port. A connection proves only that something listens there: a listener left by
+;; another program, or on Linux the polling socket connected to itself (#519).
+(unless (sb-int:encapsulated-p 'srv:start '%record-start)
+  (sb-int:encapsulate 'srv:start '%record-start
+                      (lambda (f &rest args)
+                        (let ((server (apply f args)))
+                          (when *started* (setf (car *started*) server))
+                          server))))
+
+(defun %port-taken-p (condition)
+  (and (typep condition 'aion/uv:uv-error)
+       (equal "EADDRINUSE" (aion/uv:uv-error-name condition))))
+
+(defun %clackup (app &rest clackup-args)
+  "Serve APP with (clack:clackup app :server :uv ... :use-thread t) on a port from
+*CANDIDATE-PORT*, wait until the handler's SRV:START has returned the server, and return the
+handler and the port.
+
+When the server's thread fails to listen because the port is taken, try another port, up to
++PORT-ATTEMPTS+ in all. Any other failure in that thread, or the last taken port, is signalled
+here, in the test's thread, so it fails the one test that started the server."
+  (loop for attempt from 1
+        do (let* ((port (funcall *candidate-port*))
+                  (failure (list nil))
+                  (started (list nil))
+                  ;; Each value here is evaluated in the new thread, so the box is quoted.
+                  (handler (let ((bt2:*default-special-bindings*
+                                   (list* (cons 'sb-ext:*invoke-debugger-hook*
+                                                (%server-thread-hook failure))
+                                          (cons '*started* (list 'quote started))
+                                          bt2:*default-special-bindings*)))
+                             (apply #'clack:clackup app :server :uv :port port :use-thread t
+                                                        :silent t clackup-args)))
+                  (thread (clack.handler::handler-acceptor handler)))
+             (loop repeat 2000
+                   until (or (car started) (car failure) (not (bt2:thread-alive-p thread)))
+                   do (sleep 0.005))
+             (let ((condition (car failure)))
+               (cond ((car started) (return (values handler port)))
+                     ((and (%port-taken-p condition) (< attempt +port-attempts+)))
+                     (condition
+                      (error "the server's thread failed on port ~D, attempt ~D: ~A"
+                             port attempt condition))
+                     (t (ignore-errors (clack:stop handler))
+                        (error "the server did not start on port ~D within 10 s" port)))))))
+
 (defmacro testing-app ((port app &rest clackup-args) &body body)
   "Clack's TESTING-APP: serve APP with (clack:clackup app :server :uv ...) on a free PORT, run
-BODY, and stop the handler with CLACK:STOP, as the suite does."
+BODY, and stop the handler with CLACK:STOP, as the suite does. %CLACKUP starts the server."
   (let ((handler (gensym "HANDLER")))
-    `(let* ((,port (%free-port))
-            (,handler (clack:clackup ,app :server :uv :port ,port :use-thread t :silent t
-                                          ,@clackup-args)))
+    `(multiple-value-bind (,handler ,port) (%clackup ,app ,@clackup-args)
        (unwind-protect
-            (progn
-              (loop repeat 100 until (%listening-p ,port) do (sleep 0.05))
-              (let ((dex:*use-connection-pool* nil)) ,@body))
+            (let ((dex:*use-connection-pool* nil)) ,@body)
          (clack:stop ,handler)))))
 
 (defun localhost (port &optional (path "/")) (format nil "http://127.0.0.1:~D~A" port path))
@@ -595,12 +677,67 @@ with the fixture's; this one checks that the fixture's octets arrive intact in t
                      :worker-num 2)
     (is (equal "ok" (dex:get (localhost port))))))
 
+(defun %handler-threads ()
+  (count "clack-handler-uv" (sb-thread:list-all-threads) :key #'sb-thread:thread-name :test #'equal))
+
+(defmacro with-taken-port ((var) &body body)
+  "Run BODY with VAR bound to a loopback port that a socket of the test's own is listening on,
+without SO_REUSEADDR, so a server that tries to listen on it fails with EADDRINUSE.
+
+A candidate port can still be in TIME_WAIT from an earlier server in the run. %CANDIDATE-PORT
+accepts that, as the server does, because both set SO_REUSEADDR; this socket does not set it
+and cannot bind such a port, so it takes the next candidate."
+  (let ((blocker (gensym "BLOCKER")))
+    `(multiple-value-bind (,var ,blocker)
+         (loop for port = (%candidate-port)
+               for socket = (handler-case (usocket:socket-listen "127.0.0.1" port)
+                              (usocket:address-in-use-error () nil))
+               when socket return (values port socket))
+       (unwind-protect (progn ,@body)
+         (usocket:socket-close ,blocker)))))
+
+(test candidate-ports-are-below-the-ports-clients-are-given
+  "No candidate port is one an outgoing connection can be given by default on Linux (from 32768),
+macOS or Windows (from 49152), so no client socket, including a poll of the port, can hold it
+when the server binds (#519)."
+  (let ((ports (loop repeat 200 collect (%candidate-port))))
+    (is (every (lambda (p) (<= 20000 p 32767)) ports)
+        "candidate ports outside 20000-32767: ~S" (remove-if (lambda (p) (<= 20000 p 32767)) ports))))
+
+(test a-taken-port-is-replaced-by-another
+  "When the server's thread finds its port taken, %CLACKUP starts it again on another port (#519).
+The first port it is given here is taken by a listener of the test's own."
+  (with-taken-port (taken)
+    (let* ((calls 0)
+           (*candidate-port* (lambda () (if (= 1 (incf calls)) taken (%candidate-port)))))
+      (testing-app (port (lambda (env) (declare (ignore env)) '(200 (:content-type "text/plain") ("ok"))))
+        (is (= 2 calls) "~D ports were tried" calls)
+        (is (/= taken port) "the server was given the taken port ~D" port)
+        (is (equal "ok" (dex:get (localhost port))))))))
+
+(test a-server-that-cannot-listen-fails-the-test-and-the-image-keeps-running
+  "A listen failure in clack's thread is signalled to the test that started the server. Before
+#519 it was unhandled in that thread, and with the gate's debugger disabled it ended the test
+image, losing every later check in the suite. Every port this test offers is taken. Getting to
+the checks below at all is the evidence that the image kept running."
+  (with-taken-port (taken)
+    (let* ((calls 0)
+           (*candidate-port* (lambda () (incf calls) taken))
+           (before (%handler-threads))
+           (failure (handler-case
+                        (progn (%clackup (lambda (env) (declare (ignore env)) '(200 () ("ok"))))
+                               nil)
+                      (error (e) e))))
+      (is-true failure "the server started on a port that was taken")
+      (is (search "EADDRINUSE" (princ-to-string failure)) "the error was ~A" failure)
+      (is (= +port-attempts+ calls) "~D ports were tried, not ~D" calls +port-attempts+)
+      (loop repeat 100 until (= before (%handler-threads)) do (sleep 0.01))
+      (is (= before (%handler-threads)) "a failed server's thread is still running"))))
+
 (test clack-stop-leaves-no-listener
   "CLACK:STOP destroys the thread RUN blocks in; RUN stops server-uv on the way out."
-  (let* ((port (%free-port))
-         (handler (clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
-                                 :server :uv :port port :use-thread t :silent t)))
-    (loop repeat 100 until (%listening-p port) do (sleep 0.05))
+  (multiple-value-bind (handler port)
+      (%clackup (lambda (env) (declare (ignore env)) '(200 () ("ok"))))
     (is-true (%listening-p port))
     (clack:stop handler)
     (loop repeat 100 while (%listening-p port) do (sleep 0.05))
@@ -614,7 +751,7 @@ wrapped to pause 0.3 s after it returns, and the thread is stopped as soon as th
 listens, which lands the kill inside the pause. Any server that is left running is stopped
 at the end, so a failure does not leave a listener for later tests. CLACKUP-ARGS go to
 CLACK:CLACKUP, for the same check with several loops."
-  (let* ((port (%free-port))
+  (let* ((port nil)
          (started (list nil))
          (handler nil))
     (sb-int:encapsulate 'srv:start 'slow-start
@@ -625,9 +762,8 @@ CLACK:CLACKUP, for the same check with several loops."
                             server)))
     (unwind-protect
          (progn
-           (setf handler (apply #'clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
-                                :server :uv :port port :use-thread t :silent t clackup-args))
-           (loop repeat 200 until (%listening-p port) do (sleep 0.005))
+           (multiple-value-setq (handler port)
+             (apply #'%clackup (lambda (env) (declare (ignore env)) '(200 () ("ok"))) clackup-args))
            (is-true (%listening-p port))
            (clack:stop handler)
            (loop repeat 100 while (%listening-p port) do (sleep 0.05))
@@ -653,10 +789,10 @@ thread (#463)."
                          (count-if (lambda (th) (uiop:string-prefix-p "aion/uv loop" (sb-thread:thread-name th)))
                                    (sb-thread:list-all-threads))))
          (before (funcall loop-threads))
-         (port (%free-port))
-         (handler (clack:clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
-                                 :server :uv :port port :use-thread t :silent t :loops 4)))
-    (loop repeat 100 until (%listening-p port) do (sleep 0.05))
+         (started (multiple-value-list
+                   (%clackup (lambda (env) (declare (ignore env)) '(200 () ("ok"))) :loops 4)))
+         (handler (first started))
+         (port (second started)))
     (is-true (%listening-p port))
     ;; No Content-Type in the response, so dexador returns the body as octets.
     (is (equal "ok" (let ((body (dex:get (localhost port))))
