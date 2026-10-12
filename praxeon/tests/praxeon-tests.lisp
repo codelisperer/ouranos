@@ -7185,3 +7185,65 @@ written."
       (is (equal '("B." "D.") (%thread-contents store)))
       (is (not (find 7 (nth-value 1 (mem:thread-progress store "member-1" "conv-7")) :key #'first))
           "7-12 is not recorded skipped or closed"))))
+
+;;; --------------------------------------------------------------------------
+;;; #632: observer-stuck-p measures from the start of the window attempt.
+;;; --------------------------------------------------------------------------
+
+(defclass clocked-scripted (scripted)
+  ((now :initform 1000 :accessor clocked-now)
+   (advances :initarg :advances :accessor clocked-advances)
+   (entered :initform (sb-thread:make-semaphore :name "clocked-entered") :reader clocked-entered)
+   (gate :initform (sb-thread:make-semaphore :name "clocked-gate") :reader clocked-gate))
+  (:documentation "A scripted provider over a clock of its own, in universal time. Each call moves
+the clock on by the next of ADVANCES seconds, as if the call had taken that long, signals
+CLOCKED-ENTERED, and waits for CLOCKED-GATE, so a test can look at the observer while the call
+is in progress, without waiting for real time to pass."))
+
+(defmethod llm:complete :before ((p clocked-scripted) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (incf (clocked-now p) (pop (clocked-advances p)))
+  (sb-thread:signal-semaphore (clocked-entered p))
+  (sb-thread:wait-on-semaphore (clocked-gate p) :timeout 10))
+
+(defun %clocked-observer (provider store)
+  (let ((observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                                                       :retry-delay 0 :window-timeout 100)))
+    (setf (obs::observer-clock observer) (lambda () (clocked-now provider)))
+    observer))
+
+(test a-run-longer-than-the-window-timeout-is-not-stuck-while-each-call-is-quick
+  "One run distils three windows, and each model call takes 60 seconds by the provider's clock, so
+the run takes 180 seconds in all, against a window timeout of 100. During each call the observer
+is not stuck, because the call has run 60 seconds (#632). Measured from the run's start, as
+before, the second and third calls read 120 and 180 seconds, and the observer was reported stuck."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'clocked-scripted
+                                  :advances (list 60 60 60)
+                                  :script (list (%call-with (%ob "A." "fact")) (%call-with (%ob "B." "fact"))
+                                                (%call-with (%ob "C." "fact")))))
+         (observer (%clocked-observer provider store))
+         (stuck '()))
+    (is-true (obs:observe-turn observer (%history 18)))
+    (dotimes (i 3)
+      (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10)
+               "precondition: call ~D began" (1+ i))
+      (push (obs:observer-stuck-p observer) stuck)
+      (sb-thread:signal-semaphore (clocked-gate provider)))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '(nil nil nil) stuck) "stuck during calls 1 to 3: ~S" (reverse stuck))
+    (is (equal '("A." "B." "C.") (%thread-contents store)) "precondition: one run wrote all three")
+    (is (= 1180 (clocked-now provider)) "precondition: the run took 180 seconds by the clock")))
+
+(test a-call-longer-than-the-window-timeout-is-stuck
+  "One model call that takes 150 seconds by the provider's clock, against a window timeout of 100,
+is reported stuck while it runs (#632's fix still finds a call that does not return)."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'clocked-scripted :advances (list 150)
+                                                    :script (list (%call-with (%ob "A." "fact")))))
+         (observer (%clocked-observer provider store)))
+    (is-true (obs:observe-turn observer (%history 6)))
+    (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: the call began")
+    (is-true (obs:observer-stuck-p observer))
+    (sb-thread:signal-semaphore (clocked-gate provider))
+    (obs:await-observer observer :timeout 10)))

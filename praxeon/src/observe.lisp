@@ -158,6 +158,10 @@ window, Mastra's step.")
    (last-error :initform nil :accessor observer-last-error)
    (worker :initform nil :accessor observer-worker)
    (started :initform nil :accessor observer-started)
+   ;; When the current window attempt began, or NIL before a run's first attempt (#632).
+   (attempt-started :initform nil :accessor observer-attempt-started)
+   ;; The time source, in universal time. A test replaces it to measure without waiting.
+   (clock :initform #'get-universal-time :accessor observer-clock)
    (stopping :initform nil :accessor observer-stopping)
    (lock :initform (bt:make-lock "praxeon-observer") :reader observer-lock))
   (:documentation "Distils one thread's messages into the thread's observations, a window at a time."))
@@ -293,13 +297,26 @@ every window later."
   (let ((w (observer-worker observer)))
     (and w (bt:thread-alive-p w))))
 
+(defun %now (observer) (funcall (observer-clock observer)))
+
+(defun %stuck-seconds (observer)
+  "How long the current window attempt has run, or, before a run's first attempt, the run.
+NIL when nothing has started."
+  (let ((since (or (observer-attempt-started observer) (observer-started observer))))
+    (and since (- (%now observer) since))))
+
 (defun observer-stuck-p (observer)
-  "Whether a distillation has been running longer than OBSERVER-WINDOW-TIMEOUT seconds: a
-provider call that does not return. While it is, OBSERVE-TURN starts nothing, and says so in
-the log."
-  (and (observer-busy-p observer)
-       (observer-started observer)
-       (> (- (get-universal-time) (observer-started observer)) (observer-window-timeout observer))))
+  "Whether the current window attempt of a running distillation has run longer than
+OBSERVER-WINDOW-TIMEOUT seconds: a provider call that does not return. While it is, OBSERVE-TURN
+starts nothing, and says so in the log.
+
+MEASURED FROM THE START OF THE ATTEMPT, NOT OF THE RUN (#632). A run that works through several
+windows, or waits between retries, can take longer than the timeout in all while each call is
+quick; measured from the run's start it was reported stuck."
+  (let ((seconds (%stuck-seconds observer)))
+    (and (observer-busy-p observer)
+         seconds
+         (> seconds (observer-window-timeout observer)))))
 
 (defun %window-end (history start step)
   "The end (exclusive) of the window from START in HISTORY: whole exchanges until they reach
@@ -345,7 +362,7 @@ deferred and the observer's lock held, so it should not block."
       (cond
         ((observer-stuck-p observer)
          (log:warn "memory observer stuck" :thread (observer-thread observer)
-                                           :seconds (- (get-universal-time) (observer-started observer)))
+                                           :seconds (%stuck-seconds observer))
          nil)
         ((observer-busy-p observer) nil)
         ((or (let ((window (unobserved observer snapshot)))
@@ -372,7 +389,8 @@ deferred and the observer's lock held, so it should not block."
                  (if other
                      (values nil other)
                      (let ((worker nil))
-                       (setf (observer-started observer) (get-universal-time)
+                       (setf (observer-started observer) (%now observer)
+                             (observer-attempt-started observer) nil
                              (observer-stopping observer) nil)
                        (unwind-protect (setf worker (%start-worker observer snapshot flush today))
                          (unless worker (%release observer)))
@@ -696,6 +714,7 @@ record it closed, so it would never be written. Never raises: this runs on a thr
              (when (observer-stopping observer)
                (setf outcome :stopped)
                (return))
+             (setf (observer-attempt-started observer) (%now observer))
              (handler-case
                  (progn (setf written (%distil-and-write observer window start end today))
                         (setf outcome :written)
