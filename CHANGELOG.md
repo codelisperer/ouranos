@@ -786,6 +786,14 @@ its tag.
 
 ### Fixed
 
+- **aion/oauth: the default `call-with-refresh-lock` no longer keeps a mutex for every
+  principal and connection for the life of the process** (#542). The method on `store`, which
+  `refresh`, `finish-sign-in` and `disconnect` use unless a store overrides it, added an entry
+  to a process-wide table the first time a principal and connection took the lock, and never
+  removed it. It now counts the calls holding or waiting for each entry's mutex and removes the
+  entry when none is left. Two calls for one principal and connection still never run at once.
+  A store that overrides `call-with-refresh-lock` is not affected.
+
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).
   pgvector's HNSW scan took the nearest `hnsw.ef_search` rows of the whole table (40 by
