@@ -158,7 +158,8 @@ window, Mastra's step.")
    (last-error :initform nil :accessor observer-last-error)
    (worker :initform nil :accessor observer-worker)
    (started :initform nil :accessor observer-started)
-   ;; When the current window attempt began, or NIL before a run's first attempt (#632).
+   ;; When the current window attempt began; NIL before a run's first attempt; :BETWEEN after an
+   ;; attempt ended and before the next began (#632).
    (attempt-started :initform nil :accessor observer-attempt-started)
    ;; The time source, in universal time. A test replaces it to measure without waiting.
    (clock :initform #'get-universal-time :accessor observer-clock)
@@ -300,10 +301,13 @@ every window later."
 (defun %now (observer) (funcall (observer-clock observer)))
 
 (defun %stuck-seconds (observer)
-  "How long the current window attempt has run, or, before a run's first attempt, the run.
-NIL when nothing has started."
-  (let ((since (or (observer-attempt-started observer) (observer-started observer))))
-    (and since (- (%now observer) since))))
+  "How long the current window attempt has run, or, before a run's first attempt, the run. NIL
+between attempts, including the pause before a retry, and when nothing has started."
+  (let ((attempt (observer-attempt-started observer)))
+    (cond ((numberp attempt) (- (%now observer) attempt))
+          ((eq attempt :between) nil)
+          ((observer-started observer) (- (%now observer) (observer-started observer)))
+          (t nil))))
 
 (defun observer-stuck-p (observer)
   "Whether the current window attempt of a running distillation has run longer than
@@ -312,7 +316,8 @@ starts nothing, and says so in the log.
 
 MEASURED FROM THE START OF THE ATTEMPT, NOT OF THE RUN (#632). A run that works through several
 windows, or waits between retries, can take longer than the timeout in all while each call is
-quick; measured from the run's start it was reported stuck."
+quick; measured from the run's start it was reported stuck. Between attempts, during the pause
+before a retry or the work between windows, nothing is measured and it is not stuck."
   (let ((seconds (%stuck-seconds observer)))
     (and (observer-busy-p observer)
          seconds
@@ -715,14 +720,19 @@ record it closed, so it would never be written. Never raises: this runs on a thr
                (setf outcome :stopped)
                (return))
              (setf (observer-attempt-started observer) (%now observer))
-             (handler-case
-                 (progn (setf written (%distil-and-write observer window start end today))
-                        (setf outcome :written)
-                        (return))
-               (closing-not-saved () (setf outcome :unsaved) (return))
-               (error (e)
-                 (incf (observer-failures observer))
-                 (setf (observer-last-error observer) e))))
+             ;; :BETWEEN once the attempt ends, however it ends, so the pause before a retry and
+             ;; the work between windows are not measured as the attempt (Copilot's review of
+             ;; #634).
+             (unwind-protect
+                  (handler-case
+                      (progn (setf written (%distil-and-write observer window start end today))
+                             (setf outcome :written)
+                             (return))
+                    (closing-not-saved () (setf outcome :unsaved) (return))
+                    (error (e)
+                      (incf (observer-failures observer))
+                      (setf (observer-last-error observer) e)))
+               (setf (observer-attempt-started observer) :between)))
     (log:info "memory observer window" :thread (observer-thread observer)
                                        :from (1+ start) :through end :outcome outcome :written written
                                        :failures (observer-failures observer)

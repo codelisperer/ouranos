@@ -7247,3 +7247,43 @@ is reported stuck while it runs (#632's fix still finds a call that does not ret
     (is-true (obs:observer-stuck-p observer))
     (sb-thread:signal-semaphore (clocked-gate provider))
     (obs:await-observer observer :timeout 10)))
+
+(defclass clocked-failing-first (clocked-scripted)
+  ((fail-first :initform t :accessor clocked-fail-first))
+  (:documentation "A CLOCKED-SCRIPTED provider whose first call fails after its time has passed,
+as an outage would; it uses up the first script entry."))
+
+(defmethod llm:complete :around ((p clocked-failing-first) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (let ((result (call-next-method)))
+    (if (clocked-fail-first p)
+        (progn (setf (clocked-fail-first p) nil)
+               (error 'cnd:deliberation-failure :detail "503 Service Unavailable"))
+        result)))
+
+(test the-pause-before-a-retry-is-not-measured-as-the-attempt
+  "The first model call takes 150 seconds by the provider's clock, against a window timeout of
+100, and fails. During the 2-second pause before the retry the observer is waiting, not stuck,
+because no attempt is running. During the retry, 10 seconds long, it is not stuck either
+(Copilot's review of #634). Measured from the failed attempt's start, the pause read 150 seconds
+and was reported stuck."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'clocked-failing-first
+                                  :advances (list 150 10)
+                                  :script (list (%call-with (%ob "unused" "fact")) (%call-with (%ob "A." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                                                       :retry-delay 2 :window-timeout 100)))
+    (setf (obs::observer-clock observer) (lambda () (clocked-now provider)))
+    (is-true (obs:observe-turn observer (%history 6)))
+    (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: call 1 began")
+    (is-true (obs:observer-stuck-p observer) "precondition: call 1 is stuck while it runs")
+    (sb-thread:signal-semaphore (clocked-gate provider))
+    (loop repeat 200 until (= 1 (obs:observer-failures observer)) do (sleep 0.01))
+    (is (= 1 (obs:observer-failures observer)) "precondition: call 1 failed, and the retry pause began")
+    (sleep 0.2)
+    (is (null (obs:observer-stuck-p observer)) "not stuck during the pause before the retry")
+    (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: the retry began")
+    (is (null (obs:observer-stuck-p observer)) "not stuck during the retry")
+    (sb-thread:signal-semaphore (clocked-gate provider))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '("A.") (%thread-contents store)))))
