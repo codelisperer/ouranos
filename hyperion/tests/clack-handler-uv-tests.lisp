@@ -56,7 +56,7 @@ unbindable."
   "The function %CLACKUP calls for each port it tries. A test that needs a port to be taken
 binds it.")
 
-(defparameter +port-attempts+ 5
+(defconstant +port-attempts+ 5
   "How many ports %CLACKUP tries when the server finds its port taken.")
 
 (defun %listening-p (port)
@@ -69,17 +69,19 @@ binds it.")
   "Seconds the server's thread waits between storing its failure and ending. Only the test of a
 failed start sets it, so that a %CLACKUP that does not wait for the thread to end is caught.")
 
-(defun %server-thread-hook (failure)
+(defun %server-thread-hook (failure started)
   "An *INVOKE-DEBUGGER-HOOK* for the threads a server started by %CLACKUP runs. In clack's own
-thread, which it names clack-handler-uv and in which the handler listens, an unhandled error is
-stored in (CAR FAILURE) and ends that thread, so that %CLACKUP can report it in the test. With the
-gate's debugger disabled, it used to end the whole test image (#519). The server's other threads
-inherit the hook too, and in them it calls the hook that was in place before, so an error there
-behaves as it did. *FAILED-THREAD-DELAY* is read here, in the test's thread."
+thread, which it names clack-handler-uv and in which the handler listens, an unhandled error
+before the server has started is stored in (CAR FAILURE) and ends that thread, so that %CLACKUP
+can report it in the test. With the gate's debugger disabled, it used to end the whole test image
+(#519). Once (CAR STARTED) is set, %CLACKUP has returned and reads FAILURE no more, so an error
+then calls the hook that was in place before, as it does in the server's other threads, which
+inherit the hook too. *FAILED-THREAD-DELAY* is read here, in the test's thread."
   (let ((previous sb-ext:*invoke-debugger-hook*)
         (delay *failed-thread-delay*))
     (lambda (condition hook)
-      (if (equal "clack-handler-uv" (sb-thread:thread-name sb-thread:*current-thread*))
+      (if (and (not (car started))
+               (equal "clack-handler-uv" (sb-thread:thread-name sb-thread:*current-thread*)))
           (progn (setf (car failure) condition)
                  (sleep delay)
                  (sb-thread:abort-thread))
@@ -118,7 +120,7 @@ here, in the test's thread, so it fails the one test that started the server."
                   ;; Each value here is evaluated in the new thread, so the box is quoted.
                   (handler (let ((bt2:*default-special-bindings*
                                    (list* (cons 'sb-ext:*invoke-debugger-hook*
-                                                (%server-thread-hook failure))
+                                                (%server-thread-hook failure started))
                                           (cons '*started* (list 'quote started))
                                           bt2:*default-special-bindings*)))
                              (apply #'clack:clackup app :server :uv :port port :use-thread t
@@ -127,18 +129,23 @@ here, in the test's thread, so it fails the one test that started the server."
              (loop repeat 2000
                    until (or (car started) (car failure) (not (bt2:thread-alive-p thread)))
                    do (sleep 0.005))
-             ;; The hook stores the failure before the thread unwinds, so wait for it to end
-             ;; before the next attempt or the error.
-             (when (car failure)
-               (loop repeat 2000 while (bt2:thread-alive-p thread) do (sleep 0.005)))
+             (unless (car started)
+               ;; The hook stores the failure before the thread unwinds, so wait for it to end
+               ;; before the next attempt or the error, and stop it if it has not.
+               (when (car failure)
+                 (loop repeat 2000 while (bt2:thread-alive-p thread) do (sleep 0.005)))
+               (when (bt2:thread-alive-p thread)
+                 (ignore-errors (clack:stop handler))))
              (let ((condition (car failure)))
                (cond ((car started) (return (values handler port)))
                      ((and (%port-taken-p condition) (< attempt +port-attempts+)))
                      (condition
                       (error "the server's thread failed on port ~D, attempt ~D: ~A"
                              port attempt condition))
-                     (t (ignore-errors (clack:stop handler))
-                        (error "the server did not start on port ~D within 10 s" port)))))))
+                     ((not (bt2:thread-alive-p thread))
+                      (error "the server's thread exited on port ~D without starting the server or failing"
+                             port))
+                     (t (error "the server did not start on port ~D within 10 s" port)))))))
 
 (defmacro testing-app ((port app &rest clackup-args) &body body)
   "Clack's TESTING-APP: serve APP with (clack:clackup app :server :uv ...) on a free PORT, run
@@ -829,3 +836,29 @@ thread (#463)."
   (is (equal "example.test" (uvh::%host-name "example.test" "d")))
   (is (equal "::1" (uvh::%host-name "[::1]:8080" "d")))
   (is (equal "d" (uvh::%host-name nil "d"))))
+
+(test the-server-thread-hook-stops-recording-once-the-server-has-started
+  "Before the server has started, the hook stores an error in clack's thread for %CLACKUP. After
+it has started, %CLACKUP has returned and nothing reads that box, so the hook passes the error to
+the hook that was in place before (#519)."
+  (flet ((hook-run (started)
+           (let* ((failure (list nil))
+                  (passed (list nil))
+                  (sb-ext:*invoke-debugger-hook*
+                    (lambda (condition hook)
+                      (declare (ignore hook))
+                      (setf (car passed) condition)
+                      (sb-thread:abort-thread)))
+                  (hook (%server-thread-hook failure (list started)))
+                  (condition (make-condition 'simple-error :format-control "after start")))
+             (sb-thread:join-thread
+              (sb-thread:make-thread (lambda () (funcall hook condition hook))
+                                     :name "clack-handler-uv")
+              :default nil)
+             (values (car failure) (car passed) condition))))
+    (multiple-value-bind (stored passed condition) (hook-run nil)
+      (is (eq condition stored) "before the start, the error was not stored")
+      (is (null passed) "before the start, the error went to the earlier hook"))
+    (multiple-value-bind (stored passed condition) (hook-run :server)
+      (is (null stored) "after the start, the error was stored where nothing reads it")
+      (is (eq condition passed) "after the start, the earlier hook did not get the error"))))
