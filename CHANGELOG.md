@@ -213,12 +213,17 @@ its tag.
   two pages that cannot both be written, before anything is written: a listing and a document
   keyed `<name>/index`, or a collection named `one.html` and the document `one`.
 
+- **praxeon/mcp: an ordinary call that asks for input can be answered, through an `:on-elicitation` handler** (#626).
+  - `make-connection` takes `:on-elicitation`, a function of a plist (`:key`, `:mode`, `:message`, `:schema` or `:url`, `:method`, `:connection`, `:principal`) that returns `(values action content)`, and `:input-rounds`, the most retries one call makes, three by default. `:on-elicitation` needs `:elicitation`.
+  - A `tools/call`, `resources/read` or `prompts/get` that answers `input_required` is sent again with the handler's answers in `inputResponses` and the result's `requestState` echoed exactly. Without a handler it still fails as not run.
+  - A request the app cannot be asked (sampling, roots, an undeclared mode, a malformed elicitation), an answer that cannot be sent, or a server still asking after `:input-rounds` retries fails the call as not run. A handler that signals ends the call with its condition.
+
 - **praxeon/mcp: a task can ask the user for input, and the app answers it** (#563).
   - `make-connection` takes `:elicitation`, a list of the modes `:form` and `:url`. It declares the elicitation client capability for them; sampling and roots are never declared. Without it nothing changes.
   - A task whose `tasks/get` says `input_required` with elicitation requests in declared modes sends a `:task-input-required` event per key not shown before, with `:input-key`, `:mode`, `:message`, `:schema` or `:url`, and `:task`. A request this client did not declare, or a malformed one (a form request without `requestedSchema`, a url request without `url`), still cancels the task with `:task-input-refused`.
   - `answer-task-input` sends the app's answer (`:accept` with content for a form-mode request, `:decline` or `:cancel`) with `tasks/update`, taking the task object the event carried. It checks with `tasks/get` that the key is still outstanding on the server first, and sends no answer otherwise. After an app restart, an unanswered key is not asked again; it is answered cancel when `:input-timeout` (ten minutes by default) passes, with a `:task-input-expired` event.
   - The task record has a new field, `task-inputs`, written by `task-to-json`; a record written before reads as having none.
-  - An ordinary call that answers `input_required` still fails as not run; an `:on-elicitation` handler for it is #626.
+  - An ordinary call that answers `input_required` can be answered too, through `:on-elicitation` (#626); see that entry.
 
 - **aion/libgit: fetch, fast-forward pull and push** (#429). `set-remote` names a remote and
   `remote-url` reads one back. `fetch` updates `refs/remotes/<remote>/`. `pull` fetches, then

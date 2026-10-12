@@ -232,7 +232,8 @@ a content that is not an object, has no string uri, or has neither a string text
 blob, and an input_required result."
   (check-type uri string)
   (let ((result
-          (handler-case (%request client "resources/read" (%object "uri" uri) :principal principal)
+          (handler-case (%request-answering-input client "resources/read" (%object "uri" uri)
+                                                  :principal principal)
             (request-failed (e)
               (if (member (request-failed-code e) '(-32602 -32002))
                   (error 'resource-not-found
