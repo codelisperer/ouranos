@@ -24,6 +24,7 @@
 (defconstant +git-enonfastforward+ -11)
 (defconstant +git-econflict+ -13)
 (defconstant +git-eauth+ -16)
+(defconstant +git-error-http+ 34)  ; git_error_t GIT_ERROR_HTTP
 (defconstant +git-passthrough+ -30)
 (defconstant +git-iterover+ -31)
 

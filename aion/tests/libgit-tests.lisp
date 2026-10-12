@@ -622,45 +622,42 @@ that is not HEAD's signals BRANCH-NOT-CHECKED-OUT and nothing moves."
           (is (string= branch (git:branch-not-checked-out-head c)))))
       (is (string= first (git-cli bdir "rev-parse" "HEAD"))))))
 
-(defun redirecting-handler (port-cell)
-  "A handler that answers every request outside /moved/ with a redirect to the same path
-under /moved/ on the same port, but at the host name localhost, and every request under
-/moved/ with 404. PORT-CELL is a cons whose car is the server's port."
-  (lambda (request stream)
-    (if (search "/moved/" (http:request-path request))
-        (http:write-response stream 404 '() "")
-        (http:write-response
-         stream 302
-         (list (cons "Location"
-                     (format nil "http://localhost:~D/moved~A" (car port-cell)
-                             (http:request-path request))))
-         ""))))
+(defun redirecting-handler (request stream)
+  "Answer every request with a redirect to the same path under /moved/ at
+https://localhost:1, a different host from the remote's 127.0.0.1 and a port nothing listens
+on. The address is https because libgit2's WinHTTP transport, on Windows, acts only on a
+redirect to an https address; it does not follow an http one at all, so an http redirect
+would show nothing about FOLLOW-REDIRECTS there."
+  (http:write-response
+   stream 302
+   (list (cons "Location" (format nil "https://localhost:1/moved~A" (http:request-path request))))
+   ""))
 
 (test a-redirect-to-another-host-is-refused-by-default
   "GHSA-2889-x8f6-mc4x. The remote is http://127.0.0.1:PORT/ and the server redirects its
-first request to localhost, a different host to libgit2. By default FETCH refuses that with
-a GIT-ERROR and makes no second request, so the credential it was given goes nowhere. CONTROL:
-with :FOLLOW-REDIRECTS :ALL the same redirect is followed, so the server's answer is one
-libgit2 acts on, and the refusal is the default's doing."
+first request to https://localhost:1/, a different host to libgit2. By default FETCH refuses
+that with a GIT-ERROR saying it cannot redirect to 'localhost', before any connection to
+localhost, so the credential it was given goes nowhere. CONTROL: with :FOLLOW-REDIRECTS :ALL
+the same redirect is accepted and the fetch fails later, when nothing answers at localhost:1,
+so both message checks fail and the refusal is the default's doing. The checks are the same
+on every platform, and each transport refuses the redirect in git_net_url_apply_redirect."
   (flet ((fetch-through-redirect (follow)
-           (let ((port (list nil)))
-             (http:with-server (server (redirecting-handler port))
-               (setf (car port) (http:server-port server))
-               (with-new-repository (repo dir)
-                 (git:set-remote repo "origin" (http:server-url server "/repo.git"))
-                 ;; FOLLOW NIL leaves the keyword out, so the first run tests the default.
-                 (let ((c (outcome (lambda ()
-                                     (apply #'git:fetch repo "origin"
-                                            :credentials (git:make-credential "u" "t")
-                                            (when follow (list :follow-redirects follow)))))))
-                   (list c (mapcar #'http:request-path (http:server-requests server)))))))))
-    (destructuring-bind (c paths) (fetch-through-redirect nil)
+           (http:with-server (server #'redirecting-handler)
+             (with-new-repository (repo dir)
+               (git:set-remote repo "origin" (http:server-url server "/repo.git"))
+               ;; FOLLOW NIL leaves the keyword out, so the first run tests the default.
+               (let ((c (outcome (lambda ()
+                                   (apply #'git:fetch repo "origin"
+                                          :credentials (git:make-credential "u" "t")
+                                          (when follow (list :follow-redirects follow)))))))
+                 (list c (or (ignore-errors (git:git-error-message c)) "")))))))
+    (destructuring-bind (c message) (fetch-through-redirect nil)
       (is (typep c 'git:git-error))
-      (is (search "redirect" (or (ignore-errors (git:git-error-message c)) "")) "~A" c)
-      (is (= 1 (length paths)) "requests: ~S" paths))
-    (destructuring-bind (c paths) (fetch-through-redirect :all)
+      (is (search "cannot redirect" message) "~A" c)
+      (is (search "'localhost'" message) "~A" c))
+    (destructuring-bind (c message) (fetch-through-redirect :all)
       (is (typep c 'git:git-error))
-      (is (find-if (lambda (p) (search "/moved/" p)) paths) "control, requests: ~S" paths))))
+      (is (null (search "cannot redirect" message)) "control: ~A" c))))
 
 (test a-credential-is-offered-once-and-a-refusal-is-authentication-failed
   "A server that answers 401 to everything gets the credential once, as HTTP Basic, and FETCH
@@ -668,7 +665,10 @@ then signals AUTHENTICATION-FAILED rather than offering it again. The credential
 called once with the remote's URL, and the token, given as an aion/secret, appears in no
 printed form of the credential. With no credential the same server gives the same condition,
 and a function that returns something other than a CREDENTIAL gets an error that does not
-print what it returned."
+print what it returned. On Windows WinHTTP does not return GIT_EAUTH here: it reports the last
+401 as a GIT-ERROR naming the status, and FETCH maps that to AUTHENTICATION-FAILED because the
+function gave nothing. CONTROL: without that mapping both AUTHENTICATION-FAILED checks fail on
+the Windows leg; Linux and macOS return GIT_EAUTH and cannot show it."
   (http:with-server (server (lambda (request stream)
                               (declare (ignore request))
                               (http:write-response
@@ -701,6 +701,30 @@ print what it returned."
                                                           "t0ken"))))))
           (is (typep wrong 'error))
           (is (null (search "t0ken" (princ-to-string wrong))) "~A" wrong))))))
+
+(test a-401-before-the-credentials-function-runs-is-not-authentication-failed-on-windows
+  "A server that answers 401 with no WWW-Authenticate header gives libgit2 no way to ask for a
+credential, so the credentials function is never called. On Windows WinHTTP reports this as a
+GIT-ERROR naming status 401, the same error it gives after the function has given nothing, and
+FETCH leaves it a GIT-ERROR because nothing was declined. Elsewhere libgit2 itself returns
+GIT_EAUTH, which is AUTHENTICATION-FAILED. CONTROL: mapping every 401 to
+AUTHENTICATION-FAILED fails the third check, and only on the Windows leg."
+  (http:with-server (server (lambda (request stream)
+                              (declare (ignore request))
+                              (http:write-response stream 401 '() "")))
+    (with-new-repository (repo dir)
+      (git:set-remote repo "origin" (http:server-url server "/repo.git"))
+      (let* ((asked 0)
+             (c (outcome (lambda ()
+                           (git:fetch repo "origin"
+                                      :credentials (lambda (url user)
+                                                     (declare (ignore url user))
+                                                     (incf asked)
+                                                     nil))))))
+        (is (= 0 asked))
+        (is (typep c 'git:git-error))
+        #+win32 (is (not (typep c 'git:authentication-failed)) "~A" c)
+        #-win32 (is (typep c 'git:authentication-failed) "~A" c)))))
 
 (test an-https-remote-at-an-ip-address-is-refused-on-linux
   "GHSA-h7gc-w2gg-p9xp. Which URLs count as an IP address is checked on every platform. On

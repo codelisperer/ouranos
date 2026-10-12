@@ -40,10 +40,7 @@
   (:report
    (lambda (c stream)
      (format stream "The remote ~@[at ~A ~]asked for a credential, and ~A."
-             (authentication-failed-url c)
-             (if (eql (git-error-code c) +git-eauth+)
-                 "none was given or it was refused"
-                 "refused the one given"))))
+             (authentication-failed-url c) "none was given or it refused the one given")))
   (:documentation "A remote asked for a credential and none was given, or it refused the one
 given. URL is the remote's address without any user name or password in it. A credential is
 offered at most once per operation, so a refused one is not retried."))
@@ -125,7 +122,7 @@ aion/secret:secret, and is revealed only when libgit2 asks for it."
 (defstruct (%operation (:constructor %make-operation (credentials)))
   credentials
   (offered nil)       ; a credential has been given to libgit2 once
-  (refused nil)       ; libgit2 asked again after it was given, so the remote refused it
+  (declined nil)      ; libgit2 asked and was given nothing: none was supplied, or it was refused
   (url nil)           ; the address libgit2 asked for a credential for, redacted
   (kept nil)          ; an error a callback caught, signalled once libgit2 returns
   (rejected '()))     ; (reference . reason) for each update the remote refused
@@ -156,7 +153,7 @@ here, so such a function must not make one."
             ((%operation-offered op)
              ;; Asked again: the remote refused what was given. Offering it again would only
              ;; repeat the refusal, so libgit2 is told there is nothing to give.
-             (setf (%operation-refused op) t)
+             (setf (%operation-declined op) t)
              +git-passthrough+)
             (t
              (let* ((given (%operation-credentials op))
@@ -164,7 +161,9 @@ here, so such a function must not make one."
                                     (funcall given (%operation-url op) (%string username-from-url))
                                     given)))
                (setf (%operation-offered op) t)
-               (cond ((null credential) +git-passthrough+)
+               (cond ((null credential)
+                      (setf (%operation-declined op) t)
+                      +git-passthrough+)
                      ((not (credential-p credential))
                       ;; Not CHECK-TYPE: its message would print the value, which can be the
                       ;; token itself.
@@ -197,15 +196,29 @@ here, so such a function must not make one."
         (cffi:foreign-slot-value callbacks '(:struct git-remote-callbacks) 'push-update-reference)
         (cffi:callback %push-update-reference-callback)))
 
+(defun %http-401-p (class message)
+  "True when libgit2's last error, CLASS and MESSAGE, is WinHTTP's report of a 401 answer.
+WinHTTP returns -1 with this error, not GIT_EAUTH, when the credentials callback gives nothing."
+  (and (= class +git-error-http+)
+       message
+       (let ((suffix "status code: 401"))
+         (and (>= (length message) (length suffix))
+              (string= suffix message :start2 (- (length message) (length suffix)))))))
+
 (defun %finish-operation (operation name code)
   "Signal what OPERATION, the state of the libgit2 call NAME that returned CODE, ended with:
-an error a callback kept, AUTHENTICATION-FAILED, or GIT-ERROR. CODE when it is not negative."
+an error a callback kept, AUTHENTICATION-FAILED, or GIT-ERROR. CODE when it is not negative.
+AUTHENTICATION-FAILED is GIT_EAUTH, or a 401 after the credentials callback gave nothing during
+this operation. A 401 before the callback ran stays a GIT-ERROR."
   (cond ((%operation-kept operation) (error (%operation-kept operation)))
-        ((and (minusp code) (or (= code +git-eauth+) (%operation-refused operation)))
+        ((minusp code)
          (multiple-value-bind (class message) (%last-error)
-           (error 'authentication-failed :operation name :code code :class class
-                                         :message message :url (%operation-url operation))))
-        (t (%check name code))))
+           (if (or (= code +git-eauth+)
+                   (and (%operation-declined operation) (%http-401-p class message)))
+               (error 'authentication-failed :operation name :code code :class class
+                                             :message message :url (%operation-url operation))
+               (%check name code))))
+        (t code)))
 
 ;;; --- the IP-address check for GHSA-h7gc-w2gg-p9xp -----------------------------------
 
@@ -328,7 +341,9 @@ that returns a CREDENTIAL or NIL, or NIL for none. It is used only if the remote
 and at most once: a remote that refuses it signals AUTHENTICATION-FAILED.
 
 FOLLOW-REDIRECTS is :NONE (the default), :INITIAL or :ALL. With :NONE, a redirect to the same
-host is followed and one to another host is refused (GHSA-2889-x8f6-mc4x).
+host is followed and one to another host is refused (GHSA-2889-x8f6-mc4x). On Windows,
+libgit2's WinHTTP transport acts only on a redirect to an https address; a redirect to an http
+address is not followed, whatever FOLLOW-REDIRECTS says, and the fetch fails.
 
 Signals INSECURE-REMOTE on Linux, and only there, for an https remote whose host is an IP
 address (GHSA-h7gc-w2gg-p9xp), and GIT-ERROR for anything else libgit2 reports. That check is
@@ -391,7 +406,9 @@ other lacks, and CHECKOUT-CONFLICT when the new commit would overwrite a change 
 committed or a file that is not tracked. In both cases only the remote-tracking branch has
 changed. The files are checked out before the branch is moved, because the checkout is what
 finds a conflict; if moving the branch then fails, the files are at the new commit and the
-branch at the old one, and a GIT-ERROR names git_reference_create. Signals BRANCH-NOT-CHECKED-OUT for a BRANCH that is not HEAD's while HEAD has commits,
+branch at the old one, and a GIT-ERROR names git_reference_create.
+
+Signals BRANCH-NOT-CHECKED-OUT for a BRANCH that is not HEAD's while HEAD has commits,
 DETACHED-HEAD when HEAD is not on a branch, and GIT-ERROR when the remote has no such branch.
 CREDENTIALS and FOLLOW-REDIRECTS are as for FETCH."
   (%with-repository-pointer (repo repository)

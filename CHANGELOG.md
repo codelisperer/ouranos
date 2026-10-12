@@ -214,7 +214,8 @@ its tag.
   `checkout-conflict` from `pull`, which then change nothing but the remote-tracking branch,
   `push-rejected`, `detached-head` and `branch-not-checked-out`. Two libgit2 advisories that
   have no upstream fix are handled: `:follow-redirects` defaults to `:none`, so a redirect to
-  another host is refused (GHSA-2889-x8f6-mc4x), and on Linux an https remote whose host is an
+  another host is refused (GHSA-2889-x8f6-mc4x; on Windows libgit2 does not follow a redirect
+  to an http address at all), and on Linux an https remote whose host is an
   IP address signals `insecure-remote` before any connection (GHSA-h7gc-w2gg-p9xp). Looking a
   credential up in `hades/credentials` is left to the caller until #357 lands.
 
