@@ -297,8 +297,12 @@ What is on `main`:
 - **`praxeon/observe`** (#462, step A of #317): an observer runs `distil` over a conversation
   off the request path. It writes into the conversation's own thread scope, and a thread
   observation becomes a fact about the subject only through the app's promote function. It
-  keeps its progress (how far it has distilled, and the windows it gave up on) in the store, so
-  an app that restarts does not distil a conversation twice.
+  keeps its progress (how far it has distilled, and the windows it gave up on) in the store, and
+  a new observer, or one in an app that restarted, starts from there. The progress is written in
+  a separate call after a window's observations. If that write fails, and the observer is
+  stopped or the app restarts before a later turn writes it, the window is distilled again, and
+  a model that words its answer differently leaves both wordings. Writing the two in one
+  transaction is #529.
 
 Still to come, in #317: a reflector that condenses a scope's observations (step B, #464), the
 thread's observations in the prompt in place of its old messages (step C), and a benchmark that
