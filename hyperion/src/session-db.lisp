@@ -83,9 +83,14 @@ restarts, as before #636."
 ;;; connection with a BACKEND, the store replaces its connection. One retry, never a loop: when
 ;;; the second attempt fails too, its error is signalled.
 ;;;
-;;; Every operation here is safe to run twice: a read, an upsert, and single-row UPDATEs and
-;;; DELETEs. If Postgres ended the connection after a statement ran but before its reply
-;;; arrived, the retry of STORE-DEL or STORE-SAVE reports the row as gone.
+;;; Every operation here is safe to run twice: a read, an upsert, and UPDATEs and DELETEs. Only
+;;; their results can be wrong, and only when the first attempt committed and the connection
+;;; then failed before its reply arrived. That needs a network failure in that window: a
+;;; statement Postgres's own 57P01 interrupts is aborted, and one sent to a connection already
+;;; ended never runs. In that window the retry of STORE-DEL, STORE-SAVE or STORE-TOUCH reports
+;;; the row as gone, and STORE-SWEEP counts only what it removed itself (Copilot's review of
+;;; #639). Not retrying them would leave a signed-in request failing after a restart, because
+;;; WRAP-SESSION writes the session back on a pool connection the restart also ended.
 
 (defun %lost-p (condition connection)
   (and (typep condition 'conn:db-error) (not (conn:connection-open-p connection))))
