@@ -27,8 +27,8 @@ with `:layout :directory`). It writes nothing if any page fails to render, and i
 non-empty directory unless given `:clean t`. `:assets` names a directory of the site's own files
 (CSS, images, fonts, `.well-known/`), copied into the export after `:clean` empties it, each at
 its path relative to that directory. The export is refused, before anything is written, if an
-asset's path is one a page is written to, or if the assets directory holds or is inside the
-export directory.
+asset and a page cannot both be written (the same path, or one under the other), if the assets
+directory holds a link, or if it holds or is inside the export directory.
 
 In a collection, `:sort-by` names a field, `:order` is `:ascending` (the default) or
 `:descending`, and a document without the field comes last. Documents tied on the field keep

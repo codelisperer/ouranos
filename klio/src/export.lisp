@@ -78,18 +78,42 @@ exist, so a relative or aliased spelling is not a way around the check."
   (and (null (uiop:directory-files directory))
        (null (uiop:subdirectories directory))))
 
+(defun %link-entry-p (path)
+  "Whether PATH, a file or a directory, is itself a link: a Windows junction or other reparse
+point, or a symbolic link. Asked of the name without a trailing separator, because lstat of
+`dir/' follows the link."
+  (aion/fs:link-p (uiop:parse-native-namestring
+                   (string-right-trim "/\\" (uiop:native-namestring path)))))
+
 (defun %asset-files (assets)
   "Every file under the directory ASSETS, recursively, as (relative-path . absolute-path) with
-the relative path spelled with `/', sorted by relative path."
+the relative path spelled with `/', sorted by relative path. The second value lists the links
+found under ASSETS, by relative path, which are not followed: a link can lead outside ASSETS,
+or round in a cycle (Copilot's review of #615)."
   (let ((root (uiop:ensure-directory-pathname assets))
-        (files '()))
-    (labels ((walk (dir)
-               (dolist (f (uiop:directory-files dir))
-                 (push (cons (substitute #\/ #\\ (%relative-namestring f root)) f) files))
-               (dolist (sub (uiop:subdirectories dir))
-                 (walk sub))))
-      (walk root))
-    (sort files #'string< :key #'car)))
+        (files '())
+        (links '()))
+    (flet ((relative (path) (substitute #\/ #\\ (%relative-namestring path root))))
+      (labels ((walk (dir)
+                 (dolist (f (uiop:directory-files dir))
+                   (if (%link-entry-p f)
+                       (push (relative f) links)
+                       (push (cons (relative f) f) files)))
+                 (dolist (sub (uiop:subdirectories dir))
+                   (if (%link-entry-p sub)
+                       (push (string-right-trim "/" (relative sub)) links)
+                       (walk sub)))))
+        (walk root)))
+    (values (sort files #'string< :key #'car) (sort links #'string<))))
+
+(defun %paths-collide-p (a b)
+  "Whether the export paths A and B cannot both be written: they are the same path, or one is a
+directory the other lies under (`one.html' and `one.html/image.png'). Compared without regard
+to case, because the file systems of Windows and macOS would make them one."
+  (flet ((under (x y) (and (> (length x) (length y))
+                           (string-equal y x :end2 (length y))
+                           (char= #\/ (char x (length y))))))
+    (or (string-equal a b) (under a b) (under b a))))
 
 (defun %resolved-directory (directory)
   "DIRECTORY's resolved name, also when it does not exist yet: the nearest existing ancestor is
@@ -119,8 +143,8 @@ assets directory was not refused on Windows and macOS, and was on Linux."
 (defun %check-assets (assets directory page-files)
   "The asset files to copy, as %ASSET-FILES returns them, after checking that they can be:
 signals EXPORT-REFUSED when ASSETS is not a directory, when it holds or is inside DIRECTORY
-(where :CLEAN would delete it, or the copy would copy itself), or when an asset's path is one
-in PAGE-FILES."
+(where :CLEAN would delete it, or the copy would copy itself), when it holds a link, or when an
+asset's path collides with one in PAGE-FILES (%PATHS-COLLIDE-P)."
   (let ((assets (uiop:ensure-directory-pathname assets)))
     (unless (uiop:directory-exists-p assets)
       (error 'export-refused :directory directory
@@ -128,12 +152,15 @@ in PAGE-FILES."
     (when (or (%same-or-inside-p assets directory) (%same-or-inside-p directory assets))
       (error 'export-refused :directory directory
                              :reason (format nil "the :ASSETS directory ~A holds it or is inside it" assets)))
-    (let* ((files (%asset-files assets))
-           (clash (find-if (lambda (f) (member (car f) page-files :test #'string-equal)) files)))
-      (when clash
+    (multiple-value-bind (files links) (%asset-files assets)
+      (when links
         (error 'export-refused :directory directory
-                               :reason (format nil "the asset ~A would replace the page written to the same path" (car clash))))
-      files)))
+                               :reason (format nil "the :ASSETS directory holds a link, which is not followed: ~{~A~^, ~}" links)))
+      (dolist (f files files)
+        (let ((page (find-if (lambda (p) (%paths-collide-p (car f) p)) page-files)))
+          (when page
+            (error 'export-refused :directory directory
+                                   :reason (format nil "the asset ~A and the page written to ~A cannot both be written" (car f) page))))))))
 
 (defun export-site (site directory &rest options &key (layout :file) clean now assets
                                                     &allow-other-keys)

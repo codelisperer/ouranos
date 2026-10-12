@@ -153,8 +153,10 @@ its tag.
   `:clean t` has emptied the export, so a site no longer re-copies its stylesheet and images
   after each export. Dot-names are copied too, for `.well-known/`. `export-refused` is signalled,
   before anything is written, when the directory does not exist, when it holds or is inside the
-  export directory, or when an asset's path is one a page is written to (compared without regard
-  to case). The returned list names the pages, then the assets.
+  export directory, when it holds a link (a junction or symbolic link, which could lead outside
+  it), or when an asset and a page cannot both be written: the same path, or one under the other,
+  such as `one.html/image.png` beside the page `one.html` (compared without regard to case). The
+  returned list names the pages, then the assets.
 
 - **klio: `klio:collection` and `klio:tree-collection` take `:then-by`, a second field that orders
   documents tied on `:sort-by`** (#557). It sorts in the same direction as `:order`, with a

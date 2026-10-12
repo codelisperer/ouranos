@@ -1106,6 +1106,56 @@ itself."
               (is (typep e 'k:export-refused) "assets inside the output: ~S" e)
               (is-true (uiop:directory-exists-p inner) "and :clean did not delete them"))))))))
 
+(defun %asset-link (link target)
+  "Make LINK, a directory link to the directory TARGET: a junction on Windows, which needs no
+privilege, and a symbolic link elsewhere. As aion/tests/fs/delete-tree-tests.lisp makes one."
+  (let ((l (string-right-trim "/\\" (uiop:native-namestring link)))
+        (tg (string-right-trim "/\\" (uiop:native-namestring target))))
+    (if (uiop:os-windows-p)
+        (uiop:run-program (list "cmd" "/c" "mklink" "/J" l tg) :output nil)
+        (uiop:run-program (list "ln" "-s" tg l) :output nil))
+    (assert (aion/fs:link-p (uiop:parse-native-namestring l)) () "the fixture did not make a link at ~A" l)))
+
+(test a-link-inside-the-assets-directory-is-refused-and-not-followed
+  "Copilot's review of #615: a link can lead outside the assets directory, or round in a cycle,
+so the export refuses one by name rather than copying what it points to."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (let ((outside (aion/fs:make-temporary-directory "klio-outside")))
+        (unwind-protect
+             (progn
+               (with-open-file (o (merge-pathnames "secret.txt" outside) :direction :output)
+                 (write-string "not an asset" o))
+               (%asset-link (merge-pathnames "escape/" assets) outside)
+               (with-export-dir (out)
+                 (let ((site (k:make-site src)))
+                   (k:boot site)
+                   (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+                     (is (typep e 'k:export-refused) "got ~S" e)
+                     (is (and e (search "escape" (princ-to-string e))) "the refusal names the link: ~A" e)
+                     (is (null (probe-file (merge-pathnames "escape/secret.txt" out)))
+                         "the file outside the assets directory was not copied")
+                     (is (null (probe-file out)) "nothing was written")))))
+          (ignore-errors (aion/fs:delete-tree assets))
+          (ignore-errors (aion/fs:delete-tree outside)))))))
+
+(test an-asset-and-a-page-that-would-be-file-and-directory-are-refused
+  "Copilot's review of #615: an asset at one.html/image.png needs a directory one.html where the
+page one.html is a file, and the reverse, an asset file roles beside the page roles/two.html.
+Both are refused before anything is written."
+  (with-content-dir (src ("one.md" . +good+) ("roles/two.md" . +also-good+))
+    (dolist (asset '("one.html/image.png" "roles"))
+      (with-assets-dir (assets)
+        (let ((path (merge-pathnames asset assets)))
+          (ensure-directories-exist path)
+          (with-open-file (o path :direction :output) (write-string "x" o)))
+        (with-export-dir (out)
+          (let ((site (k:make-site src)))
+            (k:boot site)
+            (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+              (is (typep e 'k:export-refused) "~A: got ~S" asset e)
+              (is (null (probe-file out)) "~A: nothing was written" asset))))))))
+
 (test a-missing-assets-directory-is-refused
   (with-content-dir (src ("one.md" . +good+))
     (with-export-dir (out)
