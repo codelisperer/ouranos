@@ -194,7 +194,9 @@
   :license "MIT"
   ;; cl-base64 for the specification's encoding of header values that are not plain ASCII.
   ;; Everything here is already in the tree; see docs/dependencies.md.
-  :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64")
+  ;; aion/windows on Windows only, for the job object each local server runs in (#599).
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64"
+               (:feature :win32 "aion/windows"))
   :serial t
   :components ((:module "src/mcp"
                 :serial t

@@ -673,3 +673,99 @@ group, which the client checks it leads first."
         (is (= 1 (%recorded-count record "SIGTERM")))
         (is (eq :signaled (sb-ext:process-status process)))
         (is (eql 9 (sb-ext:process-exit-code process)))))))
+
+;;; --- Windows: the processes a local server starts (#599) ----------------------------------
+;;;
+;;; The server starts `ping -n 600 127.0.0.1', which runs for about ten minutes. The control
+;;; test leaves it running on purpose, and each test ends what is left with taskkill, after
+;;; checking with tasklist that the pid still names a ping, so no other process is ended.
+
+#+win32
+(defun %ping-running-p (pid)
+  "Whether tasklist reports a process PING.EXE with PID."
+  (let ((line (string-trim '(#\Space #\Return #\Newline)
+                           (uiop:run-program (list "tasklist" "/FI" (format nil "PID eq ~D" pid)
+                                                   "/FO" "CSV" "/NH")
+                                             :output :string :ignore-error-status t))))
+    (uiop:string-prefix-p "\"ping.exe\"" (string-downcase line))))
+
+#+win32
+(defun %ping-ends-within-p (pid seconds)
+  (loop repeat (* seconds 5)
+        while (%ping-running-p pid)
+        do (sleep 0.2))
+  (not (%ping-running-p pid)))
+
+#+win32
+(defun %end-ping (pid)
+  (when (and pid (%ping-running-p pid))
+    (uiop:run-program (list "taskkill" "/PID" (princ-to-string pid) "/F")
+                      :output nil :error-output nil :ignore-error-status t)))
+
+#+win32
+(defun %start-grandchild (client)
+  (parse-integer (mcp:call-tool client (%tool-named client "start-grandchild") nil)))
+
+#+win32
+(test closing-a-client-ends-the-process-its-local-server-started
+  "Each local server runs in a job object that ends every process in it when it is closed, so a
+process the server started does not outlive it. This server exits when its stdin closes, so the
+job is closed without being terminated."
+  (let ((pid nil))
+    (unwind-protect
+         (with-stdio-client (client record "grandchild")
+           (setf pid (%start-grandchild client))
+           (is-true (%ping-running-p pid))
+           (is-true (praxeon/mcp::child-job (praxeon/mcp::client-child client)))
+           (mcp:close-client client)
+           (is (= 1 (%recorded-count record "eof")))
+           (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid))
+      (%end-ping pid))))
+
+#+win32
+(test a-local-server-that-is-ended-takes-the-process-it-started-with-it
+  "A server that ignores its closed stdin is ended by terminating its job, which ends the process
+it started as well."
+  (let ((pid nil)
+        (mcp:*stdio-close-seconds* 1))
+    (unwind-protect
+         (with-stdio-client (client record "grandchild-ignore-eof")
+           (setf pid (%start-grandchild client))
+           (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
+             (mcp:close-client client)
+             (is-false (sb-ext:process-alive-p process))
+             (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid)))
+      (%end-ping pid))))
+
+#+win32
+(test a-local-server-not-in-a-job-is-ended-alone-and-the-failure-is-logged
+  "The control for the two tests above, run in both of their modes, and the fallback: when the
+server cannot be put in a job, a warning names its pid and the Win32 error code, the server is
+ended by its closed stdin or with TerminateProcess, and the process it started keeps running."
+  (dolist (mode '("grandchild" "grandchild-ignore-eof"))
+    (let ((pid nil)
+          (server-pid nil)
+          (log (make-string-output-stream))
+          (mcp:*stdio-close-seconds* 1)
+          (praxeon/mcp::*child-job-function*
+            (lambda (pid)
+              (declare (ignore pid))
+              (error 'aion/windows:win32-error :code 5 :message "Access is denied."
+                                               :operation :assign-process-to-job-object))))
+      (unwind-protect
+           (progn
+             (with-captured-log (log)
+               (with-stdio-client (client record mode)
+                 (setf pid (%start-grandchild client))
+                 (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
+                   (setf server-pid (sb-ext:process-pid process))
+                   (is (null (praxeon/mcp::child-job (praxeon/mcp::client-child client))))
+                   (mcp:close-client client)
+                   (is-false (sb-ext:process-alive-p process)))))
+             (is-true (%ping-running-p pid) "in ~A, the ping ~D ended without a job to end it"
+                      mode pid)
+             (let ((logged (get-output-stream-string log)))
+               (is-true (search "not in a job object" logged) "the log said ~S" logged)
+               (is-true (search (format nil "pid=~D" server-pid) logged) "the log said ~S" logged)
+               (is-true (search "code=5" logged) "the log said ~S" logged)))
+        (%end-ping pid)))))
