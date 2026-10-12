@@ -23,7 +23,10 @@ its tag.
   COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
   SQLite (#651). A store call the app makes on its own thread inside its
   `conn:with-connection` on the same pool uses that connection and is part of its transaction.
-  A store over one connection keeps working when nothing else uses that connection.
+  A store over one connection keeps working when nothing else uses that connection. On SQLite
+  the store's own transactions (a window's, `supersede`'s and `forget-subject`'s) begin
+  IMMEDIATE, so behind an app's write transaction they wait for the write lock, within
+  mnemosyne's busy timeout (5000 ms by default), instead of failing with SQLITE_BUSY at once.
 
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to
@@ -238,6 +241,12 @@ its tag.
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
 
 ### Added
+
+- **mnemosyne/conn: `with-transaction` takes `:immediate`** (#653). On SQLite an outermost
+  transaction then begins with BEGIN IMMEDIATE and waits, within `*sqlite-busy-timeout-ms*`, for
+  the database's write lock before it reads. A deferred transaction that reads first and then
+  writes behind another connection's write transaction fails with SQLITE_BUSY at once, without
+  the busy timeout. On Postgres, and for an inner transaction, it changes nothing.
 
 - **praxeon/memory: `store-transactions-p`, `call-with-store-transaction` and
   `with-store-transaction`, for writes that take effect together or not at all** (#529). Both

@@ -1129,3 +1129,42 @@ holds the store's lock; over one connection every operation takes the lock (#653
         (loop repeat 200 until done do (sleep 0.01))
         (is-true done "the read returned while the lock was held")
         (bt:join-thread reader)))))
+
+(defun %behind-an-apps-write-transaction (store pool function)
+  "Run FUNCTION on this thread 0.2 s into a 1-second write transaction the app holds on another
+pooled connection. Returns FUNCTION's value, or the error it signalled."
+  (let* ((holder (bt:make-thread
+                  (lambda ()
+                    (conn:with-connection (c pool)
+                      (conn:with-transaction (c)
+                        (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+                        (sleep 1))))))
+         (result (progn (sleep 0.2) (handler-case (funcall function) (error (e) e)))))
+    (bt:join-thread holder)
+    result))
+
+(test over-a-pool-a-supersession-waits-behind-an-apps-write-transaction
+  "SUPERSEDE reads the observation it replaces before it writes. Behind an app's write transaction
+on SQLite, a deferred transaction's upgrade to a writer failed with BUSY at once; the store's
+transaction now begins IMMEDIATE and waits for the lock (the hub's review of #654)."
+  (with-pool-store (store pool)
+    (let* ((porto (mem:remember store "member-653" "Lives in Porto." :provenance (test-provenance 1)))
+           (result (%behind-an-apps-write-transaction
+                    store pool (lambda () (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2))))))
+      (is (typep result 'mem:observation) "the supersession succeeded: ~A" result)
+      (is (member "Lives in Lisbon." (mapcar #'mem:observation-content (mem:observations-of store "member-653"))
+                  :test #'string=)))))
+
+(test over-a-pool-a-window-with-no-proposals-waits-behind-an-apps-write-transaction
+  "A window whose model proposes nothing writes only its progress, which it reads first. Behind an
+app's write transaction on SQLite it waits for the lock and records its progress, with no failed
+attempt (the hub's review of #654)."
+  (with-pool-store (store pool)
+    (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call)))
+                                       store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                       :retry-delay 0 :max-attempts 1)))
+      (%behind-an-apps-write-transaction
+       store pool (lambda () (obs:observe-turn observer (%chat 6)) (obs:await-observer observer :timeout 20)))
+      (obs:await-observer observer :timeout 20)
+      (is (= 0 (obs:observer-failures observer)) "no attempt failed")
+      (is (equal '(6 nil) (multiple-value-list (mem:thread-progress store "member-653" "conv-653")))))))

@@ -153,36 +153,44 @@ for how each operation gets its connection."))
 ;;; OVER ONE CONNECTION, every operation, reads included, holds the store's lock, and the store
 ;;; is safe only when nothing else uses that connection.
 ;;;
+;;; ON SQLITE every pooled connection waits up to mnemosyne's busy timeout for the database's
+;;; write lock (MNEMOSYNE/CONN:*SQLITE-BUSY-TIMEOUT-MS*, 5000 ms by default, set on every
+;;; connection mnemosyne opens). The store's own transactions, which read before they write, begin
+;;; IMMEDIATE, so they wait for the lock at BEGIN rather than failing at once when they first
+;;; write behind another connection's write transaction (the hub's review of #654).
+;;;
 ;;; AN OPERATION INSIDE ANOTHER on the same thread, as SUPERSEDE's REMEMBER, a window's
 ;;; transaction or an app's :PROMOTE callback inside it, uses the connection already held, so it
 ;;; stays in the same transaction and does not wait for itself (the hub's ruling on #653).
 
-(defvar *held* nil
-  "(store . connection) while an operation of that store runs on this thread, or NIL.")
+(defvar *held* '()
+  "An alist of (store . connection), one entry for each store whose operation runs on this
+thread, so an operation of one store inside an operation of another, and back, reuses each
+store's connection (the hub's review of #654).")
 
 (defun store-connection (store)
   "The connection the running operation of STORE holds; over one connection, that connection."
-  (cond ((and *held* (eq (car *held*) store)) (cdr *held*))
+  (cond ((assoc store *held* :test #'eq) (cdr (assoc store *held* :test #'eq)))
         ((conn:poolp (store-source store))
          (error "praxeon/memory-db: no connection is held; run the operation inside %WITH-STORE"))
         (t (store-source store))))
 
 (defun %call-with-store (store function exclusive)
   (let ((source (store-source store)))
-    (cond ((and *held* (eq (car *held*) store))
+    (cond ((assoc store *held* :test #'eq)
            (if exclusive
                (bt:with-recursive-lock-held ((store-lock store)) (funcall function))
                (funcall function)))
           ((conn:poolp source)
            ;; CONNECTION FIRST, THEN THE LOCK (the hub's ruling on #653).
            (conn:with-connection (c source)
-             (let ((*held* (cons store c)))
+             (let ((*held* (acons store c *held*)))
                (if exclusive
                    (bt:with-recursive-lock-held ((store-lock store)) (funcall function))
                    (funcall function)))))
           (t
            (bt:with-recursive-lock-held ((store-lock store))
-             (let ((*held* (cons store source)))
+             (let ((*held* (acons store source *held*)))
                (funcall function)))))))
 
 (defmacro %with-store ((store &key exclusive) &body body)
@@ -463,7 +471,7 @@ store's lock, for the REMEMBERs inside the transaction (the hub's review of #645
   ;; The embedding is computed first, outside the lock.
   (let ((*embedded* (%embed-before-lock store content)))
     (%with-store (store :exclusive t)
-      (conn:with-transaction ((store-connection store))
+      (conn:with-transaction ((store-connection store) :immediate t)
         (let ((row (first (q:fetch (store-connection store)
                                    (list :select '(:superseded_by)
                                          :from (list (store-table store))
@@ -758,7 +766,7 @@ deletion and the progress rows' new marks are one transaction (#462's eighth rev
 transaction the app opened with CONN:WITH-TRANSACTION in the same dynamic extent, it is a
 savepoint. A transaction the app began with a raw BEGIN is not seen: on SQLite this call then
 signals and changes nothing, and on Postgres its COMMIT would end the app's transaction."
-  (conn:with-transaction ((store-connection store))
+  (conn:with-transaction ((store-connection store) :immediate t)
     (let* ((cited (mem::%last-cited-by-thread
                    (mem:observations-of store subject :include-superseded t :thread :all)))
            (n (q:run (store-connection store)
@@ -839,15 +847,20 @@ THUNK will write, are embedded before the lock is taken. SUPERSEDE opens a trans
 own, which becomes a savepoint inside this one; the other writes, REMEMBER, FORGET and
 RECORD-THREAD-PROGRESS among them, run in this transaction directly (Copilot's review of #645).
 
+The transaction runs on the connection %WITH-STORE holds: over a pool, one borrowed for it, or,
+on the app's own thread inside its CONN:WITH-CONNECTION on the same pool, the app's (#653). On
+SQLite an outermost transaction begins IMMEDIATE, so it waits for the database's write lock,
+within the busy timeout, before it reads.
+
 CALLED INSIDE CONN:WITH-TRANSACTION ON THE SAME THREAD, this is a savepoint, and a rollback of
 the outer transaction undoes what it wrote. That holds only on the thread that opened the outer
 transaction: cl-dbi records an open transaction per thread, not per connection. praxeon/observe
 writes on a thread of its own, so its window transaction is never a savepoint inside an app's
-transaction. When an app holds a transaction open on this store's connection while the observer
-writes, the observer's own BEGIN and COMMIT go to the same connection: on Postgres its COMMIT
-commits the app's transaction, and on SQLite its BEGIN is refused and the attempt fails (#651,
-#653). An app that opens its own transactions does not share this store's connection with an
-observer."
+transaction. Over a pool it also runs on a connection of its own, so the app's transaction and
+the observer's are separate. Over one connection shared with an app, the observer's BEGIN and
+COMMIT go to the app's connection: on Postgres its COMMIT commits the app's transaction, and on
+SQLite its BEGIN is refused (#651). So an app that also uses the database makes the store over
+its pool."
   (declare (ignore subject thread))
   ;; THE EMBEDDINGS ARE COMPUTED FIRST, outside the lock and the transaction (the hub's review of
   ;; #645). The embedding model is a network call; inside, every read of the store would wait for
@@ -861,5 +874,5 @@ observer."
                                 do (setf (gethash content table) embedding))
                           table)))))
     (%with-store (store :exclusive t)
-      (conn:with-transaction ((store-connection store))
+      (conn:with-transaction ((store-connection store) :immediate t)
         (funcall thunk)))))
