@@ -7149,3 +7149,37 @@ the worker lived on, and the window was written after the stop returned."
     (obs:await-observer observer :timeout 10)
     (sleep 0.1)
     (is (null (%thread-contents store)) "nothing was written after the call was released")))
+
+;;; --------------------------------------------------------------------------
+;;; #622: a failed closing save ends the run.
+;;; --------------------------------------------------------------------------
+
+(test a-failed-closing-save-ends-the-run-so-no-later-window-closes-the-unwritten-one
+  "The store holds windows 1-6 and 7-12 skipped and open, at mark 18. At the turn at 24, the retry
+of 1-6 fails again; the retry of 7-12 gets an answer, but the save that closes 1-6 before it fails
+once. The run ends there, so window 19-24 does not run, and its closing step does not close 7-12,
+which was never written, with a save that succeeds. At the next turn 7-12 and 19-24 are written
+(#622). At 014378f the run went on: 19-24 was written, 7-12 was recorded closed, and B was never
+written."
+  (let* ((closing-failures 1)
+         (store (make-instance 'selective-progress-store
+                               :fails-when (lambda (mark skipped) (declare (ignore mark))
+                                             (when (and (plusp closing-failures)
+                                                        (some (lambda (e) (eq (fourth e) :closed)) skipped))
+                                               (decf closing-failures)
+                                               t))))
+         (provider (make-instance 'windowed
+                                  :answers (list (list 1 100 (lambda () (%call-with (%ob "A." "fact"))))
+                                                 (list 7 0 (lambda () (%call-with (%ob "B." "fact"))))
+                                                 (list 19 0 (lambda () (%call-with (%ob "D." "fact"))))))))
+    (mem:record-thread-progress store "member-1" "conv-7" 18 '((1 6 1) (7 12 1)))
+    (let ((observer (%allergy-observer store provider :max-attempts 3)))
+      (%turn observer 24)
+      (is (= 0 closing-failures) "precondition: the closing save failed once")
+      (is (null (%thread-contents store)) "nothing was written in the run that the failed save ended")
+      (is (member '(7 12 1) (obs:observer-skipped observer) :test #'equal)
+          "7-12 is still open: ~S" (obs:observer-skipped observer))
+      (%turn observer 24)
+      (is (equal '("B." "D.") (%thread-contents store)))
+      (is (not (find 7 (nth-value 1 (mem:thread-progress store "member-1" "conv-7")) :key #'first))
+          "7-12 is not recorded skipped or closed"))))
