@@ -7045,8 +7045,9 @@ review of #533). At 8e8fdd6 only the first window was written."
     (is (equal '("A." "B." "C." "D.") (%thread-contents store)))
     (is (null (obs:observer-skipped observer)))))
 ;;; --------------------------------------------------------------------------
-;;; After the second review of #533: a failed closing save ends the window's attempts as a stop,
-;;; and the worker unblocks the deferrable signals.
+;;; After the second review of #533: a failed closing save ends the window's attempts without
+;;; counting a try (since #622 it ends the run, as :UNSAVED), and the worker unblocks the
+;;; deferrable signals.
 ;;; --------------------------------------------------------------------------
 
 (defun %lettered-provider (&rest firsts)
@@ -7097,9 +7098,10 @@ windows 13-18, 19-24 and 25-30 were closed unwritten."
 (test a-failed-closing-save-does-not-spend-the-later-windows-tries
   "Window 1-6 fails its first four model calls, so it is skipped at the turn at 6 and its retry at
 12 fails. Progress writes fail over the turns at 12, 18 and 24. Each turn's closing save before
-window 7-12 fails, and that ends the window's attempts as a stop rather than counting tries, so
-7-12 is not closed unwritten. Once writes work again, the second turn at 24 writes B, C and D and
-leaves only 1-6 closed; the turn at 30 and a flush write E (the second review of #533, case d).
+window 7-12 fails, and that ends the run (:UNSAVED, #622; a stop in #533) rather than counting
+tries, so 7-12 is not closed unwritten. Once writes work again, the second turn at 24 writes B, C
+and D and leaves only 1-6 closed; the turn at 30 and a flush write E (the second review of #533,
+case d).
 With a failed closing save counted as a failed attempt, 7-12 and 13-18 were lost."
   (let* ((store (make-instance 'selective-progress-store))
          (observer (%allergy-observer store (%lettered-provider '(1 4) 7 13 19 25))))

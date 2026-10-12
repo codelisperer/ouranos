@@ -440,9 +440,10 @@ written and before its progress was: then the next observer of the thread distil
 
 (defun %run (observer history flush today)
   "Try again the skipped windows still due, then distil HISTORY past the mark, one window at a
-time, until what is left is below a step (or, with FLUSH, nothing is left), or the observer is
-stopped. An error here is recorded and logged, never raised: an error no handler takes in this
-thread would end the process."
+time, until what is left is below a step (or, with FLUSH, nothing is left), the observer is
+stopped, or a window's closing save fails (:UNSAVED, #622), which ends the run before any later
+retry or window. An error here is recorded and logged, never raised: an error no handler takes
+in this thread would end the process."
   (unwind-protect
        (handler-case
            (progn (%reconcile-progress observer)
