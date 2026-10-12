@@ -29,7 +29,19 @@ pages from the same tree its request, or the export, is using, so a reload durin
 cannot mix two versions on one page. `export-site` writes `index.html`, `404.html` and one file
 per readable page (`roles/a.html` for the page served at `/roles/a`, or `roles/a/index.html`
 with `:layout :directory`). It writes nothing if any page fails to render, and it refuses a
-non-empty directory unless given `:clean t`. The site copies its own static assets.
+non-empty directory unless given `:clean t`. `:assets` names a directory of the site's own files
+(CSS, images, fonts, `.well-known/`), copied into the export after `:clean` empties it, each at
+its path relative to that directory. The export is refused, before anything is written, if an
+asset and a page cannot both be written (the same path, or one under the other), if the assets
+directory holds a link or a name with `*`, `?`, `[`, `]` or the escape character (`^` on
+Windows, `\` elsewhere), or if it holds or is inside the export directory.
+
+In a collection, `:sort-by` names a field, `:order` is `:ascending` (the default) or
+`:descending`, and a document without the field comes last. Documents tied on the field keep
+ascending key order under either `:order`, because `:descending` reverses the comparison and not
+the list. `:then-by` names a second field that orders a tie in the same direction, with a
+document lacking it last among the tie. `:then-by` without `:sort-by` is an error:
+`(klio:collection *site* "posts" :sort-by "date" :order :descending :then-by "title")`.
 
 A controlled list, such as skills, is declared once and checked on every load: a page that
 refers to a label that is not in the list fails to load, naming both files.
