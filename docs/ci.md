@@ -213,6 +213,13 @@ awkward platforms re-acquires that blind spot one leg at a time, and it would be
 usable Postgres, the honest response is to fix the provisioning or go red — not to excuse
 the leg.
 
+**Every leg sets `OURANOS_TEST_REAL_CREDENTIAL_STORE=1`**, in `verify.yml`'s job environment, and
+none sets `OURANOS_ALLOW_NO_CREDENTIAL_STORE`. The `hades/credentials` live tests use the real
+Credential Manager or Keychain of whoever runs them, so on a developer's machine they are opt-in
+(#357, [contributing.md](contributing.md)). A runner's store is thrown away with the runner, so
+CI always opts in, and a leg where they were skipped fails the gate the way a skipped Postgres
+does.
+
 The port is **not** pinned to 55432 on the native legs. That number exists in
 `docker-compose.test.yml` to stop a developer's real server being shadowed or silently
 `CREATE TABLE`'d into; a runner has nothing to protect, and forcing a preinstalled service

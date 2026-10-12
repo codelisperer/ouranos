@@ -10,7 +10,7 @@
 (in-package #:cons/tests)
 
 (def-suite not-covered
-  :description "The gate's NOT COVERED section lists declined axes and excused Postgres skips (#182)." :in all)
+  :description "The gate's NOT COVERED section lists declined axes and excused backend skips: Postgres (#182) and the credential store (#357)." :in all)
 (in-suite not-covered)
 
 (defun %load-not-covered ()
@@ -37,8 +37,9 @@ the file moved. Same reasoning as %FR and %FO."
              declined excused tag s)))
 
 (defparameter +memory-db-skip+
-  '("PRAXEON/MEMORY-DB/TESTS" . "Postgres unreachable: MNEMOSYNE_TEST_PG_URL is not set")
-  "An excused skip in the shape verify-tree.lisp records it: (suite . reason).")
+  '("PRAXEON/MEMORY-DB/TESTS" "postgres" "Postgres unreachable: MNEMOSYNE_TEST_PG_URL is not set"
+    "OURANOS_ALLOW_NO_PG")
+  "An excused skip in the shape verify-tree.lisp records it: (suite backend reason variable).")
 
 (defun %declined-axis (name printed)
   "An optional-axis entry in +OPTIONAL-AXES+'s shape, (name predicate disclose), whose
@@ -55,7 +56,7 @@ DISCLOSE records each call in PRINTED (a one-element list) and prints a line nam
     (is (search "========== NOT COVERED ==========" out))
     (is (search "nothing declined -- every optional axis ran (base+uv+view)" out))
     (is (not (search "postgres in" out)))
-    (is (not (search "but Postgres did not" out)))))
+    (is (not (search "but some backends did not" out)))))
 
 (test an-excused-postgres-skip-is-listed-and-nothing-declined-is-not-printed
   "The #181 defect: no axis declined, but a suite skipped its Postgres checks."
@@ -63,10 +64,10 @@ DISCLOSE records each call in PRINTED (a one-element list) and prints a line nam
   (let ((out (%not-covered '() (list +memory-db-skip+) "base+uv+view")))
     (is (not (search "nothing declined" out))
         "the section said \"nothing declined\" while a suite had skipped Postgres:~%~A" out)
-    (is (search "every optional axis ran (base+uv+view), but Postgres did not:" out))
+    (is (search "every optional axis ran (base+uv+view), but some backends did not:" out))
     (is (search "postgres in PRAXEON/MEMORY-DB/TESTS" out))
     (is (search "MNEMOSYNE_TEST_PG_URL is not set" out))
-    (is (search "Its Postgres checks did not run and are NOT in the total below." out))))
+    (is (search "OURANOS_ALLOW_NO_PG excused it. Its postgres checks did not run and are NOT in the total below." out))))
 
 (test a-declined-axis-and-an-excused-postgres-skip-are-both-listed
   (%load-not-covered)
@@ -84,14 +85,17 @@ DISCLOSE records each call in PRINTED (a one-element list) and prints a line nam
 
 (test excused-skips-are-listed-in-the-order-given
   "verify-tree.lisp pushes each excused suite as it runs and passes the list reversed, so the
-printer keeps the order it is given: the order the suites ran."
+printer keeps the order it is given: the order the suites ran. The second entry is another
+backend, the credential store (#357), which is listed by its own name."
   (%load-not-covered)
   (let* ((out (%not-covered '()
                             (list +memory-db-skip+
-                                  '("MNEMOSYNE/TESTS" . "Postgres unreachable"))
+                                  '("HADES/CREDENTIALS/TESTS" "credential-store"
+                                    "SKIPPED (OURANOS_TEST_REAL_CREDENTIAL_STORE is not set)"
+                                    "OURANOS_ALLOW_NO_CREDENTIAL_STORE"))
                             "base+uv+view"))
          (memory-db (search "postgres in PRAXEON/MEMORY-DB/TESTS" out))
-         (mnemosyne (search "postgres in MNEMOSYNE/TESTS" out)))
+         (credentials (search "credential-store in HADES/CREDENTIALS/TESTS" out)))
     (is-true memory-db)
-    (is-true mnemosyne)
-    (is (and memory-db mnemosyne (< memory-db mnemosyne)))))
+    (is-true credentials)
+    (is (and memory-db credentials (< memory-db credentials)))))

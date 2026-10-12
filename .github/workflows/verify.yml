@@ -74,6 +74,14 @@ jobs:
     # 35 to 40 minutes, and one was cancelled at the limit with every suite it had run passing.
     timeout-minutes: 60
 
+    # The credential-store tests (hades/credentials, #357) store, read and delete items in the
+    # real Credential Manager or Keychain of whoever runs them, so they run only when this is
+    # set. A runner's store is thrown away with the runner, so every leg sets it. On Linux the
+    # suite has no live tests to run. A leg where they were skipped fails the gate
+    # (+BACKEND-RULES+ in scripts/verify-tree.lisp).
+    env:
+      OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is
       # knowing WHICH platform broke, and fail-fast throws that away.
