@@ -16,11 +16,9 @@ its tag.
 
 - **praxeon/memory-db: `ensure-schema` creates an index on `subject`, `<table>_subject_idx`**
   (#482). An app that does not call `ensure-schema` and runs its own migrations creates it:
-  `CREATE INDEX IF NOT EXISTS <table>_subject_idx ON <table> (subject)`. Without it,
-  `recall-similar` still returns `:limit` rows in most cases on pgvector 0.8 or later, but a
-  subject whose rows are a small part of a large table can come back short. On pgvector before
-  0.8, `recall-similar` can return fewer rows than `:limit` whenever the HNSW index serves it;
-  upgrade pgvector to 0.8 or later.
+  `CREATE INDEX IF NOT EXISTS <table>_subject_idx ON <table> (subject)`. Without it, the exact
+  second query that `recall-similar` makes when its first comes up short reads the whole table.
+  On pgvector before 0.8 there is no iterative scan, so that second query is made more often.
 
 - **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
   `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
@@ -699,9 +697,12 @@ its tag.
   superseded ones, it got none. `recall-similar` now runs its query with
   `SET LOCAL hnsw.iterative_scan = strict_order`, inside a transaction it opens or inside the
   app's own `conn:with-transaction`, where the setting lasts until that transaction ends. That
-  needs pgvector 0.8 or later; on an older pgvector the query runs as before. `ensure-schema`
-  also creates an index on `subject`, `<table>_subject_idx`, so the planner can read a
-  subject's own rows and rank them exactly when they are a small part of the table.
+  needs pgvector 0.8 or later; on an older pgvector the query runs as before. An iterative scan
+  still stops at `hnsw.max_scan_tuples` or its memory limit, so when the query returns fewer
+  than `:limit` rows it runs again with `SET LOCAL enable_indexscan = off`, which ranks every
+  one of the subject's rows in scope. A subject with fewer than `:limit` observations in scope
+  makes that second query on every similarity recall. `ensure-schema` also creates an index on
+  `subject`, `<table>_subject_idx`, which that second query reads.
 
 - **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a
   sign-in** (#587). When `tasks/cancel` needed a sign-in and an observer of `:sign-in-required`

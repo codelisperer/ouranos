@@ -800,3 +800,29 @@ recall of the facts returns 20, and a recall of the thread returns 20 (#482's ow
                                                 (mdb:store-table store))))))
           (is (= 1 (length defs)) "one index of that name")
           (is (search "(subject)" (first defs)) "on SUBJECT, got ~A" (first defs))))))
+
+(test an-iterative-scan-that-stops-short-is-followed-by-an-exact-query
+  "Member x has 20 observations among 400 of other subjects, without the subject index, and with
+pgvector's limits lowered so the iterative scan stops after 30 rows, as it stops after 20,000 in
+a large table. That scan alone returns fewer than 20 of member x's rows; RECALL-SIMILAR then runs
+the query again without index scans and returns all 20 (Copilot's review of #625)."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store (format nil "member-~D" (mod i 40)) (format nil "Fact ~D about someone else." i)))
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store))
+              (c (mdb::store-connection store)))
+          (is (search "_embedding_idx" plan) "precondition: the HNSW index, got ~A" plan)
+          (conn:exec c "SET hnsw.ef_search = 10")
+          (conn:exec c "SET hnsw.max_scan_tuples = 30")
+          (let ((alone (length (conn:with-transaction (c)
+                                 (conn:exec c "SET LOCAL hnsw.iterative_scan = strict_order")
+                                 (conn:query c (format nil "SELECT id FROM ~A WHERE subject = 'member-x' AND thread IS NULL AND superseded_by IS NULL ORDER BY embedding <=> '~A' LIMIT 20"
+                                                       (mdb:store-table store)
+                                                       (llm:vector-text (llm:embed (make-instance 'scattered-embedder) "a query"))))))))
+            (is (< alone 20) "precondition: the iterative scan alone returns ~D of 20" alone)))
+        (is (= 20 (%nearest-count store 20))))))

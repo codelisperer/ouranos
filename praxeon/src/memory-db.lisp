@@ -530,9 +530,9 @@ HNSW.ITERATIVE_SCAN = strict_order makes the scan go on past EF_SEARCH, keeping 
 and the same three cases then return 100, 20 and 20.
 
 IT IS NOT EXACT IN EVERY CASE. An iterative scan stops after HNSW.MAX_SCAN_TUPLES rows (20,000 by
-default) or at its memory limit, so a subject holding 50 of 100,051 rows still came back short
-when the index was forced. The planner does not choose the index there: it estimates few
-matching rows and uses the subject index instead, which ranks every one of them.
+default) or at its memory limit, so a subject holding 50 of 100,051 rows still came back with 10
+when the index was forced. %POSTGRES-NEAREST runs the query again without index scans when the
+result is short, which is exact.
 
 The settings are SET LOCAL, inside a transaction this opens, or inside the app's own
 CONN:WITH-TRANSACTION, where they last until that transaction ends. On pgvector before 0.8 there
@@ -560,17 +560,35 @@ ONE SCOPE: THREAD :ALL is refused, as RECALL refuses it, since a recall builds a
            :detail "recall-similar takes one scope: NIL for the subject's facts, or a thread's id; :all is for observations-of"))
   (let ((rows (if (eq (store-dialect store) :sqlite)
                   (%sqlite-nearest store subject embedding as-of limit thread)
-                  (bt:with-recursive-lock-held ((store-lock store))
-                    (%with-complete-hnsw-scan (store)
-                      (q:fetch (store-connection store)
-                               (list :select +columns+
-                                     :from (list (store-table store))
-                                     :where (%where-current subject as-of nil thread)
-                                     :order-by (list (list (list :<=> :embedding
-                                                                 (%vector-text store embedding))))
-                                     :limit limit)
-                               :dialect (store-dialect store)))))))
+                  (%postgres-nearest store subject embedding as-of limit thread))))
     (%assemble (%rank-as-value (mapcar #'%row->observation rows)) budget kind)))
+
+(defun %postgres-nearest (store subject embedding as-of limit thread)
+  "RECALL-SIMILAR's ranking on Postgres: the LIMIT current observations of SUBJECT in THREAD's
+scope nearest EMBEDDING by cosine distance, nearest first.
+
+FIRST AS THE INDEX ALLOWS, THEN EXACTLY WHEN THAT CAME UP SHORT (#482). The query runs with an
+iterative HNSW scan (%WITH-COMPLETE-HNSW-SCAN). That scan still stops at HNSW.MAX_SCAN_TUPLES or
+its memory limit, so when it returns fewer than LIMIT rows, the query runs again with index
+scans turned off for its transaction. HNSW cannot serve it then, and the planner reads the
+subject's rows through the subject index's bitmap scan, or the table, and ranks every one. A
+subject with fewer than LIMIT observations in scope pays for that second query on every recall;
+it reads only the subject's rows."
+  (flet ((nearest ()
+           (q:fetch (store-connection store)
+                    (list :select +columns+
+                          :from (list (store-table store))
+                          :where (%where-current subject as-of nil thread)
+                          :order-by (list (list (list :<=> :embedding (%vector-text store embedding))))
+                          :limit limit)
+                    :dialect (store-dialect store))))
+    (bt:with-recursive-lock-held ((store-lock store))
+      (let ((rows (%with-complete-hnsw-scan (store) (nearest))))
+        (if (< (length rows) limit)
+            (conn:with-transaction ((store-connection store))
+              (conn:exec (store-connection store) "SET LOCAL enable_indexscan = off")
+              (nearest))
+            rows)))))
 
 (defun %sqlite-nearest (store subject embedding as-of limit &optional thread)
   "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations with their
