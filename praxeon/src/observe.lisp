@@ -870,6 +870,10 @@ with the closing save before the first write (%CLOSE-OPEN-WINDOWS-BEFORE)."
                              ;; Every text the transaction can write: the proposals, and the
                              ;; window's earlier observations that promotion may copy into the
                              ;; subject's facts, so a store embeds them before it takes its lock.
+                             ;; The cost: each attempt embeds every earlier observation of the
+                             ;; window, whether or not promotion will copy it, which on a retry
+                             ;; means one embedding call per text the window already holds (the
+                             ;; hub's review of #645).
                              :contents (append (mapcar #'distil:proposal-content
                                                        (distil:distillation-proposals fresh))
                                                (mapcar #'mem:observation-content
