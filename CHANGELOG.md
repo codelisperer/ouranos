@@ -155,6 +155,13 @@ its tag.
 
 ### Added
 
+- **klio: `klio:collection` and `klio:tree-collection` take `:then-by`, a second field that orders
+  documents tied on `:sort-by`** (#557). It sorts in the same direction as `:order`, with a
+  document lacking it last among the tie, and it also orders the documents that lack the
+  `:sort-by` field. `:then-by` without `:sort-by` signals an error. Without it, ties keep
+  ascending key order under both `:ascending` and `:descending`, as before. That rule is now in the README, so a site that worked around it can
+  replace the workaround with `:then-by`.
+
 - **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
   which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
   `--default-channel`** (#408).

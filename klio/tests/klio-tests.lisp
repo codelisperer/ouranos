@@ -908,6 +908,74 @@ included; a file whose name only begins with the collection's name is not a memb
       (is (typep (nth-value 1 (ignore-errors (k:tree-collection tree "notes" :order :sideways)))
                  'type-error)))))
 
+(defun %ranked (date rank)
+  (format nil "---~%title: \"Note\"~@[~%date: ~A~]~@[~%rank: ~D~]~%---~%x~%" date rank))
+
+(test descending-keeps-ties-in-key-order-and-then-by-orders-them
+  "#557: under :descending, documents tied on the sort field keep ascending key order, because
+the comparison is reversed and not the list. :THEN-BY orders a tie by a second field, in the
+same direction, with a document lacking it last among the tie; it also orders the documents
+that lack the sort field."
+  (with-content-dir (dir ("notes/a.md" . (%ranked "2024-01-01" 2))
+                         ("notes/b.md" . (%ranked "2024-01-01" 1))
+                         ("notes/c.md" . (%ranked "2020-01-01" 7))
+                         ("notes/d.md" . (%ranked "2024-01-01" nil))
+                         ("notes/e.md" . (%ranked nil 5))
+                         ("notes/f.md" . (%ranked nil 9)))
+    (let ((tree (k:load-tree dir :known-extra '("rank"))))
+      (flet ((keys (&rest options)
+               (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                       (apply #'k:tree-collection tree "notes" :sort-by "date" options))))
+        (is (equal '("a" "b" "d" "c" "e" "f") (keys :order :descending))
+            "without :then-by, ties stay in key order under :descending: ~S" (keys :order :descending))
+        (is (equal '("a" "b" "d" "c" "f" "e") (keys :order :descending :then-by "rank"))
+            "descending by rank within the tie, the unranked one last: ~S"
+            (keys :order :descending :then-by "rank"))
+        (is (equal '("c" "b" "a" "d" "e" "f") (keys :then-by "rank"))
+            "ascending by rank within the tie, the unranked one last: ~S" (keys :then-by "rank"))
+        (is (equal '("c" "a" "b" "d" "e" "f") (keys :then-by "missing"))
+            "a :then-by field nobody has changes nothing: ~S" (keys :then-by "missing"))
+        (signals error (k:tree-collection tree "notes" :then-by "rank")
+          ":then-by without :sort-by is refused, not ignored")))))
+
+(test the-boolean-core-fields-sort-as-present-only-when-true
+  "DRAFT and SEARCH are stored as booleans, so `false' reads as NIL and counts as missing,
+unlike an `extra' field written false. Drafts are readable only in dev mode."
+  (with-content-dir (dir ("notes/a.md" . (format nil "---~%title: \"A\"~%draft: false~%search: false~%---~%x~%"))
+                         ("notes/b.md" . (format nil "---~%title: \"B\"~%draft: true~%---~%x~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"C\"~%---~%x~%")))
+    (let ((tree (k:load-tree dir)))
+      (k:with-dev-mode ()
+        (flet ((keys (&rest options)
+                 (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                         (apply #'k:tree-collection tree "notes" options))))
+          (is (equal '("b" "a" "c") (keys :sort-by "draft"))
+              "only b's draft is true; a's false and c's absent are both missing: ~S"
+              (keys :sort-by "draft"))
+          (is (equal '("b" "c" "a") (keys :sort-by "search"))
+              "search is T unless written false, and a's false is missing: ~S"
+              (keys :sort-by "search")))))))
+
+(test a-field-written-false-is-present-and-one-written-null-is-missing
+  "Copilot's review of #614 asked whether `rank: false' is read as a missing field. It is not:
+the front matter reads `false' as :FALSE, a value, which sorts as its text. `rank: null' and an
+empty `rank:' are read as NIL and count as missing, so they go last, for :THEN-BY and :SORT-BY
+alike."
+  (with-content-dir (dir ("notes/a.md" . (format nil "---~%title: \"A\"~%date: 2024-01-01~%---~%x~%"))
+                         ("notes/b.md" . (format nil "---~%title: \"B\"~%date: 2024-01-01~%rank: false~%---~%x~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"C\"~%date: 2024-01-01~%rank: 3~%---~%x~%"))
+                         ("notes/d.md" . (format nil "---~%title: \"D\"~%date: 2024-01-01~%rank: null~%---~%x~%")))
+    (let ((tree (k:load-tree dir :known-extra '("rank"))))
+      (flet ((keys (&rest options)
+               (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                       (apply #'k:tree-collection tree "notes" options))))
+        (is (equal '("c" "b" "a" "d") (keys :sort-by "date" :then-by "rank"))
+            "ascending: the number, then false as text, then the two without a value in key order: ~S"
+            (keys :sort-by "date" :then-by "rank"))
+        (is (equal '("b" "c" "a" "d") (keys :sort-by "rank" :order :descending))
+            "as the primary field: false is present, null and absent are last: ~S"
+            (keys :sort-by "rank" :order :descending))))))
+
 (test a-document-is-found-by-its-slug-only-when-a-reader-may-see-it
   (with-content-dir (dir ("skills.md" . (format nil "---~%title: \"Skills\"~%slug: \"toolbox\"~%---~%x~%"))
                          ("secret.md" . +draft+))
