@@ -112,20 +112,41 @@ order. NAME is the collection's name (#557)."
         (:li (:a :href (format nil "/~A" (document-key d))
                  (or (content-meta-title (document-meta d)) (document-key d)))))))))
 
+(defparameter +windows-device-names+
+  '("CON" "PRN" "AUX" "NUL"
+    "COM1" "COM2" "COM3" "COM4" "COM5" "COM6" "COM7" "COM8" "COM9"
+    "LPT1" "LPT2" "LPT3" "LPT4" "LPT5" "LPT6" "LPT7" "LPT8" "LPT9")
+  "The names Windows reserves for devices. A file or directory named one of them, with or
+without an extension, cannot be made on Windows (#631).")
+
+(defun %windows-device-name-p (segment)
+  "Whether SEGMENT's name before its first `.' is a Windows device name, compared without regard
+to case: CON, nul.txt and com1 are."
+  (member (subseq segment 0 (or (position #\. segment) (length segment)))
+          +windows-device-names+ :test #'string-equal))
+
 (defun %safe-collection-name-p (name)
   "Whether NAME, without slashes at either end, is safe as both a URL path and a path under the
 export directory: segments separated by `/', each non-empty, made only of letters, digits, `.',
-`-' and `_', and not starting with `.' or `_', which also rules out `.' and `..'.
+`-' and `_', not starting with `.' or `_', which also rules out `.' and `..', not ending in `.',
+and not a Windows device name (%WINDOWS-DEVICE-NAME-P).
 
 Copilot's review of #619: `../outside' would have been written outside the export directory, and
 characters such as `*', `:' or a backslash mean something to a Lisp or Windows pathname. A
 segment starting with `_' or `.' is one CONTENT-FILES skips (#557), so its listing would always
-be empty."
+be empty.
+
+#631: Windows strips a trailing `.', so `roles.' and `roles' would be one directory there while
+%COLLIDING-PATHS took them for two, and it cannot make a file or directory named for a device.
+Both are refused on every operating system, so a site behaves the same everywhere. A space is
+not one of the characters allowed, so a trailing space is refused already."
   (let ((segments (uiop:split-string name :separator "/")))
     (and segments
          (every (lambda (segment)
                   (and (plusp (length segment))
                        (not (find (char segment 0) "._"))
+                       (char/= #\. (char segment (1- (length segment))))
+                       (not (%windows-device-name-p segment))
                        (every (lambda (c) (or (alphanumericp c) (find c ".-_"))) segment)))
                 segments))))
 
@@ -161,7 +182,7 @@ segment (`roles/page') would be taken for that collection's pages."
                      entry))))
         (let ((name (string-trim "/" name)))
           (unless (%safe-collection-name-p name)
-            (error "klio: the collection name ~S must be /-separated segments of letters, digits, . - and _, none empty or starting with . or _"
+            (error "klio: the collection name ~S must be /-separated segments of letters, digits, . - and _, none empty, starting with . or _, ending in ., or a Windows device name such as CON, NUL or COM1"
                    name))
           (when (member name names :test #'string-equal)
             (error "klio: the collection ~S is named twice in :collections" name))
