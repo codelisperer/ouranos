@@ -123,7 +123,7 @@ fails because the server is gone."
             (return)))))))
 
 (defun %read-line-within (stream limit)
-  "The next line of STREAM, without its newline or a carriage return before it, and :LINE; NIL
+  "The next line of STREAM, without its newline or the one carriage return before it, and :LINE; NIL
 and :TOO-LONG for a line of more than LIMIT octets, which is read to its end and dropped; NIL
 and :EOF at the end. The octets are counted as they arrive, as MAX-BODY-BYTES is over HTTP, and
 then decoded as UTF-8, with a byte that is not UTF-8 read as `?', so a malformed sequence

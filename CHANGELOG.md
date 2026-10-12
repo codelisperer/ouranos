@@ -190,24 +190,24 @@ its tag.
     SDK's `DEFAULT_INHERITED_ENV_VARS` (#604). On Linux and macOS that is `HOME`, `LOGNAME`,
     `PATH`, `SHELL`, `TERM` and `USER`, to which praxeon adds `LANG` and `TMPDIR`. On Windows
     it is 18 names, including `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `SYSTEMROOT`, `TEMP`
-    and `USERPROFILE`. A value that
-    starts with `()`, an exported bash function, is not passed. `:environment :inherit` passes
-    the whole environment.
+    and `USERPROFILE`. A value that starts with `()`, an exported bash function, is not passed.
+    `:environment :inherit` passes the whole environment.
   - The client finds the server's era with `server/discover` and falls back to `initialize` for
     a legacy server. A request that times out after it was written gets
     `notifications/cancelled`; one that times out while still queued fails as not run and is
     never sent. A line longer than `:max-body-bytes` octets, counted as received, is dropped.
     `client-era` and `client-protocol-version` describe the running server: once a request finds
-    that it has exited, they are NIL until a new server's handshake succeeds (#610). The server's stderr is
-    discarded, or appended to the `:stderr` file, and never logged.
+    that it has exited, they are NIL until a new server's handshake succeeds (#610), and after
+    `close-client` they are NIL (#601). The server's stderr is discarded, or appended to the
+    `:stderr` file, and never logged.
   - With `:restart t`, the default, a server that exits is started again at the next request,
     at most 3 times in any 60 seconds. With `:restart nil`, every later request fails as not
     run until the app closes the client and makes another.
   - `close-client` (new) closes the server's stdin, waits `*stdio-close-seconds*` (5), sends
     SIGTERM, waits `*stdio-term-seconds*` (2), then sends SIGKILL, to the server's process
     group. Running servers are closed the same way when the image exits, so a client stays
-    reachable until `close-client`. On Windows the server
-    is ended with `TerminateProcess`, and a process it started can outlive it (#599).
+    reachable until `close-client`. On Windows the server is ended with `TerminateProcess`, and
+    a process it started can outlive it (#599).
   - `list-tools`, `call-tool`, `grant-tools`, resources, prompts and tasks work over stdio
     unchanged. `praxeon/docs/mcp.md`, "Local servers over stdio".
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
