@@ -135,10 +135,12 @@ aion/secret:secret, and is revealed only when libgit2 asks for it."
 called it, so a special binding reaches them.")
 
 (defmacro %guarded (&body body)
-  "Run BODY in a callback. An error is kept for the operation to signal, and GIT_EUSER is
-returned to libgit2 in place of a non-local exit through its frames."
+  "Run BODY in a callback. A serious condition, an error or one such as a timeout, is kept for
+the operation to signal, and GIT_EUSER is returned to libgit2 in place of a non-local exit
+through its frames. A THROW or GO out of a caller's credential function cannot be stopped
+here, so such a function must not make one."
   `(handler-case (progn ,@body)
-     (error (e)
+     (serious-condition (e)
        (when *operation* (setf (%operation-kept *operation*) e))
        +git-euser+)))
 
@@ -163,12 +165,17 @@ returned to libgit2 in place of a non-local exit through its frames."
                                     given)))
                (setf (%operation-offered op) t)
                (cond ((null credential) +git-passthrough+)
-                     (t (check-type credential credential)
-                        (%check "git_credential_userpass_plaintext_new"
-                                (%credential-userpass-plaintext-new
-                                 out (credential-user credential)
-                                 (%reveal (credential-token credential))))
-                        0))))))))
+                     ((not (credential-p credential))
+                      ;; Not CHECK-TYPE: its message would print the value, which can be the
+                      ;; token itself.
+                      (error "The credentials function returned a ~(~A~), not a CREDENTIAL."
+                             (type-of credential)))
+                     (t
+                      (%check "git_credential_userpass_plaintext_new"
+                              (%credential-userpass-plaintext-new
+                               out (credential-user credential)
+                               (%reveal (credential-token credential))))
+                      0))))))))
 
 (cffi:defcallback %push-update-reference-callback :int
     ((reference :pointer) (status :pointer) (data :pointer))
@@ -217,17 +224,36 @@ has no scheme://."
             (subseq host-port 0 (1+ (or (position #\] host-port) (1- (length host-port)))))
             (subseq host-port 0 (or (position #\: host-port) (length host-port))))))))
 
+(defun %percent-decode (text)
+  "TEXT with each %XX replaced by the octet XX, read as Latin-1, and any other % left as it is,
+as libgit2's git_str_decode_percent does."
+  (with-output-to-string (out)
+    (let ((i 0) (n (length text)))
+      (loop while (< i n)
+            do (let ((code (and (char= #\% (char text i)) (<= (+ i 3) n)
+                                (ignore-errors (parse-integer text :start (1+ i) :end (+ i 3)
+                                                                   :radix 16)))))
+                 (if code
+                     (progn (write-char (code-char code) out) (incf i 3))
+                     (progn (write-char (char text i) out) (incf i))))))))
+
 (defun %ip-literal-https-url-p (url)
-  "Whether URL is an https URL whose host is an IP address. libgit2's OpenSSL stream treats a
-host as one when inet_pton accepts it as IPv4 or IPv6. This answers yes for any host in
-brackets, which is how a URL writes an IPv6 address, and for any four dot-separated runs of
-digits, so it refuses at least every host inet_pton accepts as an address."
+  "Whether URL is an https URL whose host is an IP address. libgit2 percent-decodes the host
+(url_parse_finalize, src/util/net.c), and its OpenSSL stream treats the decoded host as an
+address when inet_pton accepts it as IPv4 or IPv6. So the host is decoded once here too, and
+this answers yes for a host in brackets, which is how a URL writes an IPv6 address, for a
+decoded host with a colon in it, which only an IPv6 address can have, and for any four
+dot-separated runs of digits. That refuses at least every host inet_pton accepts."
   (and (>= (length url) 8)
        (string-equal "https://" url :end2 8)
-       (let ((host (%url-host url)))
+       (let ((host (let ((raw (%url-host url)))
+                     (and raw (if (and (plusp (length raw)) (char= #\[ (char raw 0)))
+                                  raw
+                                  (%percent-decode raw))))))
          (and host
               (plusp (length host))
               (or (char= #\[ (char host 0))
+                  (find #\: host)
                   (let ((parts (uiop:split-string host :separator ".")))
                     (and (= 4 (length parts))
                          (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p)))
@@ -304,8 +330,10 @@ and at most once: a remote that refuses it signals AUTHENTICATION-FAILED.
 FOLLOW-REDIRECTS is :NONE (the default), :INITIAL or :ALL. With :NONE, a redirect to the same
 host is followed and one to another host is refused (GHSA-2889-x8f6-mc4x).
 
-Signals INSECURE-REMOTE on Linux for an https remote whose host is an IP address, and
-GIT-ERROR for anything else libgit2 reports."
+Signals INSECURE-REMOTE on Linux, and only there, for an https remote whose host is an IP
+address (GHSA-h7gc-w2gg-p9xp), and GIT-ERROR for anything else libgit2 reports. That check is
+of the remote's URL before connecting; with :INITIAL or :ALL, a redirect to an https IP address
+is followed without it."
   (%with-repository-pointer (repo repository)
     (%with-remote (r repo remote)
       (%fetch r credentials follow-redirects)))
@@ -361,7 +389,9 @@ that already contains the remote's commit, including one with commits the remote
 Signals NOT-FAST-FORWARD when the branch and the remote's branch have each got commits the
 other lacks, and CHECKOUT-CONFLICT when the new commit would overwrite a change that is not
 committed or a file that is not tracked. In both cases only the remote-tracking branch has
-changed. Signals BRANCH-NOT-CHECKED-OUT for a BRANCH that is not HEAD's while HEAD has commits,
+changed. The files are checked out before the branch is moved, because the checkout is what
+finds a conflict; if moving the branch then fails, the files are at the new commit and the
+branch at the old one, and a GIT-ERROR names git_reference_create. Signals BRANCH-NOT-CHECKED-OUT for a BRANCH that is not HEAD's while HEAD has commits,
 DETACHED-HEAD when HEAD is not on a branch, and GIT-ERROR when the remote has no such branch.
 CREDENTIALS and FOLLOW-REDIRECTS are as for FETCH."
   (%with-repository-pointer (repo repository)
@@ -435,6 +465,8 @@ FETCH. (Named PUSH-BRANCH because PUSH is Common Lisp's.)"
                   (cffi:foreign-slot-value refspecs '(:struct git-strarray) 'count) 1)
             (let* ((*operation* (%make-operation credentials))
                    (code (%remote-push r refspecs options)))
+              ;; An error a callback kept comes first, as in %FINISH-OPERATION.
+              (when (%operation-kept *operation*) (error (%operation-kept *operation*)))
               (when (= code +git-enonfastforward+)
                 (error 'push-rejected :reference target :reason "not a fast-forward"))
               (%finish-operation *operation* "git_remote_push" code)

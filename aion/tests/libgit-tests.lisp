@@ -666,7 +666,9 @@ libgit2 acts on, and the refusal is the default's doing."
   "A server that answers 401 to everything gets the credential once, as HTTP Basic, and FETCH
 then signals AUTHENTICATION-FAILED rather than offering it again. The credential function is
 called once with the remote's URL, and the token, given as an aion/secret, appears in no
-printed form of the credential. With no credential the same server gives the same condition."
+printed form of the credential. With no credential the same server gives the same condition,
+and a function that returns something other than a CREDENTIAL gets an error that does not
+print what it returned."
   (http:with-server (server (lambda (request stream)
                               (declare (ignore request))
                               (http:write-response
@@ -689,7 +691,16 @@ printed form of the credential. With no credential the same server gives the sam
                                        (http:server-requests server)))))
         (is (null (search "t0ken" (prin1-to-string credential))))
         (is (typep (outcome (lambda () (git:fetch repo "origin")))
-                   'git:authentication-failed))))))
+                   'git:authentication-failed))
+        ;; A function that returns the bare token by mistake gets an error that does not
+        ;; print it (#623's review).
+        (let ((wrong (outcome (lambda ()
+                                (git:fetch repo "origin"
+                                           :credentials (lambda (url user)
+                                                          (declare (ignore url user))
+                                                          "t0ken"))))))
+          (is (typep wrong 'error))
+          (is (null (search "t0ken" (princ-to-string wrong))) "~A" wrong))))))
 
 (test an-https-remote-at-an-ip-address-is-refused-on-linux
   "GHSA-h7gc-w2gg-p9xp. Which URLs count as an IP address is checked on every platform. On
@@ -703,6 +714,10 @@ same calls are made and fail to connect, because macOS and Windows do not use Op
   (is-false (git::%ip-literal-https-url-p "https://example.invalid/r"))
   (is-false (git::%ip-literal-https-url-p "https://192.0.2.1.example.invalid/r"))
   (is-false (git::%ip-literal-https-url-p "/srv/git/r.git"))
+  ;; libgit2 percent-decodes the host before it uses it (#623's review).
+  (is-true (git::%ip-literal-https-url-p "https://%31%39%32.0.2.1/r.git"))
+  (is-true (git::%ip-literal-https-url-p "https://%3A%3A1/r.git"))
+  (is-false (git::%ip-literal-https-url-p "https://ex%61mple.invalid/r.git"))
   (with-directory (bare)
     (init-bare bare)
     (with-new-repository (repo dir)
@@ -710,12 +725,22 @@ same calls are made and fail to connect, because macOS and Windows do not use Op
       (git:set-remote repo "origin" "https://user:hunter2@127.0.0.1:1/repo.git")
       (git:set-remote repo "mirror" (uiop:native-namestring bare))
       (git-cli dir "config" "remote.mirror.pushurl" "https://127.0.0.1:1/mirror.git")
+      ;; The URLs libgit2 connects to after the configuration's rewrites.
+      (git-cli dir "config" "url.https://127.0.0.1:1/.insteadOf" "aion-fetch:")
+      (git-cli dir "config" "url.https://127.0.0.1:1/.pushInsteadOf" "aion-push:")
+      (git:set-remote repo "rewritten" "aion-fetch:repo.git")
+      (git:set-remote repo "push-rewritten" "aion-push:repo.git")
+      (is (string= "https://127.0.0.1:1/repo.git" (git:remote-url repo "rewritten")))
       (let ((fetch (outcome (lambda () (git:fetch repo "origin"))))
-            (push (outcome (lambda () (git:push-branch repo "mirror")))))
+            (push (outcome (lambda () (git:push-branch repo "mirror"))))
+            (rewritten (outcome (lambda () (git:fetch repo "rewritten"))))
+            (push-rewritten (outcome (lambda () (git:push-branch repo "push-rewritten")))))
         #+linux
         (progn
           (is (typep fetch 'git:insecure-remote))
           (is (typep push 'git:insecure-remote))
+          (is (typep rewritten 'git:insecure-remote))
+          (is (typep push-rewritten 'git:insecure-remote))
           (is (equal '("https://127.0.0.1:1/repo.git" "GHSA-h7gc-w2gg-p9xp")
                      (ignore-errors (list (git:insecure-remote-url fetch)
                                           (git:insecure-remote-advisory fetch))))))
@@ -723,7 +748,10 @@ same calls are made and fail to connect, because macOS and Windows do not use Op
         (progn
           (is (typep fetch 'git:git-error))
           (is (typep push 'git:git-error))
-          (is (not (or (typep fetch 'git:insecure-remote) (typep push 'git:insecure-remote)))))))))
+          (is (typep rewritten 'git:git-error))
+          (is (typep push-rewritten 'git:git-error))
+          (is (notany (lambda (c) (typep c 'git:insecure-remote))
+                      (list fetch push rewritten push-rewritten))))))))
 
 (test the-option-struct-layouts-agree-with-libgit2
   "ffi.lisp copies git_fetch_options and git_push_options from the 1.9.7 headers. libgit2's
