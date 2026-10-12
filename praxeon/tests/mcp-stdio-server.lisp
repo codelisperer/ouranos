@@ -23,20 +23,32 @@
 ;;;;   crash            exits with status 1 as soon as it starts
 ;;;;   garbage          modern, and before each tool result it writes a line that is not JSON, a
 ;;;;                    line of 10000 characters, a JSON line of 1500 three-octet characters,
-;;;;                    and a line with a byte that is not UTF-8
+;;;;                    a line with a byte that is not UTF-8, and a JSON line of 4500 octets of
+;;;;                    malformed UTF-8
 ;;;;   ping             legacy, and it sends a ping request before it answers tools/list
 ;;;;   ignore-eof       modern, and it keeps running after its stdin ends, until a signal
 ;;;;   ignore-term      ignore-eof, and SIGTERM is recorded but does not end it
 ;;;;   stall            modern, with a sixth tool, stall, which stops reading stdin for 5 seconds
 ;;;;                    and then answers
+;;;;   modern-then-unsupported
+;;;;                    modern at its first start, and unsupported once RECORD-FILE holds a start
 ;;;;   orphan           modern, with a sixth tool, exit-leaving-child, which starts /bin/sleep 6
 ;;;;                    with this process's stdout, then exits with status 3
 ;;;;
 ;;;; Every request also writes a line to stderr. Tools: echo, fail (isError), slow (30 s),
 ;;;; slow-a (0.5 s) and exit (the process exits with status 3), two per tools/list page.
 
-(defvar *mode* (second sb-ext:*posix-argv*))
 (defvar *record* (fourth sb-ext:*posix-argv*))
+(defvar *mode*
+  (let ((mode (second sb-ext:*posix-argv*)))
+    (if (equal mode "modern-then-unsupported")
+        ;; Modern at its first start, unsupported at every later one.
+        (if (and (probe-file *record*)
+                 (with-open-file (s *record*)
+                   (loop for line = (read-line s nil) while line thereis (equal line "start"))))
+            "unsupported"
+            "modern")
+        mode)))
 
 (let ((*standard-output* *error-output*))
   (load (third sb-ext:*posix-argv*))
@@ -116,6 +128,13 @@
       ;; {"x": "<FF>"} and a newline: valid JSON but for one byte that is not UTF-8.
       (send-bytes (concatenate '(vector (unsigned-byte 8))
                                (map 'vector #'char-code "{\"x\": \"") #(255)
+                               (map 'vector #'char-code "\"}") #(10)))
+      ;; 900 copies of the obsolete five-octet form F8 88 80 80 80, 4500 octets. SBCL's stream
+      ;; decoder reads each copy as two characters worth four octets, so under a limit of 4096
+      ;; the line fits only when the decoded characters are counted (#610).
+      (send-bytes (concatenate '(vector (unsigned-byte 8))
+                               (map 'vector #'char-code "{\"x\": \"")
+                               (loop repeat 900 append '(#xF8 #x88 #x80 #x80 #x80))
                                (map 'vector #'char-code "\"}") #(10))))
     (cond ((equal name "echo")
            (send (obj "jsonrpc" "2.0" "method" "notifications/message"
