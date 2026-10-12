@@ -26,8 +26,12 @@
 
 (defun %passed-through ()
   "Variables the server's SBCL needs to find its core and its compiled jzon, when they are set
-here. The fixed set leaves them out, so the tests pass them as an app would."
-  (loop for name in '("SBCL_HOME" "XDG_CACHE_HOME" "LOCALAPPDATA" "ASDF_OUTPUT_TRANSLATIONS")
+here. The fixed set leaves them out, so the tests pass them as an app would. On Windows, ASDF's
+default source registry includes the all-users application data folder, which it finds through
+ALLUSERSAPPDATA or ALLUSERSPROFILE; without either, the entry is invalid and loading Quicklisp
+fails."
+  (loop for name in '("SBCL_HOME" "XDG_CACHE_HOME" "LOCALAPPDATA" "ASDF_OUTPUT_TRANSLATIONS"
+                      "ALLUSERSAPPDATA" "ALLUSERSPROFILE")
         for value = (sb-ext:posix-getenv name)
         when value collect (cons name value)))
 
@@ -43,6 +47,17 @@ here. The fixed set leaves them out, so the tests pass them as an app would."
                           (append environment (%passed-through)))
          (loop for (key value) on keys by #'cddr
                unless (eq key :environment) append (list key value))))
+
+(defun %print-server-stderr (mode file)
+  "Print FILE, a test server's stderr, to this image's error output, each line marked as the
+server's. The gate's summary of a failing suite leads with the first line that holds
+\"Unhandled \", so the server's own is written in lower case, and the summary still shows this
+image's error."
+  (format *error-output* "~&;; the ~A test server recorded no start; its stderr:~%" mode)
+  (dolist (line (ignore-errors (uiop:read-file-lines file)))
+    (let ((at (search "Unhandled " line)))
+      (format *error-output* ";;   ~A~%"
+              (if at (concatenate 'string (subseq line 0 at) "u" (subseq line (1+ at))) line)))))
 
 (defmacro with-stdio-client ((client record mode &rest keys) &body body)
   "Run BODY with CLIENT on a local test server in MODE, recording to RECORD, and close it. Unless
@@ -60,8 +75,7 @@ the server never recorded its start, so a server that dies while loading says wh
        (unwind-protect (progn ,@body)
          (mcp:close-client ,client)
          (when (and (zerop (%recorded-count ,record "start")) (probe-file ,stderr))
-           (format *error-output* "~&;; the ~A test server recorded no start; its stderr:~%~A~%"
-                   ,mode (ignore-errors (uiop:read-file-string ,stderr))))
+           (%print-server-stderr ,mode ,stderr))
          (ignore-errors (delete-file ,stderr))
          (ignore-errors (delete-file ,record))))))
 
