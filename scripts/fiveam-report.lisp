@@ -36,7 +36,7 @@
 (defpackage #:ouranos-fiveam-report
   (:use #:cl)
   (:export #:failure-details #:skip-reasons #:rule-line-p #:fail-counts
-           #:every-report-passed-p))
+           #:every-report-passed-p #:print-failure-details))
 
 (in-package #:ouranos-fiveam-report)
 
@@ -125,3 +125,15 @@ reported ok (#605). An output with no `Fail:' line at all is not a pass here, an
 reports it before asking this: as NO-RUN when it also has no `Did N checks.' line."
   (let ((counts (fail-counts output)))
     (and counts (every #'zerop counts) t)))
+
+(defun print-failure-details (output &optional (stream *standard-output*))
+  "Print each line FAILURE-DETAILS finds in OUTPUT to STREAM, indented to sit under the gate's
+FAIL line, and return how many there were.
+
+Used by both of the gate's FAIL branches: a suite that exited 0 with failing checks, and one
+whose child exited non-zero. The second includes a suite that ran its checks and then
+signalled because some failed, as aion/tests does since #605; without this, its failures were
+reported only as the error that ended the child, not as the checks that failed."
+  (let ((details (failure-details output)))
+    (format stream "~{          ~a~%~}" details)
+    (length details)))

@@ -879,10 +879,6 @@ in a total (pre-publication issue 168)."
 ;;; detail away. A gate whose job is to say what to fix must carry the finding out with it --
 ;;; all of it.
 
-(defun failure-details (output)
-  "WHICH checks failed, not merely that some did. See scripts/fiveam-report.lisp."
-  (ouranos-fiveam-report:failure-details output))
-
 (defun skip-reasons (output)
   "The reasons under FiveAM's `Skip Details:` block, so the gate can say WHAT did not run
 rather than only how much. See scripts/fiveam-report.lisp."
@@ -1127,7 +1123,11 @@ let this run claim `view' while the five assertions skipped."
                       s (length fails) fails code)))
           (cond
             ((not (zerop code))
-             (format t "  FAIL    ~a  (child exited ~a)~%~a~%" s code (failure-excerpt text 6))
+             (format t "  FAIL    ~a  (child exited ~a)~%" s code)
+             ;; Which checks failed, when the child ran some before it ended: aion/tests now
+             ;; signals after a failing report (#605). Then why the child ended.
+             (ouranos-fiveam-report:print-failure-details text)
+             (format t "~a~%" (failure-excerpt text 6))
              (fail "~a" (or (ouranos-failure-origin:report-origin text s *root*)
                             (format nil "~a errored in a clean image" s))))
             ((null n)
@@ -1153,11 +1153,9 @@ let this run claim `view' while the five assertions skipped."
                    (format t "  ok      ~a~34t~a checks (~D skipped)~%~{          skip: ~a~%~}"
                            s n skipped (skip-reasons text)))))
             (t (incf grand n)
-               (let ((details (failure-details text)))
-                 (format t "  FAIL    ~a~34t~a checks, some failing~%~{          ~a~%~}"
-                         s n details)
-                 (unless details
-                   (format t "~a~%" (failure-excerpt text 8))))
+               (format t "  FAIL    ~a~34t~a checks, some failing~%" s n)
+               (when (zerop (ouranos-fiveam-report:print-failure-details text))
+                 (format t "~a~%" (failure-excerpt text 8)))
                (fail "~a had failing checks" s)))
           (report-redefinitions s redefined))
         ;; Per-backend coverage, INDEPENDENT of pass/fail above (pre-publication issue 176). A suite can be

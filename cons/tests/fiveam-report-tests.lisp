@@ -220,3 +220,25 @@ a suite as NO-RUN before it asks this; here it is not a pass either."
   (let ((out (format nil "; compiling file \"x.lisp\"~%; wrote x.fasl~%")))
     (is (null (%fr fail-counts out)))
     (is-false (%fr every-report-passed-p out))))
+
+(test a-child-that-signalled-after-its-checks-still-shows-which-failed
+  "A test op that signals when a report failed, as aion/tests does since #605, ends its child
+with an error, and the gate reports it in the exit-code branch. That branch must still print
+which checks failed, from the report before the error."
+  (%load-fiveam-report)
+  (let* ((out (concatenate 'string +real-report+
+                           (format nil "Unhandled SIMPLE-ERROR in thread #<SB-THREAD:THREAD \"main thread\" RUNNING {1}>:~%  aion/tests: a sub-suite failed; the FiveAM reports above say which~%")))
+         (printed (make-string-output-stream))
+         (n (%fr print-failure-details out printed))
+         (text (get-output-stream-string printed)))
+    (is (plusp n) "no failure details were found before the error")
+    (is (search "A-FAILING-IS-WITH-A-REASON" text) "the first failing check is not printed:~%~A" text)
+    (is (search "A-BARE-IS-FAILING" text) "the second failing check is not printed:~%~A" text)))
+
+(test print-failure-details-prints-nothing-when-no-check-failed
+  (%load-fiveam-report)
+  (let ((printed (make-string-output-stream)))
+    (is (zerop (%fr print-failure-details
+                    (concatenate 'string +real-passing-report+ (format nil "Unhandled SIMPLE-ERROR~%"))
+                    printed)))
+    (is (string= "" (get-output-stream-string printed)))))
