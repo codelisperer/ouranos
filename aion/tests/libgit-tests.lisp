@@ -556,7 +556,9 @@ fast-forward, and a pull with nothing new is :UP-TO-DATE."
 
 (test fetch-moves-only-the-remote-tracking-branch
   "FETCH updates refs/remotes/origin/BRANCH and nothing else: HEAD and the working directory
-stay where they were."
+stay where they were, and .git/FETCH_HEAD is empty. libgit2 always creates that file, and
+fills it unless told not to (#623's review). CONTROL: with update_fetchhead left as
+git_fetch_options_init sets it, the file names the fetched commit and the last check fails."
   (with-published (a adir bare branch first)
     (with-clone (b bdir bare branch)
       (let ((second (commit-file a adir "notes/a.txt" "two" "second")))
@@ -564,7 +566,8 @@ stay where they were."
         (git:fetch b "origin")
         (is (string= second (git-cli bdir "rev-parse" (format nil "refs/remotes/origin/~A" branch))))
         (is (string= first (git-cli bdir "rev-parse" "HEAD")))
-        (is (string= "one" (read-text bdir "notes/a.txt")))))))
+        (is (string= "one" (read-text bdir "notes/a.txt")))
+        (is (string= "" (or (ignore-errors (read-text bdir ".git/FETCH_HEAD")) "")))))))
 
 (test pull-refuses-a-branch-that-has-diverged
   "When the local branch and the remote's each have a commit the other lacks, PULL signals

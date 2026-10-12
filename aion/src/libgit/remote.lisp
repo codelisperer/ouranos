@@ -4,16 +4,19 @@
 ;;;; looks a credential up. The app, or a system above aion such as hades/credentials, finds
 ;;;; it and passes it in, as a CREDENTIAL or as a function that returns one.
 ;;;;
-;;;; TWO ADVISORIES THAT UPSTREAM HAS NOT FIXED, recorded in libgit2.pin, are handled here:
+;;;; TWO ADVISORIES, recorded in libgit2.pin, are handled here. libgit2 v1.9.5 fixed both
+;;;; (CVE-2026-53586 and CVE-2026-53583), and these checks go further than that fix:
 ;;;;
 ;;;;   GHSA-2889-x8f6-mc4x  FOLLOW-REDIRECTS defaults to :NONE, which libgit2 reads as
 ;;;;                        GIT_REMOTE_REDIRECT_NONE. A redirect to the same host is still
 ;;;;                        followed. A redirect to another host is refused, so a credential
-;;;;                        meant for the remote is never sent to a different host.
+;;;;                        meant for the remote is never sent to a different host. libgit2's
+;;;;                        own default still follows one on the first request.
 ;;;;   GHSA-h7gc-w2gg-p9xp  On Linux, where libgit2 uses OpenSSL for HTTPS, an https remote
 ;;;;                        whose host is an IP address is refused with INSECURE-REMOTE before
-;;;;                        any connection is made. macOS and Windows use the system's TLS,
-;;;;                        which the advisory does not concern.
+;;;;                        any connection is made, although 1.9.7 compares the certificate's IP
+;;;;                        addresses correctly. macOS and Windows use the system's TLS, which
+;;;;                        the advisory does not concern.
 ;;;;
 ;;;; LISP CODE THAT LIBGIT2 CALLS never unwinds through libgit2's frames. Each callback catches
 ;;;; any error, keeps it, and returns GIT_EUSER, and the operation signals the kept error after
@@ -326,7 +329,10 @@ when it has no remote of that name."
     (%check "git_fetch_options_init" (%fetch-options-init options +fetch-options-version+))
     (%set-callbacks (cffi:foreign-slot-pointer options '(:struct git-fetch-options) 'callbacks))
     (setf (cffi:foreign-slot-value options '(:struct git-fetch-options) 'follow-redirects)
-          (%redirect-mode follow-redirects))
+          (%redirect-mode follow-redirects)
+          ;; git_fetch_options_init asks for .git/FETCH_HEAD to be filled; libgit2 still creates it.
+          (cffi:foreign-slot-value options '(:struct git-fetch-options) 'update-fetchhead)
+          0)
     (let ((*operation* (%make-operation credentials)))
       (%finish-operation *operation* "git_remote_fetch"
                          (%remote-fetch remote (cffi:null-pointer) options
@@ -334,7 +340,9 @@ when it has no remote of that name."
 
 (defun fetch (repository remote &key credentials (follow-redirects :none))
   "Fetch the branches of REMOTE, a remote's name, into REPOSITORY's refs/remotes/REMOTE/, as
-git fetch REMOTE does. Nothing else changes: no branch moves and no file is written.
+git fetch REMOTE does. Nothing else changes: no branch moves and no file in the working
+directory is written. .git/FETCH_HEAD is left empty, where git fetch would list what it
+fetched.
 
 CREDENTIALS is a CREDENTIAL, a function of the remote's URL and the user name in it (or NIL)
 that returns a CREDENTIAL or NIL, or NIL for none. It is used only if the remote asks for one,

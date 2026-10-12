@@ -212,8 +212,8 @@ its tag.
   user name that returns one. It is offered at most once, and a remote that refuses it signals
   `authentication-failed`. Other failures are conditions too: `not-fast-forward` and
   `checkout-conflict` from `pull`, which then change nothing but the remote-tracking branch,
-  `push-rejected`, `detached-head` and `branch-not-checked-out`. Two libgit2 advisories that
-  have no upstream fix are handled: `:follow-redirects` defaults to `:none`, so a redirect to
+  `push-rejected`, `detached-head` and `branch-not-checked-out`. Two libgit2 advisories, which
+  libgit2 v1.9.5 fixed, are handled more strictly than that fix: `:follow-redirects` defaults to `:none`, so a redirect to
   another host is refused (GHSA-2889-x8f6-mc4x; on Windows libgit2 does not follow a redirect
   to an http address at all), and on Linux an https remote whose host is an
   IP address signals `insecure-remote` before any connection (GHSA-h7gc-w2gg-p9xp). Looking a
