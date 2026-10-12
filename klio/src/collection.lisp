@@ -65,14 +65,34 @@ so a collection that mixes the two still has one order."
 (defun %collection-prefix (name)
   (concatenate 'string (string-right-trim "/" name) "/"))
 
-(defun tree-collection (tree name &key now sort-by (order :ascending))
+(defun %ordered-before-p (order a b)
+  "Whether field value A comes before B in ORDER, :ASCENDING or :DESCENDING."
+  (if (eq order :ascending) (%field-before-p a b) (%field-before-p b a)))
+
+(defun %then-by-before-p (order then-by a b)
+  "Whether document A comes before document B among documents tied on the primary field: by
+the field THEN-BY in ORDER, with a document that lacks it after one that has it. NIL when
+THEN-BY is NIL or does not separate them, so a stable sort leaves them in key order."
+  (and then-by
+       (let ((x (document-field a then-by))
+             (y (document-field b then-by)))
+         (cond ((and x y) (%ordered-before-p order x y))
+               (t (and x (null y)))))))
+
+(defun tree-collection (tree name &key now sort-by then-by (order :ascending))
   "The readable documents of TREE in the collection NAME, the directory `NAME/' under the
 content directory, including its subdirectories.
 
 Unsorted, they come in key order. With SORT-BY, a field name as DOCUMENT-FIELD takes it
 (\"date\", \"title\", or an `extra' key), they are sorted by that field, ORDER :ASCENDING or
-:DESCENDING, and ties keep key order. A document without the field goes last in either
-order: a role with no date belongs at the end of the list, not at the top of it.
+:DESCENDING. A document without the field goes last in either order: a role with no date
+belongs at the end of the list, not at the top of it.
+
+TIES. Documents with equal SORT-BY values, and the documents without it, are ordered by
+THEN-BY, a second field name, in the same ORDER, a document without THEN-BY last among them
+(#557). Without THEN-BY, or where it is equal too, ties keep ascending key order, in both
+orders: :DESCENDING reverses the comparison of the field, not the list, so two documents
+dated the same day stay a, b under either order.
 
 NOW is the time visibility is judged at, as in TREE-READABLE-DOCUMENTS."
   (check-type order (member :ascending :descending))
@@ -87,16 +107,20 @@ NOW is the time visibility is judged at, as in TREE-READABLE-DOCUMENTS."
         (let ((with (remove-if (lambda (d) (null (document-field d sort-by))) members))
               (without (remove-if-not (lambda (d) (null (document-field d sort-by))) members)))
           (append (stable-sort with
-                               (if (eq order :ascending)
-                                   #'%field-before-p
-                                   (lambda (a b) (%field-before-p b a)))
-                               :key (lambda (d) (document-field d sort-by)))
-                  without)))))
+                               (lambda (a b)
+                                 (let ((x (document-field a sort-by))
+                                       (y (document-field b sort-by)))
+                                   (cond ((%ordered-before-p order x y) t)
+                                         ((%ordered-before-p order y x) nil)
+                                         (t (%then-by-before-p order then-by a b))))))
+                  (stable-sort without
+                               (lambda (a b) (%then-by-before-p order then-by a b))))))))
 
-(defun collection (site name &key sort-by (order :ascending) (now *request-now*))
+(defun collection (site name &key sort-by then-by (order :ascending) (now *request-now*))
   "TREE-COLLECTION over CURRENT-TREE: the collection NAME as the current request sees it. The
 call a theme makes."
-  (tree-collection (current-tree site) name :now now :sort-by sort-by :order order))
+  (tree-collection (current-tree site) name :now now :sort-by sort-by :then-by then-by
+                                            :order order))
 
 ;;; --- looking one document up ----------------------------------------------------
 

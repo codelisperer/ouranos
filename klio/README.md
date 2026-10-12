@@ -19,7 +19,14 @@ that is published all at once, and served by a hyperion site or exported to stat
 (klio:export-site *site* #p"public/" :page-theme #'my-page :index-theme #'my-index :clean t)
 ```
 
-A collection is a directory under the content directory. A theme reads collections and other
+A collection is a directory under the content directory. `:sort-by` names a field, `:order` is
+`:ascending` (the default) or `:descending`, and a document without the field comes last.
+Documents tied on the field keep ascending key order under either `:order`, because
+`:descending` reverses the comparison and not the list. `:then-by` names a second field that
+orders a tie in the same direction, with a document lacking it last among the tie:
+`(klio:collection *site* "posts" :sort-by "date" :order :descending :then-by "title")`.
+
+A theme reads collections and other
 pages from the same tree its request, or the export, is using, so a reload during a request
 cannot mix two versions on one page. `export-site` writes `index.html`, `404.html` and one file
 per readable page (`roles/a.html` for the page served at `/roles/a`, or `roles/a/index.html`

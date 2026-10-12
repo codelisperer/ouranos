@@ -875,6 +875,34 @@ included; a file whose name only begins with the collection's name is not a memb
       (is (typep (nth-value 1 (ignore-errors (k:tree-collection tree "notes" :order :sideways)))
                  'type-error)))))
 
+(defun %ranked (date rank)
+  (format nil "---~%title: \"Note\"~@[~%date: ~A~]~@[~%rank: ~D~]~%---~%x~%" date rank))
+
+(test descending-keeps-ties-in-key-order-and-then-by-orders-them
+  "#557: under :descending, documents tied on the sort field keep ascending key order, because
+the comparison is reversed and not the list. :THEN-BY orders a tie by a second field, in the
+same direction, with a document lacking it last among the tie; it also orders the documents
+that lack the sort field."
+  (with-content-dir (dir ("notes/a.md" . (%ranked "2024-01-01" 2))
+                         ("notes/b.md" . (%ranked "2024-01-01" 1))
+                         ("notes/c.md" . (%ranked "2020-01-01" 7))
+                         ("notes/d.md" . (%ranked "2024-01-01" nil))
+                         ("notes/e.md" . (%ranked nil 5))
+                         ("notes/f.md" . (%ranked nil 9)))
+    (let ((tree (k:load-tree dir :known-extra '("rank"))))
+      (flet ((keys (&rest options)
+               (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                       (apply #'k:tree-collection tree "notes" :sort-by "date" options))))
+        (is (equal '("a" "b" "d" "c" "e" "f") (keys :order :descending))
+            "without :then-by, ties stay in key order under :descending: ~S" (keys :order :descending))
+        (is (equal '("a" "b" "d" "c" "f" "e") (keys :order :descending :then-by "rank"))
+            "descending by rank within the tie, the unranked one last: ~S"
+            (keys :order :descending :then-by "rank"))
+        (is (equal '("c" "b" "a" "d" "e" "f") (keys :then-by "rank"))
+            "ascending by rank within the tie, the unranked one last: ~S" (keys :then-by "rank"))
+        (is (equal '("c" "a" "b" "d" "e" "f") (keys :then-by "missing"))
+            "a :then-by field nobody has changes nothing: ~S" (keys :then-by "missing"))))))
+
 (test a-document-is-found-by-its-slug-only-when-a-reader-may-see-it
   (with-content-dir (dir ("skills.md" . (format nil "---~%title: \"Skills\"~%slug: \"toolbox\"~%---~%x~%"))
                          ("secret.md" . +draft+))
