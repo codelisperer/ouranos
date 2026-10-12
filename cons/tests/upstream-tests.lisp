@@ -77,11 +77,13 @@ same for git before 2.29, which ran `git gc --auto' instead.")
 
 (defun %repack-on-commit-repo (dir)
   "Make DIR a repository whose own config makes automatic maintenance repack on every commit,
-and do it before the commit returns. A commit there leaves a pack in .git/objects/pack/
+and do it before the commit returns. It turns maintenance on and signing off itself, so a global
+setting of either cannot change what the test measures. A commit there leaves a pack in .git/objects/pack/
 exactly when the command that made it ran maintenance, so a test can check that right away."
   (uiop:run-program (list "git" "init" "-q" (uiop:native-namestring dir)))
   (dolist (kv '(("user.name" "Maintenance Test") ("user.email" "maintenance@example.invalid")
-                ("commit.gpgsign" "false") ("maintenance.geometric-repack.auto" "-1")
+                ("commit.gpgsign" "false") ("maintenance.auto" "true")
+                ("maintenance.geometric-repack.auto" "-1")
                 ("maintenance.autoDetach" "false") ("gc.autoDetach" "false")))
     (uiop:run-program (list "git" "-C" (uiop:native-namestring dir) "config" (first kv)
                             (second kv))))
