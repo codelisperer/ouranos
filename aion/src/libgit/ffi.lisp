@@ -19,8 +19,23 @@
 
 ;;; include/git2/errors.h
 (defconstant +git-enotfound+ -3)
+(defconstant +git-euser+ -7)
 (defconstant +git-eunbornbranch+ -9)
+(defconstant +git-enonfastforward+ -11)
+(defconstant +git-econflict+ -13)
+(defconstant +git-eauth+ -16)
+(defconstant +git-passthrough+ -30)
 (defconstant +git-iterover+ -31)
+
+;;; include/git2/remote.h
+(defconstant +redirect-none+ 1)
+(defconstant +redirect-initial+ 2)
+(defconstant +redirect-all+ 4)
+(defconstant +fetch-options-version+ 1)
+(defconstant +push-options-version+ 1)
+
+;;; include/git2/credential.h
+(defconstant +credential-userpass-plaintext+ 1)
 
 ;;; include/git2/common.h. GIT_FEATURE_SHA256 is set only by a build with
 ;;; GIT_EXPERIMENTAL_SHA256, whose git_oid is a type byte and 32 bytes rather than 20
@@ -79,6 +94,61 @@
   (ptr :pointer)
   (reserved :size)
   (size :size))
+
+;;; include/git2/strarray.h
+(cffi:defcstruct git-strarray
+  (strings :pointer)
+  (count :size))
+
+;;; include/git2/proxy.h
+(cffi:defcstruct git-proxy-options
+  (version :unsigned-int)
+  (type :int)
+  (url :pointer)
+  (credentials :pointer)
+  (certificate-check :pointer)
+  (payload :pointer))
+
+;;; include/git2/remote.h, as built: without GIT_DEPRECATE_HARD, so update_tips and
+;;; resolve_url are function pointers. Every member after VERSION is a pointer either way.
+(cffi:defcstruct git-remote-callbacks
+  (version :unsigned-int)
+  (sideband-progress :pointer)
+  (completion :pointer)
+  (credentials :pointer)
+  (certificate-check :pointer)
+  (transfer-progress :pointer)
+  (update-tips :pointer)
+  (pack-progress :pointer)
+  (push-transfer-progress :pointer)
+  (push-update-reference :pointer)
+  (push-negotiation :pointer)
+  (transport :pointer)
+  (remote-ready :pointer)
+  (payload :pointer)
+  (resolve-url :pointer)
+  (update-refs :pointer))
+
+;;; include/git2/remote.h. The enums are ints.
+(cffi:defcstruct git-fetch-options
+  (version :int)
+  (callbacks (:struct git-remote-callbacks))
+  (prune :int)
+  (update-fetchhead :unsigned-int)
+  (download-tags :int)
+  (proxy-opts (:struct git-proxy-options))
+  (depth :int)
+  (follow-redirects :int)
+  (custom-headers (:struct git-strarray)))
+
+(cffi:defcstruct git-push-options
+  (version :unsigned-int)
+  (pb-parallelism :unsigned-int)
+  (callbacks (:struct git-remote-callbacks))
+  (proxy-opts (:struct git-proxy-options))
+  (follow-redirects :int)
+  (custom-headers (:struct git-strarray))
+  (remote-push-options (:struct git-strarray)))
 
 ;;; --- the binding macro -------------------------------------------------------------
 
@@ -183,3 +253,42 @@
   (options :pointer) (version :unsigned-int))
 (%defgit ("git_diff_find_similar" %diff-find-similar) :int (diff :pointer) (options :pointer))
 (%defgit ("git_buf_dispose" %buf-dispose) :void (buf :pointer))
+
+;;; --- references --------------------------------------------------------------------
+
+(%defgit ("git_reference_lookup" %reference-lookup) :int
+  (out :pointer) (repo :pointer) (name (:string :encoding :utf-8)))
+(%defgit ("git_reference_symbolic_target" %reference-symbolic-target) :pointer (ref :pointer))
+(%defgit ("git_reference_create" %reference-create) :int
+  (out :pointer) (repo :pointer) (name (:string :encoding :utf-8)) (id :pointer) (force :int)
+  (log-message (:string :encoding :utf-8)))
+(%defgit ("git_reference_free" %reference-free) :void (ref :pointer))
+(%defgit ("git_repository_set_head" %repository-set-head) :int
+  (repo :pointer) (refname (:string :encoding :utf-8)))
+(%defgit ("git_graph_descendant_of" %graph-descendant-of) :int
+  (repo :pointer) (commit :pointer) (ancestor :pointer))
+(%defgit ("git_checkout_tree" %checkout-tree) :int
+  (repo :pointer) (treeish :pointer) (options :pointer))
+
+;;; --- remotes -----------------------------------------------------------------------
+
+(%defgit ("git_remote_lookup" %remote-lookup) :int
+  (out :pointer) (repo :pointer) (name (:string :encoding :utf-8)))
+(%defgit ("git_remote_create" %remote-create) :int
+  (out :pointer) (repo :pointer) (name (:string :encoding :utf-8))
+  (url (:string :encoding :utf-8)))
+(%defgit ("git_remote_set_url" %remote-set-url) :int
+  (repo :pointer) (remote (:string :encoding :utf-8)) (url (:string :encoding :utf-8)))
+(%defgit ("git_remote_free" %remote-free) :void (remote :pointer))
+(%defgit ("git_remote_url" %remote-url) :pointer (remote :pointer))
+(%defgit ("git_remote_pushurl" %remote-pushurl) :pointer (remote :pointer))
+(%defgit ("git_fetch_options_init" %fetch-options-init) :int
+  (options :pointer) (version :unsigned-int))
+(%defgit ("git_push_options_init" %push-options-init) :int
+  (options :pointer) (version :unsigned-int))
+(%defgit ("git_remote_fetch" %remote-fetch) :int
+  (remote :pointer) (refspecs :pointer) (options :pointer) (reflog-message :pointer))
+(%defgit ("git_remote_push" %remote-push) :int
+  (remote :pointer) (refspecs :pointer) (options :pointer))
+(%defgit ("git_credential_userpass_plaintext_new" %credential-userpass-plaintext-new) :int
+  (out :pointer) (username (:string :encoding :utf-8)) (password (:string :encoding :utf-8)))

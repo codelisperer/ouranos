@@ -202,6 +202,22 @@ its tag.
   two pages that cannot both be written, before anything is written: a listing and a document
   keyed `<name>/index`, or a collection named `one.html` and the document `one`.
 
+- **aion/libgit: fetch, fast-forward pull and push** (#429). `set-remote` names a remote and
+  `remote-url` reads one back. `fetch` updates `refs/remotes/<remote>/`. `pull` fetches, then
+  fast-forwards HEAD's branch and checks it out, returning `:fast-forwarded` or `:up-to-date`
+  with the commit id; given `:branch` in a repository with no commits yet, it moves HEAD onto
+  that branch. `push-branch` pushes HEAD's branch, or `:branch`, to the branch of the same name.
+  The credential is an argument: `:credentials` takes a `credential` from `make-credential`
+  (a user name and a token, which may be an `aion/secret:secret`), or a function of the URL and
+  user name that returns one. It is offered at most once, and a remote that refuses it signals
+  `authentication-failed`. Other failures are conditions too: `not-fast-forward` and
+  `checkout-conflict` from `pull`, which then change nothing but the remote-tracking branch,
+  `push-rejected`, `detached-head` and `branch-not-checked-out`. Two libgit2 advisories that
+  have no upstream fix are handled: `:follow-redirects` defaults to `:none`, so a redirect to
+  another host is refused (GHSA-2889-x8f6-mc4x), and on Linux an https remote whose host is an
+  IP address signals `insecure-remote` before any connection (GHSA-h7gc-w2gg-p9xp). Looking a
+  credential up in `hades/credentials` is left to the caller until #357 lands.
+
 - **klio: `export-site` takes `:assets`, a directory of the site's static files that is copied
   into the export** (#557). Every file is copied at its path relative to that directory, after
   `:clean t` has emptied the export, so a site no longer re-copies its stylesheet and images
