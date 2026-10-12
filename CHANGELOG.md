@@ -633,9 +633,9 @@ its tag.
   `add-resource` is kept.
 - **hyperion/markdown: with `:allow-html nil`, `>` at the start of a line renders a block
   quote** (#574). Since #559 the safe mode hid every `>` from 3bmd, so `> quoted` rendered as a
-  paragraph beginning with `&gt;`. A `>` with nothing before it on its line but spaces, other
-  quote markers and list markers is now left for 3bmd to read, and renders a block quote where
-  `:allow-html t` does: at the start of a line, in a nested quote, and inside a list item
+  paragraph beginning with `&gt;`. A `>` with nothing before it on its line but spaces, tabs,
+  other quote markers and list markers is now left for 3bmd to read, and renders a block quote
+  where `:allow-html t` does: at the start of a line, in a nested quote, and inside a list item
   (`- > quoted`, `1. > quoted`, a continuation line `    > quoted`, and `> - > quoted`) (#584).
   3bmd does not treat an indented `>` as a quote in either mode, so `   > x` is still a
   paragraph. Raw HTML inside a quote is still shown as text,

@@ -205,8 +205,11 @@ taken off, so `- > x' and a continuation line `    > x' are block quotes in a li
 marks more than 3bmd reads as markers: a `>' after four or more spaces, or after a marker in a
 paragraph that 3bmd does not take for a list, is marked too. That changes nothing, because 3bmd
 gives a marked `>' every role it has with :ALLOW-HTML T, and prints one it reads as text or code
-escaped once, the same as a hidden one. What must stay hidden is a `>' in a link's URL, which ends
-the URL, and a URL contains no space, so none of these is in one."
+escaped once, the same as a hidden one. What must stay hidden is a `>' in an explicit link's URL,
+`[text](url)', which ends the URL there; that URL contains no space or line break, so none of these
+is in one. A reference definition can put its URL on the next line, so `[x]:' followed by the line
+`    >u' gives the URL `>u' with the `>' marked. There `>' is an ordinary URL character, 3bmd reads
+it the same way in both modes, and %SAFE-URL escapes it in the href."
   (let ((n (length markdown))
         (markers '()))
     (labels ((blank-end (i)
