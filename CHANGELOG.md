@@ -178,15 +178,21 @@ its tag.
     stdio takes its credentials from its environment. The accessors `connection-command`,
     `connection-directory`, `connection-environment`, `connection-stderr` and
     `connection-restart` are exported.
-  - The server's process gets only `PATH`, `HOME`, `LANG` and `TMPDIR` from the app's
-    environment (on Windows `PATH`, `SystemRoot`, `TEMP`, `USERPROFILE` and `APPDATA`), listed
-    in `+stdio-environment+`, plus the connection's `:environment` alist. `:environment
-    :inherit` passes the whole environment.
+  - The server's process gets only the variables `+stdio-environment+` lists from the app's
+    environment, plus the connection's `:environment` alist. The list is the MCP TypeScript
+    SDK's `DEFAULT_INHERITED_ENV_VARS` (#604). On Linux and macOS that is `HOME`, `LOGNAME`,
+    `PATH`, `SHELL`, `TERM` and `USER`, to which praxeon adds `LANG` and `TMPDIR`. On Windows
+    it is 18 names, including `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `SYSTEMROOT`, `TEMP`
+    and `USERPROFILE`. A value that
+    starts with `()`, an exported bash function, is not passed. `:environment :inherit` passes
+    the whole environment.
   - The client finds the server's era with `server/discover` and falls back to `initialize` for
     a legacy server. A request that times out after it was written gets
     `notifications/cancelled`; one that times out while still queued fails as not run and is
-    never sent. The server's stderr is discarded, or appended to the `:stderr` file, and never
-    logged.
+    never sent. A line longer than `:max-body-bytes` octets, counted as received, is dropped.
+    `client-era` and `client-protocol-version` describe the running server, and are NIL after
+    it is replaced until the new server's handshake succeeds (#610). The server's stderr is
+    discarded, or appended to the `:stderr` file, and never logged.
   - With `:restart t`, the default, a server that exits is started again at the next request,
     at most 3 times in any 60 seconds. With `:restart nil`, every later request fails as not
     run until the app closes the client and makes another.

@@ -117,10 +117,17 @@ integers; anything else is refused here, before a task can start."
   (task-backoff-cap (* 5 60) :type (integer 1)))
 
 (defparameter +stdio-environment+
-  #+win32 '("PATH" "SystemRoot" "TEMP" "USERPROFILE" "APPDATA")
-  #-win32 '("PATH" "HOME" "LANG" "TMPDIR")
+  #+win32 '("APPDATA" "COMSPEC" "HOMEDRIVE" "HOMEPATH" "LOCALAPPDATA" "PATH" "PATHEXT"
+            "PROCESSOR_ARCHITECTURE" "PROGRAMDATA" "PROGRAMFILES" "PROGRAMFILES(X86)"
+            "PROGRAMW6432" "SYSTEMDRIVE" "SYSTEMROOT" "TEMP" "USERNAME" "USERPROFILE" "WINDIR")
+  #-win32 '("HOME" "LOGNAME" "PATH" "SHELL" "TERM" "USER" "LANG" "TMPDIR")
   "The variables of this process's environment that a local server's process is given, with the
-connection's ENVIRONMENT added, unless ENVIRONMENT is :INHERIT.")
+connection's ENVIRONMENT added, unless ENVIRONMENT is :INHERIT. They are the lists the MCP
+TypeScript SDK passes to the servers it starts (DEFAULT_INHERITED_ENV_VARS in
+packages/client/src/client/stdio.ts), so a server written for that SDK finds what it expects,
+and on Linux and macOS also LANG and TMPDIR. None holds a secret; on macOS, TMPDIR is the only
+place a process learns its per-user temporary directory. A value that starts with \"()\", an
+exported bash function, is not passed (#604).")
 
 (defun make-connection (&key name url command directory environment stderr (restart t)
                              token-source per-user (timeout 30) (call-timeout 120)
@@ -137,8 +144,8 @@ strings. The client starts it at the first request and talks to it over its stdi
 (2026-07-28, \"stdio\").
 - DIRECTORY is the directory it runs in; NIL for this process's.
 - ENVIRONMENT is an alist of (NAME . VALUE) strings. The server's process gets those, plus only
-  these variables from this process's environment: PATH, HOME, LANG and TMPDIR, or on Windows
-  PATH, SystemRoot, TEMP, USERPROFILE and APPDATA (+STDIO-ENVIRONMENT+). A local server is often
+  the variables +STDIO-ENVIRONMENT+ names from this process's environment: the MCP TypeScript
+  SDK's lists, and on Linux and macOS also LANG and TMPDIR. A local server is often
   someone else's code, and this process may hold keys for other services, so a variable the
   server needs, such as its API key, is passed here by name. ENVIRONMENT :INHERIT gives the
   server this process's whole environment instead.

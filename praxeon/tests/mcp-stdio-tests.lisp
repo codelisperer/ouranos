@@ -30,7 +30,7 @@ here. The fixed set leaves them out, so the tests pass them as an app would. On 
 default source registry includes the all-users application data folder, which it finds through
 ALLUSERSAPPDATA or ALLUSERSPROFILE; without either, the entry is invalid and loading Quicklisp
 fails."
-  (loop for name in '("SBCL_HOME" "XDG_CACHE_HOME" "LOCALAPPDATA" "ASDF_OUTPUT_TRANSLATIONS"
+  (loop for name in '("SBCL_HOME" "XDG_CACHE_HOME" "ASDF_OUTPUT_TRANSLATIONS"
                       "ALLUSERSAPPDATA" "ALLUSERSPROFILE")
         for value = (sb-ext:posix-getenv name)
         when value collect (cons name value)))
@@ -169,6 +169,53 @@ app's variables, which win for a name in both."
                (praxeon/mcp::%child-environment
                 (mcp:make-connection :name "x" :command '("server") :environment :inherit))))))
 
+(test the-default-environment-is-the-sdk-s-list-plus-lang-and-tmpdir
+  "+STDIO-ENVIRONMENT+ is the MCP TypeScript SDK's DEFAULT_INHERITED_ENV_VARS, and on Linux and
+macOS also LANG and TMPDIR (#604). Each of them that is set here, to a value that does not start
+with \"()\", is passed to the server."
+  (is (equal #+win32 '("APPDATA" "COMSPEC" "HOMEDRIVE" "HOMEPATH" "LOCALAPPDATA" "PATH" "PATHEXT"
+                       "PROCESSOR_ARCHITECTURE" "PROGRAMDATA" "PROGRAMFILES" "PROGRAMFILES(X86)"
+                       "PROGRAMW6432" "SYSTEMDRIVE" "SYSTEMROOT" "TEMP" "USERNAME" "USERPROFILE"
+                       "WINDIR")
+             #-win32 '("HOME" "LOGNAME" "PATH" "SHELL" "TERM" "USER" "LANG" "TMPDIR")
+             mcp:+stdio-environment+))
+  (let ((environment (praxeon/mcp::%child-environment
+                      (mcp:make-connection :name "x" :command '("server")))))
+    ;; One check, whichever of the variables this host sets, so the count is the same on every
+    ;; host.
+    (is (null (loop for name in mcp:+stdio-environment+
+                    for value = (sb-ext:posix-getenv name)
+                    when (and value (not (uiop:string-prefix-p "()" value))
+                              (not (member (format nil "~A=~A" name value) environment
+                                           :test #'equal)))
+                      collect name))
+        "the environment was ~S" environment)))
+
+#-win32
+(test a-variable-whose-value-is-a-bash-function-is-not-passed
+  "A listed variable whose value starts with \"()\" is an exported bash function, and is left
+out, as the SDK leaves it out (#604)."
+  (let ((before (sb-ext:posix-getenv "TERM")))
+    (flet ((setenv (value)
+             (sb-alien:alien-funcall
+              (sb-alien:extern-alien "setenv" (function sb-alien:int sb-alien:c-string
+                                                        sb-alien:c-string sb-alien:int))
+              "TERM" value 1)))
+      (unwind-protect
+           (flet ((term ()
+                    (find-if (lambda (entry) (uiop:string-prefix-p "TERM=" entry))
+                             (praxeon/mcp::%child-environment
+                              (mcp:make-connection :name "x" :command '("server"))))))
+             (setenv "() { :; }; echo")
+             (is (null (term)) "TERM was passed as ~S" (term))
+             (setenv "xterm-praxeon")
+             (is (equal "TERM=xterm-praxeon" (term))))
+        (if before
+            (setenv before)
+            (sb-alien:alien-funcall
+             (sb-alien:extern-alien "unsetenv" (function sb-alien:int sb-alien:c-string))
+             "TERM"))))))
+
 #-win32
 (test a-local-server-process-does-not-get-this-process-s-other-variables
   "A variable set in this process reaches the server only with :ENVIRONMENT :INHERIT."
@@ -255,6 +302,20 @@ the handshake fails rather than left running until CLOSE-CLIENT."
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
     (is (= 1 (%recorded-count record "start")))))
+
+(test a-replaced-server-whose-handshake-fails-leaves-the-client-without-an-era
+  "CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the server that is running. When a server exits
+and the one started in its place turns out to be unsupported, both are NIL, not the first
+server's values (#610)."
+  (with-stdio-client (client record "modern-then-unsupported")
+    (is (= 5 (length (mcp:list-tools client))))
+    (is (eq :modern (mcp:client-era client)))
+    (is-true (%failure-of (lambda () (mcp:call-tool client (%tool-named client "exit") nil))))
+    (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
+      (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
+    (is (= 2 (%recorded-count record "start")))
+    (is (null (mcp:client-era client)))
+    (is (null (mcp:client-protocol-version client)))))
 
 (test a-legacy-local-server-is-found-when-it-does-not-answer-discover
   "No answer to server/discover within the connection's timeout also means a legacy server."
@@ -394,8 +455,9 @@ the reader nor fail the call, and the dropped lines are counted in the log by re
         (is (equal "kept" (mcp:call-tool client (%tool-named client "echo") (%text "kept"))))))
     (let ((logged (get-output-stream-string log)))
       (is-true (search "not-json=1" logged) "the log said ~S" logged)
-      ;; The line of 10000 characters, and the one of 1500 characters in 4500 octets.
-      (is-true (search "too-long=2" logged)))))
+      ;; The line of 10000 characters, the one of 1500 characters in 4500 octets, and the one
+      ;; of 4500 octets of malformed UTF-8 that decodes to fewer octets' worth (#610).
+      (is-true (search "too-long=3" logged) "the log said ~S" logged))))
 
 (test a-local-server-s-stderr-is-discarded-or-written-to-its-file-and-never-logged
   "The server writes to stderr on every request. That neither fails a call nor reaches the log;
