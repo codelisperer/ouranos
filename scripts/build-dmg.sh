@@ -4,7 +4,17 @@
 #
 #     scripts/build-dmg.sh dist/coalton-repl-0.1.0-macos-arm64 \
 #         [--display-name "Coalton REPL"] \
-#         [--icon hyperion/examples/coalton-repl/assets/lambda.png] [--out dist]
+#         [--icon hyperion/examples/coalton-repl/assets/lambda.png] [--out dist] [--describe]
+#
+# --describe checks the bundle, prints the product, version and display name the .app would be
+# built with, one "key value" line each, and exits. It does not need macOS.
+#
+# THE BUNDLE'S RELEASE FILE. build-desktop-app.lisp writes RELEASE into the bundle when it is
+# given --product, --display-name or --default-channel (#408). The display name is taken from
+# it when --display-name is not given, so a release names it once, at the build. When RELEASE
+# names a product or a version, it must be the one the bundle's launcher and VERSION file give,
+# or the script stops: the product is the name hyperion/update and the manifest use, and a .app
+# built under another one is a different app to the updater.
 #
 # Input is exactly what scripts/build-desktop-app.lisp produced -- the launcher, the SBCL
 # runtime and the app's core (sbcl.core; #98, #332), the hyperion-view, the native libraries it carried (ADR-0013), the libraries the runtime
@@ -42,9 +52,10 @@ OUT="$ROOT/dist"
 ICON=""
 DISPLAY_NAME=""
 BUNDLE=""
+DESCRIBE=""
 
 usage() {
-  echo "usage: scripts/build-dmg.sh <bundle-dir> [--display-name NAME] [--icon PNG] [--out DIR]" >&2
+  echo "usage: scripts/build-dmg.sh <bundle-dir> [--display-name NAME] [--icon PNG] [--out DIR] [--describe]" >&2
   exit 2
 }
 
@@ -53,6 +64,7 @@ while [ $# -gt 0 ]; do
     --display-name) DISPLAY_NAME="$2"; shift 2 ;;
     --icon)         ICON="$2";         shift 2 ;;
     --out)          OUT="$2";          shift 2 ;;
+    --describe)     DESCRIBE=1;        shift ;;
     -h|--help)      usage ;;
     -*)             echo "build-dmg: unknown option $1" >&2; usage ;;
     *)              BUNDLE="$1";       shift ;;
@@ -61,7 +73,6 @@ done
 
 [ -n "$BUNDLE" ] || usage
 [ -d "$BUNDLE" ] || { echo "build-dmg: no such bundle directory: $BUNDLE" >&2; exit 2; }
-[ "$(uname -s)" = "Darwin" ] || { echo "build-dmg: macOS only (hdiutil)" >&2; exit 2; }
 
 BUNDLE_ABS=$(cd "$BUNDLE" && pwd)
 VERSION=$(cat "$BUNDLE_ABS/VERSION" 2>/dev/null || echo "0.0.0")
@@ -89,7 +100,41 @@ for f in sbcl sbcl.core; do
   }
 done
 
+# RELEASE, when build-desktop-app.lisp wrote one: see the header (#408).
+REL_PRODUCT=""
+REL_VERSION=""
+REL_DISPLAY_NAME=""
+if [ -f "$BUNDLE_ABS/RELEASE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "product "*)      REL_PRODUCT=${line#product } ;;
+      "version "*)      REL_VERSION=${line#version } ;;
+      "display-name "*) REL_DISPLAY_NAME=${line#display-name } ;;
+    esac
+  done < "$BUNDLE_ABS/RELEASE"
+fi
+if [ -n "$REL_PRODUCT" ] && [ "$REL_PRODUCT" != "$BIN" ]; then
+  echo "build-dmg: the bundle's RELEASE names the product '$REL_PRODUCT', but its launcher is '$BIN'." >&2
+  echo "build-dmg: Rebuild with scripts/build-desktop-app.lisp, whose --product must equal --name." >&2
+  exit 2
+fi
+if [ -n "$REL_VERSION" ] && [ "$REL_VERSION" != "$VERSION" ]; then
+  echo "build-dmg: the bundle's RELEASE names the version '$REL_VERSION', but its VERSION file says '$VERSION'." >&2
+  echo "build-dmg: Rebuild with scripts/build-desktop-app.lisp." >&2
+  exit 2
+fi
+
+[ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$REL_DISPLAY_NAME"
 [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$BIN"
+
+if [ -n "$DESCRIBE" ]; then
+  echo "product $BIN"
+  echo "version $VERSION"
+  echo "display-name $DISPLAY_NAME"
+  exit 0
+fi
+
+[ "$(uname -s)" = "Darwin" ] || { echo "build-dmg: macOS only (hdiutil)" >&2; exit 2; }
 
 APP="$OUT/$DISPLAY_NAME.app"
 DMG="$OUT/$BIN-$VERSION-macos-$(uname -m).dmg"
