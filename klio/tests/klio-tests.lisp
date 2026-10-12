@@ -1306,11 +1306,32 @@ Windows making a file link needs a privilege the test runner may not have."
             "collection-url gives each page's URL: ~S" urls)))))
 
 (test collection-names-that-would-share-a-listings-url-are-refused
-  (dolist (bad (list '("tags") '("page") '("roles" "roles") '(("roles" :colour "red")) '("") "roles"))
+  "Names that share a route with the tag pages or the index's pages, at the root or under it, and
+names that are not safe as a URL path and a path under the export directory (Copilot's review of
+#619): ../outside would be written outside it, and . would alias index.html."
+  (dolist (bad (list '("tags") '("page") '("roles" "roles") '(("roles" :colour "red")) '("") "roles"
+                     '("tags/lisp") '("page/2") '("roles" "roles/page/x")
+                     '("../outside") '(".") '("a/../b") '("a//b") (list (format nil "a~Cb" (code-char 92)))
+                     '("a:b") '("a*") '("a b")))
     (is (typep (nth-value 1 (ignore-errors (k:make-site-options :collections bad))) 'error)
         ":collections ~S was accepted" bad))
-  (is-true (k:make-site-options :collections '("roles" ("posts" :sort-by "date" :then-by "title")))
-           "the control: well-formed entries are accepted"))
+  (is-true (k:make-site-options :collections '("roles" ("posts" :sort-by "date" :then-by "title")
+                                               "roles/older" "one.html" "my_notes-2"))
+           "the control: well-formed entries, a nested one and one with a dot, are accepted"))
+
+(test a-collection-listing-that-needs-a-pages-file-as-a-directory-is-refused
+  "Copilot's review of #619: a collection named one.html is listed at one.html/index.html, which
+needs a directory where the document one is written as the file one.html. search.json, the
+search index, clashes the same way."
+  (with-content-dir (src ("one.md" . +good+) ("one.html/a.md" . +also-good+)
+                         ("search.json/b.md" . +also-good+))
+    (dolist (name '("one.html" "search.json"))
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors (k:export-site site out :collections (list name))))))
+            (is (typep e 'k:export-refused) "~A: got ~S" name e)
+            (is (null (probe-file out)) "~A: nothing was written" name)))))))
 
 (test a-listing-and-a-document-written-to-one-file-are-refused
   "A document keyed roles/index, or, under :layout :directory, one keyed roles, would be written

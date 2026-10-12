@@ -133,6 +133,27 @@ to case, because the file systems of Windows and macOS would make them one."
                            (char= #\/ (char x (length y))))))
     (or (string-equal a b) (under a b) (under b a))))
 
+(defun %colliding-paths (paths)
+  "The first two of PATHS, export-relative and `/'-separated, that cannot both be written, as a
+list, or NIL. Two collide when %PATHS-COLLIDE-P says so: the same path, or one under the other.
+Checked through a table of each path and each directory it needs, so a site's thousands of
+pages cost one pass, not every pair."
+  (let ((files (make-hash-table :test #'equalp))
+        (directories (make-hash-table :test #'equalp)))
+    (dolist (path paths)
+      (let ((other (gethash path files)))
+        (when other (return-from %colliding-paths (list other path))))
+      (let ((other (gethash path directories)))
+        (when other (return-from %colliding-paths (list path other))))
+      (loop for slash = (position #\/ path) then (position #\/ path :start (1+ slash))
+            while slash
+            do (let* ((dir (subseq path 0 slash))
+                      (other (gethash dir files)))
+                 (when other (return-from %colliding-paths (list other path)))
+                 (setf (gethash dir directories) path)))
+      (setf (gethash path files) path))
+    nil))
+
 (defun %resolved-directory (directory)
   "DIRECTORY's resolved name, also when it does not exist yet: the nearest existing ancestor is
 resolved and the rest of the name appended.
@@ -234,13 +255,16 @@ is one a page is written to. The returned list names the pages, then the assets.
                                         append (list k v)))))
                    (%render-site site tree now layout)))
           (asset-files nil))
-      ;; Two pages written to one file: a collection's listing and a document keyed
-      ;; <name>/index, or, under :LAYOUT :DIRECTORY, a document keyed <name> (#557). Refused
-      ;; rather than one silently replacing the other.
-      (loop for (path . rest) on (mapcar #'car files)
-            when (member path rest :test #'string-equal)
-              do (error 'export-refused :directory directory
-                                        :reason (format nil "two pages would be written to ~A" path)))
+      ;; Two pages that cannot both be written: one file, such as a collection's listing and a
+      ;; document keyed <name>/index, or a file and a directory, such as a collection named
+      ;; one.html and the document one, written to one.html (#557, Copilot's review of #619).
+      ;; Refused before anything is written, rather than one replacing the other or the export
+      ;; failing part-way.
+      (let ((clash (%colliding-paths (mapcar #'car files))))
+        (when clash
+          (error 'export-refused :directory directory
+                                 :reason (format nil "the pages written to ~A and ~A cannot both be written"
+                                                 (first clash) (second clash)))))
       (when assets
         (setf asset-files (%check-assets assets directory (mapcar #'car files))))
       ;; AION/FS:DELETE-TREE, which removes a link inside the directory as a link and refuses a
