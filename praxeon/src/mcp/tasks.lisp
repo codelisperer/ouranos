@@ -408,7 +408,14 @@ not run: a server may keep asking (server requirement 8)."
             (%request-failed client "it kept asking for input after ~D answers, so the call was not completed."
                              (list (connection-input-rounds connection)) :outcome :not-run))
           (let* ((entries (sort (%input-entries result) #'string< :key (lambda (e) (princ-to-string (first e)))))
-                 (state (gethash "requestState" result))
+                 (state (multiple-value-bind (value present) (gethash "requestState" result)
+                          ;; requestState is an optional string, echoed exactly when present, so a
+                          ;; present one that is not a string cannot be echoed: the call fails rather
+                          ;; than retrying without it (Copilot's review of #643).
+                          (when (and present (not (stringp value)))
+                            (%request-failed client "its requestState was not a string, so the call could not be sent again."
+                                             '() :outcome :not-run))
+                          value))
                  (next (%copy params)))
             (unless (or entries (stringp state))
               (%request-failed client "it asked for input without saying what, so the call was not completed."

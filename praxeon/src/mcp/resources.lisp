@@ -229,7 +229,9 @@ string blob, one of which the schema requires (#569)."
 server, whatever URI's scheme. Signals RESOURCE-NOT-FOUND when the server says the resource does
 not exist, and REQUEST-FAILED for other failures, including a reply without a list of contents,
 a content that is not an object, has no string uri, or has neither a string text nor a string
-blob, and an input_required result."
+blob, and an input_required result the client does not answer. With the connection's
+:ON-ELICITATION handler, an input_required result is answered and the read sent again, as for a
+tool call (%REQUEST-ANSWERING-INPUT, #626)."
   (check-type uri string)
   (let ((result
           (handler-case (%request-answering-input client "resources/read" (%object "uri" uri)

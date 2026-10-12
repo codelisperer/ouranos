@@ -204,8 +204,9 @@ out."
                                                "params" (%obj "maxTokens" 10)))
                               (:form-bare (%obj "method" "elicitation/create"
                                                 "params" (%obj "mode" "form" "message" "No schema")))))))
-          (unless (getf spec :no-state)
-            (setf (gethash "requestState" result) (format nil "opaque state ~D, kept as sent" n)))
+          (cond ((getf spec :bad-state) (setf (gethash "requestState" result) 42))
+                ((not (getf spec :no-state))
+                 (setf (gethash "requestState" result) (format nil "opaque state ~D, kept as sent" n))))
           result))))
 
 (defun %result (fake method params)
@@ -2463,9 +2464,20 @@ the handler gave that cannot be sent: the call fails as not run, as before."
 (test on-elicitation-is-refused-without-elicitation-or-a-function
   (dolist (bad '((:on-elicitation identity)
                  (:elicitation (:form) :on-elicitation "not a function")
+                 (:elicitation (:form) :on-elicitation when)
                  (:elicitation (:form) :on-elicitation identity :input-rounds 0)))
     (is (typep (nth-value 1 (ignore-errors (apply #'mcp:make-connection :name "x" :url "http://x" bad)))
                'error)
         "~S was accepted" bad))
   (is-true (mcp:make-connection :name "x" :url "http://x" :elicitation '(:form) :on-elicitation 'identity)
            "the control: a symbol naming a function, with :elicitation, is accepted"))
+
+(test a-request-state-that-is-not-a-string-fails-the-call
+  "Copilot's review of #643: requestState is echoed exactly, so one that is not a string cannot be,
+and the call fails rather than being sent again without it."
+  (multiple-value-bind (handler got) (%answering)
+    (declare (ignore got))
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :bad-state t)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is-true (%not-run-p (lambda () (%call client "ask"))))
+        (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again")))))

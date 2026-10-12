@@ -205,8 +205,12 @@ it writes."
     (unless (typep input-timeout '(integer 1))
       (refuse ":input-timeout is a positive number of seconds."))
     (when on-elicitation
+      ;; As observe.lisp checks its callables: FBOUNDP is also true of a macro or a special
+      ;; operator, which FUNCALL cannot call (Copilot's review of #643).
       (unless (or (functionp on-elicitation)
-                  (and (symbolp on-elicitation) (fboundp on-elicitation)))
+                  (and (symbolp on-elicitation) (fboundp on-elicitation)
+                       (not (macro-function on-elicitation))
+                       (not (special-operator-p on-elicitation))))
         (refuse ":on-elicitation is a function."))
       (unless elicitation
         (refuse ":on-elicitation needs :elicitation, the modes the app can present; without it a server must not ask, and the handler is never called.")))

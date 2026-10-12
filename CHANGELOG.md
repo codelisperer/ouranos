@@ -216,7 +216,7 @@ its tag.
 - **praxeon/mcp: an ordinary call that asks for input can be answered, through an `:on-elicitation` handler** (#626).
   - `make-connection` takes `:on-elicitation`, a function of a plist (`:key`, `:mode`, `:message`, `:schema` or `:url`, `:method`, `:connection`, `:principal`) that returns `(values action content)`, and `:input-rounds`, the most retries one call makes, three by default. `:on-elicitation` needs `:elicitation`.
   - A `tools/call`, `resources/read` or `prompts/get` that answers `input_required` is sent again with the handler's answers in `inputResponses` and the result's `requestState` echoed exactly. Without a handler it still fails as not run.
-  - A request the app cannot be asked (sampling, roots, an undeclared mode, a malformed elicitation), an answer that cannot be sent, or a server still asking after `:input-rounds` retries fails the call as not run. A handler that signals ends the call with its condition.
+  - A request the app cannot be asked (sampling, roots, an undeclared mode, a malformed elicitation), an answer that cannot be sent, a `requestState` that is not a string, or a server still asking after `:input-rounds` retries fails the call as not run. A handler that signals ends the call with its condition.
 
 - **praxeon/mcp: a task can ask the user for input, and the app answers it** (#563).
   - `make-connection` takes `:elicitation`, a list of the modes `:form` and `:url`. It declares the elicitation client capability for them; sampling and roots are never declared. Without it nothing changes.
