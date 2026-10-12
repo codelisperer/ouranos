@@ -91,6 +91,31 @@ the relative path spelled with `/', sorted by relative path."
       (walk root))
     (sort files #'string< :key #'car)))
 
+(defun %resolved-directory (directory)
+  "DIRECTORY's resolved name, also when it does not exist yet: the nearest existing ancestor is
+resolved and the rest of the name appended.
+
+An export directory usually does not exist yet, and the assets directory does. PROBE-FILE
+resolves only the second, and the two then name the same place differently wherever a path
+has two spellings: a Windows 8.3 alias in TEMP, as on CI runners (`RUNNER~1'), or macOS's
+/var, which is /private/var. Measured on #615's first run: an export directory inside the
+assets directory was not refused on Windows and macOS, and was on Linux."
+  (let ((dir (uiop:ensure-directory-pathname directory)))
+    (or (probe-file dir)
+        (let ((parent (uiop:pathname-parent-directory-pathname dir)))
+          (if (equal parent dir)
+              dir
+              (merge-pathnames (make-pathname :directory (list :relative
+                                                               (car (last (pathname-directory dir)))))
+                               (%resolved-directory parent)))))))
+
+(defun %same-or-inside-p (inner outer)
+  "Whether directory INNER is OUTER or lies under it, compared by resolved names."
+  (let ((in (namestring (%resolved-directory inner)))
+        (out (namestring (%resolved-directory outer))))
+    (and (<= (length out) (length in))
+         (string= out in :end2 (length out)))))
+
 (defun %check-assets (assets directory page-files)
   "The asset files to copy, as %ASSET-FILES returns them, after checking that they can be:
 signals EXPORT-REFUSED when ASSETS is not a directory, when it holds or is inside DIRECTORY
@@ -100,7 +125,7 @@ in PAGE-FILES."
     (unless (uiop:directory-exists-p assets)
       (error 'export-refused :directory directory
                              :reason (format nil "the :ASSETS directory ~A does not exist" assets)))
-    (when (or (%holds-content-p directory assets) (%holds-content-p assets directory))
+    (when (or (%same-or-inside-p assets directory) (%same-or-inside-p directory assets))
       (error 'export-refused :directory directory
                              :reason (format nil "the :ASSETS directory ~A holds it or is inside it" assets)))
     (let* ((files (%asset-files assets))
