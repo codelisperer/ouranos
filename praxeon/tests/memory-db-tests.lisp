@@ -935,9 +935,10 @@ Control, the same store without transactions: two copies."
         "control, without transactions: two copies")))
 
 (test a-promote-function-that-reads-the-sql-store-runs-inside-the-transaction
-  "The app's :PROMOTE reads the subject's facts from the SQL store while the window's transaction
-holds the store's lock. The lock is recursive and the read uses the transaction's connection, so
-the run finishes and the fact is promoted (the hub's review of #529's design)."
+  "The app's :PROMOTE reads the thread's observations from the SQL store while the window's
+transaction holds the store's lock. The lock is recursive and the read uses the transaction's
+connection, so the run finishes, the read sees the window's uncommitted observation, and the fact
+is promoted (the hub's review of #529's design; Copilot's review of #645)."
   (with-store (store)
     (let* ((step (praxeon/prompt:messages-tokens (%chat 6)))
            (seen nil)
@@ -945,11 +946,12 @@ the run finishes and the fact is promoted (the hub's review of #529's design)."
                                                        :replies (list (%observations-call "Has a dog.")))
                                         store "member-529" "conv-529" :step step
                                         :promote (lambda (o) (declare (ignore o))
-                                                   (setf seen (length (mem:observations-of store "member-529")))
+                                                   (setf seen (length (mem:observations-of store "member-529"
+                                                                                           :thread "conv-529")))
                                                    t))))
       (obs:observe-turn observer (%chat 6))
       (is-true (obs:await-observer observer :timeout 20) "the run finished")
-      (is (eql 0 seen) "the :promote function read the store")
+      (is (eql 1 seen) "the :promote function read the window's uncommitted observation")
       (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-529")))))))
 
 (test the-sql-store-rolls-back-a-transaction-that-signals

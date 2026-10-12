@@ -7967,20 +7967,23 @@ superseded one is current again with its own fields as they were, and the progre
     (is (equal '("Has a dog.") (%thread-contents store)))))
 
 (test a-promote-function-that-reads-the-store-runs-inside-the-transaction
-  "The app's :PROMOTE function reads the subject's facts from the store while the window's
-transaction holds the store's lock. The store's lock is recursive, so the run finishes and the
-fact is promoted (the hub's review of #529's design)."
+  "The app's :PROMOTE function reads the thread's observations from the store while the window's
+transaction holds the store's lock. The store's lock is recursive, so the run finishes, the
+function sees the window's observation that the transaction has written and not yet committed,
+and the fact is promoted (the hub's review of #529's design; Copilot's review of #645: reading
+the subject's facts would read nothing either way)."
   (let* ((store (mem:make-in-memory-store))
          (seen nil)
          (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
                                       store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
                                       :promote (lambda (o) (declare (ignore o))
-                                                 (setf seen (length (mem:observations-of store "member-1")))
+                                                 (setf seen (length (mem:observations-of store "member-1"
+                                                                                         :thread "conv-7")))
                                                  t))))
     (is (obs::observer-transactions observer) "precondition: the in-memory store has transactions")
     (obs:observe-turn observer (%history 6))
     (is-true (obs:await-observer observer :timeout 10) "the run finished")
-    (is (eql 0 seen) "the :promote function read the store")
+    (is (eql 1 seen) "the :promote function read the window's observation")
     (is (equal '("Has a dog.") (%facts store)) "and the fact was promoted")))
 
 (test a-store-without-the-transaction-generics-keeps-todays-path

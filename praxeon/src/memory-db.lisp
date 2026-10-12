@@ -772,14 +772,18 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                                             &key subject thread contents)
   "THUNK in one transaction on STORE's connection, under the store's recursive lock, so a
 callback inside THUNK that reads or writes the store re-enters it (#529). CONTENTS, the texts
-THUNK will write, are embedded before the lock is taken. SUPERSEDE, FORGET and
-RECORD-THREAD-PROGRESS open their own transactions, which become savepoints inside this one.
+THUNK will write, are embedded before the lock is taken. SUPERSEDE opens a transaction of its
+own, which becomes a savepoint inside this one; the other writes, REMEMBER, FORGET and
+RECORD-THREAD-PROGRESS among them, run in this transaction directly (Copilot's review of #645).
 
 INSIDE THE APP'S OWN CONN:WITH-TRANSACTION this is a savepoint too, and a rollback of the app's
 transaction undoes what it wrote: for the observer, a window's observations and its progress
-together, so the window is distilled again at the next run and no copy is left (the hub's review
-of #529's design). The observer's own thread opens no transaction of the app's; this happens only
-when the app shares the store's connection and opens one around the observer's writes."
+together, so no copy is left (the hub's review of #529's design). The observer object that wrote
+them has already moved its own mark past the window, and does not lower it, so it does not
+distil the window again; a new observer, or the process after a restart, starts from the store's
+mark and does (Copilot's review of #645). The observer's own thread opens no transaction of the
+app's; this happens only when the app shares the store's connection and opens one around the
+observer's writes."
   (declare (ignore subject thread))
   ;; THE EMBEDDINGS ARE COMPUTED FIRST, outside the lock and the transaction (the hub's review of
   ;; #645). The embedding model is a network call; inside, every read of the store would wait for

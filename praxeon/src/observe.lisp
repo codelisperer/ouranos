@@ -74,7 +74,9 @@
 ;;;; app wrote itself, and for a progress write that fails after a window was given up on. Inside
 ;;;; an app's own transaction on the SQL store, the window's transaction is a savepoint, and a
 ;;;; rollback of the app's transaction undoes the window's observations and its progress
-;;;; together, so the window is distilled again.
+;;;; together. The observer that wrote them has already moved its own mark past the window and
+;;;; does not lower it, so it does not distil the window again; a new observer, or the process
+;;;; after a restart, starts from the store's mark and does (Copilot's review of #645).
 ;;;;
 ;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS, FOR ONE STORE OBJECT. OBSERVE-TURN
 ;;;; starts nothing while another observer of the same store object, subject and thread holds
