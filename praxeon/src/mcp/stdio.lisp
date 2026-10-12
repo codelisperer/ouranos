@@ -471,6 +471,11 @@ it, which can take up to twice the connection's TIMEOUT."
                    ;; Its stdout can stay open after it exits, held by a process it started.
                    (sb-ext:process-alive-p (child-process child)))
           (return-from %stdio-child child))
+        ;; CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the running server only, so they are
+        ;; cleared before either refusal below; %FIND-ERA sets them again when a new server's
+        ;; handshake succeeds (#610).
+        (setf (client-era client) nil
+              (client-protocol-version client) nil)
         (when child
           (when (child-exited child)
             (%finish-child client child))
@@ -489,10 +494,6 @@ it, which can take up to twice the connection's TIMEOUT."
               ;; Exited with its stdout still held open, or started without its era found.
               (%stop-child client child :close-seconds 0 :term-seconds 1))
             (setf (client-child client) nil)))
-        ;; CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the running server only; %FIND-ERA
-        ;; sets them again when the new server's handshake succeeds (#610).
-        (setf (client-era client) nil
-              (client-protocol-version client) nil)
         (let ((new (%spawn client)))
           (setf (client-child client) new)
           (let ((found nil))

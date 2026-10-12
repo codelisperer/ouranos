@@ -190,8 +190,8 @@ its tag.
     a legacy server. A request that times out after it was written gets
     `notifications/cancelled`; one that times out while still queued fails as not run and is
     never sent. A line longer than `:max-body-bytes` octets, counted as received, is dropped.
-    `client-era` and `client-protocol-version` describe the running server, and are NIL after
-    it is replaced until the new server's handshake succeeds (#610). The server's stderr is
+    `client-era` and `client-protocol-version` describe the running server: once a request finds
+    that it has exited, they are NIL until a new server's handshake succeeds (#610). The server's stderr is
     discarded, or appended to the `:stderr` file, and never logged.
   - With `:restart t`, the default, a server that exits is started again at the next request,
     at most 3 times in any 60 seconds. With `:restart nil`, every later request fails as not

@@ -505,13 +505,15 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
 
 (test with-restart-nil-a-local-server-that-exits-stays-down
   "With :RESTART NIL, every request after the server exits fails as not run, and nothing is
-started again."
+started again. The client then has no era, since no server is running (#610)."
   (with-stdio-client (client record "modern" :restart nil)
     (%failure-of (lambda () (mcp:call-tool client (%tool-named client "exit") nil)))
     (dotimes (i 2)
       (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
         (is (eq :not-run (and e (cnd:tool-error-result-outcome e))))))
-    (is (= 1 (%recorded-count record "start")))))
+    (is (= 1 (%recorded-count record "start")))
+    (is (null (mcp:client-era client)))
+    (is (null (mcp:client-protocol-version client)))))
 
 (test a-local-server-that-keeps-exiting-is-not-started-a-fifth-time-in-a-minute
   "The first start and three restarts happen; the fifth request fails as not run without
