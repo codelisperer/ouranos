@@ -885,3 +885,80 @@ off, not as strict_order (#625's review). Restoring NULL as an empty string fail
                               (error (e) (format t "~&recall failed: ~A~%" e) -1))))
                    (is (equal "off" (setting)))))
             (conn:disconnect c))))))
+
+;;; --- a window's writes and its progress in one transaction (#529) -------------------------
+
+(defclass progress-switch-db-store (mdb:db-memory-store)
+  ((failing :initform nil :accessor progress-failing))
+  (:documentation "A SQL store whose progress writes fail while PROGRESS-FAILING is true."))
+
+(defmethod mem:record-thread-progress :before ((store progress-switch-db-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (when (progress-failing store) (error "the progress write failed")))
+
+(defclass untransacted-switch-db-store (progress-switch-db-store) ()
+  (:documentation "The same store, saying it has no transactions."))
+
+(defmethod mem:store-transactions-p ((store untransacted-switch-db-store)) nil)
+
+(defun %two-sql-observers (store first-replies later-content)
+  "As the in-memory test: observer A distils 1-6 while STORE's progress writes fail, then B does
+with the writes working. Returns the thread's contents."
+  (let ((step (praxeon/prompt:messages-tokens (%chat 6))))
+    (setf (progress-failing store) t)
+    (let ((a (obs:make-observer (make-instance 'scripted-provider
+                                               :replies (mapcar #'%observations-call first-replies))
+                                store "member-529" "conv-529" :step step :retry-delay 0 :max-attempts 2)))
+      (obs:observe-turn a (%chat 6))
+      (obs:await-observer a :timeout 20))
+    (setf (progress-failing store) nil)
+    (let ((b (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call later-content)))
+                                store "member-529" "conv-529" :step step :retry-delay 0 :max-attempts 2)))
+      (obs:observe-turn b (%chat 6))
+      (obs:await-observer b :timeout 20))
+    (sort (mapcar #'mem:observation-content (mem:observations-of store "member-529" :thread "conv-529"))
+          #'string<)))
+
+(test a-window-whose-progress-write-fails-leaves-one-copy-on-the-sql-store
+  "The issue's test on the SQL store: with its transactions, a window whose progress write fails
+leaves nothing, and a new observer whose model words the fact differently leaves one copy (#529).
+Control, the same store without transactions: two copies."
+  (with-store (store)
+    (change-class store 'progress-switch-db-store)
+    (is (equal '("Resides in Lisbon.")
+               (%two-sql-observers store '("Lives in Lisbon." "Lives in Lisbon.") "Resides in Lisbon.")))
+    (is (equal '(6 nil) (multiple-value-list (mem:thread-progress store "member-529" "conv-529")))))
+  (with-store (store)
+    (change-class store 'untransacted-switch-db-store)
+    (is (equal '("Lives in Lisbon." "Resides in Lisbon.")
+               (%two-sql-observers store '("Lives in Lisbon.") "Resides in Lisbon."))
+        "control, without transactions: two copies")))
+
+(test a-promote-function-that-reads-the-sql-store-runs-inside-the-transaction
+  "The app's :PROMOTE reads the subject's facts from the SQL store while the window's transaction
+holds the store's lock. The lock is recursive and the read uses the transaction's connection, so
+the run finishes and the fact is promoted (the hub's review of #529's design)."
+  (with-store (store)
+    (let* ((step (praxeon/prompt:messages-tokens (%chat 6)))
+           (seen nil)
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Has a dog.")))
+                                        store "member-529" "conv-529" :step step
+                                        :promote (lambda (o) (declare (ignore o))
+                                                   (setf seen (length (mem:observations-of store "member-529")))
+                                                   t))))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20) "the run finished")
+      (is (eql 0 seen) "the :promote function read the store")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-529")))))))
+
+(test the-sql-store-rolls-back-a-transaction-that-signals
+  (with-store (store)
+    (mem:record-thread-progress store "member-529" "conv-529" 6 '((1 6 1)))
+    (signals simple-error
+      (mem:with-store-transaction (store :subject "member-529" :thread "conv-529")
+        (mem:remember store "member-529" "Has a dog." :thread "conv-529" :provenance (test-provenance 7 "conv-529"))
+        (mem:record-thread-progress store "member-529" "conv-529" 12 nil)
+        (error "the transaction fails")))
+    (is (null (mem:observations-of store "member-529" :thread "conv-529")))
+    (is (equal '(6 ((1 6 1))) (multiple-value-list (mem:thread-progress store "member-529" "conv-529"))))))

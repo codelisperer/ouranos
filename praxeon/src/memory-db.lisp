@@ -759,3 +759,22 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                    :do-update (list :observed mark :skipped text :updated_at (get-universal-time)))
              :dialect (store-dialect store))))
   mark)
+
+;;; --- transactions (#529) ---------------------------------------------------------------
+
+(defmethod mem:store-transactions-p ((store db-memory-store)) t)
+
+(defmethod mem:call-with-store-transaction ((store db-memory-store) thunk &key subject thread)
+  "THUNK in one transaction on STORE's connection, under the store's recursive lock, so a
+callback inside THUNK that reads or writes the store re-enters it (#529). SUPERSEDE, FORGET and
+RECORD-THREAD-PROGRESS open their own transactions, which become savepoints inside this one.
+
+INSIDE THE APP'S OWN CONN:WITH-TRANSACTION this is a savepoint too, and a rollback of the app's
+transaction undoes what it wrote: for the observer, a window's observations and its progress
+together, so the window is distilled again at the next run and no copy is left (the hub's review
+of #529's design). The observer's own thread opens no transaction of the app's; this happens only
+when the app shares the store's connection and opens one around the observer's writes."
+  (declare (ignore subject thread))
+  (bt:with-recursive-lock-held ((store-lock store))
+    (conn:with-transaction ((store-connection store))
+      (funcall thunk))))
