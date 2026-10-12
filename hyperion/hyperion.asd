@@ -464,7 +464,7 @@
   :description "A mnemosyne-backed backend for hyperion/session's STORE protocol (durable sessions)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "mnemosyne")
+  :depends-on ("hyperion" "mnemosyne" "aion/log")
   :serial t
   :components ((:file "src/session-db"))
   :in-order-to ((test-op (test-op "hyperion/session-db/tests"))))

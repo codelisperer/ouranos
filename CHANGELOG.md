@@ -25,6 +25,17 @@ its tag.
   scan, so that second query is made more often. See `docs/migrations.md` and
   `docs/dependencies.md`.
 
+- **hyperion/session-db: make the DB session store over the app's mnemosyne pool, or pass
+  `:backend`** (#636). `make-db-store` now takes a pool as well as a connection. A store made
+  over one connection kept it for the life of the process, so after Postgres ended it (SQLSTATE
+  57P01, at a provider's maintenance or a restart) every request carrying a session cookie
+  failed with "Connection to database server lost" until the process restarted, while requests
+  without one, and so a health check, kept working. Over a pool, each operation borrows a
+  connection and, when Postgres has ended it, runs once more on a new connection opened from the
+  pool's backend. Over one connection, `:backend` lets the store reconnect once and retry. An
+  app that makes the store over one connection and passes neither still fails after a
+  disconnect, as before.
+
 - **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
   `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
   outside this tree that does not accept `:thread` is refused when it is added, at load time.
@@ -207,6 +218,11 @@ its tag.
   its first `.` is `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9`
   (`nul.txt`, `com1`), compared without regard to case. The rule applies on every operating
   system, so a site behaves the same everywhere. A space was already refused.
+
+- **mnemosyne/conn: `connection-open-p` and `pool-backend`** (#636). `connection-open-p` tells,
+  after a `db-error`, a connection Postgres has ended from a statement that failed on a working
+  one: the first reads as closed, the second as open. It reads the client's state and sends
+  nothing. `pool-backend` returns the backend a pool opens its connections from.
 
 - **klio: a site can give a collection its own listing page, with `:collections`** (#557). Each
   collection named there gets a listing at `/<name>/`, paginated with `:per-page`, in the order

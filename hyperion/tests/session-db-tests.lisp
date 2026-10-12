@@ -9,7 +9,9 @@
   (:local-nicknames (#:sess #:hyperion/session)
                     (#:sdb  #:hyperion/session-db)
                     (#:conn #:mnemosyne/conn)
-                    (#:be   #:mnemosyne/backend))
+                    (#:be   #:mnemosyne/backend)
+                    (#:url  #:mnemosyne/url)
+                    (#:param #:mnemosyne/param))
   (:export #:run-tests))
 
 (in-package #:hyperion/session-db/tests)
@@ -465,3 +467,153 @@ Does nothing when STORE no longer holds ID, which is what an expiry leaves behin
        (is (eql 2 (sess:session-get got :n)) "~a: the other request's change is kept" kind))
      (is (null (sess:store-touch store "missing" 12345)) "~a: an unknown id returns NIL" kind)
      (is (null (sess:store-ref store "missing")) "~a: and is not inserted" kind))))
+
+;;; --- Postgres ending the store's connection (#636) ---------------------------
+;;;
+;;; These need Postgres, and skip without MNEMOSYNE_TEST_PG_URL. Each ends only the store's own
+;;; backends, found with pg_backend_pid(), never every connection of the test role, because other
+;;; suites may be using the same database at the same time.
+
+(defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
+
+(defun %backend-pid (connection)
+  (param:row-value (first (conn:query connection "SELECT pg_backend_pid() AS p")) :p))
+
+(defun %terminate (pid)
+  "End backend PID from a connection of the test's own, as Postgres does at maintenance (57P01)."
+  (let ((killer (conn:connect (url:backend-from-url (%pg-url)))))
+    (unwind-protect
+         (conn:query killer "SELECT pg_terminate_backend(?) AS ended" pid)
+      (conn:disconnect killer))))
+
+(defun %fresh-table () (format nil "hyperion_sessions_~(~36R~)" (random (expt 2 40) (make-random-state t))))
+
+(defun %drop-table (table)
+  (let ((c (conn:connect (url:backend-from-url (%pg-url)))))
+    (unwind-protect (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" table)))
+      (conn:disconnect c))))
+
+(defun %create-table (table)
+  "Create TABLE with the session store's columns. ENSURE-SCHEMA cannot: it creates the schema's
+own table name whatever the store's :TABLE says."
+  (let ((c (conn:connect (url:backend-from-url (%pg-url)))))
+    (unwind-protect
+         (conn:exec c (format nil "CREATE TABLE ~A (id TEXT PRIMARY KEY, data TEXT, created BIGINT, accessed BIGINT)"
+                              table))
+      (conn:disconnect c))))
+
+(defmacro with-pg ((table) &body body)
+  "Run BODY with TABLE naming a new, empty sessions table on Postgres, dropped afterwards."
+  `(if (not (%pg-url))
+       (skip "MNEMOSYNE_TEST_PG_URL is not set -- the reconnect tests need Postgres")
+       (let ((,table (%fresh-table)))
+         (%create-table ,table)
+         (unwind-protect (progn ,@body) (%drop-table ,table)))))
+
+(test a-store-over-a-pool-reads-and-writes-after-postgres-ends-its-connection
+  "A store over a pool of one connection. Postgres ends that connection (57P01). The next read
+and the next write both succeed: the first attempt fails on the dead connection, and each runs
+once more on a new one (#636)."
+  (with-pg (table)
+    (let ((pool (conn:make-pool (url:backend-from-url (%pg-url)) :size 1)))
+      (unwind-protect
+           (let ((store (sdb:make-db-store pool :dialect :postgres :table table)))
+             (sess:store-add store (%sess "s1" :data '((:user . 7))))
+             (let ((pid (conn:with-connection (c pool) (%backend-pid c))))
+               (is (eql 1 (%terminate-count pid)) "precondition: the pool's connection was ended"))
+             (let ((got (handler-case (sess:store-ref store "s1") (error (e) e))))
+               (is (typep got 'sess:session) "the read after the disconnect: ~A" got)
+               (is (and (typep got 'sess:session) (eql 7 (sess:session-get got :user)))))
+             (is (eq :added (handler-case (progn (sess:store-add store (%sess "s2")) :added) (error (e) e)))
+                 "the write after the disconnect")
+             (is (= 2 (sess:store-count store))))
+        (conn:close-pool pool)))))
+
+(defun %terminate-count (pid)
+  "End backend PID and return 1 when Postgres reports it ended."
+  (let ((row (first (%terminate pid))))
+    (if (member (param:row-value row :ended) '(t :true 1 "t" "true") :test #'equal) 1 0)))
+
+(test a-store-over-one-connection-with-its-backend-reconnects-after-postgres-ends-it
+  "A store over one connection, made with its BACKEND. Postgres ends the connection. The next
+write and read succeed on a new connection, which the store keeps (#636)."
+  (with-pg (table)
+    (let* ((backend (url:backend-from-url (%pg-url)))
+           (c (conn:connect backend))
+           (store (sdb:make-db-store c :dialect :postgres :table table :backend backend)))
+      (unwind-protect
+           (progn
+             (sess:store-add store (%sess "s1" :data '((:user . 7))))
+             (is (eql 1 (%terminate-count (%backend-pid c))) "precondition: the connection was ended")
+             (is (eq :added (handler-case (progn (sess:store-add store (%sess "s2")) :added) (error (e) e)))
+                 "the write after the disconnect")
+             (let ((got (handler-case (sess:store-ref store "s1") (error (e) e))))
+               (is (typep got 'sess:session) "the read after the disconnect: ~A" got))
+             (is (not (eq c (sdb::db-store-source store))) "the store kept the new connection"))
+        (ignore-errors (conn:disconnect (sdb::db-store-source store)))
+        (ignore-errors (conn:disconnect c))))))
+
+(test a-store-over-one-connection-without-a-backend-cannot-reconnect
+  "Without BACKEND the store cannot open a new connection, so after Postgres ends its connection an
+operation signals a DB-ERROR, as before #636. An app passes a pool, or the backend."
+  (with-pg (table)
+    (let* ((c (conn:connect (url:backend-from-url (%pg-url))))
+           (store (sdb:make-db-store c :dialect :postgres :table table)))
+      (unwind-protect
+           (progn
+             (is (eql 1 (%terminate-count (%backend-pid c))) "precondition: the connection was ended")
+             (signals conn:db-error (sess:store-ref store "s1")))
+        (ignore-errors (conn:disconnect c))))))
+
+(test a-statement-that-fails-on-a-working-connection-is-not-retried
+  "A read from a table that does not exist fails on a working connection. The store signals it and
+keeps its connection: a failure that is not a lost connection is not retried (#636)."
+  (with-pg (table)
+    (let* ((backend (url:backend-from-url (%pg-url)))
+           (c (conn:connect backend))
+           (store (sdb:make-db-store c :dialect :postgres :table (format nil "~A_missing" table) :backend backend)))
+      (unwind-protect
+           (progn
+             (signals conn:db-error (sess:store-ref store "s1"))
+             (is (eq c (sdb::db-store-source store)) "the store kept its connection"))
+        (ignore-errors (conn:disconnect c))))))
+
+(defclass counting-store (sdb:db-store)
+  ((reconnects :initform 0 :accessor reconnects))
+  (:documentation "A DB-STORE that counts its reconnects."))
+
+(defmethod sdb::%reconnect :after ((store counting-store))
+  (incf (reconnects store)))
+
+(test threads-waiting-for-the-lock-use-the-connection-another-thread-reconnected
+  "Two threads read a session while the test holds the store's lock, so both wait for it. Postgres
+then ends the store's connection, and the test releases the lock. Both reads succeed, and the
+store reconnects once: the second thread uses the connection the first opened (Copilot's review
+of #639). A thread that read the store's connection before taking the lock reconnected again,
+and left the first new connection open."
+  (with-pg (table)
+    (let* ((backend (url:backend-from-url (%pg-url)))
+           (c (conn:connect backend))
+           (store (sdb:make-db-store c :dialect :postgres :table table :backend backend))
+           (results (list nil nil))
+           (threads '()))
+      (change-class store 'counting-store)
+      (unwind-protect
+           (progn
+             (sess:store-add store (%sess "s1" :data '((:user . 7))))
+             (bt:with-recursive-lock-held ((sdb::db-store-lock store))
+               (dotimes (i 2)
+                 (let ((i i))
+                   (push (bt:make-thread
+                          (lambda ()
+                            (setf (nth i results)
+                                  (handler-case (sess:store-ref store "s1") (error (e) e)))))
+                         threads)))
+               (sleep 0.3)
+               (is (every #'bt:thread-alive-p threads) "precondition: both threads wait for the lock")
+               (is (eql 1 (%terminate-count (%backend-pid c))) "precondition: the connection was ended"))
+             (mapc #'bt:join-thread threads)
+             (is (every (lambda (r) (typep r 'sess:session)) results) "both reads: ~S" results)
+             (is (= 1 (reconnects store)) "reconnected ~D times" (reconnects store)))
+        (ignore-errors (conn:disconnect (sdb::db-store-source store)))
+        (ignore-errors (conn:disconnect c))))))

@@ -195,6 +195,19 @@ is why the argument is always supplied."
   (log:debug "db disconnect")
   (dbi:disconnect connection))
 
+(defun connection-open-p (connection)
+  "Whether CONNECTION is still open, as far as the client knows. After a DB-ERROR this tells a
+lost connection from a failed statement (#636): when Postgres ends the connection, as with
+SQLSTATE 57P01 (an administrator's command, a restart or a provider's maintenance), the driver
+closes its end, and every later statement fails with \"Connection to database server lost\" and
+no SQLSTATE at all, while a statement that fails on a working connection leaves it open. This
+reads the client's state and sends nothing, so a connection the server ended while it sat idle
+reads as open until it is next used. A SQLite connection always reads as open."
+  (let ((handle (ignore-errors (dbi:connection-handle connection))))
+    (if (typep handle 'cl-postgres:database-connection)
+        (cl-postgres:database-open-p handle)
+        t)))
+
 (defmacro with-connection ((var source) &body body)
   "Bind VAR to a connection from SOURCE, run BODY, and give the connection back on exit.
 
