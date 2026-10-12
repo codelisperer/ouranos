@@ -870,6 +870,14 @@ its tag.
 
 ### Fixed
 
+- **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
+  store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
+  store made with another table name and `:ensure t` failed its first operation on a table that
+  did not exist. `db-store-ddl` now builds the DDL under the store's table name, as
+  `hyperion/auth-db` does since #378, and refuses a name that is not letters, digits and
+  underscores. An app that made `hyperion_sessions` by hand because of this, while its store
+  named another table, can drop it.
+
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
   `:result-stored`, `:results-cleared`, `:context-trimmed`, `:context-overflow`, `:delegate`,
