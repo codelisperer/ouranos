@@ -71,12 +71,13 @@
 ;;;; the window once and leaves one copy. The closing save before a window's first write and the
 ;;;; :UNSAVED outcome are not needed there, because closure, observations and progress commit
 ;;;; together. The paragraph above still holds for a store without transactions, such as one an
-;;;; app wrote itself, and for a progress write that fails after a window was given up on. Inside
-;;;; an app's own transaction on the SQL store, the window's transaction is a savepoint, and a
-;;;; rollback of the app's transaction undoes the window's observations and its progress
-;;;; together. The observer that wrote them has already moved its own mark past the window and
-;;;; does not lower it, so it does not distil the window again; a new observer, or the process
-;;;; after a restart, starts from the store's mark and does (Copilot's review of #645).
+;;;; app wrote itself, and for a progress write that fails after a window was given up on. The
+;;;; window's transaction is never a savepoint inside an app's transaction: cl-dbi records an
+;;;; open transaction per thread, and the observer writes on a thread of its own. An app that
+;;;; holds a transaction open on the store's connection while the observer writes has that
+;;;; transaction committed by the observer's COMMIT on Postgres, and the observer's attempt
+;;;; refused on SQLite (#651, #653); such an app does not share the store's connection with an
+;;;; observer.
 ;;;;
 ;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS, FOR ONE STORE OBJECT. OBSERVE-TURN
 ;;;; starts nothing while another observer of the same store object, subject and thread holds
