@@ -861,3 +861,27 @@ hnsw.iterative_scan as the session had them."
                 (is (= 20 count) "precondition: the recall returned 20, through the exact query")
                 (is (equal before (settings)) "~{~A~^, ~}: ~S before, ~S after" names before (settings))
                 (is (equal "on" (first (settings))) "enable_indexscan is on"))))))))
+
+(test a-recall-as-a-new-connections-first-statement-works-and-puts-the-setting-back
+  "A new connection to an existing table, whose first statement is a similarity recall. Until
+pgvector's library is loaded, hnsw.iterative_scan does not exist and reads as NULL; the recall's
+query loads it. The recall returns the subject's rows, and the setting then reads as its default,
+off, not as strict_order (#625's review). Restoring NULL as an empty string failed here with
+\"invalid value for parameter\"."
+  (if (%sqlite-p)
+      (skip "Postgres only: pgvector's settings")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 5)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (let ((c (conn:connect (url:backend-from-url (%pg-url)))))
+          (unwind-protect
+               (let ((fresh (mdb:make-db-memory-store c :embedder (make-instance 'scattered-embedder)
+                                                        :table (mdb:store-table store) :dialect :postgres)))
+                 (flet ((setting ()
+                          (param:row-value (first (conn:query c "SELECT current_setting('hnsw.iterative_scan', true) AS v"))
+                                           :v)))
+                   (is (null (setting)) "precondition: the new connection has not loaded pgvector")
+                   (is (= 5 (handler-case (%nearest-count fresh 20)
+                              (error (e) (format t "~&recall failed: ~A~%" e) -1))))
+                   (is (equal "off" (setting)))))
+            (conn:disconnect c))))))

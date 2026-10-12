@@ -526,7 +526,9 @@ PUT BACK, NOT LEFT TO THE TRANSACTION'S END (#625's review). Inside the app's ow
 CONN:WITH-TRANSACTION the store's transaction is a savepoint, and a local setting made in a
 released savepoint lasts until the app's transaction ends, so every later query of the app's
 would run with it. On a normal exit a failed restore is signalled; on a non-local exit it is
-ignored, because the transaction or savepoint is then rolled back, which undoes the settings."
+ignored, because the transaction or savepoint is then rolled back, which undoes the settings. A
+setting that did not exist before, as pgvector's do not until the library is loaded, is put back
+to its default."
   (let* ((c (store-connection store))
          (old (mapcar (lambda (setting)
                         (cons (car setting)
@@ -538,7 +540,13 @@ ignored, because the transaction or savepoint is then rolled back, which undoes 
          (finished nil))
     (flet ((restore ()
              (dolist (o old)
-               (conn:query c "SELECT set_config(?, ?, true) AS v" (car o) (or (cdr o) "")))))
+               (if (cdr o)
+                   (conn:query c "SELECT set_config(?, ?, true) AS v" (car o) (cdr o))
+                   ;; A SETTING THAT DID NOT EXIST BEFORE (#625's review): on a connection that has
+                   ;; not loaded pgvector yet, hnsw.iterative_scan reads as NULL, and the query
+                   ;; loads the library, which makes it an enum that refuses "". Its default is
+                   ;; what the connection had. The names are this file's constants.
+                   (conn:exec c (format nil "SET LOCAL ~A TO DEFAULT" (car o)))))))
       (dolist (setting settings)
         (conn:query c "SELECT set_config(?, ?, true) AS v" (car setting) (cdr setting)))
       (unwind-protect (multiple-value-prog1 (funcall thunk) (setf finished t))
