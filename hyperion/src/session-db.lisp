@@ -90,6 +90,14 @@ restarts, as before #636."
 (defun %lost-p (condition connection)
   (and (typep condition 'conn:db-error) (not (conn:connection-open-p connection))))
 
+(defgeneric %reconnect (store)
+  (:documentation "Open a new connection from STORE's backend, install it as STORE's connection
+and return it. Called with the store's lock held. A generic so a test can count the calls.")
+  (:method ((store db-store))
+    (let ((fresh (conn:connect (db-store-backend store))))
+      (setf (db-store-source store) fresh)
+      fresh)))
+
 (defun call-with-store-connection (store function)
   "Call FUNCTION with a connection for one operation of STORE; see the section above."
   (let ((source (db-store-source store)))
@@ -107,15 +115,17 @@ restarts, as before #636."
                                  :condition (string-downcase (princ-to-string (type-of result))))
                        (conn:with-connection (c (conn:pool-backend source)) (funcall function c)))))
           (bt:with-recursive-lock-held ((db-store-lock store))
-            (multiple-value-bind (result ok) (attempt source)
-              (cond (ok result)
-                    ((null (db-store-backend store)) (error result))
-                    (t (log:warn "session store connection lost, reconnecting"
-                                 :condition (string-downcase (princ-to-string (type-of result))))
-                       (ignore-errors (conn:disconnect source))
-                       (let ((fresh (conn:connect (db-store-backend store))))
-                         (setf (db-store-source store) fresh)
-                         (funcall function fresh))))))))))
+            ;; READ AGAIN UNDER THE LOCK (Copilot's review of #639). A thread that waited for the
+            ;; lock while another reconnected must use that new connection, not the dead one it
+            ;; saw before; otherwise it reconnects again and the other's connection is left open.
+            (let ((connection (db-store-source store)))
+              (multiple-value-bind (result ok) (attempt connection)
+                (cond (ok result)
+                      ((null (db-store-backend store)) (error result))
+                      (t (log:warn "session store connection lost, reconnecting"
+                                   :condition (string-downcase (princ-to-string (type-of result))))
+                         (ignore-errors (conn:disconnect connection))
+                         (funcall function (%reconnect store)))))))))))
 
 (defmacro with-store-connection ((var store) &body body)
   "Run BODY with VAR bound to a connection for one operation of STORE (#636)."

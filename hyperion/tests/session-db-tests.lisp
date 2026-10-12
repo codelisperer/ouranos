@@ -577,3 +577,43 @@ keeps its connection: a failure that is not a lost connection is not retried (#6
              (signals conn:db-error (sess:store-ref store "s1"))
              (is (eq c (sdb::db-store-source store)) "the store kept its connection"))
         (ignore-errors (conn:disconnect c))))))
+
+(defclass counting-store (sdb:db-store)
+  ((reconnects :initform 0 :accessor reconnects))
+  (:documentation "A DB-STORE that counts its reconnects."))
+
+(defmethod sdb::%reconnect :after ((store counting-store))
+  (incf (reconnects store)))
+
+(test threads-waiting-for-the-lock-use-the-connection-another-thread-reconnected
+  "Two threads read a session while the test holds the store's lock, so both wait for it. Postgres
+then ends the store's connection, and the test releases the lock. Both reads succeed, and the
+store reconnects once: the second thread uses the connection the first opened (Copilot's review
+of #639). A thread that read the store's connection before taking the lock reconnected again,
+and left the first new connection open."
+  (with-pg (table)
+    (let* ((backend (url:backend-from-url (%pg-url)))
+           (c (conn:connect backend))
+           (store (sdb:make-db-store c :dialect :postgres :table table :backend backend))
+           (results (list nil nil))
+           (threads '()))
+      (change-class store 'counting-store)
+      (unwind-protect
+           (progn
+             (sess:store-add store (%sess "s1" :data '((:user . 7))))
+             (bt:with-recursive-lock-held ((sdb::db-store-lock store))
+               (dotimes (i 2)
+                 (let ((i i))
+                   (push (bt:make-thread
+                          (lambda ()
+                            (setf (nth i results)
+                                  (handler-case (sess:store-ref store "s1") (error (e) e)))))
+                         threads)))
+               (sleep 0.3)
+               (is (every #'bt:thread-alive-p threads) "precondition: both threads wait for the lock")
+               (is (eql 1 (%terminate-count (%backend-pid c))) "precondition: the connection was ended"))
+             (mapc #'bt:join-thread threads)
+             (is (every (lambda (r) (typep r 'sess:session)) results) "both reads: ~S" results)
+             (is (= 1 (reconnects store)) "reconnected ~D times" (reconnects store)))
+        (ignore-errors (conn:disconnect (sdb::db-store-source store)))
+        (ignore-errors (conn:disconnect c))))))
