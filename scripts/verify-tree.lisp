@@ -832,21 +832,9 @@ storage engine and have nothing to say here."
 ;;; --- counting -------------------------------------------------------------
 
 (defun count-checks (output)
-  "Sum every `Did N checks.` FiveAM emits in OUTPUT. Returns NIL if it emitted none at
-all -- which means the suite never ran, not that it ran and found nothing."
-  (let ((total nil) (start 0))
-    (loop
-      (let ((p (search "Did " output :start2 start)))
-        (unless p (return))
-        (let* ((numstart (+ p 4))
-               (numend (position-if-not #'digit-char-p output :start numstart)))
-          (when (and numend (> numend numstart)
-                     (string= " checks" output :start2 numend
-                                               :end2 (min (length output) (+ numend 7))))
-            (setf total (+ (or total 0)
-                           (parse-integer output :start numstart :end numend)))))
-        (setf start (1+ p))))
-    total))
+  "The sum of every FiveAM report's check count in OUTPUT, or NIL if there was none. See
+OURANOS-FIVEAM-REPORT:COUNT-CHECKS, which also counts `Did 1 check.' (#607)."
+  (ouranos-fiveam-report:count-checks output))
 
 (defun count-skips (output)
   "Sum every `Skip: N` FiveAM emits in OUTPUT; 0 if none.
@@ -878,10 +866,6 @@ in a total (pre-publication issue 168)."
 ;;; discarded, so the one machine that could see the failure was the one that threw the
 ;;; detail away. A gate whose job is to say what to fix must carry the finding out with it --
 ;;; all of it.
-
-(defun failure-details (output)
-  "WHICH checks failed, not merely that some did. See scripts/fiveam-report.lisp."
-  (ouranos-fiveam-report:failure-details output))
 
 (defun skip-reasons (output)
   "The reasons under FiveAM's `Skip Details:` block, so the gate can say WHAT did not run
@@ -1119,9 +1103,19 @@ let this run claim `view' while the five assertions skipped."
         (let ((n (count-checks text))
               (empty-reason (cdr (assoc s +known-empty+)))
               (redefined (ouranos-redefinitions:redefinitions-in text)))
+          ;; A suite whose output holds more than one FiveAM report is named, with each
+          ;; report's Fail count, so a reader can see what the verdict below was judged on (#605).
+          (let ((fails (ouranos-fiveam-report:fail-counts text)))
+            (when (> (length fails) 1)
+              (format t "  REPORTS ~a~34t~D FiveAM reports, Fail: ~{~D~^, ~} (child exited ~a)~%"
+                      s (length fails) fails code)))
           (cond
             ((not (zerop code))
-             (format t "  FAIL    ~a  (child exited ~a)~%~a~%" s code (failure-excerpt text 6))
+             (format t "  FAIL    ~a  (child exited ~a)~%" s code)
+             ;; Which checks failed, when the child ran some before it ended: aion/tests now
+             ;; signals after a failing report (#605). Then why the child ended.
+             (ouranos-fiveam-report:print-failure-details text)
+             (format t "~a~%" (failure-excerpt text 6))
              (fail "~a" (or (ouranos-failure-origin:report-origin text s *root*)
                             (format nil "~a errored in a clean image" s))))
             ((null n)
@@ -1132,11 +1126,13 @@ let this run claim `view' while the five assertions skipped."
                  (format t "  empty   ~a  -- known: ~a~%" s empty-reason)
                  (progn (format t "  NO-RUN  ~a  -- 0 checks~%" s)
                         (fail "~a ran ZERO checks" s))))
-            ((and (search "Fail: 0 ( 0%)" text) (ouranos-compile-warnings:warnings-in text))
+            ;; Every report must say Fail: 0, not just one of them (#605).
+            ((and (ouranos-fiveam-report:every-report-passed-p text)
+                  (ouranos-compile-warnings:warnings-in text))
              (incf grand n)
              (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n (ouranos-compile-warnings:warnings-in text))
              (fail "~a compiled with ~D warning~:P" s (length (ouranos-compile-warnings:warnings-in text))))
-            ((search "Fail: 0 ( 0%)" text)
+            ((ouranos-fiveam-report:every-report-passed-p text)
              (incf grand n)
              (let ((skipped (count-skips text)))
                (if (zerop skipped)
@@ -1145,11 +1141,9 @@ let this run claim `view' while the five assertions skipped."
                    (format t "  ok      ~a~34t~a checks (~D skipped)~%~{          skip: ~a~%~}"
                            s n skipped (skip-reasons text)))))
             (t (incf grand n)
-               (let ((details (failure-details text)))
-                 (format t "  FAIL    ~a~34t~a checks, some failing~%~{          ~a~%~}"
-                         s n details)
-                 (unless details
-                   (format t "~a~%" (failure-excerpt text 8))))
+               (format t "  FAIL    ~a~34t~a checks, some failing~%" s n)
+               (when (zerop (ouranos-fiveam-report:print-failure-details text))
+                 (format t "~a~%" (failure-excerpt text 8)))
                (fail "~a had failing checks" s)))
           (report-redefinitions s redefined))
         ;; Per-backend coverage, INDEPENDENT of pass/fail above (pre-publication issue 176). A suite can be

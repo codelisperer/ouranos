@@ -35,7 +35,8 @@
 
 (defpackage #:ouranos-fiveam-report
   (:use #:cl)
-  (:export #:failure-details #:skip-reasons #:rule-line-p))
+  (:export #:failure-details #:skip-reasons #:rule-line-p #:fail-counts
+           #:every-report-passed-p #:print-failure-details #:count-checks))
 
 (in-package #:ouranos-fiveam-report)
 
@@ -103,3 +104,59 @@ line; if that ever stops being true this needs the same treatment as the block a
         (if (zerop (length trimmed))
             (return (nreverse collected))
             (push trimmed collected))))))
+
+(defun fail-counts (output)
+  "The N of every `Fail: N' line FiveAM printed in OUTPUT, in order: one per report.
+
+A test op prints more than one report when it runs more than one suite, calls RUN! more than
+once, or calls RUN and EXPLAIN! itself (#605)."
+  (loop for line in (uiop:split-string output :separator '(#\Newline))
+        for text = (%clean line)
+        for n = (and (uiop:string-prefix-p "Fail: " text)
+                     (parse-integer text :start 6 :junk-allowed t))
+        when n collect n))
+
+(defun every-report-passed-p (output)
+  "True when OUTPUT holds at least one FiveAM report and every one of them has `Fail: 0'.
+
+The gate used to ask whether `Fail: 0 ( 0%)' appeared anywhere, which is true of an output
+holding one passing report and one failing one; with the child exiting 0, such a suite was
+reported ok (#605). An output with no `Fail:' line at all is not a pass here, and the gate
+reports it before asking this: as NO-RUN when it also has no `Did N checks.' line."
+  (let ((counts (fail-counts output)))
+    (and counts (every #'zerop counts) t)))
+
+(defun print-failure-details (output &optional (stream *standard-output*))
+  "Print each line FAILURE-DETAILS finds in OUTPUT to STREAM, indented to sit under the gate's
+FAIL line, and return how many there were.
+
+Used by both of the gate's FAIL branches: a suite that exited 0 with failing checks, and one
+whose child exited non-zero. The second includes a suite that ran its checks and then
+signalled because some failed, as aion/tests does since #605; without this, its failures were
+reported only as the error that ended the child, not as the checks that failed."
+  (let ((details (failure-details output)))
+    (format stream "~{          ~a~%~}" details)
+    (length details)))
+
+(defun count-checks (output)
+  "Sum the check count of every FiveAM report in OUTPUT. Returns NIL if there was none at all,
+which means the suite never ran, not that it ran and found nothing.
+
+FiveAM prints `Did N checks.', and `Did 1 check.' for a report with one check. The gate
+counted only the first form until #607, so a one-check report was left out of the total, and
+a suite whose only report had one check read as NO-RUN."
+  (let ((total nil) (start 0))
+    (loop
+      (let ((p (search "Did " output :start2 start)))
+        (unless p (return))
+        (let* ((numstart (+ p 4))
+               (numend (position-if-not #'digit-char-p output :start numstart)))
+          (when (and numend (> numend numstart)
+                     (some (lambda (tail)
+                             (string= tail output :start2 numend
+                                                  :end2 (min (length output) (+ numend (length tail)))))
+                           '(" checks" " check.")))
+            (setf total (+ (or total 0)
+                           (parse-integer output :start numstart :end numend)))))
+        (setf start (1+ p))))
+    total))
