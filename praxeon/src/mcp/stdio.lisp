@@ -493,8 +493,11 @@ it, which can take up to twice the connection's TIMEOUT."
           (let ((found nil))
             (unwind-protect (progn (%find-era client new) (setf found t))
               ;; A handshake that failed leaves no era, so the next request starts it again
-              ;; rather than sending to a server that was never initialized.
-              (unless found (setf (child-era new) nil))))
+              ;; rather than sending to a server that was never initialized. The half-started
+              ;; server is stopped now, so with :RESTART NIL it does not run until CLOSE-CLIENT.
+              (unless found
+                (setf (child-era new) nil)
+                (%stop-child client new :close-seconds 1 :term-seconds 1))))
           new)))))
 
 (defun %stdio-request (client method params timeout)

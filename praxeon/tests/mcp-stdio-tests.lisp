@@ -213,6 +213,18 @@ and does the handshake again, rather than sending to a server that was never ini
     (is (= 2 (length (%received-method record "initialize"))))
     (is (null (%received-method record "tools/list")))))
 
+(test a-local-server-whose-handshake-fails-is-stopped-at-once
+  "With :RESTART NIL, a server whose handshake failed is not started again, so it is stopped when
+the handshake fails rather than left running until CLOSE-CLIENT."
+  (with-stdio-client (client record "legacy-no-init" :timeout 2 :restart nil)
+    (is-true (%failure-of (lambda () (mcp:list-tools client))))
+    (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
+      (is-false (sb-ext:process-alive-p process)))
+    (is (= 1 (%recorded-count record "eof")))
+    (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
+      (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
+    (is (= 1 (%recorded-count record "start")))))
+
 (test a-legacy-local-server-is-found-when-it-does-not-answer-discover
   "No answer to server/discover within the connection's timeout also means a legacy server."
   (with-stdio-client (client record "legacy-silent" :timeout 5)
@@ -387,7 +399,8 @@ the default, the next request starts it again and finds its era again."
 (test a-local-server-that-exits-while-its-stdout-stays-open-is-started-again
   "A server can exit while a process it started still holds its stdout, so its output does not
 end. The next request sees that the process has exited and starts the server again. The old
-reader ends on its own once the other process exits."
+reader ends on its own once the other process exits. That process, /bin/sleep 6, is not
+signalled by anything here, and can outlive the test by up to 6 seconds."
   (with-stdio-client (client record "orphan" :call-timeout 2)
     (let* ((tool (%tool-named client "exit-leaving-child"))
            (reader (praxeon/mcp::child-reader (praxeon/mcp::client-child client)))
