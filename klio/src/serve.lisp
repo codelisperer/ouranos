@@ -182,7 +182,7 @@ segment (`roles/page') would be taken for that collection's pages."
                      entry))))
         (let ((name (string-trim "/" name)))
           (unless (%safe-collection-name-p name)
-            (error "klio: the collection name ~S must be /-separated segments of letters, digits, . - and _, none empty or starting with . or _"
+            (error "klio: the collection name ~S must be /-separated segments of letters, digits, . - and _, none empty, starting with . or _, ending in ., or a Windows device name such as CON, NUL or COM1"
                    name))
           (when (member name names :test #'string-equal)
             (error "klio: the collection ~S is named twice in :collections" name))
