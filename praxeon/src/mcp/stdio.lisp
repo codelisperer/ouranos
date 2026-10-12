@@ -264,15 +264,24 @@ environment for :INHERIT."
           ;; needs none of the caller's bindings, and %FINISH-CHILD joins it.
           (sb-thread:make-thread (lambda ()
                                    ;; Released however the thread ends, as the writer's is.
-                                   (unwind-protect (%reader-loop name limit child)
-                                     (%release child :reader)))
+                                   (sb-sys:without-interrupts
+                                     (unwind-protect
+                                          (sb-sys:with-local-interrupts
+                                            (%reader-loop name limit child))
+                                       (%release child :reader))))
                                  :name "praxeon/mcp stdio reader")
           (child-writer child)
           ;; THREAD-LIFETIME: scoped -- it writes this child's queued lines until :CLOSE, needs
           ;; none of the caller's bindings, and %FINISH-CHILD joins it.
           (sb-thread:make-thread (lambda ()
-                                   (unwind-protect (%writer-loop child)
-                                     (%release child :writer)))
+                                   ;; Interrupts are allowed in the loop and not in the release,
+                                   ;; because an interrupt, such as %FINISH-CHILD's
+                                   ;; TERMINATE-THREAD, that arrives during a cleanup form can
+                                   ;; skip the rest of it, and the pipes would stay open.
+                                   (sb-sys:without-interrupts
+                                     (unwind-protect
+                                          (sb-sys:with-local-interrupts (%writer-loop child))
+                                       (%release child :writer))))
                                  :name "praxeon/mcp stdio writer"))
     (setf (gethash client *live-clients*) t)
     (log:info "praxeon/mcp: local server started" :connection name :pid (%child-pid child))
@@ -306,7 +315,8 @@ TerminateProcess, whatever SIGNAL is; a process it started can outlive it there.
 
 (defun %finish-child (client child)
   "Join CHILD's threads and release its process, once, after it has exited or been ended, and
-log how it ended."
+log how it ended. A writer still blocked 2 seconds after the process is ended is ended itself, so
+that it releases the pipes; no process is signalled for it."
   ;; Tested and set in one step under the lock: at image exit %CLOSE-LIVE-CLIENTS can finish a
   ;; child that another thread is finishing (#601).
   (when (sb-thread:with-mutex ((child-lock child))
@@ -326,7 +336,10 @@ log how it ended."
       ;; group id saved earlier can belong to someone else once the group is empty, which is
       ;; the case when the holder has left it with setsid. The holder keeps running, and reads
       ;; end-of-file once the pipe is closed.
-      (sb-thread:terminate-thread (child-writer child))
+      ;; The writer can return between the timeout and this call, and ending a thread that has
+      ;; returned signals INTERRUPT-THREAD-ERROR; it has released the pipes itself then.
+      (handler-case (sb-thread:terminate-thread (child-writer child))
+        (sb-thread:interrupt-thread-error () nil))
       (sb-thread:join-thread (child-writer child) :default nil :timeout 2))
     (sb-thread:join-thread (child-reader child) :default nil :timeout 2)
     (let ((process (child-process child)))

@@ -509,23 +509,37 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
 request is still being written to it. When the client finishes that server, it ends the
 blocked writer thread, so the pipes are closed once, right then, and are not kept until the
 image exits (#601). The server started next gets only whole JSON lines. The shell holding the
-old stdin is not signalled, and can outlive the test by up to 6 seconds."
+old stdin is not signalled, and can outlive the test by up to 6 seconds. The test checks that
+the old server was finished less than 5 seconds after the exit call, before that shell reads its
+stdin; on a run slower than that the writer could finish by itself, and the test fails instead
+of passing without having ended it."
   (with-stdio-client (client record "hold-stdin" :timeout 3 :call-timeout 1)
     (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
            (echo (%tool-named client "echo"))
            (old (praxeon/mcp::client-child client))
            (in (sb-ext:process-input (praxeon/mcp::child-process old)))
            (exiting (sb-thread:make-thread
+                     ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
                      (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
-                     :name "praxeon/mcp test exit-holding-stdin")))
-      (sleep 0.2)
+                     :name "praxeon/mcp test exit-holding-stdin"))
+           ;; Before the server starts the shell, so the time measured below is not less than
+           ;; the time the shell has been sleeping.
+           (started (get-internal-real-time)))
+      ;; The server has read the exit call, and reads nothing more from here.
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
       ;; About 1 MB, far more than a pipe holds, so the writer blocks.
       (is-true (%failure-of (lambda ()
                               (mcp:call-tool client echo
                                              (%text (make-string 1000000 :initial-element #\x))))))
       (is-true (sb-thread:join-thread exiting))
+      ;; Both calls can time out before the server exits, so wait until its output has ended.
+      (is-true (%wait-for (lambda () (praxeon/mcp::child-exited old))))
       ;; This finishes the old server, then starts the next one. The shell has not read yet.
       (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+      ;; The shell reads its stdin 6 seconds after it starts, and the writer would then finish
+      ;; without being ended. Under 5 seconds, the checks below are about the ending.
+      (let ((seconds (/ (- (get-internal-real-time) started) internal-time-units-per-second)))
+        (is (< seconds 5) "the old server was finished ~,1F seconds after the exit call" seconds))
       (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
       (is-false (open-stream-p in))
       (is (= 1 (praxeon/mcp::child-closes old)))
