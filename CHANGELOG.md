@@ -329,12 +329,14 @@ its tag.
     is closed, whatever its tries, and the progress is saved. The progress is also saved there
     while the observer is unsaved and a closed skipped window lies before the window, because the
     store may lack that closure. If that save fails, the model's answer for the window is
-    discarded and nothing of it is written; the attempt ends as a stop does, with no try counted
-    and the mark left where it was, and the next run asks the model again. So while progress
-    writes keep failing and a skipped window lies before the next window, each turn makes model
-    calls whose answers are discarded, and no later window is written until a progress write
-    succeeds. An observer with no skipped window before the next window keeps writing
-    observations while progress writes fail. A closed window is never retried, and
+    discarded and nothing of it is written; no try is counted, the mark stays where it was, and
+    the run ends, so no later window in the same run can close the window that was not written.
+    The window's line in the log has outcome `:unsaved`, and the next run asks the model again
+    (#622). So while progress writes keep failing and a skipped window lies before the next
+    window, each turn makes one model call whose answer is discarded, and no later window is
+    written until a progress write succeeds. An observer with no skipped window before the next
+    window keeps writing observations while progress writes fail. A closed window is never
+    retried, and
     `observer-skipped` shows it as `(from through tries :closed)`. A window is closed this way
     even when the later window's write then fails. Whether a window is closed comes from the
     progress record alone, not from the thread's observations,
