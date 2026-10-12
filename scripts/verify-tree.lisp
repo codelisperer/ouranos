@@ -832,21 +832,9 @@ storage engine and have nothing to say here."
 ;;; --- counting -------------------------------------------------------------
 
 (defun count-checks (output)
-  "Sum every `Did N checks.` FiveAM emits in OUTPUT. Returns NIL if it emitted none at
-all -- which means the suite never ran, not that it ran and found nothing."
-  (let ((total nil) (start 0))
-    (loop
-      (let ((p (search "Did " output :start2 start)))
-        (unless p (return))
-        (let* ((numstart (+ p 4))
-               (numend (position-if-not #'digit-char-p output :start numstart)))
-          (when (and numend (> numend numstart)
-                     (string= " checks" output :start2 numend
-                                               :end2 (min (length output) (+ numend 7))))
-            (setf total (+ (or total 0)
-                           (parse-integer output :start numstart :end numend)))))
-        (setf start (1+ p))))
-    total))
+  "The sum of every FiveAM report's check count in OUTPUT, or NIL if there was none. See
+OURANOS-FIVEAM-REPORT:COUNT-CHECKS, which also counts `Did 1 check.' (#607)."
+  (ouranos-fiveam-report:count-checks output))
 
 (defun count-skips (output)
   "Sum every `Skip: N` FiveAM emits in OUTPUT; 0 if none.
