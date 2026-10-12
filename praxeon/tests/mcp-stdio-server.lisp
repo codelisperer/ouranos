@@ -32,6 +32,9 @@
 ;;;;                    and then answers
 ;;;;   modern-then-unsupported
 ;;;;                    modern at its first start, and unsupported once RECORD-FILE holds a start
+;;;;   hold-stdin       modern, with a sixth tool, exit-holding-stdin, which starts a shell with
+;;;;                    this process's stdin that reads nothing for 6 seconds and then reads
+;;;;                    it to its end, stops reading stdin for 1 second, then exits with status 3
 ;;;;   orphan           modern, with a sixth tool, exit-leaving-child, which starts /bin/sleep 6
 ;;;;                    with this process's stdout, then exits with status 3
 ;;;;
@@ -93,7 +96,8 @@
 (defparameter +tools+
   (append '("echo" "fail" "slow" "slow-a" "exit")
           (cond ((equal *mode* "stall") '("stall"))
-                ((equal *mode* "orphan") '("exit-leaving-child")))))
+                ((equal *mode* "orphan") '("exit-leaving-child"))
+                ((equal *mode* "hold-stdin") '("exit-holding-stdin")))))
 
 (defun send-bytes (octets)
   "Write OCTETS to stdout as they are, after what the character stream holds."
@@ -197,6 +201,15 @@
               (fail id -32022 "Unsupported protocol version"
                     (obj "supported" (vector "2026-07-28") "requested" (or version 'null))))
              ((equal method "tools/list") (reply id (tools-page (gethash "cursor" params))))
+             ((and (equal method "tools/call") (equal (gethash "name" params) "exit-holding-stdin"))
+              ;; On this thread, so that stdin is not read again. The shell holds stdin open and
+              ;; reads nothing for 6 seconds, so a writer that has filled the pipe stays blocked
+              ;; after this exits, and then the rest of what it writes is read and discarded.
+              (sb-ext:run-program "/bin/sh" '("-c" "sleep 6; exec cat >/dev/null")
+                                  :input t :output nil :error nil :wait nil)
+              (sleep 1)
+              (record "exiting")
+              (sb-ext:exit :code 3 :abort t))
              ((and (equal method "tools/call") (equal (gethash "name" params) "stall"))
               ;; On this thread, so that stdin is not read meanwhile.
               (sleep 5)

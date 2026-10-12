@@ -503,6 +503,40 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
       (is (= 2 (%recorded-count record "start")))
       (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15)))))
 
+#-win32
+(test a-write-blocked-on-an-exited-server-does-not-reach-the-next-one
+  "A server exits while a process it started holds its stdin and reads nothing, and a long
+request is still being written to it. The server started next gets only whole JSON lines, so
+the blocked write's remaining octets never reach it through a reused descriptor, once the
+process holding the old stdin starts reading (#601)."
+  (with-stdio-client (client record "hold-stdin" :timeout 3 :call-timeout 1)
+    (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
+           (echo (%tool-named client "echo"))
+           (exiting (sb-thread:make-thread
+                     (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
+                     :name "praxeon/mcp test exit-holding-stdin")))
+      (sleep 0.2)
+      ;; About 1 MB, far more than a pipe holds, so the writer blocks.
+      (is-true (%failure-of (lambda ()
+                              (mcp:call-tool client echo
+                                             (%text (make-string 1000000 :initial-element #\x))))))
+      (is-true (sb-thread:join-thread exiting))
+      (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+      ;; By now the old stdin is being read, and any write the old writer still makes has been
+      ;; made.
+      (sleep 4)
+      (is (equal "later" (mcp:call-tool client echo (%text "later"))))
+      (is (= 2 (%recorded-count record "start")))
+      (let* ((lines (%recorded record))
+             (after (rest (member "start" (rest (member "start" lines :test #'equal))
+                                  :test #'equal)))
+             (bad (loop for line in after
+                        when (and (uiop:string-prefix-p "in " line)
+                                  (not (hash-table-p (ignore-errors
+                                                      (jzon:parse (subseq line 3))))))
+                          collect (subseq line 0 (min 60 (length line))))))
+        (is (null bad) "the second server read ~S" bad)))))
+
 (test with-restart-nil-a-local-server-that-exits-stays-down
   "With :RESTART NIL, every request after the server exits fails as not run, and nothing is
 started again. The client then has no era, since no server is running (#610)."
