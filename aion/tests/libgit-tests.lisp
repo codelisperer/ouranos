@@ -702,29 +702,33 @@ the Windows leg; Linux and macOS return GIT_EAUTH and cannot show it."
           (is (typep wrong 'error))
           (is (null (search "t0ken" (princ-to-string wrong))) "~A" wrong))))))
 
-(test a-401-before-the-credentials-function-runs-is-not-authentication-failed-on-windows
-  "A server that answers 401 with no WWW-Authenticate header gives libgit2 no way to ask for a
-credential, so the credentials function is never called. On Windows WinHTTP reports this as a
-GIT-ERROR naming status 401, the same error it gives after the function has given nothing, and
-FETCH leaves it a GIT-ERROR because nothing was declined. Elsewhere libgit2 itself returns
-GIT_EAUTH, which is AUTHENTICATION-FAILED. CONTROL: mapping every 401 to
-AUTHENTICATION-FAILED fails the third check, and only on the Windows leg."
-  (http:with-server (server (lambda (request stream)
-                              (declare (ignore request))
-                              (http:write-response stream 401 '() "")))
-    (with-new-repository (repo dir)
-      (git:set-remote repo "origin" (http:server-url server "/repo.git"))
-      (let* ((asked 0)
-             (c (outcome (lambda ()
-                           (git:fetch repo "origin"
-                                      :credentials (lambda (url user)
-                                                     (declare (ignore url user))
-                                                     (incf asked)
-                                                     nil))))))
-        (is (= 0 asked))
-        (is (typep c 'git:git-error))
-        #+win32 (is (not (typep c 'git:authentication-failed)) "~A" c)
-        #-win32 (is (typep c 'git:authentication-failed) "~A" c)))))
+(defun finish-after-error (declined code class message)
+  "The condition %FINISH-OPERATION signals for an operation whose credentials callback did or
+did not give nothing (DECLINED), after a libgit2 call returned CODE with libgit2's last error
+set to CLASS and MESSAGE, or :RETURNED."
+  (git:ensure-loaded)
+  (cffi:foreign-funcall "git_error_set_str" :int class :string message :int)
+  (let ((op (git::%make-operation nil)))
+    (setf (git::%operation-declined op) declined)
+    (outcome (lambda () (git::%finish-operation op "git_remote_fetch" code)))))
+
+(test a-winhttp-401-is-authentication-failed-only-after-the-callback-gave-nothing
+  "On Windows WinHTTP returns -1 with the HTTP-class error \"request failed with status code:
+401\" where libgit2's other transports return GIT_EAUTH. That error is AUTHENTICATION-FAILED
+only once the credentials callback has given nothing during the operation; a 401 before the
+callback ran stays a GIT-ERROR, and so does any other status. GIT_EAUTH is
+AUTHENTICATION-FAILED either way. The error is set with git_error_set_str, so the decision is
+checked the same way on every platform; the credential test measures the WinHTTP error itself
+on the Windows leg. CONTROL: without the mapping the second check fails; mapping every 401
+fails the first."
+  (let ((http git::+git-error-http+)
+        (status-401 "request failed with status code: 401"))
+    (is (not (typep (finish-after-error nil -1 http status-401) 'git:authentication-failed)))
+    (is (typep (finish-after-error t -1 http status-401) 'git:authentication-failed))
+    (let ((c (finish-after-error t -1 http "request failed with status code: 403")))
+      (is (and (typep c 'git:git-error) (not (typep c 'git:authentication-failed))) "~A" c))
+    (is (typep (finish-after-error nil git::+git-eauth+ http "unexpected authentication failure")
+               'git:authentication-failed))))
 
 (test an-https-remote-at-an-ip-address-is-refused-on-linux
   "GHSA-h7gc-w2gg-p9xp. Which URLs count as an IP address is checked on every platform. On
