@@ -14,6 +14,17 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/memory-db: make the store over a mnemosyne pool when the app also uses the
+  database** (#653). `make-db-memory-store` now takes a pool as well as a connection. Over a
+  pool each store operation borrows a connection, and writes take the store's lock after the
+  connection; reads take no lock. `praxeon/observe` writes on a thread of its own, so it gets a
+  connection of its own. Over one connection shared with the app, an app that held a
+  transaction open while the observer wrote had that transaction committed by the observer's
+  COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
+  SQLite (#651). A store call the app makes on its own thread inside its
+  `conn:with-connection` on the same pool uses that connection and is part of its transaction.
+  A store over one connection keeps working when nothing else uses that connection.
+
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to
   (`F_GETPATH` on macOS, `/proc/self/fd` on Linux, `GetFinalPathNameByHandleW` on Windows) and

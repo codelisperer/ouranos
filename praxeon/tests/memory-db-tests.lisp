@@ -997,3 +997,135 @@ waiting for the model (the hub's review of #645, as #462's supersede test)."
         (mem:remember store "member-645" "Has a cat." :thread "conv-645" :provenance (test-provenance 1 "conv-645"))
         (return-from out :returned)))
     (is (null (mem:observations-of store "member-645" :thread "conv-645")) "after RETURN-FROM")))
+
+;;; --- a store over a pool (#653) -----------------------------------------------------------
+
+(defmacro with-pool-store ((store-var pool-var &key (size 4)) &body body)
+  "A fresh table and a store over a mnemosyne pool of SIZE connections: on Postgres over the test
+database, on SQLite over a fresh database file. The pool is closed and the table dropped or the
+file deleted afterwards."
+  `(if (%sqlite-p)
+       (let ((file (%fresh-sqlite-file)))
+         (unwind-protect
+              (let ((,pool-var (conn:make-pool (be:make-sqlite (namestring file)) :size ,size)))
+                (unwind-protect
+                     (let ((,store-var (mdb:make-db-memory-store ,pool-var :embedder (make-instance 'basis-embedder)
+                                                                           :table "praxeon_observations"
+                                                                           :dialect :sqlite :ensure t)))
+                       ,@body)
+                  (conn:close-pool ,pool-var)))
+           (%delete-sqlite-files file)))
+       (let ((url (%pg-url)))
+         (if (not url)
+             (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
+             (let ((table (format nil "praxeon_obs_~(~36R~)" (random (expt 2 40) (make-random-state t))))
+                   (,pool-var (conn:make-pool (url:backend-from-url url) :size ,size)))
+               (unwind-protect
+                    (progn
+                      (conn:with-connection (c ,pool-var) (mig:require-extension c "vector"))
+                      (let ((,store-var (mdb:make-db-memory-store ,pool-var :embedder (make-instance 'basis-embedder)
+                                                                            :table table :dialect :postgres :ensure t)))
+                        ,@body))
+                 (ignore-errors (conn:with-connection (c ,pool-var)
+                                  (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" table))
+                                  (conn:exec c (format nil "DROP TABLE IF EXISTS ~A_progress" table))))
+                 (conn:close-pool ,pool-var)))))))
+
+(defun %observe-one-window (store subject thread content)
+  "One observer turn on STORE that writes CONTENT for window 1-6, waited for. Returns the observer."
+  (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call content)))
+                                     store subject thread :step (praxeon/prompt:messages-tokens (%chat 6))
+                                     :retry-delay 0)))
+    (obs:observe-turn observer (%chat 6))
+    (obs:await-observer observer :timeout 20)
+    observer))
+
+(test over-a-pool-an-apps-rollback-undoes-its-own-writes-and-not-the-observers
+  "A store over a pool. The app's thread borrows a connection and opens a transaction; on Postgres
+it writes through the store, which on its thread uses that connection; the observer, on a thread
+of its own with a connection of its own, writes a window; the app rolls back. The app's write is
+gone and the window is kept (#653).
+
+POSTGRES ONLY. On SQLite the app's open transaction holds the database's write lock, even before
+its first statement (measured: the observer's writes failed with \"database is locked\" after the
+busy timeout), so an app that waits for the observer inside its transaction waits for itself.
+SQLite allows one writer at a time; the next test checks that the observer waits behind an app's
+write transaction and writes once it ends."
+  (if (%sqlite-p)
+      (skip "Postgres only: SQLite allows one writer at a time")
+      (with-pool-store (store pool)
+        (handler-case
+            (conn:with-connection (c pool)
+              (conn:with-transaction (c)
+                (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+                (%observe-one-window store "member-653" "conv-653" "Has a dog.")
+                (error "the app's transaction fails")))
+          (error () nil))
+        (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653" :thread "conv-653")))
+            "the observer's window is kept")
+        (is (null (mem:observations-of store "member-653")) "the app's own write is rolled back"))))
+
+(test over-one-shared-connection-the-observer-commits-the-apps-transaction
+  "The control for the test above, and #651's measurement: over one connection shared with the
+app, the observer's COMMIT on Postgres commits the app's transaction, so its rollback undoes
+nothing. On SQLite the observer's BEGIN is refused and its window is not written."
+  (with-store (store)
+    (handler-case
+        (conn:with-transaction ((mdb::store-connection store))
+          (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+          (%observe-one-window store "member-653" "conv-653" "Has a dog.")
+          (error "the app's transaction fails"))
+      (error () nil))
+    (if (%sqlite-p)
+        (is (null (mem:observations-of store "member-653" :thread "conv-653")) "SQLite: the window was refused")
+        (is (equal '("App's own write.") (mapcar #'mem:observation-content (mem:observations-of store "member-653")))
+            "Postgres: the app's write survived its rollback"))))
+
+(test over-a-pool-the-observer-waits-behind-an-apps-write-transaction
+  "The app's thread holds a write transaction for 1 second while the observer writes a window. On
+SQLite the observer's connection waits for the database's write lock, within the pooled
+connection's busy timeout, and writes once the app commits; on Postgres it does not wait. Either
+way both writes are kept (the hub's ruling on #653)."
+  (with-pool-store (store pool)
+    (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call "Has a dog.")))
+                                       store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                       :retry-delay 0 :max-attempts 1)))
+      (conn:with-connection (c pool)
+        (conn:with-transaction (c)
+          (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+          (obs:observe-turn observer (%chat 6))
+          (sleep 1)))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (= 0 (obs:observer-failures observer)) "the observer's write waited rather than failing")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653" :thread "conv-653"))))
+      (is (equal '("App's own write.") (mapcar #'mem:observation-content (mem:observations-of store "member-653")))))))
+
+(test over-a-pool-a-promote-callback-uses-the-observers-connection
+  "The app's :PROMOTE, called inside the window's transaction, reads the thread through the store.
+It sees the window's observation, which the transaction has written and not committed: the read
+used the observer's borrowed connection, not a second one from the pool, which could not see it
+(the hub's ruling on #653)."
+  (with-pool-store (store pool)
+    (let* ((seen nil)
+           (observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call "Has a dog.")))
+                                        store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                        :retry-delay 0
+                                        :promote (lambda (o) (declare (ignore o))
+                                                   (setf seen (length (mem:observations-of store "member-653"
+                                                                                           :thread "conv-653")))
+                                                   t))))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (eql 1 seen) "the callback saw the uncommitted window")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653")))))))
+
+(test over-a-pool-a-read-does-not-wait-for-the-stores-lock
+  "Over a pool a read borrows a connection and takes no lock, so it returns while another thread
+holds the store's lock; over one connection every operation takes the lock (#653)."
+  (with-pool-store (store pool)
+    (bt:with-recursive-lock-held ((mdb::store-lock store))
+      (let* ((done nil)
+             (reader (bt:make-thread (lambda () (mem:observations-of store "member-653") (setf done t)))))
+        (loop repeat 200 until done do (sleep 0.01))
+        (is-true done "the read returned while the lock was held")
+        (bt:join-thread reader)))))

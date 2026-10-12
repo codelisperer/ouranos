@@ -121,7 +121,7 @@ gives another pair's key."
 ;;; --- the store --------------------------------------------------------------
 
 (defclass db-memory-store (mem:memory-store)
-  ((connection :initarg :connection :reader store-connection)
+  ((source :initarg :source :reader store-source)
    (dialect :initarg :dialect :initform :postgres :reader store-dialect)
    (table :initarg :table :initform *table* :reader store-table)
    (embedder :initarg :embedder :reader store-embedder)
@@ -135,11 +135,72 @@ gives another pair's key."
    ;; :UNKNOWN until the first similarity recall on Postgres reads the extension's version,
    ;; then T when pgvector has iterative index scans (0.8 or later) and NIL otherwise (#482).
    (iterative-scan :initform :unknown :accessor store-iterative-scan))
-  (:documentation "Observations in a mnemosyne-backed table, embedded on write."))
+  (:documentation "Observations in a mnemosyne-backed table, embedded on write. See %WITH-STORE
+for how each operation gets its connection."))
+
+;;; --- one connection per operation (#653) ---------------------------------------------
+;;;
+;;; OVER A POOL, each operation borrows a connection for its extent, and a write also holds the
+;;; store's lock, taken after the connection, so no writer holds the lock while it waits for one
+;;; (the order hyperion/auth-db uses, #371). praxeon/observe writes on a thread of its own, so it
+;;; borrows a connection of its own: an app's transaction on its request thread cannot contain
+;;; the observer's writes, and the observer's COMMIT cannot end the app's transaction. Before,
+;;; with one connection shared, cl-dbi saw the app's transaction only on the app's thread, so
+;;; on Postgres the observer's COMMIT committed it and on SQLite its BEGIN was refused (#651).
+;;; A store call on the app's own thread, inside its CONN:WITH-CONNECTION on the same pool, uses
+;;; that thread's lent connection and is part of the app's transaction.
+;;;
+;;; OVER ONE CONNECTION, every operation, reads included, holds the store's lock, and the store
+;;; is safe only when nothing else uses that connection.
+;;;
+;;; AN OPERATION INSIDE ANOTHER on the same thread, as SUPERSEDE's REMEMBER, a window's
+;;; transaction or an app's :PROMOTE callback inside it, uses the connection already held, so it
+;;; stays in the same transaction and does not wait for itself (the hub's ruling on #653).
+
+(defvar *held* nil
+  "(store . connection) while an operation of that store runs on this thread, or NIL.")
+
+(defun store-connection (store)
+  "The connection the running operation of STORE holds; over one connection, that connection."
+  (cond ((and *held* (eq (car *held*) store)) (cdr *held*))
+        ((conn:poolp (store-source store))
+         (error "praxeon/memory-db: no connection is held; run the operation inside %WITH-STORE"))
+        (t (store-source store))))
+
+(defun %call-with-store (store function exclusive)
+  (let ((source (store-source store)))
+    (cond ((and *held* (eq (car *held*) store))
+           (if exclusive
+               (bt:with-recursive-lock-held ((store-lock store)) (funcall function))
+               (funcall function)))
+          ((conn:poolp source)
+           ;; CONNECTION FIRST, THEN THE LOCK (the hub's ruling on #653).
+           (conn:with-connection (c source)
+             (let ((*held* (cons store c)))
+               (if exclusive
+                   (bt:with-recursive-lock-held ((store-lock store)) (funcall function))
+                   (funcall function)))))
+          (t
+           (bt:with-recursive-lock-held ((store-lock store))
+             (let ((*held* (cons store source)))
+               (funcall function)))))))
+
+(defmacro %with-store ((store &key exclusive) &body body)
+  "Run BODY with a connection held for STORE (#653): borrowed from its pool for BODY's extent, or
+its one connection. EXCLUSIVE, for a write, also holds the store's lock, taken after the
+connection; over one connection the lock is always held. Inside another operation of STORE on
+this thread, the connection already held is used."
+  `(%call-with-store ,store (lambda () ,@body) ,exclusive))
 
 (defun make-db-memory-store (connection &key embedder (table *table*) (dialect :postgres)
                                           ensure)
-  "A store over CONNECTION. EMBEDDER is an LLM:EMBEDDING-PROVIDER and decides the width.
+  "A store over CONNECTION: an open mnemosyne connection, or a mnemosyne pool (#653).
+EMBEDDER is an LLM:EMBEDDING-PROVIDER and decides the width.
+
+A POOL IS WHAT AN APP THAT ALSO USES THE DATABASE PASSES, usually the pool it gives
+HYPERION/DB-CONNECTION:WRAP-CONNECTION. Over one connection nothing else may use it: an app that
+opens a transaction on it while praxeon/observe writes has that transaction committed by the
+observer on Postgres, and the observer's writes refused on SQLite (#651).
 
 EMBEDDER IS INJECTED, NOT RESOLVED HERE. `make-embedding-provider-from-env' reads
 `*provider-role*', and #158 records that resolving across a thread boundary falls through to
@@ -160,7 +221,7 @@ bound and hand it in; then no path through this store can resolve one."
                     (schema:make-schema (intern (format nil "~:@(~A~)-PROGRESS-~A" table dialect) '#:praxeon/memory-db)
                                         (%progress-table table) +progress-fields+)))
          (store (make-instance 'db-memory-store
-                               :connection connection :dialect dialect :table table
+                               :source connection :dialect dialect :table table
                                :embedder embedder :dimensions dimensions
                                :schema sch :schema-name name :progress-schema progress)))
     (when ensure (ensure-schema store))
@@ -241,25 +302,27 @@ already be installed; see CHECK-VECTOR-EXTENSION.
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
 and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
 migration, before it reads from a table made before #317."
-  (when (eq (store-dialect store) :postgres)
-    (check-vector-extension (store-connection store)))
-  (dolist (statement (store-ddl store))
-    (conn:exec (store-connection store) statement))
-  (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
-    (loop for (name . type) in +added-columns+
-          unless (member (string-downcase (symbol-name name)) have :test #'string=)
-            ;; Postgres answers an existing column with a notice, which the driver signals as
-            ;; a warning; it is the expected case on every start after the first.
-            do (handler-bind ((warning #'muffle-warning))
-                 (handler-case (conn:exec (store-connection store) (%add-column-sql store name type))
-                   ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
-                   ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
-                   ;; failure is accepted only when the column is there afterwards.
-                   (error (e)
-                     (unless (and (eq (store-dialect store) :sqlite)
-                                  (member (string-downcase (symbol-name name)) (%sqlite-columns store)
-                                          :test #'string=))
-                       (error e)))))))
+  (%with-store (store :exclusive t)
+    (when (eq (store-dialect store) :postgres)
+      (check-vector-extension (store-connection store)))
+    (dolist (statement (store-ddl store))
+      (conn:exec (store-connection store) statement))
+    (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
+      (loop for (name . type) in +added-columns+
+            unless (member (string-downcase (symbol-name name)) have :test #'string=)
+              ;; Postgres answers an existing column with a notice, which the driver signals as
+              ;; a warning; it is the expected case on every start after the first.
+              do (handler-bind ((warning #'muffle-warning))
+                   (handler-case (conn:exec (store-connection store)
+                                            (%add-column-sql store name type))
+                     ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
+                     ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
+                     ;; failure is accepted only when the column is there afterwards.
+                     (error (e)
+                       (unless (and (eq (store-dialect store) :sqlite)
+                                    (member (string-downcase (symbol-name name))
+                                            (%sqlite-columns store) :test #'string=))
+                         (error e))))))))
   store)
 
 ;;; --- rows <-> observations ---------------------------------------------------
@@ -353,7 +416,7 @@ store's lock, for the REMEMBERs inside the transaction (the hub's review of #645
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))
                        :valid-from (or valid-from now) :recorded-at now
                        :thread thread :provenance provenance)))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store :exclusive t)
       ;; AN UNRECORDED SOURCE TIME IS OMITTED, NOT CAST. `cast' refuses NIL for an integer
       ;; field -- correctly, because NIL is not an integer -- and the tempting fixes are
       ;; both wrong: coercing it to 0 invents a time, and widening the column's type to
@@ -399,7 +462,7 @@ store's lock, for the REMEMBERs inside the transaction (the hub's review of #645
   ;; by the UPDATE itself, which only changes a row that is still current and must change one.
   ;; The embedding is computed first, outside the lock.
   (let ((*embedded* (%embed-before-lock store content)))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store :exclusive t)
       (conn:with-transaction ((store-connection store))
         (let ((row (first (q:fetch (store-connection store)
                                    (list :select '(:superseded_by)
@@ -459,7 +522,7 @@ which is the whole point of keeping the old one."
     (if (rest clauses) (cons :and (nreverse clauses)) (first clauses))))
 
 (defmethod mem:observations-of ((store db-memory-store) subject &key as-of include-superseded thread)
-  (bt:with-recursive-lock-held ((store-lock store))
+  (%with-store (store)
     (mapcar #'%row->observation
             (q:fetch (store-connection store)
                      (list :select +columns+
@@ -621,7 +684,7 @@ subject's rows."
                           :order-by (list (list (list :<=> :embedding (%vector-text store embedding))))
                           :limit limit)
                     :dialect (store-dialect store))))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store)
       (let ((rows (%with-complete-hnsw-scan (store) (nearest))))
         (if (< (length rows) limit)
             (conn:with-transaction ((store-connection store))
@@ -642,7 +705,7 @@ query vector is checked for width as a stored one is. An observation with no emb
 after every other, as NULL does in Postgres's ascending ORDER BY. REMEMBER always writes one,
 so that case needs a row written some other way."
   (let* ((query (llm:parse-vector-text (%vector-text store embedding)))
-         (rows (bt:with-recursive-lock-held ((store-lock store))
+         (rows (%with-store (store)
                  (q:fetch (store-connection store)
                           (list :select (append +columns+ '(:embedding))
                                 :from (list (store-table store))
@@ -663,7 +726,7 @@ so that case needs a row written some other way."
     (mapcar #'cdr (subseq sorted 0 (min limit (length sorted))))))
 
 (defmethod mem:forget ((store db-memory-store) observation)
-  (bt:with-recursive-lock-held ((store-lock store))
+  (%with-store (store :exclusive t)
     ;; Unlink the forward pointer first, or a surviving predecessor claims to be superseded
     ;; by something no longer there and can never be current again. Same rule as the
     ;; in-memory store; stated here because the storage does not enforce it.
@@ -687,7 +750,7 @@ so that case needs a row written some other way."
   ;; refuse while an observer runs included, so no run can start between that check and the
   ;; deletion (#462's eighth review). The in-memory store does the same.
   (declare (ignore subject))
-  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+  (%with-store (store :exclusive t) (call-next-method)))
 
 (defmethod mem:forget-subject ((store db-memory-store) subject)
   "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150). The
@@ -742,7 +805,7 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                             (when (equal status "closed") (list :closed)))))))
 
 (defmethod mem:thread-progress ((store db-memory-store) subject thread)
-  (let ((row (bt:with-recursive-lock-held ((store-lock store))
+  (let ((row (%with-store (store)
                (first (q:fetch (store-connection store)
                                (list :select '(:observed :skipped)
                                      :from (list (%progress-table (store-table store)))
@@ -754,7 +817,7 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
 
 (defmethod mem:record-thread-progress ((store db-memory-store) subject thread mark skipped)
   (let ((text (%skipped->text skipped)))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store :exclusive t)
       (q:run (store-connection store)
              (list :insert-into (%progress-table (store-table store))
                    :values (list (list :id (%progress-id subject thread) :subject subject :thread thread
@@ -797,6 +860,6 @@ observer."
                                 for embedding in (llm:embed-documents (store-embedder store) unique)
                                 do (setf (gethash content table) embedding))
                           table)))))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store :exclusive t)
       (conn:with-transaction ((store-connection store))
         (funcall thunk)))))
