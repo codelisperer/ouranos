@@ -290,14 +290,43 @@ must be the one the gate already gave."
 
 ;;; --- every Failure Details block, not the first (#616) --------------------------------------
 
+(defparameter +second-real-report+
+  (let ((r +real-report+))
+    (dolist (pair '(("A-FAILING-IS-WITH-A-REASON" . "SECOND-FAILING-IS-WITH-A-REASON")
+                    ("A-BARE-IS-FAILING" . "SECOND-BARE-IS-FAILING"))
+             r)
+      (let ((at (search (car pair) r)))
+        (setf r (concatenate 'string (subseq r 0 at) (cdr pair) (subseq r (+ at (length (car pair)))))))))
+  "+REAL-REPORT+ with its two test names changed, so a second failing report can be told from
+the first. Only the names differ; every other byte is FiveAM's.")
+
 (test failure-details-reads-every-failing-report
   "aion/tests prints one FiveAM report per sub-suite. When two of them fail, the output holds
-two `Failure Details:' blocks, and the gate must name the failing checks of both."
+two `Failure Details:' blocks, and the gate must name the failing checks of both, in order. The
+two reports name different tests, so reading one block twice cannot pass for reading both
+(Copilot's review of #617)."
   (%load-fiveam-report)
-  (let* ((out (concatenate 'string +real-report+ +real-passing-report+ +real-report+))
-         (details (%fr failure-details out)))
+  (let* ((out (concatenate 'string +real-report+ +real-passing-report+ +second-real-report+))
+         (details (%fr failure-details out))
+         (text (format nil "~{~A~%~}" details))
+         (first-name (search "A-BARE-IS-FAILING" text))
+         (second-name (search "SECOND-FAILING-IS-WITH-A-REASON" text)))
     (is (= 4 (%entries details))
         "two failing reports of two entries each, with a passing report between them: ~D entries"
         (%entries details))
+    (is (and first-name second-name (< first-name second-name))
+        "the first report's checks come before the second's:~%~A" text)
     (is (= 2 (%entries (%fr failure-details +real-report+)))
         "one report alone still gives its own two")))
+
+(test a-reason-that-mentions-the-header-does-not-start-a-block
+  "Copilot's review of #617: only a line that is the header and nothing else starts a block. A
+failure reason containing the words, inside an entry, is part of that entry."
+  (%load-fiveam-report)
+  (let* ((at (search "this one was given a reason string" +real-report+))
+         (out (concatenate 'string (subseq +real-report+ 0 at)
+                           "see Failure Details: below, " (subseq +real-report+ at)))
+         (details (%fr failure-details out)))
+    (is (= 2 (%entries details)) "the mention made a phantom block: ~D entries" (%entries details))
+    (is (find-if (lambda (l) (search "see Failure Details: below" l)) details)
+        "the mention is kept as part of its reason")))

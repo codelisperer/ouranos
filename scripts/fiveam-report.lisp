@@ -73,31 +73,41 @@ block. That distinction is the entire content of pre-publication issue 448: with
 written without a reason string hides itself and everything after it.
 
 STOPS ON ANYTHING UNEXPECTED rather than reading on. A non-blank line outside an entry is not
-a shape this knows, and consuming it would put arbitrary output into a failure report."
-  (loop with header = "Failure Details:"
-        for at = (search header output) then (search header output :start2 (1+ at))
-        while at
-        append (%one-failure-block
-                (rest (uiop:split-string (subseq output at) :separator '(#\Newline))))))
+a shape this knows, and consuming it would put arbitrary output into a failure report.
+
+A BLOCK STARTS ONLY AT A HEADER LINE: a line that is `Failure Details:' and nothing else, read
+outside any block. A failure reason that mentions the words, or a header-like line inside an
+entry, does not start one (Copilot's review of #617)."
+  (let ((lines (uiop:split-string output :separator '(#\Newline)))
+        (details '()))
+    (loop while lines
+          do (if (string= "Failure Details:" (%clean (first lines)))
+                 (multiple-value-bind (block rest) (%one-failure-block (rest lines))
+                   (setf details (append details block)
+                         lines rest))
+                 (pop lines)))
+    details))
 
 (defun %one-failure-block (lines)
-  "The entries of one `Failure Details:' block, read from LINES, the lines after its header.
-See FAILURE-DETAILS."
+  "The entries of one `Failure Details:' block, read from LINES, the lines after its header, and,
+as a second value, the lines after the block. See FAILURE-DETAILS."
   (let ((collected '())
         (inside nil)
         (seen nil))
-    (dolist (line lines (nreverse collected))
-      (let ((trimmed (%clean line)))
-        (cond
-          ((rule-line-p line)
-           (setf inside (not inside) seen t)
-           (push trimmed collected))
-          (inside (push trimmed collected))
-          ((zerop (length trimmed))
-           ;; The blank line FiveAM prints after the last entry. Before the first rule there
-           ;; is nothing to end, so a stray blank there is not the terminator.
-           (when seen (return (nreverse collected))))
-          (t (return (nreverse collected))))))))
+    (loop for tail on lines
+          for line = (first tail)
+          for trimmed = (%clean line)
+          do (cond
+               ((rule-line-p line)
+                (setf inside (not inside) seen t)
+                (push trimmed collected))
+               (inside (push trimmed collected))
+               ((zerop (length trimmed))
+                ;; The blank line FiveAM prints after the last entry. Before the first rule there
+                ;; is nothing to end, so a stray blank there is not the terminator.
+                (when seen (return-from %one-failure-block (values (nreverse collected) (rest tail)))))
+               (t (return-from %one-failure-block (values (nreverse collected) tail)))))
+    (values (nreverse collected) '())))
 
 (defun skip-reasons (output)
   "The reasons under FiveAM's `Skip Details:' block, so the gate can say WHAT did not run
