@@ -534,7 +534,7 @@ of passing without having ended it."
                                              (%text (make-string 1000000
                                                                  :initial-element #\x)))))))
         (is (eq :unknown (and e (cnd:tool-error-result-outcome e)))))
-      (is-true (sb-thread:join-thread exiting))
+      (is-true (aion/test-threads:join exiting))
       ;; Both calls can time out before the server exits, so wait until its output has ended.
       (is-true (%wait-for (lambda () (praxeon/mcp::child-exited old))))
       ;; This finishes the old server, then starts the next one. The shell has not read yet.
@@ -584,7 +584,7 @@ the test has waited 15 seconds for it, and the last two checks fail."
                                              (%text (make-string 1000000
                                                                  :initial-element #\x)))))))
         (is (eq :unknown (and e (cnd:tool-error-result-outcome e)))))
-      (is-true (sb-thread:join-thread exiting))
+      (is-true (aion/test-threads:join exiting))
       ;; Its output does not end while the holder has it, so wait for the process instead.
       (is-true (%wait-for (lambda ()
                             (not (sb-ext:process-alive-p (praxeon/mcp::child-process old))))))
