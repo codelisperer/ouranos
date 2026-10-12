@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **klio: a content file or directory whose name starts with `_` or `.` is no longer a page.**
+  `klio:content-files`, and so `load-tree`, the watcher, listings and `export-site`, skip it,
+  with everything under such a directory, so an author can keep a README or notes in the content
+  directory (#557). A site acts if it publishes a page from a file named like `_about.md` or
+  from a directory like `_posts/`: rename it, or its page and URL disappear. A plain
+  `README.md` is still a page; name it `_README.md` to keep it out.
+
 - **hyperion/desktop: `run-app` on `:uv` runs handlers on 2 worker threads and one event loop
   by default.**
   `run-app`'s `:workers` defaulted to NIL, so on `:uv` every handler ran on the loop thread, and

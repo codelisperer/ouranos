@@ -19,6 +19,10 @@ that is published all at once, and served by a hyperion site or exported to stat
 (klio:export-site *site* #p"public/" :page-theme #'my-page :index-theme #'my-index :clean t)
 ```
 
+Every `.md` file under the content directory is a page, except a file or directory whose name
+starts with `_` or `.`: those, and everything under such a directory, are the author's and are
+not loaded, listed or exported. Keep a README as `_README.md`, and notes in `_notes/`.
+
 A collection is a directory under the content directory. A theme reads collections and other
 pages from the same tree its request, or the export, is using, so a reload during a request
 cannot mix two versions on one page. `export-site` writes `index.html`, `404.html` and one file
