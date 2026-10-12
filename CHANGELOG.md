@@ -403,7 +403,9 @@ its tag.
   - A server's pipes are closed only once its reader thread, its writer thread and the client's
     cleanup are all done. A writer still blocked 2 seconds after the server is finished,
     because a process the server started holds its stdin and does not read it, is ended, and
-    that process is not signalled (#601).
+    that process is not signalled (#601). Ending the writer closes the server's stdin, so a
+    process that also holds the server's stdout and waits for the end of stdin exits, and the
+    reader thread ends with it (#628).
   - `list-tools`, `call-tool`, `grant-tools`, resources, prompts and tasks work over stdio
     unchanged. `praxeon/docs/mcp.md`, "Local servers over stdio".
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its

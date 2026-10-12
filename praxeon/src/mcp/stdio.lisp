@@ -278,9 +278,14 @@ environment for :INHERIT."
                                    ;; because an interrupt, such as %FINISH-CHILD's
                                    ;; TERMINATE-THREAD, that arrives during a cleanup form can
                                    ;; skip the rest of it, and the pipes would stay open.
+                                   ;; The cleanup closes stdin, so a writer ended mid-write
+                                   ;; still gives the server's stdin its end (#628).
                                    (sb-sys:without-interrupts
                                      (unwind-protect
                                           (sb-sys:with-local-interrupts (%writer-loop child))
+                                       (ignore-errors
+                                        (close (sb-ext:process-input (child-process child))
+                                               :abort t))
                                        (%release child :writer))))
                                  :name "praxeon/mcp stdio writer"))
     (setf (gethash client *live-clients*) t)
@@ -331,11 +336,14 @@ that it releases the pipes; no process is signalled for it."
       ;; The writer is blocked on a stdin that a process the server started still holds and
       ;; does not read. Left alone it never returns, and its pipes stay open until the image
       ;; exits, one set more for each restart (#601). Ending the thread unwinds the write, and
-      ;; its UNWIND-PROTECT releases the pipes. No process is signalled: the server has exited
-      ;; and been reaped, so its pid can no longer be checked against its process group, and a
-      ;; group id saved earlier can belong to someone else once the group is empty, which is
-      ;; the case when the holder has left it with setsid. The holder keeps running, and reads
-      ;; end-of-file once the pipe is closed.
+      ;; its UNWIND-PROTECT closes the server's stdin and releases the pipes. Closing stdin
+      ;; there matters when the holder also holds stdout: the reader cannot end until the
+      ;; holder exits, and a holder that waits for the end of stdin exits only once stdin is
+      ;; closed (#628). No process is signalled: the server has exited and been reaped, so its
+      ;; pid can no longer be checked against its process group, and a group id saved earlier
+      ;; can belong to someone else once the group is empty, which is the case when the holder
+      ;; has left it with setsid. The holder keeps running, and reads end-of-file once the pipe
+      ;; is closed.
       ;; The writer can return between the timeout and this call, and ending a thread that has
       ;; returned signals INTERRUPT-THREAD-ERROR; it has released the pipes itself then.
       (handler-case (sb-thread:terminate-thread (child-writer child))

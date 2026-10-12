@@ -518,19 +518,22 @@ of passing without having ended it."
            (echo (%tool-named client "echo"))
            (old (praxeon/mcp::client-child client))
            (in (sb-ext:process-input (praxeon/mcp::child-process old)))
+           ;; Before the exit call is made, so the time measured below is not less than the
+           ;; time the shell has been sleeping, however this thread is scheduled (#628).
+           (started (get-internal-real-time))
            (exiting (sb-thread:make-thread
                      ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
                      (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
-                     :name "praxeon/mcp test exit-holding-stdin"))
-           ;; Before the server starts the shell, so the time measured below is not less than
-           ;; the time the shell has been sleeping.
-           (started (get-internal-real-time)))
+                     :name "praxeon/mcp test exit-holding-stdin")))
       ;; The server has read the exit call, and reads nothing more from here.
       (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
-      ;; About 1 MB, far more than a pipe holds, so the writer blocks.
-      (is-true (%failure-of (lambda ()
+      ;; About 1 MB, far more than a pipe holds, so the writer blocks. :UNKNOWN means the
+      ;; writer took the request; :NOT-RUN would mean it never did, and nothing would block.
+      (let ((e (%failure-of (lambda ()
                               (mcp:call-tool client echo
-                                             (%text (make-string 1000000 :initial-element #\x))))))
+                                             (%text (make-string 1000000
+                                                                 :initial-element #\x)))))))
+        (is (eq :unknown (and e (cnd:tool-error-result-outcome e)))))
       (is-true (sb-thread:join-thread exiting))
       ;; Both calls can time out before the server exits, so wait until its output has ended.
       (is-true (%wait-for (lambda () (praxeon/mcp::child-exited old))))
@@ -554,6 +557,42 @@ of passing without having ended it."
                                                       (jzon:parse (subseq line 3))))))
                           collect (subseq line 0 (min 60 (length line))))))
         (is (null bad) "the second server read ~S" bad)))))
+
+#-win32
+(test ending-a-blocked-writer-closes-the-server-s-stdin
+  "A server exits while a process it started holds both its stdin and its stdout, reads nothing
+for 6 seconds, and then reads stdin until its end, and a long request is still being written.
+The client ends the blocked writer, and ending it closes the server's stdin, so the holder
+reads to the end and exits, the reader reaches the end of stdout, and the pipes are closed
+once (#628). The holder is not signalled. It exits about 6 seconds after it starts, and the
+test waits for that, so it leaves no process running. CONTROL: without the close, the holder
+waits for the end of stdin until a read takes 20 seconds, the reader is still running when
+the test has waited 15 seconds for it, and the last two checks fail."
+  (with-stdio-client (client record "hold-both" :timeout 3 :call-timeout 1)
+    (let* ((exit-tool (%tool-named client "exit-holding-both"))
+           (echo (%tool-named client "echo"))
+           (old (praxeon/mcp::client-child client))
+           (reader (praxeon/mcp::child-reader old))
+           (exiting (sb-thread:make-thread
+                     ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
+                     (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
+                     :name "praxeon/mcp test exit-holding-both")))
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
+      ;; About 1 MB, so the writer blocks, as in the test above.
+      (let ((e (%failure-of (lambda ()
+                              (mcp:call-tool client echo
+                                             (%text (make-string 1000000
+                                                                 :initial-element #\x)))))))
+        (is (eq :unknown (and e (cnd:tool-error-result-outcome e)))))
+      (is-true (sb-thread:join-thread exiting))
+      ;; Its output does not end while the holder has it, so wait for the process instead.
+      (is-true (%wait-for (lambda ()
+                            (not (sb-ext:process-alive-p (praxeon/mcp::child-process old))))))
+      ;; Finishes the old server, which ends the blocked writer, and starts the next one.
+      (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+      (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
+      (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15))
+      (is (= 1 (praxeon/mcp::child-closes old))))))
 
 (test with-restart-nil-a-local-server-that-exits-stays-down
   "With :RESTART NIL, every request after the server exits fails as not run, and nothing is
