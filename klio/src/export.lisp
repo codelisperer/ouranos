@@ -85,26 +85,44 @@ point, or a symbolic link. Asked of the name without a trailing separator, becau
   (aion/fs:link-p (uiop:parse-native-namestring
                    (string-right-trim "/\\" (uiop:native-namestring path)))))
 
+(defun %native-leaf (path)
+  "The last component of PATH, a file or a directory, as the operating system spells it."
+  (let* ((separators (if (uiop:os-windows-p) "/\\" "/"))
+         (native (string-right-trim separators (uiop:native-namestring path)))
+         (at (position-if (lambda (c) (find c separators)) native :from-end t)))
+    (subseq native (if at (1+ at) 0))))
+
+(defun %unsafe-asset-name-p (name)
+  "Whether NAME holds a character that a Lisp pathname reads as a wildcard or an escape: `*',
+`?', `[' or `]', or the escape character, `^' on Windows and `\\' elsewhere. Such a name cannot
+be carried safely from the walk to the copy (the hub's review of #615): on Linux `a*b.css' became
+a wild pathname, and the copy failed after the pages were written."
+  (find-if (lambda (c) (find c (if (uiop:os-windows-p) "*?[]^" "*?[]\\"))) name))
+
 (defun %asset-files (assets)
   "Every file under the directory ASSETS, recursively, as (relative-path . absolute-path) with
-the relative path spelled with `/', sorted by relative path. The second value lists the links
-found under ASSETS, by relative path, which are not followed: a link can lead outside ASSETS,
-or round in a cycle (Copilot's review of #615)."
+the relative path spelled with `/', sorted by relative path.
+
+Two more values list what is refused rather than copied. The second lists the links found under
+ASSETS, by relative path, which are not followed: a link can lead outside ASSETS, or round in a
+cycle (Copilot's review of #615). The third lists the file and directory names that
+%UNSAFE-ASSET-NAME-P refuses, as the operating system spells them."
   (let ((root (uiop:ensure-directory-pathname assets))
         (files '())
-        (links '()))
+        (links '())
+        (unsafe '()))
     (flet ((relative (path) (substitute #\/ #\\ (%relative-namestring path root))))
       (labels ((walk (dir)
                  (dolist (f (uiop:directory-files dir))
-                   (if (%link-entry-p f)
-                       (push (relative f) links)
-                       (push (cons (relative f) f) files)))
+                   (cond ((%unsafe-asset-name-p (%native-leaf f)) (push (%native-leaf f) unsafe))
+                         ((%link-entry-p f) (push (relative f) links))
+                         (t (push (cons (relative f) f) files))))
                  (dolist (sub (uiop:subdirectories dir))
-                   (if (%link-entry-p sub)
-                       (push (string-right-trim "/" (relative sub)) links)
-                       (walk sub)))))
+                   (cond ((%unsafe-asset-name-p (%native-leaf sub)) (push (%native-leaf sub) unsafe))
+                         ((%link-entry-p sub) (push (string-right-trim "/" (relative sub)) links))
+                         (t (walk sub))))))
         (walk root)))
-    (values (sort files #'string< :key #'car) (sort links #'string<))))
+    (values (sort files #'string< :key #'car) (sort links #'string<) (sort unsafe #'string<))))
 
 (defun %paths-collide-p (a b)
   "Whether the export paths A and B cannot both be written: they are the same path, or one is a
@@ -134,17 +152,22 @@ assets directory was not refused on Windows and macOS, and was on Linux."
                                (%resolved-directory parent)))))))
 
 (defun %same-or-inside-p (inner outer)
-  "Whether directory INNER is OUTER or lies under it, compared by resolved names."
+  "Whether directory INNER is OUTER or lies under it, compared by resolved names. On Windows
+and macOS without regard to case: their file systems treat C:\\Site and c:\\site as one
+directory, and SBCL's truename keeps the case it was given, so a case-sensitive comparison
+let an export directory spelled in another case pass as outside the assets."
   (let ((in (namestring (%resolved-directory inner)))
         (out (namestring (%resolved-directory outer))))
     (and (<= (length out) (length in))
-         (string= out in :end2 (length out)))))
+         (funcall (if (or (uiop:os-windows-p) (uiop:os-macosx-p)) #'string-equal #'string=)
+                  out in :end2 (length out)))))
 
 (defun %check-assets (assets directory page-files)
   "The asset files to copy, as %ASSET-FILES returns them, after checking that they can be:
 signals EXPORT-REFUSED when ASSETS is not a directory, when it holds or is inside DIRECTORY
-(where :CLEAN would delete it, or the copy would copy itself), when it holds a link, or when an
-asset's path collides with one in PAGE-FILES (%PATHS-COLLIDE-P)."
+(where :CLEAN would delete it, or the copy would copy itself), when it holds a link or a name
+%UNSAFE-ASSET-NAME-P refuses, or when an asset's path collides with one in PAGE-FILES
+(%PATHS-COLLIDE-P)."
   (let ((assets (uiop:ensure-directory-pathname assets)))
     (unless (uiop:directory-exists-p assets)
       (error 'export-refused :directory directory
@@ -152,7 +175,11 @@ asset's path collides with one in PAGE-FILES (%PATHS-COLLIDE-P)."
     (when (or (%same-or-inside-p assets directory) (%same-or-inside-p directory assets))
       (error 'export-refused :directory directory
                              :reason (format nil "the :ASSETS directory ~A holds it or is inside it" assets)))
-    (multiple-value-bind (files links) (%asset-files assets)
+    (multiple-value-bind (files links unsafe) (%asset-files assets)
+      (when unsafe
+        (error 'export-refused :directory directory
+                               :reason (format nil "the :ASSETS directory holds a name with a character a Lisp pathname reads as a wildcard or an escape (* ? [ ] or ~A): ~{~A~^, ~}"
+                                               (if (uiop:os-windows-p) "^" "\\") unsafe)))
       (when links
         (error 'export-refused :directory directory
                                :reason (format nil "the :ASSETS directory holds a link, which is not followed: ~{~A~^, ~}" links)))

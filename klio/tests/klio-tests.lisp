@@ -1156,6 +1156,59 @@ Both are refused before anything is written."
               (is (typep e 'k:export-refused) "~A: got ~S" asset e)
               (is (null (probe-file out)) "~A: nothing was written" asset))))))))
 
+(test an-asset-name-a-pathname-reads-as-a-wildcard-is-refused
+  "The hub's review of #615: a name with * ? [ ] or the escape character cannot be carried from
+the walk to the copy. a[1].css is a legal name on every operating system."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-open-file (o (uiop:parse-native-namestring
+                          (concatenate 'string (uiop:native-namestring assets) "a[1].css"))
+                         :direction :output)
+        (write-string "x" o))
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+            (is (typep e 'k:export-refused) "got ~S" e)
+            (is (and e (search "a[1].css" (princ-to-string e))) "the refusal names the file: ~A" e)
+            (is (null (probe-file out)) "nothing was written")))))))
+
+(test an-export-inside-the-assets-spelled-in-another-case-is-refused
+  "On Windows and macOS a directory spelled in another case is the same directory, so an export
+into ASSETS/PUBLIC/ is inside the assets however it is spelled."
+  (if (not (or (uiop:os-windows-p) (uiop:os-macosx-p)))
+      (skip "Linux file systems are case-sensitive, so another case is another directory")
+      (with-content-dir (src ("one.md" . +good+))
+        (with-assets-dir (assets)
+          (let ((site (k:make-site src))
+                (shouted (uiop:parse-native-namestring
+                          (concatenate 'string (string-upcase (uiop:native-namestring assets)) "public/"))))
+            (k:boot site)
+            (let ((e (nth-value 1 (ignore-errors (k:export-site site shouted :assets assets)))))
+              (is (typep e 'k:export-refused) "got ~S" e)))))))
+
+(test a-symlinked-file-in-the-assets-is-refused
+  "A file link, like a directory link, can lead outside the assets directory. POSIX only: on
+Windows making a file link needs a privilege the test runner may not have."
+  (if (uiop:os-windows-p)
+      (skip "a file symbolic link needs SeCreateSymbolicLinkPrivilege on Windows")
+      (with-content-dir (src ("one.md" . +good+))
+        (with-assets-dir (assets)
+          (let ((outside (aion/fs:make-temporary-directory "klio-outside")))
+            (unwind-protect
+                 (let ((secret (merge-pathnames "secret.txt" outside)))
+                   (with-open-file (o secret :direction :output) (write-string "not an asset" o))
+                   (uiop:run-program (list "ln" "-s" (uiop:native-namestring secret)
+                                           (uiop:native-namestring (merge-pathnames "link.txt" assets))))
+                   (with-export-dir (out)
+                     (let ((site (k:make-site src)))
+                       (k:boot site)
+                       (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+                         (is (typep e 'k:export-refused) "got ~S" e)
+                         (is (and e (search "link.txt" (princ-to-string e))) "the refusal names the link: ~A" e)
+                         (is (null (probe-file out)) "nothing was written")))))
+              (ignore-errors (aion/fs:delete-tree outside))))))))
+
 (test a-missing-assets-directory-is-refused
   (with-content-dir (src ("one.md" . +good+))
     (with-export-dir (out)
