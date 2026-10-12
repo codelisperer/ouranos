@@ -935,6 +935,15 @@ fallback for a child that died without printing a condition at all."
 (defvar *caught-errors* '()
   "(LABEL . COUNT) for every child whose output had a `caught ERROR', newest first.")
 
+(defun report-redefinitions (system redefined)
+  "Print and fail SYSTEM for REDEFINED, the lines REDEFINITIONS-IN found in its child's output
+(#577). Called after the child's other outcome is reported rather than instead of it, so a
+failing or warning system with a redefinition reports both, and a suite's checks still count."
+  (when redefined
+    (format t "  REDEF   ~a~%~{          ~a~%~}" system redefined)
+    (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
+          system (length redefined) redefined)))
+
 (defun report-caught-errors (label output)
   "Print OUTPUT's `caught ERROR's under LABEL, record them, and fail the run for them."
   (let ((errors (ouranos-caught-errors:errors-in output)))
@@ -1092,14 +1101,11 @@ let this run claim `view' while the five assertions skipped."
            (format t "  FAIL    ~a~%~a~%" s (failure-excerpt out 6))
            (fail "~a" (or (ouranos-failure-origin:report-origin out s *root*)
                           (format nil "~a failed to load in a clean image" s))))
-          (redefined
-           (format t "  REDEF   ~a~%~{          ~a~%~}" s redefined)
-           (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
-                 s (length redefined) redefined))
           (warned
            (format t "  WARN    ~a~%~{          ~a~%~}" s warned)
            (fail "~a compiled with ~D warning~:P" s (length warned)))
           (t (format t "  ok      ~a~%" s)))
+        (report-redefinitions s redefined)
         (report-caught-errors (format nil "load ~(~a~)" s) out))))
 
   (format t "~%========== SUITES (each in its own image) ==========~%")
@@ -1118,10 +1124,6 @@ let this run claim `view' while the five assertions skipped."
              (format t "  FAIL    ~a  (child exited ~a)~%~a~%" s code (failure-excerpt text 6))
              (fail "~a" (or (ouranos-failure-origin:report-origin text s *root*)
                             (format nil "~a errored in a clean image" s))))
-            (redefined
-             (format t "  REDEF   ~a~%~{          ~a~%~}" s redefined)
-             (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
-                   s (length redefined) redefined))
             ((null n)
              (format t "  NO-RUN  ~a  -- exited 0 but emitted no check count~%" s)
              (fail "~a ran ZERO checks (missing :perform, or an empty suite)" s))
@@ -1148,7 +1150,8 @@ let this run claim `view' while the five assertions skipped."
                          s n details)
                  (unless details
                    (format t "~a~%" (failure-excerpt text 8))))
-               (fail "~a had failing checks" s))))
+               (fail "~a had failing checks" s)))
+          (report-redefinitions s redefined))
         ;; Per-backend coverage, INDEPENDENT of pass/fail above (pre-publication issue 176). A suite can be
         ;; entirely green and still have exercised one storage engine -- that is the exact
         ;; shape of the defect this clause exists to catch, so it is checked separately

@@ -150,6 +150,19 @@ one file is reported once, by the compiler, not again as a redefinition."
       (is (not (search "defined a second time in another file" output))
           "and it is not also reported as a redefinition:~%~A" output))))
 
+(test one-file-reached-by-two-spellings-is-not-reported
+  "b.lisp loads a.lisp again by another spelling of its path, sub/../a.lisp, so HELPER is
+redefined from what SBCL records as a different source pathname. It is the same file, and the
+script compares files by truename, so nothing is reported and the system passes."
+  (%with-two-file-fixture (dir "(defun helper () 1)"
+                               "(load (merge-pathnames \"sub/../a.lisp\" (asdf:system-source-directory \"check-compile-fixture\")))")
+    (ensure-directories-exist (merge-pathnames "sub/" dir))
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output)
+      (is (not (search "CHECK-COMPILE-FIXTURE::HELPER" output))
+          "one file was reported as two:~%~A" output))))
+
 (test a-dependency-defining-a-function-in-two-files-is-not-reported
   "Only the checked code counts. Here the checked system depends on a system in another
 temporary directory, outside this tree and outside the checked system's own directory, whose

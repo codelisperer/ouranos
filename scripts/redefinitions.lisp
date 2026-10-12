@@ -24,7 +24,13 @@
 ;;;;
 ;;;; A redefinition within one file is not reported:
 ;;;; SBCL's compiler already gives the WARNING "Duplicate definition for X found in one file", and
-;;;; the gate fails on that. Nor is one whose old or new source file SBCL cannot say.
+;;;; the gate fails on that. Nor is one whose old or new source file SBCL cannot say. Two
+;;;; spellings of one file, such as a relative and an absolute path, are compared by truename,
+;;;; and on Windows without regard to case, so they are one file.
+;;;;
+;;;; WHAT IT DOES NOT CATCH. Only DEFUN: SB-KERNEL:REDEFINITION-WITH-DEFUN is the only condition
+;;;; handled. A DEFMACRO, DEFGENERIC or DEFMETHOD that replaces one from another file is not
+;;;; reported, nor is a function replaced with (SETF FDEFINITION) or (SETF SYMBOL-FUNCTION).
 ;;;;
 ;;;; SBCL-only, as the tree is: it reads the condition's NEW-FUNCTION slot and asks
 ;;;; sb-introspect where each definition came from.
@@ -42,21 +48,25 @@
   "The start of each line a child prints for a function defined in two files.")
 
 (defun %source-file (function)
-  "The source file FUNCTION was compiled from, as a native namestring, or NIL when SBCL cannot
-say: a function made by COMPILE, or one from the core."
+  "The truename of the source file FUNCTION was compiled from, or NIL when SBCL cannot say (a
+function made by COMPILE, or one from the core) or the file no longer exists."
   (let ((path (ignore-errors
                (sb-introspect:definition-source-pathname
                 (sb-introspect:find-definition-source function)))))
-    (and path (uiop:native-namestring path))))
+    (and path (ignore-errors (probe-file path)))))
 
-(defun %under-roots-p (file roots)
-  "Whether FILE, a native namestring, lies under one of the directories ROOTS."
-  (let ((path (ignore-errors (truename (uiop:parse-native-namestring file)))))
-    (and path
-         (some (lambda (root)
-                 (let ((dir (ignore-errors (truename (uiop:ensure-directory-pathname root)))))
-                   (and dir (uiop:subpathp path dir))))
-               roots))))
+(defun %same-file-p (a b)
+  "Whether truenames A and B name one file. Windows file names are not case-sensitive, and
+SBCL's truename keeps the case it was given."
+  (funcall (if (uiop:os-windows-p) #'string-equal #'string=)
+           (uiop:native-namestring a) (uiop:native-namestring b)))
+
+(defun %under-roots-p (path roots)
+  "Whether PATH, a truename, lies under one of the directories ROOTS."
+  (some (lambda (root)
+          (let ((dir (ignore-errors (truename (uiop:ensure-directory-pathname root)))))
+            (and dir (uiop:subpathp path dir))))
+        roots))
 
 (defun call-reporting-redefinitions (thunk &optional roots)
   "Call THUNK. Each time a DEFUN replaces a function first defined in a different source file,
@@ -69,10 +79,11 @@ as it would without this."
                      (let* ((name (slot-value c 'sb-kernel::name))
                             (old (and (fboundp name) (%source-file (fdefinition name))))
                             (new (%source-file (slot-value c 'sb-kernel::new-function))))
-                       (when (and old new (string/= old new)
+                       (when (and old new (not (%same-file-p old new))
                                   (%under-roots-p old roots) (%under-roots-p new roots))
                          (let ((*package* (find-package "KEYWORD")))
-                           (format *standard-output* "~&~A~S new ~A old ~A~%" +marker+ name new old))
+                           (format *standard-output* "~&~A~S new ~A old ~A~%" +marker+ name
+                                   (uiop:native-namestring new) (uiop:native-namestring old)))
                          (finish-output *standard-output*))))))
     (funcall thunk)))
 
