@@ -827,6 +827,20 @@ its tag.
   `deliberation-failure` keeps its own report, and `deliberation-failure-detail` reads the same
   slot. Every subclass is still a `praxeon-error`, so existing handlers catch the same conditions.
 
+- **aion/libgit: `set-remote` also sets the remote's push URL, so a push goes to the new URL**
+  (#641). For a remote that already existed, `set-remote` changed only `remote.<name>.url`.
+  When the repository's git configuration also had `remote.<name>.pushurl`, `push-branch`
+  went on sending commits, and the credential it was given, to that push URL. `set-remote` now
+  sets `remote.<name>.pushurl` to the same URL, in the repository's own configuration, for new
+  and existing remotes. A push URL set in the user's or the system's git configuration is
+  overridden by it. Because the remote now has a push URL, a `url.<base>.pushInsteadOf` rule
+  no longer rewrites its pushes; `url.<base>.insteadOf` still does. The two keys are written
+  together under libgit2's configuration lock, so either both change or neither does. libgit2
+  refuses to set `remote.<name>.url` or `remote.<name>.pushurl` when the repository's
+  configuration has more than one value for it, or takes it from a file named by
+  `include.path` or `includeIf`; `set-remote` then signals `git-error` and the configuration
+  file is unchanged.
+
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).
   pgvector's HNSW scan took the nearest `hnsw.ef_search` rows of the whole table (40 by
