@@ -7,7 +7,8 @@
 #         [--icon hyperion/examples/coalton-repl/assets/lambda.png] [--out dist] [--describe]
 #
 # --describe checks the bundle, prints the product, version and display name the .app would be
-# built with, one "key value" line each, and exits. It does not need macOS.
+# built with (and the display name as it is written into Info.plist), one "key value" line each,
+# and exits. It does not need macOS.
 #
 # THE BUNDLE'S RELEASE FILE. build-desktop-app.lisp writes RELEASE into the bundle when it is
 # given --product, --display-name or --default-channel (#408). The display name is taken from
@@ -127,10 +128,22 @@ fi
 [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$REL_DISPLAY_NAME"
 [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$BIN"
 
+# The display name names the .app directory under --out, which is removed and rebuilt below,
+# so a slash would put it, and that removal, outside --out ("../../Existing"); a leading dot
+# would hide it. It is also the text of two Info.plist strings, so it is XML-escaped there:
+# "Research & Development" is a valid name and would otherwise make the plist malformed.
+case "$DISPLAY_NAME" in
+  */*|.*)
+    echo "build-dmg: the display name '$DISPLAY_NAME' cannot name the .app: it contains a slash or starts with a dot." >&2
+    exit 2 ;;
+esac
+DISPLAY_NAME_XML=$(printf '%s' "$DISPLAY_NAME" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+
 if [ -n "$DESCRIBE" ]; then
   echo "product $BIN"
   echo "version $VERSION"
   echo "display-name $DISPLAY_NAME"
+  echo "display-name-xml $DISPLAY_NAME_XML"
   exit 0
 fi
 
@@ -193,8 +206,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key>              <string>$DISPLAY_NAME</string>
-  <key>CFBundleDisplayName</key>       <string>$DISPLAY_NAME</string>
+  <key>CFBundleName</key>              <string>$DISPLAY_NAME_XML</string>
+  <key>CFBundleDisplayName</key>       <string>$DISPLAY_NAME_XML</string>
   <key>CFBundleExecutable</key>        <string>$BIN</string>
   <key>CFBundleIdentifier</key>        <string>dev.codelisperer.$BIN</string>
   <key>CFBundleVersion</key>           <string>$VERSION</string>

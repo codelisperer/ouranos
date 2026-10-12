@@ -148,6 +148,25 @@ its tag.
 
 ### Added
 
+- **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
+  which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
+  `--default-channel`** (#408).
+  - Both refuse a bundle whose `RELEASE` names a product or version other than the one the
+    bundle gives: the bundle directory's name for the installer, and the launcher's name and
+    the `VERSION` file for the dmg script. An app packaged under another name registers under a
+    key its updater does not read, so rebuild rather than rename a bundle directory.
+  - `build-dmg.sh` names the `.app` after `RELEASE`'s `display-name` when `--display-name` is
+    not given. A `--display-name` on the command line still wins. Either way, it refuses a
+    display name that contains a slash or starts with a dot, which would name a directory
+    outside `--out` or a hidden one, and it XML-escapes the name in `Info.plist`, which a name
+    with `&` or `<` used to make malformed.
+  - On Windows one name is still both the `HKCU\Software\<name>` key and every name the user
+    sees. `RELEASE`'s `display-name` is not used there.
+  - `build-installer.ps1 -Describe` and `build-dmg.sh --describe` check a bundle and print the
+    product, version and executable or display name they would build with, without building
+    anything. Neither needs a packager, and `--describe` does not need macOS.
+  - A bundle without `RELEASE` is packaged as before.
+
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
   prompts** (#527, part 4).
   - `list-resources` and `list-resource-templates` follow pagination.

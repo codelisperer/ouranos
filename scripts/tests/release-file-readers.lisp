@@ -7,7 +7,9 @@
 ;;;;   - a product or version in RELEASE must be the one the bundle itself gives (the directory's
 ;;;;     name on Windows; the launcher and VERSION on macOS), or the script stops, because an app
 ;;;;     packaged under another name is a second app to its updater;
-;;;;   - build-dmg.sh takes the .app's display name from RELEASE when --display-name is not given.
+;;;;   - build-dmg.sh takes the .app's display name from RELEASE when --display-name is not given,
+;;;;     refuses one that would name a directory outside --out or a hidden one, and XML-escapes it
+;;;;     for Info.plist (Copilot's review of #598).
 ;;;;
 ;;;; The tests run the real scripts in their describe mode (-Describe, --describe), which checks
 ;;;; the bundle, prints what it would build, and exits before packaging, so neither a packager nor
@@ -166,3 +168,22 @@ read."
       (is (= 2 code) "exit ~D, expected 2:~%~A" code output)
       (is (and (search "'9.9.9'" output) (search "'1.2.3'" output))
           "the refusal does not name both versions:~%~A" output))))
+
+(test the-dmg-script-refuses-a-display-name-outside-its-output-directory
+  "The .app's directory is <out>/<display name>.app and is removed before it is rebuilt, so a
+display name with a slash would remove and rebuild a directory outside --out."
+  (%rf-off-windows
+    (multiple-value-bind (code output)
+        (%rf-dmg (%rf-macos-bundle
+                  (format nil "product ~A~%display-name ../../Existing~%version 1.2.3~%" +rf-app+)))
+      (is (= 2 code) "exit ~D, expected 2:~%~A" code output)
+      (is (search "'../../Existing'" output) "the refusal does not name the display name:~%~A" output))))
+
+(test the-dmg-script-escapes-the-display-name-for-info-plist
+  (%rf-off-windows
+    (multiple-value-bind (code output)
+        (%rf-dmg (%rf-macos-bundle
+                  (format nil "product ~A~%display-name R&D <Beta>~%version 1.2.3~%" +rf-app+)))
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "display-name-xml R&amp;D &lt;Beta&gt;" output)
+          "the name is not escaped for Info.plist:~%~A" output))))
