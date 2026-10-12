@@ -45,12 +45,25 @@ here. The fixed set leaves them out, so the tests pass them as an app would."
                unless (eq key :environment) append (list key value))))
 
 (defmacro with-stdio-client ((client record mode &rest keys) &body body)
-  "Run BODY with CLIENT on a local test server in MODE, recording to RECORD, and close it."
-  `(let* ((,record (%fresh-record))
-          (,client (mcp:make-client (%stdio-connection ,mode ,record ,@keys))))
-     (unwind-protect (progn ,@body)
-       (mcp:close-client ,client)
-       (ignore-errors (delete-file ,record)))))
+  "Run BODY with CLIENT on a local test server in MODE, recording to RECORD, and close it. Unless
+KEYS give :STDERR, the server's stderr goes to a file of the test's own, which is printed when
+the server never recorded its start, so a server that dies while loading says why in the log."
+  (let ((stderr (gensym "STDERR")))
+    `(let* ((,record (%fresh-record))
+            (,stderr (%fresh-record))
+            (,client (mcp:make-client
+                      (%stdio-connection ,mode ,record
+                                         ,@(if (loop for key in keys by #'cddr
+                                                     thereis (eq key :stderr))
+                                               keys
+                                               (list* :stderr stderr keys))))))
+       (unwind-protect (progn ,@body)
+         (mcp:close-client ,client)
+         (when (and (zerop (%recorded-count ,record "start")) (probe-file ,stderr))
+           (format *error-output* "~&;; the ~A test server recorded no start; its stderr:~%~A~%"
+                   ,mode (ignore-errors (uiop:read-file-string ,stderr))))
+         (ignore-errors (delete-file ,stderr))
+         (ignore-errors (delete-file ,record))))))
 
 (defun %recorded (record)
   (if (probe-file record) (uiop:read-file-lines record) '()))
@@ -372,7 +385,7 @@ with :STDERR it is appended to the app's file."
   (let ((log (make-string-output-stream))
         (stderr (%fresh-record)))
     (with-captured-log (log)
-      (with-stdio-client (client record "modern")
+      (with-stdio-client (client record "modern" :stderr nil)
         (is (= 5 (length (mcp:list-tools client)))))
       (with-stdio-client (client record "modern" :stderr stderr)
         (is (= 5 (length (mcp:list-tools client))))))
