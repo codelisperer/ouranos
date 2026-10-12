@@ -111,31 +111,29 @@ fails because the server is gone."
 
 (defun %read-line-within (stream limit)
   "The next line of STREAM, without its newline or a carriage return before it, and :LINE; NIL
-and :TOO-LONG for a line of more than LIMIT octets of UTF-8, which is read to its end and
-dropped; NIL and :EOF at the end."
-  (let ((buffer (make-string-output-stream))
-        (count 0)
+and :TOO-LONG for a line of more than LIMIT octets, which is read to its end and dropped; NIL
+and :EOF at the end. The octets are counted as they arrive, as MAX-BODY-BYTES is over HTTP, and
+then decoded as UTF-8, with a byte that is not UTF-8 read as `?', so a malformed sequence
+cannot make a line longer than LIMIT octets look shorter (#610)."
+  (let ((buffer (make-array 256 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
         (over nil))
-    (loop
-      (let ((c (read-char stream nil :eof)))
-        (cond ((eq c :eof)
-               (return (if (and (zerop count) (not over))
-                           (values nil :eof)
-                           (values (and (not over) (get-output-stream-string buffer))
-                                   (if over :too-long :line)))))
-              ((char= c #\Newline)
-               (return (if over
-                           (values nil :too-long)
-                           (values (string-right-trim '(#\Return) (get-output-stream-string buffer))
-                                   :line))))
-              (over)
-              (t (let ((octets (let ((code (char-code c)))
-                                 (cond ((< code #x80) 1) ((< code #x800) 2)
-                                       ((< code #x10000) 3) (t 4)))))
-                   ;; Counted in octets, as MAX-BODY-BYTES is over HTTP, not in characters.
-                   (if (> (+ count octets) limit)
-                       (setf over t)
-                       (progn (incf count octets) (write-char c buffer))))))))))
+    (flet ((line ()
+             (let ((end (fill-pointer buffer)))
+               (when (and (plusp end) (= (aref buffer (1- end)) 13))
+                 (decf end))
+               (sb-ext:octets-to-string buffer :end end
+                                               :external-format '(:utf-8 :replacement #\?)))))
+      (loop
+        (let ((b (read-byte stream nil :eof)))
+          (cond ((eq b :eof)
+                 (return (cond (over (values nil :too-long))
+                               ((zerop (fill-pointer buffer)) (values nil :eof))
+                               (t (values (line) :line)))))
+                ((= b 10)
+                 (return (if over (values nil :too-long) (values (line) :line))))
+                (over)
+                ((>= (fill-pointer buffer) limit) (setf over t))
+                (t (vector-push-extend b buffer))))))))
 
 (defun %answer-server-request (child message)
   "A request from the server. The current revision has none, so one is dropped. A legacy
@@ -210,7 +208,10 @@ environment for :INHERIT."
         (sb-ext:posix-environ)
         (append (loop for name in +stdio-environment+
                       for value = (sb-ext:posix-getenv name)
+                      ;; A value that starts with "()" is an exported bash function, which the
+                      ;; SDK also leaves out.
                       when (and value
+                                (not (uiop:string-prefix-p "()" value))
                                 (not (find name extra :key #'car
                                                       :test #+win32 #'string-equal
                                                             #-win32 #'string=)))
@@ -232,8 +233,8 @@ environment for :INHERIT."
                                           :directory (and directory
                                                           (uiop:native-namestring directory))
                                           :environment (%child-environment connection)
-                                          ;; A byte that is not UTF-8 becomes a replacement
-                                          ;; character, rather than ending the reader.
+                                          ;; The reader reads octets and decodes each line
+                                          ;; itself; this is for what is written to stdin.
                                           :external-format '(:utf-8 :replacement #\?))
                     (error (e)
                       ;; The condition's type only: its text can carry the command line.
@@ -470,6 +471,11 @@ it, which can take up to twice the connection's TIMEOUT."
                    ;; Its stdout can stay open after it exits, held by a process it started.
                    (sb-ext:process-alive-p (child-process child)))
           (return-from %stdio-child child))
+        ;; CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the running server only, so they are
+        ;; cleared before either refusal below; %FIND-ERA sets them again when a new server's
+        ;; handshake succeeds (#610).
+        (setf (client-era client) nil
+              (client-protocol-version client) nil)
         (when child
           (when (child-exited child)
             (%finish-child client child))
