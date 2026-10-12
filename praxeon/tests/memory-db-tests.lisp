@@ -831,3 +831,33 @@ session has sequential scans off and costly."
           ;; the second query is checked for not depending on the session's planner settings.
           (conn:exec c "SET seq_page_cost = 1000"))
         (is (= 20 (%nearest-count store 20))))))
+
+(test a-recall-inside-the-apps-transaction-puts-the-planner-settings-back
+  "Inside the app's own CONN:WITH-TRANSACTION the store's transaction is a savepoint, and a local
+setting made there would last until the app's transaction ends. After a recall that falls back to
+the exact query, inside such a transaction, each setting the recall changes reads what it read
+before (#625's review): enable_indexscan on, and enable_seqscan, enable_bitmapscan and
+hnsw.iterative_scan as the session had them."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store (format nil "member-~D" (mod i 40)) (format nil "Fact ~D about someone else." i)))
+        (%drop-the-subject-index store)
+        (%force-the-vector-index store)
+        (let* ((c (mdb::store-connection store))
+               (names '("enable_indexscan" "enable_seqscan" "enable_bitmapscan" "hnsw.iterative_scan")))
+          (conn:exec c "SET hnsw.ef_search = 10")
+          (conn:exec c "SET hnsw.max_scan_tuples = 30")
+          (flet ((settings ()
+                   (mapcar (lambda (n)
+                             (param:row-value (first (conn:query c "SELECT current_setting(?) AS v" n)) :v))
+                           names)))
+            (conn:with-transaction (c)
+              (let ((before (settings))
+                    (count (%nearest-count store 20)))
+                (is (= 20 count) "precondition: the recall returned 20, through the exact query")
+                (is (equal before (settings)) "~{~A~^, ~}: ~S before, ~S after" names before (settings))
+                (is (equal "on" (first (settings))) "enable_indexscan is on"))))))))

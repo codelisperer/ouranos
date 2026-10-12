@@ -15,10 +15,15 @@ its tag.
 ### An app may have to act
 
 - **praxeon/memory-db: `ensure-schema` creates an index on `subject`, `<table>_subject_idx`**
-  (#482). An app that does not call `ensure-schema` and runs its own migrations creates it:
-  `CREATE INDEX IF NOT EXISTS <table>_subject_idx ON <table> (subject)`. Without it, the exact
-  second query that `recall-similar` makes when its first comes up short reads the whole table.
-  On pgvector before 0.8 there is no iterative scan, so that second query is made more often.
+  (#482). It builds it without `CONCURRENTLY`, so on a large existing table the first start
+  after upgrading blocks writes to the table while the index builds. To avoid that, build it
+  before deploying: `CREATE INDEX CONCURRENTLY IF NOT EXISTS <table>_subject_idx ON <table>
+  (subject)`, outside a transaction; `ensure-schema` then finds it. An app that does not call
+  `ensure-schema` and runs its own migrations adds that statement as a migration. Without the
+  index, the exact second query that `recall-similar` makes when its first comes up short reads
+  the whole table. pgvector 0.8 or later is recommended: on an older one there is no iterative
+  scan, so that second query is made more often. See `docs/migrations.md` and
+  `docs/dependencies.md`.
 
 - **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
   `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
@@ -695,15 +700,16 @@ its tag.
   pgvector 0.8.6: one subject with 20,050 current observations and `:limit 100` got 40; with the
   index used for a subject holding 50 of 20,051 rows, or 50 current observations beside 20,000
   superseded ones, it got none. `recall-similar` now runs its query with
-  `SET LOCAL hnsw.iterative_scan = strict_order`, inside a transaction it opens or inside the
-  app's own `conn:with-transaction`, where the setting lasts until that transaction ends. That
-  needs pgvector 0.8 or later; on an older pgvector the query runs as before. An iterative scan
-  still stops at `hnsw.max_scan_tuples` or its memory limit, so when the query returns fewer
-  than `:limit` rows it runs again with index scans off (`SET LOCAL enable_indexscan = off`,
-  with sequential and bitmap scans on), which ranks every one of the subject's rows in scope. A
-  subject with fewer than `:limit` observations in scope makes that second query on every
-  similarity recall. `ensure-schema` also creates an index on
-  `subject`, `<table>_subject_idx`, which that second query reads.
+  `hnsw.iterative_scan` set to `strict_order`, which needs pgvector 0.8 or later; on an older
+  pgvector the query runs as before. An iterative scan still stops at `hnsw.max_scan_tuples` or
+  its memory limit, so when the query returns fewer than `:limit` rows it runs again with
+  `enable_indexscan` off and `enable_seqscan` and `enable_bitmapscan` on, which ranks every one
+  of the subject's rows in scope. A subject with fewer than `:limit` observations in scope makes
+  that second query on every similarity recall. Each setting is made for the store's own
+  transaction, or for a savepoint inside the app's `conn:with-transaction`, and put back as it
+  was afterwards, so the app's later queries in its transaction run with its own settings.
+  `ensure-schema` also creates an index on `subject`, `<table>_subject_idx`, which that second
+  query reads.
 
 - **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a
   sign-in** (#587). When `tasks/cancel` needed a sign-in and an observer of `:sign-in-required`

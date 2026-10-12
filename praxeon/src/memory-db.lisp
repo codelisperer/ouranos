@@ -518,6 +518,32 @@ pg_extension once per store."
             (and parts (or (> (first parts) 0) (>= (or (second parts) 0) 8))))))
   (store-iterative-scan store))
 
+(defun %call-with-local-settings (store settings thunk)
+  "Call THUNK with each (NAME . VALUE) of SETTINGS set for the current transaction, and each put
+back as it was afterwards. Must run inside a transaction.
+
+PUT BACK, NOT LEFT TO THE TRANSACTION'S END (#625's review). Inside the app's own
+CONN:WITH-TRANSACTION the store's transaction is a savepoint, and a local setting made in a
+released savepoint lasts until the app's transaction ends, so every later query of the app's
+would run with it. On a normal exit a failed restore is signalled; on a non-local exit it is
+ignored, because the transaction or savepoint is then rolled back, which undoes the settings."
+  (let* ((c (store-connection store))
+         (old (mapcar (lambda (setting)
+                        (cons (car setting)
+                              (param:row-value
+                               (first (conn:query c "SELECT current_setting(?, true) AS v"
+                                                  (car setting)))
+                               :v)))
+                      settings))
+         (finished nil))
+    (flet ((restore ()
+             (dolist (o old)
+               (conn:query c "SELECT set_config(?, ?, true) AS v" (car o) (or (cdr o) "")))))
+      (dolist (setting settings)
+        (conn:query c "SELECT set_config(?, ?, true) AS v" (car setting) (cdr setting)))
+      (unwind-protect (multiple-value-prog1 (funcall thunk) (setf finished t))
+        (if finished (restore) (ignore-errors (restore)))))))
+
 (defmacro %with-complete-hnsw-scan ((store) &body body)
   "Run BODY, a similarity query on STORE's Postgres, so that an HNSW index scan keeps going until
 it has LIMIT rows that pass the WHERE clause (#482).
@@ -534,15 +560,15 @@ default) or at its memory limit, so a subject holding 50 of 100,051 rows still c
 when the index was forced. %POSTGRES-NEAREST runs the query again without index scans when the
 result is short, which is exact.
 
-The settings are SET LOCAL, inside a transaction this opens, or inside the app's own
-CONN:WITH-TRANSACTION, where they last until that transaction ends. On pgvector before 0.8 there
-is no iterative scan and BODY runs as it is."
+The setting is made for a transaction this opens, or for a savepoint inside the app's own
+CONN:WITH-TRANSACTION, and put back as it was after BODY (%CALL-WITH-LOCAL-SETTINGS). On pgvector
+before 0.8 there is no iterative scan and BODY runs as it is."
   (let ((s (gensym "STORE")))
     `(let ((,s ,store))
        (if (%iterative-scan-p ,s)
            (conn:with-transaction ((store-connection ,s))
-             (conn:exec (store-connection ,s) "SET LOCAL hnsw.iterative_scan = strict_order")
-             ,@body)
+             (%call-with-local-settings ,s '(("hnsw.iterative_scan" . "strict_order"))
+                                        (lambda () ,@body)))
            (progn ,@body)))))
 
 (defmethod mem:recall-similar ((store db-memory-store) subject embedding
@@ -591,10 +617,10 @@ subject's rows."
               ;; session's own planner settings cannot leave the HNSW scan as the only plan left:
               ;; with sequential scans off too, the planner chose it anyway on macOS and Windows CI
               ;; and returned 1 row of 20 (#625's first CI run).
-              (dolist (setting '("SET LOCAL enable_indexscan = off" "SET LOCAL enable_seqscan = on"
-                                 "SET LOCAL enable_bitmapscan = on"))
-                (conn:exec (store-connection store) setting))
-              (nearest))
+              (%call-with-local-settings store '(("enable_indexscan" . "off")
+                                                 ("enable_seqscan" . "on")
+                                                 ("enable_bitmapscan" . "on"))
+                                         #'nearest))
             rows)))))
 
 (defun %sqlite-nearest (store subject embedding as-of limit &optional thread)
