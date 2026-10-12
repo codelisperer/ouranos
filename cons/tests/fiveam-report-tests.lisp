@@ -182,3 +182,63 @@ string, not a generated one, so it does not open with the blank line `is' emits.
     (is-true (some (lambda (l) (search "the reason it did not run" l)) lines))
     (is-false (some (lambda (l) (search "Did 1 check" l)) lines)
               "the skip block ran past its end")))
+
+;;; --- every report must pass, not one of them (#605) -----------------------------------------
+;;;
+;;; The gate passed a suite when "Fail: 0 ( 0%)" appeared anywhere in its output. A test op that
+;;; prints more than one report, and exits 0, could fail one and pass another and be reported
+;;; ok. The outputs below join two real reports: +REAL-REPORT+ above, and a passing one.
+
+(defparameter +real-passing-report+
+  (format nil "~{~A~%~}"
+          '(" Did 2 checks."
+            "    Pass: 2 (100%)"
+            "    Skip: 0 ( 0%)"
+            "    Fail: 0 ( 0%)"))
+  "FiveAM's report for two passing checks, from hades/credentials/tests run on 2026-10-12.")
+
+(test a-passing-report-and-a-failing-one-are-not-a-pass
+  "In either order. The control is the rule this replaced: it finds `Fail: 0 ( 0%)' in the same
+text, which is how such a suite was reported ok."
+  (%load-fiveam-report)
+  (dolist (out (list (concatenate 'string +real-passing-report+ +real-report+)
+                     (concatenate 'string +real-report+ +real-passing-report+)))
+    (is (= 2 (length (%fr fail-counts out))) "two reports, two Fail lines: ~S" (%fr fail-counts out))
+    (is-false (%fr every-report-passed-p out) "a failing report was read as a pass")
+    (is-true (search "Fail: 0 ( 0%)" out) "the control: the old rule would have passed this")))
+
+(test two-passing-reports-are-a-pass
+  (%load-fiveam-report)
+  (let ((out (concatenate 'string +real-passing-report+ +real-passing-report+)))
+    (is (equal '(0 0) (%fr fail-counts out)))
+    (is-true (%fr every-report-passed-p out))))
+
+(test an-output-with-no-report-is-not-a-pass
+  "No `Fail:' line at all, as when a test op printed nothing of FiveAM's. The gate reports such
+a suite as NO-RUN before it asks this; here it is not a pass either."
+  (%load-fiveam-report)
+  (let ((out (format nil "; compiling file \"x.lisp\"~%; wrote x.fasl~%")))
+    (is (null (%fr fail-counts out)))
+    (is-false (%fr every-report-passed-p out))))
+
+(test a-child-that-signalled-after-its-checks-still-shows-which-failed
+  "A test op that signals when a report failed, as aion/tests does since #605, ends its child
+with an error, and the gate reports it in the exit-code branch. That branch must still print
+which checks failed, from the report before the error."
+  (%load-fiveam-report)
+  (let* ((out (concatenate 'string +real-report+
+                           (format nil "Unhandled SIMPLE-ERROR in thread #<SB-THREAD:THREAD \"main thread\" RUNNING {1}>:~%  aion/tests: a sub-suite failed; the FiveAM reports above say which~%")))
+         (printed (make-string-output-stream))
+         (n (%fr print-failure-details out printed))
+         (text (get-output-stream-string printed)))
+    (is (plusp n) "no failure details were found before the error")
+    (is (search "A-FAILING-IS-WITH-A-REASON" text) "the first failing check is not printed:~%~A" text)
+    (is (search "A-BARE-IS-FAILING" text) "the second failing check is not printed:~%~A" text)))
+
+(test print-failure-details-prints-nothing-when-no-check-failed
+  (%load-fiveam-report)
+  (let ((printed (make-string-output-stream)))
+    (is (zerop (%fr print-failure-details
+                    (concatenate 'string +real-passing-report+ (format nil "Unhandled SIMPLE-ERROR~%"))
+                    printed)))
+    (is (string= "" (get-output-stream-string printed)))))

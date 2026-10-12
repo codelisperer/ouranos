@@ -818,4 +818,9 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "all"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/tests :run-tests)))
+  ;; RUN-TESTS prints four FiveAM reports and returns NIL if any failed. That value used to be
+  ;; dropped, so a failing sub-suite still exited 0 (#605). Signalling makes the exit code say
+  ;; so, independently of the gate reading every report's Fail line.
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/tests :run-tests)
+               (error "aion/tests: a sub-suite failed; the FiveAM reports above say which"))))
