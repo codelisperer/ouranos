@@ -31,6 +31,18 @@
 .PARAMETER Check
   Report whether this machine can build an installer, and exit.
 
+.PARAMETER Describe
+  Check the bundle, print the product, version and executable the installer would be built
+  for, one "key value" line each, and exit without building it. Needs no packager.
+
+.NOTES
+  The bundle's RELEASE file. build-desktop-app.lisp writes RELEASE into the bundle when it is
+  given --product, --display-name or --default-channel (#408). When RELEASE names a product or
+  a version, it must be the one the bundle directory's name gives, or the build stops: the
+  product is the HKCU\Software\<name> key that hyperion/update reads, and an installer built
+  under another name installs a second copy beside the first. RELEASE's display-name is not
+  used here; on Windows one name is both the registry key and what the user sees.
+
 .EXAMPLE
   .\scripts\build-installer.ps1 -Check
 .EXAMPLE
@@ -55,6 +67,7 @@ param(
   [string]$SignTool,
   [string]$Icon,
   [switch]$Check,
+  [switch]$Describe,
   [switch]$NoWebView2      # skip embedding the WebView2 bootstrapper (smaller, but a
                            # machine without the runtime gets no window)
 )
@@ -129,9 +142,9 @@ if ($Check) {
   Write-Host "       fix: winget install NSIS.NSIS   |   choco install nsis -y" -ForegroundColor DarkGray
   exit 1
 }
-if ($Format -eq 'nsis' -and -not $makensis) { Die "makensis not found. Install NSIS: winget install NSIS.NSIS (or choco install nsis -y), then re-run." }
+if ($Format -eq 'nsis' -and -not $makensis -and -not $Describe) { Die "makensis not found. Install NSIS: winget install NSIS.NSIS (or choco install nsis -y), then re-run." }
 $iscc = $null
-if ($Format -eq 'inno') {
+if ($Format -eq 'inno' -and -not $Describe) {
   $iscc = Find-Iscc
   if (-not $iscc) { Die "ISCC.exe not found. Install Inno Setup: winget install JRSoftware.InnoSetup, then re-run." }
 }
@@ -151,6 +164,22 @@ if ($leaf -notmatch '^(?<app>.+)-(?<ver>\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-(?<os>
 $app = $matches['app']; $version = $matches['ver']
 if ($matches['os'] -ne 'windows') { Die "bundle '$leaf' is for $($matches['os']), not windows" }
 
+# RELEASE, when build-desktop-app.lisp wrote one: see .NOTES above (#408).
+$release = @{}
+$releaseFile = Join-Path $BundleDir 'RELEASE'
+if (Test-Path -LiteralPath $releaseFile -PathType Leaf) {
+  foreach ($line in Get-Content -LiteralPath $releaseFile) {
+    $space = $line.IndexOf(' ')
+    if ($space -gt 0) { $release[$line.Substring(0, $space)] = $line.Substring($space + 1) }
+  }
+}
+if ($release['product'] -and $release['product'] -cne $app) {
+  Die "the bundle's RELEASE names the product '$($release['product'])', but the directory '$leaf' is named for '$app'. The installer would register the app under a name its updater does not look for. Rebuild with build-desktop-app.lisp, whose --product must equal --name, rather than renaming the directory."
+}
+if ($release['version'] -and $release['version'] -cne $version) {
+  Die "the bundle's RELEASE names the version '$($release['version'])', but the directory '$leaf' names '$version'. Rebuild with build-desktop-app.lisp rather than renaming the directory."
+}
+
 $exe = "$app.exe"
 if (-not (Test-Path (Join-Path $BundleDir $exe))) { Die "bundle has no $exe" }
 # The launcher's layout is sbcl-runtime.exe and sbcl.core beside $exe (#98); a one-file image has
@@ -163,6 +192,13 @@ if ($hasCore -ne $hasRuntime) {
 }
 if (-not (Test-Path (Join-Path $BundleDir 'hyperion-view.exe'))) {
   Write-Host "WARNING: bundle has no hyperion-view.exe -- the installed app will not open a window." -ForegroundColor Yellow
+}
+
+if ($Describe) {
+  Write-Output "product $app"
+  Write-Output "version $version"
+  Write-Output "exe $exe"
+  exit 0
 }
 
 if (-not $Out) { $Out = Join-Path (Split-Path -Parent $BundleDir) "$app-$version-setup.exe" }
