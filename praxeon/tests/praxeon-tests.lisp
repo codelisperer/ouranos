@@ -6969,10 +6969,13 @@ thread: a worker running without the claim."))
   (unless (obs:running-observer (checked-store p) "member-1" "conv-7")
     (incf (claims-lost p))))
 
-(defun %observer-threads-finished (&key (seconds 10))
-  "Wait until no thread named praxeon-observer is alive, at most SECONDS."
+(defun %observer-threads-finished (&key (seconds 10) (except '()))
+  "Wait until no thread named praxeon-observer is alive, at most SECONDS, ignoring the threads in
+EXCEPT, so an observer thread left by another test does not hold up every call (the second
+review of #533)."
   (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
         until (or (notany (lambda (th) (and (equal (sb-thread:thread-name th) "praxeon-observer")
+                                            (not (member th except))
                                             (sb-thread:thread-alive-p th)))
                           (sb-thread:list-all-threads))
                   (> (get-internal-real-time) deadline))
@@ -6987,13 +6990,14 @@ long the OBSERVE-TURN call took, in internal time units."
                                                   :script (list (%call-with (%ob "Has a dog." "fact")))))
          (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
          (history (%history 6))
+         (before (sb-thread:list-all-threads))
          (t0 (get-internal-real-time)))
     (if seconds
         (handler-case (sb-ext:with-timeout seconds (obs:observe-turn observer history))
           (sb-ext:timeout () nil))
         (obs:observe-turn observer history))
     (let ((took (- (get-internal-real-time) t0)))
-      (%observer-threads-finished)
+      (%observer-threads-finished :except before)
       (values (claims-lost provider)
               (and (obs:running-observer store "member-1" "conv-7") (not (obs:observer-busy-p observer)))
               took))))
@@ -7040,3 +7044,108 @@ review of #533). At 8e8fdd6 only the first window was written."
     (dolist (n '(6 12 18 24)) (%turn observer n))
     (is (equal '("A." "B." "C." "D.") (%thread-contents store)))
     (is (null (obs:observer-skipped observer)))))
+;;; --------------------------------------------------------------------------
+;;; After the second review of #533: a failed closing save ends the window's attempts as a stop,
+;;; and the worker unblocks the deferrable signals.
+;;; --------------------------------------------------------------------------
+
+(defun %lettered-provider (&rest firsts)
+  "A WINDOWED provider whose window starting at message (NTH I FIRSTS) answers with the I-th
+letter as a fact: \"A.\", \"B.\", and so on. An element (FIRST FAILURES) fails that many times
+first."
+  (make-instance 'windowed
+                 :answers (loop for f in firsts
+                                for i from 0
+                                collect (let ((fact (format nil "~C." (code-char (+ (char-code #\A) i))))
+                                              (first (if (consp f) (first f) f))
+                                              (failures (if (consp f) (second f) 0)))
+                                          (list first failures (lambda () (%call-with (%ob fact "fact"))))))))
+
+(defun %letters (n)
+  (loop for i below n collect (format nil "~C." (code-char (+ (char-code #\A) i)))))
+
+(test windows-written-while-progress-writes-fail-are-kept-once-they-work-again
+  "Every progress write fails over the turns at 6, 12, 18 and 24, with nothing skipped, and then
+progress writes work again. All four windows were written, and the store ends at 24 with nothing
+skipped (the second review of #533, its case a followed by a recovery)."
+  (let* ((store (make-instance 'selective-progress-store :fails-when (constantly t)))
+         (observer (%allergy-observer store (%lettered-provider 1 7 13 19))))
+    (dolist (n '(6 12 18 24)) (%turn observer n))
+    (setf (fails-when store) (constantly nil))
+    (%turn observer 24)
+    (is (equal (%letters 4) (%thread-contents store)))
+    (is (equal '(24 nil) (multiple-value-list (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test an-outage-of-progress-writes-with-nothing-skipped-loses-no-window
+  "Window 1-6 is written while progress writes work. They fail over the turns at 12 to 36 and
+work again for the turns at 42 and 48 and two flushes. Every window is written, A to H, and the
+store ends at 48 with nothing skipped or closed (the second review of #533, case c). At 8e8fdd6
+windows 13-18, 19-24 and 25-30 were closed unwritten."
+  (let* ((store (make-instance 'selective-progress-store))
+         (observer (%allergy-observer store (%lettered-provider 1 7 13 19 25 31 37 43))))
+    (%turn observer 6)
+    (setf (fails-when store) (constantly t))
+    (dolist (n '(12 18 24 30 36)) (%turn observer n))
+    (setf (fails-when store) (constantly nil))
+    (dolist (n '(42 48)) (%turn observer n))
+    (dotimes (i 2)
+      (obs:observe-turn observer (%history 48) :flush t)
+      (obs:await-observer observer :timeout 10))
+    (is (equal (%letters 8) (%thread-contents store)))
+    (is (equal '(48 nil) (multiple-value-list (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test a-failed-closing-save-does-not-spend-the-later-windows-tries
+  "Window 1-6 fails its first four model calls, so it is skipped at the turn at 6 and its retry at
+12 fails. Progress writes fail over the turns at 12, 18 and 24. Each turn's closing save before
+window 7-12 fails, and that ends the window's attempts as a stop rather than counting tries, so
+7-12 is not closed unwritten. Once writes work again, the second turn at 24 writes B, C and D and
+leaves only 1-6 closed; the turn at 30 and a flush write E (the second review of #533, case d).
+With a failed closing save counted as a failed attempt, 7-12 and 13-18 were lost."
+  (let* ((store (make-instance 'selective-progress-store))
+         (observer (%allergy-observer store (%lettered-provider '(1 4) 7 13 19 25))))
+    (%turn observer 6)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)) "precondition: 1-6 is skipped and open")
+    (setf (fails-when store) (constantly t))
+    (dolist (n '(12 18 24)) (%turn observer n))
+    (is (null (%thread-contents store)) "nothing is written while the closing save fails")
+    (setf (fails-when store) (constantly nil))
+    (%turn observer 24)
+    (is (equal '("B." "C." "D.") (%thread-contents store)))
+    (is (equal '(24 ((1 6 2 :closed))) (multiple-value-list (mem:thread-progress store "member-1" "conv-7"))))
+    (%turn observer 30)
+    (obs:observe-turn observer (%history 30) :flush t)
+    (obs:await-observer observer :timeout 10)
+    (is (equal '("B." "C." "D." "E.") (%thread-contents store)))))
+
+(test a-deadline-deferred-in-the-step-leaves-the-worker-stoppable
+  "%CLAIM is made to take 30 ms, so a 5 ms deadline around OBSERVE-TURN arrives inside the step
+and is deferred until it ends, while the worker is made. The model call blocks until the test
+releases it. STOP-OBSERVER with a timeout of 0.2 still ends the worker within a second, gives
+back the claim, and nothing is written after the call is released (the second review of #533).
+A worker made with the deferrable signals blocked could not be ended: the stop took 5.2 seconds,
+the worker lived on, and the window was written after the stop returned."
+  (let* ((store (mem:make-in-memory-store))
+         (provider (make-instance 'blocking-scripted :script (list (%call-with (%ob "Has a dog." "fact")))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
+         (claim (fdefinition 'obs::%claim))
+         (how nil))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'obs::%claim) (lambda (o) (sleep 0.03) (funcall claim o)))
+           (setf how (handler-case (sb-ext:with-timeout 0.005 (obs:observe-turn observer (%history 6)) :returned)
+                       (sb-ext:timeout () :timeout))))
+      (setf (fdefinition 'obs::%claim) claim))
+    (is (eq :timeout how) "precondition: the deadline fired, after the step")
+    (loop repeat 1000 until (blocking-entered provider) do (sleep 0.005))
+    (is-true (blocking-entered provider) "precondition: the worker is in the model call")
+    (let* ((t0 (get-internal-real-time))
+           (stopped (obs:stop-observer observer :timeout 0.2))
+           (seconds (/ (- (get-internal-real-time) t0) internal-time-units-per-second)))
+      (is (null stopped) "the run did not finish within the timeout")
+      (is (< seconds 1) "the stop returned after ~,2F s" seconds))
+    (is (not (obs:observer-busy-p observer)) "the worker has ended")
+    (is (null (obs:running-observer store "member-1" "conv-7")) "and the claim is given back")
+    (sb-thread:signal-semaphore (blocking-gate provider) 10)
+    (obs:await-observer observer :timeout 10)
+    (sleep 0.1)
+    (is (null (%thread-contents store)) "nothing was written after the call was released")))

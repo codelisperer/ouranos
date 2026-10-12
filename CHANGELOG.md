@@ -257,13 +257,18 @@ its tag.
   - A skipped window is retried only while no later window has been written to the thread, and
     then it is distilled and promoted as if it had never been skipped. Before a window's
     observations are first written, in a run or in a retry, every open skipped window before it
-    is closed, whatever its tries, and the progress is saved; if that save fails, the window's
-    attempt fails and nothing is written. A closed window is never retried, and
+    is closed, whatever its tries, and the progress is saved. The progress is also saved there
+    while the observer is unsaved and a closed skipped window lies before the window, because the
+    store may lack that closure. If that save fails, the model's answer for the window is
+    discarded and nothing of it is written; the attempt ends as a stop does, with no try counted
+    and the mark left where it was, and the next run asks the model again. So while progress
+    writes keep failing and a skipped window lies before the next window, each turn makes model
+    calls whose answers are discarded, and no later window is written until a progress write
+    succeeds. An observer with no skipped window before the next window keeps writing
+    observations while progress writes fail. A closed window is never retried, and
     `observer-skipped` shows it as `(from through tries :closed)`. A window is closed this way
-    even when the later window's write then fails. While progress writes keep failing and an
-    earlier skipped window is open, or closed but not yet saved, no later window is written; an
-    observer with no skipped window before it keeps writing observations. Whether a
-    window is closed comes from the progress record alone, not from the thread's observations,
+    even when the later window's write then fails. Whether a window is closed comes from the
+    progress record alone, not from the thread's observations,
     so an observation the app writes into the thread closes nothing, and erasing a later
     window's observations reopens nothing. A window whose tries are spent, with no later window
     written, stays open and is not tried again.
@@ -273,7 +278,9 @@ its tag.
   - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
     claim on the conversation, so a later call can start a run. The claim, the thread and its
     recording are one step with interrupts deferred, so a deadline around the app's request
-    neither gives back the claim while the thread runs nor keeps it with no thread.
+    neither gives back the claim while the thread runs nor keeps it with no thread. The thread
+    unblocks interrupts as it starts, so after such a deadline `stop-observer` can still end it,
+    and a timeout inside the provider's own call still fires.
   - `stop-observer` gives back the claim once the thread it ended has stopped, so
     `running-observer` no longer names the observer. When the thread has not stopped 5 seconds
     after `:timeout`, it returns NIL with the claim still held. `stop-observer :timeout 0` ends

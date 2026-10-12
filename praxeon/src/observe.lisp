@@ -28,20 +28,26 @@
 ;;;; A SKIPPED WINDOW IS RETRIED ONLY WHILE NO LATER WINDOW HAS BEEN WRITTEN TO THE THREAD (#462's
 ;;;; fifth review). Until then a retry distils and promotes it exactly as if it had never been
 ;;;; skipped. Before a later window's observations are first written, by a run or by a retry,
-;;;; every open skipped window before it is closed, whatever its tries, and the progress saved;
-;;;; when that save fails, nothing of the later window is written (#533's review). A closed
-;;;; window is marked :CLOSED in OBSERVER-SKIPPED, never retried, and its messages stay raw in
-;;;; the prompt (#317, step C). A window is closed this way even when the later window's write
-;;;; then fails. Whether a window is closed
-;;;; is read from the progress record alone, never worked out from the thread's observations
-;;;; (#508): an observation the app writes into the thread closes nothing, and an app that erases
-;;;; a later window's observations reopens nothing. A window whose tries are spent, with no later
-;;;; window written, stays open and is not tried again. So within one thread nothing older is
-;;;; written over or beside anything newer, and a window with nothing after it keeps its facts,
-;;;; with one exception: a progress write that fails lets a later run, or another observer of
-;;;; the thread, distil older windows after newer ones (see the store being behind, below;
-;;;; #462's eighth and ninth reviews). Across a subject's threads it does not hold: see the case
-;;;; of several current facts under WHAT IT WRITES.
+;;;; every open skipped window before it is closed, whatever its tries, and the progress saved.
+;;;; The progress is saved there too while the observer is unsaved and a closed skipped window
+;;;; lies before the later window, because the store may lack that closure. When that save fails,
+;;;; the model's answer for the later window is discarded and nothing of it is written. Its
+;;;; attempt ends as a stop does: no try is counted, the mark stays where it was, and the next
+;;;; run asks the model again (#533's first and second reviews). So while progress writes keep
+;;;; failing and such a skipped window lies before the next window, each turn makes model calls
+;;;; whose answers are discarded, and no later window is written until a progress write
+;;;; succeeds. A closed window is marked :CLOSED in OBSERVER-SKIPPED, never retried, and its
+;;;; messages stay raw in the prompt (#317, step C). A window is closed this way even when the
+;;;; later window's write then fails. Whether a window is closed is read from the progress record
+;;;; alone, never worked out from the thread's observations (#508): an observation the app writes
+;;;; into the thread closes nothing, and an app that erases a later window's observations reopens
+;;;; nothing. A window whose tries are spent, with no later window written, stays open and is not
+;;;; tried again. So within one thread nothing older is written over or beside anything newer,
+;;;; and a window with nothing after it keeps its facts, with one exception: a progress write that
+;;;; fails lets a later run, or another observer of the thread, distil older windows after newer
+;;;; ones (see the store being behind, below; #462's eighth and ninth reviews). Across a
+;;;; subject's threads it does not hold: see the case of several current facts under WHAT IT
+;;;; WRITES.
 ;;;;
 ;;;; THE MARK AND THE SKIPPED WINDOWS ARE KEPT IN THE STORE (`praxeon/memory:thread-progress'),
 ;;;; written after each window, and a new observer starts from them. So an app that makes an
@@ -330,8 +336,9 @@ Deciding reads nothing from the store. The history is copied here, and today's d
 so messages the app adds later are the next call's.
 
 Signals when the thread for the run cannot be made. By the time the error leaves OBSERVE-TURN
-the claim on the conversation has been given back, so a later call can start a run; a
-HANDLER-BIND handler, which runs before the unwind, still sees it held."
+the claim on the conversation has been given back, so a later call can start a run. A
+HANDLER-BIND handler, which runs before the unwind, still sees it held, and runs with interrupts
+deferred and the observer's lock held, so it should not block."
   (let ((snapshot (copy-list history))
         (today (get-universal-time)))
     (bt:with-lock-held ((observer-lock observer))
@@ -352,8 +359,10 @@ HANDLER-BIND handler, which runs before the unwind, still sees it held."
          ;; that landed after the worker started and before it was recorded gave back the claim
          ;; while the worker ran; one that landed between the claim and the start kept the claim
          ;; with no worker. Deferred, it is taken after the step, and the run, which holds the
-         ;; claim, gives it back when it ends. The UNWIND-PROTECT is for a synchronous exit from
-         ;; %START-WORKER: an error, a STORAGE-CONDITION or a THROW (#508).
+         ;; claim, gives it back when it ends. A deadline deferred here would leave a thread made in
+         ;; the step with interrupts blocked for its whole run, so the thread unblocks them first
+         ;; (%START-WORKER). The UNWIND-PROTECT is for a synchronous exit from %START-WORKER: an
+         ;; error, a STORAGE-CONDITION or a THROW (#508).
          (multiple-value-bind (started other)
              (sb-sys:without-interrupts
                ;; ONE RUNNING OBSERVER PER THREAD in this process, so an observer made per
@@ -377,7 +386,17 @@ HANDLER-BIND handler, which runs before the unwind, still sees it held."
   ;; THREAD-LIFETIME: continues the turn's unit of work, on its own thread so the turn does not
   ;; wait. It runs a praxeon model call, which reads praxeon's registered dynamic bindings
   ;; (#158), so it carries them. AWAIT-OBSERVER and STOP-OBSERVER join it.
-  (bt:make-thread (aion/dynamic:inheriting (lambda () (%run observer history flush today)))
+  ;;
+  ;; THE THREAD UNBLOCKS THE DEFERRABLE SIGNALS FIRST (the second review of #533). It is made
+  ;; inside OBSERVE-TURN's step, with interrupts deferred, and a thread inherits its maker's signal
+  ;; mask. When an interrupt such as the app's deadline arrives during the step, SBCL blocks the
+  ;; deferrable signals in the maker until the step ends, so a thread made then would run with
+  ;; them blocked: no INTERRUPT-THREAD, no DESTROY-THREAD from STOP-OBSERVER, and no WITH-TIMEOUT
+  ;; inside the provider. SB-UNIX::UNBLOCK-DEFERRABLE-SIGNALS is internal to SBCL; the test
+  ;; a-deadline-deferred-in-the-step-leaves-the-worker-stoppable fails if it stops working.
+  (bt:make-thread (aion/dynamic:inheriting (lambda ()
+                                             (sb-unix::unblock-deferrable-signals)
+                                             (%run observer history flush today)))
                   :name "praxeon-observer"))
 
 (defun await-observer (observer &key (timeout 300))
@@ -397,10 +416,9 @@ for it to end, and gives back its claim on the conversation, so RUNNING-OBSERVER
 it. Returns T when it stopped in time. When the thread has not ended 5 seconds after TIMEOUT, as
 when it is inside a call that defers interrupts, it returns NIL with the claim still held, and
 RUNNING-OBSERVER names OBSERVER until the thread ends. A window it stopped during is not given
-up on. It is not
-written either, unless the stop came after the window's observations were written and before
-its progress was: then the next observer of the thread distils it again (#462's eighth review),
-unless an erasure came between, whose raised mark covers the window."
+up on. It is not written either, unless the stop came after the window's observations were
+written and before its progress was: then the next observer of the thread distils it again
+(#462's eighth review), unless an erasure came between, whose raised mark covers the window."
   (setf (observer-stopping observer) t)
   (or (await-observer observer :timeout timeout)
       (let ((w (observer-worker observer)))
@@ -561,27 +579,31 @@ mark the store may have passed."
 
 (define-condition closing-not-saved (praxeon/conditions:praxeon-error) ()
   (:documentation "The progress write that closes the skipped windows before a window failed, so
-that window's observations were not written; the attempt fails and is retried."))
+that window's observations were not written. %OBSERVE-WINDOW ends the window's attempts as a stop:
+the model's answer is discarded, no try is counted, and the next run asks the model again."))
 
 (defun %close-open-windows-before (observer start)
-  "Before the first thread write of the window from START: close every open skipped window that
-ends at or before START, and save the progress. When that save fails, signal, so the attempt
-fails and nothing is written (#533's review).
+  "Before the first thread write of the window from START: when a skipped window ending at or
+before START is open, or the observer is unsaved and such a window is closed, close every open
+one and save the progress. When that save fails, signal CLOSING-NOT-SAVED, so nothing of the
+window is written (#533's review).
 
 THE STORED RECORD THEN NEVER SHOWS A WINDOW OPEN WHILE A LATER WINDOW'S OBSERVATIONS ARE
 STORED. Closing only after the write left that state whenever the save after it failed, or a
 stop or a restart came between the two, and the next observer, which reads closure from the
-record alone, retried the older window after the newer one was written. The cost: a window is
-closed when a later window is about to be written, even if that write then fails.
+record alone, retried the older window after the newer one was written.
 
 A CLOSED WINDOW IS SAVED HERE TOO WHILE THE OBSERVER IS UNSAVED: an earlier attempt may have
 closed it in memory and failed to save that, and writing now would leave the stored record
-showing it open. An unsaved observer with no skipped window before START does not save here, so
-a store whose progress writes keep failing still receives observations (the second review of
-#533). WHEN PROGRESS WRITES KEEP FAILING AND A SKIPPED WINDOW BEFORE START IS OPEN, OR CLOSED BUT
-NOT SAVED, NOTHING MORE IS WRITTEN until a progress write succeeds: that is intended, because the
-stored record would otherwise show a window open while a later window's observations are
-stored."
+showing it open. With no skipped window before START nothing is saved here, so a store whose
+progress writes keep failing still receives observations (the second review of #533).
+
+THE COST, WHILE PROGRESS WRITES KEEP FAILING AND A SKIPPED WINDOW LIES BEFORE START: the model's
+answer for the window is discarded and its attempts end as a stop (%OBSERVE-WINDOW), so nothing
+more is written until a progress write succeeds, and each such turn makes model calls whose
+answers are thrown away. Counting the failed save as a failed attempt instead spent the window's
+tries, and the next window then closed it unwritten (the second review of #533). A window is
+also closed when a later window is about to be written, even if that write then fails."
   (when (some (lambda (e) (and (<= (second e) start)
                                 (or (%open-p e) (observer-unsaved observer))))
               (observer-skipped observer))
@@ -606,9 +628,6 @@ stored."
                             (append (observer-skipped observer) (list (list (1+ start) end 1))))
                       (setf (observer-mark observer) (max (observer-mark observer) end)))
             (:written (setf (observer-mark observer) (max (observer-mark observer) end)))))
-        ;; A WINDOW WRITTEN CLOSES EVERY OPEN SKIPPED WINDOW BEFORE IT, at once and whatever its
-        ;; tries, rather than at a later run (Copilot's review of #462).
-        (when (eq outcome :written) (%close-before observer start))
         (when (eq outcome :stopped) (return))
         (%save-progress observer)))))
 
@@ -637,16 +656,15 @@ later window's observations reopen one."
                         (remove entry (observer-skipped observer) :test #'equal)
                         (substitute (list from through (1+ tries)) entry (observer-skipped observer)
                                     :test #'equal))))
-            ;; A retried window written closes the open windows before it, as any window
-            ;; written does (#462's sixth review).
-            (when (eq outcome :written) (%close-before observer (1- from)))
             (%save-progress observer)))))))
 
 (defun %save-progress (observer)
   "Record OBSERVER's progress in its store, merged with what is there (%SYNC-PROGRESS). A failure
-is counted and logged, and marks the progress unsaved: the next window's save carries the same
-state again, and when there is no next window, OBSERVE-TURN starts a run at the next turn to make
-the write."
+is counted and logged, and marks the progress unsaved. The next save carries the same state
+again: the one after the next window, or, when a skipped window lies before the next window, the
+one before that window's first write, whose failure ends that window's attempts as a stop
+(%CLOSE-OPEN-WINDOWS-BEFORE). When there is no next window, OBSERVE-TURN starts a run at the next
+turn to make the write."
   (%sync-progress observer :read-failure :record))
 
 (defun %pause (observer seconds)
@@ -659,7 +677,10 @@ the write."
   "Distil WINDOW, the messages from position START (from 0) to END, and write what it yields,
 trying up to OBSERVER-MAX-ATTEMPTS times with a pause before each retry. Returns :WRITTEN,
 :SKIPPED when every attempt failed, or :STOPPED when the observer was stopped before the window
-was written. Never raises: this runs on a thread of its own."
+was written, or when the progress write that closes the skipped windows before it failed
+(CLOSING-NOT-SAVED). That save's failure is counted once, where it is made, and not again as a
+failed attempt; the model's answer is discarded and the window is asked about again at the next
+run (the second review of #533). Never raises: this runs on a thread of its own."
   (let ((began (get-internal-real-time)) (written 0) (outcome :skipped))
     (loop for attempt from 1 to (observer-max-attempts observer)
           do (when (> attempt 1)
@@ -671,6 +692,7 @@ was written. Never raises: this runs on a thread of its own."
                  (progn (setf written (%distil-and-write observer window start end today))
                         (setf outcome :written)
                         (return))
+               (closing-not-saved () (setf outcome :stopped) (return))
                (error (e)
                  (incf (observer-failures observer))
                  (setf (observer-last-error observer) e))))
