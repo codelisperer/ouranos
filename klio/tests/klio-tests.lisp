@@ -1018,6 +1018,104 @@ process can take it in between."
           (is (not (search "Unfinished" (%file-text out "index.html"))))
           (is (not (probe-file (merge-pathnames "secret.html" out))) "a draft is not exported"))))))
 
+;;; --- static assets (#557) ------------------------------------------------------------------
+
+(defmacro with-assets-dir ((dir) &body body)
+  "A fresh directory holding a stylesheet, a binary image whose bytes are 0 to 255, and a file
+under .well-known/, deleted afterwards."
+  `(let ((,dir (aion/fs:make-temporary-directory "klio-assets")))
+     (unwind-protect
+          (progn
+            (with-open-file (o (merge-pathnames "style.css" ,dir) :direction :output)
+              (write-string "body { color: black; }" o))
+            (let ((png (merge-pathnames "img/logo.png" ,dir)))
+              (ensure-directories-exist png)
+              (with-open-file (o png :direction :output :element-type '(unsigned-byte 8))
+                (dotimes (i 256) (write-byte i o))))
+            (let ((wk (merge-pathnames ".well-known/security.txt" ,dir)))
+              (ensure-directories-exist wk)
+              (with-open-file (o wk :direction :output) (write-string "Contact: x" o)))
+            ,@body)
+       (ignore-errors (aion/fs:delete-tree ,dir)))))
+
+(defun %octets (path)
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+      (subseq v 0 (read-sequence v in)))))
+
+(test the-export-copies-the-sites-assets-byte-for-byte
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((written (k:export-site site out :assets assets)))
+            (is (equal '(".well-known/security.txt" "img/logo.png" "style.css")
+                       (last written 3))
+                "the assets come after the pages in the returned list: ~S" written)
+            (is (equal "body { color: black; }" (%file-text out "style.css")))
+            (is (equalp (%octets (merge-pathnames "img/logo.png" assets))
+                        (%octets (merge-pathnames "img/logo.png" out)))
+                "a binary file is copied byte for byte")
+            (is-true (probe-file (merge-pathnames ".well-known/security.txt" out))
+                     "a dot-name is copied: a static host reads .well-known/")
+            (is-true (probe-file (merge-pathnames "one.html" out)) "and the pages are written")))))))
+
+(test assets-are-copied-again-after-clean-empties-the-directory
+  "The case #557 reports: :clean t deleted the site's stylesheet, which the site then had to
+copy again after every export."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (k:export-site site out :assets assets)
+          (k:export-site site out :assets assets :clean t)
+          (is-true (probe-file (merge-pathnames "style.css" out)))
+          (k:export-site site out :clean t)
+          (is (null (probe-file (merge-pathnames "style.css" out)))
+              "the control: without :assets, :clean leaves no stylesheet"))))))
+
+(test an-asset-at-a-pages-path-is-refused-and-nothing-is-written
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-open-file (o (merge-pathnames "One.html" assets) :direction :output)
+        (write-string "not the page" o))
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+            (is (typep e 'k:export-refused) "got ~S" e)
+            (is (and e (search "One.html" (princ-to-string e))) "the refusal names the asset: ~A" e)
+            (is (null (probe-file out)) "nothing was written")))))))
+
+(test assets-inside-or-around-the-output-are-refused
+  "Inside the output, :clean would delete them; around it, the copy would copy the export into
+itself."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((e (nth-value 1 (ignore-errors
+                               (k:export-site site (merge-pathnames "public/" assets) :assets assets)))))
+          (is (typep e 'k:export-refused) "output inside the assets: ~S" e))
+        (with-export-dir (out)
+          (let ((inner (merge-pathnames "static/" (uiop:ensure-directory-pathname out))))
+            (ensure-directories-exist inner)
+            (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets inner :clean t)))))
+              (is (typep e 'k:export-refused) "assets inside the output: ~S" e)
+              (is-true (uiop:directory-exists-p inner) "and :clean did not delete them"))))))))
+
+(test a-missing-assets-directory-is-refused
+  (with-content-dir (src ("one.md" . +good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((e (nth-value 1 (ignore-errors
+                               (k:export-site site out :assets (merge-pathnames "no-such-dir/" src))))))
+          (is (typep e 'k:export-refused) "got ~S" e)
+          (is (null (probe-file out)) "nothing was written"))))))
+
 (test the-directory-layout-writes-an-index-file-per-page
   (with-content-dir (src ("roles/two.md" . +also-good+))
     (with-export-dir (out)

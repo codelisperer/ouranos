@@ -20,7 +20,15 @@
 ;;;; URLS MATCH SITE-APP. The document with key `roles/a' is served at /roles/a. :LAYOUT :FILE
 ;;;; (the default) writes roles/a.html, which the common static hosts serve at /roles/a;
 ;;;; :LAYOUT :DIRECTORY writes roles/a/index.html, served at /roles/a/, for a host that does
-;;;; not. Static assets such as the site's CSS are the site's to copy.
+;;;; not.
+;;;;
+;;;; STATIC ASSETS (#557). With :ASSETS, a directory of the site's own files -- its CSS, images,
+;;;; fonts, a .well-known/ -- is copied into the export after :CLEAN has emptied it, keeping
+;;;; each file's path relative to that directory. Every file is copied, dot-names included,
+;;;; because a static host reads .well-known/. An asset whose path is one the export writes a
+;;;; page to is refused before anything is written, rather than one silently replacing the
+;;;; other; the paths are compared without regard to case, because the file systems of Windows
+;;;; and macOS would make them one file.
 
 (in-package #:klio)
 
@@ -70,7 +78,39 @@ exist, so a relative or aliased spelling is not a way around the check."
   (and (null (uiop:directory-files directory))
        (null (uiop:subdirectories directory))))
 
-(defun export-site (site directory &rest options &key (layout :file) clean now
+(defun %asset-files (assets)
+  "Every file under the directory ASSETS, recursively, as (relative-path . absolute-path) with
+the relative path spelled with `/', sorted by relative path."
+  (let ((root (uiop:ensure-directory-pathname assets))
+        (files '()))
+    (labels ((walk (dir)
+               (dolist (f (uiop:directory-files dir))
+                 (push (cons (substitute #\/ #\\ (%relative-namestring f root)) f) files))
+               (dolist (sub (uiop:subdirectories dir))
+                 (walk sub))))
+      (walk root))
+    (sort files #'string< :key #'car)))
+
+(defun %check-assets (assets directory page-files)
+  "The asset files to copy, as %ASSET-FILES returns them, after checking that they can be:
+signals EXPORT-REFUSED when ASSETS is not a directory, when it holds or is inside DIRECTORY
+(where :CLEAN would delete it, or the copy would copy itself), or when an asset's path is one
+in PAGE-FILES."
+  (let ((assets (uiop:ensure-directory-pathname assets)))
+    (unless (uiop:directory-exists-p assets)
+      (error 'export-refused :directory directory
+                             :reason (format nil "the :ASSETS directory ~A does not exist" assets)))
+    (when (or (%holds-content-p directory assets) (%holds-content-p assets directory))
+      (error 'export-refused :directory directory
+                             :reason (format nil "the :ASSETS directory ~A holds it or is inside it" assets)))
+    (let* ((files (%asset-files assets))
+           (clash (find-if (lambda (f) (member (car f) page-files :test #'string-equal)) files)))
+      (when clash
+        (error 'export-refused :directory directory
+                               :reason (format nil "the asset ~A would replace the page written to the same path" (car clash))))
+      files)))
+
+(defun export-site (site directory &rest options &key (layout :file) clean now assets
                                                     &allow-other-keys)
   "Render SITE's published content into DIRECTORY for a static host, with the same options
 SITE-APP takes (MAKE-SITE-OPTIONS). Returns the list of files written, relative to DIRECTORY.
@@ -83,7 +123,12 @@ at, so a scheduled document is exported only once its time has come; NIL means n
 
 Nothing is written unless every page renders. DIRECTORY must be absent or empty, or CLEAN must
 be true, in which case its contents are deleted first; otherwise EXPORT-REFUSED is signalled.
-Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first)."
+Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first).
+
+ASSETS, a directory, is copied into DIRECTORY after it is emptied, every file at its path
+relative to ASSETS (see the file header). EXPORT-REFUSED is signalled, before anything is
+written, when ASSETS does not exist, holds DIRECTORY or is inside it, or has a file whose path
+is one a page is written to. The returned list names the pages, then the assets."
   (check-type layout (member :file :directory))
   (let* ((directory (uiop:ensure-directory-pathname directory))
          (tree (site-tree site))
@@ -102,9 +147,12 @@ Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first)."
     (let ((files (let ((*site-options*
                          (apply #'make-site-options
                                 (loop for (k v) on options by #'cddr
-                                      unless (member k '(:layout :clean :now))
+                                      unless (member k '(:layout :clean :now :assets))
                                         append (list k v)))))
-                   (%render-site site tree now layout))))
+                   (%render-site site tree now layout)))
+          (asset-files nil))
+      (when assets
+        (setf asset-files (%check-assets assets directory (mapcar #'car files))))
       ;; AION/FS:DELETE-TREE, which removes a link inside the directory as a link and refuses a
       ;; directory that is itself one, as the rest of the tree does since #347.
       (when (uiop:directory-exists-p directory)
@@ -115,4 +163,8 @@ Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first)."
           (with-open-file (out path :direction :output :if-exists :supersede
                                     :external-format :utf-8)
             (write-string (cdr file) out))))
-      (mapcar #'car files))))
+      (dolist (asset asset-files)
+        (let ((path (merge-pathnames (car asset) directory)))
+          (ensure-directories-exist path)
+          (uiop:copy-file (cdr asset) path)))
+      (append (mapcar #'car files) (mapcar #'car asset-files)))))
