@@ -10,8 +10,16 @@
 (cl:in-package #:praxeon/conditions)
 
 (define-condition praxeon-error (error)
-  ()
-  (:documentation "Root of all Praxeon-signalled errors."))
+  ((detail :initarg :detail :initform nil :reader praxeon-error-detail))
+  (:report (lambda (c stream)
+             (format stream "~(~A~)~@[: ~A~]" (type-of c) (praxeon-error-detail c))))
+  (:documentation "Root of all Praxeon-signalled errors.
+
+DETAIL is a string saying what went wrong, or NIL. The report prints the condition's type and
+then DETAIL. A subclass with a :REPORT of its own replaces this one; DELIBERATION-FAILURE prints
+DETAIL in its own words, and DELIBERATION-FAILURE-DETAIL reads the same slot. Before #505 this
+condition had no slot, so a :DETAIL passed to it was dropped and the report named only the
+type."))
 
 (define-condition means-failure (praxeon-error)
   ((means :initarg :means :reader means-failure-means)
@@ -41,7 +49,7 @@ tool ran and reported an error, :NOT-RUN when it was refused before it ran, and 
 it may have run, such as after a timeout."))
 
 (define-condition deliberation-failure (praxeon-error)
-  ((detail :initarg :detail :initform nil :reader deliberation-failure-detail))
+  ((detail :reader deliberation-failure-detail))
   (:report (lambda (c stream)
              (format stream "Deliberation failed~@[: ~A~]."
                      (deliberation-failure-detail c))))

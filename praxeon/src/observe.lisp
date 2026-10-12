@@ -204,7 +204,7 @@ Called after the process-wide lock is released (#508)."
              (format stream "Cannot forget ~A: an observer of thread ~A is running. Stop it (stop-observer on running-observer) and try again."
                      (observer-running-subject c) (observer-running-thread c))))
   (:documentation "FORGET-SUBJECT was called while an observer of the subject is running in this
-process. A slot of its own for the thread, since PRAXEON-ERROR carries no detail (#505)."))
+process. THREAD is the thread whose observer is running."))
 
 (defmethod mem:forget-subject :before ((store mem:memory-store) subject)
   "Refuse to erase SUBJECT while an observer of it is running in this process: that run could

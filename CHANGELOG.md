@@ -795,6 +795,17 @@ its tag.
 
 ### Fixed
 
+- **praxeon/conditions: `praxeon-error` keeps its `:detail` and prints it** (#505). Code
+  throughout praxeon signals `praxeon-error` with `:detail` saying what went wrong, such as
+  `make-observer`'s refusal of a bad `:step` or a `supersede` of an observation already
+  superseded, but the condition had no slot, so the detail was dropped and the report read only
+  "Condition PRAXEON-ERROR was signalled". It now has a `detail` slot, read with the new export
+  `praxeon-error-detail`, and its report prints the type and the detail, for example
+  `praxeon-error: :step must be a positive integer, not 0`. `praxeon/observe`'s
+  `window-not-distilled` and `closing-not-saved` print their detail the same way.
+  `deliberation-failure` keeps its own report, and `deliberation-failure-detail` reads the same
+  slot. Every subclass is still a `praxeon-error`, so existing handlers catch the same conditions.
+
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).
   pgvector's HNSW scan took the nearest `hnsw.ef_search` rows of the whole table (40 by

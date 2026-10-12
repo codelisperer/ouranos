@@ -5400,6 +5400,31 @@ window; a null or empty one is no date."
 (defun %thread-contents (store &optional (thread "conv-7"))
   (sort (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread thread)) #'string<))
 
+(test a-praxeon-error-reports-its-detail
+  "PRAXEON-ERROR keeps :DETAIL and prints it, and so do its subclasses that have no report of
+their own; DELIBERATION-FAILURE reads the same slot. A handler for PRAXEON-ERROR still catches
+each of them (#505)."
+  (flet ((report (type &rest initargs)
+           (handler-case (apply #'error type initargs)
+             (cnd:praxeon-error (e) (values (princ-to-string e) e)))))
+    (multiple-value-bind (text e) (report 'cnd:praxeon-error :detail "the store refused the write")
+      (is (string= "praxeon-error: the store refused the write" text))
+      (is (string= "the store refused the write" (cnd:praxeon-error-detail e))))
+    (is (string= "praxeon-error" (report 'cnd:praxeon-error)))
+    (is (search "the answer could not be read"
+                (report 'obs::window-not-distilled :detail "the answer could not be read")))
+    (is (search "the progress write failed"
+                (report 'obs::closing-not-saved :detail "the progress write failed")))
+    (multiple-value-bind (text e) (report 'cnd:deliberation-failure :detail "429 Too Many Requests")
+      (is (string= "Deliberation failed: 429 Too Many Requests." text))
+      (is (string= "429 Too Many Requests" (cnd:praxeon-error-detail e)))
+      (is (string= "429 Too Many Requests" (cnd::deliberation-failure-detail e)))))
+  (let ((text (handler-case (obs:make-observer (make-instance 'slow-scripted :delay 0 :script nil)
+                                               (mem:make-in-memory-store) "member-1" "conv-7" :step 0)
+                (cnd:praxeon-error (e) (princ-to-string e)))))
+    (is (search ":step must be a positive integer, not 0" text)
+        "make-observer's refusal prints its reason: ~A" text)))
+
 (test the-observer-distils-off-the-request-path-and-moves-the-mark
   "The model takes a second to answer; OBSERVE-TURN returns long before that. The observations are
 the thread's, cite the conversation and the window's message range, and the mark moves to the
