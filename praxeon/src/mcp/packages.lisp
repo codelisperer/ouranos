@@ -16,16 +16,18 @@
    "A client for MCP (Model Context Protocol) servers, and the bridge that gives their tools to
     Praxeon agents as means (#527).
 
-    A CONNECTION is data: a name, a URL, and how to get a token. A CLIENT talks to one
-    connection's server. LIST-TOOLS reads what the server offers and gives it to nobody;
-    GRANT-TOOLS gives an agent the tools the app chooses, under names prefixed by the
+    A CONNECTION is data: a name, a URL and how to get a token, or a command to run. A CLIENT
+    talks to one connection's server. LIST-TOOLS reads what the server offers and gives it to
+    nobody; GRANT-TOOLS gives an agent the tools the app chooses, under names prefixed by the
     connection's name.
 
-    Both eras of the protocol are spoken over Streamable HTTP. The current revision,
-    2026-07-28, has no handshake: every request carries its protocol version and the client's
-    identity. The legacy revisions, 2025-03-26 to 2025-11-25, open a session with
-    `initialize'. The client tries the current form first, falls back when the server's reply
-    says it does not understand it, and remembers the answer for the connection.
+    A connection is a server over Streamable HTTP, at a URL, or a local server this process
+    starts and talks to over its stdin and stdout, with a COMMAND (stdio.lisp). Both eras of
+    the protocol are spoken over either. The current revision, 2026-07-28, has no handshake:
+    every request carries its protocol version and the client's identity. The legacy
+    revisions, 2025-03-26 to 2025-11-25, open a session with `initialize'. The client tries
+    the current form first, falls back when the server's reply says it does not understand it,
+    and remembers the answer for the connection.
 
     Text from a server is untrusted. Descriptions and results reach the model; nothing a
     server sends changes which tools an agent has.")
@@ -34,6 +36,10 @@
    #:connection #:make-connection #:connection-name #:connection-url
    #:connection-token-source #:connection-per-user #:connection-timeout
    #:connection-call-timeout
+   ;; local servers over stdio (#527, part 5)
+   #:connection-command #:connection-directory #:connection-environment #:connection-stderr
+   #:connection-restart #:+stdio-environment+ #:close-client
+   #:*stdio-close-seconds* #:*stdio-term-seconds*
    #:client #:make-client #:client-connection #:client-era #:client-protocol-version
    #:+protocol-version+ #:+legacy-protocol-versions+
    ;; limits an app may set

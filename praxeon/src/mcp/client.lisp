@@ -77,14 +77,15 @@ has, or two tools under one name. Nothing was registered."))
 
 ;;; --- connections and clients -----------------------------------------------------------
 
-(defstruct (connection (:constructor make-connection
-                           (&key name url token-source per-user (timeout 30) (call-timeout 120)
-                                 (max-body-bytes (* 8 1024 1024)) tasks
-                                 (task-lifetime (* 24 60 60)) (task-backoff-cap (* 5 60)))))
-  "An MCP server the app connects to, as data.
+(defstruct (connection (:constructor %make-connection
+                           (&key name url command directory environment stderr restart
+                                 token-source per-user timeout call-timeout max-body-bytes tasks
+                                 task-lifetime task-backoff-cap)))
+  "An MCP server the app connects to, as data. MAKE-CONNECTION makes one.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
-URL is the server's MCP endpoint. TOKEN-SOURCE is where a request's bearer token comes from:
+URL is the server's MCP endpoint, for a server over Streamable HTTP. COMMAND, DIRECTORY,
+ENVIRONMENT, STDERR and RESTART describe a local server over stdio instead (stdio.lisp). TOKEN-SOURCE is where a request's bearer token comes from:
 NIL for none; a function of (CONNECTION PRINCIPAL) returning a token string or NIL; or an object
 with a TOKEN-FOR method, and optionally a TOKEN-REFUSED method that gives a new token after the
 server refuses one, such as the one OAUTH-TOKEN-SOURCE makes from an aion/oauth broker. PER-USER is true when the token belongs to a user: a
@@ -101,6 +102,11 @@ task's poll interval up to this cap, and a poll that succeeds resets it. Both ar
 integers; anything else is refused here, before a task can start."
   (name "" :type string)
   (url "" :type string)
+  (command nil :type list)
+  (directory nil)
+  (environment nil)
+  (stderr nil)
+  (restart t)
   (token-source nil)
   (per-user nil)
   (timeout 30)
@@ -109,6 +115,67 @@ integers; anything else is refused here, before a task can start."
   (tasks nil)
   (task-lifetime (* 24 60 60) :type (integer 1))
   (task-backoff-cap (* 5 60) :type (integer 1)))
+
+(defparameter +stdio-environment+
+  #+win32 '("PATH" "SystemRoot" "TEMP" "USERPROFILE" "APPDATA")
+  #-win32 '("PATH" "HOME" "LANG" "TMPDIR")
+  "The variables of this process's environment that a local server's process is given, with the
+connection's ENVIRONMENT added, unless ENVIRONMENT is :INHERIT.")
+
+(defun make-connection (&key name url command directory environment stderr (restart t)
+                             token-source per-user (timeout 30) (call-timeout 120)
+                             (max-body-bytes (* 8 1024 1024)) tasks
+                             (task-lifetime (* 24 60 60)) (task-backoff-cap (* 5 60)))
+  "A CONNECTION to an MCP server: over Streamable HTTP at URL, or a local server over stdio
+started with COMMAND. Both together are refused.
+
+For a server over HTTP, TOKEN-SOURCE and PER-USER say where a request's bearer token comes from,
+as the CONNECTION documentation describes.
+
+For a local server, COMMAND is a list: the program, found on PATH, and its arguments, all
+strings. The client starts it at the first request and talks to it over its stdin and stdout
+(2026-07-28, \"stdio\").
+- DIRECTORY is the directory it runs in; NIL for this process's.
+- ENVIRONMENT is an alist of (NAME . VALUE) strings. The server's process gets those, plus only
+  these variables from this process's environment: PATH, HOME, LANG and TMPDIR, or on Windows
+  PATH, SystemRoot, TEMP, USERPROFILE and APPDATA (+STDIO-ENVIRONMENT+). A local server is often
+  someone else's code, and this process may hold keys for other services, so a variable the
+  server needs, such as its API key, is passed here by name. ENVIRONMENT :INHERIT gives the
+  server this process's whole environment instead.
+- STDERR is NIL to discard what the server writes to its stderr, or a pathname to append it to.
+  The client does not read it, and the log never contains it.
+- RESTART is true, the default, to start the server again at the next request after it exits
+  unexpectedly, at most 3 times in any 60 seconds. With RESTART NIL, once the server has exited
+  every request fails as not run until the app closes the client and makes another.
+The specification says a server over stdio takes its credentials from its environment, so
+TOKEN-SOURCE and PER-USER are refused with COMMAND. One process serves every principal: an app
+that needs a server process per user makes a connection per user.
+
+TIMEOUT, CALL-TIMEOUT, MAX-BODY-BYTES, TASKS, TASK-LIFETIME and TASK-BACKOFF-CAP apply to both;
+see CONNECTION. For a local server MAX-BODY-BYTES bounds each line it writes."
+  (flet ((refuse (control &rest arguments)
+           (error "praxeon/mcp: make-connection ~A: ~?" name control arguments)))
+    (cond ((and url command) (refuse "takes :url or :command, not both."))
+          (command
+           (unless (and (consp command) (every #'stringp command))
+             (refuse ":command is a list of strings: the program and its arguments."))
+           (when (or token-source per-user)
+             (refuse "a local server over stdio takes its credentials from its environment, so :token-source and :per-user are not used with :command."))
+           (unless (or (eq environment :inherit)
+                       (and (listp environment)
+                            (every (lambda (e) (and (consp e) (stringp (car e)) (stringp (cdr e))))
+                                   environment)))
+             (refuse ":environment is :inherit or an alist of (name . value) strings."))
+           (unless (or (null stderr) (pathnamep stderr) (stringp stderr))
+             (refuse ":stderr is NIL or a pathname.")))
+          (t
+           (when (or directory environment stderr)
+             (refuse ":directory, :environment and :stderr apply only to a :command.")))))
+  (%make-connection :name (or name "") :url (or url "") :command command :directory directory
+                    :environment environment :stderr stderr :restart restart
+                    :token-source token-source :per-user per-user :timeout timeout
+                    :call-timeout call-timeout :max-body-bytes max-body-bytes :tasks tasks
+                    :task-lifetime task-lifetime :task-backoff-cap task-backoff-cap))
 
 (defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN
@@ -123,6 +190,11 @@ session: (SESSION-ID . VERSION). TASK-STORE keeps the tasks the server started (
   (next-id 0 :type sb-ext:word)
   ;; Requests given up at their deadline whose threads are still running (%SEND-WITHIN).
   (abandoned 0 :type sb-ext:word)
+  ;; A local server over stdio (stdio.lisp): its running process, the times it was started
+  ;; again in the last minute, and whether the app has closed the client.
+  (child nil)
+  (restarts '())
+  (closed nil)
   ;; agent -> (name . means-entry) for each means GRANT-TOOLS registered on it, for
   ;; REVOKE-TOOLS. Weak on the agent, so a client does not keep an agent alive.
   (grants (make-hash-table :test #'eq :weakness :key :synchronized t)))
@@ -614,12 +686,17 @@ may have been processed is never sent twice."
                     (%send client method params principal timeout extra-headers t))
              (values response id)))))))
 
+(declaim (ftype function %stdio-request))
+
 (defun %request (client method params &key principal timeout extra-headers no-resend)
   "Send METHOD with PARAMS for PRINCIPAL and return the result object."
   (let* ((*in-flight-method* nil)
          (connection (client-connection client))
          (timeout (or timeout (connection-timeout connection)))
          (started (get-internal-real-time)))
+    (when (connection-command connection)
+      ;; A local server over stdio (stdio.lisp): no tokens, no HTTP status, no headers.
+      (return-from %request (%result-of client method (%stdio-request client method params timeout))))
     (multiple-value-bind (response id)
         (let ((*sent-token* nil))
           (multiple-value-bind (response id)
@@ -656,40 +733,46 @@ may have been processed is never sent twice."
                                          :status (http:response-status response)
                                          :ms (round (* 1000 (- (get-internal-real-time) started))
                                                     internal-time-units-per-second))
-        (when (nth-value 1 (gethash "error" reply))
-          (let ((code (%error-code reply)))
-            (case code
-              (-32022
-               (%request-failed client "it does not support protocol version ~A; it supports ~{~A~^, ~}."
-                                (list +protocol-version+
-                                      (coerce (or (%get reply "error" "data" "supported") #())
-                                              'list))
-                                :code code :outcome :not-run))
-              (-32020
-               ;; The specification says a client SHOULD list the tools again and retry. This
-               ;; client does not: a new listing could change the tool's schema without the app
-               ;; granting it again. The call fails, and the app calls REVOKE-TOOLS and GRANT-TOOLS again.
-               (%request-failed client "it rejected the request's headers (HeaderMismatch). The tool's definition may have changed on the server; it has to be granted again."
-                                '() :code code :outcome :not-run))
-              (t
-               (%request-failed client "it answered ~A with an error (code ~A)."
-                                (list method code) :code code)))))
-        (let ((result (gethash "result" reply)))
-          (unless (hash-table-p result)
-            (%failed-in-flight client "its result was not a JSON object." '()))
-          (when (equal "input_required" (%get result "resultType"))
-            (%request-failed client "the server asked for input this client cannot provide."
-                             '() :outcome :not-run))
-          ;; A task is a valid answer only to a tools/call that declared the extension, which
-          ;; only a current-revision request does. The specification says a client that gets
-          ;; one otherwise treats it as an invalid response; for a tool call the server may
-          ;; have started the work, so the outcome is unknown.
-          (when (and (equal "task" (%get result "resultType"))
-                     (not (and (equal method "tools/call")
-                               (connection-tasks connection)
-                               (eq (client-era client) :modern))))
-            (%failed-in-flight client "it answered with a task, which this client did not ask for." '()))
-          result)))))
+        (%result-of client method reply)))))
+
+(defun %result-of (client method reply)
+  "The result object of REPLY, the JSON-RPC reply to METHOD, or a failed call for an error, an
+input request or a task nobody asked for. Both transports end here."
+  (let ((connection (client-connection client)))
+    (when (nth-value 1 (gethash "error" reply))
+      (let ((code (%error-code reply)))
+        (case code
+          (-32022
+           (%request-failed client "it does not support protocol version ~A; it supports ~{~A~^, ~}."
+                            (list +protocol-version+
+                                  (coerce (or (%get reply "error" "data" "supported") #())
+                                          'list))
+                            :code code :outcome :not-run))
+          (-32020
+           ;; The specification says a client SHOULD list the tools again and retry. This
+           ;; client does not: a new listing could change the tool's schema without the app
+           ;; granting it again. The call fails, and the app calls REVOKE-TOOLS and GRANT-TOOLS again.
+           (%request-failed client "it rejected the request's headers (HeaderMismatch). The tool's definition may have changed on the server; it has to be granted again."
+                            '() :code code :outcome :not-run))
+          (t
+           (%request-failed client "it answered ~A with an error (code ~A)."
+                            (list method code) :code code)))))
+    (let ((result (gethash "result" reply)))
+      (unless (hash-table-p result)
+        (%failed-in-flight client "its result was not a JSON object." '()))
+      (when (equal "input_required" (%get result "resultType"))
+        (%request-failed client "the server asked for input this client cannot provide."
+                         '() :outcome :not-run))
+      ;; A task is a valid answer only to a tools/call that declared the extension, which
+      ;; only a current-revision request does. The specification says a client that gets
+      ;; one otherwise treats it as an invalid response; for a tool call the server may
+      ;; have started the work, so the outcome is unknown.
+      (when (and (equal "task" (%get result "resultType"))
+                 (not (and (equal method "tools/call")
+                           (connection-tasks connection)
+                           (eq (client-era client) :modern))))
+        (%failed-in-flight client "it answered with a task, which this client did not ask for." '()))
+      result)))
 
 (defun %copy (table)
   (let ((copy (make-hash-table :test #'equal)))
@@ -850,7 +933,10 @@ ACTOR:STARTED-RESULT is returned instead. ORIGIN is a plist of :AGENT, :CONVERSA
   (let* ((connection (client-connection client))
          (started (get-universal-time))
          (arguments (if (hash-table-p arguments) arguments (%object)))
-         (headers (handler-case (header-params (tool-header-paths tool) arguments)
+         ;; Header parameters are an HTTP binding's; a local server reads the arguments.
+         (headers (handler-case (if (connection-command connection)
+                                    '()
+                                    (header-params (tool-header-paths tool) arguments))
                     (header-value-refused (e)
                       (%request-failed client "the argument for one of the tool's header parameters is ~A, so the call was not sent."
                                        (list (header-value-refused-reason e)) :outcome :not-run))))
