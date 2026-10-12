@@ -107,6 +107,7 @@ with `_' or `.' (#557). Such a file is not content, and nothing under such a dir
 A file or directory whose name starts with `_' or `.' is skipped, with everything under the
 directory: that is where an author keeps a README, notes or work in progress beside the
 content without publishing it (#557). It also keeps out `.git' and editor directories.
+DIRECTORY itself is not checked, so a content directory named `_content' is read as usual.
 
 Sorted because a report that names files in filesystem order names them differently on two
 machines, and because a duplicate-slug failure should blame the same file twice running
