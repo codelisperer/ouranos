@@ -190,6 +190,13 @@ its tag.
 
 ### Added
 
+- **klio: a collection name may not end in `.` or be a Windows device name** (#631).
+  `make-site-options` refuses a `:collections` name with a segment that ends in `.`
+  (Windows strips it, so `roles.` and `roles` would be one directory) or whose name before
+  its first `.` is `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9`
+  (`nul.txt`, `com1`), compared without regard to case. The rule applies on every operating
+  system, so a site behaves the same everywhere. A space was already refused.
+
 - **klio: a site can give a collection its own listing page, with `:collections`** (#557). Each
   collection named there gets a listing at `/<name>/`, paginated with `:per-page`, in the order
   the entry gives (`("roles" :sort-by "start" :order :descending :then-by "title")`), rendered by

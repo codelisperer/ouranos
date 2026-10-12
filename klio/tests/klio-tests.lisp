@@ -2123,3 +2123,14 @@ including a --> later on the line."
                  (mapcar #'k:document-key
                          (k:tree-readable-documents tree :now (encode-universal-time 0 0 0 2 1 2030 0))))
           "the control: at a time after it, it is readable"))))
+
+(test collection-names-windows-would-merge-or-refuse-are-refused-everywhere
+  "#631: Windows strips a trailing period, so roles. and roles would be one directory, and it
+cannot make a file or directory named for a device, with or without an extension. Refused on every
+operating system, so a site behaves the same everywhere."
+  (dolist (bad '("roles." "CON" "nul.txt" "com1" "posts/aux" "LPT9.x"))
+    (is (typep (nth-value 1 (ignore-errors (k:make-site-options :collections (list bad)))) 'error)
+        "~S was accepted" bad))
+  (dolist (good '("console" "com10" "nullable" "auxiliary" "roles.v2" "posts/lpt"))
+    (is-true (k:make-site-options :collections (list good))
+             "the control: ~S, not a device name, is accepted" good)))
