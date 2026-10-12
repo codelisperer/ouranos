@@ -62,6 +62,8 @@ thread, and :CLOSE, which closes the server's stdin."
   (reader-done nil)
   (writer-done nil)
   (close-on-end nil)
+  ;; How many times %RELEASE closed the streams: 1 once all three are done, never more.
+  (closes 0)
   reader
   writer
   ;; Counted rather than logged one by one; logged when the server's output ends. A dropped
@@ -83,7 +85,10 @@ the process's streams when it is the last of the three. Each party calls this on
             (:reader (setf (child-reader-done child) t))
             (:writer (setf (child-writer-done child) t))
             (:finish (setf (child-close-on-end child) t)))
-          (and (child-reader-done child) (child-writer-done child) (child-close-on-end child)))
+          (when (and (child-reader-done child) (child-writer-done child)
+                     (child-close-on-end child))
+            (incf (child-closes child))
+            t))
     (ignore-errors (sb-ext:process-close (child-process child)))))
 
 (defun %enqueue (child item)
@@ -204,8 +209,7 @@ because this client declares no capabilities."
               :connection name :pid (%child-pid child) :waiting (length waiting)
               :notifications (child-notifications child) :not-json (child-not-json child)
               :too-long (child-too-long child) :requests (child-requests child)
-              :late (child-late child))
-    (%release child :reader)))
+              :late (child-late child))))
 
 ;;; --- starting and stopping ----------------------------------------------------------------
 
@@ -258,7 +262,10 @@ environment for :INHERIT."
     (setf (child-reader child)
           ;; THREAD-LIFETIME: scoped -- it reads this child's stdout until the stream ends,
           ;; needs none of the caller's bindings, and %FINISH-CHILD joins it.
-          (sb-thread:make-thread (lambda () (%reader-loop name limit child))
+          (sb-thread:make-thread (lambda ()
+                                   ;; Released however the thread ends, as the writer's is.
+                                   (unwind-protect (%reader-loop name limit child)
+                                     (%release child :reader)))
                                  :name "praxeon/mcp stdio reader")
           (child-writer child)
           ;; THREAD-LIFETIME: scoped -- it writes this child's queued lines until :CLOSE, needs
@@ -310,7 +317,17 @@ log how it ended."
       (%signal-child child +sigkill+)
       (%wait-for-exit child 2))
     (%enqueue child :close)
-    (sb-thread:join-thread (child-writer child) :default nil :timeout 2)
+    (when (eq :timeout (sb-thread:join-thread (child-writer child) :default :timeout :timeout 2))
+      ;; The writer is blocked on a stdin that a process the server started still holds and
+      ;; does not read. Left alone it never returns, and its pipes stay open until the image
+      ;; exits, one set more for each restart (#601). Ending the thread unwinds the write, and
+      ;; its UNWIND-PROTECT releases the pipes. No process is signalled: the server has exited
+      ;; and been reaped, so its pid can no longer be checked against its process group, and a
+      ;; group id saved earlier can belong to someone else once the group is empty, which is
+      ;; the case when the holder has left it with setsid. The holder keeps running, and reads
+      ;; end-of-file once the pipe is closed.
+      (sb-thread:terminate-thread (child-writer child))
+      (sb-thread:join-thread (child-writer child) :default nil :timeout 2))
     (sb-thread:join-thread (child-reader child) :default nil :timeout 2)
     (let ((process (child-process child)))
       (log:info "praxeon/mcp: local server ended"

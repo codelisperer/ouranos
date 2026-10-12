@@ -504,13 +504,12 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
       (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15)))))
 
 #-win32
-(test a-write-blocked-on-an-exited-server-keeps-its-stream-until-it-ends
+(test a-write-blocked-on-an-exited-server-is-ended-and-its-pipes-closed
   "A server exits while a process it started holds its stdin and reads nothing, and a long
-request is still being written to it. The server's streams are not closed while the writer
-thread is still writing, so its descriptor cannot be taken by the next server's pipe and written
-to (#601); they are closed when the write ends. The server started next gets only whole JSON
-lines. Without the fix, the checks that the writer is still running and its stream still open
-fail on macOS, where closing the stream ended the blocked write at once."
+request is still being written to it. When the client finishes that server, it ends the
+blocked writer thread, so the pipes are closed once, right then, and are not kept until the
+image exits (#601). The server started next gets only whole JSON lines. The shell holding the
+old stdin is not signalled, and can outlive the test by up to 6 seconds."
   (with-stdio-client (client record "hold-stdin" :timeout 3 :call-timeout 1)
     (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
            (echo (%tool-named client "echo"))
@@ -525,13 +524,11 @@ fail on macOS, where closing the stream ended the blocked write at once."
                               (mcp:call-tool client echo
                                              (%text (make-string 1000000 :initial-element #\x))))))
       (is-true (sb-thread:join-thread exiting))
-      ;; This starts the next server, after the old one has been finished.
+      ;; This finishes the old server, then starts the next one. The shell has not read yet.
       (is (equal "after" (mcp:call-tool client echo (%text "after"))))
-      ;; The process holding the old stdin has not read yet, so the write is still blocked.
-      (is-true (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
-      (is-true (open-stream-p in))
-      ;; It reads after 6 seconds; then the write ends and the streams are closed.
-      (is-true (%wait-for (lambda () (not (open-stream-p in))) 8))
+      (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
+      (is-false (open-stream-p in))
+      (is (= 1 (praxeon/mcp::child-closes old)))
       (is (equal "later" (mcp:call-tool client echo (%text "later"))))
       (is (= 2 (%recorded-count record "start")))
       (let* ((lines (%recorded record))

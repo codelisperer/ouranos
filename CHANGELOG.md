@@ -208,6 +208,10 @@ its tag.
     group. Running servers are closed the same way when the image exits, so a client stays
     reachable until `close-client`. On Windows the server is ended with `TerminateProcess`, and
     a process it started can outlive it (#599).
+  - A server's pipes are closed only once its reader thread, its writer thread and the client's
+    cleanup are all done. A writer still blocked 2 seconds after the server is finished,
+    because a process the server started holds its stdin and does not read it, is ended, and
+    that process is not signalled (#601).
   - `list-tools`, `call-tool`, `grant-tools`, resources, prompts and tasks work over stdio
     unchanged. `praxeon/docs/mcp.md`, "Local servers over stdio".
 - **praxeon/mcp: an app can add an MCP server's resources to an agent's context, and get its
