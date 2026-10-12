@@ -66,8 +66,10 @@ A collection has no listing page of its own unless the site names it in `:collec
 entry is a name or a name with an ordering, `(:collections '("posts" ("roles" :sort-by "start"
 :order :descending)))`, and gets a listing at `/<name>/` (and `/<name>/page/2/` with
 `:per-page`), rendered by `:collection-theme`, `(lambda (site name documents) ...)`, which
-`collection-url` gives links to. A name that is the tag prefix or the page segment, or a listing
-and a document that `export-site` would write to one file, is refused.
+`collection-url` gives links to. A name is `/`-separated segments of letters, digits, `.`, `-`
+and `_`, none starting with `.` or `_`, and may not be at or under the tag prefix or the page
+segment (`tags/lisp`, `page/2`). `export-site` refuses a listing and a page that cannot both be
+written, such as a collection named `one.html` beside the document `one`.
 
 `/search.json` holds, for every readable page, its URL, title, tags, date and Markdown body, and
 anyone can fetch it. Pass `:search-path nil` to `site-app` and `export-site` to have no search
