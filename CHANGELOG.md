@@ -813,6 +813,15 @@ its tag.
   `ensure-schema` also creates an index on `subject`, `<table>_subject_idx`, which that second
   query reads.
 
+- **praxeon/observe: `observer-stuck-p` measures from the start of the current window attempt,
+  not of the whole run** (#632). It compared the time with the start of the run, so a run that
+  worked through several windows, or waited between retries, was reported stuck once its total
+  time passed `:window-timeout`, even while the current model call was new, and `observe-turn`
+  logged "memory observer stuck". Now each attempt, including a retry of a skipped window,
+  records its start, and `observer-stuck-p` and that log line's `:seconds` measure from it.
+  Between attempts, during the pause before a retry or the work between windows, the observer
+  is not stuck.
+
 - **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a
   sign-in** (#587). When `tasks/cancel` needed a sign-in and an observer of `:sign-in-required`
   signalled, or an app's handler of `authorization-required` exited, the task was never marked
