@@ -105,8 +105,12 @@ done
 REL_PRODUCT=""
 REL_VERSION=""
 REL_DISPLAY_NAME=""
+CR=$(printf '\r')
 if [ -f "$BUNDLE_ABS/RELEASE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
+    # A RELEASE saved with CRLF line endings: without this the CR stays on the value, and a
+    # mismatch message would show two values that look the same.
+    line=${line%"$CR"}
     case "$line" in
       "product "*)      REL_PRODUCT=${line#product } ;;
       "version "*)      REL_VERSION=${line#version } ;;
@@ -130,13 +134,25 @@ fi
 
 # The display name names the .app directory under --out, which is removed and rebuilt below,
 # so a slash would put it, and that removal, outside --out ("../../Existing"); a leading dot
-# would hide it. It is also the text of two Info.plist strings, so it is XML-escaped there:
-# "Research & Development" is a valid name and would otherwise make the plist malformed.
+# would hide it; a leading dash would reach tar and hdiutil as an option. It is also the text
+# of two Info.plist strings, so it is XML-escaped there: "Research & Development" is a valid
+# name and would otherwise make the plist malformed.
 case "$DISPLAY_NAME" in
-  */*|.*)
-    echo "build-dmg: the display name '$DISPLAY_NAME' cannot name the .app: it contains a slash or starts with a dot." >&2
+  */*|.*|-*)
+    echo "build-dmg: the display name '$DISPLAY_NAME' cannot name the .app: it contains a slash or starts with a dot or a dash." >&2
     exit 2 ;;
 esac
+# The same rule build-desktop-app.lisp applies to --display-name (release-settings.lisp): 1 to
+# 128 characters, none of them a control character. A name given here on the command line has
+# not been through that check. Characters are counted as UTF-8 bytes that do not continue a
+# character, which gives the same count in every locale.
+DISPLAY_NAME_CHARS=$(printf '%s' "$DISPLAY_NAME" | LC_ALL=C tr -d '\200-\277' | wc -c)
+DISPLAY_NAME_BYTES=$(printf '%s' "$DISPLAY_NAME" | wc -c)
+DISPLAY_NAME_PRINTABLE=$(printf '%s' "$DISPLAY_NAME" | LC_ALL=C tr -d '\001-\037' | wc -c)
+if [ "$DISPLAY_NAME_CHARS" -gt 128 ] || [ "$DISPLAY_NAME_PRINTABLE" -ne "$DISPLAY_NAME_BYTES" ]; then
+  echo "build-dmg: the display name must be 1 to 128 characters with no control characters." >&2
+  exit 2
+fi
 DISPLAY_NAME_XML=$(printf '%s' "$DISPLAY_NAME" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
 
 if [ -n "$DESCRIBE" ]; then

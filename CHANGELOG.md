@@ -157,9 +157,12 @@ its tag.
     key its updater does not read, so rebuild rather than rename a bundle directory.
   - `build-dmg.sh` names the `.app` after `RELEASE`'s `display-name` when `--display-name` is
     not given. A `--display-name` on the command line still wins. Either way, it refuses a
-    display name that contains a slash or starts with a dot, which would name a directory
-    outside `--out` or a hidden one, and it XML-escapes the name in `Info.plist`, which a name
-    with `&` or `<` used to make malformed.
+    display name that contains a slash or starts with a dot or a dash, which would name a
+    directory outside `--out` or a hidden one, or reach `tar` as an option. It applies
+    `build-desktop-app.lisp`'s rule for `--display-name` (1 to 128 characters, no control
+    characters) to a name given on its own command line, and it XML-escapes the name in
+    `Info.plist`, which a name with `&` or `<` used to make malformed. A `RELEASE` file saved
+    with CRLF line endings is read correctly.
   - On Windows one name is still both the `HKCU\Software\<name>` key and every name the user
     sees. `RELEASE`'s `display-name` is not used there.
   - `build-installer.ps1 -Describe` and `build-dmg.sh --describe` check a bundle and print the

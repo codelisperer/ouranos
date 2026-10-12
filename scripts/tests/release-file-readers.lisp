@@ -187,3 +187,45 @@ display name with a slash would remove and rebuild a directory outside --out."
       (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
       (is (search "display-name-xml R&amp;D &lt;Beta&gt;" output)
           "the name is not escaped for Info.plist:~%~A" output))))
+
+(test the-dmg-script-refuses-a-display-name-starting-with-a-dash
+  "The display name reaches tar and hdiutil as an argument, where a leading dash is an option."
+  (%rf-off-windows
+    (multiple-value-bind (code output)
+        (%rf-dmg (%rf-macos-bundle
+                  (format nil "product ~A~%display-name -rf~%version 1.2.3~%" +rf-app+)))
+      (is (= 2 code) "exit ~D, expected 2:~%~A" code output)
+      (is (search "'-rf'" output) "the refusal does not name the display name:~%~A" output))))
+
+(test the-dmg-script-reads-a-release-with-crlf-line-endings
+  "Each line's CR is removed, so the version matches and the display name has no CR in it."
+  (%rf-off-windows
+    (let ((cr (string #\Return)))
+      (multiple-value-bind (code output)
+          (%rf-dmg (%rf-macos-bundle
+                    (format nil "product ~A~A~%display-name Ouranos Rel~A~%version 1.2.3~A~%"
+                            +rf-app+ cr cr cr)))
+        (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+        (is (search (format nil "display-name Ouranos Rel~%") output)
+            "the display name is not read whole:~%~A" output)
+        (is (not (find #\Return output)) "a CR was kept:~%~S" output)))))
+
+(test the-dmg-script-counts-display-name-length-in-characters
+  "The writer's limit is 128 characters. 128 two-byte characters are 256 bytes and pass; 129
+characters are refused."
+  (%rf-off-windows
+    (let ((bundle (%rf-macos-bundle nil)))
+      (multiple-value-bind (code output)
+          (%rf-dmg bundle "--display-name" (make-string 128 :initial-element (code-char #xE9)))
+        (is (= 0 code) "128 characters: exit ~D, expected 0:~%~A" code output))
+      (multiple-value-bind (code output)
+          (%rf-dmg bundle "--display-name" (make-string 129 :initial-element #\a))
+        (is (= 2 code) "129 characters: exit ~D, expected 2:~%~A" code output)
+        (is (search "1 to 128 characters" output) "the refusal does not give the rule:~%~A" output)))))
+
+(test the-dmg-script-refuses-a-display-name-with-a-control-character
+  (%rf-off-windows
+    (multiple-value-bind (code output)
+        (%rf-dmg (%rf-macos-bundle nil) "--display-name" (format nil "Ouranos~CRel" #\Tab))
+      (is (= 2 code) "exit ~D, expected 2:~%~A" code output)
+      (is (search "no control characters" output) "the refusal does not give the rule:~%~A" output))))
