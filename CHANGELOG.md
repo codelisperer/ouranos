@@ -209,6 +209,26 @@ its tag.
   - The task record has a new field, `task-inputs`, written by `task-to-json`; a record written before reads as having none.
   - An ordinary call that answers `input_required` still fails as not run; an `:on-elicitation` handler for it is #626.
 
+- **aion/libgit: fetch, fast-forward pull and push** (#429). `set-remote` names a remote and
+  `remote-url` reads one back. `fetch` updates `refs/remotes/<remote>/`. `pull` fetches, then
+  fast-forwards HEAD's branch and checks it out, returning `:fast-forwarded` or `:up-to-date`
+  with the commit id; given `:branch` in a repository with no commits yet, it moves HEAD onto
+  that branch. `push-branch` pushes HEAD's branch, or `:branch`, to the branch of the same name.
+  The credential is an argument: `:credentials` takes a `credential` from `make-credential`
+  (a user name and a token, which may be an `aion/secret:secret`), or a function of the URL and
+  user name that returns one. It is offered at most once, and a remote that refuses it signals
+  `authentication-failed`. Other failures are conditions too: `not-fast-forward` and
+  `checkout-conflict` from `pull`, which then change nothing but the remote-tracking branch,
+  `push-rejected`, `detached-head` and `branch-not-checked-out`. `:follow-redirects` defaults
+  to `:none`, so a redirect to another host is refused. libgit2 v1.9.5 fixed GHSA-2889-x8f6-mc4x
+  (CVE-2026-53586) by asking the credentials callback with the redirected URL, but its own
+  default still follows an offsite redirect on the first request, so the default here keeps a
+  fixed credential from reaching another host. On Windows libgit2 does not follow a redirect to
+  an http address at all. GHSA-h7gc-w2gg-p9xp (CVE-2026-53583, an inverted certificate IP check
+  in the OpenSSL stream) was fixed in v1.9.5, and the pin is 1.9.7, so `aion/libgit` does
+  nothing about it. Looking a credential up in `hades/credentials` is left to the caller until
+  #357 lands.
+
 - **klio: `export-site` takes `:assets`, a directory of the site's static files that is copied
   into the export** (#557). Every file is copied at its path relative to that directory, after
   `:clean t` has emptied the export, so a site no longer re-copies its stylesheet and images

@@ -13,7 +13,8 @@
 (cl:defpackage #:aion/libgit/tests
   (:use #:cl #:fiveam)
   (:local-nicknames (#:git #:aion/libgit)
-                    (#:fs #:aion/fs))
+                    (#:fs #:aion/fs)
+                    (#:http #:aion/test-http))
   (:export #:run-tests))
 
 (in-package #:aion/libgit/tests)
@@ -273,7 +274,7 @@ functions ffi.lisp binds."
                                 (push (subseq text (1+ q) close) names)
                                 (setf i (1+ close))))
                      names)))
-    (is (= 53 (length git::*entry-points*)))
+    (is (= 70 (length git::*entry-points*)))
     (is (null (set-exclusive-or required git::*entry-points* :test #'string=))
         "differ: ~S" (set-exclusive-or required git::*entry-points* :test #'string=))))
 
@@ -475,3 +476,310 @@ load libgit2, or loads one that is not the tree's. CONTROL: any other image load
                 "a bundle's image must not load the source tree's libgit2: ~S" bundle)
             (is (from-tree-p other)
                 "control: any other image loads the vendored copy: ~S" other))))))
+
+;;; --- remotes (#429, step four) ---------------------------------------------------------
+;;;
+;;; The remote is a bare repository made by the git command, reached by its path, so these
+;;; tests need no network. What libgit2 sent or took is checked with the git command, as above.
+;;; The tests that need HTTP talk to a server on 127.0.0.1 and nothing else.
+
+(defun init-bare (dir)
+  (ensure-directories-exist dir)
+  (git-cli dir "init" "--bare" "--quiet"))
+
+(defun head-branch (dir) (git-cli dir "symbolic-ref" "--short" "HEAD"))
+
+(defun read-text (dir path)
+  (uiop:read-file-string (merge-pathnames path dir) :external-format :utf-8))
+
+(defun outcome (thunk)
+  "The condition THUNK signals, or :RETURNED."
+  (handler-case (progn (funcall thunk) :returned)
+    (error (e) e)))
+
+(defmacro with-published ((a adir bare branch first) &body body)
+  "A bare repository BARE, and a repository A in ADIR whose first commit FIRST, on BRANCH, has
+been pushed to BARE as the remote origin."
+  `(with-directory (,bare)
+     (init-bare ,bare)
+     (with-new-repository (,a ,adir)
+       (let ((,first (commit-file ,a ,adir "notes/a.txt" "one" "first"))
+             (,branch (head-branch ,adir)))
+         (git:set-remote ,a "origin" (uiop:native-namestring ,bare))
+         (git:push-branch ,a "origin")
+         ,@body))))
+
+(defmacro with-clone ((b bdir bare branch) &body body)
+  "A new repository B in BDIR with origin set to BARE, which has pulled BRANCH."
+  `(with-new-repository (,b ,bdir)
+     (git:set-remote ,b "origin" (uiop:native-namestring ,bare))
+     (git:pull ,b "origin" :branch ,branch)
+     ,@body))
+
+(test push-branch-puts-the-commit-where-git-finds-it
+  "PUSH-BRANCH sends HEAD's branch to a bare repository. git finds the same commit there and
+fsck finds every object sound, and the remote-tracking branch records it."
+  (with-directory (bare)
+    (init-bare bare)
+    (with-new-repository (repo dir)
+      (let ((id (commit-file repo dir "a.txt" "one" "first"))
+            (branch (head-branch dir)))
+        (is (string= "origin" (git:set-remote repo "origin" (uiop:native-namestring bare))))
+        (is (string= (uiop:native-namestring bare) (git:remote-url repo "origin")))
+        (is (null (git:remote-url repo "elsewhere")))
+        (is (string= id (git:push-branch repo "origin")))
+        (is (string= id (git-cli bare "rev-parse" (format nil "refs/heads/~A" branch))))
+        ;; git fsck exits non-zero on any fault, which GIT-CLI turns into an error.
+        (is (stringp (git-cli bare "fsck" "--strict")))
+        (is (string= id (git-cli dir "rev-parse" (format nil "refs/remotes/origin/~A" branch))))))))
+
+(test pull-takes-a-branch-into-a-new-repository-and-then-a-later-commit
+  "A new repository with no commits pulls the remote's branch, whatever its own default branch
+is called, and ends up on it with a clean working directory. A later commit is taken as a
+fast-forward, and a pull with nothing new is :UP-TO-DATE."
+  (with-published (a adir bare branch first)
+    (with-new-repository (b bdir)
+      (git:set-remote b "origin" (uiop:native-namestring bare))
+      (is (equal (list :fast-forwarded first)
+                 (multiple-value-list (git:pull b "origin" :branch branch))))
+      (is (string= "one" (read-text bdir "notes/a.txt")))
+      (is (string= first (git-cli bdir "rev-parse" "HEAD")))
+      (is (string= branch (head-branch bdir)))
+      (is (string= "" (git-cli bdir "status" "--porcelain")))
+      (let ((second (commit-file a adir "notes/a.txt" "two" "second")))
+        (git:push-branch a "origin")
+        (is (equal (list :fast-forwarded second) (multiple-value-list (git:pull b "origin"))))
+        (is (string= "two" (read-text bdir "notes/a.txt")))
+        (is (string= second (git-cli bdir "rev-parse" "HEAD")))
+        (is (string= "" (git-cli bdir "status" "--porcelain")))
+        (is (equal (list :up-to-date second) (multiple-value-list (git:pull b "origin"))))))))
+
+(test fetch-moves-only-the-remote-tracking-branch
+  "FETCH updates refs/remotes/origin/BRANCH and nothing else: HEAD and the working directory
+stay where they were, and .git/FETCH_HEAD is empty. libgit2 always creates that file, and
+fills it unless told not to (#623's review). CONTROL: with update_fetchhead left as
+git_fetch_options_init sets it, the file names the fetched commit and the last check fails."
+  (with-published (a adir bare branch first)
+    (with-clone (b bdir bare branch)
+      (let ((second (commit-file a adir "notes/a.txt" "two" "second")))
+        (git:push-branch a "origin")
+        (git:fetch b "origin")
+        (is (string= second (git-cli bdir "rev-parse" (format nil "refs/remotes/origin/~A" branch))))
+        (is (string= first (git-cli bdir "rev-parse" "HEAD")))
+        (is (string= "one" (read-text bdir "notes/a.txt")))
+        (is (string= "" (or (ignore-errors (read-text bdir ".git/FETCH_HEAD")) "")))))))
+
+(test pull-refuses-a-branch-that-has-diverged
+  "When the local branch and the remote's each have a commit the other lacks, PULL signals
+NOT-FAST-FORWARD naming both, and the branch, HEAD and the files are as they were."
+  (with-published (a adir bare branch first)
+    (with-clone (b bdir bare branch)
+      (let ((theirs (commit-file a adir "notes/a.txt" "theirs" "theirs"))
+            (mine (commit-file b bdir "notes/b.txt" "mine" "mine")))
+        (git:push-branch a "origin")
+        (let ((c (outcome (lambda () (git:pull b "origin")))))
+          (is (typep c 'git:not-fast-forward))
+          (when (typep c 'git:not-fast-forward)
+            (is (string= mine (git:not-fast-forward-local c)))
+            (is (string= theirs (git:not-fast-forward-remote c)))))
+        (is (string= mine (git-cli bdir "rev-parse" "HEAD")))
+        (is (string= "one" (read-text bdir "notes/a.txt")))
+        (is (string= "" (git-cli bdir "status" "--porcelain")))))))
+
+(test pull-keeps-an-uncommitted-change-it-would-overwrite
+  "A file changed but not committed, which the remote's new commit also changes, makes PULL
+signal CHECKOUT-CONFLICT. The change is kept and HEAD does not move; only the remote-tracking
+branch has the new commit."
+  (with-published (a adir bare branch first)
+    (with-clone (b bdir bare branch)
+      (let ((second (commit-file a adir "notes/a.txt" "two" "second")))
+        (git:push-branch a "origin")
+        (write-file bdir "notes/a.txt" "edited here")
+        (is (typep (outcome (lambda () (git:pull b "origin"))) 'git:checkout-conflict))
+        (is (string= "edited here" (read-text bdir "notes/a.txt")))
+        (is (string= first (git-cli bdir "rev-parse" "HEAD")))
+        (is (string= second (git-cli bdir "rev-parse" (format nil "refs/remotes/origin/~A" branch))))))))
+
+(test push-is-rejected-when-the-remote-has-commits-this-branch-lacks
+  "PUSH-BRANCH signals PUSH-REJECTED for a branch that is not a fast-forward of the remote's,
+and the remote's branch keeps its commit."
+  (with-published (a adir bare branch first)
+    (with-clone (b bdir bare branch)
+      (let ((theirs (commit-file a adir "notes/a.txt" "theirs" "theirs")))
+        (git:push-branch a "origin")
+        (commit-file b bdir "notes/b.txt" "mine" "mine")
+        (let ((c (outcome (lambda () (git:push-branch b "origin")))))
+          (is (typep c 'git:push-rejected))
+          (when (typep c 'git:push-rejected)
+            (is (string= (format nil "refs/heads/~A" branch) (git:push-rejected-reference c)))))
+        (is (string= theirs (git-cli bare "rev-parse" (format nil "refs/heads/~A" branch))))))))
+
+(test pull-of-a-branch-head-is-not-on-is-refused-once-head-has-commits
+  "PULL takes :BRANCH only into a repository whose HEAD has no commits. Once it has, a branch
+that is not HEAD's signals BRANCH-NOT-CHECKED-OUT and nothing moves."
+  (with-published (a adir bare branch first)
+    (with-clone (b bdir bare branch)
+      (let ((c (outcome (lambda () (git:pull b "origin" :branch "elsewhere")))))
+        (is (typep c 'git:branch-not-checked-out))
+        (when (typep c 'git:branch-not-checked-out)
+          (is (string= branch (git:branch-not-checked-out-head c)))))
+      (is (string= first (git-cli bdir "rev-parse" "HEAD"))))))
+
+(defun redirecting-handler (request stream)
+  "Answer every request with a redirect to the same path under /moved/ at
+https://localhost:1, a different host from the remote's 127.0.0.1 and a port nothing listens
+on. The address is https because libgit2's WinHTTP transport, on Windows, acts only on a
+redirect to an https address; it does not follow an http one at all, so an http redirect
+would show nothing about FOLLOW-REDIRECTS there."
+  (http:write-response
+   stream 302
+   (list (cons "Location" (format nil "https://localhost:1/moved~A" (http:request-path request))))
+   ""))
+
+(test a-redirect-to-another-host-is-refused-by-default
+  "GHSA-2889-x8f6-mc4x. The remote is http://127.0.0.1:PORT/ and the server redirects its
+first request to https://localhost:1/, a different host to libgit2. By default FETCH refuses
+that with a GIT-ERROR saying it cannot redirect to 'localhost', before any connection to
+localhost, so the credential it was given goes nowhere. CONTROL: with :FOLLOW-REDIRECTS :ALL
+the same redirect is accepted and the fetch fails later, when nothing answers at localhost:1,
+so both message checks fail and the refusal is the default's doing. The checks are the same
+on every platform, and each transport refuses the redirect in git_net_url_apply_redirect."
+  (flet ((fetch-through-redirect (follow)
+           (http:with-server (server #'redirecting-handler)
+             (with-new-repository (repo dir)
+               (git:set-remote repo "origin" (http:server-url server "/repo.git"))
+               ;; FOLLOW NIL leaves the keyword out, so the first run tests the default.
+               (let ((c (outcome (lambda ()
+                                   (apply #'git:fetch repo "origin"
+                                          :credentials (git:make-credential "u" "t")
+                                          (when follow (list :follow-redirects follow)))))))
+                 (list c (or (ignore-errors (git:git-error-message c)) "")))))))
+    (destructuring-bind (c message) (fetch-through-redirect nil)
+      (is (typep c 'git:git-error))
+      (is (search "cannot redirect" message) "~A" c)
+      (is (search "'localhost'" message) "~A" c))
+    (destructuring-bind (c message) (fetch-through-redirect :all)
+      (is (typep c 'git:git-error))
+      (is (null (search "cannot redirect" message)) "control: ~A" c))))
+
+(test a-credential-is-offered-once-and-a-refusal-is-authentication-failed
+  "A server that answers 401 to everything gets the credential once, as HTTP Basic, and FETCH
+then signals AUTHENTICATION-FAILED rather than offering it again. The credential function is
+called once with the remote's URL, and the token, given as an aion/secret, appears in no
+printed form of the credential. With no credential the same server gives the same condition,
+and a function that returns something other than a CREDENTIAL gets an error that does not
+print what it returned. On Windows WinHTTP does not return GIT_EAUTH here: it reports the last
+401 as a GIT-ERROR naming the status, and FETCH maps that to AUTHENTICATION-FAILED because the
+function gave nothing. CONTROL: without that mapping both AUTHENTICATION-FAILED checks fail on
+the Windows leg; Linux and macOS return GIT_EAUTH and cannot show it."
+  (http:with-server (server (lambda (request stream)
+                              (declare (ignore request))
+                              (http:write-response
+                               stream 401 '(("WWW-Authenticate" . "Basic realm=\"aion\"")) "")))
+    (with-new-repository (repo dir)
+      (git:set-remote repo "origin" (http:server-url server "/repo.git"))
+      (let* ((credential (git:make-credential "aion-user" (aion/secret:make-secret "t0ken")))
+             (asked '())
+             (c (outcome (lambda ()
+                           (git:fetch repo "origin"
+                                      :credentials (lambda (url user)
+                                                     (push (list url user) asked)
+                                                     credential))))))
+        (is (typep c 'git:authentication-failed))
+        (is (= 1 (length asked)))
+        (is (search "/repo.git" (or (first (first asked)) "")) "asked: ~S" asked)
+        ;; "aion-user:t0ken" in base64.
+        (is (equal '("Basic YWlvbi11c2VyOnQwa2Vu")
+                   (remove nil (mapcar (lambda (r) (http:request-header r "Authorization"))
+                                       (http:server-requests server)))))
+        (is (null (search "t0ken" (prin1-to-string credential))))
+        (is (typep (outcome (lambda () (git:fetch repo "origin")))
+                   'git:authentication-failed))
+        ;; A function that returns the bare token by mistake gets an error that does not
+        ;; print it (#623's review).
+        (let ((wrong (outcome (lambda ()
+                                (git:fetch repo "origin"
+                                           :credentials (lambda (url user)
+                                                          (declare (ignore url user))
+                                                          "t0ken"))))))
+          (is (typep wrong 'error))
+          (is (null (search "t0ken" (princ-to-string wrong))) "~A" wrong))))))
+
+(defun finish-after-error (declined code class message)
+  "The condition %FINISH-OPERATION signals for an operation whose credentials callback did or
+did not give nothing (DECLINED), after a libgit2 call returned CODE with libgit2's last error
+set to CLASS and MESSAGE, or :RETURNED."
+  (git:ensure-loaded)
+  (cffi:foreign-funcall "git_error_set_str" :int class :string message :int)
+  (let ((op (git::%make-operation nil)))
+    (setf (git::%operation-declined op) declined)
+    (outcome (lambda () (git::%finish-operation op "git_remote_fetch" code)))))
+
+(test a-winhttp-401-is-authentication-failed-only-after-the-callback-gave-nothing
+  "On Windows WinHTTP returns -1 with the HTTP-class error \"request failed with status code:
+401\" where libgit2's other transports return GIT_EAUTH. That error is AUTHENTICATION-FAILED
+only once the credentials callback has given nothing during the operation; a 401 before the
+callback ran stays a GIT-ERROR, and so does any other status. GIT_EAUTH is
+AUTHENTICATION-FAILED either way. The error is set with git_error_set_str, so the decision is
+checked the same way on every platform; the credential test measures the WinHTTP error itself
+on the Windows leg. CONTROL: without the mapping the second check fails; mapping every 401
+fails the first."
+  (let ((http git::+git-error-http+)
+        (status-401 "request failed with status code: 401"))
+    (is (not (typep (finish-after-error nil -1 http status-401) 'git:authentication-failed)))
+    (is (typep (finish-after-error t -1 http status-401) 'git:authentication-failed))
+    (let ((c (finish-after-error t -1 http "request failed with status code: 403")))
+      (is (and (typep c 'git:git-error) (not (typep c 'git:authentication-failed))) "~A" c))
+    (is (typep (finish-after-error nil git::+git-eauth+ http "unexpected authentication failure")
+               'git:authentication-failed))))
+
+(test remote-url-reads-the-url-after-insteadof
+  "REMOTE-URL returns the URL libgit2 connects to, which is the configured one after a
+url.<base>.insteadOf rewrite, or NIL for a remote that does not exist."
+  (with-new-repository (repo dir)
+    (git-cli dir "config" "url.https://git.example.invalid/.insteadOf" "aion-fetch:")
+    (git:set-remote repo "rewritten" "aion-fetch:repo.git")
+    (is (string= "https://git.example.invalid/repo.git" (git:remote-url repo "rewritten")))
+    (is (null (git:remote-url repo "absent")))))
+
+(test the-option-struct-layouts-agree-with-libgit2
+  "ffi.lisp copies git_fetch_options and git_push_options from the 1.9.7 headers. libgit2's
+own initialiser for each copies its template over the whole struct, so after it runs, the
+fields it sets to non-zero values must read back at our offsets, and bytes past our size must
+be untouched (its struct is no larger than ours) while our last field reads zero (it is no
+smaller)."
+  (git:ensure-loaded)
+  (flet ((check (type init fields last-field)
+           (let ((size (cffi:foreign-type-size type)))
+             (cffi:with-foreign-object (buf :uint8 (+ size 64))
+               (dotimes (i (+ size 64)) (setf (cffi:mem-aref buf :uint8 i) #xab))
+               (is (zerop (funcall init buf 1)))
+               (loop for (path value) in fields
+                     do (is (= value (reduce (lambda (pointer step)
+                                               (destructuring-bind (struct slot &optional ref) step
+                                                 (if ref
+                                                     (cffi:foreign-slot-value pointer struct slot)
+                                                     (cffi:foreign-slot-pointer pointer struct slot))))
+                                             path :initial-value buf))
+                            "~S" path))
+               (is (loop for i from size below (+ size 64)
+                         always (= #xab (cffi:mem-aref buf :uint8 i))))
+               (is (zerop (cffi:foreign-slot-value
+                           (cffi:foreign-slot-pointer buf type last-field)
+                           '(:struct git::git-strarray) 'git::count)))))))
+    (let ((fo '(:struct git::git-fetch-options))
+          (po '(:struct git::git-push-options))
+          (cb '(:struct git::git-remote-callbacks))
+          (px '(:struct git::git-proxy-options)))
+      (check fo #'git::%fetch-options-init
+             `((((,fo git::version t)) 1)
+               (((,fo git::callbacks) (,cb git::version t)) 1)
+               (((,fo git::update-fetchhead t)) 1)
+               (((,fo git::proxy-opts) (,px git::version t)) 1))
+             'git::custom-headers)
+      (check po #'git::%push-options-init
+             `((((,po git::version t)) 1)
+               (((,po git::pb-parallelism t)) 1)
+               (((,po git::callbacks) (,cb git::version t)) 1)
+               (((,po git::proxy-opts) (,px git::version t)) 1))
+             'git::remote-push-options))))
