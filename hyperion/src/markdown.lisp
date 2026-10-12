@@ -196,25 +196,40 @@ noncharacter, so text does not use it; any found in the source is replaced first
   "Stands for `>' in the source while 3bmd parses it in the safe mode.")
 
 (defun %quote-markers (markdown)
-  "The positions in MARKDOWN of each `>' that may mark a block quote: at the start of a line, and
-again after such a marker and its optional space, for a nested quote (#574). A `>' after up to
-three spaces, at a line's start or after a marker, is marked too, as CommonMark allows, but 3bmd
-reads only a `>' in the first column of a line or straight after another marker as a quote
-marker. It reads the indented ones as text and escapes them once, as with :ALLOW-HTML T. Only
-physical line starts are looked at, so a quote inside a list item, which 3bmd finds by parsing
-the item's text again, stays text in the safe mode."
+  "The positions in MARKDOWN of each `>' that may mark a block quote: each `>' with nothing
+before it on its line but spaces, tabs, other `>'s and list markers (#574, #584). A list marker
+is `-', `+' or `*', or digits and a `.', followed by a space or tab.
+
+3bmd parses a list item's text again as a document of its own, with the marker and one indent
+taken off, so `- > x' and a continuation line `    > x' are block quotes in a list item. This
+marks more than 3bmd reads as markers: a `>' after four or more spaces, or after a marker in a
+paragraph that 3bmd does not take for a list, is marked too. That changes nothing, because 3bmd
+gives a marked `>' every role it has with :ALLOW-HTML T, and prints one it reads as text or code
+escaped once, the same as a hidden one. What must stay hidden is a `>' in a link's URL, which ends
+the URL, and a URL contains no space, so none of these is in one."
   (let ((n (length markdown))
         (markers '()))
-    (flet ((skip-spaces (i most)
-             (loop while (and (< i n) (< 0 most) (char= #\Space (char markdown i)))
-                   do (incf i) (decf most))
-             i))
+    (labels ((blank-end (i)
+               (or (position-if-not (lambda (c) (member c '(#\Space #\Tab))) markdown :start i)
+                   n))
+             (marker-end (i)
+               ;; The position after the list marker at I and the space or tab after it, or NIL.
+               (let ((after (cond ((member (char markdown i) '(#\- #\+ #\*)) (1+ i))
+                                  ((digit-char-p (char markdown i))
+                                   (let ((d (or (position-if-not #'digit-char-p markdown :start i)
+                                                n)))
+                                     (and (< d n) (char= #\. (char markdown d)) (1+ d)))))))
+                 (and after (< after n) (member (char markdown after) '(#\Space #\Tab))
+                      after))))
       (loop with line = 0
             while (< line n)
-            do (loop with i = (skip-spaces line 3)
-                     while (and (< i n) (char= #\> (char markdown i)))
-                     do (push i markers)
-                        (setf i (skip-spaces (1+ i) 4)))
+            do (loop with i = (blank-end line)
+                     while (< i n)
+                     do (cond ((char= #\> (char markdown i))
+                               (push i markers)
+                               (setf i (blank-end (1+ i))))
+                              ((marker-end i) (setf i (blank-end (marker-end i))))
+                              (t (loop-finish))))
                (setf line (let ((newline (position #\Newline markdown :start line)))
                             (if newline (1+ newline) n)))))
     (nreverse markers)))

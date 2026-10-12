@@ -633,11 +633,12 @@ its tag.
   `add-resource` is kept.
 - **hyperion/markdown: with `:allow-html nil`, `>` at the start of a line renders a block
   quote** (#574). Since #559 the safe mode hid every `>` from 3bmd, so `> quoted` rendered as a
-  paragraph beginning with `&gt;`. A `>` at the start of a line, or after earlier quote markers
-  for a nested quote, is now left for 3bmd to read, and renders a block quote. A quote inside a
-  list item, such as `- > quoted`, still renders as text in the safe mode, though
-  `:allow-html t` renders it as a quote. 3bmd does not treat an indented `>` as a quote in
-  either mode, so `   > x` is still a paragraph. Raw HTML inside a quote is still shown as text,
+  paragraph beginning with `&gt;`. A `>` with nothing before it on its line but spaces, other
+  quote markers and list markers is now left for 3bmd to read, and renders a block quote where
+  `:allow-html t` does: at the start of a line, in a nested quote, and inside a list item
+  (`- > quoted`, `1. > quoted`, a continuation line `    > quoted`, and `> - > quoted`) (#584).
+  3bmd does not treat an indented `>` as a quote in either mode, so `   > x` is still a
+  paragraph. Raw HTML inside a quote is still shown as text,
   and a `>` in code is still escaped once. Every klio page changes the same way.
 
 ## v0.1.7 — 2026-09-30
