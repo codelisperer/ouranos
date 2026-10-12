@@ -1231,11 +1231,18 @@ with the producer."
   (format nil "# names invented for the hook tests~%~%zorbocorp~%quux-feathers~%")
   "A list in the real format: a comment, a blank line, and two entries.")
 
+(defparameter +no-git-maintenance+ '("-c" "maintenance.auto=false" "-c" "gc.auto=0")
+  "Options %GIT puts before every subcommand, so a commit in a fixture starts no automatic
+maintenance. `git commit' starts `git maintenance run --auto' detached, and it can still be
+writing into .git when the fixture is deleted, which then fails (#579). gc.auto=0 does the
+same for git before 2.29, which ran `git gc --auto' instead.")
+
 (defun %git (dir &rest args)
   "Run git in DIR. Returns (values exit-code output), with stdout and stderr together."
   (let ((out (make-string-output-stream)))
     (let ((code (nth-value 2 (uiop:run-program
-                              (list* "git" "-C" (uiop:native-namestring dir) args)
+                              (append (list "git") +no-git-maintenance+
+                                      (list "-C" (uiop:native-namestring dir)) args)
                               :output out :error-output out :ignore-error-status t))))
       (values code (get-output-stream-string out)))))
 
@@ -1289,6 +1296,31 @@ the machine's global setting."
   "Whether OUTPUT contains either invented name, in any case."
   (or (search "zorbocorp" output :test #'char-equal)
       (search "quux-feathers" output :test #'char-equal)))
+
+(test a-commit-made-by-the-hook-fixture-starts-no-maintenance
+  ;; The repository's own config makes automatic maintenance repack on every commit, before
+  ;; the commit returns, so a pack afterwards means %GIT let git start maintenance (#579).
+  ;; A plain `git commit' in a second repository shows this git does repack on that config.
+  (flet ((repack-repo ()
+           (let ((dir (%fresh-tree)))
+             (%git! dir "init" "-q")
+             (dolist (kv '(("user.name" "Maintenance Test")
+                           ("user.email" "maintenance@example.invalid")
+                           ("commit.gpgsign" "false") ("maintenance.geometric-repack.auto" "-1")
+                           ("maintenance.autoDetach" "false") ("gc.autoDetach" "false")))
+               (%git! dir "config" (first kv) (second kv)))
+             dir))
+         (packs (dir) (length (directory (merge-pathnames ".git/objects/pack/*.pack" dir)))))
+    (let ((plain (repack-repo))
+          (fixture (repack-repo)))
+      (uiop:run-program (list "git" "-C" (uiop:native-namestring plain)
+                              "commit" "-q" "--allow-empty" "-m" "plain"))
+      (if (/= 1 (packs plain))
+          (skip "this git does not repack when maintenance.geometric-repack.auto is -1")
+          (progn
+            (%git! fixture "commit" "-q" "--allow-empty" "-m" "fixture")
+            (is (zerop (packs fixture))
+                "a commit through %GIT ran automatic maintenance, which repacked"))))))
 
 (test name-check-passes-a-clean-commit
   ;; The control for every refusal below: a hook that refused everything would pass all of

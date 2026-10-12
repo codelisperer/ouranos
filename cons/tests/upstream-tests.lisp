@@ -64,6 +64,42 @@
 
 ;;; --- against real repositories ----------------------------------------------
 
+(defparameter +no-git-maintenance+ '("-c" "maintenance.auto=false" "-c" "gc.auto=0")
+  "Options that every git command a test runs puts before its subcommand, so the command
+starts no automatic maintenance. conform-tests.lisp uses them too.
+
+`git commit', `fetch' and `merge' start `git maintenance run --auto' detached, and it can
+still be writing into .git after the command returns. When the test's cleanup deletes the
+repository at that moment, the delete fails because a directory gained an entry (#579).
+Git 2.55 repacks when two loose objects share the objects/17/ directory, and the conform
+fixture always has one blob there, so one commit in 256 started a repack. gc.auto=0 does the
+same for git before 2.29, which ran `git gc --auto' instead.")
+
+(defun %repack-on-commit-repo (dir)
+  "Make DIR a repository whose own config makes automatic maintenance repack on every commit,
+and do it before the commit returns. A commit there leaves a pack in .git/objects/pack/
+exactly when the command that made it ran maintenance, so a test can check that right away."
+  (uiop:run-program (list "git" "init" "-q" (uiop:native-namestring dir)))
+  (dolist (kv '(("user.name" "Maintenance Test") ("user.email" "maintenance@example.invalid")
+                ("commit.gpgsign" "false") ("maintenance.geometric-repack.auto" "-1")
+                ("maintenance.autoDetach" "false") ("gc.autoDetach" "false")))
+    (uiop:run-program (list "git" "-C" (uiop:native-namestring dir) "config" (first kv)
+                            (second kv))))
+  dir)
+
+(defun %packs-in (dir)
+  "How many pack files DIR's repository has."
+  (length (directory (merge-pathnames ".git/objects/pack/*.pack" dir))))
+
+(defun %plain-commit-packs (dir)
+  "Commit a file in DIR, made by %REPACK-ON-COMMIT-REPO, with git and no other options, and
+return how many packs the repository has afterwards: 1 when this git repacks on demand."
+  (with-open-file (s (merge-pathnames "plain.txt" dir) :direction :output :if-exists :supersede)
+    (write-string "plain" s))
+  (dolist (args '(("add" "plain.txt") ("commit" "-q" "-m" "plain")))
+    (uiop:run-program (list* "git" "-C" (uiop:native-namestring dir) args)))
+  (%packs-in dir))
+
 (defun %git! (args &key dir)
   "Run git (optionally -C DIR) and SIGNAL on a non-zero exit.
 
@@ -77,7 +113,7 @@ came back \"3 commits behind\" where the test required \"never been fetched\".
 So every git invocation in this fixture is checked. If the setup cannot be built, the test
 errors saying which command failed, rather than quietly measuring something else."
   (multiple-value-bind (out err code)
-      (uiop:run-program (append (list "git")
+      (uiop:run-program (append (list "git") +no-git-maintenance+
                                 (when dir (list "-C" (uiop:native-namestring dir)))
                                 args)
                         :output '(:string :stripped t)
@@ -170,6 +206,22 @@ runs once per image cannot detect that it poisons the next run."
       ;; a leftover cannot poison the next one. On Windows this raises on git's read-only
       ;; object store, which is how pre-publication issue 284 survived -- the error was swallowed and the corpse
       ;; persisted. Swallowing it is fine now; relying on it was not.
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test a-commit-made-by-the-upstream-fixture-starts-no-maintenance
+  (let ((root (%fresh-temp-dir "cons-maint")))
+    (unwind-protect
+         (let ((plain (%repack-on-commit-repo (merge-pathnames "plain/" root)))
+               (fixture (%repack-on-commit-repo (merge-pathnames "fixture/" root))))
+           (if (/= 1 (%plain-commit-packs plain))
+               (skip "this git does not repack when maintenance.geometric-repack.auto is -1")
+               (progn
+                 (with-open-file (s (merge-pathnames "f.txt" fixture) :direction :output)
+                   (write-string "f" s))
+                 (%git! '("add" "f.txt") :dir fixture)
+                 (%git! '("commit" "-q" "-m" "f") :dir fixture)
+                 (is (zerop (%packs-in fixture))
+                     "a commit through %GIT! ran automatic maintenance, which repacked"))))
       (ignore-errors (aion/fs:delete-tree root)))))
 
 (test a-consumer-that-never-fetched-is-told-so-and-then-told-how-far-behind

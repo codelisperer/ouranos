@@ -108,7 +108,8 @@ second run found the first run's directory, with the first run's files in it (#4
   "Run git in ROOT for fixture setup and signal if it fails, so a broken fixture cannot pass
 for a working one."
   (let ((code (nth-value 2 (uiop:run-program
-                            (list* "git" "-C" (uiop:native-namestring root) args)
+                            (append (list "git") +no-git-maintenance+
+                                    (list "-C" (uiop:native-namestring root)) args)
                             :output nil :error-output nil :ignore-error-status t))))
     (unless (zerop code)
       (error "fixture setup failed: git ~{~a~^ ~} exited ~a" args code))))
@@ -130,11 +131,29 @@ the commit-msg hook accepts it, 1 when the hook refuses it."
     (with-open-file (s msg-file :direction :output :if-exists :supersede
                                 :if-does-not-exist :create)
       (write-string message s))
-    (nth-value 2 (uiop:run-program (list "git" "-C" (uiop:native-namestring root)
-                                         "commit" "--allow-empty" "-q"
-                                         "-F" (uiop:native-namestring msg-file))
+    (nth-value 2 (uiop:run-program (append (list "git") +no-git-maintenance+
+                                           (list "-C" (uiop:native-namestring root)
+                                                 "commit" "--allow-empty" "-q"
+                                                 "-F" (uiop:native-namestring msg-file)))
                                    :ignore-error-status t
                                    :output nil :error-output nil))))
+
+(test commits-made-by-the-conform-fixtures-start-no-maintenance
+  "Each helper here that can commit, tried in a repository whose config makes maintenance repack
+before the commit returns. A pack means the helper let git start maintenance (#579)."
+  (with-temp-dir (root)
+    (if (/= 1 (%plain-commit-packs (%repack-on-commit-repo (merge-pathnames "plain/" root))))
+        (skip "this git does not repack when maintenance.geometric-repack.auto is -1")
+        (flet ((try (name commit)
+                 (let ((dir (%repack-on-commit-repo (merge-pathnames name root))))
+                   (funcall commit dir)
+                   (is (zerop (%packs-in dir))
+                       "a commit through ~A ran automatic maintenance, which repacked"
+                       (string-right-trim "/" name)))))
+          (try "git-checked/" (lambda (dir) (%git-checked dir "commit" "-q" "--allow-empty"
+                                                          "-m" "e")))
+          (try "git-in/" (lambda (dir) (%git-in dir "commit" "-q" "--allow-empty" "-m" "e")))
+          (try "commit-exit/" (lambda (dir) (%commit-exit dir "e")))))))
 
 (test agents-md-forbids-ai-commit-trailers
   (with-temp-dir (root)
@@ -252,7 +271,8 @@ the commit-msg hook accepts it, 1 when the hook refuses it."
   "Run git in ROOT; return (values trimmed-output exit-code)."
   (let* ((out (make-string-output-stream))
          (code (nth-value 2 (uiop:run-program
-                             (append (list "git" "-C" (uiop:native-namestring root)) args)
+                             (append (list "git") +no-git-maintenance+
+                                     (list "-C" (uiop:native-namestring root)) args)
                              :output out :error-output nil :ignore-error-status t))))
     (values (string-trim '(#\Space #\Newline #\Return) (get-output-stream-string out)) code)))
 
