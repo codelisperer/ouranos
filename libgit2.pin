@@ -57,8 +57,9 @@ sources-digest baa8f340c5ac254627dae52c3d9ac5e93d8fd84faacb245dac64ab11c560fdfd
 # fix. Two list no patched version, and the 2026-09-30 review took that to mean no fix
 # existed. That was wrong: on 2026-10-12 (#623's review) they were found to be CVE-2026-53586
 # and CVE-2026-53583, and v1.9.5's entry in docs/changelog.md fixes both. Both concern only
-# fetching from and pushing to a remote over HTTPS. What aion/libgit's fetch, pull and push
-# do about them (aion/src/libgit/remote.lisp), as the maintainer settled on #429:
+# fetching from and pushing to a remote over HTTPS. This pin is 1.9.7. What aion/libgit's
+# fetch, pull and push do about them (aion/src/libgit/remote.lisp), as the maintainer settled
+# on #429 (comments 6126647317 and 6129212845):
 #   GHSA-2889-x8f6-mc4x  CVE-2026-53586. The HTTP transport follows an offsite redirect on
 #                        its first request, and before v1.9.5 it asked the credentials callback
 #                        with the original remote's URL. v1.9.5 passes the redirected URL, but
@@ -68,10 +69,10 @@ sources-digest baa8f340c5ac254627dae52c3d9ac5e93d8fd84faacb245dac64ab11c560fdfd
 #                        otherwise, and a test checks that an offsite redirect is refused.
 #   GHSA-h7gc-w2gg-p9xp  CVE-2026-53583. The OpenSSL stream compared a certificate's IP
 #                        addresses the wrong way round. v1.9.5 fixed it: 1.9.7's
-#                        src/libgit2/streams/openssl.c compares with memcmp(...) == 0. On Linux
-#                        aion/libgit still refuses an https remote whose host is an IP literal
-#                        with INSECURE-REMOTE, which names the advisory; that refusal is now
-#                        stricter than libgit2 needs.
+#                        src/libgit2/streams/openssl.c compares with memcmp(...) == 0.
+#                        aion/libgit does nothing about it. #623 first refused an https remote
+#                        whose host is an IP literal on Linux, and removed that refusal once
+#                        the fix was found.
 # Re-check both whenever this pin moves, and update the date.
 
 advisories https://github.com/libgit2/libgit2/security/advisories

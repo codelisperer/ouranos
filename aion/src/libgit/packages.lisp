@@ -12,9 +12,7 @@
     the repository or of one path, read a file as it was at a revision, and diff two
     revisions as a patch. Remotes: name a remote, fetch it, fast-forward a branch from it,
     and push a branch to it. A credential is passed in by the caller; this package never
-    looks one up. Redirects to another host are refused by default, and on Linux an https
-    remote whose host is an IP address is refused, for the two advisories libgit2.pin
-    records.
+    looks one up. Redirects to another host are refused by default (see libgit2.pin).
 
     A REPOSITORY is used by one thread at a time. Each operation takes the repository's
     lock, so two threads that share one are serialised rather than corrupting it. Two
@@ -41,7 +39,6 @@
    #:set-remote #:remote-url #:fetch #:pull #:push-branch
    #:credential #:make-credential #:credential-user
    #:authentication-failed #:authentication-failed-url
-   #:insecure-remote #:insecure-remote-url #:insecure-remote-advisory
    #:not-fast-forward #:not-fast-forward-branch #:not-fast-forward-local
    #:not-fast-forward-remote
    #:push-rejected #:push-rejected-reference #:push-rejected-reason

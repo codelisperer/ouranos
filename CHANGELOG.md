@@ -212,12 +212,15 @@ its tag.
   user name that returns one. It is offered at most once, and a remote that refuses it signals
   `authentication-failed`. Other failures are conditions too: `not-fast-forward` and
   `checkout-conflict` from `pull`, which then change nothing but the remote-tracking branch,
-  `push-rejected`, `detached-head` and `branch-not-checked-out`. Two libgit2 advisories, which
-  libgit2 v1.9.5 fixed, are handled more strictly than that fix: `:follow-redirects` defaults to `:none`, so a redirect to
-  another host is refused (GHSA-2889-x8f6-mc4x; on Windows libgit2 does not follow a redirect
-  to an http address at all), and on Linux an https remote whose host is an
-  IP address signals `insecure-remote` before any connection (GHSA-h7gc-w2gg-p9xp). Looking a
-  credential up in `hades/credentials` is left to the caller until #357 lands.
+  `push-rejected`, `detached-head` and `branch-not-checked-out`. `:follow-redirects` defaults
+  to `:none`, so a redirect to another host is refused. libgit2 v1.9.5 fixed GHSA-2889-x8f6-mc4x
+  (CVE-2026-53586) by asking the credentials callback with the redirected URL, but its own
+  default still follows an offsite redirect on the first request, so the default here keeps a
+  fixed credential from reaching another host. On Windows libgit2 does not follow a redirect to
+  an http address at all. GHSA-h7gc-w2gg-p9xp (CVE-2026-53583, an inverted certificate IP check
+  in the OpenSSL stream) was fixed in v1.9.5, and the pin is 1.9.7, so `aion/libgit` does
+  nothing about it. Looking a credential up in `hades/credentials` is left to the caller until
+  #357 lands.
 
 - **klio: `export-site` takes `:assets`, a directory of the site's static files that is copied
   into the export** (#557). Every file is copied at its path relative to that directory, after

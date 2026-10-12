@@ -4,19 +4,13 @@
 ;;;; looks a credential up. The app, or a system above aion such as hades/credentials, finds
 ;;;; it and passes it in, as a CREDENTIAL or as a function that returns one.
 ;;;;
-;;;; TWO ADVISORIES, recorded in libgit2.pin, are handled here. libgit2 v1.9.5 fixed both
-;;;; (CVE-2026-53586 and CVE-2026-53583), and these checks go further than that fix:
-;;;;
-;;;;   GHSA-2889-x8f6-mc4x  FOLLOW-REDIRECTS defaults to :NONE, which libgit2 reads as
-;;;;                        GIT_REMOTE_REDIRECT_NONE. A redirect to the same host is still
-;;;;                        followed. A redirect to another host is refused, so a credential
-;;;;                        meant for the remote is never sent to a different host. libgit2's
-;;;;                        own default still follows one on the first request.
-;;;;   GHSA-h7gc-w2gg-p9xp  On Linux, where libgit2 uses OpenSSL for HTTPS, an https remote
-;;;;                        whose host is an IP address is refused with INSECURE-REMOTE before
-;;;;                        any connection is made, although 1.9.7 compares the certificate's IP
-;;;;                        addresses correctly. macOS and Windows use the system's TLS, which
-;;;;                        the advisory does not concern.
+;;;; REDIRECTS. FOLLOW-REDIRECTS defaults to :NONE, which libgit2 reads as
+;;;; GIT_REMOTE_REDIRECT_NONE: a redirect to the same host is followed, and one to another host
+;;;; is refused, so a credential meant for the remote is never sent to a different host.
+;;;; libgit2 v1.9.5 fixed GHSA-2889-x8f6-mc4x (CVE-2026-53586) by asking the credentials
+;;;; callback with the redirected URL, but its own default still follows an offsite redirect on
+;;;; the first request, and a caller that passes one fixed CREDENTIAL would still send it. The
+;;;; pin is 1.9.7, so GHSA-h7gc-w2gg-p9xp (CVE-2026-53583, fixed in v1.9.5) needs nothing here.
 ;;;;
 ;;;; LISP CODE THAT LIBGIT2 CALLS never unwinds through libgit2's frames. Each callback catches
 ;;;; any error, keeps it, and returns GIT_EUSER, and the operation signals the kept error after
@@ -47,19 +41,6 @@
   (:documentation "A remote asked for a credential and none was given, or it refused the one
 given. URL is the remote's address without any user name or password in it. A credential is
 offered at most once per operation, so a refused one is not retried."))
-
-(define-condition insecure-remote (error)
-  ((url :initarg :url :reader insecure-remote-url)
-   (advisory :initarg :advisory :reader insecure-remote-advisory))
-  (:report
-   (lambda (c stream)
-     (format stream "~A ~A"
-             (format nil "Refusing the remote at ~A: its host is an IP address, and libgit2's OpenSSL check of an IP address's certificate is wrong (~A)."
-                     (insecure-remote-url c) (insecure-remote-advisory c))
-             "Use the host's name.")))
-  (:documentation "Signalled on Linux, before any connection, for an https remote whose host
-is an IP address, because of the libgit2 advisory ADVISORY. URL carries no user name or
-password."))
 
 (define-condition not-fast-forward (error)
   ((branch :initarg :branch :reader not-fast-forward-branch)
@@ -223,64 +204,6 @@ this operation. A 401 before the callback ran stays a GIT-ERROR."
                (%check name code))))
         (t code)))
 
-;;; --- the IP-address check for GHSA-h7gc-w2gg-p9xp -----------------------------------
-
-(defun %url-host (url)
-  "The host in URL as written, with the brackets of an IPv6 address kept, or NIL when URL
-has no scheme://."
-  (let ((start (search "://" url)))
-    (when start
-      (let* ((from (+ start 3))
-             (end (or (position-if (lambda (c) (member c '(#\/ #\? #\#))) url :start from)
-                      (length url)))
-             (authority (subseq url from end))
-             (at (position #\@ authority :from-end t))
-             (host-port (if at (subseq authority (1+ at)) authority)))
-        (if (and (plusp (length host-port)) (char= #\[ (char host-port 0)))
-            (subseq host-port 0 (1+ (or (position #\] host-port) (1- (length host-port)))))
-            (subseq host-port 0 (or (position #\: host-port) (length host-port))))))))
-
-(defun %percent-decode (text)
-  "TEXT with each %XX replaced by the octet XX, read as Latin-1, and any other % left as it is,
-as libgit2's git_str_decode_percent does."
-  (with-output-to-string (out)
-    (let ((i 0) (n (length text)))
-      (loop while (< i n)
-            do (let ((code (and (char= #\% (char text i)) (<= (+ i 3) n)
-                                (ignore-errors (parse-integer text :start (1+ i) :end (+ i 3)
-                                                                   :radix 16)))))
-                 (if code
-                     (progn (write-char (code-char code) out) (incf i 3))
-                     (progn (write-char (char text i) out) (incf i))))))))
-
-(defun %ip-literal-https-url-p (url)
-  "Whether URL is an https URL whose host is an IP address. libgit2 percent-decodes the host
-(url_parse_finalize, src/util/net.c), and its OpenSSL stream treats the decoded host as an
-address when inet_pton accepts it as IPv4 or IPv6. So the host is decoded once here too, and
-this answers yes for a host in brackets, which is how a URL writes an IPv6 address, for a
-decoded host with a colon in it, which only an IPv6 address can have, and for any four
-dot-separated runs of digits. That refuses at least every host inet_pton accepts."
-  (and (>= (length url) 8)
-       (string-equal "https://" url :end2 8)
-       (let ((host (let ((raw (%url-host url)))
-                     (and raw (if (and (plusp (length raw)) (char= #\[ (char raw 0)))
-                                  raw
-                                  (%percent-decode raw))))))
-         (and host
-              (plusp (length host))
-              (or (char= #\[ (char host 0))
-                  (find #\: host)
-                  (let ((parts (uiop:split-string host :separator ".")))
-                    (and (= 4 (length parts))
-                         (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p)))
-                                parts))))))))
-
-(defun %refuse-insecure (url)
-  "Signal INSECURE-REMOTE for URL on Linux when it is https and its host is an IP address."
-  #+linux (when (and url (%ip-literal-https-url-p url))
-            (error 'insecure-remote :url (%redact-url url) :advisory "GHSA-h7gc-w2gg-p9xp"))
-  #-linux (progn url nil))
-
 ;;; --- remotes -----------------------------------------------------------------------
 
 (defmacro %with-remote ((var repo name) &body body)
@@ -324,7 +247,6 @@ when it has no remote of that name."
                 (%remote-free remote))))))))
 
 (defun %fetch (remote credentials follow-redirects)
-  (%refuse-insecure (%string (%remote-url remote)))
   (cffi:with-foreign-object (options '(:struct git-fetch-options))
     (%check "git_fetch_options_init" (%fetch-options-init options +fetch-options-version+))
     (%set-callbacks (cffi:foreign-slot-pointer options '(:struct git-fetch-options) 'callbacks))
@@ -353,10 +275,7 @@ host is followed and one to another host is refused (GHSA-2889-x8f6-mc4x). On Wi
 libgit2's WinHTTP transport acts only on a redirect to an https address; a redirect to an http
 address is not followed, whatever FOLLOW-REDIRECTS says, and the fetch fails.
 
-Signals INSECURE-REMOTE on Linux, and only there, for an https remote whose host is an IP
-address (GHSA-h7gc-w2gg-p9xp), and GIT-ERROR for anything else libgit2 reports. That check is
-of the remote's URL before connecting; with :INITIAL or :ALL, a redirect to an https IP address
-is followed without it."
+Signals GIT-ERROR for anything else libgit2 reports."
   (%with-repository-pointer (repo repository)
     (%with-remote (r repo remote)
       (%fetch r credentials follow-redirects)))
@@ -473,7 +392,6 @@ FETCH. (Named PUSH-BRANCH because PUSH is Common Lisp's.)"
                        (%head-branch repository repo)))
            (refspec (format nil "~A:~A" target target)))
       (%with-remote (r repo remote)
-        (%refuse-insecure (or (%string (%remote-pushurl r)) (%string (%remote-url r))))
         (cffi:with-foreign-objects ((options '(:struct git-push-options))
                                     (refspecs '(:struct git-strarray))
                                     (strings :pointer 1)

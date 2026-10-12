@@ -274,7 +274,7 @@ functions ffi.lisp binds."
                                 (push (subseq text (1+ q) close) names)
                                 (setf i (1+ close))))
                      names)))
-    (is (= 71 (length git::*entry-points*)))
+    (is (= 70 (length git::*entry-points*)))
     (is (null (set-exclusive-or required git::*entry-points* :test #'string=))
         "differ: ~S" (set-exclusive-or required git::*entry-points* :test #'string=))))
 
@@ -733,56 +733,14 @@ fails the first."
     (is (typep (finish-after-error nil git::+git-eauth+ http "unexpected authentication failure")
                'git:authentication-failed))))
 
-(test an-https-remote-at-an-ip-address-is-refused-on-linux
-  "GHSA-h7gc-w2gg-p9xp. Which URLs count as an IP address is checked on every platform. On
-Linux FETCH and PUSH-BRANCH then refuse such a remote with INSECURE-REMOTE, naming the
-advisory and not the password in the URL, and PUSH-BRANCH checks the push URL. Elsewhere the
-same calls are made and fail to connect, because macOS and Windows do not use OpenSSL."
-  (is-true (git::%ip-literal-https-url-p "https://192.0.2.1/repo.git"))
-  (is-true (git::%ip-literal-https-url-p "HTTPS://user:pw@192.0.2.1:8443/r"))
-  (is-true (git::%ip-literal-https-url-p "https://[::1]:8443/r"))
-  (is-false (git::%ip-literal-https-url-p "http://192.0.2.1/r"))
-  (is-false (git::%ip-literal-https-url-p "https://example.invalid/r"))
-  (is-false (git::%ip-literal-https-url-p "https://192.0.2.1.example.invalid/r"))
-  (is-false (git::%ip-literal-https-url-p "/srv/git/r.git"))
-  ;; libgit2 percent-decodes the host before it uses it (#623's review).
-  (is-true (git::%ip-literal-https-url-p "https://%31%39%32.0.2.1/r.git"))
-  (is-true (git::%ip-literal-https-url-p "https://%3A%3A1/r.git"))
-  (is-false (git::%ip-literal-https-url-p "https://ex%61mple.invalid/r.git"))
-  (with-directory (bare)
-    (init-bare bare)
-    (with-new-repository (repo dir)
-      (commit-file repo dir "a.txt" "one" "first")
-      (git:set-remote repo "origin" "https://user:hunter2@127.0.0.1:1/repo.git")
-      (git:set-remote repo "mirror" (uiop:native-namestring bare))
-      (git-cli dir "config" "remote.mirror.pushurl" "https://127.0.0.1:1/mirror.git")
-      ;; The URLs libgit2 connects to after the configuration's rewrites.
-      (git-cli dir "config" "url.https://127.0.0.1:1/.insteadOf" "aion-fetch:")
-      (git-cli dir "config" "url.https://127.0.0.1:1/.pushInsteadOf" "aion-push:")
-      (git:set-remote repo "rewritten" "aion-fetch:repo.git")
-      (git:set-remote repo "push-rewritten" "aion-push:repo.git")
-      (is (string= "https://127.0.0.1:1/repo.git" (git:remote-url repo "rewritten")))
-      (let ((fetch (outcome (lambda () (git:fetch repo "origin"))))
-            (push (outcome (lambda () (git:push-branch repo "mirror"))))
-            (rewritten (outcome (lambda () (git:fetch repo "rewritten"))))
-            (push-rewritten (outcome (lambda () (git:push-branch repo "push-rewritten")))))
-        #+linux
-        (progn
-          (is (typep fetch 'git:insecure-remote))
-          (is (typep push 'git:insecure-remote))
-          (is (typep rewritten 'git:insecure-remote))
-          (is (typep push-rewritten 'git:insecure-remote))
-          (is (equal '("https://127.0.0.1:1/repo.git" "GHSA-h7gc-w2gg-p9xp")
-                     (ignore-errors (list (git:insecure-remote-url fetch)
-                                          (git:insecure-remote-advisory fetch))))))
-        #-linux
-        (progn
-          (is (typep fetch 'git:git-error))
-          (is (typep push 'git:git-error))
-          (is (typep rewritten 'git:git-error))
-          (is (typep push-rewritten 'git:git-error))
-          (is (notany (lambda (c) (typep c 'git:insecure-remote))
-                      (list fetch push rewritten push-rewritten))))))))
+(test remote-url-reads-the-url-after-insteadof
+  "REMOTE-URL returns the URL libgit2 connects to, which is the configured one after a
+url.<base>.insteadOf rewrite, or NIL for a remote that does not exist."
+  (with-new-repository (repo dir)
+    (git-cli dir "config" "url.https://git.example.invalid/.insteadOf" "aion-fetch:")
+    (git:set-remote repo "rewritten" "aion-fetch:repo.git")
+    (is (string= "https://git.example.invalid/repo.git" (git:remote-url repo "rewritten")))
+    (is (null (git:remote-url repo "absent")))))
 
 (test the-option-struct-layouts-agree-with-libgit2
   "ffi.lisp copies git_fetch_options and git_push_options from the 1.9.7 headers. libgit2's

@@ -93,7 +93,7 @@
     "git_reference_free" "git_repository_set_head" "git_graph_descendant_of"
     "git_checkout_tree"
     "git_remote_lookup" "git_remote_create" "git_remote_set_url" "git_remote_free"
-    "git_remote_url" "git_remote_pushurl" "git_fetch_options_init" "git_push_options_init"
+    "git_remote_url" "git_fetch_options_init" "git_push_options_init"
     "git_remote_fetch" "git_remote_push" "git_credential_userpass_plaintext_new")
   "Every entry point aion/libgit binds (aion/src/libgit/ffi.lisp), and only those. VERIFY-BUILT
 refuses a library missing any of them.")
