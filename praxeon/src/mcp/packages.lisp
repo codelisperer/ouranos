@@ -75,12 +75,12 @@
    #:task #:task-key #:task-connection #:task-principal #:task-tool #:task-means #:task-source
    #:task-agent #:task-conversation #:task-call-id #:task-started #:task-seen #:task-deadline
    #:task-interval #:task-next-poll #:task-status #:task-outcome #:task-text #:task-announced-at
-   #:task-failures #:task-failure
+   #:task-failures #:task-failure #:task-inputs
    #:task-to-json #:task-from-json
    #:save-task #:update-task #:finish-task #:announce-task #:due-tasks #:remove-task
    #:memory-task-store #:make-memory-task-store
    #:finished-task #:finished-task-task #:finished-task-outcome #:finished-task-text
-   #:poll-tasks #:poll-task #:cancel-task #:task-report
+   #:poll-tasks #:poll-task #:cancel-task #:answer-task-input #:task-report
    ;; conditions
    #:mcp-error #:request-failed #:request-failed-code #:tool-error
    #:authorization-required #:authorization-required-connection

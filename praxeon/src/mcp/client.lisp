@@ -80,7 +80,7 @@ has, or two tools under one name. Nothing was registered."))
 (defstruct (connection (:constructor %make-connection
                            (&key name url command directory environment stderr restart
                                  token-source per-user timeout call-timeout max-body-bytes tasks
-                                 task-lifetime task-backoff-cap)))
+                                 task-lifetime task-backoff-cap elicitation input-timeout)))
   "An MCP server the app connects to, as data. MAKE-CONNECTION makes one.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
@@ -99,7 +99,13 @@ default. A task still not finished then is polled once more and finishes as :EXP
 TASK-BACKOFF-CAP is the most seconds between polls of a task whose polls keep failing; five
 minutes by default. The wait after a failed poll doubles with each consecutive failure, from the
 task's poll interval up to this cap, and a poll that succeeds resets it. Both are positive
-integers; anything else is refused here, before a task can start."
+integers; anything else is refused here, before a task can start.
+
+ELICITATION lists the elicitation modes the app can present, :FORM and :URL, and declares the
+elicitation client capability for them, so a server on the current revision may ask a task for
+the user's input (#563); NIL, the default, declares none, and a task that asks anyway is
+cancelled. INPUT-TIMEOUT is the most seconds an input request may wait for the app's answer
+before POLL-TASKS answers it cancel; ten minutes by default, a positive integer."
   (name "" :type string)
   (url "" :type string)
   (command nil :type list)
@@ -114,7 +120,9 @@ integers; anything else is refused here, before a task can start."
   (max-body-bytes (* 8 1024 1024))
   (tasks nil)
   (task-lifetime (* 24 60 60) :type (integer 1))
-  (task-backoff-cap (* 5 60) :type (integer 1)))
+  (task-backoff-cap (* 5 60) :type (integer 1))
+  (elicitation nil :type list)
+  (input-timeout (* 10 60) :type (integer 1)))
 
 (defparameter +stdio-environment+
   #+win32 '("APPDATA" "COMSPEC" "HOMEDRIVE" "HOMEPATH" "LOCALAPPDATA" "PATH" "PATHEXT"
@@ -132,7 +140,8 @@ exported bash function, is not passed (#604).")
 (defun make-connection (&key name url command directory environment stderr (restart t)
                              token-source per-user (timeout 30) (call-timeout 120)
                              (max-body-bytes (* 8 1024 1024)) tasks
-                             (task-lifetime (* 24 60 60)) (task-backoff-cap (* 5 60)))
+                             (task-lifetime (* 24 60 60)) (task-backoff-cap (* 5 60))
+                             elicitation (input-timeout (* 10 60)))
   "A CONNECTION to an MCP server: over Streamable HTTP at URL, or a local server over stdio
 started with COMMAND. Both together are refused.
 
@@ -158,8 +167,9 @@ The specification says a server over stdio takes its credentials from its enviro
 TOKEN-SOURCE and PER-USER are refused with COMMAND. One process serves every principal: an app
 that needs a server process per user makes a connection per user.
 
-TIMEOUT, CALL-TIMEOUT, MAX-BODY-BYTES, TASKS, TASK-LIFETIME and TASK-BACKOFF-CAP apply to both;
-see CONNECTION. For a local server MAX-BODY-BYTES bounds each line it writes."
+TIMEOUT, CALL-TIMEOUT, MAX-BODY-BYTES, TASKS, TASK-LIFETIME, TASK-BACKOFF-CAP, ELICITATION and
+INPUT-TIMEOUT apply to both; see CONNECTION. For a local server MAX-BODY-BYTES bounds each line
+it writes."
   (flet ((refuse (control &rest arguments)
            (error "praxeon/mcp: make-connection ~A: ~?" name control arguments)))
     (cond ((and url command) (refuse "takes :url or :command, not both."))
@@ -177,12 +187,19 @@ see CONNECTION. For a local server MAX-BODY-BYTES bounds each line it writes."
              (refuse ":stderr is NIL or a pathname.")))
           (t
            (when (or directory environment stderr)
-             (refuse ":directory, :environment and :stderr apply only to a :command.")))))
+             (refuse ":directory, :environment and :stderr apply only to a :command."))))
+    (unless (and (listp elicitation)
+                 (every (lambda (m) (member m '(:form :url))) elicitation)
+                 (= (length elicitation) (length (remove-duplicates elicitation))))
+      (refuse ":elicitation is a list of the modes :form and :url, each at most once."))
+    (unless (typep input-timeout '(integer 1))
+      (refuse ":input-timeout is a positive number of seconds.")))
   (%make-connection :name (or name "") :url (or url "") :command command :directory directory
                     :environment environment :stderr stderr :restart restart
                     :token-source token-source :per-user per-user :timeout timeout
                     :call-timeout call-timeout :max-body-bytes max-body-bytes :tasks tasks
-                    :task-lifetime task-lifetime :task-backoff-cap task-backoff-cap))
+                    :task-lifetime task-lifetime :task-backoff-cap task-backoff-cap
+                    :elicitation elicitation :input-timeout input-timeout))
 
 (defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN
@@ -499,20 +516,32 @@ current revision uses to tell an unknown method apart from a server without the 
 (defparameter +tasks-extension+ "io.modelcontextprotocol/tasks"
   "The identifier of the MCP Tasks extension (#532).")
 
+(defun %client-capabilities (connection)
+  "The client capabilities CONNECTION declares: the Tasks extension when TASKS is true, and the
+elicitation capability with the modes ELICITATION lists, as {\"elicitation\": {\"form\": {},
+\"url\": {}}} (2026-07-28, \"Elicitation\", Capabilities). Sampling and roots are never declared."
+  (let ((capabilities (%object)))
+    (when (connection-tasks connection)
+      (setf (gethash "extensions" capabilities) (%object +tasks-extension+ (%object))))
+    (when (connection-elicitation connection)
+      (let ((modes (%object)))
+        (dolist (mode (connection-elicitation connection))
+          (setf (gethash (string-downcase (symbol-name mode)) modes) (%object)))
+        (setf (gethash "elicitation" capabilities) modes)))
+    capabilities))
+
 (defun %meta (client)
-  "The `_meta' every current-revision request carries. The client capabilities declare the
-Tasks extension when the connection asks for it, and nothing else. In particular they declare
-no elicitation, sampling or roots, so under the 2026-07-28 revision's \"Multi Round-Trip
-Requests\", server requirement 7, a server sends this client no input request: \"Servers MUST
-NOT send an inputRequests that the client has not declared support for in its capabilities.\"
-A task that asks for input anyway is cancelled (%REFUSE-INPUT)."
+  "The `_meta' every current-revision request carries. The client capabilities are
+%CLIENT-CAPABILITIES: the Tasks extension and elicitation only when the connection asks for
+them, and never sampling or roots. Under the 2026-07-28 revision's \"Multi Round-Trip
+Requests\", server requirement 7, a server sends this client no other input request: \"Servers
+MUST NOT send an inputRequests that the client has not declared support for in its
+capabilities.\" A task that asks for one anyway is cancelled (%REFUSE-INPUT)."
   (%object "io.modelcontextprotocol/protocolVersion" +protocol-version+
            "io.modelcontextprotocol/clientInfo" (%object "name" *client-name*
                                                          "version" *client-version*)
            "io.modelcontextprotocol/clientCapabilities"
-           (if (connection-tasks (client-connection client))
-               (%object "extensions" (%object +tasks-extension+ (%object)))
-               (%object))))
+           (%client-capabilities (client-connection client))))
 
 (defun %modern-request (client method params principal timeout extra-headers)
   "Send METHOD in the 2026-07-28 form. Returns the response and the request's id."

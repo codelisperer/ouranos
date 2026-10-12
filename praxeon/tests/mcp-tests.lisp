@@ -63,6 +63,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   ;; A bearer token tasks/cancel must carry, or NIL; any other gets a 401, as a sign-in (#587).
   (cancel-token nil)
   (tasks (make-hash-table :test #'equal)) (task-count 0) (cancels '())
+  ;; Each tasks/update the client sent (#563), as (taskId . inputResponses), newest first.
+  (updates '())
   (lock (sb-thread:make-mutex)))
 
 (defun %obj (&rest kv)
@@ -134,6 +136,31 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                         ((cdr script) (pop (gethash id (fake-tasks fake))))
                         (t (car script)))))))
     (flet ((done (h) (setf (gethash "resultType" h) "complete") h))
+      ;; (:ELICIT (key mode) ...): input_required with an elicitation/create per (key mode),
+      ;; MODE :FORM, :URL, or :SAMPLING for a sampling request under that key (#563).
+      (when (and (consp step) (eq (first step) :elicit))
+        (let ((requests (%obj)))
+          (loop for (key mode) in (rest step)
+                do (setf (gethash key requests)
+                         (ecase mode
+                           (:form (%obj "method" "elicitation/create"
+                                        "params" (%obj "mode" "form"
+                                                       "message" (format nil "Your name, for ~A?" key)
+                                                       "requestedSchema"
+                                                       (%obj "type" "object"
+                                                             "properties" (%obj "name" (%obj "type" "string"))))))
+                           (:url (%obj "method" "elicitation/create"
+                                       "params" (%obj "mode" "url" "message" "Sign the form"
+                                                      "url" "https://example.org/form")))
+                           (:sampling (%obj "method" "sampling/createMessage"
+                                            "params" (%obj "maxTokens" 10)))
+                           ;; Malformed: the field the mode requires is missing.
+                           (:form-bare (%obj "method" "elicitation/create"
+                                             "params" (%obj "mode" "form" "message" "No schema")))
+                           (:url-bare (%obj "method" "elicitation/create"
+                                            "params" (%obj "mode" "url" "message" "No URL"))))))
+          (return-from %task-poll
+            (done (%task-object fake id "input_required" "inputRequests" requests)))))
       (ecase step
         (:gone (remhash id (fake-tasks fake)) (list :error -32602 "Task not found"))
         (:working (done (%task-object fake id "working")))
@@ -156,6 +183,11 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
      (if (fake-get-status fake)
          (list :status (fake-get-status fake))
          (%task-poll fake (gethash "taskId" params))))
+    ((string= method "tasks/update")
+     (sb-thread:with-mutex ((fake-lock fake))
+       (push (cons (gethash "taskId" params) (gethash "inputResponses" params))
+             (fake-updates fake)))
+     (%obj "resultType" "complete"))
     ((string= method "tasks/cancel")
      (sb-thread:with-mutex ((fake-lock fake))
        (push (gethash "taskId" params) (fake-cancels fake))
@@ -2013,3 +2045,263 @@ OTHER. It sees the started call's :STARTED outcome as other, not as a result, an
             (is (equal '(:ok 0 :error 0 :other 1) ledger) "the start is not counted as a result")
             (%poll-when-due client)
             (is (equal '(:ok 1 :error 0 :other 1) ledger))))))))
+
+;;; --- elicitation in tasks (#563) ------------------------------------------------------------
+
+(defun %capabilities (request)
+  "The client capabilities REQUEST's _meta declares."
+  (gethash "io.modelcontextprotocol/clientCapabilities"
+           (gethash "_meta" (%request-params request))))
+
+(test the-elicitation-capability-is-declared-only-for-the-modes-given
+  (dolist (case '((nil . nil) ((:form) . ("form")) ((:form :url) . ("form" "url"))))
+    (let ((fake (make-fake :tools (%tools '("long" :do :task)))))
+      (with-fake (client fake :tasks t :elicitation (car case))
+        (mcp:list-tools client)
+        (let* ((caps (%capabilities (first (%by-method (requests) "tools/list"))))
+               (elicitation (gethash "elicitation" caps)))
+          (if (cdr case)
+              (is (equal (cdr case)
+                         (sort (loop for k being the hash-keys of elicitation collect k) #'string<))
+                  "~S declares ~S" (car case) elicitation)
+              (is (null elicitation) "no :elicitation declares none"))
+          (is (null (gethash "sampling" caps)) "sampling is never declared")
+          (is (null (gethash "roots" caps)) "roots are never declared"))))))
+
+(test make-connection-refuses-bad-elicitation-options
+  (dolist (bad '((:elicitation (:sms)) (:elicitation (:form :form)) (:elicitation :form)
+                 (:input-timeout 0) (:input-timeout "10")))
+    (is (typep (nth-value 1 (ignore-errors (apply #'mcp:make-connection :name "x" :url "http://x" bad)))
+               'error)
+        "~S was accepted" bad))
+  (is-true (mcp:make-connection :name "x" :url "http://x" :elicitation '(:url :form) :input-timeout 5)
+           "the control: well-formed options are accepted"))
+
+(test a-task-asking-a-declared-elicitation-tells-the-app-once-and-sends-its-answer
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)) (:elicit ("k1" :form))
+                                        (:elicit ("k1" :form)) :completed)))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (let ((tool (first (mcp:list-tools client))))
+        (mcp:call-tool client tool (%obj))
+        (evt:with-observer ((lambda (e) (push e events)))
+          (is (null (%poll-when-due client)) "a task waiting for input is not finished")
+          (is (null (%poll-when-due client)) "and still not, when the server asks the same key again"))
+        (let ((asked (remove :task-input-required events :key #'evt:event-type :test-not #'eq)))
+          (is (= 1 (length asked)) "the key is shown once across two polls: ~S" asked)
+          (let ((e (first asked)))
+            (is (equal "k1" (getf e :input-key)))
+            (is (eq :form (getf e :mode)))
+            (is (equal "Your name, for k1?" (getf e :message)))
+            (is (hash-table-p (getf e :schema)))
+            (is (null (fake-cancels fake)) "nothing was cancelled")
+            (is-true (mcp:answer-task-input client (getf e :task) "k1" :accept
+                                            :content (%obj "name" "Luca")))))
+        (let ((update (first (fake-updates fake))))
+          (is (equal "task-1" (car update)))
+          (is (equal "accept" (gethash "action" (gethash "k1" (cdr update)))))
+          (is (equal "Luca" (gethash "name" (gethash "content" (gethash "k1" (cdr update)))))))
+        (is (= 1 (length (%by-method (requests) "tasks/update"))))
+        (let ((finished (%poll-when-due client)))
+          (is (eq :ok (mcp:finished-task-outcome (first finished)))))))))
+
+(test answer-task-input-refuses-and-sends-nothing
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let ((task (getf (find :task-input-required events :key #'evt:event-type) :task)))
+        (dolist (bad (list (list "no-such-key" :accept)
+                           (list "k1" :maybe)
+                           (list "k1" :decline :content (%obj "name" "x"))
+                           (list "k1" :accept :content "not an object")))
+          (is (typep (nth-value 1 (ignore-errors (apply #'mcp:answer-task-input client task bad)))
+                     'error)
+              "~S was accepted" bad))
+        (is (null (fake-updates fake)) "nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :decline))
+        (is (typep (nth-value 1 (ignore-errors (mcp:answer-task-input client task "k1" :accept)))
+                   'error)
+            "a key already answered is not answered again")
+        (is (= 1 (length (fake-updates fake))))))))
+
+(test an-unanswered-elicitation-is-answered-cancel-after-the-input-timeout
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form) :input-timeout 60)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (let ((first-poll (mcp:task-next-poll (%only-task client))))
+          (mcp:poll-tasks client :now first-poll)
+          (is (null (fake-updates fake)) "not before the time limit")
+          (mcp:poll-tasks client :now (+ first-poll 61))
+          (mcp:poll-tasks client :now (+ first-poll 122))))
+      (is (= 1 (length (fake-updates fake))) "cancel is answered once: ~S" (fake-updates fake))
+      (is (equal "cancel" (gethash "action" (gethash "k1" (cdr (first (fake-updates fake)))))))
+      (is (= 1 (count :task-input-expired events :key #'evt:event-type)))
+      (is (null (fake-cancels fake)) "the task itself is not cancelled"))))
+
+(test an-input-request-the-connection-did-not-declare-still-cancels-the-task
+  "A url elicitation on a connection that declared form only, or a sampling request beside a
+form elicitation, is a request server requirement 7 forbids; the task is cancelled as before."
+  (dolist (case '(((:elicit ("k1" :url)) . (:form))
+                  ((:elicit ("k1" :form) ("k2" :sampling)) . (:form))
+                  ((:elicit ("k1" :form)) . nil)
+                  ;; Malformed (Copilot's review of #627): no schema, or no URL.
+                  ((:elicit ("k1" :form-bare)) . (:form))
+                  ((:elicit ("k1" :url-bare)) . (:url))))
+    (let ((fake (make-fake :tools (%tools '("long" :do :task)) :task-script (list (car case))))
+          (events '()))
+      (with-fake (client fake :tasks t :elicitation (cdr case))
+        (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+        (let ((finished (evt:with-observer ((lambda (e) (push e events)))
+                          (%poll-when-due client))))
+          (is (eq :cancelled (mcp:finished-task-outcome (first finished))) "~S" case)
+          (is (equal '("task-1") (fake-cancels fake)) "~S" case)
+          (is (null (find :task-input-required events :key #'evt:event-type))
+              "~S: the app is not asked" case))))))
+
+(test the-shown-input-keys-survive-the-task-record-in-json
+  (let ((task (mcp::%make-task :key "k" :connection "docs" :id "t" :started 1 :seen 1
+                               :inputs '(("a" 10 nil) ("b" 20 t)))))
+    (is (equal '(("a" 10 nil) ("b" 20 t))
+               (mcp:task-inputs (mcp:task-from-json (mcp:task-to-json task)))))
+    (let ((old (jzon:parse (mcp:task-to-json task))))
+      (remhash "inputs" old)
+      (is (null (mcp:task-inputs (mcp:task-from-json (jzon:stringify old))))
+          "a record written before #563 has no inputs"))))
+
+(test an-observer-can-answer-from-inside-the-event
+  "Copilot's review of #627: the key is recorded on the event's task before the event, so an app
+that answers at once, from its observer, is not refused."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (answered nil))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e)
+                            (when (eq :task-input-required (evt:event-type e))
+                              (setf answered (mcp:answer-task-input client (getf e :task)
+                                                                    (getf e :input-key) :decline)))))
+        (%poll-when-due client))
+      (is-true answered "the answer from inside the event was sent")
+      (is (= 1 (length (fake-updates fake)))))))
+
+(test an-answer-for-a-task-the-server-has-finished-is-not-sent
+  "Copilot's review of #627: the event's task is a copy from when the key was shown. When the
+server has since finished the task, the answer is refused and no tasks/update is sent."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)) :completed)))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let ((task (getf (find :task-input-required events :key #'evt:event-type) :task)))
+        (is (typep (nth-value 1 (ignore-errors
+                                 (mcp:answer-task-input client task "k1" :accept
+                                                        :content (%obj "name" "x"))))
+                   'error))
+        (is (null (fake-updates fake)) "nothing was sent")))))
+
+(test an-answer-to-a-url-request-carries-no-content
+  "Copilot's review of #627: an ElicitResult for a url-mode request omits content."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :url)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:url))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let* ((e (find :task-input-required events :key #'evt:event-type))
+             (task (getf e :task)))
+        (is (eq :url (getf e :mode)))
+        (is (equal "https://example.org/form" (getf e :url)))
+        (is (typep (nth-value 1 (ignore-errors
+                                 (mcp:answer-task-input client task "k1" :accept
+                                                        :content (%obj "name" "x"))))
+                   'error)
+            "content for a url request is refused")
+        (is (null (fake-updates fake)) "and nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :accept))
+        (is (null (gethash "content" (gethash "k1" (cdr (first (fake-updates fake)))))))))))
+
+(test answering-does-not-change-the-stored-task
+  "Copilot's review of #627: the memory store's copies of a task share their input entries, so
+answering must not change an entry in place. The stored record keeps the key as shown and not
+answered; the server dropping the key is what ends it."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (mcp:answer-task-input client (getf (find :task-input-required events :key #'evt:event-type) :task)
+                             "k1" :decline)
+      (is (equal '(nil) (mapcar #'third (mcp:task-inputs (%only-task client))))
+          "the stored record is as the poll saved it: ~S" (mcp:task-inputs (%only-task client))))))
+
+(test an-answer-after-the-input-timeout-is-refused-before-anything-is-sent
+  "The hub's review of #627: a key shown INPUT-TIMEOUT ago or more is one POLL-TASKS answers
+cancel, so the app's late answer is refused here rather than racing the cancel."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form) :input-timeout 60)
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let* ((task (getf (find :task-input-required events :key #'evt:event-type) :task))
+             (seen (second (first (mcp:task-inputs task)))))
+        (is (typep (nth-value 1 (ignore-errors
+                                 (mcp:answer-task-input client task "k1" :decline :now (+ seen 60))))
+                   'error)
+            "an answer at the time limit is refused")
+        (is (null (%by-method (requests) "tasks/update")) "and nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :decline :now (+ seen 59))
+                 "the control: one second earlier it is sent")))))
+
+(test an-accept-to-a-form-request-must-carry-its-content
+  "The hub's review of #627: a form-mode accept submits the form's data."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (events '()))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (evt:with-observer ((lambda (e) (push e events)))
+        (%poll-when-due client))
+      (let ((task (getf (find :task-input-required events :key #'evt:event-type) :task)))
+        (is (typep (nth-value 1 (ignore-errors (mcp:answer-task-input client task "k1" :accept)))
+                   'error))
+        (is (null (fake-updates fake)) "nothing was sent")
+        (is-true (mcp:answer-task-input client task "k1" :accept :content (%obj "name" "x"))
+                 "the control: with content it is sent")))))
+
+(test a-key-is-shown-again-when-the-observer-signals
+  "The events for new keys come before the record is saved, so an observer that signals leaves
+the key unsaved, and the next poll shows it again: at least once, not at most once."
+  (let ((fake (make-fake :tools (%tools '("long" :do :task))
+                         :task-script '((:elicit ("k1" :form)))))
+        (shown 0))
+    (with-fake (client fake :tasks t :elicitation '(:form))
+      (mcp:call-tool client (first (mcp:list-tools client)) (%obj))
+      (is (typep (nth-value 1 (ignore-errors
+                               (evt:with-observer ((lambda (e)
+                                                     (when (eq :task-input-required (evt:event-type e))
+                                                       (incf shown)
+                                                       (error "the app's observer failed"))))
+                                 (%poll-when-due client))))
+                 'error)
+          "the observer's error leaves the poll")
+      (is (null (mcp:task-inputs (%only-task client))) "the key was not saved")
+      (evt:with-observer ((lambda (e) (when (eq :task-input-required (evt:event-type e)) (incf shown))))
+        (%poll-when-due client))
+      (is (= 2 shown) "the key was shown again at the next poll")
+      (is (equal '("k1") (mapcar #'first (mcp:task-inputs (%only-task client))))
+          "and saved this time"))))

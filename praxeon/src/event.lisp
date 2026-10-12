@@ -34,6 +34,15 @@
 ;;;;   (:type :task-input-refused .. :methods (..))
 ;;;;                        -- a task asked for input this client does not provide, and is
 ;;;;                           cancelled (#532)
+;;;;   (:type :task-input-required .. :input-key .. :mode .. :message .. :schema .. :url ..
+;;;;                        :task ..)
+;;;;                        -- a task asks the user for input through an elicitation the
+;;;;                           connection declared (#563): MODE :FORM with SCHEMA, or :URL with
+;;;;                           URL. MESSAGE, SCHEMA and URL come from the server and are
+;;;;                           untrusted. Answer with MCP:ANSWER-TASK-INPUT and TASK
+;;;;   (:type :task-input-expired .. :input-key ..)
+;;;;                        -- the app did not answer INPUT-KEY within the connection's
+;;;;                           INPUT-TIMEOUT, and the client answered cancel (#563)
 ;;;;   (:type :task-finished .. :outcome .. :ms ..)
 ;;;;                        -- a task ended: :OK, :ERROR, :CANCELLED, :EXPIRED or :UNKNOWN
 ;;;;   (:type :truncated    :step N :max-tokens M :tool-calls (name ..))

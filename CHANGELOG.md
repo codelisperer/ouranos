@@ -202,6 +202,13 @@ its tag.
   two pages that cannot both be written, before anything is written: a listing and a document
   keyed `<name>/index`, or a collection named `one.html` and the document `one`.
 
+- **praxeon/mcp: a task can ask the user for input, and the app answers it** (#563).
+  - `make-connection` takes `:elicitation`, a list of the modes `:form` and `:url`. It declares the elicitation client capability for them; sampling and roots are never declared. Without it nothing changes.
+  - A task whose `tasks/get` says `input_required` with elicitation requests in declared modes sends a `:task-input-required` event per key not shown before, with `:input-key`, `:mode`, `:message`, `:schema` or `:url`, and `:task`. A request this client did not declare, or a malformed one (a form request without `requestedSchema`, a url request without `url`), still cancels the task with `:task-input-refused`.
+  - `answer-task-input` sends the app's answer (`:accept` with content for a form-mode request, `:decline` or `:cancel`) with `tasks/update`, taking the task object the event carried. It checks with `tasks/get` that the key is still outstanding on the server first, and sends no answer otherwise. After an app restart, an unanswered key is not asked again; it is answered cancel when `:input-timeout` (ten minutes by default) passes, with a `:task-input-expired` event.
+  - The task record has a new field, `task-inputs`, written by `task-to-json`; a record written before reads as having none.
+  - An ordinary call that answers `input_required` still fails as not run; an `:on-elicitation` handler for it is #626.
+
 - **klio: `export-site` takes `:assets`, a directory of the site's static files that is copied
   into the export** (#557). Every file is copied at its path relative to that directory, after
   `:clean t` has emptied the export, so a site no longer re-copies its stylesheet and images
@@ -738,10 +745,11 @@ its tag.
   even when an observer of `:sign-in-required` signals or an app's handler of
   `authorization-required` exits. `make-connection` refuses a `:task-lifetime` or
   `:task-backoff-cap` that is not a positive integer, and `make-client` refuses a task store
-  that lacks a method for one of the six functions. The client declares no elicitation,
-  sampling or roots, so a server must not ask a task for input; a task that does is cancelled,
-  with a `:task-input-refused` event naming the request methods. Answering elicitations is
-  #563. See `praxeon/docs/mcp.md`, "Long-running calls".
+  that lacks a method for one of the six functions. The client declares no sampling or roots,
+  and declares elicitation only when the app passes `:elicitation` to `make-connection` (#563),
+  so a server must not ask a task for any other input; a task that does is cancelled, with a
+  `:task-input-refused` event naming the request methods. See `praxeon/docs/mcp.md`,
+  "Long-running calls".
 
 ### Fixed
 
