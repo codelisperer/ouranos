@@ -60,8 +60,12 @@ width. Requiring dashes and only dashes is the property; the exact width is not.
   (string-trim '(#\Space #\Tab #\Return) line))
 
 (defun failure-details (output)
-  "WHICH checks failed, not merely that some did: every line of FiveAM's `Failure Details:'
-block, entry rules included, interior blank lines preserved.
+  "WHICH checks failed, not merely that some did: every line of every FiveAM `Failure Details:'
+block in OUTPUT, in order, entry rules included, interior blank lines preserved.
+
+EVERY BLOCK, NOT THE FIRST (#616). A test op that prints several reports, as aion/tests does,
+prints one block per failing report; reading only the first named one sub-suite's failures
+when two had failed.
 
 READ TO THE STRUCTURE, NOT TO THE FIRST BLANK LINE. Each entry is wrapped in a rule, so a
 blank line inside one is part of a reason and a blank line outside one is the end of the
@@ -70,8 +74,16 @@ written without a reason string hides itself and everything after it.
 
 STOPS ON ANYTHING UNEXPECTED rather than reading on. A non-blank line outside an entry is not
 a shape this knows, and consuming it would put arbitrary output into a failure report."
-  (let ((lines (%lines-after output "Failure Details:"))
-        (collected '())
+  (loop with header = "Failure Details:"
+        for at = (search header output) then (search header output :start2 (1+ at))
+        while at
+        append (%one-failure-block
+                (rest (uiop:split-string (subseq output at) :separator '(#\Newline))))))
+
+(defun %one-failure-block (lines)
+  "The entries of one `Failure Details:' block, read from LINES, the lines after its header.
+See FAILURE-DETAILS."
+  (let ((collected '())
         (inside nil)
         (seen nil))
     (dolist (line lines (nreverse collected))

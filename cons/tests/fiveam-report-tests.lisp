@@ -287,3 +287,17 @@ must be the one the gate already gave."
     (is (eql (%count-plural-only out) (%fr count-checks out))))
   (is (null (%fr count-checks (format nil "; compiling file~%Did a thing.~%")))
       "text that is not a report is not counted"))
+
+;;; --- every Failure Details block, not the first (#616) --------------------------------------
+
+(test failure-details-reads-every-failing-report
+  "aion/tests prints one FiveAM report per sub-suite. When two of them fail, the output holds
+two `Failure Details:' blocks, and the gate must name the failing checks of both."
+  (%load-fiveam-report)
+  (let* ((out (concatenate 'string +real-report+ +real-passing-report+ +real-report+))
+         (details (%fr failure-details out)))
+    (is (= 4 (%entries details))
+        "two failing reports of two entries each, with a passing report between them: ~D entries"
+        (%entries details))
+    (is (= 2 (%entries (%fr failure-details +real-report+)))
+        "one report alone still gives its own two")))
