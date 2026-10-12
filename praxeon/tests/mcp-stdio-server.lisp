@@ -87,8 +87,10 @@
   "Write OCTETS to stdout as they are, after what the character stream holds."
   (sb-thread:with-mutex (*lock*)
     (finish-output *standard-output*)
-    (let ((out (sb-sys:make-fd-stream 1 :output t :element-type '(unsigned-byte 8)
-                                        :buffering :full)))
+    ;; The descriptor of SBCL's own stdout stream, not 1: on Windows it is a handle.
+    (let ((out (sb-sys:make-fd-stream (sb-sys:fd-stream-fd sb-sys:*stdout*)
+                                      :output t :element-type '(unsigned-byte 8)
+                                      :buffering :full)))
       (write-sequence octets out)
       (finish-output out))))
 

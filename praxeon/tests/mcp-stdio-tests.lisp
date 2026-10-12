@@ -53,7 +53,7 @@ fails."
 server's. The gate's summary of a failing suite leads with the first line that holds
 \"Unhandled \", so the server's own is written in lower case, and the summary still shows this
 image's error."
-  (format *error-output* "~&;; the ~A test server recorded no start; its stderr:~%" mode)
+  (format *error-output* "~&;; the stderr of the ~A test server:~%" mode)
   (dolist (line (ignore-errors (uiop:read-file-lines file)))
     (let ((at (search "Unhandled " line)))
       (format *error-output* ";;   ~A~%"
@@ -62,19 +62,23 @@ image's error."
 (defmacro with-stdio-client ((client record mode &rest keys) &body body)
   "Run BODY with CLIENT on a local test server in MODE, recording to RECORD, and close it. Unless
 KEYS give :STDERR, the server's stderr goes to a file of the test's own, which is printed when
-the server never recorded its start, so a server that dies while loading says why in the log."
-  (let ((stderr (gensym "STDERR")))
+the server never recorded its start or when BODY does not finish, so a server that dies says why
+in the log."
+  (let ((stderr (gensym "STDERR"))
+        (finished (gensym "FINISHED")))
     `(let* ((,record (%fresh-record))
             (,stderr (%fresh-record))
+            (,finished nil)
             (,client (mcp:make-client
                       (%stdio-connection ,mode ,record
                                          ,@(if (loop for key in keys by #'cddr
                                                      thereis (eq key :stderr))
                                                keys
                                                (list* :stderr stderr keys))))))
-       (unwind-protect (progn ,@body)
+       (unwind-protect (multiple-value-prog1 (progn ,@body) (setf ,finished t))
          (mcp:close-client ,client)
-         (when (and (zerop (%recorded-count ,record "start")) (probe-file ,stderr))
+         (when (and (or (not ,finished) (zerop (%recorded-count ,record "start")))
+                    (probe-file ,stderr))
            (%print-server-stderr ,mode ,stderr))
          (ignore-errors (delete-file ,stderr))
          (ignore-errors (delete-file ,record))))))
