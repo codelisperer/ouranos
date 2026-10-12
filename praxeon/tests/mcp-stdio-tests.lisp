@@ -504,14 +504,18 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
       (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15)))))
 
 #-win32
-(test a-write-blocked-on-an-exited-server-does-not-reach-the-next-one
+(test a-write-blocked-on-an-exited-server-keeps-its-stream-until-it-ends
   "A server exits while a process it started holds its stdin and reads nothing, and a long
-request is still being written to it. The server started next gets only whole JSON lines, so
-the blocked write's remaining octets never reach it through a reused descriptor, once the
-process holding the old stdin starts reading (#601)."
+request is still being written to it. The server's streams are not closed while the writer
+thread is still writing, so its descriptor cannot be taken by the next server's pipe and written
+to (#601); they are closed when the write ends. The server started next gets only whole JSON
+lines. Without the fix, the checks that the writer is still running and its stream still open
+fail on macOS, where closing the stream ended the blocked write at once."
   (with-stdio-client (client record "hold-stdin" :timeout 3 :call-timeout 1)
     (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
            (echo (%tool-named client "echo"))
+           (old (praxeon/mcp::client-child client))
+           (in (sb-ext:process-input (praxeon/mcp::child-process old)))
            (exiting (sb-thread:make-thread
                      (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
                      :name "praxeon/mcp test exit-holding-stdin")))
@@ -521,10 +525,13 @@ process holding the old stdin starts reading (#601)."
                               (mcp:call-tool client echo
                                              (%text (make-string 1000000 :initial-element #\x))))))
       (is-true (sb-thread:join-thread exiting))
+      ;; This starts the next server, after the old one has been finished.
       (is (equal "after" (mcp:call-tool client echo (%text "after"))))
-      ;; By now the old stdin is being read, and any write the old writer still makes has been
-      ;; made.
-      (sleep 4)
+      ;; The process holding the old stdin has not read yet, so the write is still blocked.
+      (is-true (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
+      (is-true (open-stream-p in))
+      ;; It reads after 6 seconds; then the write ends and the streams are closed.
+      (is-true (%wait-for (lambda () (not (open-stream-p in))) 8))
       (is (equal "later" (mcp:call-tool client echo (%text "later"))))
       (is (= 2 (%recorded-count record "start")))
       (let* ((lines (%recorded record))
@@ -573,6 +580,16 @@ as not run."
     (is (= 0 (%recorded-count record "SIGTERM")))
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))))
+
+(test after-close-client-the-client-has-no-era
+  "CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the server that is running, so after
+CLOSE-CLIENT both are NIL (#601)."
+  (with-stdio-client (client record "modern")
+    (mcp:list-tools client)
+    (is (eq :modern (mcp:client-era client)))
+    (mcp:close-client client)
+    (is (null (mcp:client-era client)))
+    (is (null (mcp:client-protocol-version client)))))
 
 (test a-local-server-that-ignores-its-closed-stdin-is-ended
   "A server still running *STDIO-CLOSE-SECONDS* after its stdin closed is sent SIGTERM, to its

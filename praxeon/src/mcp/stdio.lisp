@@ -55,10 +55,12 @@ thread, and :CLOSE, which closes the server's stdin."
   (era nil)
   (exited nil)
   (finished nil)
-  ;; The process's streams are closed by whichever of the reader and %FINISH-CHILD is done
-  ;; last, so a reader still blocked on a stdout a grandchild holds never reads from a
-  ;; descriptor number that a later server's pipe has taken.
+  ;; The process's streams are closed by whichever of the reader, the writer and %FINISH-CHILD
+  ;; is done last, so a thread still blocked on a pipe that a process the server started holds
+  ;; never reads from or writes to a descriptor number that a later server's pipe has taken
+  ;; (#601). See %RELEASE.
   (reader-done nil)
+  (writer-done nil)
   (close-on-end nil)
   reader
   writer
@@ -72,6 +74,17 @@ thread, and :CLOSE, which closes the server's stdin."
   (late 0 :type sb-ext:word))
 
 (defun %child-pid (child) (sb-ext:process-pid (child-process child)))
+
+(defun %release (child party)
+  "Record that PARTY, one of :READER, :WRITER and :FINISH, is done with CHILD's process, and close
+the process's streams when it is the last of the three. Each party calls this once."
+  (when (sb-thread:with-mutex ((child-lock child))
+          (ecase party
+            (:reader (setf (child-reader-done child) t))
+            (:writer (setf (child-writer-done child) t))
+            (:finish (setf (child-close-on-end child) t)))
+          (and (child-reader-done child) (child-writer-done child) (child-close-on-end child)))
+    (ignore-errors (sb-ext:process-close (child-process child)))))
 
 (defun %enqueue (child item)
   (sb-thread:with-mutex ((child-lock child))
@@ -192,10 +205,7 @@ because this client declares no capabilities."
               :notifications (child-notifications child) :not-json (child-not-json child)
               :too-long (child-too-long child) :requests (child-requests child)
               :late (child-late child))
-    (when (sb-thread:with-mutex ((child-lock child))
-            (setf (child-reader-done child) t)
-            (child-close-on-end child))
-      (ignore-errors (sb-ext:process-close (child-process child))))))
+    (%release child :reader)))
 
 ;;; --- starting and stopping ----------------------------------------------------------------
 
@@ -253,7 +263,9 @@ environment for :INHERIT."
           (child-writer child)
           ;; THREAD-LIFETIME: scoped -- it writes this child's queued lines until :CLOSE, needs
           ;; none of the caller's bindings, and %FINISH-CHILD joins it.
-          (sb-thread:make-thread (lambda () (%writer-loop child))
+          (sb-thread:make-thread (lambda ()
+                                   (unwind-protect (%writer-loop child)
+                                     (%release child :writer)))
                                  :name "praxeon/mcp stdio writer"))
     (setf (gethash client *live-clients*) t)
     (log:info "praxeon/mcp: local server started" :connection name :pid (%child-pid child))
@@ -288,8 +300,11 @@ TerminateProcess, whatever SIGNAL is; a process it started can outlive it there.
 (defun %finish-child (client child)
   "Join CHILD's threads and release its process, once, after it has exited or been ended, and
 log how it ended."
-  (unless (child-finished child)
-    (setf (child-finished child) t)
+  ;; Tested and set in one step under the lock: at image exit %CLOSE-LIVE-CLIENTS can finish a
+  ;; child that another thread is finishing (#601).
+  (when (sb-thread:with-mutex ((child-lock child))
+          (unless (child-finished child)
+            (setf (child-finished child) t)))
     (unless (%wait-for-exit child 2)
       ;; Its output ended but it has not exited: it is not a server any more.
       (%signal-child child +sigkill+)
@@ -302,11 +317,8 @@ log how it ended."
                 :connection (connection-name (client-connection client))
                 :pid (sb-ext:process-pid process)
                 :status (sb-ext:process-status process)
-                :code (sb-ext:process-exit-code process))
-      (when (sb-thread:with-mutex ((child-lock child))
-              (or (child-reader-done child)
-                  (progn (setf (child-close-on-end child) t) nil)))
-        (ignore-errors (sb-ext:process-close process))))))
+                :code (sb-ext:process-exit-code process)))
+    (%release child :finish)))
 
 (defun %stop-child (client child &key (close-seconds *stdio-close-seconds*)
                                       (term-seconds *stdio-term-seconds*))
@@ -327,13 +339,16 @@ SIGKILL. Returns :EXITED, :TERMINATED or :KILLED."
 wait up to *STDIO-CLOSE-SECONDS* for it to exit, then send SIGTERM and wait up to
 *STDIO-TERM-SECONDS*, then SIGKILL, as the specification's \"Shutdown\" says. On Windows the
 server is ended with TerminateProcess instead of the two signals. Requests the client makes
-after this fail as not run. For a server over HTTP it does nothing. Returns NIL."
+after this fail as not run, and CLIENT-ERA and CLIENT-PROTOCOL-VERSION are NIL, since no server
+is running. For a server over HTTP it does nothing. Returns NIL."
   (sb-thread:with-mutex ((client-lock client))
     (setf (client-closed client) t)
     (let ((child (client-child client)))
       (when child
         ;; Stopped before the log line, not inside it: aion/log evaluates its fields while it
         ;; holds the appender's lock, and the reader thread logs as the server's output ends.
+        (setf (client-era client) nil
+              (client-protocol-version client) nil)
         (let ((how (%stop-child client child)))
           (log:info "praxeon/mcp: local server stopped"
                     :connection (connection-name (client-connection client))
