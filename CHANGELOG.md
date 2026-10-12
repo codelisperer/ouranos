@@ -786,6 +786,17 @@ its tag.
 
 ### Fixed
 
+- **aion/libgit: `set-remote` also sets the remote's push URL, so a push goes to the new URL**
+  (#641). For a remote that already existed, `set-remote` changed only `remote.<name>.url`.
+  When the repository's git configuration also had `remote.<name>.pushurl`, `push-branch`
+  went on sending commits, and the credential it was given, to that push URL. `set-remote` now
+  sets `remote.<name>.pushurl` to the same URL, in the repository's own configuration, for new
+  and existing remotes. A push URL set in the user's or the system's git configuration is
+  overridden by it. Because the remote now has a push URL, a `url.<base>.pushInsteadOf` rule
+  no longer rewrites its pushes; `url.<base>.insteadOf` still does. When the repository's
+  configuration has more than one `remote.<name>.pushurl`, `set-remote` signals `git-error`
+  and changes nothing.
+
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).
   pgvector's HNSW scan took the nearest `hnsw.ef_search` rows of the whole table (40 by

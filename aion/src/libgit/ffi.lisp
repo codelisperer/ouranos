@@ -280,6 +280,8 @@
   (url (:string :encoding :utf-8)))
 (%defgit ("git_remote_set_url" %remote-set-url) :int
   (repo :pointer) (remote (:string :encoding :utf-8)) (url (:string :encoding :utf-8)))
+(%defgit ("git_remote_set_pushurl" %remote-set-pushurl) :int
+  (repo :pointer) (remote (:string :encoding :utf-8)) (url (:string :encoding :utf-8)))
 (%defgit ("git_remote_free" %remote-free) :void (remote :pointer))
 (%defgit ("git_remote_url" %remote-url) :pointer (remote :pointer))
 (%defgit ("git_fetch_options_init" %fetch-options-init) :int

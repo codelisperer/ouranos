@@ -220,17 +220,30 @@ so its URLs are the ones it will connect to."
 (defun set-remote (repository name url)
   "Make NAME a remote of REPOSITORY that fetches from and pushes to URL, and return NAME. A new
 remote gets git's default fetch refspec, +refs/heads/*:refs/remotes/NAME/*. For a remote that
-exists, only its URL changes. URL is anything git accepts: an https:// or http:// address, a
-file:// URL, or the path of a local repository."
+exists, its URL and its push URL both change, and its refspecs stay. URL is anything git
+accepts: an https:// or http:// address, a file:// URL, or the path of a local repository.
+
+The push URL, remote.NAME.pushurl, is set to URL in the repository's own configuration, for a
+new remote too. Changing only the URL would leave a push URL that was already configured in
+place, and PUSH-BRANCH would go on sending commits and credentials to that host (#641). Setting
+it, rather than deleting it, also covers a push URL from the user's or the system's git
+configuration, which the repository's own value overrides. Because the push URL is set,
+url.<base>.insteadOf still rewrites it but url.<base>.pushInsteadOf does not, which is how git
+treats any remote with a push URL. When the repository's configuration holds more than one
+remote.NAME.pushurl, or takes it from a file it includes, libgit2 refuses to set it, and
+SET-REMOTE signals GIT-ERROR without changing anything."
   (%with-repository-pointer (repo repository)
     (cffi:with-foreign-object (out :pointer)
       (let ((code (%remote-lookup out repo name)))
         (cond ((zerop code)
                (%remote-free (cffi:mem-ref out :pointer))
+               ;; The push URL first: if libgit2 refuses it, the URL is still the old one too.
+               (%check "git_remote_set_pushurl" (%remote-set-pushurl repo name url))
                (%check "git_remote_set_url" (%remote-set-url repo name url)))
               ((= code +git-enotfound+)
                (%check "git_remote_create" (%remote-create out repo name url))
-               (%remote-free (cffi:mem-ref out :pointer)))
+               (%remote-free (cffi:mem-ref out :pointer))
+               (%check "git_remote_set_pushurl" (%remote-set-pushurl repo name url)))
               (t (%check "git_remote_lookup" code))))))
   name)
 

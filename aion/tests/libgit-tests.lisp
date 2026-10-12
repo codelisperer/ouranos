@@ -274,7 +274,7 @@ functions ffi.lisp binds."
                                 (push (subseq text (1+ q) close) names)
                                 (setf i (1+ close))))
                      names)))
-    (is (= 70 (length git::*entry-points*)))
+    (is (= 71 (length git::*entry-points*)))
     (is (null (set-exclusive-or required git::*entry-points* :test #'string=))
         "differ: ~S" (set-exclusive-or required git::*entry-points* :test #'string=))))
 
@@ -732,6 +732,52 @@ fails the first."
       (is (and (typep c 'git:git-error) (not (typep c 'git:authentication-failed))) "~A" c))
     (is (typep (finish-after-error nil git::+git-eauth+ http "unexpected authentication failure")
                'git:authentication-failed))))
+
+(test set-remote-moves-the-push-url-too
+  "A remote whose push URL is an HTTP server on 127.0.0.1 is moved to a bare repository with
+SET-REMOTE. remote.origin.pushurl then names the bare repository, PUSH-BRANCH puts the commit
+there, and the server receives no request, so neither the commit nor the credential goes to the
+old push URL (#641). The old push URL is a server rather than a second repository because
+libgit2's local transport pushes to the remote's URL and never reads its push URL
+(transports/local.c, local_push), so two local repositories could not show which one a push
+was sent to. CONTROL: with SET-REMOTE setting only the URL, the push goes to the server, which
+answers 401, and all four checks fail."
+  (http:with-server (server (lambda (request stream)
+                              (declare (ignore request))
+                              (http:write-response
+                               stream 401 '(("WWW-Authenticate" . "Basic realm=\"aion\"")) "")))
+    (with-directory (new)
+      (init-bare new)
+      (with-new-repository (repo dir)
+        (let ((id (commit-file repo dir "a.txt" "one" "first"))
+              (branch (head-branch dir))
+              (new-url (uiop:native-namestring new)))
+          (git:set-remote repo "origin" (http:server-url server "/old.git"))
+          (git-cli dir "config" "remote.origin.pushurl" (http:server-url server "/old.git"))
+          (git:set-remote repo "origin" new-url)
+          (is (string= new-url (git-cli dir "config" "remote.origin.pushurl")))
+          (let ((pushed (handler-case (git:push-branch repo "origin"
+                                                       :credentials (git:make-credential "u" "t"))
+                          (error (e) e))))
+            (is (equal id pushed) "push: ~A" pushed))
+          (is (string= id (or (ignore-errors
+                               (git-cli new "rev-parse" (format nil "refs/heads/~A" branch)))
+                              "")))
+          (is (null (http:server-requests server))
+              "~D requests to the old push URL" (length (http:server-requests server))))))))
+
+(test set-remote-changes-nothing-when-the-push-url-is-ambiguous
+  "With two remote.origin.pushurl entries libgit2 will not set the push URL. SET-REMOTE
+signals GIT-ERROR and leaves the URL as it was, so fetch and push are not split between two
+hosts by a half-finished change (#641). CONTROL: setting the URL before the push URL leaves
+the URL changed."
+  (with-new-repository (repo dir)
+    (git:set-remote repo "origin" "https://git.example.invalid/old.git")
+    (git-cli dir "config" "--add" "remote.origin.pushurl" "https://git.example.invalid/a.git")
+    (git-cli dir "config" "--add" "remote.origin.pushurl" "https://git.example.invalid/b.git")
+    (is (typep (outcome (lambda () (git:set-remote repo "origin" "https://git.example.invalid/new.git")))
+               'git:git-error))
+    (is (string= "https://git.example.invalid/old.git" (git:remote-url repo "origin")))))
 
 (test remote-url-reads-the-url-after-insteadof
   "REMOTE-URL returns the URL libgit2 connects to, which is the configured one after a
