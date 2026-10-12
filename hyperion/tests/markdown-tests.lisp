@@ -266,6 +266,32 @@ other > and every < is escaped once, and raw HTML inside a quote is still text."
   (let ((html (md:render (format nil "~C> not a quote~%" #\\))))
     (is (null (search "<blockquote>" html)) "an escaped > is text: ~S" html)))
 
+(test a-block-quote-in-a-list-item-renders-in-the-safe-mode-as-in-the-trusted-mode
+  "3bmd parses a list item's text again as its own document, so `- > x' is a block quote inside
+the item. Before #584 the safe mode marked a > only at the start of a line or after other
+markers, so it rendered `- > x' as an item reading &gt; x."
+  (dolist (src (list (format nil "- > quoted~%")
+                     (format nil "- a~%    > b~%")
+                     (format nil "> - > x~%")
+                     (format nil "1. > one~%")
+                     (format nil "- a~%~%    > b~%")
+                     (format nil "- a > b~%")))
+    (destructuring-bind (safe trusted) (%safe-and-trusted src)
+      (is (string= trusted safe) "~S: the safe mode gave ~S, the trusted mode ~S" src safe trusted)))
+  (let ((html (md:render (format nil "- > quoted~%"))))
+    (is (search "<li><blockquote>" html) "got ~S" html))
+  (let ((html (md:render (format nil "- a~%    > b~%"))))
+    (is (search "<blockquote>" html) "a quote on an item's continuation line: ~S" html))
+  (let ((html (md:render (format nil "> - > x~%"))))
+    (is (= 2 (%count-of "<blockquote>" html)) "a quote in an item in a quote: ~S" html))
+  (let ((html (md:render (format nil "- a > b~%"))))
+    (is (null (search "<blockquote>" html)) "a > after an item's first word is text: ~S" html)
+    (is (search "<li>a &gt; b</li>" html) "got ~S" html))
+  (let ((html (md:render (format nil "- > <b>x</b> & y~%"))))
+    (is (search "<li><blockquote>" html) "got ~S" html)
+    (is (search "&lt;b&gt;x&lt;/b&gt; &amp; y" html) "raw HTML in the quote is text: ~S" html)
+    (is (null (search "<b>" html)))))
+
 (test a-placeholder-character-in-the-source-does-not-become-a-bracket
   "The safe mode stands U+FDD0 and U+FDD1 in for < and > while 3bmd parses. One already in the
 source is replaced with U+FFFD, so it cannot turn into a bracket."

@@ -52,10 +52,17 @@
 
 (defun octets (text) (sb-ext:string-to-octets text :external-format :utf-8))
 
+(defparameter +no-git-maintenance+ '("-c" "maintenance.auto=false" "-c" "gc.auto=0")
+  "Options GIT-CLI passes to every git command, so a commit or merge starts no automatic
+maintenance. Those commands start `git maintenance run --auto' detached, and it can still be
+writing into .git when WITH-DIRECTORY deletes the repository, which then fails (#579).
+gc.auto=0 does the same for git before 2.29, which ran `git gc --auto' instead.")
+
 (defun git-cli (dir &rest args)
   "What the git command prints for ARGS in DIR, less one final newline."
-  (let ((out (uiop:run-program (list* "git" "-C" (uiop:native-namestring dir)
-                                      "-c" "core.quotepath=off" args)
+  (let ((out (uiop:run-program (append (list "git" "-C" (uiop:native-namestring dir)
+                                             "-c" "core.quotepath=off")
+                                       +no-git-maintenance+ args)
                                :output :string :error-output :string
                                :external-format :utf-8)))
     (string-right-trim '(#\Newline) out)))
@@ -329,6 +336,33 @@ check. CONTROL: without the copy loaded first, the load succeeds."
 (defun git-commit-cli (dir message)
   (git-cli dir "-c" "user.name=Aion Test" "-c" "user.email=aion@example.invalid"
            "commit" "-q" "-m" message))
+
+(test a-commit-made-through-git-cli-starts-no-maintenance
+  ;; The repository's own config makes automatic maintenance repack on every commit, before
+  ;; the commit returns, so a pack afterwards means GIT-CLI let git start maintenance (#579).
+  ;; A plain `git commit' in a second repository shows this git does repack on that config.
+  (flet ((configure (dir)
+           (ensure-directories-exist dir)
+           (git-cli dir "init" "-q")
+           (dolist (kv '(("commit.gpgsign" "false") ("maintenance.auto" "true")
+                         ("maintenance.geometric-repack.auto" "-1")
+                         ("maintenance.autoDetach" "false") ("gc.autoDetach" "false")))
+             (git-cli dir "config" (first kv) (second kv))))
+         (packs (dir) (length (directory (merge-pathnames ".git/objects/pack/*.pack" dir)))))
+    (with-directory (plain)
+      (with-directory (dir)
+        (configure plain)
+        (configure dir)
+        (uiop:run-program (list "git" "-C" (uiop:native-namestring plain)
+                                "-c" "user.name=Aion Test" "-c" "user.email=aion@example.invalid"
+                                "commit" "-q" "--allow-empty" "-m" "plain"))
+        (if (/= 1 (packs plain))
+            (skip "this git does not repack when maintenance.geometric-repack.auto is -1")
+            (progn
+              (git-cli dir "-c" "user.name=Aion Test" "-c" "user.email=aion@example.invalid"
+                       "commit" "-q" "--allow-empty" "-m" "fixture")
+              (is (zerop (packs dir))
+                  "a commit through GIT-CLI ran automatic maintenance, which repacked")))))))
 
 (test history-of-a-path-leaves-out-a-branch-a-merge-discarded
   "A side branch changes a.txt, and the merge keeps the main line's a.txt (git merge -s ours).
