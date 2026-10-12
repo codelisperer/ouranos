@@ -191,7 +191,9 @@ out."
         final
         (let ((result (%obj "resultType" "input_required"))
               (key (format nil "k~D" n)))
-          (unless (eq (getf spec :mode) :state-only)
+          (when (eq (getf spec :mode) :bad-requests)
+            (setf (gethash "inputRequests" result) "not an object"))
+          (unless (member (getf spec :mode) '(:state-only :bad-requests))
             (setf (gethash "inputRequests" result)
                   (%obj key (ecase (getf spec :mode :form)
                               (:form (%obj "method" "elicitation/create"
@@ -2481,3 +2483,13 @@ and the call fails rather than being sent again without it."
       (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
         (is-true (%not-run-p (lambda () (%call client "ask"))))
         (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again")))))
+
+(test input-requests-that-are-not-an-object-fail-the-call-at-once
+  "The hub's review of #643: an inputRequests that is not an object is malformed, and is refused at
+once, not read as no requests and sent again with the requestState up to the cap."
+  (multiple-value-bind (handler got) (%answering)
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :mode :bad-requests :rounds 9)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is-true (%not-run-p (lambda () (%call client "ask"))))
+        (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again")
+        (is (null (car got)) "the app was not asked")))))

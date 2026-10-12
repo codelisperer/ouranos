@@ -111,7 +111,8 @@ before POLL-TASKS answers it cancel; ten minutes by default, a positive integer.
 ON-ELICITATION is a function the client calls when an ordinary tools/call, resources/read or
 prompts/get answers input_required (#626): with a plist describing one elicitation request, it
 returns the action and, for :ACCEPT to a form request, the content, and the client retries the
-request with the answers. It needs ELICITATION. INPUT-ROUNDS is the most retries one call makes
+request with the answers. Nothing bounds how long the handler takes, since CALL-TIMEOUT applies to
+each request: an app that asks a person bounds the wait itself. It needs ELICITATION. INPUT-ROUNDS is the most retries one call makes
 before it fails; three by default, a positive integer. See %REQUEST-ANSWERING-INPUT."
   (name "" :type string)
   (url "" :type string)

@@ -298,9 +298,9 @@ SEVERAL POLLERS ON ONE STORE (#642). Each poller decides whether a key is new fr
 the task, which DUE-TASKS returned, and the store has no operation that records a key only if no
 other poller has. Two pollers whose polls overlap can each send :TASK-INPUT-REQUIRED for the same
 key, which the at-least-once promise above already allows, and later each answer it cancel, with
-:TASK-INPUT-EXPIRED, so the server gets the same cancel twice. That is safe for the server: both
-send the same answer, and the Tasks extension says a server SHOULD ignore a response for a key that
-is no longer outstanding, so the second has no effect. An app that wants each event once runs one
+:TASK-INPUT-EXPIRED, so the server gets the same cancel twice. Both send the same answer, and the
+Tasks extension says a server SHOULD ignore a response for a key that is no longer outstanding, so a
+server that follows it ignores the second; one that does not gets the same cancel twice. An app that wants each event once runs one
 poller per store. A store operation that claims a key could make it exact later, as an optional
 generic, so that stores written by apps keep working.
 The message, schema and URL in the event come from the server and are untrusted (#563)."
@@ -407,6 +407,13 @@ not run: a server may keep asking (server requirement 8)."
           (when (= round (connection-input-rounds connection))
             (%request-failed client "it kept asking for input after ~D answers, so the call was not completed."
                              (list (connection-input-rounds connection)) :outcome :not-run))
+          ;; inputRequests present but not an object is malformed: refused at once, rather than
+          ;; read as no requests and, with a string requestState, sent again up to the cap (the
+          ;; hub's review of #643).
+          (multiple-value-bind (requests present) (gethash "inputRequests" result)
+            (when (and present (not (hash-table-p requests)))
+              (%request-failed client "its inputRequests was not an object, so the call could not be answered."
+                               '() :outcome :not-run)))
           (let* ((entries (sort (%input-entries result) #'string< :key (lambda (e) (princ-to-string (first e)))))
                  (state (multiple-value-bind (value present) (gethash "requestState" result)
                           ;; requestState is an optional string, echoed exactly when present, so a
