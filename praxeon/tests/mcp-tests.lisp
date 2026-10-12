@@ -65,6 +65,9 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
   (tasks (make-hash-table :test #'equal)) (task-count 0) (cancels '())
   ;; Each tasks/update the client sent (#563), as (taskId . inputResponses), newest first.
   (updates '())
+  ;; Ordinary calls that ask for input (#626): the params of each call to an asking tool,
+  ;; resource or prompt, newest first, and how many calls each has had.
+  (asked '()) (ask-counts (make-hash-table :test #'equal))
   (lock (sb-thread:make-mutex)))
 
 (defun %obj (&rest kv)
@@ -176,6 +179,38 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
                                                                     "params" (%obj "maxTokens" 10))
                                                           "r" (%obj "method" "made/up" "params" (%obj))))))))))
 
+(defun %ask-result (fake name params spec final)
+  "For an ordinary call that asks for input (#626): the first (GETF SPEC :ROUNDS 1) calls to NAME
+answer input_required, and the next FINAL. SPEC's :MODE is :FORM (the default), :URL, :SAMPLING,
+:FORM-BARE, or :STATE-ONLY for a requestState and no inputRequests; :NO-STATE leaves requestState
+out."
+  (let ((n (sb-thread:with-mutex ((fake-lock fake))
+             (push params (fake-asked fake))
+             (incf (gethash name (fake-ask-counts fake) 0)))))
+    (if (> n (getf spec :rounds 1))
+        final
+        (let ((result (%obj "resultType" "input_required"))
+              (key (format nil "k~D" n)))
+          (when (eq (getf spec :mode) :bad-requests)
+            (setf (gethash "inputRequests" result) "not an object"))
+          (unless (member (getf spec :mode) '(:state-only :bad-requests))
+            (setf (gethash "inputRequests" result)
+                  (%obj key (ecase (getf spec :mode :form)
+                              (:form (%obj "method" "elicitation/create"
+                                           "params" (%obj "mode" "form" "message" "Your name?"
+                                                          "requestedSchema" (%obj "type" "object"))))
+                              (:url (%obj "method" "elicitation/create"
+                                          "params" (%obj "mode" "url" "message" "Sign"
+                                                         "url" "https://example.org/sign")))
+                              (:sampling (%obj "method" "sampling/createMessage"
+                                               "params" (%obj "maxTokens" 10)))
+                              (:form-bare (%obj "method" "elicitation/create"
+                                                "params" (%obj "mode" "form" "message" "No schema")))))))
+          (cond ((getf spec :bad-state) (setf (gethash "requestState" result) 42))
+                ((not (getf spec :no-state))
+                 (setf (gethash "requestState" result) (format nil "opaque state ~D, kept as sent" n))))
+          result))))
+
 (defun %result (fake method params)
   "The result for METHOD, or (:ERROR code text), or (:STATUS n)."
   (cond
@@ -223,6 +258,8 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
          (:slow (sleep 3) (%obj "content" #()))
          (:status-500 (list :status 500))
          (:input (%obj "resultType" "input_required" "inputRequests" (%obj)))
+         (:ask (%ask-result fake name params entry
+                            (%obj "content" (vector (%obj "type" "text" "text" "answered")))))
          ;; A compliant server makes a task only for a client that declared the extension, and
          ;; otherwise answers -32021 (Missing Required Client Capability).
          (:task (if (%declares-tasks-p params)
@@ -252,8 +289,15 @@ plist's :SCHEMA is the inputSchema, and :DO is :ECHO, :FAIL, :SLOW, :STATUS-500,
        (cond ((equal uri "file:///missing") (list :error -32602 "Resource not found"))
              ((equal uri "file:///old-missing") (list :error -32002 "Resource not found"))
              ((equal uri "file:///ask") (%obj "resultType" "input_required" "inputRequests" (%obj)))
+             ((equal uri "file:///ask-form")
+              (%ask-result fake uri params '()
+                           (%obj "contents" (vector (%obj "uri" uri "text" "answered")))))
              ((equal uri "file:///no-contents") (%obj "resultType" "complete"))
              (t (%obj "contents" (or (cdr (assoc uri (fake-contents fake) :test #'equal)) #()))))))
+    ((and (string= method "prompts/get") (equal "ask" (gethash "name" params)))
+     (%ask-result fake "ask" params '()
+                  (%obj "messages" (vector (%obj "role" "user"
+                                                 "content" (%obj "type" "text" "text" "answered"))))))
     ((string= method "prompts/get")
      (setf (fake-prompt-arguments fake) (gethash "arguments" params))
      (let ((messages (cdr (assoc (gethash "name" params) (fake-prompt-messages fake) :test #'equal))))
@@ -2305,3 +2349,147 @@ the key unsaved, and the next poll shows it again: at least once, not at most on
       (is (= 2 shown) "the key was shown again at the next poll")
       (is (equal '("k1") (mapcar #'first (mcp:task-inputs (%only-task client))))
           "and saved this time"))))
+
+;;; --- elicitation on an ordinary call (#626) ---------------------------------------------------
+
+(defun %answering (&optional (action :accept) (content (%obj "name" "Luca")))
+  "An :ON-ELICITATION handler that answers every request with ACTION and CONTENT, and a list of
+the requests it got, newest first, as its second value through the cons it closes over."
+  (let ((got (list nil)))
+    (values (lambda (request) (push request (car got)) (values action content))
+            got)))
+
+(defun %not-run-p (thunk)
+  "Whether THUNK fails as a call that was not run."
+  (handler-case (progn (funcall thunk) nil)
+    (mcp:request-failed (e) (eq :not-run (cnd:tool-error-result-outcome e)))))
+
+(test an-ordinary-call-asking-for-input-is-answered-and-sent-again
+  (multiple-value-bind (handler got) (%answering)
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is (equal "answered" (%call client "ask")))
+        (let ((first-call (second (fake-asked fake)))
+              (retry (first (fake-asked fake))))
+          (is (null (gethash "inputResponses" first-call)) "the first call carries no answers")
+          (is (null (gethash "requestState" first-call)))
+          (is (equal "accept" (gethash "action" (gethash "k1" (gethash "inputResponses" retry)))))
+          (is (equal "Luca" (gethash "name" (gethash "content" (gethash "k1" (gethash "inputResponses" retry))))))
+          (is (equal "opaque state 1, kept as sent" (gethash "requestState" retry))
+              "requestState is echoed exactly"))
+        (let ((request (first (car got))))
+          (is (equal "k1" (getf request :key)))
+          (is (eq :form (getf request :mode)))
+          (is (equal "Your name?" (getf request :message)))
+          (is (hash-table-p (getf request :schema)))
+          (is (equal "tools/call" (getf request :method))))
+        (is (= 2 (length (%by-method (requests) "tools/call"))) "one call, one retry")))))
+
+(test a-retry-carries-no-request-state-when-none-was-given
+  (multiple-value-bind (handler got) (%answering)
+    (declare (ignore got))
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :no-state t)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (%call client "ask")
+        (multiple-value-bind (value present) (gethash "requestState" (first (fake-asked fake)))
+          (declare (ignore value))
+          (is-false present "no requestState is invented"))))))
+
+(test request-state-without-input-requests-is-sent-again-without-the-handler
+  (multiple-value-bind (handler got) (%answering)
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :mode :state-only)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is (equal "answered" (%call client "ask")))
+        (is (null (car got)) "the handler was not called")
+        (is (equal "opaque state 1, kept as sent" (gethash "requestState" (first (fake-asked fake)))))
+        (multiple-value-bind (value present) (gethash "inputResponses" (first (fake-asked fake)))
+          (declare (ignore value))
+          (is-false present))))))
+
+(test several-rounds-are-answered-and-the-rounds-are-bounded
+  (multiple-value-bind (handler got) (%answering)
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :rounds 2)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is (equal "answered" (%call client "ask")))
+        (is (= 2 (length (car got))) "two rounds, two questions")
+        (is (null (gethash "k1" (gethash "inputResponses" (first (fake-asked fake)))))
+            "the second retry carries only the second round's answer"))))
+  (multiple-value-bind (handler got) (%answering)
+    (declare (ignore got))
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :rounds 9)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler :input-rounds 3)
+        (is-true (%not-run-p (lambda () (%call client "ask"))) "a server that keeps asking fails the call")
+        (is (= 4 (length (%by-method (requests) "tools/call"))) "the call and three retries")))))
+
+(test an-ordinary-call-is-not-answered-when-it-should-not-be
+  "Without a handler, a request the connection did not declare, a malformed request, or an answer
+the handler gave that cannot be sent: the call fails as not run, as before."
+  (dolist (case '((:mode :form :handler nil)
+                  (:mode :sampling)
+                  (:mode :url)
+                  (:mode :form-bare)
+                  (:mode :form :action :accept :content nil)
+                  (:mode :form :action :maybe)))
+    (multiple-value-bind (handler got) (%answering (getf case :action :accept)
+                                                   (if (member :content case) (getf case :content) (%obj "name" "x")))
+      (let ((fake (make-fake :tools (%tools (list "ask" :do :ask :mode (getf case :mode))))))
+        (with-fake (client fake :elicitation '(:form)
+                                :on-elicitation (if (and (member :handler case) (null (getf case :handler)))
+                                                    nil
+                                                    handler))
+          (is-true (%not-run-p (lambda () (%call client "ask"))) "~S" case)
+          (is (= 1 (length (%by-method (requests) "tools/call"))) "~S: nothing was sent again" case)
+          (when (member (getf case :mode) '(:sampling :url :form-bare))
+            (is (null (car got)) "~S: the app was not asked" case)))))))
+
+(test a-handler-that-signals-ends-the-call-without-a-retry
+  (let ((fake (make-fake :tools (%tools '("ask" :do :ask)))))
+    (with-fake (client fake :elicitation '(:form)
+                            :on-elicitation (lambda (request) (declare (ignore request))
+                                              (error "the app's dialog failed")))
+      (is (search "the app's dialog failed"
+                  (princ-to-string (nth-value 1 (ignore-errors (%call client "ask"))))))
+      (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again"))))
+
+(test resources-and-prompts-are-answered-the-same-way
+  (multiple-value-bind (handler got) (%answering)
+    (let ((fake (make-fake)))
+      (setf (fake-prompts fake) (list (%prompt-json "ask")))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is (equal "answered" (mcp:resource-content-text (first (mcp:read-resource client "file:///ask-form")))))
+        (is (= 1 (length (getf (list :got (car got)) :got))))
+        (let ((messages (mcp:get-prompt client (first (mcp:list-prompts client)))))
+          (is (= 1 (length messages))))
+        (is (equal '("prompts/get" "resources/read")
+                   (sort (mapcar (lambda (r) (getf r :method)) (car got)) #'string<)))))))
+
+(test on-elicitation-is-refused-without-elicitation-or-a-function
+  (dolist (bad '((:on-elicitation identity)
+                 (:elicitation (:form) :on-elicitation "not a function")
+                 (:elicitation (:form) :on-elicitation when)
+                 (:elicitation (:form) :on-elicitation identity :input-rounds 0)))
+    (is (typep (nth-value 1 (ignore-errors (apply #'mcp:make-connection :name "x" :url "http://x" bad)))
+               'error)
+        "~S was accepted" bad))
+  (is-true (mcp:make-connection :name "x" :url "http://x" :elicitation '(:form) :on-elicitation 'identity)
+           "the control: a symbol naming a function, with :elicitation, is accepted"))
+
+(test a-request-state-that-is-not-a-string-fails-the-call
+  "Copilot's review of #643: requestState is echoed exactly, so one that is not a string cannot be,
+and the call fails rather than being sent again without it."
+  (multiple-value-bind (handler got) (%answering)
+    (declare (ignore got))
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :bad-state t)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is-true (%not-run-p (lambda () (%call client "ask"))))
+        (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again")))))
+
+(test input-requests-that-are-not-an-object-fail-the-call-at-once
+  "The hub's review of #643: an inputRequests that is not an object is malformed, and is refused at
+once, not read as no requests and sent again with the requestState up to the cap."
+  (multiple-value-bind (handler got) (%answering)
+    (let ((fake (make-fake :tools (%tools '("ask" :do :ask :mode :bad-requests :rounds 9)))))
+      (with-fake (client fake :elicitation '(:form) :on-elicitation handler)
+        (is-true (%not-run-p (lambda () (%call client "ask"))))
+        (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again")
+        (is (null (car got)) "the app was not asked")))))
