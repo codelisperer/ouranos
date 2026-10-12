@@ -848,16 +848,6 @@ all -- which means the suite never ran, not that it ran and found nothing."
         (setf start (1+ p))))
     total))
 
-(defun fail-counts (output)
-  "The N of every `Fail: N' line FiveAM printed in OUTPUT, in order: one per report. A test op
-that runs more than one suite, or calls RUN! more than once, prints more than one report
-(#605)."
-  (loop for line in (uiop:split-string output :separator '(#\Newline))
-        for text = (string-trim '(#\Space #\Tab #\Return) line)
-        for n = (and (uiop:string-prefix-p "Fail: " text)
-                     (parse-integer text :start 6 :junk-allowed t))
-        when n collect n))
-
 (defun count-skips (output)
   "Sum every `Skip: N` FiveAM emits in OUTPUT; 0 if none.
 
@@ -1129,8 +1119,9 @@ let this run claim `view' while the five assertions skipped."
         (let ((n (count-checks text))
               (empty-reason (cdr (assoc s +known-empty+)))
               (redefined (ouranos-redefinitions:redefinitions-in text)))
-          ;; Survey for #605: a suite whose output holds more than one FiveAM report.
-          (let ((fails (fail-counts text)))
+          ;; A suite whose output holds more than one FiveAM report is named, with each
+          ;; report's Fail count, so a reader can see what the verdict below was judged on (#605).
+          (let ((fails (ouranos-fiveam-report:fail-counts text)))
             (when (> (length fails) 1)
               (format t "  REPORTS ~a~34t~D FiveAM reports, Fail: ~{~D~^, ~} (child exited ~a)~%"
                       s (length fails) fails code)))
@@ -1147,11 +1138,13 @@ let this run claim `view' while the five assertions skipped."
                  (format t "  empty   ~a  -- known: ~a~%" s empty-reason)
                  (progn (format t "  NO-RUN  ~a  -- 0 checks~%" s)
                         (fail "~a ran ZERO checks" s))))
-            ((and (search "Fail: 0 ( 0%)" text) (ouranos-compile-warnings:warnings-in text))
+            ;; Every report must say Fail: 0, not just one of them (#605).
+            ((and (ouranos-fiveam-report:every-report-passed-p text)
+                  (ouranos-compile-warnings:warnings-in text))
              (incf grand n)
              (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n (ouranos-compile-warnings:warnings-in text))
              (fail "~a compiled with ~D warning~:P" s (length (ouranos-compile-warnings:warnings-in text))))
-            ((search "Fail: 0 ( 0%)" text)
+            ((ouranos-fiveam-report:every-report-passed-p text)
              (incf grand n)
              (let ((skipped (count-skips text)))
                (if (zerop skipped)

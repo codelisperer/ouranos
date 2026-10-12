@@ -35,7 +35,8 @@
 
 (defpackage #:ouranos-fiveam-report
   (:use #:cl)
-  (:export #:failure-details #:skip-reasons #:rule-line-p))
+  (:export #:failure-details #:skip-reasons #:rule-line-p #:fail-counts
+           #:every-report-passed-p))
 
 (in-package #:ouranos-fiveam-report)
 
@@ -103,3 +104,24 @@ line; if that ever stops being true this needs the same treatment as the block a
         (if (zerop (length trimmed))
             (return (nreverse collected))
             (push trimmed collected))))))
+
+(defun fail-counts (output)
+  "The N of every `Fail: N' line FiveAM printed in OUTPUT, in order: one per report.
+
+A test op prints more than one report when it runs more than one suite, calls RUN! more than
+once, or calls RUN and EXPLAIN! itself (#605)."
+  (loop for line in (uiop:split-string output :separator '(#\Newline))
+        for text = (%clean line)
+        for n = (and (uiop:string-prefix-p "Fail: " text)
+                     (parse-integer text :start 6 :junk-allowed t))
+        when n collect n))
+
+(defun every-report-passed-p (output)
+  "True when OUTPUT holds at least one FiveAM report and every one of them has `Fail: 0'.
+
+The gate used to ask whether `Fail: 0 ( 0%)' appeared anywhere, which is true of an output
+holding one passing report and one failing one; with the child exiting 0, such a suite was
+reported ok (#605). An output with no `Fail:' line at all is not a pass here, and the gate
+reports it before asking this: as NO-RUN when it also has no `Did N checks.' line."
+  (let ((counts (fail-counts output)))
+    (and counts (every #'zerop counts) t)))
