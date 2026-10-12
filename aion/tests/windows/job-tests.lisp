@@ -40,6 +40,22 @@
       (%end inside)
       (%end outside))))
 
+(test a-process-already-in-a-job-can-be-put-in-a-second-one-which-ends-it
+  "#599: the app may itself run in a job, as under some CI runners and terminals, and then the
+server is in two. Windows 8 and later allow this. The process is put in an outer job first, and
+closing the inner, kill-on-close job ends it while the outer job is still open."
+  (let ((process (%start-ping)))
+    (unwind-protect
+         (w:with-handle (outer (w:make-kill-on-close-job))
+           (w:assign-process-to-job outer (sb-ext:process-pid process))
+           (let ((inner (w:make-kill-on-close-job)))
+             (is-true (w:assign-process-to-job inner (sb-ext:process-pid process)))
+             (is-true (sb-ext:process-alive-p process))
+             (w:close-handle inner))
+           (is-true (%exited-within-p process 5) "closing the inner job did not end the process")
+           (is (w:handle-valid-p outer)))
+      (%end process))))
+
 (test terminating-a-job-ends-its-process-and-leaves-the-job-open
   (let ((process (%start-ping)))
     (unwind-protect

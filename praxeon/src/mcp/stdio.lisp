@@ -81,6 +81,8 @@ thread, and :CLOSE, which closes the server's stdin."
   ;; On Windows, the job object the process is in, or NIL when it could not be put in one
   ;; (#599). Closing it ends the process and every process it started.
   (job nil)
+  ;; On Windows, the thread that closes JOB when the process exits, whatever ends it.
+  job-watcher
   reader
   writer
   ;; Counted rather than logged one by one; logged when the server's output ends. A dropped
@@ -93,6 +95,24 @@ thread, and :CLOSE, which closes the server's stdin."
   (late 0 :type sb-ext:word))
 
 (defun %child-pid (child) (sb-ext:process-pid (child-process child)))
+
+#+win32
+(defun %close-job (child)
+  "Close CHILD's job object, once, which ends every process still in it. Taken from the slot
+under the child's lock, because the job watcher and %FINISH-CHILD can both get here."
+  (let ((job (sb-thread:with-mutex ((child-lock child))
+               (shiftf (child-job child) nil))))
+    (when job (ignore-errors (aion/windows:close-handle job)))))
+
+#+win32
+(defun %watch-job (child)
+  "Close CHILD's job when its process exits. A server that exits by itself is otherwise noticed
+only at the next request, at CLOSE-CLIENT or at the image's exit, and the processes it started
+would run until then (#599). Its output may never end, because a process it started can hold
+its stdout, so the process itself is polled."
+  (loop while (and (child-job child) (sb-ext:process-alive-p (child-process child)))
+        do (sleep 0.25))
+  (%close-job child))
 
 (defun %release (child party)
   "Record that PARTY, one of :READER, :WRITER and :FINISH, is done with CHILD's process, and close
@@ -280,7 +300,14 @@ environment for :INHERIT."
     (let ((pid (sb-ext:process-pid process)))
       ;; SBCL holds the process's handle until the process is closed, so the pid cannot have
       ;; been given to another process yet.
-      (handler-case (setf (child-job child) (funcall *child-job-function* pid))
+      (handler-case (progn
+                      (setf (child-job child) (funcall *child-job-function* pid))
+                      (setf (child-job-watcher child)
+                            ;; THREAD-LIFETIME: scoped -- it polls this child's process and ends
+                            ;; once the process has exited or the job is closed; %FINISH-CHILD
+                            ;; joins it.
+                            (sb-thread:make-thread (lambda () (%watch-job child))
+                                                   :name "praxeon/mcp stdio job watcher")))
         ;; Any error, so that a server already started is not left running without a CHILD.
         (error (e)
           (log:warn "praxeon/mcp: local server is not in a job object, so a process it starts can outlive it"
@@ -340,8 +367,11 @@ is not in a job, or whose job cannot be terminated, is ended alone with Terminat
                  (sb-ext:process-kill process signal :process-group)
                  (sb-ext:process-kill process signal)))
     #+win32 (progn signal
-                   (unless (and (child-job child)
-                                (ignore-errors (aion/windows:terminate-job (child-job child))))
+                   ;; Under the lock, so the job watcher cannot close the job between reading the
+                   ;; slot and terminating it; a closed handle's value may name another object.
+                   (unless (sb-thread:with-mutex ((child-lock child))
+                             (and (child-job child)
+                                  (ignore-errors (aion/windows:terminate-job (child-job child)))))
                      (ignore-errors (sb-ext:process-kill process +sigkill+))))))
 
 (defun %wait-for-exit (child seconds)
@@ -367,8 +397,9 @@ that it releases the pipes; no process is signalled for it."
       (%wait-for-exit child 2))
     ;; Closing the job ends the processes the server started, which may hold its pipes, before
     ;; the threads reading and writing those pipes are joined (#599).
-    #+win32 (when (child-job child)
-              (ignore-errors (aion/windows:close-handle (child-job child))))
+    #+win32 (progn (%close-job child)
+                   (when (child-job-watcher child)
+                     (sb-thread:join-thread (child-job-watcher child) :default nil :timeout 2)))
     (%enqueue child :close)
     (when (eq :timeout (sb-thread:join-thread (child-writer child) :default :timeout :timeout 2))
       ;; The writer is blocked on a stdin that a process the server started still holds and

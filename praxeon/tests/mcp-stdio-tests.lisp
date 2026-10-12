@@ -738,34 +738,53 @@ it started as well."
       (%end-ping pid))))
 
 #+win32
+(test a-local-server-that-exits-by-itself-takes-the-process-it-started-with-it
+  "A server that exits with no request after it and no CLOSE-CLIENT has its job closed by the
+job watcher, which ends the process it started (Copilot's review of #648)."
+  (let ((pid nil))
+    (unwind-protect
+         (with-stdio-client (client record "grandchild" :call-timeout 3)
+           (setf pid (%start-grandchild client))
+           (%failure-of (lambda () (mcp:call-tool client (%tool-named client "exit") nil)))
+           (is (= 1 (%recorded-count record "exiting")))
+           (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid))
+      (%end-ping pid))))
+
+#+win32
 (test a-local-server-not-in-a-job-is-ended-alone-and-the-failure-is-logged
-  "The control for the two tests above, run in both of their modes, and the fallback: when the
-server cannot be put in a job, a warning names its pid and the Win32 error code, the server is
-ended by its closed stdin or with TerminateProcess, and the process it started keeps running."
-  (dolist (mode '("grandchild" "grandchild-ignore-eof"))
-    (let ((pid nil)
-          (server-pid nil)
-          (log (make-string-output-stream))
-          (mcp:*stdio-close-seconds* 1)
-          (praxeon/mcp::*child-job-function*
-            (lambda (pid)
-              (declare (ignore pid))
-              (error 'aion/windows:win32-error :code 5 :message "Access is denied."
-                                               :operation :assign-process-to-job-object))))
-      (unwind-protect
-           (progn
-             (with-captured-log (log)
-               (with-stdio-client (client record mode)
-                 (setf pid (%start-grandchild client))
-                 (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
-                   (setf server-pid (sb-ext:process-pid process))
-                   (is (null (praxeon/mcp::child-job (praxeon/mcp::client-child client))))
-                   (mcp:close-client client)
-                   (is-false (sb-ext:process-alive-p process)))))
-             (is-true (%ping-running-p pid) "in ~A, the ping ~D ended without a job to end it"
-                      mode pid)
-             (let ((logged (get-output-stream-string log)))
-               (is-true (search "not in a job object" logged) "the log said ~S" logged)
-               (is-true (search (format nil "pid=~D" server-pid) logged) "the log said ~S" logged)
-               (is-true (search "code=5" logged) "the log said ~S" logged)))
-        (%end-ping pid)))))
+  "The control for the three tests above, run in each of their cases, and the fallback: when the
+server cannot be put in a job, a warning names its pid and the Win32 error code, the server ends
+by its closed stdin, by TerminateProcess or by itself, and the process it started keeps running."
+  (dolist (case '(("grandchild" :close) ("grandchild-ignore-eof" :close) ("grandchild" :exit)))
+    (destructuring-bind (mode how) case
+      (let ((pid nil)
+            (server-pid nil)
+            (log (make-string-output-stream))
+            (mcp:*stdio-close-seconds* 1)
+            (praxeon/mcp::*child-job-function*
+              (lambda (pid)
+                (declare (ignore pid))
+                (error 'aion/windows:win32-error :code 5 :message "Access is denied."
+                                                 :operation :assign-process-to-job-object))))
+        (unwind-protect
+             (progn
+               (with-captured-log (log)
+                 (with-stdio-client (client record mode :call-timeout 3)
+                   (setf pid (%start-grandchild client))
+                   (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
+                     (setf server-pid (sb-ext:process-pid process))
+                     (is (null (praxeon/mcp::child-job (praxeon/mcp::client-child client))))
+                     (ecase how
+                       (:close (mcp:close-client client))
+                       (:exit (%failure-of (lambda ()
+                                             (mcp:call-tool client (%tool-named client "exit") nil)))
+                        ;; As long as the job watcher would take to close a job.
+                        (sleep 1)))
+                     (is-false (sb-ext:process-alive-p process))
+                     (is-true (%ping-running-p pid) "in ~A ~A, the ping ~D ended without a job to end it"
+                              mode how pid))))
+               (let ((logged (get-output-stream-string log)))
+                 (is-true (search "not in a job object" logged) "the log said ~S" logged)
+                 (is-true (search (format nil "pid=~D" server-pid) logged) "the log said ~S" logged)
+                 (is-true (search "code=5" logged) "the log said ~S" logged)))
+          (%end-ping pid))))))

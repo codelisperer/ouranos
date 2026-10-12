@@ -211,7 +211,8 @@ its tag.
   (#599). Each server started for a `:command` connection is put in a job object that ends every
   process in it when the job is closed. `close-client`, a server that exits by itself, and the
   image's exit therefore also end what the server started, such as the program behind an `npx`
-  or `.cmd` launcher. A server that cannot be put in a job runs anyway, and the warning
+  or `.cmd` launcher. A server that exits by itself has its job closed within about 0.25
+  seconds, by a thread that checks whether the server process is still running. A server that cannot be put in a job runs anyway, and the warning
   "local server is not in a job object" names its pid and the Win32 error code; such a server is
   ended alone with `TerminateProcess`, as before. A server ended through its job exits with
   code 1. `praxeon/mcp` now loads `aion/windows` on Windows.
