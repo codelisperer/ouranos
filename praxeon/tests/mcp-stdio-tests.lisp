@@ -503,6 +503,58 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
       (is (= 2 (%recorded-count record "start")))
       (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15)))))
 
+#-win32
+(test a-write-blocked-on-an-exited-server-is-ended-and-its-pipes-closed
+  "A server exits while a process it started holds its stdin and reads nothing, and a long
+request is still being written to it. When the client finishes that server, it ends the
+blocked writer thread, so the pipes are closed once, right then, and are not kept until the
+image exits (#601). The server started next gets only whole JSON lines. The shell holding the
+old stdin is not signalled, and can outlive the test by up to 6 seconds. The test checks that
+the old server was finished less than 5 seconds after the exit call, before that shell reads its
+stdin; on a run slower than that the writer could finish by itself, and the test fails instead
+of passing without having ended it."
+  (with-stdio-client (client record "hold-stdin" :timeout 3 :call-timeout 1)
+    (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
+           (echo (%tool-named client "echo"))
+           (old (praxeon/mcp::client-child client))
+           (in (sb-ext:process-input (praxeon/mcp::child-process old)))
+           (exiting (sb-thread:make-thread
+                     ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
+                     (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
+                     :name "praxeon/mcp test exit-holding-stdin"))
+           ;; Before the server starts the shell, so the time measured below is not less than
+           ;; the time the shell has been sleeping.
+           (started (get-internal-real-time)))
+      ;; The server has read the exit call, and reads nothing more from here.
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
+      ;; About 1 MB, far more than a pipe holds, so the writer blocks.
+      (is-true (%failure-of (lambda ()
+                              (mcp:call-tool client echo
+                                             (%text (make-string 1000000 :initial-element #\x))))))
+      (is-true (sb-thread:join-thread exiting))
+      ;; Both calls can time out before the server exits, so wait until its output has ended.
+      (is-true (%wait-for (lambda () (praxeon/mcp::child-exited old))))
+      ;; This finishes the old server, then starts the next one. The shell has not read yet.
+      (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+      ;; The shell reads its stdin 6 seconds after it starts, and the writer would then finish
+      ;; without being ended. Under 5 seconds, the checks below are about the ending.
+      (let ((seconds (/ (- (get-internal-real-time) started) internal-time-units-per-second)))
+        (is (< seconds 5) "the old server was finished ~,1F seconds after the exit call" seconds))
+      (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
+      (is-false (open-stream-p in))
+      (is (= 1 (praxeon/mcp::child-closes old)))
+      (is (equal "later" (mcp:call-tool client echo (%text "later"))))
+      (is (= 2 (%recorded-count record "start")))
+      (let* ((lines (%recorded record))
+             (after (rest (member "start" (rest (member "start" lines :test #'equal))
+                                  :test #'equal)))
+             (bad (loop for line in after
+                        when (and (uiop:string-prefix-p "in " line)
+                                  (not (hash-table-p (ignore-errors
+                                                      (jzon:parse (subseq line 3))))))
+                          collect (subseq line 0 (min 60 (length line))))))
+        (is (null bad) "the second server read ~S" bad)))))
+
 (test with-restart-nil-a-local-server-that-exits-stays-down
   "With :RESTART NIL, every request after the server exits fails as not run, and nothing is
 started again. The client then has no era, since no server is running (#610)."
@@ -539,6 +591,16 @@ as not run."
     (is (= 0 (%recorded-count record "SIGTERM")))
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))))
+
+(test after-close-client-the-client-has-no-era
+  "CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the server that is running, so after
+CLOSE-CLIENT both are NIL (#601)."
+  (with-stdio-client (client record "modern")
+    (mcp:list-tools client)
+    (is (eq :modern (mcp:client-era client)))
+    (mcp:close-client client)
+    (is (null (mcp:client-era client)))
+    (is (null (mcp:client-protocol-version client)))))
 
 (test a-local-server-that-ignores-its-closed-stdin-is-ended
   "A server still running *STDIO-CLOSE-SECONDS* after its stdin closed is sent SIGTERM, to its
