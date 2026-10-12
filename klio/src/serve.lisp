@@ -99,10 +99,91 @@ the tag's slug."
         (:li (:a :href (format nil "/~A" (document-key d))
                  (or (content-meta-title (document-meta d)) (document-key d)))))))))
 
+(defun default-collection-theme (site name documents)
+  "The default listing page for one collection: its documents, by title, in the collection's
+order. NAME is the collection's name (#557)."
+  (declare (ignore site))
+  (%page-html
+   name
+   (spin:with-html-string
+     (:h1 name)
+     (:ul
+      (dolist (d documents)
+        (:li (:a :href (format nil "/~A" (document-key d))
+                 (or (content-meta-title (document-meta d)) (document-key d)))))))))
+
+(defun %safe-collection-name-p (name)
+  "Whether NAME, without slashes at either end, is safe as both a URL path and a path under the
+export directory: segments separated by `/', each non-empty, made only of letters, digits, `.',
+`-' and `_', and not starting with `.' or `_', which also rules out `.' and `..'.
+
+Copilot's review of #619: `../outside' would have been written outside the export directory, and
+characters such as `*', `:' or a backslash mean something to a Lisp or Windows pathname. A
+segment starting with `_' or `.' is one CONTENT-FILES skips (#557), so its listing would always
+be empty."
+  (let ((segments (uiop:split-string name :separator "/")))
+    (and segments
+         (every (lambda (segment)
+                  (and (plusp (length segment))
+                       (not (find (char segment 0) "._"))
+                       (every (lambda (c) (or (alphanumericp c) (find c ".-_"))) segment)))
+                segments))))
+
+(defun %at-or-under-p (path base)
+  "Whether PATH is BASE or lies under it, as `/'-separated paths, without regard to case: on
+Windows and macOS `Tags/' and `tags/' are one directory, and refusing the pair on Linux too
+costs nothing."
+  (or (string-equal path base)
+      (and (> (length path) (length base))
+           (string-equal base path :end2 (length base))
+           (char= #\/ (char path (length base))))))
+
+(defun %check-collections (collections tags-prefix page-segment)
+  "Signal an error unless COLLECTIONS is a list of entries MAKE-SITE-OPTIONS accepts: each a safe
+name (%SAFE-COLLECTION-NAME-P), or a name with only :SORT-BY, :ORDER and :THEN-BY, no name given
+twice, and no name whose listing a route resolved first would hide or replace. A name at or under
+the tags prefix would replace a tag's page (`tags/lisp'); one at or under the page segment would
+be taken for the index's pages (`page/2'); and one at or under another listed collection's page
+segment (`roles/page') would be taken for that collection's pages."
+  (unless (listp collections)
+    (error "klio: :collections must be a list of collection names, got ~S" collections))
+  (let ((names '()))
+    (dolist (entry collections)
+      (let ((name (if (consp entry) (first entry) entry)))
+        (unless (and (stringp name) (plusp (length (string-trim "/" name))))
+          (error "klio: a :collections entry must be a name or (name :sort-by ...), got ~S" entry))
+        (when (consp entry)
+          (let ((options (rest entry)))
+            (unless (and (evenp (length options))
+                         (loop for (k nil) on options by #'cddr
+                               always (member k '(:sort-by :order :then-by))))
+              (error "klio: the :collections entry ~S may give only :sort-by, :order and :then-by"
+                     entry))))
+        (let ((name (string-trim "/" name)))
+          (unless (%safe-collection-name-p name)
+            (error "klio: the collection name ~S must be /-separated segments of letters, digits, . - and _, none empty or starting with . or _"
+                   name))
+          (when (member name names :test #'string-equal)
+            (error "klio: the collection ~S is named twice in :collections" name))
+          (push name names))))
+    (dolist (name names)
+      (let ((clash (or (and (%at-or-under-p name (string-trim "/" tags-prefix)) "the tag pages")
+                       (and (%at-or-under-p name page-segment) "the index's pages")
+                       (let ((other (find-if
+                                     (lambda (o)
+                                       (%at-or-under-p name (format nil "~A/~A" o page-segment)))
+                                     names)))
+                         (and other (format nil "the pages of the collection ~S" other))))))
+        (when clash
+          (error "klio: the collection ~S would share its listing's URL with ~A; rename it"
+                 name clash))))))
+
 (defun make-site-options (&key (page-theme #'default-page-theme)
                                (index-theme #'default-index-theme)
                                (not-found #'default-not-found)
                                (tag-theme #'default-tag-theme)
+                               (collection-theme #'default-collection-theme)
+                               collections
                                per-page base-url feed-title feed-collection (feed-limit 20)
                                (tags-prefix "tags") (page-segment "page")
                                (rss-path "feed.xml") (atom-path "atom.xml")
@@ -110,11 +191,20 @@ the tag's slug."
   "The options SITE-APP and EXPORT-SITE share; each takes these as keyword arguments.
 
 The themes are functions of the site and what they render: PAGE-THEME (site document),
-INDEX-THEME (site documents), TAG-THEME (site tag documents), NOT-FOUND (site key). A listing
-theme runs with *PAGE-NUMBER* and *PAGE-COUNT* bound, and PAGE-URL and TAG-URL give it links.
+INDEX-THEME (site documents), TAG-THEME (site tag documents), COLLECTION-THEME (site name
+documents), NOT-FOUND (site key). A listing theme runs with *PAGE-NUMBER* and *PAGE-COUNT*
+bound, and PAGE-URL, TAG-URL and COLLECTION-URL give it links.
 
-PER-PAGE, when given, paginates the index and each tag's listing: page 1 is the listing's own
-URL, page N adds PAGE-SEGMENT/N/. Without it, a listing is one page.
+COLLECTIONS turns on a listing page for each collection it names, at /<name>/ (#557). Without
+it, a collection has no listing page of its own. An entry is a name, \"roles\", or a name with
+the ordering COLLECTION takes, (\"roles\" :sort-by \"start\" :order :descending :then-by
+\"title\"). A name is `/'-separated segments of letters, digits, `.', `-' and `_', none empty or
+starting with `.' or `_' (%SAFE-COLLECTION-NAME-P). Any other name is an error, and so is a name
+at or under the tags prefix, the page segment or another listed collection's page segment, or a
+name given twice, compared without regard to case (%CHECK-COLLECTIONS).
+
+PER-PAGE, when given, paginates the index, each tag's listing and each collection's listing:
+page 1 is the listing's own URL, page N adds PAGE-SEGMENT/N/. Without it, a listing is one page.
 
 BASE-URL, such as \"https://example.org\", turns the feeds on. RSS and Atom need absolute
 links, so without it there are no feeds. FEED-COLLECTION limits them to one collection, such as
@@ -127,8 +217,10 @@ readable document's Markdown body; front-matter `search: false' leaves a documen
   (check-type per-page (or null (integer 1)))
   (check-type search-path (or null string))
   (check-type feed-limit (integer 1))
+  (%check-collections collections tags-prefix page-segment)
   (%make-site-options :page-theme page-theme :index-theme index-theme :not-found not-found
-                      :tag-theme tag-theme :per-page per-page :base-url base-url
+                      :tag-theme tag-theme :collection-theme collection-theme
+                      :collections (copy-list collections) :per-page per-page :base-url base-url
                       :feed-title feed-title :feed-collection feed-collection
                       :feed-limit feed-limit :tags-prefix tags-prefix :page-segment page-segment
                       :rss-path rss-path :atom-path atom-path :search-path search-path))

@@ -155,6 +155,18 @@ its tag.
 
 ### Added
 
+- **klio: a site can give a collection its own listing page, with `:collections`** (#557). Each
+  collection named there gets a listing at `/<name>/`, paginated with `:per-page`, in the order
+  the entry gives (`("roles" :sort-by "start" :order :descending :then-by "title")`), rendered by
+  `:collection-theme` (default `klio:default-collection-theme`), with `klio:collection-url` for
+  links. Off by default: without `:collections` nothing changes, and a hand-written listing
+  document keeps working. A name is `/`-separated segments of letters, digits, `.`, `-` and `_`,
+  none empty or starting with `.` or `_`. `make-site-options` refuses any other name, a name at
+  or under the tag prefix, the page segment or another listed collection's page segment
+  (`tags/lisp`, `page/2`), and a name given twice, without regard to case. `export-site` refuses
+  two pages that cannot both be written, before anything is written: a listing and a document
+  keyed `<name>/index`, or a collection named `one.html` and the document `one`.
+
 - **klio: `export-site` takes `:assets`, a directory of the site's static files that is copied
   into the export** (#557). Every file is copied at its path relative to that directory, after
   `:clean t` has emptied the export, so a site no longer re-copies its stylesheet and images

@@ -133,6 +133,27 @@ to case, because the file systems of Windows and macOS would make them one."
                            (char= #\/ (char x (length y))))))
     (or (string-equal a b) (under a b) (under b a))))
 
+(defun %colliding-paths (paths)
+  "The first two of PATHS, export-relative and `/'-separated, that cannot both be written, as a
+list, or NIL. Two collide when %PATHS-COLLIDE-P says so: the same path, or one under the other.
+Checked through a table of each path and each directory it needs, so a site's thousands of
+pages cost one pass, not every pair."
+  (let ((files (make-hash-table :test #'equalp))
+        (directories (make-hash-table :test #'equalp)))
+    (dolist (path paths)
+      (let ((other (gethash path files)))
+        (when other (return-from %colliding-paths (list other path))))
+      (let ((other (gethash path directories)))
+        (when other (return-from %colliding-paths (list path other))))
+      (loop for slash = (position #\/ path) then (position #\/ path :start (1+ slash))
+            while slash
+            do (let* ((dir (subseq path 0 slash))
+                      (other (gethash dir files)))
+                 (when other (return-from %colliding-paths (list other path)))
+                 (setf (gethash dir directories) path)))
+      (setf (gethash path files) path))
+    nil))
+
 (defun %resolved-directory (directory)
   "DIRECTORY's resolved name, also when it does not exist yet: the nearest existing ancestor is
 resolved and the rest of the name appended.
@@ -195,14 +216,18 @@ signals EXPORT-REFUSED when ASSETS is not a directory, when it holds or is insid
 SITE-APP takes (MAKE-SITE-OPTIONS). Returns the list of files written, relative to DIRECTORY.
 
 Writes 404.html and every page RESOLVE-PATH answers: the index and its pages, each tag's
-listing and its pages, the feeds when BASE-URL is given, the search index unless SEARCH-PATH is
-NIL, and one file per readable document. A listing at /tags/x/ is written to tags/x/index.html;
-see the file header for LAYOUT, which applies to documents. NOW is the time visibility is judged
+listing and its pages, each listed collection's listing and its pages (:COLLECTIONS), the feeds
+when BASE-URL is given, the search index unless SEARCH-PATH is NIL, and one file per readable
+document. A listing at /tags/x/ is written to tags/x/index.html; see the file header for LAYOUT,
+which applies to documents. NOW is the time visibility is judged
 at, so a scheduled document is exported only once its time has come; NIL means now.
 
 Nothing is written unless every page renders. DIRECTORY must be absent or empty, or CLEAN must
 be true, in which case its contents are deleted first; otherwise EXPORT-REFUSED is signalled.
 Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first).
+
+Two pages that would be written to one file, such as a collection's listing and a document
+keyed <name>/index, are refused with EXPORT-REFUSED before anything is written.
 
 ASSETS, a directory, is copied into DIRECTORY after it is emptied, every file at its path
 relative to ASSETS (see the file header). EXPORT-REFUSED is signalled, before anything is
@@ -230,6 +255,16 @@ is one a page is written to. The returned list names the pages, then the assets.
                                         append (list k v)))))
                    (%render-site site tree now layout)))
           (asset-files nil))
+      ;; Two pages that cannot both be written: one file, such as a collection's listing and a
+      ;; document keyed <name>/index, or a file and a directory, such as a collection named
+      ;; one.html and the document one, written to one.html (#557, Copilot's review of #619).
+      ;; Refused before anything is written, rather than one replacing the other or the export
+      ;; failing part-way.
+      (let ((clash (%colliding-paths (mapcar #'car files))))
+        (when clash
+          (error 'export-refused :directory directory
+                                 :reason (format nil "the pages written to ~A and ~A cannot both be written"
+                                                 (first clash) (second clash)))))
       (when assets
         (setf asset-files (%check-assets assets directory (mapcar #'car files))))
       ;; AION/FS:DELETE-TREE, which removes a link inside the directory as a link and refuses a
