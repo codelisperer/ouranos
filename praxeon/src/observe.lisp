@@ -855,14 +855,26 @@ with the closing save before the first write (%CLOSE-OPEN-WINDOWS-BEFORE)."
                                                            :accept (observer-accept observer)
                                                            :thread thread))
                    ;; PROMOTION RUNS OVER EVERY CURRENT OBSERVATION OF THE WINDOW, not only this
-                   ;; attempt's writes, so an attempt that failed during promotion is finished by
-                   ;; the next one. %MAYBE-PROMOTE leaves alone a fact the subject already holds,
-                   ;; so running it again changes nothing that was done.
+                   ;; attempt's writes, so on a store without transactions an attempt that failed
+                   ;; during promotion, whose thread observations stayed written, is finished by
+                   ;; the next one. With transactions a failed promotion rolls the window's thread
+                   ;; observations back too, and the next attempt writes them again (the hub's
+                   ;; review of #645). %MAYBE-PROMOTE leaves alone a fact the subject already
+                   ;; holds, so running it again changes nothing that was done.
                    (dolist (o (%window-observations store subject thread start end))
                      (%maybe-promote observer o provenance)))))
           (if atomic
               (multiple-value-bind (written mark skipped)
-                  (mem:with-store-transaction (store :subject subject :thread thread)
+                  (mem:with-store-transaction
+                      (store :subject subject :thread thread
+                             ;; Every text the transaction can write: the proposals, and the
+                             ;; window's earlier observations that promotion may copy into the
+                             ;; subject's facts, so a store embeds them before it takes its lock.
+                             :contents (append (mapcar #'distil:proposal-content
+                                                       (distil:distillation-proposals fresh))
+                                               (mapcar #'mem:observation-content
+                                                       (%window-observations store subject thread
+                                                                             start end))))
                     (let ((written (write-window)))
                       (multiple-value-bind (mark skipped) (%commit-progress observer progress-after)
                         (values written mark skipped))))

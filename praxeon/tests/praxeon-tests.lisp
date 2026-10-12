@@ -7989,3 +7989,69 @@ CALL-WITH-STORE-TRANSACTION calls its thunk and returns its values (#529)."
   (let ((store (make-instance 'reader-only-store)))
     (is (null (mem:store-transactions-p store)))
     (is (equal '(1 2) (multiple-value-list (mem:with-store-transaction (store) (values 1 2)))))))
+
+;;; THE PROMOTION-FAILURE STORES ALSO HAVE NO TRANSACTIONS, so their tests above keep checking the
+;;; earlier path, where a thread observation stays written and the next attempt finishes its
+;;; promotion (the hub's review of #645). The versions below check the transaction path.
+(defmethod mem:store-transactions-p ((store promotion-fails-store)) nil)
+(defmethod mem:store-transactions-p ((store promotion-outage-store)) nil)
+
+(defclass transacted-promotion-fails-store (promotion-fails-store) ()
+  (:documentation "PROMOTION-FAILS-STORE with the in-memory store's transactions."))
+(defmethod mem:store-transactions-p ((store transacted-promotion-fails-store)) t)
+
+(defclass transacted-promotion-outage-store (promotion-outage-store) ()
+  (:documentation "PROMOTION-OUTAGE-STORE with the in-memory store's transactions."))
+(defmethod mem:store-transactions-p ((store transacted-promotion-outage-store)) t)
+
+(test with-transactions-a-promotion-that-fails-rolls-back-the-window-and-the-retry-writes-it
+  "The window's thread observation is written, then its promotion fails. With transactions the
+observation is rolled back with it, so the retry writes it again, once, and promotes it (#529;
+the hub's review of #645)."
+  (let* ((store (make-instance 'transacted-promotion-fails-store))
+         (reply (%call-with (%ob "Is vegetarian." "preference")))
+         (observer (obs:make-observer (%provider-returning reply reply) store "member-1" "conv-7"
+                                      :step (%step-for 6) :retry-delay 0 :promote (constantly t))))
+    (is (obs::observer-transactions observer) "precondition: the store has transactions")
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (obs:observer-failures observer)))
+    (is (equal '("Is vegetarian.") (%thread-contents store)))
+    (is (= 1 (length (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t)))
+        "one thread observation was ever kept")
+    (is (equal '("Is vegetarian.") (%facts store)))))
+
+(test with-transactions-a-promotion-that-keeps-failing-leaves-no-thread-observation
+  "Promotion fails on both attempts at the window. With transactions each attempt's thread
+observation is rolled back with it, so the window is skipped with nothing written to the thread,
+where without transactions the thread observation was kept (the behaviour change the CHANGELOG
+records). At the next turn, with the store back, the window is written once and promoted."
+  (let* ((store (make-instance 'transacted-promotion-outage-store :failures 2))
+         (reply (%call-with (%ob +allergy+ "fact")))
+         (observer (%allergy-observer store (%provider-returning reply reply reply))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (is (null (%thread-contents store)) "nothing in the thread")
+    (is (null (%facts store)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal (list +allergy+) (%thread-contents store)))
+    (is (equal (list +allergy+) (%facts store)) "promoted once the store is back")))
+
+(test a-transaction-left-by-throw-or-return-from-is-rolled-back
+  "A transaction left by THROW, or by RETURN-FROM, is rolled back as one left by an error is
+(the hub's review of #645)."
+  (let ((store (mem:make-in-memory-store)))
+    (is (eq :thrown (catch 'out
+                      (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                        (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                                      :provenance (mem:make-provenance "conv-7" 1))
+                        (throw 'out :thrown)))))
+    (is (null (%thread-contents store)) "after THROW")
+    (is (eq :returned (block out
+                        (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                          (mem:remember store "member-1" "Has a cat." :thread "conv-7"
+                                        :provenance (mem:make-provenance "conv-7" 1))
+                          (return-from out :returned)))))
+    (is (null (%thread-contents store)) "after RETURN-FROM")))

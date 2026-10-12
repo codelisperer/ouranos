@@ -245,22 +245,25 @@ returns it. Replaces what was recorded. Returns MARK."))
 effect together or not at all (#529). The default method returns NIL.")
   (:method ((store memory-store)) nil))
 
-(defgeneric call-with-store-transaction (store thunk &key subject thread)
+(defgeneric call-with-store-transaction (store thunk &key subject thread contents)
   (:documentation "Call THUNK so that STORE's writes inside it all take effect, or, when THUNK
 exits non-locally, none do (#529). Returns THUNK's values. SUBJECT and THREAD, when given, name
 the only subject and thread THUNK writes, which a store may use to keep less for a rollback.
+CONTENTS, when given, are the texts THUNK will write, which a store may prepare before it takes
+its lock, as the SQL store computes their embeddings (the hub's review of #645).
 
 THUNK MAY CALL BACK INTO THE STORE, as an app's :PROMOTE function reading the subject's facts
 does, on the same thread: a store that implements this holds a recursive lock, or none (the
 hub's review of #529's design). The default method calls THUNK and nothing more, which is right
 for a store whose STORE-TRANSACTIONS-P is NIL.")
-  (:method ((store memory-store) thunk &key subject thread)
-    (declare (ignore subject thread))
+  (:method ((store memory-store) thunk &key subject thread contents)
+    (declare (ignore subject thread contents))
     (funcall thunk)))
 
-(defmacro with-store-transaction ((store &key subject thread) &body body)
+(defmacro with-store-transaction ((store &key subject thread contents) &body body)
   "Run BODY as CALL-WITH-STORE-TRANSACTION's thunk on STORE (#529)."
-  `(call-with-store-transaction ,store (lambda () ,@body) :subject ,subject :thread ,thread))
+  `(call-with-store-transaction ,store (lambda () ,@body)
+                                :subject ,subject :thread ,thread :contents ,contents))
 
 ;;; RECALL NEVER MIXES THE SCOPES (#317). :ALL is for OBSERVATIONS-OF, the access right; a
 ;;; recall builds a prompt, and one that mixed two conversations' observations with the subject's
@@ -524,9 +527,9 @@ whose mark is at least the last message its erased observations cited, with noth
     (let ((name (sb-mop:slot-definition-name slot)))
       (setf (slot-value to name) (slot-value from name)))))
 
-(defmethod call-with-store-transaction ((store in-memory-store) thunk &key subject thread)
+(defmethod call-with-store-transaction ((store in-memory-store) thunk &key subject thread contents)
   "Under the store's lock, keep what THUNK can change, call it, and put that back if it exits
-non-locally.
+non-locally. CONTENTS is not used: this store embeds nothing.
 
 WHAT IS KEPT, AND WHAT THAT COSTS (the hub's review of #529's design). With SUBJECT: that
 subject's observations, each copied, because SUPERSEDE changes the one it replaces, and the
@@ -534,6 +537,7 @@ progress entry for SUBJECT and THREAD. Without SUBJECT: every observation and ev
 entry. Either way the id counter. So a transaction costs a copy of one subject's observations,
 not of the store. THUNK must not write another subject's observations or another thread's
 progress when it names a SUBJECT; the observer writes only its own."
+  (declare (ignore contents))
   (bt:with-recursive-lock-held ((store-lock store))
     (let* ((observations (store-observations store))
            (progress (store-progress store))

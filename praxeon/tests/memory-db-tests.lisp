@@ -962,3 +962,36 @@ the run finishes and the fact is promoted (the hub's review of #529's design)."
         (error "the transaction fails")))
     (is (null (mem:observations-of store "member-529" :thread "conv-529")))
     (is (equal '(6 ((1 6 1))) (multiple-value-list (mem:thread-progress store "member-529" "conv-529"))))))
+
+(test a-windows-transaction-embeds-before-it-takes-the-stores-lock
+  "The observer's window proposes a fact whose embedding takes 0.6 s. The window's transaction
+embeds it before it takes the store's lock, so a read made meanwhile returns at once rather than
+waiting for the model (the hub's review of #645, as #462's supersede test)."
+  (with-store (store (make-instance 'slow-embedder))
+    (let* ((step (praxeon/prompt:messages-tokens (%chat 6)))
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Slowly moved to Lisbon.")))
+                                        store "member-645" "conv-645" :step step :retry-delay 0)))
+      (is (obs::observer-transactions observer) "precondition: the SQL store has transactions")
+      (obs:observe-turn observer (%chat 6))
+      (sleep 0.15)
+      (let ((began (get-internal-real-time)))
+        (mem:observations-of store "member-645")
+        (let ((waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))
+          (is (< waited 0.3) "the read waited ~,3F s" waited)))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (equal '("Slowly moved to Lisbon.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-645" :thread "conv-645")))))))
+
+(test a-sql-transaction-left-by-throw-or-return-from-is-rolled-back
+  (with-store (store)
+    (catch 'out
+      (mem:with-store-transaction (store :subject "member-645" :thread "conv-645")
+        (mem:remember store "member-645" "Has a dog." :thread "conv-645" :provenance (test-provenance 1 "conv-645"))
+        (throw 'out :thrown)))
+    (is (null (mem:observations-of store "member-645" :thread "conv-645")) "after THROW")
+    (block out
+      (mem:with-store-transaction (store :subject "member-645" :thread "conv-645")
+        (mem:remember store "member-645" "Has a cat." :thread "conv-645" :provenance (test-provenance 1 "conv-645"))
+        (return-from out :returned)))
+    (is (null (mem:observations-of store "member-645" :thread "conv-645")) "after RETURN-FROM")))

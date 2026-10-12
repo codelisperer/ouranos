@@ -886,7 +886,14 @@ its tag.
   worded its answer differently left a second copy. Now the failed progress write rolls the
   window's observations back, the attempt is retried, and the window is written once. Both
   stores in this tree have transactions; a store without them, such as one an app wrote itself,
-  keeps the earlier behaviour, which the observe.lisp header describes.
+  keeps the earlier behaviour, which the observe.lisp header describes. The window's embeddings
+  are computed before the transaction takes the store's lock.
+  - **A promotion that fails now loses the window's thread observations with it.** The
+    transaction covers promotion, so when the app's `:promote` or `:promote-accept`, or the
+    store's write of the promoted fact, signals, the window's thread observations are rolled
+    back too, and the attempt is retried. Before, they stayed written and the next attempt only
+    finished the promotion. A promotion callback that keeps signalling therefore leaves the
+    window skipped with nothing in the thread, where before its thread observations were kept.
 
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
