@@ -30,7 +30,7 @@ In a collection, `:sort-by` names a field, `:order` is `:ascending` (the default
 `:descending`, and a document without the field comes last. Documents tied on the field keep
 ascending key order under either `:order`, because `:descending` reverses the comparison and not
 the list. `:then-by` names a second field that orders a tie in the same direction, with a
-document lacking it last among the tie:
+document lacking it last among the tie. `:then-by` without `:sort-by` is an error:
 `(klio:collection *site* "posts" :sort-by "date" :order :descending :then-by "title")`.
 
 A controlled list, such as skills, is declared once and checked on every load: a page that

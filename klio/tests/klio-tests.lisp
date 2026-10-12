@@ -901,7 +901,27 @@ that lack the sort field."
         (is (equal '("c" "b" "a" "d" "e" "f") (keys :then-by "rank"))
             "ascending by rank within the tie, the unranked one last: ~S" (keys :then-by "rank"))
         (is (equal '("c" "a" "b" "d" "e" "f") (keys :then-by "missing"))
-            "a :then-by field nobody has changes nothing: ~S" (keys :then-by "missing"))))))
+            "a :then-by field nobody has changes nothing: ~S" (keys :then-by "missing"))
+        (signals error (k:tree-collection tree "notes" :then-by "rank")
+          ":then-by without :sort-by is refused, not ignored")))))
+
+(test the-boolean-core-fields-sort-as-present-only-when-true
+  "DRAFT and SEARCH are stored as booleans, so `false' reads as NIL and counts as missing,
+unlike an `extra' field written false. Drafts are readable only in dev mode."
+  (with-content-dir (dir ("notes/a.md" . (format nil "---~%title: \"A\"~%draft: false~%search: false~%---~%x~%"))
+                         ("notes/b.md" . (format nil "---~%title: \"B\"~%draft: true~%---~%x~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"C\"~%---~%x~%")))
+    (let ((tree (k:load-tree dir)))
+      (k:with-dev-mode ()
+        (flet ((keys (&rest options)
+                 (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                         (apply #'k:tree-collection tree "notes" options))))
+          (is (equal '("b" "a" "c") (keys :sort-by "draft"))
+              "only b's draft is true; a's false and c's absent are both missing: ~S"
+              (keys :sort-by "draft"))
+          (is (equal '("b" "c" "a") (keys :sort-by "search"))
+              "search is T unless written false, and a's false is missing: ~S"
+              (keys :sort-by "search")))))))
 
 (test a-field-written-false-is-present-and-one-written-null-is-missing
   "Copilot's review of #614 asked whether `rank: false' is read as a missing field. It is not:

@@ -86,18 +86,26 @@ content directory, including its subdirectories.
 Unsorted, they come in key order. With SORT-BY, a field name as DOCUMENT-FIELD takes it
 (\"date\", \"title\", or an `extra' key), they are sorted by that field, ORDER :ASCENDING or
 :DESCENDING. A document without the field goes last in either order: a role with no date
-belongs at the end of the list, not at the top of it. A field written `null', or with no value,
-counts as missing. One written `false' is present: the front matter reads it as :FALSE, which
-sorts as its text.
+belongs at the end of the list, not at the top of it.
+
+FALSE AND NULL. An `extra' field written `null', or with no value, counts as missing. An
+`extra' field written `false' is present: the front matter reads it as :FALSE, which sorts as
+its text. The core fields DRAFT and SEARCH are different, because the front matter stores them
+as booleans: DRAFT is NIL, so missing, when it is false or absent, and SEARCH is T unless it is
+written false, which makes it NIL, so missing.
 
 TIES. Documents with equal SORT-BY values, and the documents without it, are ordered by
 THEN-BY, a second field name, in the same ORDER, a document without THEN-BY last among them
 (#557). Without THEN-BY, or where it is equal too, ties keep ascending key order, in both
 orders: :DESCENDING reverses the comparison of the field, not the list, so two documents
-dated the same day stay a, b under either order.
+dated the same day stay a, b under either order. THEN-BY without SORT-BY is an error, because
+there is nothing for it to break ties in.
 
 NOW is the time visibility is judged at, as in TREE-READABLE-DOCUMENTS."
   (check-type order (member :ascending :descending))
+  (when (and then-by (null sort-by))
+    (error "klio: :then-by ~S needs :sort-by; without a sort field there are no ties to order"
+           then-by))
   (let* ((prefix (%collection-prefix name))
          (members (remove-if-not (lambda (d)
                                    (let ((key (document-key d)))
