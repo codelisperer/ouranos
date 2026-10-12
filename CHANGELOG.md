@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/memory-db: `ensure-schema` creates an index on `subject`, `<table>_subject_idx`**
+  (#482). An app that does not call `ensure-schema` and runs its own migrations creates it:
+  `CREATE INDEX IF NOT EXISTS <table>_subject_idx ON <table> (subject)`. Without it,
+  `recall-similar` still returns `:limit` rows in most cases on pgvector 0.8 or later, but a
+  subject whose rows are a small part of a large table can come back short. On pgvector before
+  0.8, `recall-similar` can return fewer rows than `:limit` whenever the HNSW index serves it;
+  upgrade pgvector to 0.8 or later.
+
 - **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
   `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
   outside this tree that does not accept `:thread` is refused when it is added, at load time.
@@ -681,6 +689,19 @@ its tag.
   #563. See `praxeon/docs/mcp.md`, "Long-running calls".
 
 ### Fixed
+
+- **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
+  asks for, when that many match, also when the HNSW index serves the query** (#482).
+  pgvector's HNSW scan took the nearest `hnsw.ef_search` rows of the whole table (40 by
+  default) and only then applied the subject, scope and supersession filter. Measured on
+  pgvector 0.8.6: one subject with 20,050 current observations and `:limit 100` got 40; with the
+  index used for a subject holding 50 of 20,051 rows, or 50 current observations beside 20,000
+  superseded ones, it got none. `recall-similar` now runs its query with
+  `SET LOCAL hnsw.iterative_scan = strict_order`, inside a transaction it opens or inside the
+  app's own `conn:with-transaction`, where the setting lasts until that transaction ends. That
+  needs pgvector 0.8 or later; on an older pgvector the query runs as before. `ensure-schema`
+  also creates an index on `subject`, `<table>_subject_idx`, so the planner can read a
+  subject's own rows and rank them exactly when they are a small part of the table.
 
 - **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a
   sign-in** (#587). When `tasks/cancel` needed a sign-in and an observer of `:sign-in-required`

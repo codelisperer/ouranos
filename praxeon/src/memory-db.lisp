@@ -131,7 +131,10 @@ gives another pair's key."
    (progress-schema :initarg :progress-schema :reader store-progress-schema)
    ;; Recursive because SUPERSEDE holds it around REMEMBER, so the check that the observation
    ;; is still current and the writes that replace it are one step.
-   (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock))
+   (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock)
+   ;; :UNKNOWN until the first similarity recall on Postgres reads the extension's version,
+   ;; then T when pgvector has iterative index scans (0.8 or later) and NIL otherwise (#482).
+   (iterative-scan :initform :unknown :accessor store-iterative-scan))
   (:documentation "Observations in a mnemosyne-backed table, embedded on write."))
 
 (defun make-db-memory-store (connection &key embedder (table *table*) (dialect :postgres)
@@ -183,6 +186,19 @@ bound and hand it in; then no path through this store can resolve one."
                             :columns '(:embedding)
                             :using :hnsw
                             :opclass :vector_cosine_ops)
+                      :dialect (store-dialect store))
+             ;; A SUBJECT'S OWN ROWS HAVE AN INDEX OF THEIR OWN (#482). An HNSW scan applies the
+             ;; WHERE clause to the nearest rows of the whole table, so when a subject's current
+             ;; rows in its scope are a small part of the table, the scan can end with fewer than
+             ;; LIMIT of them, or none. With this index the planner reads the subject's rows and
+             ;; ranks them exactly when they are few, which is the case where the HNSW scan comes
+             ;; up short. It is on SUBJECT alone, not on THREAD too, because this statement runs
+             ;; before ENSURE-SCHEMA adds THREAD to a table made before #317.
+             (ddl:ddl (list :create-index
+                            :name (intern (string-upcase
+                                           (format nil "~A_subject_idx" table)) :keyword)
+                            :on (intern (string-upcase table) :keyword)
+                            :columns '(:subject))
                       :dialect (store-dialect store)))))))
 
 (defun check-vector-extension (connection)
@@ -487,6 +503,48 @@ of its own -- which is why this is ctx:assemble and not a LIMIT."
 (defmethod mem:recall ((store db-memory-store) subject &key (budget 1000) kind as-of thread)
   (%assemble (mem:observations-of store subject :as-of as-of :thread thread) budget kind))
 
+;;; --- complete HNSW scans (#482) --------------------------------------------------
+
+(defun %iterative-scan-p (store)
+  "Whether STORE's Postgres has pgvector's iterative index scans, which came in 0.8. Read from
+pg_extension once per store."
+  (when (eq (store-iterative-scan store) :unknown)
+    (setf (store-iterative-scan store)
+          (let* ((row (first (conn:query (store-connection store)
+                                         "SELECT extversion FROM pg_extension WHERE extname = 'vector'")))
+                 (version (and row (param:row-value row :extversion)))
+                 (parts (and version (mapcar (lambda (p) (or (parse-integer p :junk-allowed t) 0))
+                                             (uiop:split-string version :separator ".")))))
+            (and parts (or (> (first parts) 0) (>= (or (second parts) 0) 8))))))
+  (store-iterative-scan store))
+
+(defmacro %with-complete-hnsw-scan ((store) &body body)
+  "Run BODY, a similarity query on STORE's Postgres, so that an HNSW index scan keeps going until
+it has LIMIT rows that pass the WHERE clause (#482).
+
+WHY. pgvector's HNSW scan collects the nearest HNSW.EF_SEARCH rows of the whole table (40 by
+default) and only then applies the WHERE clause. Measured on pgvector 0.8.6 with 16 dimensions:
+one subject with 20,050 current rows and :LIMIT 100 got 40 rows back; with the index used for a
+subject holding 50 of 20,051 rows, or 50 current rows beside 20,000 superseded ones, it got none.
+HNSW.ITERATIVE_SCAN = strict_order makes the scan go on past EF_SEARCH, keeping the order exact,
+and the same three cases then return 100, 20 and 20.
+
+IT IS NOT EXACT IN EVERY CASE. An iterative scan stops after HNSW.MAX_SCAN_TUPLES rows (20,000 by
+default) or at its memory limit, so a subject holding 50 of 100,051 rows still came back short
+when the index was forced. The planner does not choose the index there: it estimates few
+matching rows and uses the subject index instead, which ranks every one of them.
+
+The settings are SET LOCAL, inside a transaction this opens, or inside the app's own
+CONN:WITH-TRANSACTION, where they last until that transaction ends. On pgvector before 0.8 there
+is no iterative scan and BODY runs as it is."
+  (let ((s (gensym "STORE")))
+    `(let ((,s ,store))
+       (if (%iterative-scan-p ,s)
+           (conn:with-transaction ((store-connection ,s))
+             (conn:exec (store-connection ,s) "SET LOCAL hnsw.iterative_scan = strict_order")
+             ,@body)
+           (progn ,@body)))))
+
 (defmethod mem:recall-similar ((store db-memory-store) subject embedding
                                &key (budget 1000) kind as-of (limit 20) thread)
   "Nearest by COSINE distance, then budgeted.
@@ -503,14 +561,15 @@ ONE SCOPE: THREAD :ALL is refused, as RECALL refuses it, since a recall builds a
   (let ((rows (if (eq (store-dialect store) :sqlite)
                   (%sqlite-nearest store subject embedding as-of limit thread)
                   (bt:with-recursive-lock-held ((store-lock store))
-                    (q:fetch (store-connection store)
-                             (list :select +columns+
-                                   :from (list (store-table store))
-                                   :where (%where-current subject as-of nil thread)
-                                   :order-by (list (list (list :<=> :embedding
-                                                               (%vector-text store embedding))))
-                                   :limit limit)
-                             :dialect (store-dialect store))))))
+                    (%with-complete-hnsw-scan (store)
+                      (q:fetch (store-connection store)
+                               (list :select +columns+
+                                     :from (list (store-table store))
+                                     :where (%where-current subject as-of nil thread)
+                                     :order-by (list (list (list :<=> :embedding
+                                                                 (%vector-text store embedding))))
+                                     :limit limit)
+                               :dialect (store-dialect store)))))))
     (%assemble (%rank-as-value (mapcar #'%row->observation rows)) budget kind)))
 
 (defun %sqlite-nearest (store subject embedding as-of limit &optional thread)

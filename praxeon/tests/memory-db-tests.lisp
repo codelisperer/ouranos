@@ -704,3 +704,99 @@ refused and its replacement rolled back."
                  (mapcar #'mem:observation-content
                          (mem:observations-of store "member-16" :include-superseded t)))
           "the replacement was rolled back"))))
+
+;;; --- similarity recall with the HNSW index in use (#482) ---------------------
+
+(defclass scattered-embedder (llm:embedding-provider) ()
+  (:documentation "Eight dimensions, each vector drawn from a random state seeded by the text, so
+distinct texts point in scattered directions and an HNSW graph over them is an ordinary one."))
+(defmethod llm:embedding-dimensions ((p scattered-embedder)) 8)
+(defmethod llm:embedding-model-of ((p scattered-embedder)) "scattered")
+(defmethod llm:embed ((p scattered-embedder) text)
+  (let ((rs (sb-ext:seed-random-state (sxhash text)))
+        (v (make-array 8 :element-type 'double-float)))
+    (dotimes (i 8 v) (setf (aref v i) (- (random 2d0 rs) 1d0)))))
+
+(defun %force-the-vector-index (store)
+  "ANALYZE STORE's table, then turn sequential scans off for its connection, as a table large
+enough for the planner to choose an index would. Returns the plan of a similarity query for
+member-x, as one string."
+  (let ((c (mdb::store-connection store)) (table (mdb:store-table store)))
+    (conn:exec c (format nil "ANALYZE ~A" table))
+    (conn:exec c "SET enable_seqscan = off")
+    (format nil "~{~A~^ | ~}"
+            (mapcar #'second
+                    (conn:query c (format nil "EXPLAIN SELECT id FROM ~A WHERE subject = 'member-x' AND thread IS NULL AND superseded_by IS NULL ORDER BY embedding <=> '[1,0,0,0,0,0,0,0]' LIMIT 20" table))))))
+
+(defun %drop-the-subject-index (store)
+  (conn:exec (mdb::store-connection store)
+             (format nil "DROP INDEX IF EXISTS ~A_subject_idx" (mdb:store-table store))))
+
+(defun %nearest-count (store limit &key thread)
+  (length (mem:recall-similar store "member-x"
+                              (llm:embed (make-instance 'scattered-embedder) "a query")
+                              :limit limit :budget 1000000 :thread thread)))
+
+(test a-similarity-recall-past-ef-search-returns-limit-rows
+  "One subject with 120 current observations and :LIMIT 100. With the subject index the planner
+reads the subject's rows and ranks them. With it dropped the query goes through the HNSW index,
+whose scan collects HNSW.EF_SEARCH rows, 40 by default, so before #482 the recall returned 40."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 120)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (%force-the-vector-index store)
+        (is (= 100 (%nearest-count store 100)) "with the subject index")
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store)))
+          (is (search "_embedding_idx" plan) "precondition: without it, the HNSW index, got ~A" plan))
+        (is (= 100 (%nearest-count store 100)) "with the iterative scan alone"))))
+
+(test a-subject-with-few-rows-among-many-gets-all-it-asked-for
+  "Member x has 20 current observations among 400 of other subjects, and sequential scans are off.
+The recall returns 20. Before #482 the HNSW scan's 40 nearest rows held only a few of member x's.
+The subject index and the iterative scan each fix this; the test with the subject index dropped
+checks the iterative scan alone."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store (format nil "member-~D" (mod i 40)) (format nil "Fact ~D about someone else." i)))
+        (%force-the-vector-index store)
+        (is (= 20 (%nearest-count store 20)) "with the subject index")
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store)))
+          (is (search "_embedding_idx" plan) "precondition: without it, the HNSW index, got ~A" plan))
+        (is (= 20 (%nearest-count store 20)) "with the iterative scan alone"))))
+
+(test thread-observations-outnumbering-the-facts-do-not-crowd-them-out
+  "Member x has 20 facts and 400 observations of one thread, and sequential scans are off. A
+recall of the facts returns 20, and a recall of the thread returns 20 (#482's own case)."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store "member-x" (format nil "Observation ~D of the thread." i) :thread "conv-7"))
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store)))
+          (is (search "_embedding_idx" plan) "precondition: the HNSW index, got ~A" plan))
+        (is (= 20 (%nearest-count store 20)) "the facts")
+        (is (= 20 (%nearest-count store 20 :thread "conv-7")) "the thread"))))
+
+(test ensure-schema-creates-the-subject-index
+  "On Postgres the store's table gets an index on SUBJECT (#482), and ENSURE-SCHEMA can run again."
+  (if (%sqlite-p)
+      (skip "Postgres only")
+      (with-store (store)
+        (mdb:ensure-schema store)
+        (let ((defs (mapcar #'second
+                            (conn:query (mdb::store-connection store)
+                                        (format nil "SELECT indexdef FROM pg_indexes WHERE indexname = '~(~A~)_subject_idx'"
+                                                (mdb:store-table store))))))
+          (is (= 1 (length defs)) "one index of that name")
+          (is (search "(subject)" (first defs)) "on SUBJECT, got ~A" (first defs))))))
