@@ -99,10 +99,49 @@ the tag's slug."
         (:li (:a :href (format nil "/~A" (document-key d))
                  (or (content-meta-title (document-meta d)) (document-key d)))))))))
 
+(defun default-collection-theme (site name documents)
+  "The default listing page for one collection: its documents, by title, in the collection's
+order. NAME is the collection's name (#557)."
+  (declare (ignore site))
+  (%page-html
+   name
+   (spin:with-html-string
+     (:h1 name)
+     (:ul
+      (dolist (d documents)
+        (:li (:a :href (format nil "/~A" (document-key d))
+                 (or (content-meta-title (document-meta d)) (document-key d)))))))))
+
+(defun %check-collections (collections tags-prefix page-segment)
+  "Signal an error unless COLLECTIONS is a list of entries MAKE-SITE-OPTIONS accepts."
+  (unless (listp collections)
+    (error "klio: :collections must be a list of collection names, got ~S" collections))
+  (let ((names '()))
+    (dolist (entry collections)
+      (let ((name (if (consp entry) (first entry) entry)))
+        (unless (and (stringp name) (plusp (length (string-trim "/" name))))
+          (error "klio: a :collections entry must be a name or (name :sort-by ...), got ~S" entry))
+        (when (consp entry)
+          (let ((options (rest entry)))
+            (unless (and (evenp (length options))
+                         (loop for (k nil) on options by #'cddr
+                               always (member k '(:sort-by :order :then-by))))
+              (error "klio: the :collections entry ~S may give only :sort-by, :order and :then-by"
+                     entry))))
+        (let ((name (string-trim "/" name)))
+          (when (member name (list (string-trim "/" tags-prefix) page-segment) :test #'string=)
+            (error "klio: the collection ~S would share its listing's URL with ~A; rename it"
+                   name (if (string= name page-segment) "the index's pages" "the tag pages")))
+          (when (member name names :test #'string=)
+            (error "klio: the collection ~S is named twice in :collections" name))
+          (push name names))))))
+
 (defun make-site-options (&key (page-theme #'default-page-theme)
                                (index-theme #'default-index-theme)
                                (not-found #'default-not-found)
                                (tag-theme #'default-tag-theme)
+                               (collection-theme #'default-collection-theme)
+                               collections
                                per-page base-url feed-title feed-collection (feed-limit 20)
                                (tags-prefix "tags") (page-segment "page")
                                (rss-path "feed.xml") (atom-path "atom.xml")
@@ -110,10 +149,17 @@ the tag's slug."
   "The options SITE-APP and EXPORT-SITE share; each takes these as keyword arguments.
 
 The themes are functions of the site and what they render: PAGE-THEME (site document),
-INDEX-THEME (site documents), TAG-THEME (site tag documents), NOT-FOUND (site key). A listing
-theme runs with *PAGE-NUMBER* and *PAGE-COUNT* bound, and PAGE-URL and TAG-URL give it links.
+INDEX-THEME (site documents), TAG-THEME (site tag documents), COLLECTION-THEME (site name
+documents), NOT-FOUND (site key). A listing theme runs with *PAGE-NUMBER* and *PAGE-COUNT*
+bound, and PAGE-URL, TAG-URL and COLLECTION-URL give it links.
 
-PER-PAGE, when given, paginates the index and each tag's listing: page 1 is the listing's own
+COLLECTIONS turns on a listing page for each collection it names, at /<name>/ (#557). Without
+it, a collection has no listing page of its own. An entry is a name, \"roles\", or a name with
+the ordering COLLECTION takes, (\"roles\" :sort-by \"start\" :order :descending :then-by
+\"title\"). A name that is the tags prefix or the page segment would share URLs with the tag
+pages or the index's pages, and is an error, as is a name given twice.
+
+PER-PAGE, when given, paginates the index, each tag's listing and each collection's listing: page 1 is the listing's own
 URL, page N adds PAGE-SEGMENT/N/. Without it, a listing is one page.
 
 BASE-URL, such as \"https://example.org\", turns the feeds on. RSS and Atom need absolute
@@ -127,8 +173,10 @@ readable document's Markdown body; front-matter `search: false' leaves a documen
   (check-type per-page (or null (integer 1)))
   (check-type search-path (or null string))
   (check-type feed-limit (integer 1))
+  (%check-collections collections tags-prefix page-segment)
   (%make-site-options :page-theme page-theme :index-theme index-theme :not-found not-found
-                      :tag-theme tag-theme :per-page per-page :base-url base-url
+                      :tag-theme tag-theme :collection-theme collection-theme
+                      :collections (copy-list collections) :per-page per-page :base-url base-url
                       :feed-title feed-title :feed-collection feed-collection
                       :feed-limit feed-limit :tags-prefix tags-prefix :page-segment page-segment
                       :rss-path rss-path :atom-path atom-path :search-path search-path))

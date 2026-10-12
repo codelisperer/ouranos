@@ -59,8 +59,8 @@ server, its port, its .env and its MAIN -- which is why nothing here starts anyt
            #:export-site #:export-refused #:export-refused-directory #:export-refused-reason
            ;; serving -- the tree as a hyperion application; the look is the site's
            #:site-app #:default-page-theme #:default-index-theme #:default-not-found
-           #:default-tag-theme #:make-site-options
+           #:default-tag-theme #:default-collection-theme #:make-site-options
            ;; listings -- feeds, tags, pagination, the search index, and the resolver (#353)
-           #:tag-slug #:tree-tags #:page-url #:tag-url #:*page-number* #:*page-count*
+           #:tag-slug #:tree-tags #:page-url #:tag-url #:collection-url #:*page-number* #:*page-count*
            #:feed-entries #:rss-feed #:atom-feed #:search-json #:resolve-path #:site-paths
            #:*site-options*))

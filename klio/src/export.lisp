@@ -195,14 +195,18 @@ signals EXPORT-REFUSED when ASSETS is not a directory, when it holds or is insid
 SITE-APP takes (MAKE-SITE-OPTIONS). Returns the list of files written, relative to DIRECTORY.
 
 Writes 404.html and every page RESOLVE-PATH answers: the index and its pages, each tag's
-listing and its pages, the feeds when BASE-URL is given, the search index unless SEARCH-PATH is
-NIL, and one file per readable document. A listing at /tags/x/ is written to tags/x/index.html;
-see the file header for LAYOUT, which applies to documents. NOW is the time visibility is judged
+listing and its pages, each listed collection's listing and its pages (:COLLECTIONS), the feeds
+when BASE-URL is given, the search index unless SEARCH-PATH is NIL, and one file per readable
+document. A listing at /tags/x/ is written to tags/x/index.html; see the file header for LAYOUT,
+which applies to documents. NOW is the time visibility is judged
 at, so a scheduled document is exported only once its time has come; NIL means now.
 
 Nothing is written unless every page renders. DIRECTORY must be absent or empty, or CLEAN must
 be true, in which case its contents are deleted first; otherwise EXPORT-REFUSED is signalled.
 Signals EXPORT-REFUSED too when SITE has no published content (BOOT it first).
+
+Two pages that would be written to one file, such as a collection's listing and a document
+keyed <name>/index, are refused with EXPORT-REFUSED before anything is written.
 
 ASSETS, a directory, is copied into DIRECTORY after it is emptied, every file at its path
 relative to ASSETS (see the file header). EXPORT-REFUSED is signalled, before anything is
@@ -230,6 +234,13 @@ is one a page is written to. The returned list names the pages, then the assets.
                                         append (list k v)))))
                    (%render-site site tree now layout)))
           (asset-files nil))
+      ;; Two pages written to one file: a collection's listing and a document keyed
+      ;; <name>/index, or, under :LAYOUT :DIRECTORY, a document keyed <name> (#557). Refused
+      ;; rather than one silently replacing the other.
+      (loop for (path . rest) on (mapcar #'car files)
+            when (member path rest :test #'string-equal)
+              do (error 'export-refused :directory directory
+                                        :reason (format nil "two pages would be written to ~A" path)))
       (when assets
         (setf asset-files (%check-assets assets directory (mapcar #'car files))))
       ;; AION/FS:DELETE-TREE, which removes a link inside the directory as a link and refuses a

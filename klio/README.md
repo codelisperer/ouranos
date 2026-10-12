@@ -62,6 +62,13 @@ of every readable page for a search box. A tag's URL is its slug (`C#` is `/tags
 listing theme gets `*page-number*` and `*page-count*`, and `page-url` and `tag-url` for links.
 `publish-at` takes an ISO 8601 date, and a scheduled page appears when its time comes.
 
+A collection has no listing page of its own unless the site names it in `:collections`. Each
+entry is a name or a name with an ordering, `(:collections '("posts" ("roles" :sort-by "start"
+:order :descending)))`, and gets a listing at `/<name>/` (and `/<name>/page/2/` with
+`:per-page`), rendered by `:collection-theme`, `(lambda (site name documents) ...)`, which
+`collection-url` gives links to. A name that is the tag prefix or the page segment, or a listing
+and a document that `export-site` would write to one file, is refused.
+
 `/search.json` holds, for every readable page, its URL, title, tags, date and Markdown body, and
 anyone can fetch it. Pass `:search-path nil` to `site-app` and `export-site` to have no search
 file, or put `search: false` in a page's front-matter to leave that page out of it and out of the

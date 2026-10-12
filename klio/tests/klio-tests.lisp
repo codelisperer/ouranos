@@ -1252,6 +1252,81 @@ Windows making a file link needs a privilege the test runner may not have."
           (is (typep e 'k:export-refused) "got ~S" e)
           (is (null (probe-file out)) "nothing was written"))))))
 
+;;; --- collection listing pages (#557) ------------------------------------------------------
+
+(defun %names-theme (site name documents)
+  "A collection theme that writes the collection's name and its documents' titles in order."
+  (declare (ignore site))
+  (format nil "~A:~{ ~A~}" name (mapcar (lambda (d) (k:document-field d "title")) documents)))
+
+(test a-collection-has-no-listing-page-unless-the-site-names-it
+  "Off by default, as #557's reporter asked."
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+)))
+        (k:boot site)
+        (let ((written (k:export-site site out)))
+          (is (not (member "roles/index.html" written :test #'string=)) "written: ~S" written))
+        (is (= 404 (%get (k:site-app site) "/roles/")))))))
+
+(test a-named-collection-gets-a-listing-page-in-its-order
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01"))
+                         ("roles/c.md" . (%role "Gamma" "2021-01-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+))
+            (options (list :collections '(("roles" :sort-by "start" :order :descending))
+                           :collection-theme #'%names-theme)))
+        (k:boot site)
+        (apply #'k:export-site site out options)
+        (is (equal "roles: Beta Gamma Alpha" (%file-text out "roles/index.html"))
+            "the listing is written to roles/index.html, newest first")
+        (multiple-value-bind (status body) (%get (apply #'k:site-app site options) "/roles/")
+          (is (= 200 status))
+          (is (equal "roles: Beta Gamma Alpha" body) "and served at /roles/"))
+        (multiple-value-bind (status body) (%get (apply #'k:site-app site options) "/roles/a")
+          (is (= 200 status) "a document under the collection is still served")
+          (is (search "Alpha" body)))))))
+
+(test a-collection-listing-paginates-and-collection-url-links-its-pages
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+))
+            (urls '()))
+        (k:boot site)
+        (k:export-site site out :per-page 1 :collections '(("roles" :sort-by "start"))
+                                :collection-theme (lambda (site name documents)
+                                                    (declare (ignore site documents))
+                                                    (push (k:collection-url name k:*page-number*) urls)
+                                                    (format nil "page ~D of ~D" k:*page-number* k:*page-count*)))
+        (is (equal "page 1 of 2" (%file-text out "roles/index.html")))
+        (is (equal "page 2 of 2" (%file-text out "roles/page/2/index.html")))
+        (is (equal '("/roles/" "/roles/page/2/") (sort (remove-duplicates urls :test #'string=) #'string<))
+            "collection-url gives each page's URL: ~S" urls)))))
+
+(test collection-names-that-would-share-a-listings-url-are-refused
+  (dolist (bad (list '("tags") '("page") '("roles" "roles") '(("roles" :colour "red")) '("") "roles"))
+    (is (typep (nth-value 1 (ignore-errors (k:make-site-options :collections bad))) 'error)
+        ":collections ~S was accepted" bad))
+  (is-true (k:make-site-options :collections '("roles" ("posts" :sort-by "date" :then-by "title")))
+           "the control: well-formed entries are accepted"))
+
+(test a-listing-and-a-document-written-to-one-file-are-refused
+  "A document keyed roles/index, or, under :layout :directory, one keyed roles, would be written
+to roles/index.html with the listing."
+  (dolist (case '(("roles/index.md" :file) ("roles.md" :directory)))
+    (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                           ((first case) . +good+))
+      (with-export-dir (out)
+        (let ((site (k:make-site src :known-extra +role-extra+)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors
+                                 (k:export-site site out :collections '("roles") :layout (second case))))))
+            (is (typep e 'k:export-refused) "~A: got ~S" (first case) e)
+            (is (and e (search "roles/index.html" (princ-to-string e))) "~A: ~A" (first case) e)
+            (is (null (probe-file out)) "~A: nothing was written" (first case))))))))
+
 (test the-directory-layout-writes-an-index-file-per-page
   (with-content-dir (src ("roles/two.md" . +also-good+))
     (with-export-dir (out)
