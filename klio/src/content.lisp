@@ -96,8 +96,18 @@ refusing to start, and :RELOAD, where the site keeps serving what it had."))
   "The extension a content file has. One type, deliberately: a tree where some files are
 content and others are anyone's guess is a tree whose failures are unattributable.")
 
+(defun %author-name-p (name)
+  "Whether NAME, a file or directory name, is the author's rather than the site's: it starts
+with `_' or `.' (#557). Such a file is not content, and nothing under such a directory is."
+  (and (plusp (length name)) (member (char name 0) '(#\_ #\.)) t))
+
 (defun content-files (directory)
   "Every content file under DIRECTORY, recursively, in a deterministic order.
+
+A file or directory whose name starts with `_' or `.' is skipped, with everything under the
+directory: that is where an author keeps a README, notes or work in progress beside the
+content without publishing it (#557). It also keeps out `.git' and editor directories.
+DIRECTORY itself is not checked, so a content directory named `_content' is read as usual.
 
 Sorted because a report that names files in filesystem order names them differently on two
 machines, and because a duplicate-slug failure should blame the same file twice running
@@ -105,10 +115,12 @@ rather than whichever the OS happened to hand back first."
   (let ((files '()))
     (labels ((walk (dir)
                (dolist (f (uiop:directory-files dir))
-                 (when (string-equal *content-extension* (pathname-type f))
+                 (when (and (string-equal *content-extension* (pathname-type f))
+                            (not (%author-name-p (file-namestring f))))
                    (push f files)))
                (dolist (sub (uiop:subdirectories dir))
-                 (walk sub))))
+                 (unless (%author-name-p (car (last (pathname-directory sub))))
+                   (walk sub)))))
       (walk (uiop:ensure-directory-pathname directory)))
     (sort files #'string< :key #'namestring)))
 

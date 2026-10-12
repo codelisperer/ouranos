@@ -330,6 +330,39 @@ found there, and a fixture that hands it strings would test everything except th
           "the body is rendered at load, so a body that cannot be rendered is a LOAD failure
 rather than a 500 on one page later"))))
 
+(test files-and-directories-starting-with-underscore-or-dot-are-not-content
+  "Where an author keeps notes beside the content (#557): a file or directory whose name starts
+with `_' or `.' is skipped, with everything under the directory, at any depth."
+  (with-content-dir (dir ("one.md" . +good+)
+                         ("_README.md" . +also-good+)
+                         (".hidden.md" . +also-good+)
+                         ("_notes/two.md" . +also-good+)
+                         (".git/three.md" . +also-good+)
+                         ("roles/_idea.md" . +also-good+)
+                         ("roles/four.md" . +also-good+))
+    (multiple-value-bind (tree failures) (k:load-tree dir)
+      (is (null failures))
+      (is (equal '("one" "roles/four")
+                 (sort (mapcar #'k:document-key (k:tree-documents tree)) #'string<))
+          "only one.md and roles/four.md are content: ~S"
+          (mapcar #'k:document-key (k:tree-documents tree))))))
+
+(test a-content-directory-whose-own-name-starts-with-underscore-is-read
+  "The rule is about names under the content directory, not the content directory's own name."
+  (with-content-dir (dir ("_content/one.md" . +good+))
+    (multiple-value-bind (tree failures) (k:load-tree (merge-pathnames "_content/" dir))
+      (is (null failures))
+      (is-true (and tree (k:tree-document tree "one"))
+               "a.md under a content directory named _content was not loaded"))))
+
+(test a-readme-without-the-prefix-is-still-content
+  "The rule is the prefix alone, not the name README: a site may publish a page called readme.
+An author who wants a README kept out names it _README.md."
+  (with-content-dir (dir ("README.md" . +good+))
+    (multiple-value-bind (tree failures) (k:load-tree dir)
+      (is (null failures))
+      (is-true (k:tree-document tree "README")))))
+
 (defun another-name-for (dir)
   "A second, textually different name that resolves to DIR, or NIL if this platform has none.
 
