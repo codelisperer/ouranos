@@ -635,10 +635,12 @@ app_sessions did not exist."
       (conn:disconnect c))))
 
 (test a-table-name-that-is-not-one-is-refused
-  "The table name is written into SQL, so a name that is not letters, digits and underscores is
-refused when the DDL is made, rather than quoted (#638)."
+  "The table name is written into SQL by every operation, so a name that is not letters, digits
+and underscores is refused when the store is made, with or without :ENSURE, rather than quoted
+(#638; Copilot's review of #652)."
   (let ((c (conn:connect (be:make-sqlite ":memory:"))))
     (unwind-protect
          (dolist (bad '("sessions; DROP TABLE users" "1sessions" ""))
-           (signals error (sdb:db-store-ddl (sdb:make-db-store c :dialect :sqlite :table bad))))
+           (signals error (sdb:make-db-store c :dialect :sqlite :table bad))
+           (signals error (sdb:make-db-store c :dialect :sqlite :table bad :ensure t)))
       (conn:disconnect c))))

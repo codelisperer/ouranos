@@ -63,6 +63,9 @@ OVER ONE CONNECTION, every operation takes turns on it under the store's lock. P
 backend that connection was opened from, so the store can open a new connection when Postgres
 ends that one; without it, a lost connection fails every later operation until the process
 restarts, as before #636."
+  ;; THE NAME IS CHECKED HERE, NOT ONLY WHEN DDL IS MADE (Copilot's review of #652): with :ENSURE
+  ;; NIL, an app's own migrations path, every operation still writes the name into SQL.
+  (%check-table table)
   (let ((store (make-instance 'db-store :source source :backend backend
                                        :dialect dialect :table table)))
     (when ensure (ensure-schema store))
