@@ -12,14 +12,22 @@
 ;;;;
 ;;;;   modern         the 2026-07-28 revision: answers server/discover, and refuses a request
 ;;;;                  whose _meta does not carry that version
-;;;;   legacy         an initialize-based server that answers server/discover with -32601
-;;;;   legacy-silent  the same, but it does not answer server/discover at all
-;;;;   unsupported    a current-era server that supports only 2099-01-01
-;;;;   crash          exits with status 1 as soon as it starts
-;;;;   garbage        modern, and before each tool result it writes a line that is not JSON and a
-;;;;                  line of 10000 characters
-;;;;   ping           legacy, and it sends a ping request before it answers tools/list
-;;;;   ignore-eof     modern, and it keeps running after its stdin ends, until a signal
+;;;;   legacy           an initialize-based server that answers server/discover with -32601
+;;;;   legacy-invalid   the same, but it answers server/discover with -32600
+;;;;   legacy-silent    the same, but it does not answer server/discover at all
+;;;;   legacy-no-init   legacy, but it does not answer initialize
+;;;;   unsupported      a current-era server that refuses 2026-07-28 with -32022, supporting
+;;;;                    only 2099-01-01
+;;;;   unsupported-list a current-era server whose DiscoverResult lists only 2099-01-01
+;;;;   crash            exits with status 1 as soon as it starts
+;;;;   garbage          modern, and before each tool result it writes a line that is not JSON, a
+;;;;                    line of 10000 characters, and a line with a byte that is not UTF-8
+;;;;   ping             legacy, and it sends a ping request before it answers tools/list
+;;;;   ignore-eof       modern, and it keeps running after its stdin ends, until a signal
+;;;;   stall            modern, with a sixth tool, stall, which stops reading stdin for 5 seconds
+;;;;                    and then answers
+;;;;   orphan           modern, with a sixth tool, exit-leaving-child, which starts /bin/sleep 6
+;;;;                    with this process's stdout, then exits with status 3
 ;;;;
 ;;;; Every request also writes a line to stderr. Tools: echo, fail (isError), slow (30 s),
 ;;;; slow-a (0.5 s) and exit (the process exits with status 3), two per tools/list page.
@@ -67,7 +75,19 @@
 (defun text-result (text &optional error-p)
   (obj "content" (vector (obj "type" "text" "text" text)) "isError" (if error-p t nil)))
 
-(defparameter +tools+ '("echo" "fail" "slow" "slow-a" "exit"))
+(defparameter +tools+
+  (append '("echo" "fail" "slow" "slow-a" "exit")
+          (cond ((equal *mode* "stall") '("stall"))
+                ((equal *mode* "orphan") '("exit-leaving-child")))))
+
+(defun send-bytes (octets)
+  "Write OCTETS to stdout as they are, after what the character stream holds."
+  (sb-thread:with-mutex (*lock*)
+    (finish-output *standard-output*)
+    (let ((out (sb-sys:make-fd-stream 1 :output t :element-type '(unsigned-byte 8)
+                                        :buffering :full)))
+      (write-sequence octets out)
+      (finish-output out))))
 
 (defun tools-page (cursor)
   (let* ((start (if (stringp cursor) (parse-integer cursor) 0))
@@ -85,7 +105,11 @@
         (arguments (or (gethash "arguments" params) (obj))))
     (when (equal *mode* "garbage")
       (send-raw "this line is not JSON")
-      (send-raw (make-string 10000 :initial-element #\x)))
+      (send-raw (make-string 10000 :initial-element #\x))
+      ;; {"x": "<FF>"} and a newline: valid JSON but for one byte that is not UTF-8.
+      (send-bytes (concatenate '(vector (unsigned-byte 8))
+                               (map 'vector #'char-code "{\"x\": \"") #(255)
+                               (map 'vector #'char-code "\"}") #(10))))
     (cond ((equal name "echo")
            (send (obj "jsonrpc" "2.0" "method" "notifications/message"
                       "params" (obj "level" "info" "data" "echoing")))
@@ -94,27 +118,39 @@
           ((equal name "slow") (sleep 30) (reply id (text-result "slow")))
           ((equal name "slow-a") (sleep 0.5) (reply id (text-result "a")))
           ((equal name "exit") (record "exiting") (sb-ext:exit :code 3 :abort t))
+          ((equal name "exit-leaving-child")
+           (sb-ext:run-program "/bin/sleep" '("6") :input nil :output t :error nil :wait nil)
+           (record "exiting")
+           (sb-ext:exit :code 3 :abort t))
           (t (fail id -32602 "Unknown tool")))))
 
 (defvar *initialized* nil)
 (defvar *held-list* nil "A tools/list id waiting for the answer to the server's ping.")
 
-(defun legacy-p () (member *mode* '("legacy" "legacy-silent" "ping") :test #'equal))
+(defun legacy-p ()
+  (member *mode* '("legacy" "legacy-invalid" "legacy-silent" "legacy-no-init" "ping")
+          :test #'equal))
 
 (defun handle-request (id method params)
   (format *error-output* "stderr: a request for ~A~%" method)
   (finish-output *error-output*)
   (cond
     ((equal method "server/discover")
-     (cond ((member *mode* '("legacy" "ping") :test #'equal) (fail id -32601 "Method not found"))
+     (cond ((member *mode* '("legacy" "legacy-no-init" "ping") :test #'equal)
+            (fail id -32601 "Method not found"))
+           ((equal *mode* "legacy-invalid") (fail id -32600 "Invalid Request"))
            ((equal *mode* "legacy-silent"))   ; no answer at all
+           ((equal *mode* "unsupported-list")
+            (reply id (obj "supportedVersions" (vector "2099-01-01")
+                           "capabilities" (obj "tools" (obj)) "ttlMs" 0)))
            ((equal *mode* "unsupported")
             (fail id -32022 "Unsupported protocol version"
                   (obj "supported" (vector "2099-01-01") "requested" "2026-07-28")))
            (t (reply id (obj "supportedVersions" (vector "2026-07-28")
                              "capabilities" (obj "tools" (obj)) "ttlMs" 0)))))
     ((legacy-p)
-     (cond ((equal method "initialize")
+     (cond ((and (equal method "initialize") (equal *mode* "legacy-no-init")))
+           ((equal method "initialize")
             (reply id (obj "protocolVersion" "2025-11-25" "capabilities" (obj "tools" (obj))
                            "serverInfo" (obj "name" "test" "version" "1"))))
            ((not *initialized*) (fail id -32600 "Not initialized"))
@@ -133,6 +169,10 @@
               (fail id -32022 "Unsupported protocol version"
                     (obj "supported" (vector "2026-07-28") "requested" (or version 'null))))
              ((equal method "tools/list") (reply id (tools-page (gethash "cursor" params))))
+             ((and (equal method "tools/call") (equal (gethash "name" params) "stall"))
+              ;; On this thread, so that stdin is not read meanwhile.
+              (sleep 5)
+              (reply id (text-result "stalled")))
              ((equal method "tools/call")
               (sb-thread:make-thread (lambda () (call-tool id params))))
              (t (fail id -32601 "Method not found")))))))

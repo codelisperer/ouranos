@@ -210,11 +210,12 @@
 (defsystem "praxeon/mcp/tests"
   :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
   ;; aion/oauth/tests for its test authorization server, which the OAuth path here runs against.
-  ;; aion/log for the stdio tests, which check what is logged. tests/mcp-stdio-server.lisp is
-  ;; the local server those tests start as a child process; it is never loaded here.
+  ;; aion/log and log4cl, which aion/log is built on, for the stdio tests, which check what is
+  ;; logged and put the log's setup back afterwards. tests/mcp-stdio-server.lisp is the local
+  ;; server those tests start as a child process; it is never loaded here.
   :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
                "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret" "aion/log"
-               "com.inuoe.jzon" "cl-base64")
+               "log4cl" "com.inuoe.jzon" "cl-base64")
   :serial t
   :components ((:file "tests/mcp-tests")
                (:file "tests/mcp-stdio-tests")

@@ -163,14 +163,16 @@ its tag.
     :inherit` passes the whole environment.
   - The client finds the server's era with `server/discover` and falls back to `initialize` for
     a legacy server. A request that times out after it was written gets
-    `notifications/cancelled`. The server's stderr is discarded, or appended to the `:stderr`
-    file, and never logged.
+    `notifications/cancelled`; one that times out while still queued fails as not run and is
+    never sent. The server's stderr is discarded, or appended to the `:stderr` file, and never
+    logged.
   - With `:restart t`, the default, a server that exits is started again at the next request,
     at most 3 times in any 60 seconds. With `:restart nil`, every later request fails as not
     run until the app closes the client and makes another.
   - `close-client` (new) closes the server's stdin, waits `*stdio-close-seconds*` (5), sends
     SIGTERM, waits `*stdio-term-seconds*` (2), then sends SIGKILL, to the server's process
-    group. Running servers are closed the same way when the image exits. On Windows the server
+    group. Running servers are closed the same way when the image exits, so a client stays
+    reachable until `close-client`. On Windows the server
     is ended with `TerminateProcess`, and a process it started can outlive it (#599).
   - `list-tools`, `call-tool`, `grant-tools`, resources, prompts and tasks work over stdio
     unchanged. `praxeon/docs/mcp.md`, "Local servers over stdio".

@@ -76,6 +76,27 @@ here. The fixed set leaves them out, so the tests pass them as an app would."
 (defun %tool-named (client name)
   (find name (mcp:list-tools client) :key #'mcp:tool-name :test #'equal))
 
+(defmacro with-captured-log ((stream) &body body)
+  "Run BODY with the log at :INFO going to STREAM, then put back the appenders, level and layout
+that were there before."
+  (let ((appenders (gensym "APPENDERS")) (level (gensym "LEVEL")) (layout (gensym "LAYOUT")))
+    `(let ((,appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+           (,level (log4cl:logger-log-level log4cl:*root-logger*))
+           (,layout aion/log:*layout*))
+       (unwind-protect
+            (progn (aion/log:setup :env :dev :level :info :stream ,stream)
+                   ,@body)
+         (log4cl:remove-all-appenders log4cl:*root-logger*)
+         (dolist (appender ,appenders)
+           (log4cl:add-appender log4cl:*root-logger* appender))
+         (log4cl:set-log-level log4cl:*root-logger* ,level)
+         (setf aion/log:*layout* ,layout)))))
+
+(defun %text (text)
+  (let ((h (make-hash-table :test #'equal)))
+    (setf (gethash "text" h) text)
+    h))
+
 (defun %failure-of (thunk)
   (handler-case (progn (funcall thunk) nil)
     (cnd:tool-error-result (e) e)))
@@ -174,6 +195,24 @@ the initialize handshake."
     (is (= 1 (length (%received-method record "initialize"))))
     (is (= 1 (length (%received-method record "notifications/initialized"))))))
 
+(test a-legacy-local-server-is-found-whatever-error-it-gives-discover
+  "The fallback is not keyed to -32601: a server that answers server/discover with -32600 gets
+the initialize handshake too."
+  (with-stdio-client (client record "legacy-invalid")
+    (is (= 5 (length (mcp:list-tools client))))
+    (is (eq :legacy (mcp:client-era client)))
+    (is (= 1 (length (%received-method record "initialize"))))))
+
+(test a-legacy-local-server-that-does-not-answer-initialize-gets-no-other-request
+  "A handshake that fails leaves the server without an era, so the next request starts it again
+and does the handshake again, rather than sending to a server that was never initialized."
+  (with-stdio-client (client record "legacy-no-init" :timeout 2)
+    (is-true (%failure-of (lambda () (mcp:list-tools client))))
+    (is-true (%failure-of (lambda () (mcp:list-tools client))))
+    (is (= 2 (%recorded-count record "start")))
+    (is (= 2 (length (%received-method record "initialize"))))
+    (is (null (%received-method record "tools/list")))))
+
 (test a-legacy-local-server-is-found-when-it-does-not-answer-discover
   "No answer to server/discover within the connection's timeout also means a legacy server."
   (with-stdio-client (client record "legacy-silent" :timeout 5)
@@ -189,6 +228,16 @@ what it supports, and gets no initialize."
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e))))
       (is-true (and e (search "2099-01-01" (cnd:tool-error-result-text e)))))
     (is (null (%received-method record "initialize")))))
+
+(test a-local-server-whose-versions-leave-out-the-current-revision-is-refused
+  "A DiscoverResult whose supportedVersions does not list 2026-07-28 fails the request as not
+run, naming what the server supports, and the server gets no other request."
+  (with-stdio-client (client record "unsupported-list")
+    (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
+      (is (eq :not-run (and e (cnd:tool-error-result-outcome e))))
+      (is-true (and e (search "2099-01-01" (cnd:tool-error-result-text e)))))
+    (is (null (%received-method record "initialize")))
+    (is (null (%received-method record "tools/list")))))
 
 (test a-legacy-local-server-gets-an-answer-to-its-ping
   "A legacy server may ping the client, which answers with an empty result."
@@ -212,17 +261,25 @@ answered after the fast one, and each caller gets its own."
   (with-stdio-client (client record "modern")
     (let* ((slow (%tool-named client "slow-a"))
            (echo (%tool-named client "echo"))
+           (lock (sb-thread:make-mutex :name "finished"))
+           (finished '())
            (slow-result nil)
            (thread (sb-thread:make-thread
                     ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
-                    (lambda () (setf slow-result (mcp:call-tool client slow nil)))))
-           (echo-result (mcp:call-tool client echo
-                                       (let ((h (make-hash-table :test #'equal)))
-                                         (setf (gethash "text" h) "fast")
-                                         h))))
-      (sb-thread:join-thread thread :default nil :timeout 10)
-      (is (equal "fast" echo-result))
-      (is (equal "a" slow-result)))))
+                    (lambda ()
+                      (setf slow-result (mcp:call-tool client slow nil))
+                      (sb-thread:with-mutex (lock) (push :slow finished))))))
+      ;; The slow call is sent first.
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
+      (let ((echo-result (mcp:call-tool client echo (%text "fast"))))
+        (sb-thread:with-mutex (lock) (push :fast finished))
+        (sb-thread:join-thread thread :default nil :timeout 10)
+        (is (equal "fast" echo-result))
+        (is (equal "a" slow-result))
+        (is (equal '(:fast :slow) (reverse finished)))
+        (is (equal '("slow-a" "echo")
+                   (mapcar (lambda (m) (gethash "name" (gethash "params" m)))
+                           (%received-method record "tools/call"))))))))
 
 (test a-local-server-that-does-not-answer-gets-a-cancellation
   "A call past its deadline fails with an unknown outcome, and the client sends
@@ -241,28 +298,63 @@ notifications/cancelled with the call's id. The server stays up for the next cal
                                         (setf (gethash "text" h) "after")
                                         h))))))
 
+(test a-request-that-times-out-before-it-is-written-is-never-sent
+  "A server that stops reading its stdin leaves requests queued. One whose deadline passes in the
+queue fails as not run, and is not sent once the server reads again, so an app that retries it
+does not run it twice."
+  (with-stdio-client (client record "stall" :call-timeout 3)
+    (let* ((tools (mcp:list-tools client))
+           (stall (find "stall" tools :key #'mcp:tool-name :test #'equal))
+           (echo (find "echo" tools :key #'mcp:tool-name :test #'equal))
+           (threads '()))
+      (push (sb-thread:make-thread
+             ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
+             (lambda () (%failure-of (lambda () (mcp:call-tool client stall nil)))))
+            threads)
+      ;; The server reads nothing for 5 seconds from here.
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
+      ;; A line longer than any pipe's buffer, so the writer is held inside it.
+      (push (sb-thread:make-thread
+             ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
+             (lambda ()
+               (%failure-of (lambda ()
+                              (mcp:call-tool client echo
+                                             (%text (make-string (* 1024 1024)
+                                                                 :initial-element #\b)))))))
+            threads)
+      (sleep 0.5)
+      (let ((e (%failure-of (lambda () (mcp:call-tool client echo (%text "never-sent"))))))
+        (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
+      (dolist (thread threads) (sb-thread:join-thread thread :default nil :timeout 15))
+      ;; Both earlier calls timed out after they were written, so each gets a cancellation,
+      ;; queued after the line that was not sent.
+      (is-true (%wait-for (lambda ()
+                            (= 2 (length (%received-method record "notifications/cancelled"))))
+                          15))
+      (is (= 2 (length (%received-method record "tools/call"))))
+      (is (notany (lambda (line) (search "never-sent" line)) (%recorded record))))))
+
 (test lines-a-local-server-should-not-write-are-dropped
-  "A line that is not JSON, and a line over MAX-BODY-BYTES, are dropped, and the reply after them
-is read."
-  (with-stdio-client (client record "garbage" :max-body-bytes 4096)
-    (is (equal "kept" (mcp:call-tool client (%tool-named client "echo")
-                                     (let ((h (make-hash-table :test #'equal)))
-                                       (setf (gethash "text" h) "kept")
-                                       h))))))
+  "A line that is not JSON, a line over MAX-BODY-BYTES, and a byte that is not UTF-8 neither end
+the reader nor fail the call, and the dropped lines are counted in the log by reason."
+  (let ((log (make-string-output-stream)))
+    (with-captured-log (log)
+      (with-stdio-client (client record "garbage" :max-body-bytes 4096)
+        (is (equal "kept" (mcp:call-tool client (%tool-named client "echo") (%text "kept"))))))
+    (let ((logged (get-output-stream-string log)))
+      (is-true (search "not-json=1" logged) "the log said ~S" logged)
+      (is-true (search "too-long=1" logged)))))
 
 (test a-local-server-s-stderr-is-discarded-or-written-to-its-file-and-never-logged
   "The server writes to stderr on every request. That neither fails a call nor reaches the log;
 with :STDERR it is appended to the app's file."
   (let ((log (make-string-output-stream))
         (stderr (%fresh-record)))
-    (unwind-protect
-         (progn
-           (aion/log:setup :env :dev :level :info :stream log)
-           (with-stdio-client (client record "modern")
-             (is (= 5 (length (mcp:list-tools client)))))
-           (with-stdio-client (client record "modern" :stderr stderr)
-             (is (= 5 (length (mcp:list-tools client))))))
-      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (with-captured-log (log)
+      (with-stdio-client (client record "modern")
+        (is (= 5 (length (mcp:list-tools client)))))
+      (with-stdio-client (client record "modern" :stderr stderr)
+        (is (= 5 (length (mcp:list-tools client))))))
     (let ((logged (get-output-stream-string log)))
       (is-true (search "local server started" logged) "nothing was logged: ~S" logged)
       (is-false (search "stderr:" logged)))
@@ -281,6 +373,20 @@ the default, the next request starts it again and finds its era again."
     (is (= 5 (length (mcp:list-tools client))))
     (is (= 2 (%recorded-count record "start")))
     (is (= 2 (length (%received-method record "server/discover"))))))
+
+#-win32
+(test a-local-server-that-exits-while-its-stdout-stays-open-is-started-again
+  "A server can exit while a process it started still holds its stdout, so its output does not
+end. The next request sees that the process has exited and starts the server again. The old
+reader ends on its own once the other process exits."
+  (with-stdio-client (client record "orphan" :call-timeout 2)
+    (let* ((tool (%tool-named client "exit-leaving-child"))
+           (reader (praxeon/mcp::child-reader (praxeon/mcp::client-child client)))
+           (e (%failure-of (lambda () (mcp:call-tool client tool nil)))))
+      (is (eq :unknown (and e (cnd:tool-error-result-outcome e))))
+      (is (= 6 (length (mcp:list-tools client))))
+      (is (= 2 (%recorded-count record "start")))
+      (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15)))))
 
 (test with-restart-nil-a-local-server-that-exits-stays-down
   "With :RESTART NIL, every request after the server exits fails as not run, and nothing is
