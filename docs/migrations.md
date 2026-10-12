@@ -134,6 +134,14 @@ The convenience path (`:ensure t`, which creates tables on connect) is for tests
 starts. An app that owns migrations should not use it — two things creating tables is how
 databases and `schema_migrations` drift apart.
 
+**An index added to a large existing table blocks writes while it builds**, unless it is built
+`CONCURRENTLY`, which `ensure-schema` does not do. `praxeon/memory-db` added
+`<table>_subject_idx` in #482: on the first start after upgrading, `ensure-schema` builds it, and
+writes to the observations table wait until it is done. On a large table, build it before
+deploying with `CREATE INDEX CONCURRENTLY IF NOT EXISTS <table>_subject_idx ON <table> (subject)`,
+outside a transaction; `ensure-schema` then finds it and does nothing. An app with its own
+migrations adds the same statement as a migration of its own.
+
 ## 6. Up, down, and dialect
 
 - **Write the `down`.** Even if you never roll back in production, `rollback` is how you

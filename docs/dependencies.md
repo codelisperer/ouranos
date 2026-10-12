@@ -122,6 +122,15 @@ and MSYS2 carry; (3) it is the same artifact CI publishes and installers will sh
 The build needs only a C compiler — no cmake, no make — so the "no external build tools"
 rule survives intact.
 
+### Database server extensions
+
+Not loaded into any image: they are installed in the Postgres server an app connects to, and a
+deployment fact, so nothing here creates them (#138).
+
+| Extension | Role | Used by | Version |
+|---|---|---|---|
+| `vector` (pgvector) | the `vector` type, cosine distance and the HNSW index | `praxeon/memory-db`, `praxeon/retrieval` on Postgres | **0.8 or later recommended.** CI runs 0.8.6. `praxeon/memory-db`'s `recall-similar` uses pgvector 0.8's iterative index scans when they are there; on an older pgvector it still returns the right rows, but each result the HNSW scan cuts short is answered by a second, exact query that reads all of the subject's rows (#482). |
+
 ### SBCL contrib (free — ships with SBCL)
 | Dep | Role | Used by |
 |---|---|---|
