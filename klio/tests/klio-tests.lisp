@@ -903,6 +903,26 @@ that lack the sort field."
         (is (equal '("c" "a" "b" "d" "e" "f") (keys :then-by "missing"))
             "a :then-by field nobody has changes nothing: ~S" (keys :then-by "missing"))))))
 
+(test a-field-written-false-is-present-and-one-written-null-is-missing
+  "Copilot's review of #614 asked whether `rank: false' is read as a missing field. It is not:
+the front matter reads `false' as :FALSE, a value, which sorts as its text. `rank: null' and an
+empty `rank:' are read as NIL and count as missing, so they go last, for :THEN-BY and :SORT-BY
+alike."
+  (with-content-dir (dir ("notes/a.md" . (format nil "---~%title: \"A\"~%date: 2024-01-01~%---~%x~%"))
+                         ("notes/b.md" . (format nil "---~%title: \"B\"~%date: 2024-01-01~%rank: false~%---~%x~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"C\"~%date: 2024-01-01~%rank: 3~%---~%x~%"))
+                         ("notes/d.md" . (format nil "---~%title: \"D\"~%date: 2024-01-01~%rank: null~%---~%x~%")))
+    (let ((tree (k:load-tree dir :known-extra '("rank"))))
+      (flet ((keys (&rest options)
+               (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                       (apply #'k:tree-collection tree "notes" options))))
+        (is (equal '("c" "b" "a" "d") (keys :sort-by "date" :then-by "rank"))
+            "ascending: the number, then false as text, then the two without a value in key order: ~S"
+            (keys :sort-by "date" :then-by "rank"))
+        (is (equal '("b" "c" "a" "d") (keys :sort-by "rank" :order :descending))
+            "as the primary field: false is present, null and absent are last: ~S"
+            (keys :sort-by "rank" :order :descending))))))
+
 (test a-document-is-found-by-its-slug-only-when-a-reader-may-see-it
   (with-content-dir (dir ("skills.md" . (format nil "---~%title: \"Skills\"~%slug: \"toolbox\"~%---~%x~%"))
                          ("secret.md" . +draft+))

@@ -86,7 +86,9 @@ content directory, including its subdirectories.
 Unsorted, they come in key order. With SORT-BY, a field name as DOCUMENT-FIELD takes it
 (\"date\", \"title\", or an `extra' key), they are sorted by that field, ORDER :ASCENDING or
 :DESCENDING. A document without the field goes last in either order: a role with no date
-belongs at the end of the list, not at the top of it.
+belongs at the end of the list, not at the top of it. A field written `null', or with no value,
+counts as missing. One written `false' is present: the front matter reads it as :FALSE, which
+sorts as its text.
 
 TIES. Documents with equal SORT-BY values, and the documents without it, are ordered by
 THEN-BY, a second field name, in the same ORDER, a document without THEN-BY last among them
