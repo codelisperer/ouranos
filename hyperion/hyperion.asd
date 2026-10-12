@@ -233,9 +233,10 @@
   :license "MIT"
   ;; clack for clackup and its release directory, whose test fixtures the cases read;
   ;; dexador is the client Clack's own suite uses, and usocket finds a free port as it does.
-  ;; All three are already in the tree.
-  :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "clack" "dexador" "usocket"
-               "fiveam")
+  ;; All three are already in the tree. aion/uv for uv-error, which tells a taken port
+  ;; from other listen failures (#519).
+  :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "aion/uv" "clack" "dexador"
+               "usocket" "fiveam")
   :serial t
   :components ((:file "tests/clack-handler-uv-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/clack-handler-uv/tests :run-tests)))
