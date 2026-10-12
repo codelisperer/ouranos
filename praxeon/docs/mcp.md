@@ -1,7 +1,8 @@
 # praxeon/mcp: agents that use MCP servers' tools, resources and prompts
 
 `praxeon/mcp` connects Praxeon agents to MCP (Model Context Protocol) servers over Streamable
-HTTP. It gives agents a server's tools, lets an app add a server's resources to an agent's
+HTTP, and to local servers it starts as child processes and talks to over stdio (see "Local
+servers over stdio" below). It gives agents a server's tools, lets an app add a server's resources to an agent's
 context, and gets a server's prompts (see "Resources and prompts" below).
 
 - **Tokens.** A request's bearer token comes from the connection's token source:
@@ -10,7 +11,7 @@ context, and gets a server's prompts (see "Resources and prompts" below).
 - **Long-running calls.** On a connection made with `:tasks t`, a server may answer a tool call with a task that finishes later. The app polls it with `poll-tasks` (see "Long-running calls" below, #532).
 - **Confirmation.** `grant-tools :confirm` names the tools whose calls need the user's confirmation. The turn's `:on-hold` decides how the user is asked; with no `:on-hold`, such a call is not run ([`confirm.md`](confirm.md), #531).
 
-This is parts 1, 2 and 4 of #527. Local servers over stdio are part 5.
+This is parts 1, 2, 4 and 5 of #527.
 
 ## Using it
 
@@ -158,6 +159,39 @@ The client also speaks the legacy revisions 2025-11-25, 2025-06-18 and 2025-03-2
   - `ttlMs` and `cacheScope` on list results are ignored, because a grant does not change by itself.
   - The deprecated HTTP+SSE transport from 2024-11-05 is not implemented.
 
+## Local servers over stdio
+
+Part 5 of #527, from the 2026-07-28 pages "Transports" and "stdio", read at modelcontextprotocol.io on 2026-10-12.
+
+```lisp
+(defparameter *files*
+  (mcp:make-connection :name "files"
+                       :command '("npx" "-y" "some-mcp-server" "/srv/shared")
+                       :environment '(("SOME_API_KEY" . "…"))
+                       :stderr #p"/var/log/my-app/files-mcp.log"))
+
+(defparameter *files-client* (mcp:make-client *files*))
+;; list-tools, call-tool, grant-tools, resources, prompts and tasks work as over HTTP.
+(mcp:close-client *files-client*)
+```
+
+- **Starting.** A connection made with `:command` instead of `:url` is a local server. `:command` is a list of strings: the program, found on `PATH`, and its arguments. The client starts the server at the first request, with `:directory` as its working directory when given, and writes one JSON-RPC message per line to its stdin and reads one per line from its stdout.
+- **Environment.** The server's process does not get this process's environment. It gets only these variables from it, as `+stdio-environment+` lists them:
+  - on Linux and macOS: `PATH`, `HOME`, `LANG` and `TMPDIR`;
+  - on Windows: `PATH`, `SystemRoot`, `TEMP`, `USERPROFILE` and `APPDATA`.
+
+  To these the client adds the connection's `:environment`, an alist of `(name . value)` strings, which wins for a name in both. A local server is often someone else's code, and an app's process may hold keys for other services, so a variable the server needs, such as its API key, is passed by name. `:environment :inherit` gives the server this process's whole environment instead.
+- **Credentials.** The specification says a server over stdio takes its credentials from its environment, so `:token-source` and `:per-user` are refused with `:command`. One process serves every principal; an app that needs a server process per user makes a connection per user.
+- **The era.** The first request is preceded by `server/discover`, as the stdio page's "Backward Compatibility" says. A `DiscoverResult` whose `supportedVersions` holds 2026-07-28 means the current revision. A `DiscoverResult` without it, or an error with a current-revision code (-32020, -32021 or -32022), means a server on the current era that does not support 2026-07-28. Any other error, or no answer within the connection's `:timeout`, means a legacy server, and the client sends `initialize`, offering 2025-11-25, then `notifications/initialized`; a legacy server whose `initialize` names a revision this client does not speak is unsupported too. Requests to an unsupported server fail as not run. A legacy server's `ping` is answered.
+- **Replies.** Requests may be in flight together; each reply is matched to its request by id. A line that is not JSON, a line longer than `:max-body-bytes`, a notification, a reply nobody is waiting for, and a request from a server on the current era are counted in the log and dropped.
+- **Timeouts.** A request that gets no answer within its timeout fails, and if it had been written to the server, the client sends `notifications/cancelled` for it with the reason `"timeout"`. A tool call that times out after it was written has the outcome `:unknown`.
+- **stderr.** With `:stderr nil`, the default, what the server writes to stderr is discarded. With a pathname, it is appended to that file. The client never reads it, and it never reaches the log, because a server may write anything there.
+- **When the server exits.** Requests waiting on it fail; a tool call has the outcome `:unknown`.
+  - With `:restart t`, the default, the next request starts the server again and finds its era again. A server that exits a fourth time within 60 seconds is not started again: requests fail as not run until a minute has passed since the earliest of the last three restarts.
+  - With `:restart nil`, every later request fails as not run, until the app closes the client and makes another.
+- **Closing.** `close-client` closes the server's stdin and waits `*stdio-close-seconds*` (5) for it to exit, then sends SIGTERM and waits `*stdio-term-seconds*` (2), then sends SIGKILL, as the stdio page's "Shutdown" says. Requests made with the client after that fail as not run. For an HTTP connection `close-client` does nothing. Clients whose server is still running are closed the same way when the image exits.
+- **Which processes are signalled.** On Linux and macOS, `sb-ext:run-program` makes the server the leader of a new process group, so the signals go to that group, which holds the server and any process it started. Before signalling, the client checks that the group's id equals the server's pid, and otherwise signals only the server, so no process of the app's is reached. On Windows the server is ended with `TerminateProcess`, which ends the server process alone (see "Known limitations").
+
 ## Resources and prompts
 
 Part 4 of #527, from the 2026-07-28 pages for resources and prompts, read at modelcontextprotocol.io on 2026-10-05.
@@ -232,6 +266,7 @@ A tool call that takes minutes can finish after the turn that started it, throug
 
 ## Known limitations
 
+- **On Windows, a process a local server started can outlive it.** `close-client` ends the server with `TerminateProcess`, which does not end the processes the server started. A server started through a launcher such as `npx` or a `.cmd` file can therefore keep running after the client is closed. Putting the server in a Job Object would end them together; that is #599.
 - **A reply stream left open fails at the read timeout.** `aion/http-client` reads a whole body. A server that leaves its event stream open after its final reply is therefore read until the read timeout, and the call fails then, with outcome `:unknown` for a tool call. The specification says the final response SHOULD end the stream, so a server that conforms does not do this. A test records the behaviour.
 
 ## Logging
@@ -242,6 +277,7 @@ The client logs counts, ids and durations:
 - the HTTP status;
 - the milliseconds a request took;
 - the number of tools, resources, templates, prompts, contents or pages;
-- of a resource's URI, only its scheme and host, because a URI can carry a user's data.
+- of a resource's URI, only its scheme and host, because a URI can carry a user's data;
+- for a local server, its pid, its era, how it was stopped, its exit status and code, and the numbers of notifications, dropped lines and late replies it sent. A server that could not be started is logged with the error's type only, since the message can name the command.
 
-It never logs tool arguments, results, descriptions, resource contents, prompt arguments or tokens (`docs/logging.md`).
+It never logs tool arguments, results, descriptions, resource contents, prompt arguments or tokens, nor a local server's command, environment or stderr (`docs/logging.md`).

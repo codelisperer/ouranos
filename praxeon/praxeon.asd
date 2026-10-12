@@ -188,7 +188,7 @@
   :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))
 
 (defsystem "praxeon/mcp"
-  :description "Agents that use the tools an MCP server offers, over Streamable HTTP (#527)."
+  :description "Agents that use the tools an MCP server offers, over Streamable HTTP or stdio (#527)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; cl-base64 for the specification's encoding of header values that are not plain ASCII.
@@ -201,6 +201,7 @@
                              (:file "wire")
                              (:file "task-store")
                              (:file "client")
+                             (:file "stdio")
                              (:file "resources")
                              (:file "prompts")
                              (:file "tasks"))))
@@ -209,11 +210,15 @@
 (defsystem "praxeon/mcp/tests"
   :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
   ;; aion/oauth/tests for its test authorization server, which the OAuth path here runs against.
+  ;; aion/log for the stdio tests, which check what is logged. tests/mcp-stdio-server.lisp is
+  ;; the local server those tests start as a child process; it is never loaded here.
   :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
-               "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret"
+               "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret" "aion/log"
                "com.inuoe.jzon" "cl-base64")
   :serial t
-  :components ((:file "tests/mcp-tests"))
+  :components ((:file "tests/mcp-tests")
+               (:file "tests/mcp-stdio-tests")
+               (:static-file "tests/mcp-stdio-server.lisp"))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
 
 (defsystem "praxeon/web-search"
