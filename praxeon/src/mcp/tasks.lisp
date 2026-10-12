@@ -293,6 +293,16 @@ the keys unrecorded and the next poll tells the app again: a question is shown a
 key's first-seen time is then the time of that next poll, so an observer that signals on every
 poll resets it each time, and the key's INPUT-TIMEOUT never passes: only the task's deadline
 bounds the wait (the hub's review of #627).
+
+SEVERAL POLLERS ON ONE STORE (#642). Each poller decides whether a key is new from its own copy of
+the task, which DUE-TASKS returned, and the store has no operation that records a key only if no
+other poller has. Two pollers whose polls overlap can each send :TASK-INPUT-REQUIRED for the same
+key, which the at-least-once promise above already allows, and later each answer it cancel, with
+:TASK-INPUT-EXPIRED, so the server gets the same cancel twice. That is safe for the server: both
+send the same answer, and the Tasks extension says a server SHOULD ignore a response for a key that
+is no longer outstanding, so the second has no effect. An app that wants each event once runs one
+poller per store. A store operation that claims a key could make it exact later, as an optional
+generic, so that stores written by apps keep working.
 The message, schema and URL in the event come from the server and are untrusted (#563)."
   (let* ((connection (client-connection client))
          (entries (%input-entries object)))
