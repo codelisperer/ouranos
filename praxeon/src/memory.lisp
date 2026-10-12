@@ -64,8 +64,10 @@ all of them. NIL means the single turn TURN. An observer's TURN and THROUGH are 
 positions in the thread, counted from 1, not exchanges. AN APP THAT WRITES AN OBSERVATION INTO
 A THREAD, with CONVERSATION naming that thread, cites the thread's message positions the same
 way (#462's ninth review): FORGET-SUBJECT keeps each thread's mark at least at the last position
-its observations cite, so a position past the transcript's end would keep an observer from
-ever observing the messages up to it."
+its observations cite. So any cited position past the observer's mark, such as a correction the
+app makes at a later message of the thread, or a position past the transcript's end, keeps an
+observer from ever observing the messages between the mark and that position (#462's tenth
+review)."
   (conversation "" :type string)
   (turn 0 :type integer)
   (at nil :type (or null integer))
