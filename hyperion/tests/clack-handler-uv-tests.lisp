@@ -65,17 +65,23 @@ binds it.")
                   t)
     (error () nil)))
 
+(defvar *failed-thread-delay* 0
+  "Seconds the server's thread waits between storing its failure and ending. Only the test of a
+failed start sets it, so that a %CLACKUP that does not wait for the thread to end is caught.")
+
 (defun %server-thread-hook (failure)
   "An *INVOKE-DEBUGGER-HOOK* for the threads a server started by %CLACKUP runs. In clack's own
 thread, which it names clack-handler-uv and in which the handler listens, an unhandled error is
 stored in (CAR FAILURE) and ends that thread, so that %CLACKUP can report it in the test. With the
 gate's debugger disabled, it used to end the whole test image (#519). The server's other threads
 inherit the hook too, and in them it calls the hook that was in place before, so an error there
-behaves as it did."
-  (let ((previous sb-ext:*invoke-debugger-hook*))
+behaves as it did. *FAILED-THREAD-DELAY* is read here, in the test's thread."
+  (let ((previous sb-ext:*invoke-debugger-hook*)
+        (delay *failed-thread-delay*))
     (lambda (condition hook)
       (if (equal "clack-handler-uv" (sb-thread:thread-name sb-thread:*current-thread*))
           (progn (setf (car failure) condition)
+                 (sleep delay)
                  (sb-thread:abort-thread))
           (when previous (funcall previous condition hook))))))
 
@@ -121,6 +127,10 @@ here, in the test's thread, so it fails the one test that started the server."
              (loop repeat 2000
                    until (or (car started) (car failure) (not (bt2:thread-alive-p thread)))
                    do (sleep 0.005))
+             ;; The hook stores the failure before the thread unwinds, so wait for it to end
+             ;; before the next attempt or the error.
+             (when (car failure)
+               (loop repeat 2000 while (bt2:thread-alive-p thread) do (sleep 0.005)))
              (let ((condition (car failure)))
                (cond ((car started) (return (values handler port)))
                      ((and (%port-taken-p condition) (< attempt +port-attempts+)))
@@ -719,10 +729,13 @@ The first port it is given here is taken by a listener of the test's own."
   "A listen failure in clack's thread is signalled to the test that started the server. Before
 #519 it was unhandled in that thread, and with the gate's debugger disabled it ended the test
 image, losing every later check in the suite. Every port this test offers is taken. Getting to
-the checks below at all is the evidence that the image kept running."
+the checks below at all is the evidence that the image kept running. The thread count is read
+at once, because %CLACKUP waits for a failed thread to end before it returns; each failed thread
+here waits 0.2 s before ending, so a %CLACKUP that did not wait would leave it counted."
   (with-taken-port (taken)
     (let* ((calls 0)
            (*candidate-port* (lambda () (incf calls) taken))
+           (*failed-thread-delay* 0.2)
            (before (%handler-threads))
            (failure (handler-case
                         (progn (%clackup (lambda (env) (declare (ignore env)) '(200 () ("ok"))))
@@ -731,7 +744,6 @@ the checks below at all is the evidence that the image kept running."
       (is-true failure "the server started on a port that was taken")
       (is (search "EADDRINUSE" (princ-to-string failure)) "the error was ~A" failure)
       (is (= +port-attempts+ calls) "~D ports were tried, not ~D" calls +port-attempts+)
-      (loop repeat 100 until (= before (%handler-threads)) do (sleep 0.01))
       (is (= before (%handler-threads)) "a failed server's thread is still running"))))
 
 (test clack-stop-leaves-no-listener
