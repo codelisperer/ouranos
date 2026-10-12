@@ -198,8 +198,10 @@ bound, and PAGE-URL, TAG-URL and COLLECTION-URL give it links.
 COLLECTIONS turns on a listing page for each collection it names, at /<name>/ (#557). Without
 it, a collection has no listing page of its own. An entry is a name, \"roles\", or a name with
 the ordering COLLECTION takes, (\"roles\" :sort-by \"start\" :order :descending :then-by
-\"title\"). A name that is the tags prefix or the page segment would share URLs with the tag
-pages or the index's pages, and is an error, as is a name given twice.
+\"title\"). A name is `/'-separated segments of letters, digits, `.', `-' and `_', none empty or
+starting with `.' or `_' (%SAFE-COLLECTION-NAME-P). Any other name is an error, and so is a name
+at or under the tags prefix, the page segment or another listed collection's page segment, or a
+name given twice, compared without regard to case (%CHECK-COLLECTIONS).
 
 PER-PAGE, when given, paginates the index, each tag's listing and each collection's listing:
 page 1 is the listing's own URL, page N adds PAGE-SEGMENT/N/. Without it, a listing is one page.
