@@ -699,9 +699,10 @@ its tag.
   app's own `conn:with-transaction`, where the setting lasts until that transaction ends. That
   needs pgvector 0.8 or later; on an older pgvector the query runs as before. An iterative scan
   still stops at `hnsw.max_scan_tuples` or its memory limit, so when the query returns fewer
-  than `:limit` rows it runs again with `SET LOCAL enable_indexscan = off`, which ranks every
-  one of the subject's rows in scope. A subject with fewer than `:limit` observations in scope
-  makes that second query on every similarity recall. `ensure-schema` also creates an index on
+  than `:limit` rows it runs again with index scans off (`SET LOCAL enable_indexscan = off`,
+  with sequential and bitmap scans on), which ranks every one of the subject's rows in scope. A
+  subject with fewer than `:limit` observations in scope makes that second query on every
+  similarity recall. `ensure-schema` also creates an index on
   `subject`, `<table>_subject_idx`, which that second query reads.
 
 - **praxeon/mcp: a task that asked for input is cancelled even when the cancel needs a

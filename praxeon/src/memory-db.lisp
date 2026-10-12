@@ -570,10 +570,11 @@ scope nearest EMBEDDING by cosine distance, nearest first.
 FIRST AS THE INDEX ALLOWS, THEN EXACTLY WHEN THAT CAME UP SHORT (#482). The query runs with an
 iterative HNSW scan (%WITH-COMPLETE-HNSW-SCAN). That scan still stops at HNSW.MAX_SCAN_TUPLES or
 its memory limit, so when it returns fewer than LIMIT rows, the query runs again with index
-scans turned off for its transaction. HNSW cannot serve it then, and the planner reads the
-subject's rows through the subject index's bitmap scan, or the table, and ranks every one. A
-subject with fewer than LIMIT observations in scope pays for that second query on every recall;
-it reads only the subject's rows."
+scans turned off, and sequential and bitmap scans on, for its transaction. HNSW cannot serve it
+then, because pgvector's index has no bitmap scan, and the planner reads the subject's rows
+through the subject index's bitmap scan, or the table, and ranks every one. A subject with fewer
+than LIMIT observations in scope pays for that second query on every recall; it reads only the
+subject's rows."
   (flet ((nearest ()
            (q:fetch (store-connection store)
                     (list :select +columns+
@@ -586,7 +587,13 @@ it reads only the subject's rows."
       (let ((rows (%with-complete-hnsw-scan (store) (nearest))))
         (if (< (length rows) limit)
             (conn:with-transaction ((store-connection store))
-              (conn:exec (store-connection store) "SET LOCAL enable_indexscan = off")
+              ;; Sequential and bitmap scans are turned on as well as index scans off, so that the
+              ;; session's own planner settings cannot leave the HNSW scan as the only plan left:
+              ;; with sequential scans off too, the planner chose it anyway on macOS and Windows CI
+              ;; and returned 1 row of 20 (#625's first CI run).
+              (dolist (setting '("SET LOCAL enable_indexscan = off" "SET LOCAL enable_seqscan = on"
+                                 "SET LOCAL enable_bitmapscan = on"))
+                (conn:exec (store-connection store) setting))
               (nearest))
             rows)))))
 

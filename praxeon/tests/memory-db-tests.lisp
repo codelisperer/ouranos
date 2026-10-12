@@ -805,7 +805,8 @@ recall of the facts returns 20, and a recall of the thread returns 20 (#482's ow
   "Member x has 20 observations among 400 of other subjects, without the subject index, and with
 pgvector's limits lowered so the iterative scan stops after 30 rows, as it stops after 20,000 in
 a large table. That scan alone returns fewer than 20 of member x's rows; RECALL-SIMILAR then runs
-the query again without index scans and returns all 20 (Copilot's review of #625)."
+the query again without index scans and returns all 20 (Copilot's review of #625), also when the
+session has sequential scans off and costly."
   (if (%sqlite-p)
       (skip "Postgres only: the HNSW index")
       (with-store (store (make-instance 'scattered-embedder))
@@ -824,5 +825,9 @@ the query again without index scans and returns all 20 (Copilot's review of #625
                                  (conn:query c (format nil "SELECT id FROM ~A WHERE subject = 'member-x' AND thread IS NULL AND superseded_by IS NULL ORDER BY embedding <=> '~A' LIMIT 20"
                                                        (mdb:store-table store)
                                                        (llm:vector-text (llm:embed (make-instance 'scattered-embedder) "a query"))))))))
-            (is (< alone 20) "precondition: the iterative scan alone returns ~D of 20" alone)))
+            (is (< alone 20) "precondition: the iterative scan alone returns ~D of 20" alone))
+          ;; A sequential scan this expensive makes the planner prefer the HNSW scan among plans
+          ;; it was told to avoid, as macOS's and Windows's Postgres did in #625's first CI run, so
+          ;; the second query is checked for not depending on the session's planner settings.
+          (conn:exec c "SET seq_page_cost = 1000"))
         (is (= 20 (%nearest-count store 20))))))
