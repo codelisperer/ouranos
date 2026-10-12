@@ -44,16 +44,26 @@
 
 (defun run-tests ()
   "Run the tests that touch no store, then, on Windows and macOS, the live tests if
-+LIVE-VARIABLE+ allows them, and print a BACKEND-CHECKS credential-store line saying which."
-  (fiveam:run! 'all)
-  #+(or win32 darwin)
-  (if (%live-p)
-      (let ((results (fiveam:run 'live)))
-        (fiveam:explain! results)
-        (format t "~&BACKEND-CHECKS credential-store ~D~%" (length results))
-        (fiveam:run! 'leftovers))
-      (format t "~&BACKEND-CHECKS credential-store SKIPPED (~A is not set; the live tests use this machine's real credential store)~%"
-              +live-variable+)))
++LIVE-VARIABLE+ allows them, and print a BACKEND-CHECKS credential-store line saying which.
+
+Signals an error when any of those suites had a failure, after all of them have run. This
+prints up to three FiveAM reports, and the gate takes a report of \"Fail: 0\" anywhere in a
+suite's output, with the child exiting 0, as a pass; so a failure in one report followed by a
+passing one would read as green unless the child exits non-zero (Copilot's review of #603)."
+  (let ((passed (fiveam:run! 'all)))
+    #+(or win32 darwin)
+    (if (%live-p)
+        (let ((results (fiveam:run 'live)))
+          (fiveam:explain! results)
+          (format t "~&BACKEND-CHECKS credential-store ~D~%" (length results))
+          (unless (fiveam:results-status results) (setf passed nil))
+          ;; Run even when a live test failed: that is when an item is most likely left behind.
+          (unless (fiveam:run! 'leftovers) (setf passed nil)))
+        (format t "~&BACKEND-CHECKS credential-store SKIPPED (~A is not set; the live tests use this machine's real credential store)~%"
+                +live-variable+))
+    (unless passed
+      (error "hades/credentials/tests: a check failed; the reports above say which"))
+    passed))
 
 (defun %token ()
   (format nil "~36R" (random (expt 36 12) (make-random-state t))))
