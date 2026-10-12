@@ -415,7 +415,9 @@ second caller finds the first one's new token and does not refresh at all."
         (let ((tokens (aion/test-threads:join-all threads :timeout 20)))
           (is (every #'stringp tokens) "both callers got a token: ~S" tokens)
           (is (= 1 (as-refresh-requests as)))
-          (is-true (oauth:get-token (oauth:broker-store broker) "u1" "docs")))))))
+          (is-true (oauth:get-token (oauth:broker-store broker) "u1" "docs"))
+          (is (null (gethash (list "u1" "docs") oauth::*refresh-locks*))
+              "the refresh lock's entry is gone once no call holds or waits for it (#542)"))))))
 
 (net-test a-token-is-only-for-the-resource-it-was-issued-for
   (with-as (as)
@@ -429,10 +431,64 @@ second caller finds the first one's new token and does not refresh at all."
   (with-as (as)
     (let ((broker (%broker)))
       (%sign-in as broker)
+      (is (null (gethash (list "u1" "docs") oauth::*refresh-locks*))
+          "a finished sign-in leaves no refresh-lock entry (#542)")
       (let ((refresh (secret:reveal (oauth:token-set-refresh (oauth:get-token (oauth:broker-store broker) "u1" "docs")))))
         (oauth:disconnect broker "u1" "docs")
         (is (member refresh (as-revoked as) :test #'equal))
-        (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs")))))))
+        (is (null (oauth:get-token (oauth:broker-store broker) "u1" "docs")))
+        (is (null (gethash (list "u1" "docs") oauth::*refresh-locks*))
+            "a finished disconnect leaves no refresh-lock entry (#542)")))))
+
+(test the-default-refresh-lock-keeps-an-entry-only-while-a-call-holds-or-waits
+  "CALL-WITH-REFRESH-LOCK on a store that does not override it counts the calls holding or
+waiting for a key's mutex. A nested call on the same thread counts twice, and the entry is
+removed when the outer call returns, also when it unwinds with an error (#542)."
+  (let ((store (oauth:make-memory-store))
+        (key (list "u-542" "nested"))
+        (seen '()))
+    (flet ((count-now () (cdr (gethash key oauth::*refresh-locks*))))
+      (is (eq :done
+              (oauth:call-with-refresh-lock
+               store key
+               (lambda ()
+                 (push (count-now) seen)
+                 (oauth:call-with-refresh-lock store key (lambda () (push (count-now) seen)))
+                 (push (count-now) seen)
+                 :done))))
+      (is (equal '(1 2 1) (reverse seen)) "counts inside the calls: ~S" (reverse seen))
+      (is (null (gethash key oauth::*refresh-locks*)))
+      (is (eq :unwound (handler-case (oauth:call-with-refresh-lock store key (lambda () (error "boom")))
+                         (error () :unwound))))
+      (is (null (gethash key oauth::*refresh-locks*)) "an error leaves no entry"))))
+
+(test calls-for-one-key-never-overlap-while-earlier-ones-are-released
+  "Six threads start 30 ms apart, each holding the refresh lock of one key for 100 ms, so new
+callers keep arriving while earlier ones release it with others still waiting. No two thunks
+ever run at once, and the entry is gone at the end (#542). CONTROL: removing the entry on every
+release, whoever is waiting, lets a caller that arrives after a release create a second mutex
+and run beside the waiting caller who took the first, so the most at once is 2."
+  (let* ((store (oauth:make-memory-store))
+         (key (list "u-542" "overlap"))
+         (lock (sb-thread:make-mutex :name "overlap counter"))
+         (running 0)
+         (most 0)
+         (threads (loop for i from 0 below 6
+                        collect (let ((delay (* i 0.03)))
+                                  (sb-thread:make-thread
+                                   (lambda ()
+                                     (sleep delay)
+                                     (oauth:call-with-refresh-lock
+                                      store key
+                                      (lambda ()
+                                        (sb-thread:with-mutex (lock)
+                                          (setf most (max most (incf running))))
+                                        (sleep 0.1)
+                                        (sb-thread:with-mutex (lock) (decf running))
+                                        t))))))))
+    (is (every #'identity (aion/test-threads:join-all threads :timeout 20)))
+    (is (= 1 most) "~D thunks ran at once" most)
+    (is (null (gethash key oauth::*refresh-locks*)))))
 
 (net-test a-token-endpoint-that-redirects-gets-no-code-forwarded
   (let ((hits 0))
