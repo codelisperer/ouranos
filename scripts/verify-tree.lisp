@@ -848,6 +848,16 @@ all -- which means the suite never ran, not that it ran and found nothing."
         (setf start (1+ p))))
     total))
 
+(defun fail-counts (output)
+  "The N of every `Fail: N' line FiveAM printed in OUTPUT, in order: one per report. A test op
+that runs more than one suite, or calls RUN! more than once, prints more than one report
+(#605)."
+  (loop for line in (uiop:split-string output :separator '(#\Newline))
+        for text = (string-trim '(#\Space #\Tab #\Return) line)
+        for n = (and (uiop:string-prefix-p "Fail: " text)
+                     (parse-integer text :start 6 :junk-allowed t))
+        when n collect n))
+
 (defun count-skips (output)
   "Sum every `Skip: N` FiveAM emits in OUTPUT; 0 if none.
 
@@ -1119,6 +1129,11 @@ let this run claim `view' while the five assertions skipped."
         (let ((n (count-checks text))
               (empty-reason (cdr (assoc s +known-empty+)))
               (redefined (ouranos-redefinitions:redefinitions-in text)))
+          ;; Survey for #605: a suite whose output holds more than one FiveAM report.
+          (let ((fails (fail-counts text)))
+            (when (> (length fails) 1)
+              (format t "  REPORTS ~a~34t~D FiveAM reports, Fail: ~{~D~^, ~} (child exited ~a)~%"
+                      s (length fails) fails code)))
           (cond
             ((not (zerop code))
              (format t "  FAIL    ~a  (child exited ~a)~%~a~%" s code (failure-excerpt text 6))
