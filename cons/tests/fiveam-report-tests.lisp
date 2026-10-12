@@ -242,3 +242,48 @@ which checks failed, from the report before the error."
                     (concatenate 'string +real-passing-report+ (format nil "Unhandled SIMPLE-ERROR~%"))
                     printed)))
     (is (string= "" (get-output-stream-string printed)))))
+
+;;; --- a report with one check is counted (#607) ------------------------------------------------
+
+(defparameter +real-one-check-report+
+  (format nil "~{~A~%~}"
+          '(" Did 1 check."
+            "    Pass: 1 (100%)"
+            "    Skip: 0 ( 0%)"
+            "    Fail: 0 ( 0%)"))
+  "FiveAM's report for a suite with one passing check, from `(run! 'one)' against
+fiveam-20241012-git on 2026-10-12. FiveAM writes `check' in the singular here.")
+
+(defun %count-plural-only (output)
+  "The count this replaced: only `Did N checks' lines. KEPT AS THE CONTROL: it returns NIL for
+the one-check report, which is what the gate did with it."
+  (let ((total nil) (start 0))
+    (loop
+      (let ((p (search "Did " output :start2 start)))
+        (unless p (return))
+        (let* ((numstart (+ p 4))
+               (numend (position-if-not #'digit-char-p output :start numstart)))
+          (when (and numend (> numend numstart)
+                     (string= " checks" output :start2 numend
+                                               :end2 (min (length output) (+ numend 7))))
+            (setf total (+ (or total 0) (parse-integer output :start numstart :end numend)))))
+        (setf start (1+ p))))
+    total))
+
+(test a-report-with-one-check-is-counted
+  (%load-fiveam-report)
+  (is (eql 1 (%fr count-checks +real-one-check-report+)))
+  (is (null (%count-plural-only +real-one-check-report+))
+      "the control: the old count must have missed this report")
+  (is (eql 3 (%fr count-checks (concatenate 'string +real-passing-report+ +real-one-check-report+)))
+      "a two-check report and a one-check report are three checks"))
+
+(test check-counts-are-unchanged-where-no-report-has-one-check
+  "The survey for #607 found no one-check report in any suite, so on today's outputs the count
+must be the one the gate already gave."
+  (%load-fiveam-report)
+  (dolist (out (list +real-passing-report+ +real-report+
+                     (concatenate 'string +real-passing-report+ +real-report+)))
+    (is (eql (%count-plural-only out) (%fr count-checks out))))
+  (is (null (%fr count-checks (format nil "; compiling file~%Did a thing.~%")))
+      "text that is not a report is not counted"))
