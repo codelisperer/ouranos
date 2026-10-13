@@ -705,7 +705,9 @@ binding.")
 
 (defun %pause (observer seconds)
   "Wait SECONDS, or less if OBSERVER is being stopped."
-  (when *pause-hook* (funcall *pause-hook* observer))
+  ;; Read once: a test clears the hook from its own thread (Copilot's review of #656).
+  (let ((hook *pause-hook*))
+    (when hook (funcall hook observer)))
   (let ((until (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
     (loop while (and (< (get-internal-real-time) until) (not (observer-stopping observer)))
           do (sleep 0.05))))

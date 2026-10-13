@@ -7309,7 +7309,10 @@ pause however the threads are scheduled."
            (progn
              (setf obs::*pause-hook* (lambda (o) (declare (ignore o))
                                        (sb-thread:signal-semaphore paused)
-                                       (sb-thread:wait-on-semaphore resume :timeout 10)))
+                                       ;; No timeout: the pause ends only when the test says so,
+                                       ;; and the cleanup below always does (Copilot's review of
+                                       ;; #656).
+                                       (sb-thread:wait-on-semaphore resume)))
              (is-true (obs:observe-turn observer (%history 6)))
              (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: call 1 began")
              (is-true (obs:observer-stuck-p observer) "precondition: call 1 is stuck while it runs")
