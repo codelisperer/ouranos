@@ -795,6 +795,12 @@ its tag.
 
 ### Fixed
 
+- **hyperion/dev: a file saved in the same second as the reloader's last poll is reloaded** (#658).
+  The reloader compared write dates only, and a write date has a resolution of one second, so
+  such a save kept its date and was not reloaded until the file was saved again. Each poll now
+  also compares the file's size, and, for a file written in the last two seconds
+  (`hyperion/dev::+recent-seconds+`), a hash of its contents. Older files are not read.
+
 - **praxeon/conditions: `praxeon-error` keeps its `:detail` and prints it** (#505). Code
   throughout praxeon signals `praxeon-error` with `:detail` saying what went wrong, such as
   `make-observer`'s refusal of a bad `:step` or a `supersede` of an observation already
