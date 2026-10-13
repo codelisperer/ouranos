@@ -16,6 +16,9 @@
 ;;;; configured in the environment, as praxeon's other model calls do.
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+;; First, so that a source file rewritten in the same second as its last compile is compiled
+;; again, rather than its previous fasl being loaded into the binary (#573).
+(asdf:load-system "cons/fasl-dates")
 ;; Found through the ASDF source-registry drop-in bootstrap.lisp writes, or CL_SOURCE_REGISTRY.
 (ql:quickload :praxeon/claude-code :silent t)
 

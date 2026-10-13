@@ -6,6 +6,9 @@
 ;;;; script copies beside it with its licence under bin/LICENSES/ (#513): copy bin/ as a whole.
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+;; First, so that a source file rewritten in the same second as its last compile is compiled
+;; again, rather than its previous fasl being loaded into the binary (#573).
+(asdf:load-system "cons/fasl-dates")
 ;; Discovery comes from the ASDF source-registry drop-in written by the repo-root
 ;; bootstrap.lisp (or `cons setup`); no *central-registry* push / local-projects.
 (ql:quickload "{{name}}")

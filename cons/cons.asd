@@ -22,6 +22,15 @@
                 :components ((:file "env-package")
                              (:file "env")))))
 
+(defsystem "cons/fasl-dates"
+  :description "ASDF compiles a source file again when its fasl has the same write date (#573)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; ASDF only, so that every entry point that compiles, a generated app's build script included,
+  ;; can load it before anything else. See src/fasl-dates.lisp.
+  :components ((:module "src" :components ((:file "fasl-dates")))))
+
 (defsystem "cons"
   :description "cons the magnificent -- project & dev tooling for Common Lisp."
   :author "Bob <eternal.recursion@proton.me>"
@@ -106,6 +115,7 @@
                              (:file "check-compile-tests")
                              (:file "not-covered-tests")
                              (:file "strict-load-tests")
+                             (:file "fasl-dates-tests")
                              (:file "view-launcher-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :cons/tests :run-tests)))
 

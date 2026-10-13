@@ -409,6 +409,10 @@ bytes with spaces. Signals an error naming certutil's output when no line is a h
 ;;; --- discovery + load ---------------------------------------------------------
 (asdf:initialize-source-registry
  `(:source-registry (:tree ,*root*) :inherit-configuration))
+;; Before anything is compiled, aion/platform included, whose answer decides which platform the
+;; bundle is for: a source file rewritten in the same second as its last compile is compiled
+;; again, rather than its previous fasl being loaded (#573). It needs only ASDF.
+(asdf:load-system "cons/fasl-dates")
 (asdf:load-system "aion/platform")
 
 ;;; --- refusing an unverified platform (pre-publication issue 145) -------------------------------------

@@ -41,6 +41,7 @@
     :doc "build example #1 to bin/active-search (native)"
     :sh ("sbcl" "--dynamic-space-size" "4096" "--non-interactive"
          "--eval" "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
+         "--eval" "(asdf:load-system \"cons/fasl-dates\")"   ; #573
          "--eval" "(ql:quickload :hyperion/examples/active-search)"
          "--eval" "(ensure-directories-exist \"bin/\")"
          "--eval" "(load \"../scripts/dump-image.lisp\")"
