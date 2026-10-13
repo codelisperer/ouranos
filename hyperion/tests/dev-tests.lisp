@@ -165,6 +165,90 @@ and the editor droppings that appear beside a file on every save."
         (is (member (namestring (truename css)) changed :test #'string=)
             "editing a stylesheet must register as a change")))))
 
+;;; --- a save in the same second as the snapshot (#658) ----------------------
+;;;
+;;; FILE-WRITE-DATE has one-second resolution, so these tests do not rely on the clock to make
+;;; two writes fall in one second: after each write, the file is given the write date of a
+;;; reference file, so its date is the same before and after the edit, as it is when a save
+;;; lands in the same second as the snapshot.
+
+(defun %copy-write-date (from to)
+  "Give the file TO the write date of the file FROM, to the precision the file system keeps."
+  (if (uiop:os-windows-p)
+      (uiop:run-program (list "powershell" "-NoProfile" "-NonInteractive" "-Command"
+                              (format nil "(Get-Item -LiteralPath '~A').LastWriteTimeUtc = (Get-Item -LiteralPath '~A').LastWriteTimeUtc"
+                                      (uiop:native-namestring to) (uiop:native-namestring from))))
+      (uiop:run-program (list "touch" "-r" (uiop:native-namestring from)
+                              (uiop:native-namestring to)))))
+
+(defun %write-dated (path text reference)
+  (with-open-file (s path :direction :output :if-exists :supersede)
+    (write-string text s))
+  (%copy-write-date reference path))
+
+(test a-save-in-the-same-second-as-the-snapshot-is-a-change
+  (%with-dev-tree (root)
+    (let ((css (merge-pathnames "resources/style.css" root))
+          (reference (merge-pathnames "reference.txt" root)))
+      (with-open-file (s reference :direction :output :if-exists :supersede) (write-string "r" s))
+      (%write-dated css "body{color:red}" reference)
+      (let* ((key (namestring (truename css)))
+             (before (hyperion/dev::%snapshot (list root))))
+        ;; The same size, other content: only the hash can tell.
+        (%write-dated css "body{color:tan}" reference)
+        (let ((after (hyperion/dev::%snapshot (list root))))
+          ;; The control: the dates are equal, so the comparison of dates alone, which this
+          ;; replaced, reported no change.
+          (is (= (first (gethash key before)) (first (gethash key after))))
+          (is (eql (second (gethash key before)) (second (gethash key after))))
+          (is (member key (hyperion/dev::%changed-files before after) :test #'string=)
+              "a save with the same date and size must register as a change")
+          ;; Nothing written since: no change.
+          (is (null (hyperion/dev::%changed-files after (hyperion/dev::%snapshot (list root))))))
+        ;; Another size, the same date.
+        (let ((before (hyperion/dev::%snapshot (list root))))
+          (%write-dated css "body{color:rebeccapurple}" reference)
+          (is (member key (hyperion/dev::%changed-files before (hyperion/dev::%snapshot (list root)))
+                      :test #'string=)))))))
+
+(test only-a-recently-written-file-is-hashed
+  "A file written more than +RECENT-SECONDS+ before the snapshot is not read; its date would
+have moved had it been rewritten since."
+  (%with-dev-tree (root)
+    (let* ((css (merge-pathnames "resources/style.css" root))
+           (date (file-write-date css)))
+      (is (integerp (third (hyperion/dev::%file-state css date))))
+      (is (eq :old (third (hyperion/dev::%file-state
+                           css (+ date hyperion/dev::+recent-seconds+ 1))))))))
+
+(test a-recent-file-whose-content-was-not-read-counts-as-changed
+  "Copilot's review of #659: a recent file that could not be read, as when an editor replaces it,
+has no known content, and the next poll with the same date and size is a change, not proof that
+nothing changed. A file skipped because it is old is the same."
+  (%with-dev-tree (root)
+    (let* ((css (merge-pathnames "resources/style.css" root))
+           (now (hyperion/dev::%file-state css (file-write-date css))))
+      (destructuring-bind (date size hash) now
+        (is (integerp hash))
+        (is-false (hyperion/dev::%same-file-p css (list date size :unreadable) now))
+        (is-true (hyperion/dev::%same-file-p css (list date size :old) now))
+        (is-true (hyperion/dev::%same-file-p css now now))))))
+
+(test a-hash-the-snapshot-did-not-take-is-taken-when-the-dates-match
+  "A poll more than +RECENT-SECONDS+ after a save that kept its date still compares content:
+the hash is computed then, because the earlier snapshot has one."
+  (%with-dev-tree (root)
+    (let ((css (merge-pathnames "resources/style.css" root))
+          (reference (merge-pathnames "reference.txt" root)))
+      (with-open-file (s reference :direction :output :if-exists :supersede) (write-string "r" s))
+      (%write-dated css "body{color:red}" reference)
+      (let ((old (hyperion/dev::%file-state css (file-write-date css))))
+        (%write-dated css "body{color:tan}" reference)
+        (let ((late (hyperion/dev::%file-state
+                     css (+ (file-write-date css) hyperion/dev::+recent-seconds+ 1))))
+          (is (eq :old (third late)))
+          (is-false (hyperion/dev::%same-file-p css old late)))))))
+
 ;;;; ---------------------------------------------------------------------------
 ;;;; The hyperion/dev cluster: pre-publication issue 157 pre-publication issue 233 pre-publication issue 234 pre-publication issue 235 pre-publication issue 236 pre-publication issue 237.
 ;;;;

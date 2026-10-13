@@ -45,7 +45,7 @@ and watching it makes the reload loop feed itself.")
   (excluded-dirs *watch-excluded-directories*)   ; pruned subtrees
   (excluded-types *watch-excluded-types*)        ; never-reload extensions
   (interval 0.5)                            ; poll seconds
-  snapshot                                  ; namestring -> file-write-date
+  snapshot                                  ; namestring -> (date size hash), see %FILE-STATE
   thread
   (lock (sb-thread:make-mutex :name "hyperion-dev-reload"))
   (running t)
@@ -117,21 +117,82 @@ PRUNED: a glob visits everything and then filters, which does the expensive part
   (let ((type (pathname-type path)))
     (and type (member (string-downcase type) '("lisp" "lsp" "cl") :test #'string=) t)))
 
+;;; --- what counts as a change (#658) ------------------------------------------
+;;;
+;;; FILE-WRITE-DATE has a resolution of one second, so a file saved in the same second as the
+;;; snapshot before it keeps its date, and a reloader that compares dates alone misses the save
+;;; until the file is saved again. Each file's state is therefore its date, its size, and, for a
+;;; file written in the last +RECENT-SECONDS+, a hash of its octets, as klio's watcher keeps a
+;;; hash of its content. An older file is not read: it cannot have been rewritten without its
+;;; date moving past the one recorded, so each poll reads only what was written recently.
+
+(defparameter +recent-seconds+ 2
+  "A file whose write date is this many seconds old or less is hashed as well as dated.")
+
+(defun %octet-hash (path)
+  "A 64-bit FNV-1a hash of PATH's octets, or NIL when it cannot be read."
+  (ignore-errors
+   (with-open-file (in path :element-type '(unsigned-byte 8))
+     (let ((hash #xcbf29ce484222325)
+           (buffer (make-array 65536 :element-type '(unsigned-byte 8))))
+       (declare (type (unsigned-byte 64) hash))
+       (loop for n = (read-sequence buffer in)
+             while (plusp n)
+             do (dotimes (i n)
+                  (setf hash (ldb (byte 64 0)
+                                  (* (logxor hash (aref buffer i)) #x100000001b3)))))
+       hash))))
+
+(defun %file-state (path now)
+  "PATH's (DATE SIZE HASH), or NIL when it has no write date. HASH is :OLD when the file was
+written more than +RECENT-SECONDS+ before NOW and so was not read, and :UNREADABLE when it was
+recent but could not be read, for instance because an editor was replacing it. The two are kept
+apart because only the first says the content is known not to have changed (Copilot's review of
+#659)."
+  (let ((date (ignore-errors (file-write-date path))))
+    (when date
+      (list date
+            (ignore-errors (with-open-file (in path :element-type '(unsigned-byte 8))
+                             (file-length in)))
+            (if (<= (- now date) +recent-seconds+)
+                (or (%octet-hash path) :unreadable)
+                :old)))))
+
 (defun %snapshot (roots &key (excluded-dirs *watch-excluded-directories*)
                              (excluded-types *watch-excluded-types*))
-  (let ((h (make-hash-table :test 'equal)))
+  "Each watched file under ROOTS, by namestring, with its state from %FILE-STATE."
+  (let ((h (make-hash-table :test 'equal))
+        (now (get-universal-time)))
     (dolist (f (%watched-files roots :excluded-dirs excluded-dirs
                                      :excluded-types excluded-types)
              h)
-      (let ((d (ignore-errors (file-write-date f))))
-        (when d (setf (gethash f h) d))))))
+      (let ((state (%file-state f now)))
+        (when state (setf (gethash f h) state))))))
+
+(defun %same-file-p (path old new)
+  "Whether the states OLD and NEW of PATH describe the same content. Different dates or sizes
+are a change. With equal dates and sizes:
+- OLD's hash :OLD means the file was not rewritten after its date, so it is the same;
+- OLD's hash :UNREADABLE means its content was not known, so it counts as a change;
+- otherwise the hashes decide. NEW has no hash of its own when the poll came more than
+  +RECENT-SECONDS+ after the save, and it is computed now; one that cannot be read is a change."
+  (destructuring-bind (old-date old-size old-hash) old
+    (destructuring-bind (date size hash) new
+      (and (= date old-date)
+           (eql size old-size)
+           (case old-hash
+             (:old t)
+             (:unreadable nil)
+             (t (eql old-hash (if (integerp hash) hash (%octet-hash path)))))))))
 
 (defun %changed-files (old new)
-  "Files in NEW that are new or newer than in OLD."
+  "Files in NEW that are not in OLD, or whose content may differ from what OLD recorded:
+another write date, another size, or, with the same date, another hash (#658)."
   (let ((changed '()))
-    (maphash (lambda (f date)
+    (maphash (lambda (f state)
                (let ((prev (and old (gethash f old))))
-                 (when (or (null prev) (> date prev)) (push f changed))))
+                 (unless (and prev (%same-file-p f prev state))
+                   (push f changed))))
              new)
     changed))
 
