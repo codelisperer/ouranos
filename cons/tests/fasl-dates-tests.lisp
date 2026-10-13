@@ -66,6 +66,10 @@ source registry. WITH-FIX loads cons/fasl-dates first."
           (is (= (file-write-date fasl) (file-write-date source)) "the dates were not made equal")
           ;; The control: ASDF alone keeps the fasl and runs the previous code.
           (is (equal "version-1" (%fasl-dates-child dir nil)))
+          ;; A second later, so the compile below writes a fasl dated after the source. On a fast
+          ;; machine every step so far fits in one second, and a fasl compiled in it would have
+          ;; the source's date again and be compiled once more on the next load (#657's Linux leg).
+          (sleep 1.1)
           (is (equal "version-2" (%fasl-dates-child dir t)))
           ;; Compiled once more, then left alone: the new fasl is dated later than the source.
           (let ((date (file-write-date fasl)))
