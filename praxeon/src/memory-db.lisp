@@ -210,6 +210,10 @@ HYPERION/DB-CONNECTION:WRAP-CONNECTION. Over one connection nothing else may use
 opens a transaction on it while praxeon/observe writes has that transaction committed by the
 observer on Postgres, and the observer's writes refused on SQLite (#651).
 
+ON SQLITE every connection the pool opens waits up to mnemosyne's busy timeout for the
+database's write lock: MNEMOSYNE/CONN:*SQLITE-BUSY-TIMEOUT-MS*, 5000 ms by default. The store's
+own transactions begin IMMEDIATE, so they wait at BEGIN (#653).
+
 EMBEDDER IS INJECTED, NOT RESOLVED HERE. `make-embedding-provider-from-env' reads
 `*provider-role*', and #158 records that resolving across a thread boundary falls through to
 the shared level without erroring -- the wrong model, quietly. Resolve it where the role is

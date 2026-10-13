@@ -1123,12 +1123,14 @@ used the observer's borrowed connection, not a second one from the pool, which c
   "Over a pool a read borrows a connection and takes no lock, so it returns while another thread
 holds the store's lock; over one connection every operation takes the lock (#653)."
   (with-pool-store (store pool)
-    (bt:with-recursive-lock-held ((mdb::store-lock store))
-      (let* ((done nil)
-             (reader (bt:make-thread (lambda () (mem:observations-of store "member-653") (setf done t)))))
+    (let ((done nil) (reader nil))
+      ;; The lock is released before the join, and the join is bounded, so a read that waits for
+      ;; the lock fails the check instead of hanging the suite (Copilot's review of #654).
+      (bt:with-recursive-lock-held ((mdb::store-lock store))
+        (setf reader (bt:make-thread (lambda () (mem:observations-of store "member-653") (setf done t))))
         (loop repeat 200 until done do (sleep 0.01))
-        (is-true done "the read returned while the lock was held")
-        (bt:join-thread reader)))))
+        (is-true done "the read returned while the lock was held"))
+      (sb-thread:join-thread reader :default nil :timeout 10))))
 
 (defun %behind-an-apps-write-transaction (store pool function)
   "Run FUNCTION on this thread 0.2 s into a 1-second write transaction the app holds on another
