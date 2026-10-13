@@ -150,6 +150,8 @@
                                    "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
                                    "--eval" "(require :asdf)"
                                    "--eval" (format nil "(load ~S)" (uiop:native-namestring *quicklisp*))
+                                   ;; As verify-tree.lisp's children do (#573).
+                                   "--eval" "(asdf:load-system \"cons/fasl-dates\")"
                                    "--eval" form)
                              :output out :error-output out :ignore-error-status t
                              :environment (cons (format nil "CL_SOURCE_REGISTRY=~A" (child-registry))

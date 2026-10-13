@@ -564,6 +564,9 @@ a later step does: a resource update rewrites the file and drops an Authenticode
   (ignore-errors (require contrib)))
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+;; Before the app is compiled: a source file rewritten in the same second as its last compile is
+;; compiled again, rather than its previous fasl being loaded into the bundle (#573).
+(asdf:load-system "cons/fasl-dates")
 
 (format t "~&build-desktop-app: loading ~A (first Coalton compile takes minutes)~%" *system*)
 (finish-output)

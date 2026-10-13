@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **cons: a source file rewritten in the same second as its last compile is compiled again, once
+  the build loads `cons/fasl-dates`** (#573). ASDF keeps a fasl whose write date equals its
+  source's, and write dates have a resolution of one second, so a file rewritten in the second
+  after its compile was loaded as its previous version, and `cons bin` or a desktop build shipped
+  that code without an error. The new system `cons/fasl-dates` adds a method to
+  `asdf:operation-done-p` that compiles such a file again. It applies to every Lisp source file
+  compiled in the image once it is loaded, Quicklisp libraries included, and it compiles a file
+  at most once more. `bootstrap.lisp` (and so the `bin/cons` image), the `cons` loader,
+  `scripts/build-desktop-app.lisp`, `scripts/verify-tree.lisp` and `scripts/check-compile.lisp`
+  load it. **An app made from the agent, cli or web template before this change** has a
+  `scripts/build-<name>.lisp` that does not: add `(asdf:load-system "cons/fasl-dates")` after
+  the line that loads `quicklisp/setup.lisp`, as the templates now do.
+
 - **praxeon/memory-db: `ensure-schema` creates an index on `subject`, `<table>_subject_idx`**
   (#482). It builds it without `CONCURRENTLY`, so on a large existing table the first start
   after upgrading blocks writes to the table while the index builds. To avoid that, build it
