@@ -24,6 +24,7 @@
                     (#:spec #:cons/spec)
                     (#:run #:cons/run)
                     (#:toolchain #:cons/toolchain)
+                    (#:build-record #:cons/build-record)
                     (#:env-scan #:cons/env-scan))
   (:export #:main))
 (in-package #:cons/cli)
@@ -42,7 +43,7 @@ keeps working after an upgrade replaces the sbcl on PATH -- and then `cons versi
 only place the two can be compared. When they differ, MAIN has already said so on stderr;
 this is where you check what it said."
   (declare (ignore cmd))
-  (format t "cons ~A~%" (cons:version))
+  (format t "cons ~A~@[ (~A)~]~%" (cons:version) (build-record:describe-build))
   (format t "sbcl ~A~@[ (PATH: ~A)~]~%"
           (lisp-implementation-version)
           (let ((on-path (toolchain:sbcl-on-path-version)))
@@ -235,6 +236,8 @@ fasl still fails the target (#303); use it in CI. With no
   ;; (pre-publication issue 161). Reported, not fatal: `cons version` and `cons help` must still answer on a
   ;; broken toolchain, since that is when you need them most.
   (toolchain:check)
+  ;; The same kind of report: a binary older than the clone it lives in still runs (#526).
+  (ignore-errors (build-record:check))
   (project:ensure-source-registry)
   (let ((argv (uiop:command-line-arguments)))
     (multiple-value-bind (fresh rest) (%pop-flag "--fresh" argv)
