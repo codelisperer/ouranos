@@ -97,6 +97,8 @@
      (%sbcl "--dynamic-space-size" "4096" "--non-interactive"
             "--load" (%ql-setup)
             "--eval" "(ql:register-local-projects)"
+            ;; A fasl with its source's write date is compiled again (#573).
+            "--eval" "(asdf:load-system \"cons/fasl-dates\")"
             "--eval" (format nil "(ql:quickload :~A)" sys)
             "--eval" "(uiop:quit 0)"))))
 
@@ -111,6 +113,8 @@
      (%sbcl "--dynamic-space-size" "4096" "--non-interactive"
             "--load" (%ql-setup)
             "--eval" "(ql:register-local-projects)"
+            ;; A fasl with its source's write date is compiled again (#573).
+            "--eval" "(asdf:load-system \"cons/fasl-dates\")"
             "--eval" (format nil "(ql:quickload :~A)" sys)
             "--eval" (format nil "(asdf:test-system :~A)" sys)
             "--eval" "(uiop:quit 0)"))))

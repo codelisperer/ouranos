@@ -80,14 +80,13 @@ source registry. WITH-FIX loads cons/fasl-dates first."
 (defparameter *fasl-dates-entry-points*
   '(("bootstrap.lisp" 3)        ; the bin/cons image, the warm step and the platform packages
     ("cons/src/run.lisp" 1)     ; the cons loader, in process and in the --fresh child
-    ("cons/templates/agent/files/scripts/build-{{name}}.lisp" 1)
-    ("cons/templates/cli/files/scripts/build-{{name}}.lisp" 1)
-    ("cons/templates/web/files/scripts/build-{{name}}.lisp" 1)
+    ("hyperion/src/cli.lisp" 2) ; `hyperion build' and `hyperion test'
     ("scripts/build-desktop-app.lisp" 1)
     ("scripts/verify-tree.lisp" 1)
     ("scripts/check-compile.lisp" 1))
-  "Each file that compiles an app or the tree, and how many loads of cons/fasl-dates it makes:
-one per image it compiles in.")
+  "Files that compile an app or the tree without dumping a binary themselves, or that start more
+than one image, and how many loads of cons/fasl-dates each makes: one per image it compiles in.
+Every file that dumps a binary is found by %BINARY-BUILDERS instead.")
 
 (defun %count-loads (text)
   "How many forms in TEXT load cons/fasl-dates, written as quickload or load-system, the name
@@ -100,6 +99,41 @@ quoted as a string or a keyword, escaped or not."
                           (or (search "quickload" before) (search "load-system" before)))
                   do (setf start (1+ at)))))
 
+(defparameter +dump-markers+
+  '("(ouranos-dump:dump-executable" "\"ouranos-dump:dump-executable\"" "(sb-ext:save-lisp-and-die")
+  "How a file in this tree calls for an executable to be dumped: directly, through
+READ-FROM-STRING, or as a form in a child's --eval.")
+
+(defun %binary-builders (root)
+  "Every Lisp file under ROOT, outside test, vendor and build-output directories, that dumps an
+executable and loads a system first: the files that build a binary from code ASDF compiles. Found
+by reading the tree, so a builder added later is checked without anyone adding it to a list
+(Copilot's review of #657 found four that the list had missed)."
+  (let ((skip '("tests" "vendor" "dist" "bin" ".git" "node_modules"))
+        (found '()))
+    (labels ((walk (dir)
+               (dolist (file (uiop:directory-files dir "*.lisp"))
+                 (let ((text (ignore-errors (uiop:read-file-string file))))
+                   (when (and text
+                              (some (lambda (m) (search m text)) +dump-markers+)
+                              (or (search "quickload" text) (search "load-system" text)))
+                     (push (enough-namestring file root) found))))
+               (dolist (sub (uiop:subdirectories dir))
+                 (unless (member (car (last (pathname-directory sub))) skip :test #'string=)
+                   (walk sub)))))
+      (walk root))
+    (sort (mapcar (lambda (f) (substitute #\/ (code-char 92) f)) found) #'string<)))
+
+(test every-binary-builder-loads-cons-fasl-dates
+  (let ((builders (%binary-builders (%tree-root))))
+    ;; The search finds what it is for: three builders known to dump a binary.
+    (dolist (known '("bootstrap.lisp" "scripts/build-desktop-app.lisp"
+                     "praxeon/scripts/build-elise.lisp"))
+      (is (member known builders :test #'string=) "~A was not found as a builder" known))
+    (dolist (file builders)
+      (is (plusp (%count-loads (uiop:read-file-string (merge-pathnames file (%tree-root)))))
+          "~A dumps a binary and does not load cons/fasl-dates" file))))
+
 (test every-entry-point-that-compiles-loads-cons-fasl-dates
   (dolist (entry *fasl-dates-entry-points*)
     (destructuring-bind (file wanted) entry
@@ -108,3 +142,44 @@ quoted as a string or a keyword, escaped or not."
         (when (probe-file path)
           (let ((found (%count-loads (uiop:read-file-string path))))
             (is (= wanted found) "~A loads cons/fasl-dates ~D time~:P, not ~D" file found wanted)))))))
+
+;;; --- the fasl a compile writes is dated after its source ------------------------------------
+
+(defun %same-second-child (dir wait)
+  "In a fresh SBCL, start at the beginning of a second, write DIR/sys2/a.lisp, load the system
+s573b with cons/fasl-dates loaded and *WAIT-FOR-A-LATER-SECOND* set to WAIT, and return the
+source's and the fasl's write dates, as two integers, or a string saying what went wrong."
+  (let* ((source (merge-pathnames "sys2/a.lisp" dir))
+         (form (format nil "(progn (asdf:initialize-output-translations '(:output-translations (t (~S :**/ :*.*.*)) :ignore-inherited-configuration)) (asdf:initialize-source-registry '(:source-registry (:directory ~S) (:directory ~S) :ignore-inherited-configuration)) (asdf:load-system \"cons/fasl-dates\") (setf (symbol-value (find-symbol \"*WAIT-FOR-A-LATER-SECOND*\" \"CONS/FASL-DATES\")) ~:[nil~;t~]) (let ((s (get-universal-time))) (loop while (= s (get-universal-time)) do (sleep 0.01))) (with-open-file (o ~S :direction :output :if-exists :supersede) (write-line \"(defpackage :s573b (:use :cl)) (in-package :s573b) (defun says () 1)\" o)) (asdf:load-system \"s573b\") (format t \"~~&DATES ~~D ~~D~~%\" (file-write-date ~S) (file-write-date (first (asdf:output-files 'asdf:compile-op (asdf:find-component \"s573b\" \"a\"))))))"
+                       (namestring (merge-pathnames "cache2/" dir))
+                       (namestring (merge-pathnames "sys2/" dir))
+                       (namestring (merge-pathnames "cons/" (%tree-root)))
+                       wait
+                       (namestring source) (namestring source))))
+    (multiple-value-bind (out err code)
+        (uiop:run-program (list (namestring sb-ext:*runtime-pathname*)
+                                "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                                "--eval" "(require :asdf)" "--eval" form)
+                          :output :string :error-output :output :ignore-error-status t)
+      (declare (ignore err))
+      (let ((at (search "DATES " out)))
+        (if (and (eql code 0) at)
+            (with-input-from-string (in out :start (+ at 6))
+              (list (read in) (read in)))
+            (format nil "the child exited ~A:~%~A" code out))))))
+
+(test a-fasl-compiled-in-its-sources-second-is-dated-after-it
+  "Copilot's review of #657: without the wait, a source written and compiled in one second gives
+a fasl with the source's date, and every load in that second compiles it again. With the wait,
+the fasl is dated later, so the file is compiled at most once more."
+  (tempdir:with-temporary-directory (dir "fasl-dates")
+    (ensure-directories-exist (merge-pathnames "sys2/" dir))
+    (with-open-file (o (merge-pathnames "sys2/s573b.asd" dir) :direction :output)
+      (write-line "(defsystem \"s573b\" :components ((:file \"a\")))" o))
+    ;; The control: no wait, so the compile in the source's second gives the fasl that date.
+    (let ((dates (%same-second-child dir nil)))
+      (is (and (consp dates) (= (first dates) (second dates)))
+          "without the wait the dates were ~S" dates))
+    (let ((dates (%same-second-child dir t)))
+      (is (and (consp dates) (> (second dates) (first dates)))
+          "with the wait the dates were ~S" dates))))
