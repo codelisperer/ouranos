@@ -74,7 +74,7 @@
     prints one line on stderr when a recorded source file changed after the build, and how to
     rebuild only the binary. CHANGED-FILES is pure over the dates it is given. uiop and ASDF
     only.")
-  (:export #:record-build #:image-files #:changed-files #:binary-root #:check #:report
+  (:export #:record-build #:image-files #:bootstrap-inputs #:changed-files #:binary-root #:check #:report
            #:describe-build #:*record*))
 
 (cl:defpackage #:cons/setup

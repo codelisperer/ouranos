@@ -5,8 +5,9 @@
 ;;;; forward kept answering "no target --strict" because its binary predated the option.
 ;;;;
 ;;;; RECORD-BUILD runs in bootstrap.lisp just before the dump. It keeps the commit the tree was
-;;;; at, the time, and every source file of the systems in the image that lie in the tree, taken
-;;;; from ASDF, so the list follows cons's dependencies without being kept by hand. CHECK runs at
+;;;; at, the time, every source file of the systems in the image that lie in the tree, taken
+;;;; from ASDF, so the list follows cons's dependencies without being kept by hand, and the files
+;;;; bootstrap.lisp loads without ASDF, read from bootstrap.lisp itself. CHECK runs at
 ;;;; startup in CONS/CLI:MAIN, beside CONS/TOOLCHAIN:CHECK, and prints one line on stderr when a
 ;;;; recorded file has a later write date than the build or has gone. Write dates and not commits,
 ;;;; because a pull rewrites the files it changes and so does an edit that was never committed,
@@ -62,12 +63,37 @@ under ROOT."
               (when relative (pushnew relative files :test #'string=)))))))
     (sort files #'string<)))
 
+(defun bootstrap-inputs (root)
+  "The files bootstrap.lisp builds bin/cons from without ASDF: bootstrap.lisp itself, which
+decides the contribs and the heap baked into the image, and every scripts/*.lisp it names that
+exists, such as dump-image.lisp, which defines what the binary does when it starts. Read from
+bootstrap.lisp, so a script it starts to load is recorded without a list kept by hand (Copilot's
+review of #660)."
+  (let ((text (ignore-errors (uiop:read-file-string (merge-pathnames "bootstrap.lisp" root))))
+        (files '()))
+    (when text
+      (push "bootstrap.lisp" files)
+      (loop with start = 0
+            for at = (search "\"scripts/" text :start2 start)
+            while at
+            do (let ((end (position #\" text :start (1+ at))))
+                 (when end
+                   (let ((name (subseq text (1+ at) end)))
+                     (when (and (uiop:string-suffix-p name ".lisp")
+                                (probe-file (merge-pathnames name root)))
+                       (pushnew name files :test #'string=))))
+                 (setf start (1+ at)))))
+    (sort files #'string<)))
+
 (defun record-build (root)
-  "Keep, in this image, what CHECK compares against: ROOT's commit, the time, and IMAGE-FILES.
-Called by bootstrap.lisp just before it dumps bin/cons. Returns the record."
+  "Keep, in this image, what CHECK compares against: ROOT's commit, the time, and the files
+IMAGE-FILES and BOOTSTRAP-INPUTS name. Called by bootstrap.lisp just before it dumps bin/cons.
+Returns the record."
   (setf *record* (list :commit (%git-head root)
                        :time (get-universal-time)
-                       :files (image-files root))))
+                       :files (sort (union (image-files root) (bootstrap-inputs root)
+                                           :test #'string=)
+                                    #'string<))))
 
 (defun changed-files (record dates)
   "The recorded files that changed after the build. DATES maps each of RECORD's files to its

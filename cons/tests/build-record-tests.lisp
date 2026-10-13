@@ -32,6 +32,14 @@ the root, and nothing from outside the tree is."
         "every recorded file is under the root")
     (is (notany (lambda (f) (or (search ".." f) (search "quicklisp" f))) files))))
 
+(test the-bootstrap-inputs-are-bootstrap-lisp-and-the-scripts-it-loads
+  "Copilot's review of #660: files bootstrap.lisp loads without ASDF go into the binary too."
+  (let ((files (cons/build-record:bootstrap-inputs (%tree-root))))
+    (dolist (f '("bootstrap.lisp" "scripts/dump-image.lisp" "scripts/heap-guard.lisp"
+                 "scripts/human-path.lisp"))
+      (is (member f files :test #'string=) "~A is not among ~S" f files))
+    (is (every (lambda (f) (probe-file (merge-pathnames f (%tree-root)))) files))))
+
 (test binary-root-is-the-tree-only-for-a-binary-in-its-bin-directory
   (tempdir:with-temporary-directory (dir "build-record")
     (let ((bin (merge-pathnames "bin/cons.exe" dir)))
