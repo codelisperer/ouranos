@@ -144,14 +144,19 @@ PRUNED: a glob visits everything and then filters, which does the expensive part
        hash))))
 
 (defun %file-state (path now)
-  "PATH's (DATE SIZE HASH), HASH NIL unless the file was written within +RECENT-SECONDS+ of NOW,
-or NIL when the file cannot be read."
+  "PATH's (DATE SIZE HASH), or NIL when it has no write date. HASH is :OLD when the file was
+written more than +RECENT-SECONDS+ before NOW and so was not read, and :UNREADABLE when it was
+recent but could not be read, for instance because an editor was replacing it. The two are kept
+apart because only the first says the content is known not to have changed (Copilot's review of
+#659)."
   (let ((date (ignore-errors (file-write-date path))))
     (when date
       (list date
             (ignore-errors (with-open-file (in path :element-type '(unsigned-byte 8))
                              (file-length in)))
-            (and (<= (- now date) +recent-seconds+) (%octet-hash path))))))
+            (if (<= (- now date) +recent-seconds+)
+                (or (%octet-hash path) :unreadable)
+                :old)))))
 
 (defun %snapshot (roots &key (excluded-dirs *watch-excluded-directories*)
                              (excluded-types *watch-excluded-types*))
@@ -166,14 +171,19 @@ or NIL when the file cannot be read."
 
 (defun %same-file-p (path old new)
   "Whether the states OLD and NEW of PATH describe the same content. Different dates or sizes
-are a change. With equal dates, the hashes decide; a hash missing from NEW, because the poll
-came more than +RECENT-SECONDS+ after the save, is computed now."
+are a change. With equal dates and sizes:
+- OLD's hash :OLD means the file was not rewritten after its date, so it is the same;
+- OLD's hash :UNREADABLE means its content was not known, so it counts as a change;
+- otherwise the hashes decide. NEW has no hash of its own when the poll came more than
+  +RECENT-SECONDS+ after the save, and it is computed now; one that cannot be read is a change."
   (destructuring-bind (old-date old-size old-hash) old
     (destructuring-bind (date size hash) new
       (and (= date old-date)
            (eql size old-size)
-           (or (null old-hash)
-               (eql old-hash (or hash (%octet-hash path))))))))
+           (case old-hash
+             (:old t)
+             (:unreadable nil)
+             (t (eql old-hash (if (integerp hash) hash (%octet-hash path)))))))))
 
 (defun %changed-files (old new)
   "Files in NEW that are not in OLD, or whose content may differ from what OLD recorded:

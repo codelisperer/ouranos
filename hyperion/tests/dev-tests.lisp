@@ -218,8 +218,21 @@ have moved had it been rewritten since."
     (let* ((css (merge-pathnames "resources/style.css" root))
            (date (file-write-date css)))
       (is (integerp (third (hyperion/dev::%file-state css date))))
-      (is (null (third (hyperion/dev::%file-state
-                        css (+ date hyperion/dev::+recent-seconds+ 1))))))))
+      (is (eq :old (third (hyperion/dev::%file-state
+                           css (+ date hyperion/dev::+recent-seconds+ 1))))))))
+
+(test a-recent-file-whose-content-was-not-read-counts-as-changed
+  "Copilot's review of #659: a recent file that could not be read, as when an editor replaces it,
+has no known content, and the next poll with the same date and size is a change, not proof that
+nothing changed. A file skipped because it is old is the same."
+  (%with-dev-tree (root)
+    (let* ((css (merge-pathnames "resources/style.css" root))
+           (now (hyperion/dev::%file-state css (file-write-date css))))
+      (destructuring-bind (date size hash) now
+        (is (integerp hash))
+        (is-false (hyperion/dev::%same-file-p css (list date size :unreadable) now))
+        (is-true (hyperion/dev::%same-file-p css (list date size :old) now))
+        (is-true (hyperion/dev::%same-file-p css now now))))))
 
 (test a-hash-the-snapshot-did-not-take-is-taken-when-the-dates-match
   "A poll more than +RECENT-SECONDS+ after a save that kept its date still compares content:
@@ -233,7 +246,7 @@ the hash is computed then, because the earlier snapshot has one."
         (%write-dated css "body{color:tan}" reference)
         (let ((late (hyperion/dev::%file-state
                      css (+ (file-write-date css) hyperion/dev::+recent-seconds+ 1))))
-          (is (null (third late)))
+          (is (eq :old (third late)))
           (is-false (hyperion/dev::%same-file-p css old late)))))))
 
 ;;;; ---------------------------------------------------------------------------
