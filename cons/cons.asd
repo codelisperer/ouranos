@@ -44,6 +44,7 @@
                              (:file "upstream") ; is the framework checkout behind? (pre-publication issue 240)
                              (:file "db")       ; db-repl/db-url: a session per environment
                              (:file "toolchain"); is the Lisp under us the one we think it is?
+                             (:file "build-record") ; is bin/cons older than its source? (#526)
                              (:file "env-scan") ; which config keys does this project need?
                              (:file "project")  ; runtime root discovery + registry init
                              (:file "setup")    ; put a project on the ASDF path (drop-in)
@@ -106,6 +107,7 @@
                              (:file "check-compile-tests")
                              (:file "not-covered-tests")
                              (:file "strict-load-tests")
+                             (:file "build-record-tests")
                              (:file "view-launcher-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :cons/tests :run-tests)))
 

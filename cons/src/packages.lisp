@@ -66,6 +66,17 @@
   (:export #:check #:diagnose #:facts #:report #:fatal-p #:sbcl-on-path-version
            #:*probe-contrib*))
 
+(cl:defpackage #:cons/build-record
+  (:use #:cl)
+  (:documentation
+   "Is bin/cons older than the source it was built from (#526)? bootstrap.lisp calls
+    RECORD-BUILD just before it dumps the binary; CONS/CLI:MAIN calls CHECK at startup, which
+    prints one line on stderr when a recorded source file changed after the build, and how to
+    rebuild only the binary. CHANGED-FILES is pure over the dates it is given. uiop and ASDF
+    only.")
+  (:export #:record-build #:image-files #:changed-files #:binary-root #:check #:report
+           #:describe-build #:*record*))
+
 (cl:defpackage #:cons/setup
   (:use #:cl)
   (:local-nicknames (#:project #:cons/project))

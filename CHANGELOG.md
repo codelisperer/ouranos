@@ -201,6 +201,16 @@ its tag.
 
 ### Added
 
+- **cons: bin/cons says when a file it was built from has changed, and `bootstrap.lisp
+  --cons-only` rebuilds only bin/cons** (#526). `bootstrap.lisp` records the commit, the time
+  and the source files of every system in the image that lies in the tree. At startup, a
+  `bin/cons` inside its tree's `bin/` directory prints one line on stderr when one of those files
+  has a later write date than the build or is gone, naming the commit it was built from and the
+  command to rebuild it. It never stops the command. `cons version` prints the commit and time
+  the binary was built from. `sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+  --cons-only` rebuilds `bin/cons` and skips the ASDF source-registry drop-in, the
+  `core.hooksPath` setting, the warm step, the platform packages and the view launcher.
+
 - **klio: a collection name may not end in `.` or be a Windows device name** (#631).
   `make-site-options` refuses a `:collections` name with a segment that ends in `.`
   (Windows strips it, so `roles.` and `roles` would be one directory) or whose name before
