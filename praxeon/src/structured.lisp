@@ -209,20 +209,22 @@ TEXT has a malformed escape or the octets are not UTF-8. A $ref is a URI, so a f
 as #/$defs/%6Eode names the definition node (#686)."
   (if (not (find #\% text))
       text
-      (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0)))
+      (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0
+                                                 :adjustable t)))
         (loop with i = 0
               while (< i (length text))
               do (let ((c (char text i)))
                    (cond ((char/= c #\%)
                           (loop for o across (sb-ext:string-to-octets (string c)
                                                                        :external-format :utf-8)
-                                do (vector-push o octets))
+                                do (vector-push-extend o octets))
                           (incf i))
                          ((and (<= (+ i 3) (length text))
                                (digit-char-p (char text (+ i 1)) 16)
                                (digit-char-p (char text (+ i 2)) 16))
-                          (vector-push (parse-integer text :start (1+ i) :end (+ i 3) :radix 16)
-                                       octets)
+                          (vector-push-extend (parse-integer text :start (1+ i) :end (+ i 3)
+                                                             :radix 16)
+                                              octets)
                           (incf i 3))
                          (t (return-from %percent-decode nil)))))
         (handler-case (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8)))

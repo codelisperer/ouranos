@@ -3265,6 +3265,8 @@ under a name the reference does not decode to is not recursive."
     (is-true (recursion "{\"$defs\":{\"a/b\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/a%7E1b\"}}}}}"))
     (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"n\\u00e9\",\"properties\":{\"c\":{\"$ref\":\"#n%C3%A9\"}}}}}")
              "an anchor named with a UTF-8 escape")
+    (is-true (recursion "{\"$defs\":{\"\\u20ac\\u20ac\\u20acA\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/\\u20ac\\u20ac\\u20ac%41\"}}}}}")
+             "a fragment whose UTF-8 octets outnumber its characters (review of #688)")
     (is-false (recursion "{\"properties\":{\"n\":{\"$ref\":\"#/$defs/%6Eode\"}},\"$defs\":{\"%6Eode\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%6Eode\"}}}}}")
               "control: a definition named with the literal escape is not what the reference names")
     (is-false (recursion "{\"$defs\":{\"n\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%zz\"}}}}}")
