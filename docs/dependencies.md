@@ -135,7 +135,7 @@ deployment fact, so nothing here creates them (#138).
 | Dep | Role | Used by |
 |---|---|---|
 | `sb-concurrency` | thread-safe mailbox; a lock-free queue | praxeon/web (SSE channel); `aion/pool`, whose submit path takes no pool mutex, so several server-uv loops do not wait on each other (#466) |
-| `sb-bsd-sockets` | port probing / socket checks | `hyperion/desktop` (localhost lifecycle) |
+| `sb-bsd-sockets` | port probing / socket checks; a test server on 127.0.0.1 | `hyperion/desktop` (localhost lifecycle); `praxeon/tests`, whose #678 tests answer the `meta` impl from a local server |
 | `sb-posix` | `mkdir` — atomic create-or-fail; `chmod`, `link`, `rename`, `stat`, `umask` | `cons` (`cons/tempdir`), `hyperion/update` (the Linux AppImage strategy and the private staging directory, #251), `praxeon/claude-code` (`umask` and `chmod` for the hook's private archive, #452) and `praxeon/claude-code/tests` (`chmod` for the stand-in programs) — **Unix only** in all of them: `(:feature :unix …)` |
 
 `sb-posix` is there for exactly one call. A scratch directory must be **created**, never
