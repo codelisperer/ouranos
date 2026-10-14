@@ -46,10 +46,28 @@
 
 (defun mode-cache (mode)
   "The fasl cache for MODE. Under the user's cache directory, never in the tree: it is
-build output, it is large, and two of them exist."
+build output, it is large, and two of them exist. OURANOS_WITH_MODE_CACHE names another
+directory to hold the caches, which the tests use so that they do not write to the user's."
   (uiop:ensure-directory-pathname
-   (merge-pathnames (format nil ".cache/ouranos/fasl-~(~a~)/" mode)
-                    (user-homedir-pathname))))
+   (merge-pathnames (format nil "fasl-~(~a~)/" mode)
+                    (let ((override (uiop:getenv "OURANOS_WITH_MODE_CACHE")))
+                      (if (and override (plusp (length override)))
+                          (uiop:ensure-directory-pathname (uiop:parse-native-namestring override))
+                          (merge-pathnames ".cache/ouranos/" (user-homedir-pathname)))))))
+
+(defun output-translations (cache)
+  "ASDF_OUTPUT_TRANSLATIONS for CACHE, in ASDF's s-expression form (#572):
+
+- the source is :ROOT, which matches any path, a Windows path with its drive included. The
+  string form \"/;cache\" this replaced named `/' as the source, which has no device, so on
+  Windows the first file compiled failed in TRANSLATE-PATHNAME;
+- the destination adds :IMPLEMENTATION, a directory naming the Lisp and its version, such as
+  sbcl-2.6.8-win-x64/, as ASDF's own default translations do. Without it, a cache left by one
+  SBCL version was loaded by the next, which stops with INVALID-FASL-VERSION;
+- inherited configuration is ignored, so a translation in the user's own ASDF configuration
+  cannot send a fasl elsewhere and mix the two modes."
+  (format nil "(:output-translations ((:root :**/ :*.*.*) (~S :implementation :**/ :*.*.*)) :ignore-inherited-configuration)"
+          (namestring cache)))
 
 (let* ((args (uiop:command-line-arguments))
        (mode (first args))
@@ -72,11 +90,7 @@ build output, it is large, and two of them exist."
         (format *error-output* "~&with-mode: no such script: ~a~%" (human-path:human-path script-path))
         (uiop:quit 2))
 
-      ;; The entry separator is `:` on Unix and `;` on Windows -- a colon there would be
-      ;; read as part of the `d:` drive letter. Ask UIOP rather than assuming; hardcoding
-      ;; it is what once made all 36 of verify-tree's children resolve nothing on Windows.
-      (let* ((translations (format nil "/~A~A" (uiop:inter-directory-separator)
-                                   (uiop:native-namestring cache)))
+      (let* ((translations (output-translations cache))
              (env (list* (format nil "COALTON_ENV=~A"
                                  (if (eq mode :release) "release" "development"))
                          (format nil "ASDF_OUTPUT_TRANSLATIONS=~A" translations)
@@ -86,7 +100,8 @@ build output, it is large, and two of them exist."
                                     (sb-ext:posix-environ)))))
 
         (format t "~&========== ~(~a~) mode ==========~%" mode)
-        (format t "cache:  ~a~%" (uiop:native-namestring cache))
+        (format t "cache:  ~a~a~%" (uiop:native-namestring cache)
+                (uiop:native-namestring (uiop:ensure-directory-pathname (uiop:implementation-identifier))))
         (format t "script: ~a~{ ~a~}~%~%" script rest)
         (finish-output)
 
