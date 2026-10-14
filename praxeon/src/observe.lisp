@@ -696,8 +696,18 @@ one before that window's first write, whose failure ends the run (%CLOSE-OPEN-WI
 When there is no next window, OBSERVE-TURN starts a run at the next turn to make the write."
   (%sync-progress observer :read-failure :record))
 
+(defvar *pause-hook* nil
+  "NIL, or a function of the observer, called on the observer's thread as a retry's pause begins,
+after the failed attempt has ended. For tests (#655): it tells a test that the pause has been
+entered, and can hold the thread there, rather than the test inferring the pause from the
+failure counter and a sleep. Set with SETF, not bound: the observer's thread does not inherit a
+binding.")
+
 (defun %pause (observer seconds)
   "Wait SECONDS, or less if OBSERVER is being stopped."
+  ;; Read once: a test clears the hook from its own thread (Copilot's review of #656).
+  (let ((hook *pause-hook*))
+    (when hook (funcall hook observer)))
   (let ((until (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
     (loop while (and (< (get-internal-real-time) until) (not (observer-stopping observer)))
           do (sleep 0.05))))
