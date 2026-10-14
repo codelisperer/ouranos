@@ -212,6 +212,16 @@ its tag.
 
 ### Added
 
+- **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
+  `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an
+  `openai-compatible` provider with `https://api.meta.ai/v1` as its default base URL and
+  `muse-wonder-1.0` as its default model. The key is read from `PRAXEON_META_API_KEY` and is
+  required: a role on `meta` with no key signals `missing-provider-key` at construction.
+  Meta's API accepts only `tool_choice: "auto"`, so `supports-tool-choice-p` is false for
+  `meta`, and a forced tool choice, which `generate-structured` always makes, signals
+  `tool-choice-unsupported` before a request is sent. `PRAXEON_META_MODEL` and
+  `PRAXEON_META_BASE_URL` override the defaults.
+
 - **klio: a collection name may not end in `.` or be a Windows device name** (#631).
   `make-site-options` refuses a `:collections` name with a segment that ends in `.`
   (Windows strips it, so `roles.` and `roles` would be one directory) or whose name before
