@@ -3251,6 +3251,10 @@ keywords is still a schema. Control: the same $ref outside the data keyword is r
               "an $anchor inside an example is not the anchor a reference names")
     (is-true (recursion "{\"type\":\"object\",\"properties\":{\"default\":{\"$ref\":\"#\"}}}")
              "a property named default is a schema")
+    (is-true (recursion "{\"type\":\"object\",\"dependencies\":{\"default\":{\"$ref\":\"#\"}}}")
+             "a dependency named default is a schema (Copilot's review of #688)")
+    (is-true (recursion "{\"type\":\"object\",\"dependentSchemas\":{\"enum\":{\"$ref\":\"#\"}}}")
+             "a dependent schema named enum is a schema")
     (is-true (recursion "{\"type\":\"object\",\"items\":{\"$ref\":\"#\"}}")
              "control: the same $ref under a schema keyword is recursive")))
 

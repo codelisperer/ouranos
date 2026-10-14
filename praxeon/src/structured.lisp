@@ -171,9 +171,11 @@ first and the caller's checks see arguments that are at least the right shape."
 part of an example or a constant and refers to nothing (#686).")
 
 (defparameter +named-schema-keywords+
-  '("properties" "patternProperties" "$defs" "definitions" "dependentSchemas")
+  '("properties" "patternProperties" "$defs" "definitions" "dependentSchemas" "dependencies")
   "Schema keywords whose value is an object of names to schemas. Its keys are names, so a
-property called \"default\" is a schema like any other property.")
+property called \"default\" is a schema like any other property. \"dependencies\" is the
+older keyword that \"dependentSchemas\" replaced; a value under it that is an array of names
+holds no schema and is walked harmlessly.")
 
 (defun %walk-schemas (fn node)
   "Call FN on every schema object inside NODE, NODE included when it is one, without entering
