@@ -160,6 +160,9 @@ tested and shipped, naming a Clack internal rather than anything its author did.
 worse than not supporting streaming on those backends at all, which is why the adapter lands
 with the convention rather than after it.
 
+A body that is an open FILE-STREAM -- what hyperion/static returns (#314) -- is adapted by
+%FILE-STREAM-RESPONSE, with Content-Length measured from the stream.
+
 Clack's protocol is the other shape: the RESPONSE may be a function taking a responder, and
 the responder returns a writer of (chunk &key close). Hyperion keeps the response a
 three-list -- so middleware and interceptors destructure one thing and never learn that
@@ -189,19 +192,69 @@ rather than a discovery, and it is the sharpest argument for the native path tha
 performance argument."
   (lambda (env)
     (let ((res (funcall app env)))
-      (if (and (consp res) (= (length res) 3) (functionp (third res)))
-          (destructuring-bind (status headers body) res
-            (lambda (responder)
-              (let ((writer (funcall responder (list status headers))))
-                (funcall body (lambda (chunk)
-                                ;; An empty chunk is a no-op, matching the native path: a
-                                ;; handler writing "" is an ordinary accident and must not
-                                ;; be mistaken for the end of the stream.
-                                (when (and chunk (plusp (length chunk)))
-                                  (funcall writer chunk))))
-                ;; Reached only on normal completion -- see the docstring.
-                (funcall writer "" :close t))))
-          res))))
+      (if (and (consp res) (= (length res) 3) (typep (third res) 'file-stream))
+          (%file-stream-response res (eq :head (getf env :request-method)))
+          (%function-body-response res)))))
+
+(defparameter *file-piece-octets* 65536
+  "How many octets %FILE-STREAM-RESPONSE reads from a file and writes at a time.")
+
+(defun %file-stream-response (res head-request)
+  "RES, whose body is an open octet input FILE-STREAM, as Clack's responder protocol: the head
+with Content-Length from the stream, then the file in pieces of *FILE-PIECE-OCTETS*. The
+stream is closed when this is done or fails. HEAD-REQUEST writes the head only.
+
+A stream body is what hyperion/static returns (#314): the handle whose path it checked, so
+the file sent is the file checked. A Clack backend takes a pathname and opens it again later,
+which is the gap that check closes, so the stream is written here instead. Hunchentoot sends
+the Content-Length; Woo sends any responder-written body chunked and drops it."
+  (destructuring-bind (status headers stream) res
+    (lambda (responder)
+      (unwind-protect
+           (let* ((size (file-length stream))
+                  (writer (funcall responder
+                                   (list status (list* :content-length size
+                                                       (%without-content-length headers))))))
+             (unless head-request
+               (let ((buffer (make-array (min size *file-piece-octets*)
+                                         :element-type '(unsigned-byte 8)))
+                     (left size))
+                 (loop while (plusp left)
+                       do (let ((n (read-sequence buffer stream
+                                                  :end (min left (length buffer)))))
+                            ;; A file that shrank. Signalling makes the backend drop the
+                            ;; connection, which tells the client the body is short; ending
+                            ;; normally would leave a kept-alive connection owing octets.
+                            (when (zerop n)
+                              (error "hyperion/server: the file ended after ~D of its ~D octets"
+                                     (- size left) size))
+                            (funcall writer (subseq buffer 0 n))
+                            (decf left n)))))
+             (funcall writer "" :close t))
+        (close stream)))))
+
+(defun %without-content-length (headers)
+  "HEADERS without any Content-Length, which %FILE-STREAM-RESPONSE replaces with the measured one."
+  (loop for (name value) on headers by #'cddr
+        unless (string-equal "content-length" (if (stringp name) name (symbol-name name)))
+          nconc (list name value)))
+
+(defun %function-body-response (res)
+  "RES as is, unless its body is a function: then the function adapted onto Clack's responder
+protocol. See WRAP-STREAMING-BODY."
+  (if (and (consp res) (= (length res) 3) (functionp (third res)))
+      (destructuring-bind (status headers body) res
+        (lambda (responder)
+          (let ((writer (funcall responder (list status headers))))
+            (funcall body (lambda (chunk)
+                            ;; An empty chunk is a no-op, matching the native path: a
+                            ;; handler writing "" is an ordinary accident and must not
+                            ;; be mistaken for the end of the stream.
+                            (when (and chunk (plusp (length chunk)))
+                              (funcall writer chunk))))
+            ;; Reached only on normal completion -- see the docstring.
+            (funcall writer "" :close t))))
+      res))
 
 (defun %uv-call (name &rest args)
   "Call NAME in HYPERION/SERVER-UV, a system this one deliberately does not depend on.

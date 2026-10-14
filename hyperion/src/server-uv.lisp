@@ -423,7 +423,7 @@ case's work early, never decide something differently."
   (or (ignore-errors
        (when (and (consp result) (= 3 (length result)))
          (destructuring-bind (status headers body) result
-           (unless (or (functionp body) (pathnamep body)
+           (unless (or (functionp body) (pathnamep body) (typep body 'file-stream)
                        (and (h1:body-forbidden? status) (not (%empty-body-p body))))
              (let ((pieces (%encode-response status headers
                                              (%body-pieces (if (h1:body-forbidden? status)
@@ -867,6 +867,11 @@ left, and it is what every client renders as a truncated response -- the same an
 (defun %write-file-response (conn app state status headers path keep-alive)
   "Answer with the contents of PATH: Content-Length from the file, body in bounded pieces.
 
+PATH is a pathname, which is opened here, or an open octet input FILE-STREAM, which is
+written from where it stands and closed like one opened here. hyperion/static returns the
+stream (#314), because the file it checked has to be the file that is sent: a pathname is
+opened again here, after the check, and a link swapped in between would be followed.
+
 Returns :STREAMING -- the response has begun and this path owns the connection until
 %FILE-FINISH settles it, exactly as %STREAM-RESPONSE does. %COMPLETE must neither resume nor
 close it in the meantime.
@@ -874,8 +879,10 @@ close it in the meantime.
 The file is opened and the head encoded BEFORE anything is written, because that is the last
 moment a refusal can still become a 500. An unreadable file signals here, where %COMPLETE's
 handler turns it into a 500; after the head there is no status left to change."
-  (let ((stream (open path :element-type '(unsigned-byte 8) :direction :input
-                           :if-does-not-exist nil)))
+  (let ((stream (if (streamp path)
+                    path
+                    (open path :element-type '(unsigned-byte 8) :direction :input
+                               :if-does-not-exist nil))))
     (unless stream
       (error "hyperion/server-uv: the response body names a file that is not readable: ~A"
              path))
@@ -1457,6 +1464,7 @@ request, which gets the head only."
           (unless (%empty-body-p body)
             (log:warn "server-uv: dropped the body of a response whose status carries none"
                       :status status))
+          (when (typep body 'file-stream) (close body))
           (setf body nil))
         (cond
           ;; A HEAD REQUEST GETS THE HEAD ONLY, whatever body the handler
@@ -1467,6 +1475,12 @@ request, which gets the head only."
            (%write-head-only conn status headers :chunked keep-alive))
           ((and head-request (pathnamep body))
            (%write-head-only conn status headers (%file-size body) keep-alive))
+          ;; AN OPEN FILE (#314): what hyperion/static returns, the handle whose path it
+          ;; checked. HEAD gets its size, and the stream is closed unread.
+          ((and head-request (typep body 'file-stream))
+           (unwind-protect
+                (%write-head-only conn status headers (file-length body) keep-alive)
+             (close body)))
           (head-request
            (%write-head-only conn status headers
                              (length (%body-octets body)) keep-alive))
@@ -1478,7 +1492,7 @@ request, which gets the head only."
           ;; a list body is pieces to concatenate and there is one length for
           ;; the lot -- hyperion/static returns the pathname itself, which is
           ;; the case that matters.
-          ((pathnamep body)
+          ((or (pathnamep body) (typep body 'file-stream))
            (%write-file-response conn app state status headers body
                                  keep-alive))
           (t

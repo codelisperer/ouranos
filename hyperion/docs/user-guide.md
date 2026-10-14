@@ -563,25 +563,29 @@ reaches the app through that many proxies. If the app can also be reached direct
 ## Static files + HTTP caching (`hyperion/static`)
 
 `file-response` maps a URL path onto a file under a root directory, refusing `..`
-traversal and inferring the content type from the extension. The body is a **pathname**,
-which is the Clack contract for a file, and `file-response` deliberately sets no
-`Content-Length` — the backend does, because the backend is what knows how it will send the
-file.
+traversal and inferring the content type from the extension. The body is the **open file
+stream** of the file it checked, not a pathname (#314). `file-response` opens the file, asks
+the operating system which file the open handle actually refers to, and serves it only when
+that path is still under the root. A directory swapped for a symbolic link between the
+check and the open therefore cannot make it serve a file outside the root. `file-response`
+sets no `Content-Length`; the server takes it from the open stream.
 
-**What each backend does with it differs, and it is worth knowing which you are on.** Woo and
-Hunchentoot `sendfile(2)` it. The native `:uv` server declares `Content-Length` from the file
-and copies it to the socket in bounded pieces (`hyperion/server-uv:*file-chunk-bytes*`,
-64 KiB), so a large download costs one piece of memory rather than the whole file — it does
-not hold the file in the image, and it does not use `sendfile` either (pre-publication issue 313; `sendfile` on
-`:uv` removes the copy through user space and is PLANNED, a separate change from the bounded
-memory).
+**What each backend does with it differs, and it is worth knowing which you are on.** The
+native `:uv` server declares `Content-Length` from the stream and copies it to the socket in
+bounded pieces (`hyperion/server-uv:*file-chunk-bytes*`, 64 KiB), so a large download costs
+one piece of memory rather than the whole file. It does not use `sendfile` (pre-publication
+issue 313; `sendfile` on `:uv` is PLANNED). On Clack backends, `hyperion:wrap-streaming-body`
+turns the stream into a writer loop of 64 KiB pieces with `Content-Length` taken from the
+stream: Hunchentoot sends that length, and Woo sends the file chunked, without
+`Content-Length`. Every server closes the stream after the response, including a `HEAD`
+response, which carries the file's length and no body.
 
 ```lisp
 (static:file-response #p"/srv/app/resources/public/" (getf env :path-info))
 ;; => (200 (:content-type "text/css" :etag "\"8f3e9a1-4d2\""
 ;;          :last-modified "Sun, 26 Jul 2026 21:14:03 GMT"
 ;;          :cache-control "public, max-age=3600")
-;;     #P"/srv/app/resources/public/app.css")
+;;     #<SB-SYS:FD-STREAM for "file /srv/app/resources/public/app.css" {…}>)
 ```
 
 Every response carries **cache validators** and a **policy**, because without them a

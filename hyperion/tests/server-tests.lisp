@@ -348,6 +348,65 @@ stream is exact framing whether the backend chunked the response or not."
                       "both chunks arrived, in order, and the empty write did not end it")))
       (ignore-errors (srv:stop handler)))))
 
+(defun %adapt-stream-body (stream &key (method :get))
+  "Run a response whose body is STREAM through WRAP-STREAMING-BODY with a responder that
+records what a Clack backend would be given. Returns the head, the octets written as a
+string, whether the writer was closed, and the condition the response signalled, if any."
+  (let* ((app (srv:wrap-streaming-body
+               (lambda (env)
+                 (declare (ignore env))
+                 (list 200 (list :content-type "text/plain" :content-length 999) stream))))
+         (response (funcall app (list :request-method method)))
+         (head nil) (octets '()) (closed nil))
+    (let ((condition
+            (nth-value 1 (ignore-errors
+                          (funcall response
+                                   (lambda (h)
+                                     (setf head h)
+                                     (lambda (chunk &key close)
+                                       (when close (setf closed t))
+                                       (loop for o across (if (stringp chunk)
+                                                              (map 'vector #'char-code chunk)
+                                                              chunk)
+                                             do (push o octets)))))
+                          t))))
+      (values head (map 'string #'code-char (reverse octets)) closed condition))))
+
+(test the-streaming-shim-writes-a-file-stream-body-with-its-measured-length
+  "#314. hyperion/static returns the open stream of the file it checked. On a Clack backend
+the shim writes it through the responder with Content-Length measured from the stream, in
+place of any the handler set; HEAD gets the head only; the stream is closed either way. A file
+that ends before its length signals, so the backend drops the connection instead of leaving
+it owing octets."
+  (uiop:with-temporary-file (:pathname path :type "txt")
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string "0123456789abcdef" out))
+    (let ((stream (open path :element-type '(unsigned-byte 8))))
+      (multiple-value-bind (head text closed condition) (%adapt-stream-body stream)
+        (is (= 200 (first head)))
+        (is (eql 16 (getf (second head) :content-length)))
+        (is (= 1 (count :content-length (second head))) "the handler's Content-Length was kept")
+        (is (string= "0123456789abcdef" text))
+        (is-true closed)
+        (is (null condition))
+        (is-false (open-stream-p stream))))
+    (let ((stream (open path :element-type '(unsigned-byte 8))))
+      (multiple-value-bind (head text closed) (%adapt-stream-body stream :method :head)
+        (is (eql 16 (getf (second head) :content-length)))
+        (is (string= "" text) "HEAD wrote the body")
+        (is-true closed)
+        (is-false (open-stream-p stream))))
+    ;; A file that ends early: the stream starts at octet 10, so only six octets are left
+    ;; while FILE-LENGTH still says 16.
+    (let ((stream (open path :element-type '(unsigned-byte 8))))
+      (file-position stream 10)
+      (multiple-value-bind (head text closed condition) (%adapt-stream-body stream)
+        (declare (ignore head))
+        (is (string= "abcdef" text))
+        (is-false closed "a short body was closed as though it were complete")
+        (is (typep condition 'error))
+        (is-false (open-stream-p stream))))))
+
 (test a-failed-stream-is-reported-as-COMPLETE-by-the-clack-backends
   "A KNOWN DIVERGENCE, asserted so it is documented rather than discovered.
 

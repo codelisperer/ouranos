@@ -26,6 +26,14 @@
 ;;;; `schema.sql'. A path whose file resolves outside the root, through a symbolic link, is
 ;;;; refused as well. A refused path gives NIL, like a missing file, so the caller's 404 does
 ;;;; not tell the client that the file exists.
+;;;;
+;;;; The file that is checked is the file that is sent (#314). FILE-RESPONSE opens the file,
+;;;; reads the real path of what it opened from the open handle, refuses it unless that path
+;;;; is inside the root, and returns a body that streams from the same handle. Checking the
+;;;; path and letting the server open it later left a gap: a link swapped in between the two
+;;;; got the server to send whatever the link pointed to. So the body is the open stream, not
+;;;; a pathname: the native server writes it in bounded pieces with its length measured from
+;;;; the handle, and hyperion/server's adapter writes it to the Clack backends.
 
 (in-package #:hyperion/static)
 
@@ -221,6 +229,94 @@ served."
                                      parts)))))
                 patterns)))))
 
+;;; --- the file that was opened (#314) ----------------------------------------
+
+#+darwin
+(defconstant +f-getpath+ 50
+  "fcntl's F_GETPATH on macOS: the path of the file an open descriptor refers to.")
+
+(defun %fd-path (fd)
+  "The real path of the file that FD, an open descriptor (a HANDLE on Windows), refers to, as a
+native namestring; NIL when it cannot be read. Links are already resolved, because it describes
+the file that was opened rather than the name it was opened by.
+
+Linux reads /proc/self/fd/FD, macOS asks fcntl with F_GETPATH, and Windows asks
+GetFinalPathNameByHandleW. On any other system it is NIL, so nothing is served."
+  #+linux
+  (sb-unix:unix-readlink (format nil "/proc/self/fd/~D" fd))
+  #+darwin
+  (sb-alien:with-alien ((buf (array (sb-alien:unsigned 8) 1024)))
+    (when (/= -1 (sb-alien:alien-funcall
+                  (sb-alien:extern-alien "fcntl"
+                                         (function sb-alien:int sb-alien:int sb-alien:int
+                                                   &optional (* (array (sb-alien:unsigned 8) 1024))))
+                  fd +f-getpath+ (sb-alien:addr buf)))
+      (let ((end (or (loop for i below 1024 when (zerop (sb-alien:deref buf i)) return i) 1024)))
+        (sb-ext:octets-to-string
+         (let ((octets (make-array end :element-type '(unsigned-byte 8))))
+           (dotimes (i end octets) (setf (aref octets i) (sb-alien:deref buf i))))
+         :external-format :utf-8))))
+  #+win32
+  (sb-alien:with-alien ((buf (array (sb-alien:unsigned 16) 1024)))
+    (let ((n (sb-alien:alien-funcall
+              (sb-alien:extern-alien "GetFinalPathNameByHandleW"
+                                     (function (sb-alien:unsigned 32) (sb-alien:signed 64)
+                                               (* (array (sb-alien:unsigned 16) 1024))
+                                               (sb-alien:unsigned 32) (sb-alien:unsigned 32)))
+              fd (sb-alien:addr buf) 1024 0)))
+      (when (< 0 n 1024)
+        (let* ((octets (make-array (* 2 n) :element-type '(unsigned-byte 8)))
+               (path (progn
+                       (dotimes (i n)
+                         (let ((unit (sb-alien:deref buf i)))
+                           (setf (aref octets (* 2 i)) (ldb (byte 8 0) unit)
+                                 (aref octets (1+ (* 2 i))) (ldb (byte 8 8) unit))))
+                       (sb-ext:octets-to-string octets :external-format :utf-16le))))
+          ;; The answer is in the \\?\ form: \\?\C:\dir\file, or \\?\UNC\server\share\file
+          ;; for a network path. Without the prefix it reads as a NATIVE-NAMESTRING does.
+          (cond ((eql 0 (search "\\\\?\\UNC\\" path)) (concatenate 'string "\\\\" (subseq path 8)))
+                ((eql 0 (search "\\\\?\\" path)) (subseq path 4))
+                (t path))))))
+  #-(or linux darwin win32)
+  (progn fd nil))
+
+(defun %root-real-path (base)
+  "The real path of the directory BASE (a truename), as %FD-PATH would give it for a file
+inside, so the two compare. On Linux and macOS it is read from an open descriptor of the
+directory, so a difference in letter case or in Unicode normalisation between the name the app
+gave and the name on disk cannot make a file inside read as outside. On Windows a directory
+cannot be opened without other flags, so it is BASE's native namestring, and the comparison
+ignores letter case there."
+  #+(or linux darwin)
+  (let ((fd (sb-unix:unix-open (sb-ext:native-namestring base) sb-unix:o_rdonly 0)))
+    (when fd
+      (unwind-protect (%fd-path fd)
+        (sb-unix:unix-close fd))))
+  #-(or linux darwin)
+  (sb-ext:native-namestring base))
+
+(defun %path-inside-p (path root)
+  "Whether the native namestring PATH names something inside the directory ROOT (a native
+namestring, with or without a trailing separator), and is not ROOT itself."
+  (let ((dir (string-right-trim "/\\" root)))
+    (and (> (length path) (1+ (length dir)))
+         (#+win32 string-equal #-win32 string= dir path :end2 (length dir))
+         (member (char path (length dir)) '(#\/ #\\)))))
+
+(defun %open-inside (file root-real)
+  "FILE opened for reading octets, and the real path of what was opened, when that path is
+inside ROOT-REAL; otherwise NIL, with nothing left open."
+  (let ((stream (ignore-errors
+                 (open file :element-type '(unsigned-byte 8) :if-does-not-exist nil))))
+    (when stream
+      (let ((real (ignore-errors (%fd-path (sb-sys:fd-stream-fd stream)))))
+        (if (and real root-real (%path-inside-p real root-real))
+            (values stream real)
+            (progn (close stream) nil))))))
+
+(defun %etag-of (mtime size)
+  (format nil "\"~(~X~)-~(~X~)\"" mtime size))
+
 ;;; --- serving ---------------------------------------------------------------
 
 (defun %safe-relative (path-info)
@@ -239,6 +335,12 @@ NIL too when the path is not to be served (#296): when a pattern in *DEFAULT-DEN
 matches it, when ALLOW is given and it is under none of those prefixes, or when its file
 resolves outside ROOT. See DENIED-BY for the patterns.
 
+The body is the file's open octet input stream, the handle that was checked (#314). The file
+is opened here and the real path of what was opened is checked against ROOT, so a link
+swapped in after the path was resolved is not followed. The server measures the length from
+the stream and closes it once written; a stream nobody writes is closed when it is garbage
+collected, by the finalizer SBCL's OPEN registers. A 304 closes it at once.
+
 The response carries `ETag`, `Last-Modified`, and `Cache-Control` (CACHE-CONTROL, default
 *CACHE-CONTROL*; NIL omits it -- pass *IMMUTABLE-CACHE-CONTROL* for fingerprinted URLs).
 
@@ -254,24 +356,29 @@ is unchanged apart from the new headers, so existing two-argument callers keep w
         (when (and (uiop:file-exists-p file)
                    (not (uiop:directory-exists-p file))
                    ;; Resolved, the file must still be under the root: a symbolic link
-                   ;; under it may point anywhere.
+                   ;; under it may point anywhere. This refuses before anything is opened;
+                   ;; %OPEN-INSIDE checks again what was actually opened.
                    (uiop:subpathp (truename file) base))
-          (let* ((file (truename file))
-                 (mtime (ignore-errors (file-write-date file)))
-                 (etag (file-etag file))
-                 (headers (append (when etag (list :etag etag))
-                                  (when mtime (list :last-modified (http-date mtime)))
-                                  (when cache-control (list :cache-control cache-control)))))
-            (if (not-modified-p env etag mtime)
-                ;; 304 repeats the validators and the policy, and carries no body --
-                ;; that is the entire point of the exchange.
-                (list 304 headers nil)
-                ;; A *pathname* body is the Clack contract for static files: every
-                ;; handler (Woo, Hunchentoot) streams it (sendfile) and sets
-                ;; Content-Length itself -- no reading the whole file into the image.
-                (list 200
-                      (list* :content-type (content-type-for file) headers)
-                      file))))))))
+          (multiple-value-bind (stream real) (%open-inside (truename file) (%root-real-path base))
+            (when stream
+              (let* ((size (file-length stream))
+                     (mtime (ignore-errors (file-write-date (sb-ext:parse-native-namestring real))))
+                     (etag (and mtime (%etag-of mtime size)))
+                     (headers (append (when etag (list :etag etag))
+                                      (when mtime (list :last-modified (http-date mtime)))
+                                      (when cache-control (list :cache-control cache-control)))))
+                (cond
+                  ((not-modified-p env etag mtime)
+                   (close stream)
+                   ;; 304 repeats the validators and the policy, and carries no body --
+                   ;; that is the entire point of the exchange.
+                   (list 304 headers nil))
+                  (t
+                   ;; The open stream is the body, so what is sent is what was checked.
+                   ;; No Content-Length here: each server measures it from the stream.
+                   (list 200
+                         (list* :content-type (content-type-for file) headers)
+                         stream)))))))))))
 
 (defun make-static-handler (root &key deny allow (cache-control *cache-control*))
   "A function of a Clack env that serves ROOT's files by the env's PATH-INFO through

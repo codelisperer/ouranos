@@ -41,6 +41,19 @@ it and broke that suite."
 (defun %static-header (response name)
   (getf (second response) name))
 
+(defun %body-text (body)
+  "The octets of a static response's BODY, as a latin-1 string: a function is called with a
+writer that collects them, a stream is read to its end and closed."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (etypecase body
+      (function (funcall body (lambda (chunk)
+                                (loop for octet across chunk do (vector-push-extend octet out)))))
+      (stream (unwind-protect
+                   (loop for octet = (read-byte body nil) while octet
+                         do (vector-push-extend octet out))
+                (close body))))
+    (map 'string #'code-char out)))
+
 ;;; --- content type + traversal (pre-existing behaviour, now pinned) ---------
 
 (test content-type-by-extension
@@ -56,11 +69,15 @@ it and broke that suite."
     (is (null (static:file-response root "")))
     (is (null (static:file-response root "/missing.txt")))))
 
-(test serves-an-existing-file-as-a-pathname
+(test serves-an-existing-file-as-its-open-stream
+  "The body is the open octet stream of the file that was checked (#314), not a pathname for
+the server to open again, and it holds the file's bytes."
   (with-static-root (root ("ok.txt" "fine"))
     (let ((r (static:file-response root "/ok.txt")))
       (is (= 200 (first r)))
-      (is (pathnamep (third r)))                                  ; streamed, not slurped
+      (is (typep (third r) 'file-stream))                         ; streamed, not slurped
+      (is (equal '(unsigned-byte 8) (stream-element-type (third r))))
+      (is (string= "fine" (%body-text (third r))))
       (is (string= "text/plain; charset=utf-8" (%static-header r :content-type))))))
 
 ;;; --- caching headers -------------------------------------------------------
@@ -256,6 +273,69 @@ Control: a link to a file inside the root is served."
                               (namestring (merge-pathnames "alias.css" root))))
       (is-false (%served-p root "/leak.txt"))
       (is-true (%served-p root "/alias.css")))))
+
+(test a-directory-swapped-for-a-link-after-the-check-is-not-followed
+  "#314. The path is checked, then a directory on it is replaced by a link to a directory
+outside the root, then the file is opened. The file opened is outside the root, so nothing is
+served. The swap is made between the check and the open by wrapping %OPEN-INSIDE, which is
+where the file is opened. Control: with the check of the opened handle made to accept
+anything, the same swap serves the outside file, so the test can see the gap it closes."
+  #+os-windows (skip "symbolic links need a privilege on Windows")
+  #-os-windows
+  (flet ((swap-then (root outside)
+           ;; sub/ becomes a link to OUTSIDE, which has a file of the same name.
+           (let ((sub (merge-pathnames "sub/" root)))
+             (rename-file (merge-pathnames "sub/page.txt" root)
+                          (merge-pathnames "moved-page.txt" root))
+             (uiop:delete-empty-directory sub)
+             (uiop:run-program (list "ln" "-s" (string-right-trim "/" (namestring outside))
+                                     (string-right-trim "/" (namestring sub)))))))
+    (dolist (control '(nil t))
+      (with-static-root (root ("sub/page.txt" "inside the root"))
+        (with-static-root (outside ("page.txt" "outside the root"))
+          (let ((open-inside (fdefinition 'static::%open-inside))
+                (path-inside-p (fdefinition 'static::%path-inside-p)))
+            (unwind-protect
+                 (progn
+                   (setf (fdefinition 'static::%open-inside)
+                         (lambda (file root-real)
+                           (swap-then root outside)
+                           (funcall open-inside file root-real)))
+                   (when control
+                     (setf (fdefinition 'static::%path-inside-p) (constantly t)))
+                   (let ((r (static:file-response root "/sub/page.txt")))
+                     (if control
+                         (is (and r (string= "outside the root" (%body-text (third r))))
+                             "control: without the handle check the outside file is served")
+                         (is (null r) "a file outside the root was served: ~S"
+                             (and r (%body-text (third r)))))))
+              (setf (fdefinition 'static::%open-inside) open-inside
+                    (fdefinition 'static::%path-inside-p) path-inside-p))))))))
+
+(test a-static-file-is-served-on-hunchentoot-with-its-length
+  "#314. A static file's body is an open stream, which no Clack backend takes. Through the
+shim, Hunchentoot sends its bytes with the Content-Length measured from the stream."
+  (with-static-root (root ("ok.txt" "fine, from disk"))
+    (let* ((app (lambda (env)
+                  (or (static:file-response root (getf env :path-info) :env env)
+                      (list 404 nil (list "not found")))))
+           (port nil)
+           (handler (ports:call-with-port
+                     (lambda (p)
+                       (prog1 (srv:start app :port p :server :hunchentoot)
+                         (setf port p))))))
+      (unwind-protect
+           (progn
+             (is-true (%srv-await (lambda () (ports:listening-p port))) "backend came up")
+             (let ((r (%srv-http-get port "/ok.txt")))
+               (is-true (search "200" r) "~S" r)
+               (is-true (search (format nil "Content-Length: 15~C~C" #\Return #\Linefeed) r)
+                        "~S" r)
+               (is (string= "fine, from disk"
+                            (subseq r (+ 4 (search (format nil "~C~C~C~C" #\Return #\Linefeed
+                                                           #\Return #\Linefeed)
+                                                   r)))))))
+        (ignore-errors (srv:stop handler))))))
 
 (test the-static-handler-logs-its-rules-once-and-serves-through-them
   "The effective rules are logged once, when the handler is made, and not per request."

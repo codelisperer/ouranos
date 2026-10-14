@@ -1441,6 +1441,32 @@ if two of them disagree about who writes what."
               "Content-Length must be the file's length -- static does not set it, the
 backend does"))))))
 
+(test a-static-file-stream-answers-head-with-its-size-and-is-closed
+  "#314. hyperion/static's body is the open stream of the file it checked. HEAD gets the file's
+size as Content-Length and nothing else, GET gets the bytes with the same length, and the
+server closes both streams. Control: the HEAD stream is the one the app handed over, still
+open when it was handed over."
+  (%with-static-dir (dir file "0123456789abcdef")
+    (let ((streams '()) (open-when-given '()))
+      (with-server (port (lambda (env)
+                           (let ((r (static:file-response dir "/hello.txt" :env env)))
+                             (push (third r) streams)
+                             (push (open-stream-p (third r)) open-when-given)
+                             r)))
+        (multiple-value-bind (head get lines) (head-then-get port)
+          (is (= 2 lines))
+          (is (string= "16" (header-of head "Content-Length")))
+          (is (string= "" (body-after-head head)) "the HEAD response carried a body")
+          (is (and get (string= "0123456789abcdef" (body-after-head get))))
+          (is (and get (string= "16" (header-of get "Content-Length"))))))
+      (is (= 2 (length streams)))
+      (is (every (lambda (s) (typep s 'file-stream)) streams))
+      (is (equal '(t t) open-when-given) "control: each stream was open when it was handed over")
+      (is-true (loop repeat 200
+                     when (notany #'open-stream-p streams) return t
+                     do (sleep 0.01))
+               "a stream the server was given is still open"))))
+
 (test a-static-binary-file-arrives-byte-for-byte
   ;; The clause reads OCTETS. A text-mode read would mangle every byte above 127, and this
   ;; serves images -- where the corruption is invisible in a status code and obvious to a
