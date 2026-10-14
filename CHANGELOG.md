@@ -816,6 +816,13 @@ its tag.
 
 ### Fixed
 
+- **mnemosyne/conn: `connection-open-p` reads a connection with no readable driver handle as
+  closed** (#675). It used to read a connection as open when `dbi:connection-handle` returned
+  NIL or signalled, so `hyperion`'s database session store, which calls it after a `db-error`,
+  would have kept such a connection and used it again instead of replacing it. This case is not
+  known to occur with today's drivers. A SQLite connection still reads as open, and a Postgres
+  connection still reads its client-side state.
+
 - **praxeon/conditions: `praxeon-error` keeps its `:detail` and prints it** (#505). Code
   throughout praxeon signals `praxeon-error` with `:detail` saying what went wrong, such as
   `make-observer`'s refusal of a bad `:step` or a `supersede` of an observation already
