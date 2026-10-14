@@ -295,13 +295,19 @@ ignores letter case there."
   #-(or linux darwin)
   (sb-ext:native-namestring base))
 
+(defparameter +path-separators+ #+win32 "/\\" #-win32 "/"
+  "The characters that separate directories in a native namestring. Only / on Linux and
+macOS, where a backslash is an ordinary filename character: /srv/public\\outside is a sibling
+of /srv/public, not a file inside it.")
+
 (defun %path-inside-p (path root)
   "Whether the native namestring PATH names something inside the directory ROOT (a native
-namestring, with or without a trailing separator), and is not ROOT itself."
-  (let ((dir (string-right-trim "/\\" root)))
+namestring, with or without a trailing separator), and is not ROOT itself. The character after
+ROOT must be one of +PATH-SEPARATORS+."
+  (let ((dir (string-right-trim +path-separators+ root)))
     (and (> (length path) (1+ (length dir)))
          (#+win32 string-equal #-win32 string= dir path :end2 (length dir))
-         (member (char path (length dir)) '(#\/ #\\)))))
+         (find (char path (length dir)) +path-separators+))))
 
 (defun %open-inside (file root-real)
   "FILE opened for reading octets, and the real path of what was opened, when that path is

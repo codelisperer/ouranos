@@ -274,43 +274,75 @@ Control: a link to a file inside the root is served."
       (is-false (%served-p root "/leak.txt"))
       (is-true (%served-p root "/alias.css")))))
 
+(defun %backslash-sibling (root)
+  "A new directory beside ROOT whose native name is ROOT's followed by a backslash and
+\"outside\", holding page.txt. On Linux and macOS a backslash is a filename character, so
+this directory is outside ROOT although its name starts with ROOT's."
+  (let ((dir (sb-ext:parse-native-namestring
+              (concatenate 'string (string-right-trim "/" (sb-ext:native-namestring root))
+                           "\\outside/"))))
+    (ensure-directories-exist dir)
+    (with-open-file (s (merge-pathnames "page.txt" dir) :direction :output :if-exists :supersede)
+      (write-string "outside the root" s))
+    dir))
+
 (test a-directory-swapped-for-a-link-after-the-check-is-not-followed
   "#314. The path is checked, then a directory on it is replaced by a link to a directory
 outside the root, then the file is opened. The file opened is outside the root, so nothing is
 served. The swap is made between the check and the open by wrapping %OPEN-INSIDE, which is
-where the file is opened. Control: with the check of the opened handle made to accept
-anything, the same swap serves the outside file, so the test can see the gap it closes."
+where the file is opened. Two outside directories: one elsewhere, and one beside the root whose
+name is the root's followed by a backslash, which a check that took a backslash for a separator
+read as inside (Copilot's review of #684). Control: with the check of the opened handle made
+to accept anything, the same swap serves the outside file, so the test can see the gap it
+closes."
   #+os-windows (skip "symbolic links need a privilege on Windows")
   #-os-windows
   (flet ((swap-then (root outside)
            ;; sub/ becomes a link to OUTSIDE, which has a file of the same name.
            (let ((sub (merge-pathnames "sub/" root)))
-             (rename-file (merge-pathnames "sub/page.txt" root)
-                          (merge-pathnames "moved-page.txt" root))
-             (uiop:delete-empty-directory sub)
-             (uiop:run-program (list "ln" "-s" (string-right-trim "/" (namestring outside))
-                                     (string-right-trim "/" (namestring sub)))))))
-    (dolist (control '(nil t))
-      (with-static-root (root ("sub/page.txt" "inside the root"))
-        (with-static-root (outside ("page.txt" "outside the root"))
-          (let ((open-inside (fdefinition 'static::%open-inside))
-                (path-inside-p (fdefinition 'static::%path-inside-p)))
-            (unwind-protect
-                 (progn
-                   (setf (fdefinition 'static::%open-inside)
-                         (lambda (file root-real)
-                           (swap-then root outside)
-                           (funcall open-inside file root-real)))
-                   (when control
-                     (setf (fdefinition 'static::%path-inside-p) (constantly t)))
-                   (let ((r (static:file-response root "/sub/page.txt")))
-                     (if control
-                         (is (and r (string= "outside the root" (%body-text (third r))))
-                             "control: without the handle check the outside file is served")
-                         (is (null r) "a file outside the root was served: ~S"
-                             (and r (%body-text (third r)))))))
-              (setf (fdefinition 'static::%open-inside) open-inside
-                    (fdefinition 'static::%path-inside-p) path-inside-p))))))))
+             (when (probe-file (merge-pathnames "sub/page.txt" root))
+               (rename-file (merge-pathnames "sub/page.txt" root)
+                            (merge-pathnames "moved-page.txt" root))
+               (uiop:delete-empty-directory sub)
+               (uiop:run-program (list "ln" "-s"
+                                       (string-right-trim "/" (sb-ext:native-namestring outside))
+                                       (string-right-trim "/" (namestring sub))))))))
+    (dolist (sibling '(nil t))
+      (dolist (control '(nil t))
+        (with-static-root (root ("sub/page.txt" "inside the root"))
+          (with-static-root (elsewhere ("page.txt" "outside the root"))
+            (let ((outside (if sibling (%backslash-sibling root) elsewhere))
+                  (open-inside (fdefinition 'static::%open-inside))
+                  (path-inside-p (fdefinition 'static::%path-inside-p)))
+              (unwind-protect
+                   (progn
+                     (setf (fdefinition 'static::%open-inside)
+                           (lambda (file root-real)
+                             (swap-then root outside)
+                             (funcall open-inside file root-real)))
+                     (when control
+                       (setf (fdefinition 'static::%path-inside-p) (constantly t)))
+                     (let ((r (static:file-response root "/sub/page.txt")))
+                       (if control
+                           (is (and r (string= "outside the root" (%body-text (third r))))
+                               "control (~:[elsewhere~;backslash sibling~]): without the handle check the outside file is served"
+                               sibling)
+                           (is (null r) "a file outside the root (~:[elsewhere~;backslash sibling~]) was served: ~S"
+                               sibling (and r (%body-text (third r)))))))
+                (setf (fdefinition 'static::%open-inside) open-inside
+                      (fdefinition 'static::%path-inside-p) path-inside-p)
+                (when sibling
+                  (ignore-errors (delete-file (merge-pathnames "page.txt" outside)))
+                  (ignore-errors (uiop:delete-empty-directory outside)))))))))))
+
+(test a-backslash-is-a-separator-only-on-windows
+  "Copilot's review of #684. On Linux and macOS a backslash is a filename character, so a path
+that continues ROOT's name with a backslash is a sibling of ROOT, not inside it. On Windows it
+is a separator. Control: a path continuing with / is inside on every platform."
+  (is-true (static::%path-inside-p "/srv/public/page.txt" "/srv/public"))
+  (is-true (static::%path-inside-p "/srv/public/page.txt" "/srv/public/"))
+  #-win32 (is-false (static::%path-inside-p "/srv/public\\outside/page.txt" "/srv/public"))
+  #+win32 (is-true (static::%path-inside-p "C:\\srv\\public\\page.txt" "C:\\srv\\public\\")))
 
 (test a-static-file-is-served-on-hunchentoot-with-its-length
   "#314. A static file's body is an open stream, which no Clack backend takes. Through the
