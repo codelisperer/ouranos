@@ -43,8 +43,8 @@ discovery now comes from the bootstrap drop-in, not a `local-projects` symlink.)
   on its default source-registry). Praxeon's typed core is written in Coalton.
 - Dependencies (pulled by Quicklisp): `alexandria`, `dexador`, `com.inuoe.jzon`,
   `fiveam`, plus the web layer's `clack`, `woo`, `quri`, `spinneret`.
-- An **LLM provider**: an Anthropic API key with credits, an OpenRouter key, or
-  a local Ollama/LM Studio endpoint.
+- An **LLM provider**: an Anthropic API key with credits, an OpenRouter key, a key for
+  Meta's Model API, or a local Ollama/LM Studio endpoint.
 - **Optional**: a **Tavily** API key (`TAVILY_API_KEY`) to give agents web search.
 
 > If loading fails with `Bug in readtable iterators or concurrent access?`, that's
@@ -77,7 +77,13 @@ PRAXEON_OPENROUTER_API_KEY=sk-or-...
 
 Notes:
 
-- Impls: `anthropic`, `openai`, `ollama`, `openrouter`.
+- Impls: `anthropic`, `openai`, `ollama`, `openrouter`, `meta`.
+- `meta` is Meta's Model API (Muse Wonder). Its variables are `PRAXEON_META_API_KEY`
+  (required), `PRAXEON_META_MODEL` (default `muse-wonder-1.0`) and `PRAXEON_META_BASE_URL`
+  (default `https://api.meta.ai/v1`). Meta's API accepts only `tool_choice: "auto"`, so on
+  `meta` a forced tool choice, and with it `generate-structured`, signals
+  `praxeon/conditions:tool-choice-unsupported` before any request is sent. Its models reason
+  before they answer, and the reasoning counts against `max_tokens`.
 - Every var can be **shared** (`PRAXEON_LLM_MODEL`, `PRAXEON_LLM_API_KEY`, …) or
   **per-provider** (`PRAXEON_<IMPL>_MODEL`, `PRAXEON_<IMPL>_API_KEY`, …). The
   per-provider form wins, so you can keep several providers configured and switch
@@ -352,7 +358,7 @@ inspectable. (To run the chat loop *and* inspect concurrently, run it in a threa
 With per-provider vars set (step 1), switching is one line in `.env`:
 
 ```sh
-PRAXEON_LLM_IMPL=anthropic        # <-> openrouter, ollama, openai
+PRAXEON_LLM_IMPL=anthropic        # <-> openrouter, ollama, openai, meta
 ```
 
 ### Per-agent models (roles)
@@ -363,7 +369,7 @@ the shared `PRAXEON_LLM_<VAR>` (for `MODEL`, `IMPL`, `API_KEY`, `AUTH`, `BASE_UR
 The shared level applies only when the role's provider is the one `PRAXEON_LLM_IMPL`
 names. A role that selects a different provider (`PRAXEON_<ROLE>_IMPL`) gets its
 settings from `PRAXEON_<ROLE>_<VAR>` or `PRAXEON_<IMPL>_<VAR>`. When that provider is
-a hosted one (`anthropic`, `openrouter`) and neither key variable is set, building it
+a hosted one (`anthropic`, `openrouter`, `meta`) and neither key variable is set, building it
 signals `praxeon/conditions:missing-provider-key`, which names both variables.
 So one process runs several agents, each on its own model/vendor:
 

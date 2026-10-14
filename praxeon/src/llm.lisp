@@ -516,15 +516,32 @@ PARSED is the jzon hash-table form of the JSON body."
 ;;;
 ;;; One class for every server that speaks OpenAI's /v1/chat/completions -- a
 ;;; local runtime (Ollama, LM Studio, llama.cpp) or a hosted aggregator
-;;; (OpenRouter). Only the base URL and key differ; the neutral vocabulary is
+;;; (OpenRouter, Meta's Model API). Only the base URL, key and default model differ,
+;;; plus whether a forced tool choice is accepted; the neutral vocabulary is
 ;;; translated to/from OpenAI's schema here (tool_calls with JSON-string
 ;;; arguments, role:"tool" result messages, finish_reason).
 ;;; --------------------------------------------------------------------------
 (defparameter +openai-compatible-impls+
   '(("openai" . "http://localhost:11434/v1")
     ("ollama" . "http://localhost:11434/v1")
-    ("openrouter" . "https://openrouter.ai/api/v1"))
+    ("openrouter" . "https://openrouter.ai/api/v1")
+    ("meta" . "https://api.meta.ai/v1"))
   "The backends OPENAI-COMPATIBLE serves, each with its default base URL.")
+
+(defparameter +openai-compatible-default-models+
+  '(("meta" . "muse-wonder-1.0"))
+  "The default model of each backend that has one of its own. Any other backend defaults to
+qwen2.5. Meta's Model API serves only Meta's models, so qwen2.5 cannot be its default (#678).")
+
+(defparameter +openai-compatible-auto-only-impls+
+  '("meta")
+  "The backends that accept only tool_choice \"auto\". Meta's Model API returns HTTP 400 for
+\"none\", \"required\" and a named function (https://dev.meta.ai/docs/tool-calling, #678), so
+SUPPORTS-TOOL-CHOICE-P is false for it and a forced choice signals before anything is sent.")
+
+(defun %oai-default-model (impl)
+  "The model OPENAI-COMPATIBLE uses for IMPL when none is configured."
+  (or (cdr (assoc impl +openai-compatible-default-models+ :test #'string=)) "qwen2.5"))
 
 (defun %default-oai-impl ()
   "The backend a directly made OPENAI-COMPATIBLE is for: the shared backend when
@@ -542,16 +559,16 @@ BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
 \(local servers usually ignore it, hosted ones require it).
 
-IMPL is the backend these settings belong to: \"openai\", \"ollama\" or \"openrouter\".
+IMPL is the backend these settings belong to: \"openai\", \"ollama\", \"openrouter\" or \"meta\".
 A MODEL, BASE-URL or API-KEY not passed is read for that backend as MAKE-PROVIDER-FROM-ENV
 reads it (%ENV-FOR), then defaulted. Unless given, IMPL is the backend PRAXEON_LLM_IMPL names
-when that is one of the three, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
+when that is one of the four, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
 the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291."))
 
 (defmethod initialize-instance :after ((p openai-compatible) &key)
   (let ((impl (oai-impl p)))
     (unless (slot-boundp p 'model)
-      (setf (slot-value p 'model) (or (%env-for impl "MODEL") "qwen2.5")))
+      (setf (slot-value p 'model) (or (%env-for impl "MODEL") (%oai-default-model impl))))
     (unless (slot-boundp p 'base-url)
       (setf (slot-value p 'base-url)
             (or (%env-for impl "BASE_URL")
@@ -598,7 +615,8 @@ same reason as the Anthropic one."
       (when choice (setf (gethash "tool_choice" body) choice)))
     body))
 
-(defmethod supports-tool-choice-p ((p openai-compatible)) t)
+(defmethod supports-tool-choice-p ((p openai-compatible))
+  (not (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)))
 
 (defmethod complete ((p openai-compatible) messages
                      &key system tools (max-tokens *default-max-tokens*) temperature
@@ -832,12 +850,13 @@ For the shared backend a missing key is left to the request, as before."
 (defun make-openai-from-env (impl &optional default-base-url key-required)
   "An OPENAI-COMPATIBLE provider configured for IMPL (a name like \"openrouter\").
 Reads PRAXEON_<IMPL>_{MODEL,API_KEY,BASE_URL} and the shared PRAXEON_LLM_* as %ENV-FOR
-describes, then DEFAULT-BASE-URL / Ollama's local URL. KEY-REQUIRED is true for a hosted
+describes, then DEFAULT-BASE-URL / Ollama's local URL. The model defaults as %OAI-DEFAULT-MODEL
+says. KEY-REQUIRED is true for a hosted
 service, where a missing key is reported at construction (see %REQUIRED-KEY); a local server
 usually needs none."
   (make-instance 'openai-compatible
                  :impl impl
-                 :model (or (%env-for impl "MODEL") "qwen2.5")
+                 :model (or (%env-for impl "MODEL") (%oai-default-model impl))
                  :base-url (or (%env-for impl "BASE_URL")
                                default-base-url
                                "http://localhost:11434/v1")
@@ -902,6 +921,10 @@ API_KEY}, and the shared PRAXEON_LLM_* when anthropic is the shared backend."
                         (lambda () (make-openai-from-env "ollama" "http://localhost:11434/v1")))
 (register-provider-impl "openrouter"
                         (lambda () (make-openai-from-env "openrouter" "https://openrouter.ai/api/v1" t)))
+;; Meta's Model API, OpenAI-compatible at https://api.meta.ai/v1 (#678). Hosted, so the key is
+;; required. Its default model is muse-wonder-1.0, and it accepts no forced tool choice.
+(register-provider-impl "meta"
+                        (lambda () (make-openai-from-env "meta" "https://api.meta.ai/v1" t)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Introspection (provider-neutral)
