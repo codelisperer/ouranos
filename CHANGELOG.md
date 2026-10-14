@@ -854,6 +854,17 @@ its tag.
 
 ### Fixed
 
+- **praxeon/structured: `schema-recursion` no longer reads examples as references, and
+  percent-decodes a reference's fragment** (#686). It found a `$ref` or `$anchor` anywhere in
+  a schema, including inside `examples`, `default`, `const` and `enum`, whose values are data.
+  A schema such as `{"type":"object","examples":[{"$ref":"#"}]}` was reported as recursive, so
+  `generate-structured` on `meta` signalled `unsendable-schema` for a schema it could send. It
+  now looks only in the parts of a schema that hold schemas. It also read a fragment such as
+  `#/$defs/%6Eode` literally, so a schema that refers to itself that way was not reported as
+  recursive: on `meta` it was sent, refused with HTTP 400, and signalled as
+  `deliberation-failure` instead of `unsendable-schema`. The fragment is now percent-decoded
+  before it is read as a JSON pointer or an anchor name.
+
 - **mnemosyne/conn: `connection-open-p` reads a connection with no readable driver handle as
   closed** (#675). It used to read a connection as open when `dbi:connection-handle` returned
   NIL or signalled, so `hyperion`'s database session store, which calls it after a `db-error`,

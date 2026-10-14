@@ -3240,6 +3240,36 @@ definitions, and a pointer with an escaped token are recursive; a definition use
     (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"node\",\"properties\":{\"c\":{\"$ref\":\"#node\"}}}}}")
              "a schema that refers to its own anchor is")))
 
+(test schema-recursion-leaves-literal-data-alone
+  "#686. A $ref or $anchor inside examples, default, const or enum is data, not a reference,
+so a schema that only shows one is not recursive. A property whose NAME is one of those
+keywords is still a schema. Control: the same $ref outside the data keyword is recursive."
+  (flet ((recursion (json) (praxeon/llm::schema-recursion (jzon:parse json))))
+    (is-false (recursion "{\"type\":\"object\",\"examples\":[{\"$ref\":\"#\"}]}"))
+    (is-false (recursion "{\"type\":\"object\",\"default\":{\"$ref\":\"#\"},\"const\":{\"$ref\":\"#\"},\"enum\":[{\"$ref\":\"#\"}]}"))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#leaf\"}},\"examples\":[{\"$anchor\":\"leaf\",\"properties\":{\"y\":{\"$ref\":\"#leaf\"}}}],\"$defs\":{\"s\":{\"$anchor\":\"leaf\",\"type\":\"string\"}}}")
+              "an $anchor inside an example is not the anchor a reference names")
+    (is-true (recursion "{\"type\":\"object\",\"properties\":{\"default\":{\"$ref\":\"#\"}}}")
+             "a property named default is a schema")
+    (is-true (recursion "{\"type\":\"object\",\"items\":{\"$ref\":\"#\"}}")
+             "control: the same $ref under a schema keyword is recursive")))
+
+(test schema-recursion-percent-decodes-a-fragment
+  "#686. A $ref is a URI, so its fragment is percent-decoded before it is read: #/$defs/%6Eode
+names the definition node, and %25 is a literal percent sign. Decoding comes before the JSON
+pointer escapes, so %7E1 is ~1, which is /. Control: the same schema with the definition
+under a name the reference does not decode to is not recursive."
+  (flet ((recursion (json) (praxeon/llm::schema-recursion (jzon:parse json))))
+    (is-true (recursion "{\"properties\":{\"n\":{\"$ref\":\"#/$defs/%6Eode\"}},\"$defs\":{\"node\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%6Eode\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"a%b\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/a%25b\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"a/b\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/a%7E1b\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"n\\u00e9\",\"properties\":{\"c\":{\"$ref\":\"#n%C3%A9\"}}}}}")
+             "an anchor named with a UTF-8 escape")
+    (is-false (recursion "{\"properties\":{\"n\":{\"$ref\":\"#/$defs/%6Eode\"}},\"$defs\":{\"%6Eode\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%6Eode\"}}}}}")
+              "control: a definition named with the literal escape is not what the reference names")
+    (is-false (recursion "{\"$defs\":{\"n\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%zz\"}}}}}")
+              "a malformed escape names nothing")))
+
 (defclass %schema-only-provider (recording) ()
   (:documentation "A provider that cannot force a tool call, takes a response_format, and does not
 refuse a recursive schema. Its replies are the texts in its script."))

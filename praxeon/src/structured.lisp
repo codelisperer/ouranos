@@ -166,35 +166,91 @@ first and the caller's checks see arguments that are at least the right shape."
 ;;; protocol. SCHEMA-RECURSION finds a recursive schema: one whose $ref chain leads back to a
 ;;; schema it started from. A provider that refuses recursive schemas calls it from its method.
 
+(defparameter +data-keywords+ '("examples" "default" "const" "enum")
+  "Schema keywords whose values are JSON data, not schemas. A $ref or $anchor inside one is
+part of an example or a constant and refers to nothing (#686).")
+
+(defparameter +named-schema-keywords+
+  '("properties" "patternProperties" "$defs" "definitions" "dependentSchemas")
+  "Schema keywords whose value is an object of names to schemas. Its keys are names, so a
+property called \"default\" is a schema like any other property.")
+
+(defun %walk-schemas (fn node)
+  "Call FN on every schema object inside NODE, NODE included when it is one, without entering
+the values of +DATA-KEYWORDS+. A keyword not named in either list is read as holding schemas,
+so an unfamiliar one is checked rather than skipped."
+  (labels ((schema (node)
+             (cond ((hash-table-p node)
+                    (funcall fn node)
+                    (maphash (lambda (key value)
+                               (cond ((member key +data-keywords+ :test #'equal))
+                                     ((and (member key +named-schema-keywords+ :test #'equal)
+                                           (hash-table-p value))
+                                      (maphash (lambda (name sub) (declare (ignore name))
+                                                 (schema sub))
+                                               value))
+                                     (t (schema value))))
+                             node))
+                   ((and (vectorp node) (not (stringp node))) (map nil #'schema node))
+                   ((consp node) (map nil #'schema node)))))
+    (schema node)))
+
 (defun %anchor-target (root name)
   "The schema inside ROOT whose $anchor is NAME, or NIL."
-  (labels ((walk (node)
-             (cond ((hash-table-p node)
-                    (when (equal (gethash "$anchor" node) name)
-                      (return-from %anchor-target node))
-                    (maphash (lambda (key value) (declare (ignore key)) (walk value)) node))
-                   ((and (vectorp node) (not (stringp node))) (map nil #'walk node)))))
-    (walk root)
-    nil))
+  (%walk-schemas (lambda (node)
+                   (when (equal (gethash "$anchor" node) name)
+                     (return-from %anchor-target node)))
+                 root)
+  nil)
+
+(defun %percent-decode (text)
+  "TEXT with each %XX replaced by the octet it encodes, the octets read as UTF-8, or NIL when
+TEXT has a malformed escape or the octets are not UTF-8. A $ref is a URI, so a fragment such
+as #/$defs/%6Eode names the definition node (#686)."
+  (if (not (find #\% text))
+      text
+      (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0)))
+        (loop with i = 0
+              while (< i (length text))
+              do (let ((c (char text i)))
+                   (cond ((char/= c #\%)
+                          (loop for o across (sb-ext:string-to-octets (string c)
+                                                                       :external-format :utf-8)
+                                do (vector-push o octets))
+                          (incf i))
+                         ((and (<= (+ i 3) (length text))
+                               (digit-char-p (char text (+ i 1)) 16)
+                               (digit-char-p (char text (+ i 2)) 16))
+                          (vector-push (parse-integer text :start (1+ i) :end (+ i 3) :radix 16)
+                                       octets)
+                          (incf i 3))
+                         (t (return-from %percent-decode nil)))))
+        (handler-case (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8)))
+                                               :external-format '(:utf-8 :replacement nil))
+          (error () nil)))))
 
 (defun %pointer-target (root ref)
   "The schema REF names inside ROOT, or NIL when REF is not local or names nothing. A local
-reference is \"#\" (the root), a JSON pointer \"#/a/b\", whose escapes are read as JSON pointer
-defines them (~1 is /, ~0 is ~), or \"#name\", the schema whose $anchor is name."
-  (cond
-    ((not (and (stringp ref) (plusp (length ref)) (char= (char ref 0) #\#))) nil)
-    ((string= ref "#") root)
-    ((char/= (char ref 1) #\/) (%anchor-target root (subseq ref 1)))
-    (t
-      (let ((node root))
-        (dolist (token (rest (uiop:split-string (subseq ref 1) :separator "/")) node)
-          (let ((key (%unescape-pointer-token token)))
-            (setf node (cond ((hash-table-p node) (gethash key node))
-                             ((and (vectorp node) (not (stringp node))
-                                   (every #'digit-char-p key) (plusp (length key))
-                                   (< (parse-integer key) (length node)))
-                              (aref node (parse-integer key)))
-                             (t (return nil))))))))))
+reference is \"#\" (the root), a JSON pointer \"#/a/b\", or \"#name\", the schema whose
+$anchor is name. The fragment is percent-decoded first, because a $ref is a URI; a pointer is
+then split into tokens, and each token's escapes are read as JSON pointer defines them (~1 is
+/, ~0 is ~)."
+  (let ((fragment (and (stringp ref) (plusp (length ref)) (char= (char ref 0) #\#)
+                       (%percent-decode (subseq ref 1)))))
+    (cond
+      ((null fragment) nil)
+      ((string= fragment "") root)
+      ((char/= (char fragment 0) #\/) (%anchor-target root fragment))
+      (t
+        (let ((node root))
+          (dolist (token (rest (uiop:split-string fragment :separator "/")) node)
+            (let ((key (%unescape-pointer-token token)))
+              (setf node (cond ((hash-table-p node) (gethash key node))
+                               ((and (vectorp node) (not (stringp node))
+                                     (every #'digit-char-p key) (plusp (length key))
+                                     (< (parse-integer key) (length node)))
+                                (aref node (parse-integer key)))
+                               (t (return nil)))))))))))
 
 (defun %unescape-pointer-token (token)
   (with-output-to-string (out)
@@ -208,18 +264,13 @@ defines them (~1 is /, ~0 is ~), or \"#name\", the schema whose $anchor is name.
                    (progn (write-char c out) (incf i)))))))
 
 (defun %refs-in (schema)
-  "Every $ref string anywhere inside SCHEMA, in the order found."
+  "Every $ref string in a schema inside SCHEMA, in the order found. A $ref inside an example,
+a default, a const or an enum value is data and is not collected."
   (let ((refs '()))
-    (labels ((walk (node)
-               (cond ((hash-table-p node)
-                      (maphash (lambda (key value)
-                                 (if (and (equal key "$ref") (stringp value))
-                                     (push value refs)
-                                     (walk value)))
-                               node))
-                     ((and (vectorp node) (not (stringp node))) (map nil #'walk node))
-                     ((consp node) (map nil #'walk node)))))
-      (walk schema))
+    (%walk-schemas (lambda (node)
+                     (let ((ref (gethash "$ref" node)))
+                       (when (stringp ref) (push ref refs))))
+                   schema)
     (nreverse refs)))
 
 (defun schema-recursion (schema)
