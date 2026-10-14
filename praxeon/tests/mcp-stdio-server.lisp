@@ -41,6 +41,10 @@
 ;;;;                    process's stdin and stdout; it reads nothing for 6 seconds, then reads
 ;;;;                    stdin until its end, giving up when a line takes more than 20 seconds;
 ;;;;                    this process stops reading stdin for 1 second, then exits with status 3
+;;;;   grandchild       modern, with a sixth tool, start-grandchild, which starts
+;;;;                    `ping -n 600 127.0.0.1' and answers with its pid; Windows only (#599)
+;;;;   grandchild-ignore-eof
+;;;;                    grandchild, and it keeps running after its stdin ends, as ignore-eof
 ;;;;
 ;;;; Every request also writes a line to stderr. Tools: echo, fail (isError), slow (30 s),
 ;;;; slow-a (0.5 s) and exit (the process exits with status 3), two per tools/list page.
@@ -102,7 +106,9 @@
           (cond ((equal *mode* "stall") '("stall"))
                 ((equal *mode* "orphan") '("exit-leaving-child"))
                 ((equal *mode* "hold-stdin") '("exit-holding-stdin"))
-                ((equal *mode* "hold-both") '("exit-holding-both")))))
+                ((equal *mode* "hold-both") '("exit-holding-both"))
+                ((member *mode* '("grandchild" "grandchild-ignore-eof") :test #'equal)
+                 '("start-grandchild")))))
 
 (defun send-bytes (octets)
   "Write OCTETS to stdout as they are, after what the character stream holds."
@@ -157,6 +163,11 @@
            (sb-ext:run-program "/bin/sleep" '("6") :input nil :output t :error nil :wait nil)
            (record "exiting")
            (sb-ext:exit :code 3 :abort t))
+          ((equal name "start-grandchild")
+           (let ((ping (sb-ext:run-program "ping" '("-n" "600" "127.0.0.1")
+                                           :search t :wait nil :input nil :output nil :error nil)))
+             (record "grandchild ~D" (sb-ext:process-pid ping))
+             (reply id (text-result (princ-to-string (sb-ext:process-pid ping))))))
           (t (fail id -32602 "Unknown tool")))))
 
 (defvar *initialized* nil)
@@ -266,6 +277,6 @@
       while line
       do (handle line))
 (record "eof")
-(when (member *mode* '("ignore-eof" "ignore-term") :test #'equal)
+(when (member *mode* '("ignore-eof" "ignore-term" "grandchild-ignore-eof") :test #'equal)
   (loop (sleep 1)))
 (sb-ext:exit :code 0 :abort t)

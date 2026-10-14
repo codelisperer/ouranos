@@ -56,7 +56,14 @@
    #:target-alias #:user-name
    #:cred-write-w #:cred-read-w #:cred-delete-w #:cred-free
    #:+cred-type-generic+ #:+cred-persist-local-machine+ #:+cred-max-credential-blob-size+
-   #:+error-not-found+))
+   #:+error-not-found+
+   ;; job objects (#599)
+   #:jobobject-basic-limit-information #:io-counters #:jobobject-extended-limit-information
+   #:limit-flags #:basic-limit-information
+   #:create-job-object-w #:open-process #:set-information-job-object
+   #:assign-process-to-job-object #:terminate-job-object
+   #:+job-object-extended-limit-information+ #:+job-object-limit-kill-on-job-close+
+   #:+process-terminate+ #:+process-set-quota+))
 
 (cl:defpackage #:aion/windows
   (:use #:common-lisp)
@@ -80,5 +87,7 @@
    ;; handles
    #:handle #:handle-p #:wrap-handle #:handle-pointer #:handle-kind
    #:handle-valid-p #:close-handle #:with-handle
+   ;; job objects (#599)
+   #:make-kill-on-close-job #:assign-process-to-job #:terminate-job
    ;; file attributes, from aion/fs
    #:file-attributes #:file-attributes-error #:file-attributes-error-code))
