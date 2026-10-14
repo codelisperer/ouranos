@@ -854,6 +854,13 @@ its tag.
 
 ### Fixed
 
+- **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
+  praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
+  `:result-stored`, `:results-cleared`, `:context-trimmed`, `:context-overflow`, `:delegate`,
+  `:workflow-start`, `:workflow-step` and `:workflow-end`. Each is now listed with its fields. A
+  test fails when a praxeon source file emits an event type the list does not name, or the list
+  names one nothing emits. No event changed.
+
 - **mnemosyne/conn: `connection-open-p` reads a connection with no readable driver handle as
   closed** (#675). It used to read a connection as open when `dbi:connection-handle` returned
   NIL or signalled, so `hyperion`'s database session store, which calls it after a `db-error`,
