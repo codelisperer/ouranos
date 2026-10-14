@@ -3233,7 +3233,37 @@ definitions, and a pointer with an escaped token are recursive; a definition use
     (is-true (recursion "{\"$defs\":{\"a\":{\"properties\":{\"b\":{\"$ref\":\"#/$defs/b\"}}},\"b\":{\"properties\":{\"a\":{\"$ref\":\"#/$defs/a\"}}}}}"))
     (is-true (recursion "{\"$defs\":{\"a/b\":{\"properties\":{\"x\":{\"$ref\":\"#/$defs/a~1b\"}}}}}"))
     (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#/$defs/s\"},\"y\":{\"$ref\":\"#/$defs/s\"}},\"$defs\":{\"s\":{\"type\":\"string\"}}}"))
-    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"https://example.com/s.json\"}}}"))))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"https://example.com/s.json\"}}}"))
+    ;; Copilot's review of #681: "#name" names the schema whose $anchor is name, not the root.
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#leaf\"}},\"$defs\":{\"s\":{\"$anchor\":\"leaf\",\"type\":\"string\"}}}")
+              "a reference to an anchor on a leaf schema is not recursive")
+    (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"node\",\"properties\":{\"c\":{\"$ref\":\"#node\"}}}}}")
+             "a schema that refers to its own anchor is")))
+
+(defclass %schema-only-provider (recording) ()
+  (:documentation "A provider that cannot force a tool call, takes a response_format, and does not
+refuse a recursive schema. Its replies are the texts in its script."))
+
+(defmethod llm:supports-tool-choice-p ((p %schema-only-provider)) nil)
+(defmethod llm:supports-response-format-p ((p %schema-only-provider)) t)
+(defmethod llm:complete-with-schema ((p %schema-only-provider) messages spec &key system max-tokens temperature)
+  (declare (ignore spec system max-tokens temperature))
+  (push messages (recording-requests p))
+  (llm:make-completion :text (pop (recording-script p)) :stop-reason :end))
+
+(test only-a-provider-that-refuses-a-recursive-schema-has-it-refused
+  "Copilot's review of #681. Refusing a recursive schema is the provider's decision
+(RESPONSE-FORMAT-SCHEMA-PROBLEM), not GENERATE-STRUCTURED's: a provider that takes response_format
+and does not refuse one is sent it, while meta refuses it, naming its backend."
+  (let* ((p (make-instance '%schema-only-provider
+                           :script (list "{\"root\":{\"label\":\"a\"}}")))
+         (result (llm:generate-structured p '((:role :user :content "b")) (%recursive-spec))))
+    (is (string= "a" (gethash "label" (gethash "root" result))))
+    (is (= 1 (length (recording-requests p)))))
+  (let ((meta (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                    :base-url "http://127.0.0.1:1/v1")))
+    (is (search "the meta backend"
+                (llm:response-format-schema-problem meta (llm:tool-spec-schema (%recursive-spec)))))))
 
 (defclass %both-ways-provider (recording) ()
   (:documentation "A provider that can force a tool call and also take a response_format."))

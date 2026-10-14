@@ -563,6 +563,11 @@ json_schema. Meta's Model API does (https://dev.meta.ai/docs/structured-output, 
 may too, but GENERATE-STRUCTURED prefers a forced tool call wherever one is supported, so a
 backend is listed here only when it cannot force one.")
 
+(defparameter +openai-compatible-no-recursive-schema-impls+
+  '("meta")
+  "The backends that return HTTP 400 for a recursive schema in response_format. Meta's Model API
+does (https://dev.meta.ai/docs/structured-output, #680). RESPONSE-FORMAT-SCHEMA-PROBLEM reads it.")
+
 (defparameter +openai-compatible-auto-only-impls+
   '("meta")
   "The backends that accept only tool_choice \"auto\". Meta's Model API returns HTTP 400 for

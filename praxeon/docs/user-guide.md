@@ -85,8 +85,8 @@ Notes:
   `praxeon/conditions:tool-choice-unsupported` before any request is sent. `generate-structured`
   still works on `meta`: it sends the spec's schema as `response_format` (`json_schema`) and
   reads the JSON object in the reply's text, with the same validation, conditions and restarts
-  as the tool-call path. A recursive schema is refused with `praxeon/llm:unsendable-schema`
-  before anything is sent, because Meta returns HTTP 400 for one. Its models reason before they
+  as the tool-call path. On `meta`, a recursive schema is refused with
+  `praxeon/llm:unsendable-schema` before anything is sent, because Meta returns HTTP 400 for one. Its models reason before they
   answer, and the reasoning counts against `max_tokens`.
 - Every var can be **shared** (`PRAXEON_LLM_MODEL`, `PRAXEON_LLM_API_KEY`, …) or
   **per-provider** (`PRAXEON_<IMPL>_MODEL`, `PRAXEON_<IMPL>_API_KEY`, …). The

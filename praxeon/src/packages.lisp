@@ -157,7 +157,8 @@
    #:unenforced-declarations #:check-schema-enforceable
    #:unenforceable-schema #:unenforceable-schema-tool
    #:unenforceable-schema-declarations
-   #:check-schema-sendable #:unsendable-schema #:unsendable-schema-tool
+   #:check-schema-sendable #:response-format-schema-problem #:schema-recursion
+   #:unsendable-schema #:unsendable-schema-tool
    #:unsendable-schema-reason
    #:*default-structured-attempts*
    #:structured-result-rejected #:structured-result-rejected-tool

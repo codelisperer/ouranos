@@ -161,23 +161,40 @@ first and the caller's checks see arguments that are at least the right shape."
 
 ;;; --- a schema sent as response_format (#680) --------------------------------
 ;;;
-;;; Meta's Model API returns HTTP 400 for a recursive schema in response_format
-;;; (https://dev.meta.ai/docs/structured-output). A recursive schema is one whose $ref chain
-;;; leads back to a schema it started from, so it is refused here, before a request is sent.
+;;; A provider may refuse some schemas in response_format, and says which through
+;;; RESPONSE-FORMAT-SCHEMA-PROBLEM. Meta's Model API returns HTTP 400 for a recursive schema
+;;; (https://dev.meta.ai/docs/structured-output): one whose $ref chain leads back to a schema
+;;; it started from. SCHEMA-RECURSION finds such a chain.
+
+(defun %anchor-target (root name)
+  "The schema inside ROOT whose $anchor is NAME, or NIL."
+  (labels ((walk (node)
+             (cond ((hash-table-p node)
+                    (when (equal (gethash "$anchor" node) name)
+                      (return-from %anchor-target node))
+                    (maphash (lambda (key value) (declare (ignore key)) (walk value)) node))
+                   ((and (vectorp node) (not (stringp node))) (map nil #'walk node)))))
+    (walk root)
+    nil))
 
 (defun %pointer-target (root ref)
-  "The schema REF names inside ROOT, for a local reference (\"#\" or \"#/a/b\"), or NIL when
-REF is not local or names nothing. Escapes are read as JSON pointer defines them (~1 is /, ~0 is ~)."
-  (when (and (stringp ref) (plusp (length ref)) (char= (char ref 0) #\#))
-    (let ((node root))
-      (dolist (token (rest (uiop:split-string (subseq ref 1) :separator "/")) node)
-        (let ((key (%unescape-pointer-token token)))
-          (setf node (cond ((hash-table-p node) (gethash key node))
-                           ((and (vectorp node) (not (stringp node))
-                                 (every #'digit-char-p key) (plusp (length key))
-                                 (< (parse-integer key) (length node)))
-                            (aref node (parse-integer key)))
-                           (t (return nil)))))))))
+  "The schema REF names inside ROOT, or NIL when REF is not local or names nothing. A local
+reference is \"#\" (the root), a JSON pointer \"#/a/b\", whose escapes are read as JSON pointer
+defines them (~1 is /, ~0 is ~), or \"#name\", the schema whose $anchor is name."
+  (cond
+    ((not (and (stringp ref) (plusp (length ref)) (char= (char ref 0) #\#))) nil)
+    ((string= ref "#") root)
+    ((char/= (char ref 1) #\/) (%anchor-target root (subseq ref 1)))
+    (t
+      (let ((node root))
+        (dolist (token (rest (uiop:split-string (subseq ref 1) :separator "/")) node)
+          (let ((key (%unescape-pointer-token token)))
+            (setf node (cond ((hash-table-p node) (gethash key node))
+                             ((and (vectorp node) (not (stringp node))
+                                   (every #'digit-char-p key) (plusp (length key))
+                                   (< (parse-integer key) (length node)))
+                              (aref node (parse-integer key)))
+                             (t (return nil))))))))))
 
 (defun %unescape-pointer-token (token)
   (with-output-to-string (out)
@@ -232,6 +249,22 @@ resolved here and is ignored."
                        defs))))
         nil))))
 
+(defgeneric response-format-schema-problem (provider schema)
+  (:documentation "Why PROVIDER cannot be sent SCHEMA as response_format, as a string, or NIL when it
+can. GENERATE-STRUCTURED calls this before the first request on the response_format path and
+signals UNSENDABLE-SCHEMA with the answer (#680). The default is NIL: a provider that opts in to
+SUPPORTS-RESPONSE-FORMAT-P and refuses some schemas says which by defining this.")
+  (:method (provider schema)
+    (declare (ignore provider schema))
+    nil))
+
+(defmethod response-format-schema-problem ((p openai-compatible) schema)
+  (when (member (oai-impl p) +openai-compatible-no-recursive-schema-impls+ :test #'string=)
+    (let ((chain (schema-recursion schema)))
+      (when chain
+        (format nil "it is recursive (~{~A~^ -> ~} leads back to a schema already on the way), and the ~A backend returns HTTP 400 for a recursive schema"
+                chain (oai-impl p))))))
+
 (define-condition unsendable-schema (praxeon/conditions:praxeon-error)
   ((tool :initarg :tool :reader unsendable-schema-tool)
    (reason :initarg :reason :reader unsendable-schema-reason))
@@ -240,17 +273,14 @@ resolved here and is ignored."
      (format s "The schema of ~S cannot be sent as response_format: ~A. Nothing was sent."
              (unsendable-schema-tool c) (unsendable-schema-reason c))))
   (:documentation "GENERATE-STRUCTURED would send a tool-spec's schema as response_format, and the
-schema is one such a request refuses. Signalled before any request (#680). REASON says why."))
+provider has said it refuses that schema (RESPONSE-FORMAT-SCHEMA-PROBLEM). Signalled before any
+request (#680). REASON says why."))
 
-(defun check-schema-sendable (spec)
-  "Signal UNSENDABLE-SCHEMA when SPEC's schema cannot be sent as response_format: today, when it
-is recursive."
-  (let ((chain (schema-recursion (tool-spec-schema spec))))
-    (when chain
-      (error 'unsendable-schema
-             :tool (tool-spec-name spec)
-             :reason (format nil "it is recursive (~{~A~^ -> ~} leads back to a schema already on the way), and Meta's Model API returns HTTP 400 for a recursive schema"
-                             chain)))))
+(defun check-schema-sendable (provider spec)
+  "Signal UNSENDABLE-SCHEMA when PROVIDER cannot be sent SPEC's schema as response_format."
+  (let ((reason (response-format-schema-problem provider (tool-spec-schema spec))))
+    (when reason
+      (error 'unsendable-schema :tool (tool-spec-name spec) :reason reason))))
 
 (defun %reply-object (text)
   "The JSON object TEXT holds, or NIL and a problem saying why there is none."
@@ -273,24 +303,27 @@ is recursive."
    (attempt :initarg :attempt :initform 1 :reader structured-result-invalid-attempt))
   (:report
    (lambda (c s)
-     (format s "The model's call to ~S did not match its schema (attempt ~D):~%~{  - ~A~%~}"
+     (format s "The model's result for ~S did not match its schema (attempt ~D):~%~{  - ~A~%~}"
              (structured-result-invalid-tool c)
              (structured-result-invalid-attempt c)
              (structured-result-invalid-problems c))))
-  (:documentation "The forced tool was called with arguments that failed validation."))
+  (:documentation "The structured result failed validation: the arguments of the forced tool call,
+or, on the response_format path, the reply's text, which was not a JSON object or was one that
+did not match the schema (#680)."))
 
 (define-condition structured-result-truncated (structured-result-invalid
                                                praxeon/conditions:output-limit-reached)
   ()
   (:report
    (lambda (c s)
-     (format s "The model's call to ~S reached the output limit of ~D tokens before the model had finished (attempt ~D), so its arguments may be incomplete (#338).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS) or take the cut-off arguments (ACCEPT-TRUNCATED). GENERATE-STRUCTURED's :max-tokens sets the limit."
+     (format s "The model's reply for ~S reached the output limit of ~D tokens before the model had finished (attempt ~D), so its result may be incomplete (#338).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS) or take the cut-off arguments (ACCEPT-TRUNCATED). GENERATE-STRUCTURED's :max-tokens sets the limit."
              (structured-result-invalid-tool c)
              (praxeon/conditions:output-limit-reached-max-tokens c)
              (structured-result-invalid-attempt c))))
   (:documentation "Signalled by GENERATE-STRUCTURED when the completion stopped at the output limit
-\(stop reason :MAX-TOKENS), whether or not the forced tool was called (#338). ARGUMENTS are the
-arguments the provider parsed from the cut-off output, or NIL when there was no call.
+\(stop reason :MAX-TOKENS), whether or not a result came back (#338). ARGUMENTS are what could be
+parsed from the cut-off output: the forced call's arguments, or the JSON object in the reply's
+text on the response_format path, or NIL when there was none (#680).
 
 A subtype of STRUCTURED-RESULT-INVALID, so a handler an app already has for a result it cannot
 use also receives this, and of OUTPUT-LIMIT-REACHED. Signalled with ERROR inside the restarts
@@ -379,8 +412,9 @@ that way, as above. One that cannot, and takes a schema as response_format inste
 (SUPPORTS-RESPONSE-FORMAT-P), is asked through COMPLETE-WITH-SCHEMA, and the JSON object in its
 reply's text is the record. That reply is checked the same way: text that is not a JSON object,
 or an object that fails validation, is a rejected attempt with the same conditions and restarts
-as a bad tool argument, and the re-ask shows the model its reply. A recursive schema is refused
-with UNSENDABLE-SCHEMA before anything is sent. A provider that can do neither signals
+as a bad tool argument, and the re-ask shows the model its reply. A schema the provider refuses
+(RESPONSE-FORMAT-SCHEMA-PROBLEM; for meta, a recursive one) is refused with UNSENDABLE-SCHEMA
+before anything is sent. A provider that can do neither signals
 TOOL-CHOICE-UNSUPPORTED, as before."
   (let ((strategy (cond ((supports-tool-choice-p provider) :tool-call)
                         ((supports-response-format-p provider) :response-format)
@@ -390,7 +424,7 @@ TOOL-CHOICE-UNSUPPORTED, as before."
     ;; the spec rather than at the model's answer (pre-publication issue 454).
     (check-schema-enforceable spec)
     (when (eq strategy :response-format)
-      (check-schema-sendable spec))
+      (check-schema-sendable provider spec))
     (%generate-structured strategy provider messages spec system max-tokens temperature attempts)))
 
 (defun %generate-structured (strategy provider messages spec system max-tokens temperature attempts)

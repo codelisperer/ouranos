@@ -230,9 +230,12 @@ its tag.
   `tool-choice-unsupported` as before when neither is supported. A reply whose text is not a
   JSON object, or does not match the schema, is a rejected attempt with the same
   `structured-result-rejected`, `re-ask`, `structured-result-invalid` and
-  `structured-result-truncated` as a bad tool argument. A recursive schema is refused with the
-  new condition `unsendable-schema` before anything is sent. `openai-request-body` takes a new
-  `:response-format` argument.
+  `structured-result-truncated` as a bad tool argument; the reports of
+  `structured-result-invalid` and `structured-result-truncated` now say "result" and "reply"
+  rather than "call". A provider says which schemas it refuses through a third new generic,
+  `response-format-schema-problem`; `meta` refuses a recursive one, and the refusal is
+  signalled as the new condition `unsendable-schema` before anything is sent.
+  `openai-request-body` takes a new `:response-format` argument.
 
 - **klio: a collection name may not end in `.` or be a Windows device name** (#631).
   `make-site-options` refuses a `:collections` name with a segment that ends in `.`
