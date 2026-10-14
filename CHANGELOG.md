@@ -25,6 +25,17 @@ its tag.
   scan, so that second query is made more often. See `docs/migrations.md` and
   `docs/dependencies.md`.
 
+- **hyperion/session-db: make the DB session store over the app's mnemosyne pool, or pass
+  `:backend`** (#636). `make-db-store` now takes a pool as well as a connection. A store made
+  over one connection kept it for the life of the process, so after Postgres ended it (SQLSTATE
+  57P01, at a provider's maintenance or a restart) every request carrying a session cookie
+  failed with "Connection to database server lost" until the process restarted, while requests
+  without one, and so a health check, kept working. Over a pool, each operation borrows a
+  connection and, when Postgres has ended it, runs once more on a new connection opened from the
+  pool's backend. Over one connection, `:backend` lets the store reconnect once and retry. An
+  app that makes the store over one connection and passes neither still fails after a
+  disconnect, as before.
+
 - **praxeon/memory: `remember`, `observations-of`, `recall` and `recall-similar` take
   `:thread`, and an app's own memory store must accept it** (#317). A method of a store written
   outside this tree that does not accept `:thread` is refused when it is added, at load time.
@@ -208,6 +219,11 @@ its tag.
   (`nul.txt`, `com1`), compared without regard to case. The rule applies on every operating
   system, so a site behaves the same everywhere. A space was already refused.
 
+- **mnemosyne/conn: `connection-open-p` and `pool-backend`** (#636). `connection-open-p` tells,
+  after a `db-error`, a connection Postgres has ended from a statement that failed on a working
+  one: the first reads as closed, the second as open. It reads the client's state and sends
+  nothing. `pool-backend` returns the backend a pool opens its connections from.
+
 - **klio: a site can give a collection its own listing page, with `:collections`** (#557). Each
   collection named there gets a listing at `/<name>/`, paginated with `:per-page`, in the order
   the entry gives (`("roles" :sort-by "start" :order :descending :then-by "title")`), rendered by
@@ -220,12 +236,17 @@ its tag.
   two pages that cannot both be written, before anything is written: a listing and a document
   keyed `<name>/index`, or a collection named `one.html` and the document `one`.
 
+- **praxeon/mcp: an ordinary call that asks for input can be answered, through an `:on-elicitation` handler** (#626).
+  - `make-connection` takes `:on-elicitation`, a function of a plist (`:key`, `:mode`, `:message`, `:schema` or `:url`, `:method`, `:connection`, `:principal`) that returns `(values action content)`, and `:input-rounds`, the most retries one call makes, three by default. `:on-elicitation` needs `:elicitation`.
+  - A `tools/call`, `resources/read` or `prompts/get` that answers `input_required` is sent again with the handler's answers in `inputResponses` and the result's `requestState` echoed exactly. Without a handler it still fails as not run.
+  - A request the app cannot be asked (sampling, roots, an undeclared mode, a malformed elicitation), an answer that cannot be sent, a `requestState` that is not a string, or a server still asking after `:input-rounds` retries fails the call as not run. A handler that signals ends the call with its condition.
+
 - **praxeon/mcp: a task can ask the user for input, and the app answers it** (#563).
   - `make-connection` takes `:elicitation`, a list of the modes `:form` and `:url`. It declares the elicitation client capability for them; sampling and roots are never declared. Without it nothing changes.
   - A task whose `tasks/get` says `input_required` with elicitation requests in declared modes sends a `:task-input-required` event per key not shown before, with `:input-key`, `:mode`, `:message`, `:schema` or `:url`, and `:task`. A request this client did not declare, or a malformed one (a form request without `requestedSchema`, a url request without `url`), still cancels the task with `:task-input-refused`.
   - `answer-task-input` sends the app's answer (`:accept` with content for a form-mode request, `:decline` or `:cancel`) with `tasks/update`, taking the task object the event carried. It checks with `tasks/get` that the key is still outstanding on the server first, and sends no answer otherwise. After an app restart, an unanswered key is not asked again; it is answered cancel when `:input-timeout` (ten minutes by default) passes, with a `:task-input-expired` event.
   - The task record has a new field, `task-inputs`, written by `task-to-json`; a record written before reads as having none.
-  - An ordinary call that answers `input_required` still fails as not run; an `:on-elicitation` handler for it is #626.
+  - An ordinary call that answers `input_required` can be answered too, through `:on-elicitation` (#626); see that entry.
 
 - **aion/libgit: fetch, fast-forward pull and push** (#429). `set-remote` names a remote and
   `remote-url` reads one back. `fetch` updates `refs/remotes/<remote>/`. `pull` fetches, then
@@ -805,6 +826,28 @@ its tag.
   `window-not-distilled` and `closing-not-saved` print their detail the same way.
   `deliberation-failure` keeps its own report, and `deliberation-failure-detail` reads the same
   slot. Every subclass is still a `praxeon-error`, so existing handlers catch the same conditions.
+
+- **aion/libgit: `set-remote` also sets the remote's push URL, so a push goes to the new URL**
+  (#641). For a remote that already existed, `set-remote` changed only `remote.<name>.url`.
+  When the repository's git configuration also had `remote.<name>.pushurl`, `push-branch`
+  went on sending commits, and the credential it was given, to that push URL. `set-remote` now
+  sets `remote.<name>.pushurl` to the same URL, in the repository's own configuration, for new
+  and existing remotes. A push URL set in the user's or the system's git configuration is
+  overridden by it. Because the remote now has a push URL, a `url.<base>.pushInsteadOf` rule
+  no longer rewrites its pushes; `url.<base>.insteadOf` still does. The two keys are written
+  together under libgit2's configuration lock, so either both change or neither does. libgit2
+  refuses to set `remote.<name>.url` or `remote.<name>.pushurl` when the repository's
+  configuration has more than one value for it, or takes it from a file named by
+  `include.path` or `includeIf`; `set-remote` then signals `git-error` and the configuration
+  file is unchanged.
+
+- **aion/oauth: the default `call-with-refresh-lock` no longer keeps a mutex for every
+  principal and connection for the life of the process** (#542). The method on `store`, which
+  `refresh`, `finish-sign-in` and `disconnect` use unless a store overrides it, added an entry
+  to a process-wide table the first time a principal and connection took the lock, and never
+  removed it. It now counts the calls holding or waiting for each entry's mutex and removes the
+  entry when none is left. Two calls for one principal and connection still never run at once.
+  A store that overrides `call-with-refresh-lock` is not affected.
 
 - **praxeon/memory-db: `recall-similar` on Postgres returns as many observations as `:limit`
   asks for, when that many match, also when the HNSW index serves the query** (#482).

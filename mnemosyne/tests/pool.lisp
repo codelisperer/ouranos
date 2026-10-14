@@ -297,6 +297,31 @@ from a backend, not from a connection."
                "with it, the dead connection is replaced and the query answers")
           (is* (= 1 (conn:pool-open-count pool))))))))
 
+(test connection-open-p-tells-a-lost-connection-from-a-failed-statement
+  ;; #636: a statement that fails on a working connection leaves it open; once the server has
+  ;; ended the connection (57P01), the failure that finds it out leaves it closed, and so does
+  ;; every later one. A SQLite connection always reads as open.
+  (with-each-pool-backend (backend)
+    (let ((c (conn:connect backend)))
+      (unwind-protect
+           (progn
+             (ignore-errors (conn:query c "SELECT * FROM no_such_table_636"))
+             (is* (conn:connection-open-p c) "a failed statement leaves the connection open")
+             (when (%postgres-p)
+               (let ((pid (second (first (conn:query c "SELECT pg_backend_pid() AS pid"))))
+                     (other (conn:connect backend)))
+                 (unwind-protect (conn:query other "SELECT pg_terminate_backend(?)" pid)
+                   (conn:disconnect other))
+                 (sleep 0.2)
+                 (is* (conn:connection-open-p c)
+                      "control: the client cannot know before it next uses the connection")
+                 (is* (typep (nth-value 1 (ignore-errors (conn:query c "SELECT 1 AS one"))) 'conn:db-error)
+                      "precondition: the next statement fails")
+                 (is* (not (conn:connection-open-p c)) "after that failure it reads as closed")
+                 (ignore-errors (conn:query c "SELECT 1 AS one"))
+                 (is* (not (conn:connection-open-p c)) "and after the next one too"))))
+        (ignore-errors (conn:disconnect c))))))
+
 (test with-connection-still-opens-and-closes-a-connection-for-a-backend
   (with-each-pool-backend (backend)
     (let ((lent nil))

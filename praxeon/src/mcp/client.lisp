@@ -80,7 +80,8 @@ has, or two tools under one name. Nothing was registered."))
 (defstruct (connection (:constructor %make-connection
                            (&key name url command directory environment stderr restart
                                  token-source per-user timeout call-timeout max-body-bytes tasks
-                                 task-lifetime task-backoff-cap elicitation input-timeout)))
+                                 task-lifetime task-backoff-cap elicitation input-timeout
+                                 on-elicitation input-rounds)))
   "An MCP server the app connects to, as data. MAKE-CONNECTION makes one.
 
 NAME is a short identifier: it prefixes the tool names an agent sees, and it appears in logs.
@@ -105,7 +106,14 @@ ELICITATION lists the elicitation modes the app can present, :FORM and :URL, and
 elicitation client capability for them, so a server on the current revision may ask a task for
 the user's input (#563); NIL, the default, declares none, and a task that asks anyway is
 cancelled. INPUT-TIMEOUT is the most seconds an input request may wait for the app's answer
-before POLL-TASKS answers it cancel; ten minutes by default, a positive integer."
+before POLL-TASKS answers it cancel; ten minutes by default, a positive integer.
+
+ON-ELICITATION is a function the client calls when an ordinary tools/call, resources/read or
+prompts/get answers input_required (#626): with a plist describing one elicitation request, it
+returns the action and, for :ACCEPT to a form request, the content, and the client retries the
+request with the answers. Nothing bounds how long the handler takes, since CALL-TIMEOUT applies to
+each request: an app that asks a person bounds the wait itself. It needs ELICITATION. INPUT-ROUNDS is the most retries one call makes
+before it fails; three by default, a positive integer. See %REQUEST-ANSWERING-INPUT."
   (name "" :type string)
   (url "" :type string)
   (command nil :type list)
@@ -122,7 +130,9 @@ before POLL-TASKS answers it cancel; ten minutes by default, a positive integer.
   (task-lifetime (* 24 60 60) :type (integer 1))
   (task-backoff-cap (* 5 60) :type (integer 1))
   (elicitation nil :type list)
-  (input-timeout (* 10 60) :type (integer 1)))
+  (input-timeout (* 10 60) :type (integer 1))
+  (on-elicitation nil)
+  (input-rounds 3 :type (integer 1)))
 
 (defparameter +stdio-environment+
   #+win32 '("APPDATA" "COMSPEC" "HOMEDRIVE" "HOMEPATH" "LOCALAPPDATA" "PATH" "PATHEXT"
@@ -141,7 +151,8 @@ exported bash function, is not passed (#604).")
                              token-source per-user (timeout 30) (call-timeout 120)
                              (max-body-bytes (* 8 1024 1024)) tasks
                              (task-lifetime (* 24 60 60)) (task-backoff-cap (* 5 60))
-                             elicitation (input-timeout (* 10 60)))
+                             elicitation (input-timeout (* 10 60))
+                             on-elicitation (input-rounds 3))
   "A CONNECTION to an MCP server: over Streamable HTTP at URL, or a local server over stdio
 started with COMMAND. Both together are refused.
 
@@ -167,8 +178,8 @@ The specification says a server over stdio takes its credentials from its enviro
 TOKEN-SOURCE and PER-USER are refused with COMMAND. One process serves every principal: an app
 that needs a server process per user makes a connection per user.
 
-TIMEOUT, CALL-TIMEOUT, MAX-BODY-BYTES, TASKS, TASK-LIFETIME, TASK-BACKOFF-CAP, ELICITATION and
-INPUT-TIMEOUT apply to both; see CONNECTION. For a local server MAX-BODY-BYTES bounds each line
+TIMEOUT, CALL-TIMEOUT, MAX-BODY-BYTES, TASKS, TASK-LIFETIME, TASK-BACKOFF-CAP, ELICITATION,
+INPUT-TIMEOUT, ON-ELICITATION and INPUT-ROUNDS apply to both; see CONNECTION. For a local server MAX-BODY-BYTES bounds each line
 it writes."
   (flet ((refuse (control &rest arguments)
            (error "praxeon/mcp: make-connection ~A: ~?" name control arguments)))
@@ -193,13 +204,26 @@ it writes."
                  (= (length elicitation) (length (remove-duplicates elicitation))))
       (refuse ":elicitation is a list of the modes :form and :url, each at most once."))
     (unless (typep input-timeout '(integer 1))
-      (refuse ":input-timeout is a positive number of seconds.")))
+      (refuse ":input-timeout is a positive number of seconds."))
+    (when on-elicitation
+      ;; As observe.lisp checks its callables: FBOUNDP is also true of a macro or a special
+      ;; operator, which FUNCALL cannot call (Copilot's review of #643).
+      (unless (or (functionp on-elicitation)
+                  (and (symbolp on-elicitation) (fboundp on-elicitation)
+                       (not (macro-function on-elicitation))
+                       (not (special-operator-p on-elicitation))))
+        (refuse ":on-elicitation is a function."))
+      (unless elicitation
+        (refuse ":on-elicitation needs :elicitation, the modes the app can present; without it a server must not ask, and the handler is never called.")))
+    (unless (typep input-rounds '(integer 1))
+      (refuse ":input-rounds is a positive number of retries.")))
   (%make-connection :name (or name "") :url (or url "") :command command :directory directory
                     :environment environment :stderr stderr :restart restart
                     :token-source token-source :per-user per-user :timeout timeout
                     :call-timeout call-timeout :max-body-bytes max-body-bytes :tasks tasks
                     :task-lifetime task-lifetime :task-backoff-cap task-backoff-cap
-                    :elicitation elicitation :input-timeout input-timeout))
+                    :elicitation elicitation :input-timeout input-timeout
+                    :on-elicitation on-elicitation :input-rounds input-rounds))
 
 (defstruct (client (:constructor %make-client (connection task-store)))
   "One connection's protocol state. ERA is NIL until the first request finds out, then :MODERN
@@ -254,6 +278,10 @@ none of them is a store's implementation of the function."
 
 (defun %next-id (client)
   (sb-ext:atomic-incf (client-next-id client)))
+
+(defvar *answering-input* nil
+  "True while %REQUEST-ANSWERING-INPUT sends a request: %RESULT-OF then returns an
+input_required result for it to answer, rather than failing the call (#626).")
 
 (defvar *call-may-run* nil
   "True while a tools/call is in flight. A failure then may have come after the tool ran, so
@@ -796,7 +824,8 @@ input request or a task nobody asked for. Both transports end here."
     (let ((result (gethash "result" reply)))
       (unless (hash-table-p result)
         (%failed-in-flight client "its result was not a JSON object." '()))
-      (when (equal "input_required" (%get result "resultType"))
+      (when (and (equal "input_required" (%get result "resultType"))
+                 (not *answering-input*))
         (%request-failed client "the server asked for input this client cannot provide."
                          '() :outcome :not-run))
       ;; A task is a valid answer only to a tools/call that declared the extension, which
@@ -977,7 +1006,7 @@ ACTOR:STARTED-RESULT is returned instead. ORIGIN is a plist of :AGENT, :CONVERSA
                       (%request-failed client "the argument for one of the tool's header parameters is ~A, so the call was not sent."
                                        (list (header-value-refused-reason e)) :outcome :not-run))))
          (result (let ((*call-may-run* t))
-                   (%request client "tools/call"
+                   (%request-answering-input client "tools/call"
                              (%object "name" (tool-name tool) "arguments" arguments)
                              :principal principal
                              :timeout (connection-call-timeout connection)

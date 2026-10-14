@@ -115,7 +115,7 @@ fails the call, rather than being left out."
     (when arguments
       (dolist (pair arguments) (setf (gethash (car pair) table) (cdr pair)))
       (setf (gethash "arguments" params) table))
-    (let* ((result (%request client "prompts/get" params :principal principal))
+    (let* ((result (%request-answering-input client "prompts/get" params :principal principal))
            (messages (gethash "messages" result)))
       (unless (and (vectorp messages) (not (stringp messages)))
         (%request-failed client "its prompt reply had no list of messages." '() :outcome :not-run))

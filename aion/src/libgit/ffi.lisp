@@ -280,7 +280,14 @@
   (url (:string :encoding :utf-8)))
 (%defgit ("git_remote_set_url" %remote-set-url) :int
   (repo :pointer) (remote (:string :encoding :utf-8)) (url (:string :encoding :utf-8)))
+(%defgit ("git_remote_set_pushurl" %remote-set-pushurl) :int
+  (repo :pointer) (remote (:string :encoding :utf-8)) (url (:string :encoding :utf-8)))
 (%defgit ("git_remote_free" %remote-free) :void (remote :pointer))
+(%defgit ("git_repository_config" %repository-config) :int (out :pointer) (repo :pointer))
+(%defgit ("git_config_lock" %config-lock) :int (out :pointer) (config :pointer))
+(%defgit ("git_config_free" %config-free) :void (config :pointer))
+(%defgit ("git_transaction_commit" %transaction-commit) :int (transaction :pointer))
+(%defgit ("git_transaction_free" %transaction-free) :void (transaction :pointer))
 (%defgit ("git_remote_url" %remote-url) :pointer (remote :pointer))
 (%defgit ("git_fetch_options_init" %fetch-options-init) :int
   (options :pointer) (version :unsigned-int))

@@ -242,6 +242,14 @@ browser is attached to). Backends sit behind a small `store` protocol;
 `make-memory-store` is the in-memory default and `hyperion/session-db` is the DB-backed one.
 Nickname it: `(:local-nicknames (#:session #:hyperion/session))`.
 
+**On Postgres, make the DB store over the app's pool:** `(make-db-store pool :dialect
+:postgres)`, the same pool given to `hyperion/db-connection:wrap-connection`. Each store
+operation then borrows a connection, and when Postgres has ended that connection (SQLSTATE
+57P01, at a provider's maintenance or a restart), the operation runs once more on a new
+connection (#636). A store made over one connection can do the same only when it is given the
+backend that connection came from, `:backend`; without it, every later session lookup fails
+until the process restarts.
+
 **Changes are written back by `wrap-session`.** A DB-backed store hands out a fresh copy of the
 session on every request, so `wrap-session` writes the session back through `store-save`
 after the handler whenever the data bag changed (`session-set`, `session-del`,
