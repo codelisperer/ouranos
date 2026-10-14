@@ -7327,3 +7327,84 @@ pause however the threads are scheduled."
              (is (equal '("A.") (%thread-contents store))))
         (setf obs::*pause-hook* nil)
         (sb-thread:signal-semaphore resume)))))
+
+;;; --------------------------------------------------------------------------
+;;; #339: the list of events at the top of event.lisp names every event praxeon emits.
+;;;
+;;; The list is what a UI author reads to learn what to render, and eleven event types were
+;;; emitted for months without appearing in it. The test reads the source: each (evt:emit :X ..)
+;;; and (apply #'evt:emit :X ..), and, for a function that passes its own argument as the type
+;;; (apply #'evt:emit type ..), each call (that-function :X ..) anywhere under praxeon/src.
+;;; --------------------------------------------------------------------------
+
+(in-suite praxeon)
+
+(defun %token-after (text start)
+  "The symbol name in TEXT that begins at START, up to whitespace or a parenthesis."
+  (let ((end (or (position-if (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return #\( #\))))
+                              text :start start)
+                 (length text))))
+    (subseq text start end)))
+
+(defun %source-at (text start)
+  "Up to 40 characters of TEXT from START, to show where a call is."
+  (subseq text start (min (length text) (+ start 40))))
+
+(defun %positions-after (needle text)
+  "The position just after each occurrence of NEEDLE in TEXT."
+  (loop for p = (search needle text) then (search needle text :start2 (1+ p))
+        while p collect (+ p (length needle))))
+
+(defun %listed-event-types (event-file-text)
+  "The event types the comment at the top of event.lisp lists, as keywords."
+  (remove-duplicates
+   (loop for line in (uiop:split-string event-file-text :separator '(#\Newline))
+         for p = (search "(:type :" line)
+         when (and p (eql 0 (search ";;;;" line)))
+           collect (intern (string-upcase (%token-after line (+ p 8))) :keyword))))
+
+(defun %emitted-event-types (texts)
+  "The event types emitted in TEXTS (source files as strings), as keywords, and a list of the
+calls whose type could not be read: a direct call with a non-keyword type, or a function that
+passes its own type to EVT:EMIT but whose name could not be found."
+  (let ((types '()) (unreadable '()) (wrappers '()))
+    (dolist (text texts)
+      (dolist (p (%positions-after "(evt:emit " text))
+        (if (char= (char text p) #\:)
+            (push (intern (string-upcase (%token-after text (1+ p))) :keyword) types)
+            (push (%source-at text p) unreadable)))
+      (dolist (p (%positions-after "#'evt:emit " text))
+        (if (char= (char text p) #\:)
+            (push (intern (string-upcase (%token-after text (1+ p))) :keyword) types)
+            (let ((defun-at (search "(defun " text :from-end t :end2 p)))
+              (if defun-at
+                  (push (%token-after text (+ defun-at 7)) wrappers)
+                  (push (%source-at text p) unreadable))))))
+    (dolist (wrapper wrappers)
+      (dolist (text texts)
+        (dolist (p (%positions-after (format nil "(~A " wrapper) text))
+          (when (char= (char text p) #\:)
+            (push (intern (string-upcase (%token-after text (1+ p))) :keyword) types)))))
+    (values (remove-duplicates types) unreadable (remove-duplicates wrappers :test #'string=))))
+
+(test the-event-list-names-every-event-praxeon-emits
+  "#339. Every event type a praxeon source file emits is in the list at the top of event.lisp,
+and every type in the list is emitted somewhere, so the list is complete and has no stale
+entries. The scan has to reach the MCP files in a subdirectory and the types passed through
+%HELD-EVENT and %TASK-EVENT, so the test checks that it found those first."
+  (let* ((src (asdf:system-relative-pathname :praxeon "src/"))
+         (files (directory (merge-pathnames "**/*.lisp" src)))
+         (listed (%listed-event-types (uiop:read-file-string (merge-pathnames "event.lisp" src)))))
+    (multiple-value-bind (emitted unreadable wrappers)
+        (%emitted-event-types (mapcar #'uiop:read-file-string files))
+      (is (member :task-started emitted) "the scan reached praxeon/src/mcp/ and %TASK-EVENT")
+      (is (member :tool-held emitted) "the scan followed %HELD-EVENT")
+      (is (equal '("%held-event" "%task-event") (sort (copy-list wrappers) #'string<))
+          "the functions that pass their own type to EVT:EMIT: ~S" wrappers)
+      (is (null unreadable) "calls whose event type cannot be read from the source: ~S" unreadable)
+      (is (null (set-difference emitted listed))
+          "emitted but not in the list at the top of event.lisp: ~S"
+          (set-difference emitted listed))
+      (is (null (set-difference listed emitted))
+          "in the list at the top of event.lisp but emitted nowhere: ~S"
+          (set-difference listed emitted)))))
