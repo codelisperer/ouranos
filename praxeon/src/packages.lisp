@@ -151,11 +151,15 @@
    #:text-part #:tool-use-part #:tool-result-part
    ;; neutral tools + completions
    #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema
    #:unenforced-declarations #:check-schema-enforceable
    #:unenforceable-schema #:unenforceable-schema-tool
    #:unenforceable-schema-declarations
+   #:check-schema-sendable #:response-format-schema-problem #:schema-recursion
+   #:unsendable-schema #:unsendable-schema-tool
+   #:unsendable-schema-reason
    #:*default-structured-attempts*
    #:structured-result-rejected #:structured-result-rejected-tool
    #:structured-result-rejected-problems #:structured-result-rejected-attempt
