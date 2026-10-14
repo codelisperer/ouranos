@@ -433,7 +433,8 @@
                              (:file "ffi")
                              (:file "conditions")
                              (:file "string")
-                             (:file "handle"))))
+                             (:file "handle")
+                             (:file "job"))))
   :in-order-to ((test-op (test-op "aion/windows/tests"))))
 
 (defsystem "aion/windows/tests"
@@ -446,7 +447,8 @@
                              (:file "layout-tests")
                              (:file "string-tests")
                              (:file "conditions-tests")
-                             (:file "file-tests"))))
+                             (:file "file-tests")
+                             (:file "job-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :aion/windows/tests :run-tests)))
 
 (defsystem "aion/windows/registry"

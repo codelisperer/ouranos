@@ -218,6 +218,19 @@ its tag.
   its first `.` is `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9`
   (`nul.txt`, `com1`), compared without regard to case. The rule applies on every operating
   system, so a site behaves the same everywhere. A space was already refused.
+- **praxeon/mcp: on Windows, a local server and the processes it starts are ended together**
+  (#599). Each server started for a `:command` connection is put in a job object that ends every
+  process in it when the job is closed. `close-client`, a server that exits by itself, and the
+  image's exit therefore also end what the server started, such as the program behind an `npx`
+  or `.cmd` launcher. A server that exits by itself has its job closed within about 0.25
+  seconds, by a thread that checks whether the server process is still running. A server that cannot be put in a job runs anyway, and the warning
+  "local server is not in a job object" names its pid and the Win32 error code; such a server is
+  ended alone with `TerminateProcess`, as before. A server ended through its job exits with
+  code 1. `praxeon/mcp` now loads `aion/windows` on Windows.
+- **aion/windows: job objects** (#599). `make-kill-on-close-job` creates a job that ends its
+  processes when its handle is closed, `assign-process-to-job` puts a process in it by pid, and
+  `terminate-job` ends its processes and leaves it open. Each signals `win32-error` when Windows
+  refuses.
 
 - **mnemosyne/conn: `connection-open-p` and `pool-backend`** (#636). `connection-open-p` tells,
   after a `db-error`, a connection Postgres has ended from a statement that failed on a working
@@ -466,8 +479,8 @@ its tag.
   - `close-client` (new) closes the server's stdin, waits `*stdio-close-seconds*` (5), sends
     SIGTERM, waits `*stdio-term-seconds*` (2), then sends SIGKILL, to the server's process
     group. Running servers are closed the same way when the image exits, so a client stays
-    reachable until `close-client`. On Windows the server is ended with `TerminateProcess`, and
-    a process it started can outlive it (#599).
+    reachable until `close-client`. On Windows the server runs in a job object, and ending it
+    ends the processes it started too (#599); see the entry under Added.
   - A server's pipes are closed only once its reader thread, its writer thread and the client's
     cleanup are all done. A writer still blocked 2 seconds after the server is finished,
     because a process the server started holds its stdin and does not read it, is ended, and
@@ -815,6 +828,13 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **mnemosyne/conn: `connection-open-p` reads a connection with no readable driver handle as
+  closed** (#675). It used to read a connection as open when `dbi:connection-handle` returned
+  NIL or signalled, so `hyperion`'s database session store, which calls it after a `db-error`,
+  would have kept such a connection and used it again instead of replacing it. This case is not
+  known to occur with today's drivers. A SQLite connection still reads as open, and a Postgres
+  connection still reads its client-side state.
 
 - **praxeon/conditions: `praxeon-error` keeps its `:detail` and prints it** (#505). Code
   throughout praxeon signals `praxeon-error` with `:detail` saying what went wrong, such as

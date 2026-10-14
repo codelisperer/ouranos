@@ -396,10 +396,9 @@ not run: a server may keep asking (server requirement 8)."
     (unless answering
       (return-from %request-answering-input (apply #'%request client method params request-arguments)))
     (let ((sent params))
-      (dotimes (round (1+ (connection-input-rounds connection))
-                      (%request-failed client "it kept asking for input after ~D answers, so the call was not completed."
-                                       (list (connection-input-rounds connection)) :outcome :not-run))
-        (declare (ignorable round))
+      ;; Each round returns the result, signals, or sends again; the last round never sends
+      ;; again, so the loop has no result form and the failure is signalled once, below (#676).
+      (dotimes (round (1+ (connection-input-rounds connection)))
         (let ((result (let ((*answering-input* t))
                         (apply #'%request client method sent request-arguments))))
           (unless (equal "input_required" (%get result "resultType"))
