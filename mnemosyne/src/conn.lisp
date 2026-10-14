@@ -202,11 +202,14 @@ SQLSTATE 57P01 (an administrator's command, a restart or a provider's maintenanc
 closes its end, and every later statement fails with \"Connection to database server lost\" and
 no SQLSTATE at all, while a statement that fails on a working connection leaves it open. This
 reads the client's state and sends nothing, so a connection the server ended while it sat idle
-reads as open until it is next used. A SQLite connection always reads as open."
+reads as open until it is next used. A SQLite connection always reads as open. A connection
+whose driver handle is NIL, or cannot be read, reads as closed, because there is nothing left
+to send a statement through (#675)."
   (let ((handle (ignore-errors (dbi:connection-handle connection))))
-    (if (typep handle 'cl-postgres:database-connection)
-        (cl-postgres:database-open-p handle)
-        t)))
+    (typecase handle
+      (null nil)
+      (cl-postgres:database-connection (cl-postgres:database-open-p handle))
+      (t t))))
 
 (defmacro with-connection ((var source) &body body)
   "Bind VAR to a connection from SOURCE, run BODY, and give the connection back on exit.

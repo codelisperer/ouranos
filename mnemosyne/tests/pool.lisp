@@ -322,6 +322,16 @@ from a backend, not from a connection."
                  (is* (not (conn:connection-open-p c)) "and after the next one too"))))
         (ignore-errors (conn:disconnect c))))))
 
+(test connection-open-p-reads-a-connection-without-a-handle-as-closed
+  ;; #675: a NIL handle, or one whose read signals, is not a working connection, so the session
+  ;; store must replace it after a DB-ERROR rather than keep it. No database is needed.
+  (is (not (conn:connection-open-p (make-instance 'dbi.driver:dbi-connection :handle nil)))
+       "a NIL handle reads as closed")
+  (let ((unbound (make-instance 'dbi.driver:dbi-connection)))
+    (is (typep (nth-value 1 (ignore-errors (dbi:connection-handle unbound))) 'error)
+         "precondition: reading the unset handle signals")
+    (is (not (conn:connection-open-p unbound)) "an unreadable handle reads as closed")))
+
 (test with-connection-still-opens-and-closes-a-connection-for-a-backend
   (with-each-pool-backend (backend)
     (let ((lent nil))
