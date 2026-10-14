@@ -162,9 +162,9 @@ first and the caller's checks see arguments that are at least the right shape."
 ;;; --- a schema sent as response_format (#680) --------------------------------
 ;;;
 ;;; A provider may refuse some schemas in response_format, and says which through
-;;; RESPONSE-FORMAT-SCHEMA-PROBLEM. Meta's Model API returns HTTP 400 for a recursive schema
-;;; (https://dev.meta.ai/docs/structured-output): one whose $ref chain leads back to a schema
-;;; it started from. SCHEMA-RECURSION finds such a chain.
+;;; RESPONSE-FORMAT-SCHEMA-PROBLEM, which llm.lisp defines with the rest of the provider
+;;; protocol. SCHEMA-RECURSION finds a recursive schema: one whose $ref chain leads back to a
+;;; schema it started from. A provider that refuses recursive schemas calls it from its method.
 
 (defun %anchor-target (root name)
   "The schema inside ROOT whose $anchor is NAME, or NIL."
@@ -248,22 +248,6 @@ resolved here and is ignored."
                            (visit def (list (format nil "#/~A/~A" key name)))))
                        defs))))
         nil))))
-
-(defgeneric response-format-schema-problem (provider schema)
-  (:documentation "Why PROVIDER cannot be sent SCHEMA as response_format, as a string, or NIL when it
-can. GENERATE-STRUCTURED calls this before the first request on the response_format path and
-signals UNSENDABLE-SCHEMA with the answer (#680). The default is NIL: a provider that opts in to
-SUPPORTS-RESPONSE-FORMAT-P and refuses some schemas says which by defining this.")
-  (:method (provider schema)
-    (declare (ignore provider schema))
-    nil))
-
-(defmethod response-format-schema-problem ((p openai-compatible) schema)
-  (when (member (oai-impl p) +openai-compatible-no-recursive-schema-impls+ :test #'string=)
-    (let ((chain (schema-recursion schema)))
-      (when chain
-        (format nil "it is recursive (~{~A~^ -> ~} leads back to a schema already on the way), and the ~A backend returns HTTP 400 for a recursive schema"
-                chain (oai-impl p))))))
 
 (define-condition unsendable-schema (praxeon/conditions:praxeon-error)
   ((tool :initarg :tool :reader unsendable-schema-tool)
@@ -413,9 +397,8 @@ that way, as above. One that cannot, and takes a schema as response_format inste
 reply's text is the record. That reply is checked the same way: text that is not a JSON object,
 or an object that fails validation, is a rejected attempt with the same conditions and restarts
 as a bad tool argument, and the re-ask shows the model its reply. A schema the provider refuses
-(RESPONSE-FORMAT-SCHEMA-PROBLEM; for meta, a recursive one) is refused with UNSENDABLE-SCHEMA
-before anything is sent. A provider that can do neither signals
-TOOL-CHOICE-UNSUPPORTED, as before."
+(RESPONSE-FORMAT-SCHEMA-PROBLEM) is refused with UNSENDABLE-SCHEMA before anything is sent. A
+provider that can do neither signals TOOL-CHOICE-UNSUPPORTED, as before."
   (let ((strategy (cond ((supports-tool-choice-p provider) :tool-call)
                         ((supports-response-format-p provider) :response-format)
                         (t (check-tool-choice provider (list :tool (tool-spec-name spec)))))))

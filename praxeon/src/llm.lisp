@@ -211,6 +211,16 @@ GENERATE-STRUCTURED uses this only for a provider that cannot force a tool call.
 for the same reason as SUPPORTS-TOOL-CHOICE-P: a backend opts in by defining it.")
   (:method ((p provider)) nil))
 
+(defgeneric response-format-schema-problem (provider schema)
+  (:documentation "Why PROVIDER cannot be sent SCHEMA as response_format, as a string, or NIL when it
+can. GENERATE-STRUCTURED (praxeon/structured) calls this before the first request on the
+response_format path and signals UNSENDABLE-SCHEMA with the answer (#680). The default is NIL: a
+provider that opts in to SUPPORTS-RESPONSE-FORMAT-P and refuses some schemas says which by
+defining this.")
+  (:method (provider schema)
+    (declare (ignore provider schema))
+    nil))
+
 (defgeneric complete-with-schema (provider messages spec &key system max-tokens temperature)
   (:documentation "Return a COMPLETION for MESSAGES whose text the provider was asked to make a
 JSON object matching SPEC's schema (a TOOL-SPEC; its name and description go with the schema).
@@ -680,6 +690,15 @@ through response_format (#680)."
 
 (defmethod supports-response-format-p ((p openai-compatible))
   (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t))
+
+(declaim (ftype function schema-recursion)) ; praxeon/structured, loaded after this file
+
+(defmethod response-format-schema-problem ((p openai-compatible) schema)
+  (when (member (oai-impl p) +openai-compatible-no-recursive-schema-impls+ :test #'string=)
+    (let ((chain (schema-recursion schema)))
+      (when chain
+        (format nil "it is recursive (~{~A~^ -> ~} leads back to a schema already on the way), and the ~A backend returns HTTP 400 for a recursive schema"
+                chain (oai-impl p))))))
 
 (defmethod complete-with-schema ((p openai-compatible) messages spec
                                  &key system (max-tokens *default-max-tokens*) temperature)
