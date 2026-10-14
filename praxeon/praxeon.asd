@@ -288,7 +288,10 @@
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
                "fiveam"
-               "aion/test-threads")   ; the #531 tests continue a held turn on another thread
+               "aion/test-threads"    ; the #531 tests continue a held turn on another thread
+               ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
+               ;; contrib, declared because it otherwise arrives only through usocket.
+               (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests"
                 :serial t

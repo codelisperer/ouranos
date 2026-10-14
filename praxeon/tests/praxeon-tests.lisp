@@ -2891,6 +2891,400 @@ is for openai, and PRAXEON_LLM_API_KEY, which belongs to anthropic, is not read.
       (is (string= "k" (llm::oai-api-key p)))
       (is (string= "https://openrouter.ai/api/v1" (llm::oai-base-url p))))))
 
+;;; --- Meta's Model API, the meta impl (#678) --------------------------------
+;;;
+;;; No test here calls Meta. The reply below is built from the response schema Meta documents
+;;; for Chat Completions (https://dev.meta.ai/docs/api-reference/chat-completions/schemas and
+;;; https://dev.meta.ai/docs/tool-calling, read 2026-10-14), not recorded from the live API,
+;;; and it is served from 127.0.0.1.
+
+(defparameter +meta-reply+
+  "{\"id\":\"chatcmpl-678\",\"object\":\"chat.completion\",\"created\":1792000000,
+    \"model\":\"muse-wonder-1.0\",
+    \"choices\":[{\"index\":0,
+                  \"message\":{\"role\":\"assistant\",\"content\":null,
+                               \"tool_calls\":[{\"id\":\"call_abc123\",\"type\":\"function\",
+                                                \"function\":{\"name\":\"draft_copy\",
+                                                  \"arguments\":\"{\\\"headline\\\":\\\"Spring\\\",\\\"characters\\\":6}\"}}]},
+                  \"finish_reason\":\"tool_calls\"}],
+    \"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":85,\"total_tokens\":1285,
+               \"prompt_tokens_details\":{\"cached_tokens\":1024},
+               \"completion_tokens_details\":{\"reasoning_tokens\":40}}}"
+  "A Chat Completions reply in the shape Meta documents, with a tool call and the usage figures,
+including the two optional breakdowns.")
+
+(defparameter +openai-reply+
+  "{\"choices\":[{\"message\":{\"content\":null,
+                  \"tool_calls\":[{\"id\":\"call_abc123\",\"type\":\"function\",
+                                   \"function\":{\"name\":\"draft_copy\",
+                                     \"arguments\":\"{\\\"headline\\\":\\\"Spring\\\",\\\"characters\\\":6}\"}}]},
+                  \"finish_reason\":\"tool_calls\"}],
+    \"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":85,
+               \"prompt_tokens_details\":{\"cached_tokens\":1024}}}"
+  "The same answer as +META-REPLY+ in the fields an OpenAI reply carries.")
+
+(defun %completion-fields (c)
+  "C's fields as a list that EQUAL can compare, with each call's arguments as an alist."
+  (list (llm:completion-text c) (llm:completion-stop-reason c)
+        (llm:completion-input-tokens c) (llm:completion-output-tokens c)
+        (llm:completion-cache-read-tokens c) (llm:completion-cache-write-tokens c)
+        (mapcar (lambda (call)
+                  (list (llm:tool-call-id call) (llm:tool-call-name call)
+                        (sort (loop for k being the hash-keys of (llm:tool-call-arguments call)
+                                      using (hash-value v) collect (cons k v))
+                              #'string< :key #'car)))
+                (llm:completion-tool-calls c))))
+
+(defun %answer-one-request (listener reply)
+  "Accept one connection on LISTENER within 10 seconds, read its request, and answer with REPLY
+as JSON. Returns the request line, the headers as an alist with lowercased names, and the body."
+  (let* ((socket (loop with deadline = (+ (get-universal-time) 10)
+                       for s = (sb-bsd-sockets:socket-accept listener)
+                       when s return (progn (setf (sb-bsd-sockets:non-blocking-mode s) nil) s)
+                       when (> (get-universal-time) deadline)
+                         do (error "no request reached the test server in 10 seconds")
+                       do (sleep 0.02)))
+         (stream (sb-bsd-sockets:socket-make-stream
+                  socket :input t :output t :element-type 'character
+                         :external-format '(:utf-8 :replacement #\?) :buffering :full)))
+    (unwind-protect
+         (flet ((line () (string-right-trim '(#\Return) (read-line stream))))
+           (let* ((request-line (line))
+                  (headers (loop for l = (line) until (zerop (length l))
+                                 collect (let ((colon (position #\: l)))
+                                           (cons (string-downcase (subseq l 0 colon))
+                                                 (string-trim " " (subseq l (1+ colon)))))))
+                  (length (parse-integer (or (cdr (assoc "content-length" headers
+                                                          :test #'string=))
+                                             "0")))
+                  (body (make-string length)))
+             (read-sequence body stream)
+             (format stream "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+                     #\Return #\Newline #\Return #\Newline
+                     (length (sb-ext:string-to-octets reply :external-format :utf-8))
+                     #\Return #\Newline #\Return #\Newline #\Return #\Newline reply)
+             (finish-output stream)
+             (list request-line headers body)))
+      (close stream))))
+
+(defun %serve-replies (replies)
+  "Listen on 127.0.0.1 at a free port and answer one HTTP request per element of REPLIES, in
+order, with that element as JSON. Returns the port and the thread, which gives up after 10
+seconds without a request. The thread's value is a list with one element per request: the
+request line, the headers as an alist with lowercased names, and the request body."
+  (let ((listener (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address listener) t)
+    (sb-bsd-sockets:socket-bind listener #(127 0 0 1) 0)
+    (sb-bsd-sockets:socket-listen listener 1)
+    ;; Non-blocking, so a test that fails before sending ends this thread after 10 seconds
+    ;; rather than leaving it waiting in accept.
+    (setf (sb-bsd-sockets:non-blocking-mode listener) t)
+    (values
+     (nth-value 1 (sb-bsd-sockets:socket-name listener))
+     (sb-thread:make-thread
+      (lambda ()
+        (unwind-protect
+             (loop for reply in replies
+                   collect (%answer-one-request listener reply))
+          (sb-bsd-sockets:socket-close listener)))
+      :name "praxeon-tests meta replies"))))
+
+(test the-meta-impl-is-selected-with-its-url-model-and-key
+  "#678. PRAXEON_<ROLE>_IMPL=meta builds an OPENAI-COMPATIBLE for Meta's Model API: its
+documented base URL, muse-wonder-1.0 when no model is set, and PRAXEON_META_API_KEY. A model or
+base URL that is set still wins."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "anthropic")
+                 ("PRAXEON_CRITIC_IMPL" "meta")
+                 ("PRAXEON_CRITIC_API_KEY" nil) ("PRAXEON_CRITIC_MODEL" nil)
+                 ("PRAXEON_CRITIC_BASE_URL" nil)
+                 ("PRAXEON_META_API_KEY" "meta-key") ("PRAXEON_META_MODEL" nil)
+                 ("PRAXEON_META_BASE_URL" nil))
+    (let ((p (llm:make-provider-from-env :role :critic)))
+      (is (typep p 'llm:openai-compatible))
+      (is (string= "meta" (llm::oai-impl p)))
+      (is (string= "https://api.meta.ai/v1" (llm::oai-base-url p)))
+      (is (string= "muse-wonder-1.0" (llm:model-of p)) "Meta's model, not qwen2.5")
+      (is (string= "meta-key" (llm::oai-api-key p))))
+    (setf (uiop:getenv "PRAXEON_META_MODEL") "muse-spark-1.3"
+          (uiop:getenv "PRAXEON_META_BASE_URL") "https://gateway.example/v1")
+    (let ((p (llm:make-provider-from-env :role :critic)))
+      (is (string= "muse-spark-1.3" (llm:model-of p)))
+      (is (string= "https://gateway.example/v1" (llm::oai-base-url p))))
+    (let ((p (make-instance 'llm:openai-compatible :impl "meta" :api-key "k")))
+      (is (string= "muse-spark-1.3" (llm:model-of p))
+          "a directly made one reads the backend's model too"))))
+
+(test the-meta-impl-without-a-key-names-the-two-variables
+  "#678. Meta's API is hosted, so a role on meta with no key signals MISSING-PROVIDER-KEY at
+construction, naming the role's variable and PRAXEON_META_API_KEY, as openrouter does."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "anthropic")
+                 ("PRAXEON_CRITIC_IMPL" "meta")
+                 ("PRAXEON_CRITIC_API_KEY" nil)
+                 ("PRAXEON_META_API_KEY" nil))
+    (handler-case (progn (llm:make-provider-from-env :role :critic)
+                         (fail "expected MISSING-PROVIDER-KEY"))
+      (cnd:missing-provider-key (c)
+        (is (string= "meta" (cnd:missing-provider-key-impl c)))
+        (is (equal '("PRAXEON_CRITIC_API_KEY" "PRAXEON_META_API_KEY")
+                   (cnd:missing-provider-key-variables c)))))))
+
+(test the-meta-impl-refuses-a-forced-tool-choice-before-sending
+  "#678. Meta's API accepts only tool_choice \"auto\" and returns HTTP 400 for anything else, so
+the meta impl reports that it cannot force a choice, and a forced choice signals
+TOOL-CHOICE-UNSUPPORTED before a request is made. The base URL is a closed port: had a request
+been made, the failure would be a DELIBERATION-FAILURE instead. Other OpenAI-compatible
+backends still force a choice."
+  (let ((p (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                 :base-url "http://127.0.0.1:1/v1")))
+    (is-false (llm:supports-tool-choice-p p))
+    (dolist (choice (list '(:tool "draft_copy") :none))
+      (is (typep (nth-value 1 (ignore-errors
+                               (llm:complete p '((:role :user :content "hi"))
+                                             :tools (list (%spec)) :tool-choice choice)))
+                 'cnd:tool-choice-unsupported)
+          "~S signals before sending" choice)))
+  (is-true (llm:supports-tool-choice-p
+            (make-instance 'llm:openai-compatible :impl "openrouter" :api-key "k" :model "m"))
+           "control: openrouter still forces a choice"))
+
+(test a-meta-reply-parses-to-the-completion-an-openai-reply-gives
+  "#678. The meta impl posts to <base>/chat/completions with the key as a Bearer token and no
+tool_choice, and a reply in Meta's documented shape, with a tool call and usage, parses to the
+same completion as the same answer in OpenAI's shape."
+  (multiple-value-bind (port server) (%serve-replies (list +meta-reply+))
+    (let* ((p (make-instance 'llm:openai-compatible
+                             :impl "meta" :api-key "meta-test-key" :model "muse-wonder-1.0"
+                             :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+           (c (llm:complete p '((:role :user :content "Write a headline."))
+                            :tools (list (%spec))))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request))))
+      (is (string= "POST /v1/chat/completions HTTP/1.1" (first request)))
+      (is (string= "Bearer meta-test-key"
+                   (cdr (assoc "authorization" (second request) :test #'string=))))
+      (is (string= "muse-wonder-1.0" (gethash "model" sent)))
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "no tool_choice is sent")
+      (is (= 1 (length (gethash "tools" sent))))
+      (is (eq :tool-use (llm:completion-stop-reason c)))
+      (is (equal '(1200 85 1024)
+                 (list (llm:completion-input-tokens c) (llm:completion-output-tokens c)
+                       (llm:completion-cache-read-tokens c))))
+      (is (equal (%completion-fields (praxeon/llm::%parse-openai (jzon:parse +openai-reply+)))
+                 (%completion-fields c))
+          "the same completion as the OpenAI-shaped reply"))))
+
+;;; --- generate-structured on meta, through response_format (#680) ----------
+
+(defun %meta-text-reply (content &key (finish-reason "stop"))
+  "A Chat Completions reply in the shape Meta documents, whose message content is CONTENT."
+  (let ((reply (make-hash-table :test #'equal))
+        (choice (make-hash-table :test #'equal))
+        (message (make-hash-table :test #'equal))
+        (usage (make-hash-table :test #'equal)))
+    (setf (gethash "role" message) "assistant"
+          (gethash "content" message) content
+          (gethash "index" choice) 0
+          (gethash "message" choice) message
+          (gethash "finish_reason" choice) finish-reason
+          (gethash "prompt_tokens" usage) 300
+          (gethash "completion_tokens" usage) 40
+          (gethash "total_tokens" usage) 340
+          (gethash "id" reply) "chatcmpl-680"
+          (gethash "object" reply) "chat.completion"
+          (gethash "created" reply) 1792000000
+          (gethash "model" reply) "muse-wonder-1.0"
+          (gethash "choices" reply) (vector choice)
+          (gethash "usage" reply) usage)
+    (jzon:stringify reply)))
+
+(defun %meta-provider (port)
+  (make-instance 'llm:openai-compatible :impl "meta" :api-key "meta-test-key"
+                                        :model "muse-wonder-1.0"
+                                        :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+
+(defun %sorted-fields (table)
+  (sort (loop for k being the hash-keys of table using (hash-value v) collect (cons k v))
+        #'string< :key #'car))
+
+(test generate-structured-on-meta-asks-through-response-format
+  "#680. On meta, which cannot force a tool call, GENERATE-STRUCTURED sends the spec's schema as
+response_format json_schema, offers no tools and no tool_choice, and returns the JSON object in
+the reply's text: the same record the tool-call path returns for the same answer."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spring\",\"characters\":6}")))
+    (let* ((p (%meta-provider port))
+           (result (llm:generate-structured p '((:role :user :content "Write a headline."))
+                                            (%spec)))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request)))
+           (format (gethash "response_format" sent)))
+      (is-true (llm:supports-response-format-p p))
+      (is (string= "json_schema" (gethash "type" format)))
+      (is (string= "draft_copy" (gethash "name" (gethash "json_schema" format))))
+      (is (equal (jzon:stringify (llm:tool-spec-schema (%spec)))
+                 (jzon:stringify (gethash "schema" (gethash "json_schema" format))))
+          "the spec's schema is sent as it is")
+      (is (null (nth-value 1 (gethash "tools" sent))) "no tools are offered")
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "and no tool_choice is sent")
+      (is (equal (%sorted-fields
+                  (llm:tool-call-arguments
+                   (first (llm:completion-tool-calls
+                           (praxeon/llm::%parse-openai (jzon:parse +openai-reply+))))))
+                 (%sorted-fields result))
+          "the record the tool-call path returns for the same answer"))))
+
+(test a-meta-reply-that-is-not-the-record-is-rejected-and-re-asked
+  "#680. Text that is not JSON, JSON that is not an object, and an object missing a required
+property are each a rejected attempt, signalled as STRUCTURED-RESULT-REJECTED with the RE-ASK
+restart, exactly as a bad tool argument is. Each re-ask carries the model's reply and the
+problems. When the attempts run out, STRUCTURED-RESULT-INVALID is signalled."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "Here is the copy you asked for.")
+                            (%meta-text-reply "[\"Spring\", 6]")
+                            (%meta-text-reply "{\"headline\":\"Spring\"}")))
+    (let ((rejections '())
+          (restarts 0)
+          (failure nil))
+      (handler-case
+          (handler-bind ((llm:structured-result-rejected
+                           (lambda (c)
+                             ;; Records each rejection and declines it, so the default repair
+                             ;; applies. Invoking RE-ASK would ask again past :ATTEMPTS.
+                             (push (llm:structured-result-rejected-problems c) rejections)
+                             (when (find-restart 'llm::re-ask c) (incf restarts)))))
+            (llm:generate-structured (%meta-provider port) '((:role :user :content "brief"))
+                                     (%spec) :attempts 3))
+        (llm:structured-result-invalid (c) (setf failure c)))
+      (let ((requests (aion/test-threads:join server :timeout 10)))
+        (is (equal '(("the reply was not valid JSON")
+                     ("the reply was JSON but not an object")
+                     ("required property \"characters\" is missing"))
+                   (reverse rejections)))
+        (is (= 3 restarts) "each rejection offered RE-ASK")
+        (is (typep failure 'llm:structured-result-invalid))
+        (is (= 3 (llm:structured-result-invalid-attempt failure)))
+        (is (= 3 (length requests)))
+        (let* ((messages (gethash "messages" (jzon:parse (third (second requests)))))
+               (last-two (subseq messages (- (length messages) 2))))
+          (is (string= "Here is the copy you asked for."
+                       (gethash "content" (elt last-two 0)))
+              "the re-ask shows the model its reply")
+          (is (search "the reply was not valid JSON" (gethash "content" (elt last-two 1))))
+          (is (search "Reply again with one corrected JSON object"
+                      (gethash "content" (elt last-two 1)))))))))
+
+(test a-meta-reply-repaired-on-the-second-attempt-is-returned
+  "#680. The default repair applies on meta too: a reply that is not JSON is re-asked without a
+handler, and a valid second reply is returned after two requests."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "not json")
+                            (%meta-text-reply "{\"headline\":\"Ship it\",\"characters\":7}")))
+    (let ((result (llm:generate-structured (%meta-provider port)
+                                           '((:role :user :content "brief")) (%spec)
+                                           :attempts 3)))
+      (is (equal '(("characters" . 7) ("headline" . "Ship it")) (%sorted-fields result)))
+      (is (= 2 (length (aion/test-threads:join server :timeout 10)))))))
+
+(test a-cut-off-meta-reply-is-structured-result-truncated
+  "#680. A reply stopped at the output limit signals STRUCTURED-RESULT-TRUNCATED, as on the
+tool-call path, and ACCEPT-TRUNCATED returns what could be parsed, here nothing."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spr" :finish-reason "length")))
+    (multiple-value-bind (arguments marker)
+        (handler-bind ((llm:structured-result-truncated
+                         (lambda (c) (invoke-restart (find-restart 'cnd:accept-truncated c)))))
+          (llm:generate-structured (%meta-provider port) '((:role :user :content "brief"))
+                                   (%spec)))
+      (is (null arguments))
+      (is (eq :truncated marker)))
+    (aion/test-threads:join server :timeout 10)))
+
+(defun %recursive-spec (&key (recursive t))
+  "A spec whose schema holds a node definition. With RECURSIVE, the node refers to itself."
+  (let ((schema (jzon:parse (format nil "{\"type\":\"object\",\"properties\":{\"root\":{\"$ref\":\"#/$defs/node\"}},\"required\":[\"root\"],\"$defs\":{\"node\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"}~:[~;,\"child\":{\"$ref\":\"#/$defs/node\"}~]}}}}"
+                                    recursive))))
+    ;; A validator, so the spec passes CHECK-SCHEMA-ENFORCEABLE and reaches the check under test.
+    (llm:make-tool-spec :name "tree" :description "A tree." :schema schema
+                        :validators (list (constantly nil)))))
+
+(test a-recursive-schema-is-refused-before-anything-is-sent-to-meta
+  "#680. Meta's API returns HTTP 400 for a recursive schema, so GENERATE-STRUCTURED refuses one
+with UNSENDABLE-SCHEMA before a request. The base URL is a closed port: a request that was made
+would fail as DELIBERATION-FAILURE instead, which is what the non-recursive control shows."
+  (let ((p (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                 :base-url "http://127.0.0.1:1/v1")))
+    (let ((c (nth-value 1 (ignore-errors
+                           (llm:generate-structured p '((:role :user :content "b"))
+                                                    (%recursive-spec))))))
+      (is (typep c 'llm:unsendable-schema))
+      (is (search "recursive" (llm:unsendable-schema-reason c)))
+      (is (search "#/$defs/node" (llm:unsendable-schema-reason c))))
+    (is (typep (nth-value 1 (ignore-errors
+                             (llm:generate-structured p '((:role :user :content "b"))
+                                                      (%recursive-spec :recursive nil))))
+               'cnd:deliberation-failure)
+        "control: the same schema without the self-reference is sent")))
+
+(test schema-recursion-follows-local-references
+  "#680. The recursion check, on its own: a reference to the root, a chain through two
+definitions, and a pointer with an escaped token are recursive; a definition used twice is not."
+  (flet ((recursion (json) (praxeon/llm::schema-recursion (jzon:parse json))))
+    (is-true (recursion "{\"type\":\"object\",\"properties\":{\"next\":{\"$ref\":\"#\"}}}"))
+    (is-true (recursion "{\"$defs\":{\"a\":{\"properties\":{\"b\":{\"$ref\":\"#/$defs/b\"}}},\"b\":{\"properties\":{\"a\":{\"$ref\":\"#/$defs/a\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"a/b\":{\"properties\":{\"x\":{\"$ref\":\"#/$defs/a~1b\"}}}}}"))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#/$defs/s\"},\"y\":{\"$ref\":\"#/$defs/s\"}},\"$defs\":{\"s\":{\"type\":\"string\"}}}"))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"https://example.com/s.json\"}}}"))
+    ;; Copilot's review of #681: "#name" names the schema whose $anchor is name, not the root.
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#leaf\"}},\"$defs\":{\"s\":{\"$anchor\":\"leaf\",\"type\":\"string\"}}}")
+              "a reference to an anchor on a leaf schema is not recursive")
+    (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"node\",\"properties\":{\"c\":{\"$ref\":\"#node\"}}}}}")
+             "a schema that refers to its own anchor is")))
+
+(defclass %schema-only-provider (recording) ()
+  (:documentation "A provider that cannot force a tool call, takes a response_format, and does not
+refuse a recursive schema. Its replies are the texts in its script."))
+
+(defmethod llm:supports-tool-choice-p ((p %schema-only-provider)) nil)
+(defmethod llm:supports-response-format-p ((p %schema-only-provider)) t)
+(defmethod llm:complete-with-schema ((p %schema-only-provider) messages spec &key system max-tokens temperature)
+  (declare (ignore spec system max-tokens temperature))
+  (push messages (recording-requests p))
+  (llm:make-completion :text (pop (recording-script p)) :stop-reason :end))
+
+(test only-a-provider-that-refuses-a-recursive-schema-has-it-refused
+  "Copilot's review of #681. Refusing a recursive schema is the provider's decision
+(RESPONSE-FORMAT-SCHEMA-PROBLEM), not GENERATE-STRUCTURED's: a provider that takes response_format
+and does not refuse one is sent it, while meta refuses it, naming its backend."
+  (let* ((p (make-instance '%schema-only-provider
+                           :script (list "{\"root\":{\"label\":\"a\"}}")))
+         (result (llm:generate-structured p '((:role :user :content "b")) (%recursive-spec))))
+    (is (string= "a" (gethash "label" (gethash "root" result))))
+    (is (= 1 (length (recording-requests p)))))
+  (let ((meta (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                    :base-url "http://127.0.0.1:1/v1")))
+    (is (search "the meta backend"
+                (llm:response-format-schema-problem meta (llm:tool-spec-schema (%recursive-spec)))))))
+
+(defclass %both-ways-provider (recording) ()
+  (:documentation "A provider that can force a tool call and also take a response_format."))
+
+(defmethod llm:supports-tool-choice-p ((p %both-ways-provider)) t)
+(defmethod llm:supports-response-format-p ((p %both-ways-provider)) t)
+(defmethod llm:complete-with-schema ((p %both-ways-provider) messages spec &key system max-tokens temperature)
+  (declare (ignore messages spec system max-tokens temperature))
+  (error "complete-with-schema was called"))
+
+(test a-provider-that-can-force-a-tool-call-keeps-the-tool-call
+  "#680. A forced tool call stays first: a provider that supports both ways is asked with the
+tool call, never through COMPLETE-WITH-SCHEMA."
+  (let* ((p (make-instance '%both-ways-provider
+                           :script (list (%call-completion "draft_copy"
+                                                           (%args "headline" "Ship it"
+                                                                  "characters" 7)))))
+         (result (llm:generate-structured p '((:role :user :content "brief")) (%spec))))
+    (is (string= "Ship it" (gethash "headline" result)))
+    (is (= 1 (length (recording-requests p))))))
+
 (test openrouter-embeddings-without-a-key-name-the-three-variables
   "Review follow-up on #291. OpenRouter is hosted, so building its embedding provider with no
 key signals MISSING-PROVIDER-KEY naming the role's, the process's and the backend's variable,

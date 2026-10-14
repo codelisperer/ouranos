@@ -202,6 +202,39 @@ silently downgraded. A new backend opts in by defining this, which is a decision
 makes rather than a default they inherit.")
   (:method ((p provider)) nil))
 
+(defgeneric supports-response-format-p (provider)
+  (:documentation "True when PROVIDER can be asked, through COMPLETE-WITH-SCHEMA, for a reply whose
+text is a JSON object in a given schema, using the provider's own structured-output setting
+rather than a forced tool call (#680).
+
+GENERATE-STRUCTURED uses this only for a provider that cannot force a tool call. Defaults to NIL
+for the same reason as SUPPORTS-TOOL-CHOICE-P: a backend opts in by defining it.")
+  (:method ((p provider)) nil))
+
+(defgeneric response-format-schema-problem (provider schema)
+  (:documentation "Why PROVIDER cannot be sent SCHEMA as response_format, as a string, or NIL when it
+can. GENERATE-STRUCTURED (praxeon/structured) calls this before the first request on the
+response_format path and signals UNSENDABLE-SCHEMA with the answer (#680). The default is NIL: a
+provider that opts in to SUPPORTS-RESPONSE-FORMAT-P and refuses some schemas says which by
+defining this.")
+  (:method (provider schema)
+    (declare (ignore provider schema))
+    nil))
+
+(defgeneric complete-with-schema (provider messages spec &key system max-tokens temperature)
+  (:documentation "Return a COMPLETION for MESSAGES whose text the provider was asked to make a
+JSON object matching SPEC's schema (a TOOL-SPEC; its name and description go with the schema).
+No tools are offered. The text is returned as the provider sent it: checking it against the
+schema is the caller's job, as GENERATE-STRUCTURED does (#680).
+
+Only a provider whose SUPPORTS-RESPONSE-FORMAT-P is true implements this. The default method
+signals DELIBERATION-FAILURE before anything is sent.")
+  (:method ((p provider) messages spec &key system max-tokens temperature)
+    (declare (ignore messages system max-tokens temperature))
+    (error 'praxeon/conditions:deliberation-failure
+           :detail (format nil "~A cannot be asked for a reply in the schema of ~S"
+                           (type-of p) (tool-spec-name spec)))))
+
 (defun check-tool-choice (provider tool-choice)
   "Signal unless PROVIDER can honour TOOL-CHOICE. Returns the choice."
   (unless (or (null tool-choice) (eq tool-choice :auto)
@@ -516,15 +549,44 @@ PARSED is the jzon hash-table form of the JSON body."
 ;;;
 ;;; One class for every server that speaks OpenAI's /v1/chat/completions -- a
 ;;; local runtime (Ollama, LM Studio, llama.cpp) or a hosted aggregator
-;;; (OpenRouter). Only the base URL and key differ; the neutral vocabulary is
+;;; (OpenRouter, Meta's Model API). Only the base URL, key and default model differ,
+;;; plus whether a forced tool choice is accepted; the neutral vocabulary is
 ;;; translated to/from OpenAI's schema here (tool_calls with JSON-string
 ;;; arguments, role:"tool" result messages, finish_reason).
 ;;; --------------------------------------------------------------------------
 (defparameter +openai-compatible-impls+
   '(("openai" . "http://localhost:11434/v1")
     ("ollama" . "http://localhost:11434/v1")
-    ("openrouter" . "https://openrouter.ai/api/v1"))
+    ("openrouter" . "https://openrouter.ai/api/v1")
+    ("meta" . "https://api.meta.ai/v1"))
   "The backends OPENAI-COMPATIBLE serves, each with its default base URL.")
+
+(defparameter +openai-compatible-default-models+
+  '(("meta" . "muse-wonder-1.0"))
+  "The default model of each backend that has one of its own. Any other backend defaults to
+qwen2.5. Meta's Model API serves only Meta's models, so qwen2.5 cannot be its default (#678).")
+
+(defparameter +openai-compatible-response-format-impls+
+  '("meta")
+  "The backends SUPPORTS-RESPONSE-FORMAT-P is true for: those that take response_format with type
+json_schema. Meta's Model API does (https://dev.meta.ai/docs/structured-output, #680). Others
+may too, but GENERATE-STRUCTURED prefers a forced tool call wherever one is supported, so a
+backend is listed here only when it cannot force one.")
+
+(defparameter +openai-compatible-no-recursive-schema-impls+
+  '("meta")
+  "The backends that return HTTP 400 for a recursive schema in response_format. Meta's Model API
+does (https://dev.meta.ai/docs/structured-output, #680). RESPONSE-FORMAT-SCHEMA-PROBLEM reads it.")
+
+(defparameter +openai-compatible-auto-only-impls+
+  '("meta")
+  "The backends that accept only tool_choice \"auto\". Meta's Model API returns HTTP 400 for
+\"none\", \"required\" and a named function (https://dev.meta.ai/docs/tool-calling, #678), so
+SUPPORTS-TOOL-CHOICE-P is false for it and a forced choice signals before anything is sent.")
+
+(defun %oai-default-model (impl)
+  "The model OPENAI-COMPATIBLE uses for IMPL when none is configured."
+  (or (cdr (assoc impl +openai-compatible-default-models+ :test #'string=)) "qwen2.5"))
 
 (defun %default-oai-impl ()
   "The backend a directly made OPENAI-COMPATIBLE is for: the shared backend when
@@ -542,16 +604,16 @@ BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
 \(local servers usually ignore it, hosted ones require it).
 
-IMPL is the backend these settings belong to: \"openai\", \"ollama\" or \"openrouter\".
+IMPL is the backend these settings belong to: \"openai\", \"ollama\", \"openrouter\" or \"meta\".
 A MODEL, BASE-URL or API-KEY not passed is read for that backend as MAKE-PROVIDER-FROM-ENV
 reads it (%ENV-FOR), then defaulted. Unless given, IMPL is the backend PRAXEON_LLM_IMPL names
-when that is one of the three, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
+when that is one of the four, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
 the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291."))
 
 (defmethod initialize-instance :after ((p openai-compatible) &key)
   (let ((impl (oai-impl p)))
     (unless (slot-boundp p 'model)
-      (setf (slot-value p 'model) (or (%env-for impl "MODEL") "qwen2.5")))
+      (setf (slot-value p 'model) (or (%env-for impl "MODEL") (%oai-default-model impl))))
     (unless (slot-boundp p 'base-url)
       (setf (slot-value p 'base-url)
             (or (%env-for impl "BASE_URL")
@@ -580,11 +642,34 @@ object in every case. That difference is exactly what the neutral value exists t
     (t (error 'praxeon/conditions:deliberation-failure
               :detail (format nil "unknown tool-choice ~S" tool-choice)))))
 
+(defvar *oai-response-format* nil
+  "The TOOL-SPEC whose schema the next OPENAI-COMPATIBLE request asks for as response_format, or
+NIL. Bound only by COMPLETE-WITH-SCHEMA, so that its request goes through COMPLETE and is logged
+like any other.")
+
+(defun %oai-response-format-json (spec)
+  "OpenAI's response_format value asking for a JSON object in SPEC's schema. strict is not sent:
+Meta documents that it defaults to false and that false currently behaves the same as true, and
+true would add rules of its own about the schema (https://dev.meta.ai/docs/structured-output)."
+  (let ((response-format (make-hash-table :test #'equal))
+        (json-schema (make-hash-table :test #'equal)))
+    (setf (gethash "name" json-schema) (tool-spec-name spec)
+          (gethash "schema" json-schema) (or (tool-spec-schema spec)
+                                             (let ((empty (make-hash-table :test #'equal)))
+                                               (setf (gethash "type" empty) "object")
+                                               empty)))
+    (when (plusp (length (tool-spec-description spec)))
+      (setf (gethash "description" json-schema) (tool-spec-description spec)))
+    (setf (gethash "type" response-format) "json_schema"
+          (gethash "json_schema" response-format) json-schema)
+    response-format))
+
 (defun openai-request-body (p messages &key system tools
                                          (max-tokens *default-max-tokens*)
-                                         temperature tool-choice)
+                                         temperature tool-choice response-format)
   "The request body this backend sends, as a hash-table. Separate from the POST for the
-same reason as the Anthropic one."
+same reason as the Anthropic one. RESPONSE-FORMAT, a TOOL-SPEC, asks for a reply in its schema
+through response_format (#680)."
   (let ((body (make-hash-table :test #'equal)))
     (setf (gethash "model" body) (oai-model p)
           (gethash "max_tokens" body) max-tokens
@@ -596,9 +681,31 @@ same reason as the Anthropic one."
       (setf (gethash "temperature" body) temperature))
     (let ((choice (%oai-tool-choice-json tool-choice)))
       (when choice (setf (gethash "tool_choice" body) choice)))
+    (when response-format
+      (setf (gethash "response_format" body) (%oai-response-format-json response-format)))
     body))
 
-(defmethod supports-tool-choice-p ((p openai-compatible)) t)
+(defmethod supports-tool-choice-p ((p openai-compatible))
+  (not (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)))
+
+(defmethod supports-response-format-p ((p openai-compatible))
+  (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t))
+
+(declaim (ftype function schema-recursion)) ; praxeon/structured, loaded after this file
+
+(defmethod response-format-schema-problem ((p openai-compatible) schema)
+  (when (member (oai-impl p) +openai-compatible-no-recursive-schema-impls+ :test #'string=)
+    (let ((chain (schema-recursion schema)))
+      (when chain
+        (format nil "it is recursive (~{~A~^ -> ~} leads back to a schema already on the way), and the ~A backend returns HTTP 400 for a recursive schema"
+                chain (oai-impl p))))))
+
+(defmethod complete-with-schema ((p openai-compatible) messages spec
+                                 &key system (max-tokens *default-max-tokens*) temperature)
+  (unless (supports-response-format-p p)
+    (return-from complete-with-schema (call-next-method)))
+  (let ((*oai-response-format* spec))
+    (complete p messages :system system :max-tokens max-tokens :temperature temperature)))
 
 (defmethod complete ((p openai-compatible) messages
                      &key system tools (max-tokens *default-max-tokens*) temperature
@@ -607,7 +714,8 @@ same reason as the Anthropic one."
   (let ((body (openai-request-body p messages :system system :tools tools
                                               :max-tokens max-tokens
                                               :temperature temperature
-                                              :tool-choice tool-choice)))
+                                              :tool-choice tool-choice
+                                              :response-format *oai-response-format*)))
     (let* ((payload (jzon:stringify body))
            (url (concatenate 'string (oai-base-url p) "/chat/completions"))
            (headers (append '(("content-type" . "application/json"))
@@ -832,12 +940,13 @@ For the shared backend a missing key is left to the request, as before."
 (defun make-openai-from-env (impl &optional default-base-url key-required)
   "An OPENAI-COMPATIBLE provider configured for IMPL (a name like \"openrouter\").
 Reads PRAXEON_<IMPL>_{MODEL,API_KEY,BASE_URL} and the shared PRAXEON_LLM_* as %ENV-FOR
-describes, then DEFAULT-BASE-URL / Ollama's local URL. KEY-REQUIRED is true for a hosted
+describes, then DEFAULT-BASE-URL / Ollama's local URL. The model defaults as %OAI-DEFAULT-MODEL
+says. KEY-REQUIRED is true for a hosted
 service, where a missing key is reported at construction (see %REQUIRED-KEY); a local server
 usually needs none."
   (make-instance 'openai-compatible
                  :impl impl
-                 :model (or (%env-for impl "MODEL") "qwen2.5")
+                 :model (or (%env-for impl "MODEL") (%oai-default-model impl))
                  :base-url (or (%env-for impl "BASE_URL")
                                default-base-url
                                "http://localhost:11434/v1")
@@ -902,6 +1011,10 @@ API_KEY}, and the shared PRAXEON_LLM_* when anthropic is the shared backend."
                         (lambda () (make-openai-from-env "ollama" "http://localhost:11434/v1")))
 (register-provider-impl "openrouter"
                         (lambda () (make-openai-from-env "openrouter" "https://openrouter.ai/api/v1" t)))
+;; Meta's Model API, OpenAI-compatible at https://api.meta.ai/v1 (#678). Hosted, so the key is
+;; required. Its default model is muse-wonder-1.0, and it accepts no forced tool choice.
+(register-provider-impl "meta"
+                        (lambda () (make-openai-from-env "meta" "https://api.meta.ai/v1" t)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Introspection (provider-neutral)

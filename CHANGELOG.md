@@ -212,6 +212,31 @@ its tag.
 
 ### Added
 
+- **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
+  `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an
+  `openai-compatible` provider with `https://api.meta.ai/v1` as its default base URL and
+  `muse-wonder-1.0` as its default model. The key is read from `PRAXEON_META_API_KEY` and is
+  required: a role on `meta` with no key signals `missing-provider-key` at construction.
+  Meta's API accepts only `tool_choice: "auto"`, so `supports-tool-choice-p` is false for
+  `meta`, and a forced tool choice passed to `complete` signals `tool-choice-unsupported`
+  before a request is sent. `generate-structured` works on `meta` through `response_format`
+  (#680, below). `PRAXEON_META_MODEL` and `PRAXEON_META_BASE_URL` override the defaults.
+- **praxeon/llm: `generate-structured` works on providers that take a schema as
+  `response_format`, including `meta`** (#680). A new generic, `supports-response-format-p`
+  (false by default), says whether a provider can be asked through the other new generic,
+  `complete-with-schema`, for a reply whose text is a JSON object in a schema. `meta` says yes.
+  `generate-structured` still forces a tool call wherever `supports-tool-choice-p` is true; it
+  uses `response_format` only for a provider that cannot force one, and signals
+  `tool-choice-unsupported` as before when neither is supported. A reply whose text is not a
+  JSON object, or does not match the schema, is a rejected attempt with the same
+  `structured-result-rejected`, `re-ask`, `structured-result-invalid` and
+  `structured-result-truncated` as a bad tool argument; the reports of
+  `structured-result-invalid` and `structured-result-truncated` now say "result" and "reply"
+  rather than "call". A provider says which schemas it refuses through a third new generic,
+  `response-format-schema-problem`; `meta` refuses a recursive one, and the refusal is
+  signalled as the new condition `unsendable-schema` before anything is sent.
+  `openai-request-body` takes a new `:response-format` argument.
+
 - **klio: a collection name may not end in `.` or be a Windows device name** (#631).
   `make-site-options` refuses a `:collections` name with a segment that ends in `.`
   (Windows strips it, so `roles.` and `roles` would be one directory) or whose name before
