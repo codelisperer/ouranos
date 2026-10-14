@@ -22,7 +22,8 @@ its tag.
   could serve a file outside the root. An app or middleware that reads the body of a static
   response and expects a pathname (for example to log it, or to call `probe-file` on it) gets
   an `sb-sys:fd-stream` with element type `(unsigned-byte 8)` instead, and if it consumes the
-  stream it must close it. On `:uv`, a file-stream body is written in bounded pieces like a
+  stream it must close it. `hyperion/router`, when it answers `HEAD` from a GET route, closes
+  a file-stream body as it removes it. On `:uv`, a file-stream body is written in bounded pieces like a
   pathname body was, with `Content-Length` from the stream, and a `HEAD` response closes it
   after sending the length. On Clack backends, `hyperion:wrap-streaming-body` writes the stream
   in 64 KiB pieces (`hyperion::*file-piece-octets*`): Hunchentoot sends `Content-Length`, and

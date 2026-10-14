@@ -417,8 +417,8 @@ profile put encoding the head and body at about 17% of the loop's time, with the
 most of theirs. Only the plain case is taken here, a response triple whose body is a string,
 an octet vector or a list of them, with nothing to drop and every header one we send. Anything
 else is returned as it is and %COMPLETE handles it on the loop exactly as before: a
-condition, a function body (a stream), a bare pathname (a file), a body on a status that
-carries none, a header we refuse, or any error while encoding. So this can only do the plain
+condition, a function body (a stream), a bare pathname or an open file stream (a file), a
+body on a status that carries none, a header we refuse, or any error while encoding. So this can only do the plain
 case's work early, never decide something differently."
   (or (ignore-errors
        (when (and (consp result) (= 3 (length result)))
@@ -868,7 +868,8 @@ left, and it is what every client renders as a truncated response -- the same an
   "Answer with the contents of PATH: Content-Length from the file, body in bounded pieces.
 
 PATH is a pathname, which is opened here, or an open octet input FILE-STREAM, which is
-written from where it stands and closed like one opened here. hyperion/static returns the
+closed like one opened here. Content-Length is the stream's FILE-LENGTH, the whole file, so a
+stream must be at its start; hyperion/static returns one that is. hyperion/static returns a
 stream (#314), because the file it checked has to be the file that is sent: a pathname is
 opened again here, after the check, and a link swapped in between would be followed.
 
@@ -886,32 +887,47 @@ handler turns it into a 500; after the head there is no status left to change."
     (unless stream
       (error "hyperion/server-uv: the response body names a file that is not readable: ~A"
              path))
-    (let* ((size (file-length stream))
-           (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
-                                         size keep-alive)))
-      (cond
-        ((not (h1:encode-ok? encoded))
-         (close stream)
-         ;; Same answer as %WRITE-RESPONSE: a header we will not put on the wire is an
-         ;; application bug, reported as a 500 and never sanitised. NIL, because
-         ;; H1:ENCODE-ERROR says Connection: close and the socket must agree.
-         (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
-         (net:write-bytes conn (%latin1 (h1:encode-error 500)))
-         nil)
-        (t
-         ;; THE REQUEST IS STILL IN FLIGHT, and saying so is what keeps a pipelined peer
-         ;; from being answered into the middle of this body. %COMPLETE clears the flag
-         ;; before it returns, and %RESUME serves the next buffered request as soon as it is
-         ;; clear -- so without this the second of two pipelined requests has its head and
-         ;; chunks queued BETWEEN this body's pieces. Measured before the fix: a 307200-octet
-         ;; file came back with its first wrong octet at 4096, exactly one piece in, and the
-         ;; connection then closed. %FILE-FINISH clears it, immediately before deciding what
-         ;; becomes of the connection.
-         (setf (conn-state-in-flight state) t)
-         (let ((fo (%make-file-out :conn conn :app app :state state :stream stream
-                                   :keep-alive keep-alive :declared size)))
-           (%file-emit fo (%latin1 (h1:encode-text encoded)))
-           :streaming))))))
+    ;; Until the write callbacks own the stream, this function does: a refusal, or an
+    ;; error from FILE-LENGTH, the encoder or the first read, closes it here rather than
+    ;; leaving the descriptor to the finalizer.
+    (let ((owned-elsewhere nil))
+      (unwind-protect
+           (%write-file-head conn app state status headers stream keep-alive
+                             (lambda () (setf owned-elsewhere t)))
+        (unless owned-elsewhere (close stream))))))
+
+(defun %write-file-head (conn app state status headers stream keep-alive hand-off)
+  "%WRITE-FILE-RESPONSE's body once STREAM is open. HAND-OFF is called once the first piece
+has been read and written, when the write callbacks own STREAM; until then the caller closes
+it on the way out."
+  (let* ((size (file-length stream))
+         (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
+                                       size keep-alive)))
+    (cond
+      ((not (h1:encode-ok? encoded))
+       ;; Same answer as %WRITE-RESPONSE: a header we will not put on the wire is an
+       ;; application bug, reported as a 500 and never sanitised. NIL, because
+       ;; H1:ENCODE-ERROR says Connection: close and the socket must agree.
+       (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
+       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       nil)
+      (t
+       ;; THE REQUEST IS STILL IN FLIGHT, and saying so is what keeps a pipelined peer
+       ;; from being answered into the middle of this body. %COMPLETE clears the flag
+       ;; before it returns, and %RESUME serves the next buffered request as soon as it is
+       ;; clear -- so without this the second of two pipelined requests has its head and
+       ;; chunks queued BETWEEN this body's pieces. Measured before the fix: a 307200-octet
+       ;; file came back with its first wrong octet at 4096, exactly one piece in, and the
+       ;; connection then closed. %FILE-FINISH clears it, immediately before deciding what
+       ;; becomes of the connection.
+       (setf (conn-state-in-flight state) t)
+       (let ((fo (%make-file-out :conn conn :app app :state state :stream stream
+                                 :keep-alive keep-alive :declared size)))
+         ;; The first piece is read inside %FILE-EMIT. Only once it has returned do the
+         ;; write callbacks own the stream, and %FILE-FINISH close it.
+         (%file-emit fo (%latin1 (h1:encode-text encoded)))
+         (funcall hand-off)
+         :streaming)))))
 
 ;;; --- one connection --------------------------------------------------------
 ;;;
@@ -1413,6 +1429,10 @@ one test of a flag and does not require every dispatcher to be correct.
 Returning early when the connection is already DONE matters for the same reason in the
 other direction: a peer that disconnected while its handler ran must not have a response
 written into a closed socket."
+  (unless (and (conn-state-in-flight state) (not (conn-state-done state)))
+    ;; Not written: a second answer to one request, or a peer that has gone. A file-stream
+    ;; body is closed now rather than by its finalizer (#314).
+    (%close-file-body result))
   (when (conn-state-in-flight state)
     (setf (conn-state-in-flight state) nil)
     ;; A request that arrived before a drain began is answered after it: its response still
@@ -1448,6 +1468,12 @@ written into a closed socket."
         (cond ((eq kept :streaming) (setf (conn-state-streaming state) t))
               (kept (%resume conn app state))
               (t (%close-after conn state)))))))
+
+(defun %close-file-body (result)
+  "Close RESULT's body when RESULT is a response triple whose body is a file stream."
+  (when (and (consp result) (consp (cdr result)) (consp (cddr result))
+             (typep (third result) 'file-stream))
+    (close (third result))))
 
 (defun %complete-response (conn app state result keep-alive head-request)
   "Write the response triple RESULT on the loop thread, and return what %COMPLETE resumes on:
@@ -1486,12 +1512,12 @@ request, which gets the head only."
                              (length (%body-octets body)) keep-alive))
           ((functionp body)
            (%stream-response conn app state status headers body keep-alive))
-          ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (pre-publication issue 313):
-          ;; a known Content-Length with the body written in pieces. A
-          ;; pathname INSIDE a list still goes through %BODY-OCTETS, because
-          ;; a list body is pieces to concatenate and there is one length for
-          ;; the lot -- hyperion/static returns the pathname itself, which is
-          ;; the case that matters.
+          ;; A BARE PATHNAME OR AN OPEN FILE STREAM IS A FILE, and it gets the
+          ;; bounded path (pre-publication issue 313): a known Content-Length with
+          ;; the body written in pieces. A pathname INSIDE a list still goes
+          ;; through %BODY-OCTETS, because a list body is pieces to concatenate
+          ;; and there is one length for the lot. hyperion/static returns the
+          ;; open file stream it checked (#314), which is the case that matters.
           ((or (pathnamep body) (typep body 'file-stream))
            (%write-file-response conn app state status headers body
                                  keep-alive))

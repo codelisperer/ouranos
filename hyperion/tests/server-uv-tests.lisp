@@ -1467,6 +1467,57 @@ open when it was handed over."
                      do (sleep 0.01))
                "a stream the server was given is still open"))))
 
+;; The two tests below hold the stream in a variable, so its finalizer cannot run and close
+;; it: an open stream at the end means the server left it open.
+
+(test a-file-stream-whose-first-read-fails-is-closed
+  "#314. A file-stream body whose first read signals -- here a character stream, which
+%FILE-CHUNK cannot read octets from -- is answered with a 500 before any head is written, and
+the server closes the stream rather than leaving it to its finalizer. Control: the stream was
+open when it was handed over."
+  (%with-static-dir (dir file "0123456789abcdef")
+    (let ((stream nil) (open-when-given nil))
+      (with-server (port (lambda (env) (declare (ignore env))
+                           (setf stream (open file))
+                           (setf open-when-given (open-stream-p stream))
+                           (list 200 +ok+ stream)))
+        (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))))
+      (is-true open-when-given "control: the stream was open when it was handed over")
+      (is (typep stream 'file-stream))
+      (is-false (and stream (open-stream-p stream)) "the server left the stream open")
+      (when stream (close stream)))))
+
+(test a-file-stream-answered-after-the-peer-left-is-closed
+  "#314. A handler on a worker returns a file-stream body after its client has disconnected.
+Nothing is written, and the server closes the stream rather than dropping it to its
+finalizer. Control: the stream was open when it was handed over."
+  (%with-static-dir (dir file "0123456789abcdef")
+    (let ((stream nil) (open-when-given nil) (left nil))
+      (with-server (port (lambda (env) (declare (ignore env))
+                           (%wait-until (lambda () left))
+                           ;; Time for the loop to read the client's FIN and mark the
+                           ;; connection done.
+                           (sleep 0.3)
+                           (setf stream (open file :element-type '(unsigned-byte 8)))
+                           (setf open-when-given (open-stream-p stream))
+                           (list 200 +ok+ stream))
+                         :workers 2)
+        (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+          (sock:socket-connect s #(127 0 0 1) port)
+          (let ((out (sock:socket-make-stream s :output t :element-type '(unsigned-byte 8))))
+            (write-sequence (sb-ext:string-to-octets (req "GET / HTTP/1.1" "Host: x")
+                                                     :external-format :latin-1)
+                            out)
+            (force-output out))
+          (sleep 0.1)
+          (sock:socket-close s)
+          (setf left t))
+        (%wait-until (lambda () (and stream (not (open-stream-p stream)))) :seconds 3))
+      (is-true open-when-given "control: the stream was open when it was handed over")
+      (is (typep stream 'file-stream))
+      (is-false (and stream (open-stream-p stream)) "the server left the stream open")
+      (when stream (close stream)))))
+
 (test a-static-binary-file-arrives-byte-for-byte
   ;; The clause reads OCTETS. A text-mode read would mangle every byte above 127, and this
   ;; serves images -- where the corruption is invisible in a status code and obvious to a

@@ -131,8 +131,8 @@ it has a complete response -- so every request on a keep-alive connection stalls
 delayed-ACK timer. On Hunchentoot that measured a flat p50 of 44 ms per request; the same
 server, same bytes, with Content-Length set: 0.17 ms. See hyperion/bench/ and ADR-0011.
 
-Bodies that are NOT a fully-known sequence -- a function (streamed), a pathname -- are left
-strictly alone: they must stay chunked, because their length is not knowable up front. SSE
+Bodies that are NOT a fully-known sequence -- a function (streamed), a pathname, an open
+file stream -- are left strictly alone: they must stay chunked, because their length is not knowable up front. SSE
 in particular depends on that."
   (lambda (env)
     (let ((res (funcall app env)))

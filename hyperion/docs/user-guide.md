@@ -577,8 +577,10 @@ one piece of memory rather than the whole file. It does not use `sendfile` (pre-
 issue 313; `sendfile` on `:uv` is PLANNED). On Clack backends, `hyperion:wrap-streaming-body`
 turns the stream into a writer loop of 64 KiB pieces with `Content-Length` taken from the
 stream: Hunchentoot sends that length, and Woo sends the file chunked, without
-`Content-Length`. Every server closes the stream after the response, including a `HEAD`
-response, which carries the file's length and no body.
+`Content-Length`. Every server closes the stream after the response. A `HEAD` request that
+reaches `file-response` directly gets the file's length and no body, and the server closes the
+stream. A `HEAD` request answered through `hyperion/router`'s GET route has its body removed
+by the router, which closes the stream; that response carries no file length, as before.
 
 ```lisp
 (static:file-response #p"/srv/app/resources/public/" (getf env :path-info))
