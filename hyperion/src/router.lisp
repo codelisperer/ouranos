@@ -186,7 +186,12 @@ plus the HEAD and OPTIONS this router derives."
 
 (defun %strip-body (response)
   "RESPONSE with its body emptied -- a HEAD answer, which must carry the headers a
-GET would and no content."
+GET would and no content. A file-stream body (what `hyperion/static:file-response`
+returns) is closed here, because nothing downstream sees it once it is dropped and
+its file descriptor would otherwise stay open until garbage collection (#314)."
+  (let ((body (third response)))
+    (when (typep body 'file-stream)
+      (close body)))
   (list (first response) (second response) '()))
 
 (defun %prefix-match (prefix path)

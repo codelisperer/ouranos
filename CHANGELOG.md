@@ -14,6 +14,22 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
+  `file-response` now opens the file, reads back the path the open handle refers to
+  (`F_GETPATH` on macOS, `/proc/self/fd` on Linux, `GetFinalPathNameByHandleW` on Windows) and
+  serves it only when that path is under the root. Before, it checked the path and returned a
+  pathname that the server opened later, so a directory replaced by a symbolic link in between
+  could serve a file outside the root. An app or middleware that reads the body of a static
+  response and expects a pathname (for example to log it, or to call `probe-file` on it) gets
+  an `sb-sys:fd-stream` with element type `(unsigned-byte 8)` instead, and if it consumes the
+  stream it must close it. `hyperion/router`, when it answers `HEAD` from a GET route, closes
+  a file-stream body as it removes it. On `:uv`, a file-stream body is written in bounded pieces like a
+  pathname body was, with `Content-Length` from the stream, and a `HEAD` response closes it
+  after sending the length. On Clack backends, `hyperion:wrap-streaming-body` writes the stream
+  in 64 KiB pieces (`hyperion::*file-piece-octets*`): Hunchentoot sends `Content-Length`, and
+  Woo sends the file chunked, without `Content-Length`. An app on Woo that relied on a
+  `Content-Length` for static files no longer gets one.
+
 - **praxeon/memory-db: `ensure-schema` creates an index on `subject`, `<table>_subject_idx`**
   (#482). It builds it without `CONCURRENTLY`, so on a large existing table the first start
   after upgrading blocks writes to the table while the index builds. To avoid that, build it
