@@ -81,9 +81,13 @@ Notes:
 - `meta` is Meta's Model API (Muse Wonder). Its variables are `PRAXEON_META_API_KEY`
   (required), `PRAXEON_META_MODEL` (default `muse-wonder-1.0`) and `PRAXEON_META_BASE_URL`
   (default `https://api.meta.ai/v1`). Meta's API accepts only `tool_choice: "auto"`, so on
-  `meta` a forced tool choice, and with it `generate-structured`, signals
-  `praxeon/conditions:tool-choice-unsupported` before any request is sent. Its models reason
-  before they answer, and the reasoning counts against `max_tokens`.
+  `meta` a forced tool choice passed to `complete` signals
+  `praxeon/conditions:tool-choice-unsupported` before any request is sent. `generate-structured`
+  still works on `meta`: it sends the spec's schema as `response_format` (`json_schema`) and
+  reads the JSON object in the reply's text, with the same validation, conditions and restarts
+  as the tool-call path. A recursive schema is refused with `praxeon/llm:unsendable-schema`
+  before anything is sent, because Meta returns HTTP 400 for one. Its models reason before they
+  answer, and the reasoning counts against `max_tokens`.
 - Every var can be **shared** (`PRAXEON_LLM_MODEL`, `PRAXEON_LLM_API_KEY`, …) or
   **per-provider** (`PRAXEON_<IMPL>_MODEL`, `PRAXEON_<IMPL>_API_KEY`, …). The
   per-provider form wins, so you can keep several providers configured and switch
