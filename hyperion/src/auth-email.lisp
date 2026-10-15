@@ -125,8 +125,12 @@ its TOKEN-WINDOW. RETRY-AFTER is the seconds until another may be sent."))
   "The ALTER TABLE that adds email_confirmed_at to the users table named TABLE (#690). Every
 timeline adds it as its own step, new or old; see the header of this file for why USERS-DDL does
 not include it."
+  ;; The column type comes from mnemosyne's dialect mapping, as every other column here does, so
+  ;; each dialect designator (a keyword, a string or a typed Dialect) gets the type the schema's
+  ;; :INTEGER fields get: a 64-bit one on Postgres, where a universal time does not fit in 32 bits.
   (format nil "ALTER TABLE ~A ADD COLUMN email_confirmed_at ~A" (%check-table table)
-          (if (member dialect '(:postgres "postgres" "postgresql") :test #'equalp) "BIGINT" "INTEGER")))
+          (mnemosyne/field-shell:column-sql (schema:field-type-for "integer" nil) dialect
+                                            :field-name :email_confirmed_at)))
 
 (defun email-tokens-ddl (&key (dialect :sqlite) (table *tokens-table*))
   "CREATE TABLE DDL for the token table, named TABLE (#690)."
@@ -263,6 +267,20 @@ exclusive store connection, so a failure later in the caller's transaction leave
       (error 'invalid-token :reason :used))
     row))
 
+(defun %take-token-locked (store token purpose now)
+  "As %TAKE-TOKEN, but take the write lock on the token's user first. Returns the token's row, and
+whether the user's row exists.
+
+EVERY PATH LOCKS THE USER BEFORE IT WRITES A TOKEN. Issuing a token and SET-EMAIL lock the user
+and then write tokens; a path that marked the token used first and then locked the user would
+take the two locks in the other order, and two such transactions on Postgres, from two stores or
+from two uses of tokens of one user, could each hold the lock the other waits for (#695 review).
+So the token's user is read without a lock, the user is locked, and the token is then checked
+again and marked used. A token's user never changes, so the user read first is the one locked."
+  (let* ((user-id (%rget (%check-token store token purpose now) :user_id))
+         (exists (%lock-user store user-id)))
+    (values (%take-token store token purpose now) exists)))
+
 (defun %cancel-tokens (store user-id now &key revert-after)
   "Mark the user's unused confirm, change and reset tokens used. With REVERT-AFTER, the row of the
 revert token being used, also mark the user's revert tokens created after it. See the header for
@@ -327,8 +345,8 @@ when the token is unknown, used or expired, or the account no longer has that ad
   (let ((user-id
           (with-store-connection (store :exclusive t)
             (let ((now (%now store)))
-              (conn:with-transaction ((conn store))
-                (let* ((tok (%take-token store token :confirm now))
+              (conn:with-transaction ((conn store) :immediate t)
+                (let* ((tok (%take-token-locked store token :confirm now))
                        (user-id (%rget tok :user_id))
                        (email (%rget tok :email)))
                   (unless (plusp (%to-int
@@ -387,21 +405,20 @@ unused."
   (let (user-id old revert revert-expires)
     (with-store-connection (store :exclusive t)
       (let ((now (%now store)))
-        (conn:with-transaction ((conn store))
-          (let* ((tok (%take-token store token :change now))
-                 (new (%rget tok :email))
-                 (row (and (%lock-user store (%rget tok :user_id))
-                           (%user-row store (%rget tok :user_id)))))
-            (unless row (error 'invalid-token :reason :superseded))
-            (setf user-id (%rget row :_id)
-                  old (%rget row :email))
-            (when (%email-taken-p store new user-id) (error 'duplicate-email :email new))
-            (unless (%write-email store user-id old new now now)
-              (error 'invalid-token :reason :superseded))
-            (%cancel-tokens store user-id now)
-            (%record-email-event store user-id "changed" old new (or actor user-id) now)
-            (multiple-value-setq (revert revert-expires)
-              (%issue-token store user-id :revert old now :limit nil))))))
+        (conn:with-transaction ((conn store) :immediate t)
+          (multiple-value-bind (tok exists) (%take-token-locked store token :change now)
+            (let* ((new (%rget tok :email))
+                   (row (and exists (%user-row store (%rget tok :user_id)))))
+              (unless row (error 'invalid-token :reason :superseded))
+              (setf user-id (%rget row :_id)
+                    old (%rget row :email))
+              (when (%email-taken-p store new user-id) (error 'duplicate-email :email new))
+              (unless (%write-email store user-id old new now now)
+                (error 'invalid-token :reason :superseded))
+              (%cancel-tokens store user-id now)
+              (%record-email-event store user-id "changed" old new (or actor user-id) now)
+              (multiple-value-setq (revert revert-expires)
+                (%issue-token-locked store user-id :revert old now nil)))))))
     (values (find-user-by-id store user-id) old revert revert-expires)))
 
 (defun revert-email-change (store token session-store &key (session-key :user-id) actor)
@@ -432,17 +449,17 @@ address."
            (ended (end user-id)))
       (with-store-connection (store :exclusive t)
         (let ((now (%now store)))
-          (conn:with-transaction ((conn store))
-            (let* ((tok (%take-token store token :revert now))
-                   (restore (%rget tok :email))
-                   (row (and (%lock-user store user-id) (%user-row store user-id))))
-              (unless row (error 'invalid-token :reason :superseded))
-              (let ((current (%rget row :email)))
-                (when (%email-taken-p store restore user-id) (error 'duplicate-email :email restore))
-                (unless (%write-email store user-id current restore now now)
-                  (error 'invalid-token :reason :superseded))
-                (%cancel-tokens store user-id now :revert-after tok)
-                (%record-email-event store user-id "reverted" current restore (or actor user-id) now))))))
+          (conn:with-transaction ((conn store) :immediate t)
+            (multiple-value-bind (tok exists) (%take-token-locked store token :revert now)
+              (let* ((restore (%rget tok :email))
+                     (row (and exists (%user-row store user-id))))
+                (unless row (error 'invalid-token :reason :superseded))
+                (let ((current (%rget row :email)))
+                  (when (%email-taken-p store restore user-id) (error 'duplicate-email :email restore))
+                  (unless (%write-email store user-id current restore now now)
+                    (error 'invalid-token :reason :superseded))
+                  (%cancel-tokens store user-id now :revert-after tok)
+                  (%record-email-event store user-id "reverted" current restore (or actor user-id) now)))))))
       (values (find-user-by-id store user-id) (+ ended (end user-id))))))
 
 (defun set-email (store user-id new-email &key actor confirmed)
@@ -505,8 +522,8 @@ sessions afterwards (HYPERION/SESSION:END-SESSIONS)."
         user-id)
     (with-store-connection (store :exclusive t)
       (let ((now (%now store)))
-        (conn:with-transaction ((conn store))
-          (let* ((tok (%take-token store token :reset now)))
+        (conn:with-transaction ((conn store) :immediate t)
+          (let* ((tok (%take-token-locked store token :reset now)))
             (setf user-id (%rget tok :user_id))
             (unless (plusp (%to-int
                             (conn:exec (conn store)

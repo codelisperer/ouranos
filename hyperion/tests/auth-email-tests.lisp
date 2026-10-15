@@ -338,6 +338,101 @@ insert run in one transaction behind a lock on the user's row, so the database s
              (is (null other) "no other outcome: ~S" (remove-duplicates other :test #'equal))))
       (ignore-errors (delete-file path)))))
 
+;;; --- lock order and SQLite write locks (#695 review) ---------------------------------------
+
+(defun %write-order (store thunk)
+  "The tables THUNK's UPDATE statements write, in order: :USER for STORE's users table, :TOKEN
+for its token table. Read from the SQL that reaches CONN:EXEC."
+  (let ((seen '())
+        (user (format nil "UPDATE ~A " (auth::table store)))
+        (token (format nil "UPDATE ~A " (auth::tokens-table store))))
+    (sb-int:encapsulate 'conn:exec 'write-order
+                        (lambda (f c sql &rest params)
+                          (cond ((eql 0 (search user sql :test #'char-equal)) (push :user seen))
+                                ((eql 0 (search token sql :test #'char-equal)) (push :token seen)))
+                          (apply f c sql params)))
+    (unwind-protect (funcall thunk)
+      (sb-int:unencapsulate 'conn:exec 'write-order))
+    (reverse seen)))
+
+(test every-path-locks-the-user-before-it-writes-a-token
+  "#695 review: issuing a token and SET-EMAIL lock the user's row and then write tokens. A token
+use that marked the token first and then wrote the user would take the two locks in the other
+order, and two such transactions on Postgres could each wait for the other. So each path's first
+write is to the users table."
+  (with-email-auth (a)
+    (let ((id (%new-user a "order@x.com"))
+          (revert nil))
+      (let ((token (auth:issue-confirmation a id)))
+        (is (eq :user (first (%write-order a (lambda () (auth:confirm-email a token)))))
+            "CONFIRM-EMAIL"))
+      (let ((token (auth:request-email-change a id "order2@x.com" :password "old-pw")))
+        (is (eq :user (first (%write-order a (lambda ()
+                                               (setf revert (nth-value 2 (auth:confirm-email-change
+                                                                          a token)))))))
+            "CONFIRM-EMAIL-CHANGE"))
+      (is (eq :user (first (%write-order a (lambda () (auth:revert-email-change a revert :none)))))
+          "REVERT-EMAIL-CHANGE")
+      (let ((token (auth:issue-password-reset a "order@x.com")))
+        (is (eq :user (first (%write-order a (lambda () (auth:reset-password a token "new-pw")))))
+            "RESET-PASSWORD"))
+      (is (eq :user (first (%write-order a (lambda () (auth:set-email a id "order3@x.com"
+                                                                       :actor "op")))))
+          "SET-EMAIL"))))
+
+(defun %behind-a-writer (path thunk)
+  "Call THUNK while another connection to the SQLite file PATH holds a write transaction, for
+1.5 seconds after it has written. Returns :OK, or the error THUNK signalled."
+  (let* ((holding (sb-thread:make-semaphore))
+         (holder
+           ;; THREAD-LIFETIME: scoped -- joined below, before this returns.
+           (sb-thread:make-thread
+            (lambda ()
+              (let ((c (conn:connect (be:make-sqlite (namestring path)))))
+                (unwind-protect
+                     (conn:with-transaction (c)
+                       (conn:exec c "INSERT INTO writer_holds VALUES (1)")
+                       (sb-thread:signal-semaphore holding)
+                       (sleep 1.5))
+                  (conn:disconnect c))))
+            :name "writer")))
+    (sb-thread:wait-on-semaphore holding)
+    (prog1 (handler-case (progn (funcall thunk) :ok) (error (e) e))
+      (aion/test-threads:join holder))))
+
+(test the-token-uses-wait-behind-another-sqlite-writer
+  "#695 review: each token use reads the token and then writes. Begun deferred on SQLite, a
+transaction that has read cannot become a writer while another connection is writing, and fails
+with SQLITE_BUSY at once instead of waiting for the busy timeout. Begun IMMEDIATE, it waits."
+  (let ((path (%temp-db-path "writer-wait")))
+    (unwind-protect
+         (let ((c (conn:connect (be:make-sqlite (namestring path)))))
+           (unwind-protect
+                (let* ((a (auth:make-db-auth c :dialect :sqlite :ensure t :clock #'%clock))
+                       (id (%new-user a "wait@x.com"))
+                       (revert nil))
+                  (conn:exec c "CREATE TABLE writer_holds (n INTEGER)")
+                  (let ((token (auth:issue-confirmation a id)))
+                    (is (eq :ok (%behind-a-writer path (lambda () (auth:confirm-email a token))))
+                        "CONFIRM-EMAIL"))
+                  (let ((token (auth:request-email-change a id "wait2@x.com" :password "old-pw")))
+                    (is (eq :ok (%behind-a-writer
+                                 path (lambda ()
+                                        (setf revert (nth-value 2 (auth:confirm-email-change
+                                                                   a token))))))
+                        "CONFIRM-EMAIL-CHANGE"))
+                  (is (eq :ok (%behind-a-writer path (lambda ()
+                                                      (auth:revert-email-change a revert :none))))
+                      "REVERT-EMAIL-CHANGE")
+                  (let ((token (auth:issue-password-reset a "wait@x.com")))
+                    (is (eq :ok (%behind-a-writer path (lambda ()
+                                                        (auth:reset-password a token "new-pw"))))
+                        "RESET-PASSWORD")))
+             (conn:disconnect c)))
+      (dolist (suffix '("" "-journal" "-wal" "-shm"))
+        (let ((f (probe-file (concatenate 'string (namestring path) suffix))))
+          (when f (delete-file f)))))))
+
 ;;; --- the operator path ---------------------------------------------------------------------
 
 (test set-email-writes-nothing-when-the-address-moved-after-it-was-read
@@ -500,7 +595,11 @@ The accounts are unconfirmed until the documented UPDATE marks them."
 (test the-email-ddl-helpers-take-a-table-name
   (is (search "ALTER TABLE members ADD COLUMN email_confirmed_at INTEGER"
               (auth:users-email-confirmed-ddl :table "members")))
-  (is (search "BIGINT" (auth:users-email-confirmed-ddl :dialect :postgres)))
+  ;; Every designator of Postgres gets a 64-bit column: the keyword, a string, and the typed
+  ;; Dialect, which an earlier version of the helper did not recognise and typed INTEGER.
+  (dolist (dialect (list :postgres "postgres" mnemosyne/field:d-postgres))
+    (is (search "email_confirmed_at BIGINT" (auth:users-email-confirmed-ddl :dialect dialect))
+        "~S gives BIGINT" dialect))
   (is (search "CREATE TABLE IF NOT EXISTS member_tokens ("
               (auth:email-tokens-ddl :table "member_tokens")))
   (is (search "ON member_tokens (token_hash)" (auth:email-tokens-hash-index-ddl :table "member_tokens")))
