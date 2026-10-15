@@ -320,7 +320,9 @@
 (defsystem "hyperion/sidecar/tests"
   :description "Tests for hyperion/sidecar. Each sidecar is a child SBCL started with --eval."
   :depends-on ("hyperion/sidecar" "hyperion" "hyperion/test-ports" "aion/secret" "aion/log" "log4cl" "fiveam"
-               "clack-handler-hunchentoot")
+               "clack-handler-hunchentoot"
+               ;; On Windows, for WIN32-ERROR, which the no-job test signals.
+               (:feature :win32 "aion/windows"))
   :components ((:file "tests/sidecar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/sidecar/tests :run-tests)))
 

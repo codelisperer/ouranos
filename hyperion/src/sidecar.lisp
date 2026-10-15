@@ -526,6 +526,7 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
               (list (sb-thread:make-thread
                      (lambda () (%read-lines s (%output process) :stdout generation))
                      :name "hyperion/sidecar stdout")
+                    ;; THREAD-LIFETIME: scoped -- the same, for standard error.
                     (sb-thread:make-thread
                      (lambda () (%read-lines s (%error-stream process) :stderr generation))
                      :name "hyperion/sidecar stderr"))
