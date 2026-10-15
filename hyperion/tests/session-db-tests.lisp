@@ -494,8 +494,8 @@ Does nothing when STORE no longer holds ID, which is what an expiry leaves behin
       (conn:disconnect c))))
 
 (defun %create-table (table)
-  "Create TABLE with the session store's columns. ENSURE-SCHEMA cannot: it creates the schema's
-own table name whatever the store's :TABLE says."
+  "Create TABLE with the session store's columns, with SQL of the test's own rather than the
+store's ENSURE-SCHEMA, so these tests do not depend on the code they share a table with."
   (let ((c (conn:connect (url:backend-from-url (%pg-url)))))
     (unwind-protect
          (conn:exec c (format nil "CREATE TABLE ~A (id TEXT PRIMARY KEY, data TEXT, created BIGINT, accessed BIGINT)"
@@ -617,3 +617,30 @@ and left the first new connection open."
              (is (= 1 (reconnects store)) "reconnected ~D times" (reconnects store)))
         (ignore-errors (conn:disconnect (sdb::db-store-source store)))
         (ignore-errors (conn:disconnect c))))))
+
+;;; --- the store's own table name (#638) ----------------------------------------
+
+(test ensure-creates-the-table-the-store-names
+  "A store made with :TABLE \"app_sessions\" and :ENSURE T creates app_sessions, and adds and reads
+a session there. Before #638 it created hyperion_sessions, and its first write failed because
+app_sessions did not exist."
+  (let ((c (conn:connect (be:make-sqlite ":memory:"))))
+    (unwind-protect
+         (let ((store (sdb:make-db-store c :dialect :sqlite :table "app_sessions" :ensure t)))
+           (is (search "app_sessions" (sdb:db-store-ddl store)) "the DDL names the store's table")
+           (sess:store-add store (%sess "s1" :data '((:user . 7))))
+           (let ((got (sess:store-ref store "s1")))
+             (is (eql 7 (and got (sess:session-get got :user)))))
+           (is (= 1 (sess:store-count store))))
+      (conn:disconnect c))))
+
+(test a-table-name-that-is-not-one-is-refused
+  "The table name is written into SQL by every operation, so a name that is not letters, digits
+and underscores is refused when the store is made, with or without :ENSURE, rather than quoted
+(#638; Copilot's review of #652)."
+  (let ((c (conn:connect (be:make-sqlite ":memory:"))))
+    (unwind-protect
+         (dolist (bad '("sessions; DROP TABLE users" "1sessions" ""))
+           (signals error (sdb:make-db-store c :dialect :sqlite :table bad))
+           (signals error (sdb:make-db-store c :dialect :sqlite :table bad :ensure t)))
+      (conn:disconnect c))))
