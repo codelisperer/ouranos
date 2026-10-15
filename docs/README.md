@@ -29,6 +29,9 @@ material that spans several frameworks and has no single home.
 - **[ci.md](ci.md)** — what the three-OS matrix proves and what it deliberately does not:
   the gate is `verify-tree.lisp`, why the fasl cache gets no fallback, why no leg excuses
   Postgres, and why native amd64 is the only meaningful Coalton-pin signal.
+- **[scheduling.md](scheduling.md)** — scheduled jobs with `aion/schedule` and
+  `mnemosyne/jobs`: schedules across daylight-saving changes, one run per slot across
+  instances, why a job must tolerate running twice, and the clock skew the lease tolerates.
 - **[logging.md](logging.md)** — how the frameworks log (`aion/log`): correlation ids bound
   once at the outermost seam, which level means what, structured fields over interpolated
   strings, and the hard rule that payloads (bind params, prompts) never reach a log.
