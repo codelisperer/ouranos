@@ -910,6 +910,14 @@ its tag.
 
 ### Fixed
 
+- **`aion/http-client`: pinned TLS connections work when the default libssl is OpenSSL 4**
+  (#706). cl+ssl reads a certificate's names with `ASN1_STRING_data`, which OpenSSL 4 removed,
+  so an https request made with `:connect-address` failed on a host whose default libcrypto is
+  OpenSSL 4. `aion/http-client` now points `cl+ssl::asn1-string-data` at
+  `ASN1_STRING_get0_data`, which OpenSSL 1.1, 3 and 4 all have, in
+  `aion/src/http-client/openssl.lisp`. The patch is removed once the pinned cl+ssl contains
+  cl-plus-ssl pull request 202, and this file will say so then.
+
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
   `:result-stored`, `:results-cleared`, `:context-trimmed`, `:context-overflow`, `:delegate`,
