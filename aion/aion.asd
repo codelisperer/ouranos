@@ -541,6 +541,51 @@
                 :components ((:file "pool"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/pool/tests :run-tests)))
 
+(defsystem "aion/schedule"
+  :description "Named jobs on interval, daily and weekly schedules, run once per slot across instances through a lease, with a run log (#689)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; aion/tz for local-time schedules across daylight-saving changes; aion/pool to run jobs
+  ;; off the driver thread; aion/clock for run ids; aion/log for start, finish and failure.
+  ;; The store is a protocol: the in-memory store is here, the database one is mnemosyne/jobs.
+  :depends-on ("aion/tz" "aion/pool" "aion/clock" "aion/log")
+  :serial t
+  :components ((:module "src/schedule"
+                :serial t
+                :components ((:file "packages")
+                             (:file "schedule")
+                             (:file "store")
+                             (:file "scheduler"))))
+  :in-order-to ((test-op (test-op "aion/schedule/tests"))))
+
+(defsystem "aion/schedule/tests"
+  :description "Tests for aion/schedule: next due times across daylight-saving changes, and the scheduler on a manual clock over the in-memory store."
+  :depends-on ("aion/schedule" "aion/tz" "fiveam" "aion/test-threads")
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                ;; store-checks: the store protocol's contract as a function over a store
+                ;; constructor, which mnemosyne/jobs/tests runs against its database store.
+                :components ((:file "schedule-store-checks")
+                             (:file "schedule"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/schedule/tests :run-tests)))
+
+(defsystem "aion/schedule/uv"
+  :description "Drives an aion/schedule scheduler from a libuv timer on a loop of its own (#689). Requires a built libuv (scripts/build-libuv.lisp)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("aion/schedule" "aion/uv" "aion/log")
+  :components ((:file "src/schedule/uv/uv"))
+  :in-order-to ((test-op (test-op "aion/schedule/uv/tests"))))
+
+(defsystem "aion/schedule/uv/tests"
+  :description "Tests for aion/schedule/uv. Requires a built libuv (scripts/build-libuv.lisp)."
+  :depends-on ("aion/schedule/uv" "aion/schedule" "aion/uv" "fiveam")  ; the tests stand in for aion/uv:make-timer
+  :components ((:file "tests/schedule-uv"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
+
 (defsystem "aion/interceptor"
   :description "A typed, protocol-agnostic interceptor pipeline over a context (Coalton)."
   :author "Bob <eternal.recursion@proton.me>"

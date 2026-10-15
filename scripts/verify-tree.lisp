@@ -162,6 +162,8 @@
     :praxeon/retrieval
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
+    ;; The job scheduler and its database store (#689).
+    :aion/schedule :mnemosyne/jobs
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
     :praxeon/elise :praxeon/chat-rbt
     :hyperion/examples/active-search :hyperion/examples/active-search-db
@@ -212,6 +214,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The OAuth client and its routes (#527 part 2), registered in the commit that adds them.
     ;; Their authorization server runs on 127.0.0.1 in the test image.
     :aion/oauth/tests :hyperion/oauth/tests
+    ;; The job scheduler (#689) and its database store, registered in the commit that adds
+    ;; them. The store's suite runs on SQLite everywhere and on Postgres where the gate has it.
+    :aion/schedule/tests :mnemosyne/jobs/tests
     ;; The gate's own checkers, tested against trees built to break them (#163). Here
     ;; rather than in the +CHECKERS+ block because that block must not move the check
     ;; count, and a fix for "nothing attests these work" that produces no number would be
@@ -283,14 +288,17 @@ decision someone made, not an accident -- which is the difference that matters."
     ;; see ADR-0015 and the commentary in hyperion/src/http1/packages.lisp.
     :hyperion/server-uv
     ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
-    :hyperion/clack-handler-uv)
+    :hyperion/clack-handler-uv
+    ;; The scheduler's libuv driver (#689).
+    :aion/schedule/uv)
   "The libuv-backed systems. Absent from +SYSTEMS+ because they need
 scripts/build-libuv.lisp to have run first, so on a machine without it their absence is
 not evidence of anything.")
 
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
-    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests)
+    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
+    :aion/schedule/uv/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)
