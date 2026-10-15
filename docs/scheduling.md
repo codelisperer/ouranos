@@ -81,6 +81,15 @@ slot. The first run may have done part or all of its work before the instance di
 job so that running it a second time does no harm: record what it has sent or changed, and skip
 what is already done.
 
+A slot is retried once. When the instance running the `:retry` dies too, the next instance to
+tick marks the retry `:abandoned`, frees the lease, starts nothing, and logs a warning; the job
+runs again at its next slot. A job that brings down its process therefore costs two instances at
+most, not one instance after another.
+
+An instance that was only slow, not dead, may finish after its run was marked `:abandoned`. Its
+finish then replaces `:abandoned` with the run's actual outcome in the log, and leaves the lease,
+which has passed to the retry, alone.
+
 ## Keep the instances' clocks synchronised
 
 Lease times are written from each instance's own clock. An instance whose clock is ahead of
@@ -107,3 +116,10 @@ SQLite, for the app's migrations (see [migrations.md](migrations.md) §5). Witho
 `make-db-job-store` reads both tables once and signals `missing-job-tables` when it cannot, so a
 missing migration stops the app at start. Other table names are passed as `:jobs-table` and
 `:runs-table`, to both `make-db-job-store` and `jobs-ddl`.
+
+A job row whose schedule or arguments cannot be read back, for example because they name a
+package a later build removed, does not stop the other jobs. `store-jobs` returns it with
+`stored-job-unreadable` set to the reason, and each scheduler logs it once and leaves it in the
+table; `run-now` on it signals `unreadable-job`. Replace it with `define-job` or
+`schedule-once`, or remove it with `store-remove-job`. A job whose function no instance has
+registered is treated the same way, and neither kind makes the driver tick more often.

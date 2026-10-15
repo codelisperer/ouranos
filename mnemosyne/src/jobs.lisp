@@ -118,10 +118,27 @@ ENSURE, creates the tables; without it, signals MISSING-JOB-TABLES when they can
     (string (parse-integer value))))
 
 (defun %row->job (row)
+  "The stored job in ROW. When its schedule or arguments cannot be read back -- they name a
+package a redeploy removed, say -- the job comes back with UNREADABLE set to the reason, so one
+such row costs only its own job and not every job in the table."
+  (let ((unreadable nil))
+    (flet ((decode (column)
+             (handler-case (s:read-data (param:row-value row column))
+               (error (e)
+                 (let ((text (princ-to-string e)))
+                   (setf unreadable (format nil "~(~A~) ~A: ~A" column (type-of e)
+                                            (subseq text 0 (min 300 (length text))))))
+                 nil))))
+      (let* ((schedule (decode :schedule))
+             (args (decode :args)))
+        (%make-job row schedule args unreadable)))))
+
+(defun %make-job (row schedule args unreadable)
   (s:make-stored-job :key (param:row-value row :job_key)
                      :function-name (param:row-value row :function_name)
-                     :schedule (s:read-data (param:row-value row :schedule))
-                     :args (s:read-data (param:row-value row :args))
+                     :schedule schedule
+                     :args args
+                     :unreadable unreadable
                      :next-due (%int (param:row-value row :next_due))
                      :lease-holder (param:row-value row :lease_holder)
                      :lease-until (%int (param:row-value row :lease_until))
@@ -227,6 +244,19 @@ SQL, so a NIL value is matched with IS NULL and binds nothing."
                                                :args args)))
                       (%insert-run c store run)
                       run)))))))))))
+
+(defmethod s:store-abandon ((store db-job-store) key &key now expected-run)
+  (when expected-run
+    (with-connection (c store)
+      (conn:with-transaction (c)
+        ;; The job row first, then the run row, the order STORE-ACQUIRE and STORE-FINISH use.
+        (when (plusp (conn:exec c (format nil "UPDATE ~A SET lease_holder = NULL, lease_until = NULL, current_run = NULL, updated_at = ? WHERE job_key = ? AND current_run = ? AND (lease_holder IS NULL OR lease_until IS NULL OR lease_until < ?)"
+                                          (jobs-table store))
+                                now key expected-run now))
+          (conn:exec c (format nil "UPDATE ~A SET outcome = 'abandoned', finished_at = ? WHERE id = ? AND outcome = 'running'"
+                               (runs-table store))
+                     now expected-run)
+          t)))))
 
 (defmethod s:store-advance ((store db-job-store) key &key expected-due next-due)
   (multiple-value-bind (term params) (%equals "next_due" expected-due)

@@ -69,8 +69,31 @@
       (setf (hold store) t)
       (funcall (s:scheduler-wake-function a))
       (sb-thread:wait-on-semaphore (entered store))
-      (is (eq :timed-out (s:stop a :timeout 0.3)) "the tick holds the loop thread")
+      (let ((start (get-internal-real-time)))
+        (is (eq :timed-out (s:stop a :timeout 1)) "the tick holds the loop thread")
+        (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 1.6)
+            "and STOP gives up within its timeout, not twice it"))
       (is-true (sb-thread:thread-alive-p thread))
       (sb-thread:signal-semaphore (gate store))
       (is (eq :stopped (s:stop a :timeout 5)) "a later STOP closes the loop")
       (is-true (wait-until (lambda () (not (sb-thread:thread-alive-p thread))))))))
+
+(test a-timer-that-cannot-be-made-fails-start-and-installs-no-driver
+  (let ((a (s:make-scheduler (s:make-memory-job-store)
+                             :clock (s:make-manual-clock 3990000000))))
+    (sb-int:encapsulate 'aion/uv:make-timer 'refuse
+                        (lambda (f &rest args) (declare (ignore f args)) (error "no timer today")))
+    (unwind-protect
+         (signals error (suv:start a))
+      (sb-int:unencapsulate 'aion/uv:make-timer 'refuse))
+    (is (null (s:scheduler-driver-stop a)) "no driver is installed")
+    (is (null (s:scheduler-wake-function a)))
+    (is-true (wait-until (lambda () (null (driver-thread)))) "and the loop thread has ended")
+    (is (eq :stopped (s:stop a :timeout 5)))))
+
+(test start-refuses-a-scheduler-that-is-stopping
+  (let ((a (s:make-scheduler (s:make-memory-job-store)
+                             :clock (s:make-manual-clock 3990000000))))
+    (is (eq :stopped (s:stop a :timeout 5)))
+    (signals s:scheduler-stopped (suv:start a))
+    (is (null (driver-thread)) "and starts no loop thread")))

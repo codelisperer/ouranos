@@ -229,7 +229,9 @@ its tag.
   run log. Drive the scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv
   timer), and end it with `stop`. **A job must tolerate running twice**: when an instance dies
   during a run, the run is marked `:abandoned` once its lease expires and another instance runs
-  the job again (trigger `:retry`). Lease times come from each instance's own clock, which may
+  the job again (trigger `:retry`), once per slot: a retry that is abandoned too is not retried.
+  A stored job that cannot be read back is returned with `stored-job-unreadable` set, logged
+  once and left alone, and `run-now` on it signals `unreadable-job`. Lease times come from each instance's own clock, which may
   differ from another's by up to about a third of `:lease-seconds` (100 seconds at the default
   of 300), so keep the instances' clocks synchronised. `mnemosyne/jobs:make-db-job-store` keeps
   jobs in the tables `aion_jobs` and `aion_job_runs`; it refuses to start with

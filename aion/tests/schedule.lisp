@@ -124,7 +124,18 @@
   (is (null (s:write-data nil)))
   (is (equal '(:a "b" 1 (2.5d0)) (s:read-data (s:write-data '(:a "b" 1 (2.5d0))))))
   (signals error (s:write-data (list (make-hash-table))))
-  (signals reader-error (s:read-data "#.(+ 1 2)") "READ-DATA does not evaluate"))
+  (signals reader-error (s:read-data "#.(+ 1 2)") "READ-DATA does not evaluate")
+  ;; A handler that PRIN1s the error where it is signalled, as fiveam does, can print it, rather
+  ;; than getting PRINT-NOT-READABLE from WITH-STANDARD-IO-SYNTAX's *PRINT-READABLY*.
+  (let ((printed nil))
+    (handler-case
+        (handler-bind ((reader-error
+                         (lambda (e)
+                           (setf printed (handler-case (prin1-to-string e)
+                                           (print-not-readable () :print-not-readable))))))
+          (s:read-data "(no-such-package-689::x)"))
+      (reader-error () nil))
+    (is (stringp printed))))
 
 ;;; --- the scheduler ----------------------------------------------------------------------------
 
@@ -234,6 +245,38 @@
               (is (= (+ +t0+ 1200) (s:stored-job-next-due (s:store-job store "j")))
                   "a retry leaves the next due time alone")
               (is (= 1 (car n))))))))))
+
+(test a-retry-whose-instance-dies-too-is-abandoned-and-not-retried
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (multiple-value-bind (dispatch box) (capture)
+      (declare (ignorable box))
+      (multiple-value-bind (f n) (counter)
+        ;; A starts the slot's run and dies; B retries it and dies too. Neither thunk runs.
+        (let ((a (s:make-scheduler store :clock clock :dispatch dispatch :lease-seconds 30))
+              (b (s:make-scheduler store :clock clock :dispatch dispatch :lease-seconds 30)))
+          (s:define-job a "j" f :schedule '(:every 600))
+          (s:define-job b "j" f :schedule '(:every 600))
+          (s:clock-advance clock 600)
+          (let ((first-run (first (s:tick a))))
+            (s:clock-advance clock 31)
+            (let ((retry (first (s:tick b))))
+              (is-true retry "the first abandoned run is retried")
+              (with-scheduler (c store clock :dispatch :inline :lease-seconds 30)
+                (s:define-job c "j" f :schedule '(:every 600))
+                (s:clock-advance clock 31)
+                (is (null (s:tick c)) "the abandoned retry is not retried")
+                (is (eq :abandoned (s:job-run-outcome (s:store-run store first-run))))
+                (is (eq :abandoned (s:job-run-outcome (s:store-run store retry))))
+                (is (= 2 (length (s:store-runs store "j"))) "no third run was started")
+                (let ((job (s:store-job store "j")))
+                  (is (null (s:stored-job-lease-holder job)) "the lease is freed")
+                  (is (null (s:stored-job-current-run job)))
+                  (is (= (+ +t0+ 1200) (s:stored-job-next-due job))
+                      "the job waits for its next slot"))
+                (is (null (s:tick c)) "and the next tick starts nothing either")
+                (s:clock-set clock (+ +t0+ 1200))
+                (is (= 1 (length (s:tick c))) "the next slot runs as usual")
+                (is (= 1 (car n)))))))))))
 
 (test a-live-instance-renews-its-lease
   (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
@@ -346,6 +389,24 @@
           "an instance that cannot run it does not take its lease")
       (signals s:unknown-job (s:run-now b "j")))))
 
+(test a-stored-job-that-cannot-be-read-is-left-alone-and-the-others-run
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (multiple-value-bind (f n) (counter)
+      (with-scheduler (a store clock :dispatch :inline :lease-seconds 300)
+        (s:define-job a "j" f :schedule '(:every 60))
+        ;; What a database store returns for a row whose arguments name a package that is gone.
+        (s:store-put-job store (s:make-stored-job :key "bad" :function-name "j"
+                                                  :schedule '(:every 60)
+                                                  :next-due +t0+ :updated-at +t0+
+                                                  :unreadable "READER-ERROR: no package"))
+        (s:clock-advance clock 60)
+        (is (= 1 (length (s:tick a))) "the readable job runs")
+        (is (= 1 (car n)))
+        (is (null (s:store-runs store "bad")) "the unreadable one does not")
+        (is (null (s:stored-job-lease-holder (s:store-job store "bad"))))
+        (is (= 60 (s:next-wake a)) "and does not make the driver tick every second")
+        (signals s:unreadable-job (s:run-now a "bad"))))))
+
 (test a-one-off-runs-once-and-is-removed
   (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)) (seen (list nil)))
     (with-scheduler (a store clock :dispatch :inline)
@@ -423,6 +484,21 @@
       (is (= 40 (s:next-wake a)))
       (s:clock-advance clock 45)
       (is (= 1 (s:next-wake a)) "an overdue job wakes it at once"))))
+
+(test next-wake-ignores-jobs-this-instance-cannot-run
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (with-scheduler (a store clock :dispatch :inline)
+      (s:define-job a "j" (counter) :schedule '(:every 40)))
+    (s:store-put-job store (s:make-stored-job :key "broken" :function-name "k"
+                                              :schedule '(:every -5) :next-due +t0+
+                                              :updated-at +t0+))
+    (with-scheduler (b store clock :dispatch :inline :lease-seconds 300)
+      ;; B runs "k" but not "j": "j" is overdue and unregistered here, "broken" is overdue and
+      ;; registered with a schedule nobody can run.
+      (s:define-job b "k" (counter))
+      (s:clock-advance clock 45)
+      (is (= 100 (s:next-wake b))
+          "an overdue job with no registered function here, or an unusable schedule, does not wake it every second"))))
 
 (test the-thread-driver-ticks-and-wakes
   (let* ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+))

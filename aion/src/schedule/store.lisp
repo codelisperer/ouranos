@@ -10,10 +10,12 @@
 (defstruct stored-job
   "A job as the store keeps it. KEY is unique; FUNCTION-NAME names the registered function that
 runs it; ARGS are a one-off job's arguments. NEXT-DUE is NIL when nothing is due (a one-off that
-has run). LEASE-HOLDER and LEASE-UNTIL are the lease; CURRENT-RUN is the run holding it."
+has run). LEASE-HOLDER and LEASE-UNTIL are the lease; CURRENT-RUN is the run holding it.
+UNREADABLE is NIL, or the reason a database store could not read the job's schedule or arguments
+back; the scheduler then reports the job once and leaves it alone."
   (key "" :type string)
   (function-name "" :type string)
-  schedule args next-due lease-holder lease-until current-run (updated-at 0))
+  schedule args next-due lease-holder lease-until current-run (updated-at 0) unreadable)
 
 (defstruct job-run
   "One run of a job. TRIGGER is :SCHEDULE, :CATCH-UP, :RETRY or :RUN-NOW. OUTCOME is :RUNNING,
@@ -50,6 +52,11 @@ when the job's NEXT-DUE equals EXPECTED-DUE, and only when its CURRENT-RUN equal
 (NIL for none); either may be :ANY, the default for EXPECTED-RUN. NEXT-DUE becomes the new next
 due time, unless it is :KEEP. A run the expired lease still names is marked :ABANDONED, finished
 at NOW. Returns the new :RUNNING JOB-RUN, with id RUN-ID and arguments ARGS."))
+
+(defgeneric store-abandon (store key &key now expected-run)
+  (:documentation "When the lease on job KEY has expired at NOW and its CURRENT-RUN is still
+EXPECTED-RUN, mark that run :ABANDONED, finished at NOW, and free the lease without starting a
+run; the job's NEXT-DUE is left as it is. One atomic step. Returns true when it changed."))
 
 (defgeneric store-advance (store key &key expected-due next-due)
   (:documentation "Set job KEY's next due time to NEXT-DUE when it is EXPECTED-DUE, without
@@ -98,8 +105,12 @@ cannot read."
   "The value TEXT was written from by WRITE-DATA; NIL for NIL. Never evaluates anything."
   (and text
        (with-standard-io-syntax
+         ;; *PRINT-READABLY* NIL: WITH-STANDARD-IO-SYNTAX makes it true, and a handler that prints
+         ;; a reader error signalled here (a test framework's, or a logger's) would otherwise get
+         ;; PRINT-NOT-READABLE instead of the error.
          (let ((*package* (find-package :keyword))
-               (*read-eval* nil))
+               (*read-eval* nil)
+               (*print-readably* nil))
            (values (read-from-string text))))))
 
 ;;; --- the in-memory store ---------------------------------------------------------------
@@ -174,6 +185,19 @@ contents end with the process, so it does not keep schedules across a redeploy."
                                  :outcome :running :args args)))
           (setf (gethash run-id (%runs store)) run)
           (copy-job-run run))))))
+
+(defmethod store-abandon ((store memory-job-store) key &key now expected-run)
+  (%with-store-lock (store)
+    (let ((job (gethash key (%jobs store))))
+      (when (and job expected-run
+                 (%lease-free-p job now)
+                 (equal expected-run (stored-job-current-run job)))
+        (let ((run (gethash expected-run (%runs store))))
+          (when (and run (eq :running (job-run-outcome run)))
+            (setf (job-run-outcome run) :abandoned (job-run-finished-at run) now)))
+        (setf (stored-job-lease-holder job) nil (stored-job-lease-until job) nil
+              (stored-job-current-run job) nil (stored-job-updated-at job) now)
+        t))))
 
 (defmethod store-advance ((store memory-job-store) key &key expected-due next-due)
   (%with-store-lock (store)

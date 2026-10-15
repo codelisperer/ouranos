@@ -23,13 +23,13 @@
    #:stored-job #:make-stored-job #:copy-stored-job #:stored-job-key
    #:stored-job-function-name #:stored-job-schedule #:stored-job-args #:stored-job-next-due
    #:stored-job-lease-holder #:stored-job-lease-until #:stored-job-current-run
-   #:stored-job-updated-at
+   #:stored-job-updated-at #:stored-job-unreadable
    #:job-run #:make-job-run #:copy-job-run #:job-run-id #:job-run-job-key #:job-run-holder
    #:job-run-trigger #:job-run-scheduled-for #:job-run-started-at #:job-run-finished-at
    #:job-run-outcome #:job-run-counts #:job-run-error #:job-run-args
    ;; the store protocol
    #:job-store #:store-jobs #:store-job #:store-put-job #:store-remove-job #:store-acquire
-   #:store-advance #:store-renew #:store-finish #:store-record-run #:store-runs #:store-run
+   #:store-abandon #:store-advance #:store-renew #:store-finish #:store-record-run #:store-runs #:store-run
    #:store-prune-runs
    #:memory-job-store #:make-memory-job-store
    #:write-data #:read-data
@@ -37,8 +37,10 @@
    #:scheduler #:make-scheduler #:scheduler-store #:scheduler-holder #:scheduler-lease-seconds
    #:define-job #:schedule-once #:tick #:run-now #:run-job #:start #:stop #:next-wake
    #:scheduler-stopped #:unknown-job #:unknown-job-key #:unreadable-job-args
+   #:unreadable-job #:unreadable-job-key #:unreadable-job-reason
    ;; the run context a job function receives
    #:run-context #:run-id #:run-key #:run-trigger #:run-scheduled-for #:run-local-date
    #:run-args #:note-item-error #:stop-requested-p
    ;; for drivers
-   #:scheduler-wake-function #:scheduler-driver-stop #:scheduler-clock-now))
+   #:scheduler-wake-function #:scheduler-driver-stop #:scheduler-clock-now
+   #:scheduler-stopping-p))

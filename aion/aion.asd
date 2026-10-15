@@ -582,7 +582,7 @@
 
 (defsystem "aion/schedule/uv/tests"
   :description "Tests for aion/schedule/uv. Requires a built libuv (scripts/build-libuv.lisp)."
-  :depends-on ("aion/schedule/uv" "aion/schedule" "fiveam")
+  :depends-on ("aion/schedule/uv" "aion/schedule" "aion/uv" "fiveam")  ; the tests stand in for aion/uv:make-timer
   :components ((:file "tests/schedule-uv"))
   :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
 

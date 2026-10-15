@@ -131,6 +131,27 @@
   (is (null (s:store-job store "once")) "the run that holds the lease removes the job")
   (is (eq :completed (s:job-run-outcome (s:store-run store "r2")))))
 
+(defun %check-abandon (store)
+  (s:store-put-job store (%job "j"))
+  (%acquire store "j" "h1" +t0+ :run-id "r1")
+  (is (null (s:store-abandon store "j" :now (+ +t0+ 10) :expected-run "r1"))
+      "a live lease is not abandoned")
+  (is (null (s:store-abandon store "j" :now (+ +t0+ 31) :expected-run "r-other"))
+      "nor an expired one whose run is not the one the caller read")
+  (is (null (s:store-abandon store "j" :now (+ +t0+ 31) :expected-run nil))
+      "nor when the caller read no run")
+  (is-true (s:store-abandon store "j" :now (+ +t0+ 31) :expected-run "r1"))
+  (let ((run (s:store-run store "r1")))
+    (is (eq :abandoned (s:job-run-outcome run)))
+    (is (eql (+ +t0+ 31) (s:job-run-finished-at run))))
+  (let ((job (s:store-job store "j")))
+    (is (null (s:stored-job-lease-holder job)) "the lease is freed")
+    (is (null (s:stored-job-current-run job)))
+    (is (eql (+ +t0+ 60) (s:stored-job-next-due job)) "the next due time is left alone"))
+  (is (eql 1 (length (s:store-runs store "j"))) "no run is started")
+  (is (null (s:store-abandon store "j" :now (+ +t0+ 32) :expected-run "r1"))
+      "a second abandon changes nothing"))
+
 (defun %check-advance (store)
   (s:store-put-job store (%job "j"))
   (is (null (s:store-advance store "j" :expected-due 5 :next-due 6)))
@@ -167,6 +188,6 @@
   "Run the store protocol's checks, each against a fresh store from MAKE-STORE, a function of no
 arguments."
   (dolist (check (list #'%check-put #'%check-data #'%check-acquire #'%check-renew-and-finish
-                       #'%check-takeover #'%check-remove-on-finish #'%check-advance
+                       #'%check-takeover #'%check-remove-on-finish #'%check-abandon #'%check-advance
                        #'%check-runs-and-prune))
     (funcall check (funcall make-store))))

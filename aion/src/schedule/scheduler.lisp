@@ -38,6 +38,13 @@
              (format s "aion/schedule: a one-off job's arguments must be data that can be written and read back (numbers, strings, symbols, lists), and ~S cannot."
                      (unreadable-job-args-args c)))))
 
+(define-condition unreadable-job (error)
+  ((key :initarg :key :reader unreadable-job-key)
+   (reason :initarg :reason :reader unreadable-job-reason))
+  (:report (lambda (c s)
+             (format s "aion/schedule: the stored job ~S cannot be read back from its store (~A)."
+                     (unreadable-job-key c) (unreadable-job-reason c)))))
+
 (defparameter *error-text-limit* 1000
   "The longest error text a run keeps. The log line keeps only the condition's type.")
 
@@ -91,6 +98,10 @@ this instance in leases and runs; it defaults to the host name and a fresh id."
                  :created-at (clock-now clock)))
 
 (defun scheduler-clock-now (scheduler) (clock-now (%clock scheduler)))
+
+(defun scheduler-stopping-p (scheduler)
+  "True once STOP has begun on SCHEDULER. A driver refuses to start then."
+  (%stopping scheduler))
 
 (defmacro %with-lock ((scheduler) &body body)
   `(sb-thread:with-recursive-lock ((%lock ,scheduler)) ,@body))
@@ -330,6 +341,18 @@ not this instance's to take. Signals SCHEDULER-STOPPED once STOP has begun."
       (%report-once scheduler job "aion/schedule: a stored job's schedule cannot be read")
       nil)))
 
+(defun %runnable-here-p (scheduler job)
+  "True when this instance could run JOB: it was read back, its function is registered here, and
+its schedule is usable. Reports the first failure once."
+  (cond ((stored-job-unreadable job)
+         (%report-once scheduler job "aion/schedule: a stored job cannot be read back from its store")
+         nil)
+        ((not (%with-lock (scheduler)
+                (gethash (stored-job-function-name job) (%functions scheduler))))
+         (%report-once scheduler job "aion/schedule: a stored job names no registered function")
+         nil)
+        (t (%usable-schedule-p scheduler job))))
+
 (defun %running-locally-p (scheduler key)
   (%with-lock (scheduler) (nth-value 1 (gethash key (%running scheduler)))))
 
@@ -355,11 +378,7 @@ and move the next due time past now."
   (let ((key (stored-job-key job))
         (due (stored-job-next-due job)))
     (cond
-      ((not (%with-lock (scheduler)
-              (gethash (stored-job-function-name job) (%functions scheduler))))
-       (%report-once scheduler job "aion/schedule: a stored job names no registered function")
-       nil)
-      ((not (%usable-schedule-p scheduler job)) nil)
+      ((not (%runnable-here-p scheduler job)) nil)
       ((%running-locally-p scheduler key)
        (when (and due (<= due now)) (%skip scheduler job now))
        nil)
@@ -370,11 +389,22 @@ and move the next due time past now."
        ;; it since, this acquire changes nothing. The retry gets the abandoned run's slot and
        ;; arguments, which RUN-NOW may have given.
        (let ((old (store-run (scheduler-store scheduler) (stored-job-current-run job))))
-         (%start-run scheduler job :retry :expected-due due
-                                          :expected-run (stored-job-current-run job)
-                                          :next-due :keep
-                                          :scheduled-for (and old (job-run-scheduled-for old))
-                                          :args (if old (job-run-args old) (stored-job-args job)))))
+         (cond
+           ;; A slot gets one retry. A retry whose instance died too is abandoned and not tried
+           ;; again, so a job that kills its process cannot take down instance after instance.
+           ;; The job's next due time is already the following slot, and stays.
+           ((and old (eq :retry (job-run-trigger old)))
+            (when (store-abandon (scheduler-store scheduler) key
+                                 :now now :expected-run (stored-job-current-run job))
+              (log:warn "aion/schedule: a retried run was abandoned too, and is not retried again"
+                        :job key :run-id (stored-job-current-run job)))
+            nil)
+           (t
+            (%start-run scheduler job :retry :expected-due due
+                                             :expected-run (stored-job-current-run job)
+                                             :next-due :keep
+                                             :scheduled-for (and old (job-run-scheduled-for old))
+                                             :args (if old (job-run-args old) (stored-job-args job)))))))
       ((and due (<= due now))
        (%start-run scheduler job (if (< due (%created-at scheduler)) :catch-up :schedule)
                    :expected-due due :expected-run nil
@@ -418,11 +448,15 @@ instance holds expires, but at least 1 and at most a third of the lease, so this
 leases are renewed in time and jobs written by other instances are noticed."
   (let* ((cap (max 1 (floor (scheduler-lease-seconds scheduler) 3)))
          (now (scheduler-clock-now scheduler))
-         (jobs (handler-case (store-jobs (scheduler-store scheduler))
-                 (error () (return-from next-wake cap)))))
+         ;; A job this instance cannot run counts for nothing here: its due time stays in the
+         ;; past, and counting it would make the driver tick every second until someone
+         ;; removed it.
+         (jobs (remove-if-not (lambda (job) (%runnable-here-p scheduler job))
+                              (handler-case (store-jobs (scheduler-store scheduler))
+                                (error () (return-from next-wake cap))))))
+    (when (null jobs) (return-from next-wake cap))
     (max 1 (min cap
                 (loop for job in jobs
-                      initially (when (null jobs) (return cap))
                       for until = (stored-job-lease-until job)
                       for due = (stored-job-next-due job)
                       minimize (cond ((and due (%running-locally-p scheduler (stored-job-key job)))
@@ -441,6 +475,8 @@ leases are renewed in time and jobs written by other instances are noticed."
   (when (%stopping scheduler) (error 'scheduler-stopped))
   (let ((job (store-job (scheduler-store scheduler) key)))
     (unless job (error 'unknown-job :key key))
+    (when (stored-job-unreadable job)
+      (error 'unreadable-job :key key :reason (stored-job-unreadable job)))
     (unless (%with-lock (scheduler)
               (gethash (stored-job-function-name job) (%functions scheduler)))
       (error 'unknown-job :key (stored-job-function-name job) :what "registered job function"))

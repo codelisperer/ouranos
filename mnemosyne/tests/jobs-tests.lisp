@@ -89,7 +89,7 @@ MAKE-DB-JOB-STORE's keys."
     (jobs:ensure-schema store)
     (is (null (s:store-jobs store)) "and creating them twice is harmless")))
 
-(backend-test two-schedulers-on-one-database-run-a-slot-once (make-store)
+(backend-test two-schedulers-ticking-in-turn-on-one-database-run-a-slot-once (make-store)
   (let* ((store (funcall make-store :ensure t))
          (clock (s:make-manual-clock 3990000000))
          (n (list 0))
@@ -110,6 +110,31 @@ MAKE-DB-JOB-STORE's keys."
              (is (equal '(:items 2) (s:job-run-counts run)))))
       (s:stop a :timeout 5)
       (s:stop b :timeout 5))))
+
+(backend-test a-row-that-cannot-be-read-costs-only-its-own-job (make-store)
+  (let* ((store (funcall make-store :ensure t))
+         (clock (s:make-manual-clock 3990000000))
+         (n (list 0))
+         (a (s:make-scheduler store :clock clock :dispatch :inline)))
+    (unwind-protect
+         (progn
+           (s:define-job a "nightly" (lambda (ctx) (declare (ignore ctx)) (incf (car n)) nil)
+                         :schedule '(:every 60))
+           ;; Arguments naming a package this image does not have, as after a redeploy that
+           ;; removed it.
+           (conn:exec (jobs::store-source store)
+                      (format nil "INSERT INTO ~A (job_key, function_name, schedule, args, next_due, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+                              (jobs::jobs-table store))
+                      "gone" "nightly" "(:EVERY 60)" "(NO-SUCH-PACKAGE-689::X)"
+                      3990000000 3990000000)
+           (let ((bad (find "gone" (s:store-jobs store) :key #'s:stored-job-key :test #'equal)))
+             (is-true bad "STORE-JOBS still returns every row")
+             (is (stringp (s:stored-job-unreadable bad)) "with the unreadable one marked"))
+           (s:clock-advance clock 60)
+           (is (= 1 (length (s:tick a))) "and a tick runs the readable job")
+           (is (= 1 (car n)))
+           (is (null (s:store-runs store "gone"))))
+      (s:stop a :timeout 5))))
 
 (test the-table-names-are-checked
   (signals error (jobs:jobs-ddl :jobs-table "jobs; DROP TABLE x"))

@@ -15,13 +15,24 @@
 
 (in-package #:aion/schedule/uv)
 
+(defun %end-loop (loop thread)
+  "Stop LOOP's thread, wait for it to end however long that takes, then close LOOP. Only for a
+loop whose thread has nothing long left to do: closing frees the memory a callback still running
+on the thread would use, so the loop is never closed before the thread has ended (#694)."
+  (uv:stop-loop-thread loop :timeout 0)
+  (sb-thread:join-thread thread :default nil)
+  (uv:close-loop loop))
+
 (defun start (scheduler)
   "Tick SCHEDULER once on the calling thread, then from a libuv timer on a loop and loop thread of
-its own, until S:STOP. Returns SCHEDULER."
+its own, until S:STOP. Returns SCHEDULER. Signals an error, and leaves no driver installed, when
+the loop thread cannot create the timer."
+  (when (s:scheduler-stopping-p scheduler) (error 's:scheduler-stopped))
   (when (s:scheduler-driver-stop scheduler)
     (error "aion/schedule/uv: this scheduler already has a driver."))
   (let* ((loop (uv:make-loop))
          (timer nil)
+         (failure nil)
          (thread nil)
          (ready (sb-thread:make-semaphore :name "aion/schedule/uv ready")))
     (labels ((tick-once ()
@@ -42,23 +53,33 @@ its own, until S:STOP. Returns SCHEDULER."
       (setf thread (uv:start-loop-thread loop :name "aion/schedule/uv loop"))
       (uv:submit loop (lambda ()
                         (unwind-protect
-                             (progn (setf timer (uv:make-timer loop #'fire))
-                                    (uv:start-timer timer :after (delay-ms)))
+                             (handler-case
+                                 (let ((tm (uv:make-timer loop #'fire)))
+                                   (uv:start-timer tm :after (delay-ms))
+                                   (setf timer tm))
+                               (error (e) (setf failure e)))
                           (sb-thread:signal-semaphore ready))))
-      (unless (sb-thread:wait-on-semaphore ready :timeout 10)
-        (uv:close-loop loop)
-        (error "aion/schedule/uv: the loop thread did not start the timer within 10 seconds."))
+      ;; No timeout that closes the loop: DELAY-MS reads the store, which can be slow, and the
+      ;; loop must not be closed while its thread may still be in it (#694). The wait ends when
+      ;; the thread has created the timer or failed to, or when the thread itself has ended.
+      (loop until (sb-thread:wait-on-semaphore ready :timeout 1)
+            unless (sb-thread:thread-alive-p thread)
+              do (setf failure (or failure "the loop thread ended before it created the timer"))
+                 (return))
+      (when failure
+        (%end-loop loop thread)
+        (error "aion/schedule/uv: the driver's timer could not be started: ~A" failure))
       (setf (s:scheduler-wake-function scheduler) #'wake
             (s:scheduler-driver-stop scheduler)
             ;; Ends the driver; true once the loop thread has ended, within SECONDS.
             (lambda (seconds)
               (setf (s:scheduler-wake-function scheduler) nil)
-              (uv:stop-loop-thread loop :timeout seconds)
-              ;; STOP-LOOP-THREAD returns after its timeout whether or not the thread ended,
-              ;; and a tick on that thread may be in a long database call. The loop is closed
-              ;; only once the thread has ended, because closing frees the memory the thread's
-              ;; timer callback would use. Until then the loop is kept, and a later S:STOP
-              ;; waits for the thread again.
+              ;; Asks the loop to stop and returns at once; the join below is the only wait, so
+              ;; the whole call stays within SECONDS. A tick on the thread may be in a long
+              ;; database call, and the loop is closed only once the thread has ended, because
+              ;; closing frees the memory the thread's timer callback would use. Until then the
+              ;; loop is kept, and a later S:STOP waits for the thread again.
+              (uv:stop-loop-thread loop :timeout 0)
               (sb-thread:join-thread thread :timeout seconds :default nil)
               (unless (sb-thread:thread-alive-p thread)
                 (uv:close-loop loop)
