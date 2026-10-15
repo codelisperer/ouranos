@@ -16,9 +16,15 @@ its tag.
 
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
-  `SBCL_SHA256_ARM64_WINDOWS` values, so `scripts/setup.sh` and `scripts/setup.ps1` install
-  2.6.9 and refuse a 2.6.8 download. The Linux binary still needs glibc 2.38. After updating,
-  clear `~/.cache/common-lisp` and rebuild `bin/cons`, which refuses to run under an SBCL
+  `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
+  `scripts/setup.ps1` gets 2.6.9 and refuses a 2.6.8 download. The Linux binary still needs
+  glibc 2.38. A machine that already has SBCL is not upgraded by every script:
+  - Linux: re-running `scripts/setup.sh` installs 2.6.9 alongside the older one.
+  - macOS: `setup.sh` leaves Homebrew's SBCL alone; run `brew upgrade sbcl`.
+  - Windows: `setup.ps1` leaves an installed SBCL alone. Install the 2.6.9 MSI over it, or
+    uninstall the old one and re-run `setup.ps1`.
+
+  Then clear `~/.cache/common-lisp` and rebuild `bin/cons`, which refuses to run under an SBCL
   other than the one that built it. An app that pins SBCL in its own CI or Dockerfile moves
   that pin to 2.6.9 to build against the same compiler the framework is tested on.
 
