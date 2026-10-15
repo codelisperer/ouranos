@@ -368,10 +368,11 @@ The accounts are unconfirmed until the documented UPDATE marks them."
                (let* ((a (auth:make-db-auth c :dialect :postgres :table users :events-table events
                                               :tokens-table tokens :email-events-table email-events
                                               :ensure t :clock #'%clock))
-                      (id (%new-user a "pg@x.com")))
-                 (is (auth:email-confirmed-p (auth:confirm-email a (auth:issue-confirmation a id))))
-                 (is (eq :used (%token-reason
-                                (lambda () (auth:confirm-email a (auth:issue-confirmation a id))))))
+                      (id (%new-user a "pg@x.com"))
+                      (confirm (auth:issue-confirmation a id)))
+                 (is (auth:email-confirmed-p (auth:confirm-email a confirm)))
+                 (is (eq :used (%token-reason (lambda () (auth:confirm-email a confirm))))
+                     "the same token a second time")
                  (let ((other (%new-user a "pg-taken@x.com")))
                    (declare (ignore other))
                    (signals auth:duplicate-email
