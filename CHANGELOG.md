@@ -932,6 +932,14 @@ its tag.
 
 ### Fixed
 
+- **scripts/setup.ps1: moving to a new Coalton pin fetches it, instead of stopping** (#697).
+  When the Coalton checkout did not contain the pinned commit yet, which is the usual state
+  after `coalton.pin` changes, `git rev-parse` reported an unknown revision and Windows
+  PowerShell treated that message as a terminating error, so `setup.ps1` exited 1 before it
+  fetched. `setup.ps1 -Check` stopped the same way instead of reporting the pin as missing.
+  Both now resolve the commit through `Resolve-GitCommit`, which returns nothing for a
+  revision git cannot resolve. `scripts/setup.sh` was not affected.
+
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
   `:result-stored`, `:results-cleared`, `:context-trimmed`, `:context-overflow`, `:delegate`,

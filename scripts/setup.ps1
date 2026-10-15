@@ -316,13 +316,25 @@ function Set-QlDist {
 }
 
 # --- 3. Coalton -------------------------------------------------------------
+# The commit REV names in the checkout at DIR, or $null when git cannot resolve it. A pin that
+# the checkout has not fetched yet is the ordinary case on an upgrade, and it must reach the
+# fetch below. Under the script's ErrorActionPreference 'Stop', Windows PowerShell turns git's
+# "unknown revision" on stderr into a terminating error even with 2>$null, so the setup stopped
+# before the fetch (#697, a CI runner whose cached checkout predates the pin).
+function Resolve-GitCommit($dir, $rev) {
+  $ErrorActionPreference = 'Continue'
+  $out = (& git -C $dir rev-parse --verify --quiet "$rev^{commit}" 2>$null)
+  if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
+  return ([string]$out).Trim()
+}
+
 function Install-Coalton {
   if (Test-Path (Join-Path $CoaltonDir '.git')) {
     # coalton.pin carries a SHORT sha, so compare RESOLVED commit ids -- a string compare
     # against HEAD's full sha never matches and would re-checkout on every run.
-    $current = (& git -C $CoaltonDir rev-parse HEAD 2>$null).Trim()
-    $want = (& git -C $CoaltonDir rev-parse "$CoaltonRef^{commit}" 2>$null)
-    if ($want -and $current -eq $want.Trim()) { Note "Coalton already at the pinned $CoaltonRef"; return }
+    $current = Resolve-GitCommit $CoaltonDir 'HEAD'
+    $want = Resolve-GitCommit $CoaltonDir $CoaltonRef
+    if ($want -and $current -eq $want) { Note "Coalton already at the pinned $CoaltonRef"; return }
     Info "fetching Coalton -> $CoaltonRef"
     & git -C $CoaltonDir fetch --quiet origin
   } else {
@@ -609,11 +621,12 @@ if ($Check) {
   # Checking the directory EXISTS is not enough: a checkout at the wrong commit is the exact
   # drift coalton.pin exists to catch, and it stays invisible until something behaves oddly.
   if (Test-Path (Join-Path $CoaltonDir '.git')) {
-    $head = (& git -C $CoaltonDir rev-parse HEAD 2>$null)
-    $want = (& git -C $CoaltonDir rev-parse "$CoaltonRef^{commit}" 2>$null)
-    if ($want -and $head -and $head.Trim() -eq $want.Trim()) { Pass "Coalton at $CoaltonDir (pinned $CoaltonRef)" }
+    $head = Resolve-GitCommit $CoaltonDir 'HEAD'
+    $want = Resolve-GitCommit $CoaltonDir $CoaltonRef
+    if ($want -and $head -and $head -eq $want) { Pass "Coalton at $CoaltonDir (pinned $CoaltonRef)" }
     elseif (-not $want) { Miss "Coalton pin $CoaltonRef not present in $CoaltonDir" '.\scripts\setup.ps1   (fetches; or the remote is wrong)' }
-    else { Miss "Coalton is at $($head.Trim().Substring(0,8)), pin says $CoaltonRef" '.\scripts\setup.ps1' }
+    elseif (-not $head) { Miss "Coalton checkout at $CoaltonDir has no readable HEAD" '.\scripts\setup.ps1' }
+    else { Miss "Coalton is at $($head.Substring(0,8)), pin says $CoaltonRef" '.\scripts\setup.ps1' }
   }
   else { Miss 'Coalton checkout' '.\scripts\setup.ps1' }
   Write-Host "      (deep check -- which Coalton actually LOADS: sbcl --script scripts/check-coalton.lisp)" -ForegroundColor DarkGray
