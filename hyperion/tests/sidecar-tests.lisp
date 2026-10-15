@@ -39,7 +39,7 @@ read them from SB-EXT:*POSIX-ARGV*."
   #+win32 (let ((out (uiop:run-program (list "tasklist" "/FI" (format nil "PID eq ~D" pid) "/NH")
                                        :output :string :ignore-error-status t)))
             (and (search (format nil " ~D " pid) out) t))
-  #-win32 (and (sb-unix:unix-kill pid 0) t))
+  #-win32 (eql 0 (sb-unix:unix-kill pid 0)))
 
 (defun %ends-within-p (pid seconds)
   (loop repeat (* seconds 4) while (%pid-alive-p pid) do (sleep 0.25))
@@ -370,8 +370,12 @@ still runs the recorded program is ended; a record whose image still runs is lef
              (record dead-owner orphan)
              (record (sb-unix:unix-getpid) kept))
            (sc::%reap-leftovers)
-           (is-true (%ends-within-p (sb-ext:process-pid orphan) 5) "the orphan is still running")
-           (is-true (%pid-alive-p (sb-ext:process-pid kept)) "a sidecar of a running image was ended"))
+           ;; Both are this image's children, so a killed one stays a zombie until it is reaped,
+           ;; and kill(pid, 0) still finds it. PROCESS-ALIVE-P reaps.
+           (is-true (loop repeat 20 while (sb-ext:process-alive-p orphan) do (sleep 0.25)
+                          finally (return (not (sb-ext:process-alive-p orphan))))
+                    "the orphan is still running")
+           (is-true (sb-ext:process-alive-p kept) "a sidecar of a running image was ended"))
       (dolist (p (list orphan kept))
         (ignore-errors (sb-ext:process-kill p 9))
         (ignore-errors (sb-ext:process-wait p))

@@ -177,6 +177,7 @@ replacing any of the same name. NIL, meaning inherit it unchanged, when ALIST is
 (defun %spawn (name path arguments environment directory)
   "Start PATH with ARGUMENTS. Returns the platform's process object, whose standard output and
 standard error are character streams."
+  #-win32 (declare (ignorable name))
   #+win32
   (multiple-value-bind (process failure)
       (aion/windows:spawn-in-job path arguments
@@ -260,7 +261,9 @@ directory. On Windows none are written.")
 
 #-win32
 (defun %pid-alive-p (pid)
-  (and (plusp pid) (sb-unix:unix-kill pid 0) t))
+  "Whether a process PID exists. SB-UNIX:UNIX-KILL returns 0 when it does and -1 when it does not,
+and both are true in Lisp, so the result is compared with 0."
+  (and (plusp pid) (eql 0 (sb-unix:unix-kill pid 0))))
 
 #-win32
 (defun %command-of (pid)
