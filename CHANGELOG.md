@@ -256,10 +256,13 @@ its tag.
   recorded with its trigger, outcome (`:completed`, `:completed-with-errors`, `:failed`,
   `:skipped`, `:abandoned`), the counts plist the job returned, and an error text; a job calls
   `note-item-error` for an item that failed without failing the run. `run-now` and `run-job`
-  run a job off its schedule, and start nothing while this instance is still running the job.
+  run a job off its schedule, and start nothing while this instance is still running the job;
+  when a run of the job is still starting here, `run-now` waits for it and returns its id. Each
+  run gets its own copy of the job's arguments.
   `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the run log. Drive the
   scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv timer), and end it
-  with `stop`. **A job must tolerate running twice**: when an instance dies
+  with `stop`, which returns `:timed-out` while a lease renewal an earlier `stop` started is
+  still using the store. **A job must tolerate running twice**: when an instance dies
   during a run, the run is marked `:abandoned` once its lease expires and another instance runs
   the job again (trigger `:retry`), once per slot: a retry that is abandoned too is not retried.
   A stored job that cannot be read back is returned with `stored-job-unreadable` set, logged

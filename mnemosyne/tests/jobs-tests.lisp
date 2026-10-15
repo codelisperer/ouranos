@@ -136,6 +136,19 @@ MAKE-DB-JOB-STORE's keys."
            (is (null (s:store-runs store "gone"))))
       (s:stop a :timeout 5))))
 
+(backend-test a-one-off-whose-run-changes-its-arguments-is-still-removed (make-store)
+  (let* ((store (funcall make-store :ensure t))
+         (clock (s:make-manual-clock 3990000000))
+         (a (s:make-scheduler store :clock clock :dispatch :inline)))
+    (unwind-protect
+         (progn
+           (s:define-job a "change" (lambda (ctx x) (declare (ignore ctx)) (setf (first x) 2) nil))
+           (s:schedule-once a "change" :key "once" :at 3990000000 :args (list (list 1)))
+           (is (= 1 (length (s:tick a))))
+           (is (null (s:store-job store "once")) "the completed one-off is removed")
+           (is (equal '(:completed) (mapcar #'s:job-run-outcome (s:store-runs store "once")))))
+      (s:stop a :timeout 5))))
+
 (backend-test registering-again-recovers-a-row-whose-arguments-could-not-be-read (make-store)
   (let* ((store (funcall make-store :ensure t))
          (clock (s:make-manual-clock 3990000000))

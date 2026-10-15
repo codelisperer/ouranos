@@ -31,7 +31,9 @@ apps. Design and the maintainer's rulings: issue #689.
 A job function takes the run context and the job's arguments. It returns a plist of counts,
 which the run log keeps, or NIL. It calls `note-item-error` for each item that failed; the run
 then finishes `:completed-with-errors` with the summaries in its error text, instead of failing.
-A long job may poll `stop-requested-p` and return early when the app is shutting down.
+A long job may poll `stop-requested-p` and return early when the app is shutting down. Each run
+gets its own copy of the job's arguments, so a job function that changes them changes neither the
+stored job nor the arguments a later run gets.
 
 Schedules are data:
 
@@ -59,7 +61,9 @@ arguments are still the ones the run started from.
 already in progress; `run-job` runs it on the calling thread and returns the finished run. Both
 leave the schedule alone. Neither starts a run of a job this instance is still running, even when
 that run has outlived its lease: `run-now` returns the running run's id with `:already-running`,
-and `run-job` returns `nil`.
+and `run-job` returns `nil`. When another call has started a run of the job on this instance and
+the store has not yet recorded it, `run-now` waits until it has, and returns that run's id; if
+that run did not start, `run-now` tries to start one itself.
 
 `start` ticks once, then drives the scheduler from a thread; `aion/schedule/uv:start` drives it
 from a libuv timer on a loop of its own. `stop` starts no more runs, stops the driver, and waits
@@ -68,6 +72,9 @@ returns `:stopped`, or `:timed-out` with the keys of the jobs still running; a d
 a tick at the timeout is left in place, and a later `stop` waits for it again. A lease renewal
 that is waiting on the store when the timeout passes is left to finish on its own thread, so
 `stop` returns at its timeout even when a database renewal is waiting for a connection or a lock.
+A later `stop` waits for that renewal too, within its own timeout, even when no run is left, and
+returns `:timed-out` with no keys while the renewal is still going, so an app does not close the
+database under it.
 A `stop` that begins while `start` is still in its first tick waits for that tick, within its
 timeout, and `start` then starts no driver.
 

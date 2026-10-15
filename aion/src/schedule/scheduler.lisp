@@ -305,29 +305,52 @@ the run log."
                                                      :condition (type-of e)))))
     (%finish scheduler context job outcome counts error)))
 
-(defun %admit (scheduler key)
+(defun %copy-data (value)
+  "A copy of VALUE that shares no conses, strings or vectors with it. Other objects are shared."
+  (typecase value
+    (cons (let* ((head (list nil)) (tail head))
+            (loop for rest = value then (cdr rest)
+                  while (consp rest)
+                  do (setf tail (setf (cdr tail) (list (%copy-data (car rest)))))
+                  finally (setf (cdr tail) (%copy-data rest)))
+            (cdr head)))
+    (string (copy-seq value))
+    (vector (let ((copy (copy-seq value)))
+              (if (eq t (array-element-type value)) (map-into copy #'%copy-data copy) copy)))
+    (t value)))
+
+(defun %admit (scheduler key &key wait)
   "Admit a run of job KEY: count it as starting, so STOP waits for it, and claim KEY, so no second
 run of it starts here until this one has finished. Returns true, or NIL and the id of the run
-this instance already has of KEY (NIL while that run is still starting). Signals
-SCHEDULER-STOPPED when STOP has begun. Checked under the scheduler's lock, which STOP takes to
-set its flag."
+this instance already has of KEY. While that run is still starting it has no id yet: with WAIT,
+%ADMIT waits until it has started, and returns its id, or until it did not start, and then tries
+to claim KEY again; without WAIT it returns NIL and NIL. Signals SCHEDULER-STOPPED when STOP has
+begun. Checked under the scheduler's lock, which STOP takes to set its flag."
   (%with-lock (scheduler)
-    (when (%stopping scheduler) (error 'scheduler-stopped))
-    (if (gethash key (%claimed scheduler))
-        (values nil (gethash key (%running scheduler)))
-        (progn (setf (gethash key (%claimed scheduler)) t)
+    (loop
+      (when (%stopping scheduler) (error 'scheduler-stopped))
+      (let ((run (gethash key (%running scheduler))))
+        (cond ((not (gethash key (%claimed scheduler)))
+               (setf (gethash key (%claimed scheduler)) t)
                (incf (%starting scheduler))
-               t))))
+               (return t))
+              ((or run (not wait)) (return (values nil run)))
+              ;; %START-RUN broadcasts on %IDLE both when the run starts and when it does not.
+              (t (sb-thread:condition-wait (%idle scheduler) (%lock scheduler))))))))
 
 (defun %start-run (scheduler job trigger &key expected-due (expected-run :any) next-due
-                                             scheduled-for args (dispatch (%dispatch scheduler)))
+                                             scheduled-for args (dispatch (%dispatch scheduler))
+                                             wait)
   "Take JOB's lease and start a run with TRIGGER. Returns the run id; or NIL when the lease was not
 this instance's to take; or NIL and the id of this instance's own run of JOB when it has one
 already, which may have outlived its lease. Every trigger comes through here, so that check
-covers scheduled runs, retries and operator calls alike. Signals SCHEDULER-STOPPED once STOP has
-begun."
+covers scheduled runs, retries and operator calls alike. WAIT is %ADMIT's, for a caller that
+needs the id of a run that is still starting. Signals SCHEDULER-STOPPED once STOP has begun.
+
+The run gets its own copy of ARGS, so a job function that changes its arguments changes neither
+the stored job nor the JOB that %FINISH compares with the stored job."
   (let ((key (stored-job-key job)))
-    (multiple-value-bind (admitted local-run) (%admit scheduler key)
+    (multiple-value-bind (admitted local-run) (%admit scheduler key :wait wait)
       (unless admitted (return-from %start-run (values nil local-run)))
       (let ((starting t))
         (unwind-protect
@@ -349,7 +372,7 @@ begun."
                                  :local-date (and scheduled-for
                                                   (%local-date-of-slot (stored-job-schedule job)
                                                                        scheduled-for))
-                                 :args args :scheduler scheduler)))
+                                 :args (%copy-data args) :scheduler scheduler)))
                    ;; From here the claim is the run's, and %FINISH gives it up.
                    (%with-lock (scheduler)
                      (setf (gethash key (%running scheduler)) run-id
@@ -527,12 +550,14 @@ leases are renewed in time and jobs written by other instances are noticed."
   "Run the stored job KEY now, off its schedule, through the same lease and run log; its next due
 time does not change. Returns (VALUES run-id :STARTED), or (VALUES the-current-run-id
 :ALREADY-RUNNING) when an instance holds its lease or this instance is still running the job,
-even past its lease. The run happens on the pool; poll (STORE-RUN store run-id) for its outcome.
-ARGS replace the stored arguments for this run."
+even past its lease. When a run of KEY is still starting on this instance, RUN-NOW waits until
+it has started and returns its id, or until it did not start and then tries itself. The run
+happens on the pool; poll (STORE-RUN store run-id) for its outcome. ARGS replace the stored
+arguments for this run."
   (let ((job (%job-for-run-now scheduler key)))
     (multiple-value-bind (id local-run)
         (%start-run scheduler job :run-now :expected-due :any :next-due :keep
-                    :args (if args-p args (stored-job-args job)))
+                    :args (if args-p args (stored-job-args job)) :wait t)
       (if id
           (values id :started)
           (values (or local-run
@@ -545,7 +570,8 @@ ARGS replace the stored arguments for this run."
 an instance holds its lease or this instance is still running the job."
   (let* ((job (%job-for-run-now scheduler key))
          (id (%start-run scheduler job :run-now :expected-due :any :next-due :keep
-                         :args (if args-p args (stored-job-args job)) :dispatch :inline)))
+                         :args (if args-p args (stored-job-args job)) :dispatch :inline
+                         :wait t)))
     (and id (store-run (scheduler-store scheduler) id))))
 
 ;;; --- stopping ------------------------------------------------------------------------------
@@ -561,6 +587,10 @@ leaving the caller's WITH-MUTEX to release a mutex it does not hold signals an e
 (defun %busy-p (scheduler)
   (%with-lock (scheduler)
     (or (plusp (%starting scheduler)) (plusp (hash-table-count (%running scheduler))))))
+
+(defun %renewing-p (scheduler)
+  (let ((thread (%with-lock (scheduler) (%renewal scheduler))))
+    (and thread (sb-thread:thread-alive-p thread))))
 
 (defun %renew-within (scheduler seconds)
   "Renew this instance's leases, waiting at most SECONDS for the store. A database renewal can wait
@@ -583,7 +613,9 @@ instead of starting a second."
   "Stop SCHEDULER: start no more runs, make STOP-REQUESTED-P true, stop its driver, and wait for
 the runs in progress to finish, renewing their leases meanwhile. All of it within TIMEOUT
 seconds. Returns :STOPPED, or (VALUES :TIMED-OUT keys) naming the jobs still running; KEYS is
-empty when it was the driver that did not end in time, and a later STOP tries it again. Runs
+empty when it was the driver, or a lease renewal, that did not end in time, and a later STOP
+waits for it again. A renewal an earlier STOP left going is waited for too, because it still
+uses the store, even when no run is left. Runs
 still going keep their leases, which expire once the process has gone, and another instance
 then runs them again."
   (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
@@ -606,8 +638,11 @@ then runs them again."
                      (%wait (%idle scheduler) (%lock scheduler) (min slice (left)))))
                  (when (and (%busy-p scheduler) (plusp (left)))
                    (%renew-within scheduler (left)))))
+      (let ((renewal (%with-lock (scheduler) (%renewal scheduler))))
+        (when (and renewal (sb-thread:thread-alive-p renewal))
+          (sb-thread:join-thread renewal :timeout (max 0.001 (left)) :default nil)))
       (let ((still (running-keys)))
-        (cond ((or still (%busy-p scheduler)) (values :timed-out still))
+        (cond ((or still (%busy-p scheduler) (%renewing-p scheduler)) (values :timed-out still))
               (t (when (and (%own-pool scheduler) (%pool scheduler))
                    (pool:stop-pool (%pool scheduler)))
                  :stopped))))))
