@@ -23,7 +23,9 @@
                     (#:conn   #:mnemosyne/conn)
                     (#:schema #:mnemosyne/schema)
                     (#:id     #:mnemosyne/id)
-                    (#:bt     #:bordeaux-threads))
+                    (#:bt     #:bordeaux-threads)
+                    (#:rnd    #:aion/random)
+                    (#:session #:hyperion/session))
   (:documentation
    "A mnemosyne-backed identity store: users (email + optional phone), PBKDF2 password
     hashing, a temp-password flag (forced change at first login), and a serialized roles
@@ -42,13 +44,32 @@
            #:role-history #:role-events-ddl #:role-events-index-ddl #:events-table #:*events-table*
            #:users-email-index-ddl
            #:missing-role-log #:missing-role-log-table #:missing-role-log-cause
-           #:missing-actor #:missing-actor-operation))
+           #:missing-actor #:missing-actor-operation
+           ;; #690: email confirmation, change of address, password reset.
+           #:user-email-confirmed-at #:email-confirmed-p
+           #:*tokens-table* #:*email-events-table* #:tokens-table #:email-events-table
+           #:users-email-confirmed-ddl #:email-tokens-ddl #:email-tokens-hash-index-ddl
+           #:email-tokens-user-index-ddl #:email-events-ddl #:email-events-index-ddl
+           #:missing-email-tables #:missing-email-tables-cause
+           #:issue-confirmation #:confirm-email
+           #:request-email-change #:confirm-email-change #:revert-email-change #:set-email
+           #:issue-password-reset #:reset-password
+           #:email-history #:prune-email-tokens
+           #:invalid-token #:invalid-token-reason
+           #:too-many-tokens #:too-many-tokens-purpose #:too-many-tokens-retry-after
+           #:wrong-password #:same-email))
 (in-package #:hyperion/auth-db)
 
 (defvar *table* "hyperion_users" "Default table name for the identity store.")
 
 (defvar *events-table* "hyperion_role_events"
   "Default table name for the append-only role-change log (pre-publication issue 166).")
+
+(defvar *tokens-table* "hyperion_email_tokens"
+  "Default table name for the one-time tokens mailed to an address (#690).")
+
+(defvar *email-events-table* "hyperion_email_events"
+  "Default table name for the append-only log of address confirmations and changes (#690).")
 
 (defparameter *pbkdf2-iterations* 100000
   "PBKDF2 iteration count for password hashing (raise over time as hardware allows).")
@@ -99,6 +120,15 @@
    (table      :initarg :table      :reader table   :initform *table*)
    (events-table :initarg :events-table :reader events-table :initform *events-table*)
    (known-roles :initarg :known-roles :reader known-roles :initform nil)
+   ;; #690: the token and email-event tables, the token lifetimes in seconds, how many tokens
+   ;; of one purpose a user may be sent in a window, and the clock they are all measured by.
+   (tokens-table :initarg :tokens-table :reader tokens-table :initform *tokens-table*)
+   (email-events-table :initarg :email-events-table :reader email-events-table
+                       :initform *email-events-table*)
+   (token-seconds :initarg :token-seconds :reader token-seconds)
+   (token-limit :initarg :token-limit :reader token-limit :initform 5)
+   (token-window :initarg :token-window :reader token-window :initform 3600)
+   (clock :initarg :clock :reader store-clock :initform #'get-universal-time)
    (lock :initform (bt:make-recursive-lock "hyperion-auth-db") :reader lock))
   (:documentation "An identity store over a mnemosyne connection or a mnemosyne pool. See
 WITH-STORE-CONNECTION for how each operation gets its connection."))
@@ -167,7 +197,14 @@ Inside another operation of the same store, the connection already held is used.
 
 (defun make-db-auth (source &key (dialect :sqlite) (table *table*)
                                  (events-table *events-table*) ensure known-roles
-                                 (require-role-log t))
+                                 (require-role-log t)
+                                 (tokens-table *tokens-table*)
+                                 (email-events-table *email-events-table*)
+                                 (require-email-tables t)
+                                 (confirm-token-seconds 86400) (reset-token-seconds 3600)
+                                 (revert-token-seconds 604800)
+                                 (token-limit 5) (token-window 3600)
+                                 (clock #'get-universal-time))
   "An identity store over SOURCE: an open mnemosyne connection, or a mnemosyne pool
 \(MNEMOSYNE/CONN:MAKE-POOL). DIALECT is :sqlite or :postgres. With :ENSURE, create the users
 table, its unique email index, and the role-event log.
@@ -189,12 +226,31 @@ KNOWN-ROLES is an optional vocabulary: when NIL (the default) any keyword is acc
 is the historical behaviour and means a typo like :MODERATER is stored happily and silently
 grants nothing. Supply a list and CREATE-USER, GRANT-ROLE and REVOKE-ROLE signal UNKNOWN-ROLE
 instead, turning that typo into an error at the point of the mistake. Opt-in, because the
-framework does not know an application's vocabulary and existing callers must keep working."
+framework does not know an application's vocabulary and existing callers must keep working.
+
+THE EMAIL TABLES ARE CHECKED HERE TOO (#690): the users table's email_confirmed_at column, the
+token table and the email-event log. Without them this signals MISSING-EMAIL-TABLES naming the
+migrations; :REQUIRE-EMAIL-TABLES NIL is the opt-out for an app that uses none of
+ISSUE-CONFIRMATION, the change-of-address functions or the password reset. CONFIRM-TOKEN-SECONDS
+(24 hours; also the lifetime of a token sent to a new address), RESET-TOKEN-SECONDS (1 hour) and
+REVERT-TOKEN-SECONDS (7 days) are the token lifetimes. A user is sent at most TOKEN-LIMIT tokens
+of one purpose in any TOKEN-WINDOW seconds. CLOCK returns universal time; tests inject one."
+  (check-type token-limit (integer 1))
+  (check-type token-window (integer 1))
   (let ((store (make-instance 'db-auth :source source :dialect dialect :table table
                                        :events-table events-table
-                                       :known-roles known-roles)))
+                                       :known-roles known-roles
+                                       :tokens-table (%check-table tokens-table)
+                                       :email-events-table (%check-table email-events-table)
+                                       :token-seconds (list :confirm confirm-token-seconds
+                                                            :change confirm-token-seconds
+                                                            :reset reset-token-seconds
+                                                            :revert revert-token-seconds)
+                                       :token-limit token-limit :token-window token-window
+                                       :clock clock)))
     (when ensure (ensure-schema store))
     (when require-role-log (%check-role-log store))
+    (when require-email-tables (%check-email-tables store))
     store))
 
 (define-condition missing-role-log (error)
@@ -294,7 +350,8 @@ store's TABLE and EVENTS-TABLE. Returns STORE."
     ;; tables created under the defaults left a store with other names unusable.
     (conn:exec (conn store) (role-events-ddl :dialect (dialect store) :table (events-table store)))
     ;; Never an index on `at' alone: the question is never "every role event ever".
-    (conn:exec (conn store) (role-events-index-ddl :table (events-table store))))
+    (conn:exec (conn store) (role-events-index-ddl :table (events-table store)))
+    (%ensure-email-schema store))
   store)
 
 ;;; --- passwords (pure; PBKDF2 self-describing combined string) --------------
@@ -314,7 +371,14 @@ store's TABLE and EVENTS-TABLE. Returns STORE."
 
 ;;; --- user records ---------------------------------------------------------
 (defstruct (user (:constructor %make-user) (:predicate user-p))
-  id email phone hash temp-password-p roles status created-at updated-at)
+  id email phone hash temp-password-p roles status created-at updated-at
+  ;; Universal time the address was confirmed, or NIL (#690). The framework reports it; what an
+  ;; unconfirmed account may do is the app's decision.
+  email-confirmed-at)
+
+(defun email-confirmed-p (user)
+  "True when USER's current address has been confirmed (#690)."
+  (and (user-email-confirmed-at user) t))
 
 (define-condition duplicate-email (error)
   ((email :initarg :email :reader duplicate-email-email))
@@ -363,7 +427,9 @@ disagree on key case)."
               :roles (%read-roles (%rget row :roles))
               :status (%rget row :status)
               :created-at (%to-int (%rget row :created_at))
-              :updated-at (%to-int (%rget row :updated_at))))
+              :updated-at (%to-int (%rget row :updated_at))
+              :email-confirmed-at (let ((v (%rget row :email_confirmed_at)))
+                                    (and v (%to-int v)))))
 
 ;;; --- CRUD -----------------------------------------------------------------
 (defun %norm-email (email) (string-downcase (string-trim " " email)))

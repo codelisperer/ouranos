@@ -222,7 +222,9 @@
            #:session-cookie-not-attachable #:session-cookie-not-attachable-response
            ;; dev/REPL session management
            #:sessions #:session-summary #:describe-sessions
-           #:kill-session #:kill-sessions))
+           #:kill-session #:kill-sessions
+           ;; #690: end every session of one user, after a change of address or a revert.
+           #:end-sessions))
 
 (cl:defpackage #:hyperion/csrf
   (:use #:cl)

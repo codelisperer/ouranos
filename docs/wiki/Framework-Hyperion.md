@@ -90,7 +90,7 @@ Praxeon runs on it and dogfoods it.
 | `hyperion/output` | One knob for output formatting — dev **pretty**, prod **compact** — for HTML *and* JS. |
 | `hyperion/import` | HTML snippet → Spinneret s-expressions (a porting aid; separate Plump-only system). |
 | `hyperion/session-db` *(aux)* | A **mnemosyne-backed** `store` backend — sessions survive a restart and span processes. Dogfoods the mnemosyne query builder (upsert via `ON CONFLICT`, `COUNT(*)`). |
-| `hyperion/auth-db` *(aux)* | A mnemosyne-backed identity store: users, PBKDF2 passwords, temp-password flag, and roles that can be **granted and revoked** after creation (`grant-role` / `revoke-role`, idempotent, compare-and-swap on `vid` so a second process cannot silently lose an edit); store-less `users-ddl` so an app owns its own migration timeline. |
+| `hyperion/auth-db` *(aux)* | A mnemosyne-backed identity store: users, PBKDF2 passwords, temp-password flag, and roles that can be **granted and revoked** after creation (`grant-role` / `revoke-role`, idempotent, compare-and-swap on `vid` so a second process cannot silently lose an edit); email confirmation, change of address with a revert link, and password reset, on one table of hashed single-use tokens (#690); store-less `users-ddl` so an app owns its own migration timeline. |
 | `hyperion/desktop` *(aux)* | `run-app` + lifecycle + the native `hyperion-view`. **M1 proven end to end on all three platforms.** |
 | Examples | `active-search` (Bulma + HTMX + Alpine + Parenscript), `active-search-db` (over a mnemosyne migration), `coalton-repl` (a typed Coalton REPL in a native desktop window; CSS via LASS, JS via Parenscript). |
 
