@@ -28,6 +28,19 @@ its tag.
   IMMEDIATE, so behind an app's write transaction they wait for the write lock, within
   mnemosyne's busy timeout (5000 ms by default), instead of failing with SQLITE_BUSY at once.
 
+- **hyperion/auth-db: `make-db-auth` refuses to start unless the users table has the column
+  `email_confirmed_at` and the tables `hyperion_email_tokens` and `hyperion_email_events`
+  exist** (#690). Without them it signals `missing-email-tables`, whose report names the
+  migrations to add: `users-email-confirmed-ddl` (an `ALTER TABLE … ADD COLUMN`),
+  `email-tokens-ddl`, `email-tokens-hash-index-ddl`, `email-tokens-user-index-ddl`,
+  `email-events-ddl` and `email-events-index-ddl`, in that order. `docs/migrations.md` section 5
+  lists them as `make-migration` steps. The column is not in `users-ddl`, so a new timeline adds
+  it with the same `ALTER` step as an existing one. Existing accounts start unconfirmed; to mark
+  them confirmed, add `UPDATE hyperion_users SET email_confirmed_at = created_at WHERE
+  email_confirmed_at IS NULL` after the `ALTER`. An app that uses none of the new functions
+  below can pass `:require-email-tables nil` instead. `:ensure t` and `ensure-schema` create
+  all of it. A store with its own table names passes `:tokens-table` and `:email-events-table`.
+
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to
   (`F_GETPATH` on macOS, `/proc/self/fd` on Linux, `GetFinalPathNameByHandleW` on Windows) and
@@ -256,6 +269,22 @@ its tag.
   thread's progress to put back on a non-local exit; `praxeon/memory-db` uses
   `conn:with-transaction` under its recursive lock, a savepoint inside an app's own
   transaction.
+
+- **hyperion/auth-db: email confirmation, change of address and password reset** (#690).
+  `issue-confirmation` and `confirm-email` confirm an account's address, and `email-confirmed-p`
+  and `user-email-confirmed-at` report it. `request-email-change` (which requires the current
+  password unless `:password :skip`), `confirm-email-change` and `revert-email-change` move an
+  account to a new address, with a revert link to the old one that ends every session of the
+  account. `set-email` is the operator path and requires `:actor`. `issue-password-reset` and
+  `reset-password` reset a password. A change of address cancels the account's unused
+  confirmation, change and reset tokens. Tokens are stored as SHA-256 hashes, and a failed one
+  signals `invalid-token` with a reason. A user is sent at most 5 tokens of one purpose an hour
+  (`too-many-tokens`); the limit and the lifetimes (24 hours, 1 hour for a reset, 7 days for a
+  revert) are `make-db-auth` keys. `email-history` reads the log of confirmations and changes,
+  and `prune-email-tokens` deletes expired tokens. The functions return the tokens and the app
+  sends the mail.
+- **hyperion/session: `end-sessions`** ends every session that holds a given value under a
+  key, such as one user's sessions under `:user-id`, except the one named by `:except` (#690).
 
 - **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
   `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an

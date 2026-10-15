@@ -641,3 +641,22 @@ those for which (PREDICATE session) is true. Returns the number evicted."
                      (sessions store))))
     (dolist (s victims) (store-del store (session-id s)))
     (length victims)))
+
+(defun end-sessions (store key value &key except)
+  "Evict every session in STORE whose data holds VALUE under KEY (compared with EQUAL), except
+EXCEPT (a session or a session id), and return how many were evicted. This is how an app ends
+one user's sessions: KEY is the key it gave SIGN-IN!, usually :USER-ID, and VALUE the user's id
+(#690). Pass the current session as EXCEPT to keep it, and rotate it with ROTATE-SESSION.
+
+VALUE must not be NIL: every session that never had KEY set would match it.
+
+It reads STORE-LIST, a full scan of the store, which is acceptable for an action a user takes
+a few times a year and is not for a request path."
+  (when (null value)
+    (error "hyperion/session: END-SESSIONS needs a value; NIL would match every session without ~S"
+           key))
+  (let ((keep (if (session-p except) (session-id except) except)))
+    (kill-sessions store
+                   (lambda (s)
+                     (and (not (equal (session-id s) keep))
+                          (equal (session-get s key) value))))))

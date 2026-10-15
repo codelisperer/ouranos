@@ -44,6 +44,16 @@
       (is (eql 100 (sess:session-created got)))
       (is (eql 200 (sess:session-accessed got))))))
 
+(test end-sessions-reads-the-user-from-sessions-the-database-stored
+  "#690: END-SESSIONS reads STORE-LIST, so it must find the user's id in sessions this store
+read back from its table."
+  (with-store (s)
+    (sess:store-add s (%sess "a" :data '((:user-id . "u1"))))
+    (sess:store-add s (%sess "b" :data '((:user-id . "u1"))))
+    (sess:store-add s (%sess "c" :data '((:user-id . "u2"))))
+    (is (= 1 (sess:end-sessions s :user-id "u1" :except "a")))
+    (is (equal '("a" "c") (sort (mapcar #'sess:session-id (sess:store-list s)) #'string<)))))
+
 (test ref-missing-is-nil
   (with-store (s) (is (null (sess:store-ref s "nope")))))
 
