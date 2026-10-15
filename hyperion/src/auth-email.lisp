@@ -184,10 +184,30 @@ no rows."
 
 (defun %purpose-word (purpose) (string-downcase (symbol-name purpose)))
 
+(defun %lock-user (store user-id)
+  "Take the write lock on USER-ID's row for the rest of the current transaction, by an UPDATE that
+changes nothing. Returns true when the row exists.
+
+The store's own lock serialises only the threads of one DB-AUTH. Another store or another process
+on the same database is serialised only by the database: on Postgres this holds the row's lock
+until the transaction ends, and on SQLite the first write takes the database's write lock. A
+second transaction doing the same waits here, and every read after this sees what the first one
+committed. That is what keeps two issuers from both counting under the limit (#690 review), and
+two address changes from both reading the old address."
+  (plusp (%to-int (conn:exec (conn store)
+                             (format nil "UPDATE ~A SET vid = vid WHERE _id = ?" (table store))
+                             user-id))))
+
 (defun %issue-token (store user-id purpose email now &key (limit t))
   "Insert a token of PURPOSE for USER-ID, sent to EMAIL. Returns (values token expires-at).
 Signals TOO-MANY-TOKENS when LIMIT is true and the user has had the store's limit of this purpose
-within its window. Runs inside an exclusive store connection."
+within its window. Runs inside an exclusive store connection. The count and the insert run in
+one transaction behind %LOCK-USER, so concurrent issuers in other processes take turns."
+  (conn:with-transaction ((conn store))
+    (%lock-user store user-id)
+    (%issue-token-locked store user-id purpose email now limit)))
+
+(defun %issue-token-locked (store user-id purpose email now limit)
   (when limit
     (let* ((since (- now (token-window store)))
            (rows (conn:query (conn store)
@@ -208,9 +228,8 @@ within its window. Runs inside an exclusive store connection."
                (id:new-id) user-id (%purpose-word purpose) email (%token-hash token) now expires)
     (values token expires)))
 
-(defun %take-token (store token purpose now)
-  "Mark TOKEN used and return its row, or signal INVALID-TOKEN. Runs inside a transaction on an
-exclusive store connection, so a failure later in the caller's transaction leaves it unused."
+(defun %check-token (store token purpose now)
+  "TOKEN's row when it can be used for PURPOSE now, or signal INVALID-TOKEN. Marks nothing."
   (let ((row (and (stringp token)
                   (first (conn:query (conn store)
                                      (format nil "SELECT _id, user_id, purpose, email, expires_at, used_at FROM ~A WHERE token_hash = ?"
@@ -220,6 +239,12 @@ exclusive store connection, so a failure later in the caller's transaction leave
            (error 'invalid-token :reason :unknown))
           ((%rget row :used_at) (error 'invalid-token :reason :used))
           ((< (%to-int (%rget row :expires_at)) now) (error 'invalid-token :reason :expired)))
+    row))
+
+(defun %take-token (store token purpose now)
+  "Mark TOKEN used and return its row, or signal INVALID-TOKEN. Runs inside a transaction on an
+exclusive store connection, so a failure later in the caller's transaction leaves it unused."
+  (let ((row (%check-token store token purpose now)))
     ;; Conditional, so two requests with one token cannot both use it.
     (unless (plusp (%to-int (conn:exec (conn store)
                                        (format nil "UPDATE ~A SET used_at = ? WHERE _id = ? AND used_at IS NULL"
@@ -347,7 +372,8 @@ unused."
         (conn:with-transaction ((conn store))
           (let* ((tok (%take-token store token :change now))
                  (new (%rget tok :email))
-                 (row (%user-row store (%rget tok :user_id))))
+                 (row (and (%lock-user store (%rget tok :user_id))
+                           (%user-row store (%rget tok :user_id)))))
             (unless row (error 'invalid-token :reason :superseded))
             (setf user-id (%rget row :_id)
                   old (%rget row :email))
@@ -369,31 +395,37 @@ SESSION-STORE is required, because a revert means someone else may hold a sessio
 HYPERION/SESSION store, whose sessions hold the user's id under SESSION-KEY (:USER-ID, as
 SIGN-IN! is usually called). Pass :NONE for an app that keeps no server-side sessions.
 
+THE SESSIONS ARE ENDED BEFORE THE TOKEN IS USED. If the session store fails, this signals its
+error with the token still unused and the address unchanged, so the same link can be tried again
+(#690 review). They are ended once more after the revert commits, for a sign-in made in between.
+
 Returns (values user sessions-ended). Consider also sending ISSUE-PASSWORD-RESET's token to the
 restored address, since whoever made the change may have changed the password. ACTOR defaults to
 the user's id. Signals INVALID-TOKEN, and DUPLICATE-EMAIL when another account now has the old
 address."
   (unless (or (eq session-store :none) session-store)
     (error "hyperion/auth-db: REVERT-EMAIL-CHANGE needs the session store, or :NONE"))
-  (let (user-id)
-    (with-store-connection (store :exclusive t)
-      (let ((now (%now store)))
-        (conn:with-transaction ((conn store))
-          (let* ((tok (%take-token store token :revert now))
-                 (restore (%rget tok :email))
-                 (row (%user-row store (%rget tok :user_id))))
-            (unless row (error 'invalid-token :reason :superseded))
-            (setf user-id (%rget row :_id))
-            (let ((current (%rget row :email)))
-              (when (%email-taken-p store restore user-id) (error 'duplicate-email :email restore))
-              (unless (%write-email store user-id current restore now now)
-                (error 'invalid-token :reason :superseded))
-              (%cancel-tokens store user-id now :include-revert t)
-              (%record-email-event store user-id "reverted" current restore (or actor user-id) now))))))
-    (let ((ended (if (eq session-store :none)
-                     0
-                     (session:end-sessions session-store session-key user-id))))
-      (values (find-user-by-id store user-id) ended))))
+  (flet ((end (user-id)
+           (if (eq session-store :none)
+               0
+               (session:end-sessions session-store session-key user-id))))
+    (let* ((user-id (with-store-connection (store)
+                      (%rget (%check-token store token :revert (%now store)) :user_id)))
+           (ended (end user-id)))
+      (with-store-connection (store :exclusive t)
+        (let ((now (%now store)))
+          (conn:with-transaction ((conn store))
+            (let* ((tok (%take-token store token :revert now))
+                   (restore (%rget tok :email))
+                   (row (and (%lock-user store user-id) (%user-row store user-id))))
+              (unless row (error 'invalid-token :reason :superseded))
+              (let ((current (%rget row :email)))
+                (when (%email-taken-p store restore user-id) (error 'duplicate-email :email restore))
+                (unless (%write-email store user-id current restore now now)
+                  (error 'invalid-token :reason :superseded))
+                (%cancel-tokens store user-id now :include-revert t)
+                (%record-email-event store user-id "reverted" current restore (or actor user-id) now))))))
+      (values (find-user-by-id store user-id) (+ ended (end user-id))))))
 
 (defun set-email (store user-id new-email &key actor confirmed)
   "The operator path: move USER-ID to NEW-EMAIL at once, recording ACTOR (required, as for
@@ -411,12 +443,16 @@ To have the new address prove itself, call ISSUE-CONFIRMATION afterwards.
     (with-store-connection (store :exclusive t)
       (let ((now (%now store)))
         (conn:with-transaction ((conn store))
-          (let ((row (%user-row store user-id)))
+          (let ((row (and (%lock-user store user-id) (%user-row store user-id))))
             (when row
               (let ((old (%rget row :email)))
                 (when (equal new old) (error 'same-email :email new))
                 (when (%email-taken-p store new user-id) (error 'duplicate-email :email new))
-                (%write-email store user-id old new (and confirmed now) now)
+                ;; Under the row lock the address cannot have moved since it was read; if the
+                ;; write matches nothing anyway, nothing else in this transaction may happen.
+                (unless (%write-email store user-id old new (and confirmed now) now)
+                  (error "hyperion/auth-db: SET-EMAIL: the address of ~A changed while it was being set; nothing was written"
+                         user-id))
                 (%cancel-tokens store user-id now)
                 (%record-email-event store user-id
                                      (if confirmed "operator-changed-confirmed" "operator-changed")
@@ -478,10 +514,13 @@ sessions afterwards (HYPERION/SESSION:END-SESSIONS)."
                         user-id))))
 
 (defun prune-email-tokens (store &key (before (%now store)))
-  "Delete tokens that expired before BEFORE (by default now), used or not. A used token that has
-not yet expired is kept, so a second use of it still reports :USED rather than :UNKNOWN. Returns
-how many were deleted."
+  "Delete tokens that expired before BEFORE (by default now), used or not, once they were also
+created more than the store's TOKEN-WINDOW before it. A used token that has not yet expired is
+kept, so a second use of it still reports :USED rather than :UNKNOWN; and a token the per-user
+limit still counts is kept even when it has expired, or pruning would let a user be sent more
+than the limit within one window (#690 review). Returns how many were deleted."
   (with-store-connection (store :exclusive t)
     (%to-int (conn:exec (conn store)
-                        (format nil "DELETE FROM ~A WHERE expires_at < ?" (tokens-table store))
-                        before))))
+                        (format nil "DELETE FROM ~A WHERE expires_at < ? AND created_at <= ?"
+                                (tokens-table store))
+                        before (- before (token-window store))))))
