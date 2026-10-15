@@ -16,9 +16,12 @@ its tag.
 
 - **praxeon/memory-db: make the store over a mnemosyne pool when the app also uses the
   database** (#653). `make-db-memory-store` now takes a pool as well as a connection. Over a
-  pool each store operation borrows a connection, and writes take the store's lock after the
-  connection; reads take no lock. `praxeon/observe` writes on a thread of its own, so it gets a
-  connection of its own. Over one connection shared with the app, an app that held a
+  pool each store operation borrows a connection, and reads take no lock. A write on Postgres
+  takes the store's lock after the connection. A write on SQLite runs in a transaction that
+  begins IMMEDIATE, or a savepoint inside one already open, and holds the database's write lock
+  in place of the store's lock, so an observer that waits for an app's transaction to commit
+  holds nothing the app's next store write needs. `praxeon/observe` writes on a thread of its
+  own, so it gets a connection of its own. Over one connection shared with the app, an app that held a
   transaction open while the observer wrote had that transaction committed by the observer's
   COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
   SQLite (#651). A store call the app makes on its own thread inside its
@@ -27,6 +30,10 @@ its tag.
   the store's own transactions (a window's, `supersede`'s and `forget-subject`'s) begin
   IMMEDIATE, so behind an app's write transaction they wait for the write lock, within
   mnemosyne's busy timeout (5000 ms by default), instead of failing with SQLITE_BUSY at once.
+  `forget` clears the predecessor's link and deletes the observation in one transaction, so a
+  pooled reader never sees both as current. An embedding a transaction computed before taking
+  the lock is used only by the store whose embedder computed it, and `supersede` inside the
+  transaction uses it instead of embedding the text again.
 
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to

@@ -1170,3 +1170,103 @@ attempt (the hub's review of #654)."
       (obs:await-observer observer :timeout 20)
       (is (= 0 (obs:observer-failures observer)) "no attempt failed")
       (is (equal '(6 nil) (multiple-value-list (mem:thread-progress store "member-653" "conv-653")))))))
+
+;;; --- Copilot's review of train 47 ---------------------------------------------------------
+
+(test over-a-pool-an-apps-second-write-does-not-wait-for-an-observer-waiting-for-its-commit
+  "The app's thread holds a transaction on its own pooled connection and writes through the store.
+The observer starts a window, which on SQLite waits for the app's write lock. The app then writes
+through the store again, and that write returns at once; the app commits, and the observer writes
+its window with no failed attempt. Before, on SQLite, the observer held the store's lock while it
+waited in BEGIN IMMEDIATE, so the app's second write waited for the store's lock until the
+observer's busy timeout failed it (Copilot's review of train 47)."
+  (with-pool-store (store pool)
+    (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call "Has a dog.")))
+                                       store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                       :retry-delay 0 :max-attempts 1))
+          (waited nil))
+      (conn:with-connection (c pool)
+        (conn:with-transaction (c)
+          (mem:remember store "member-653" "App's first write." :provenance (test-provenance 1 "app"))
+          (obs:observe-turn observer (%chat 6))
+          (sleep 0.3)
+          (let ((began (get-internal-real-time)))
+            (mem:remember store "member-653" "App's second write." :provenance (test-provenance 2 "app"))
+            (setf waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))))
+      (is (< waited 1) "the app's second write waited ~,3F s" waited)
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (= 0 (obs:observer-failures observer)) "the observer's window waited for the commit rather than failing")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653" :thread "conv-653"))))
+      (is (equal '("App's first write." "App's second write.")
+                 (sort (mapcar #'mem:observation-content (mem:observations-of store "member-653")) #'string<))))))
+
+(defun %second-store (store embedder)
+  "A store over STORE's connection with EMBEDDER and a table of its own, created now."
+  (mdb:make-db-memory-store (mdb::store-source store) :embedder embedder
+                                                      :table (format nil "~A_b" (mdb:store-table store))
+                                                      :dialect (mdb::store-dialect store) :ensure t))
+
+(defun %drop-store-tables (store)
+  (ignore-errors (conn:exec (mdb::store-source store) (format nil "DROP TABLE IF EXISTS ~A" (mdb:store-table store))))
+  (ignore-errors (conn:exec (mdb::store-source store) (format nil "DROP TABLE IF EXISTS ~A_progress" (mdb:store-table store)))))
+
+(test an-embedding-prepared-for-one-store-is-not-used-by-another
+  "Store A's transaction prepares the embedding of \"Has a dog.\". Inside it, a REMEMBER of the same
+text on store B, which has an embedder of its own, embeds the text with B's embedder. Before, B
+found A's embedding by its content and stored a vector from A's model (Copilot's review of train
+47)."
+  (with-store (a)
+    (let* ((b-embedder (make-instance 'call-recording-embedder))
+           (b (%second-store a b-embedder)))
+      (unwind-protect
+           (progn
+             (mem:with-store-transaction (a :subject "member-2" :contents '("Has a dog."))
+               (mem:remember a "member-2" "Has a dog." :provenance (test-provenance 1))
+               (mem:remember b "member-2" "Has a dog." :provenance (test-provenance 1)))
+             (is (equal '((:documents "Has a dog.")) (recorded-calls b-embedder))
+                 "B's embedder embedded the text: ~S" (recorded-calls b-embedder))
+             (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of b "member-2")))))
+        (%drop-store-tables b)))))
+
+(test a-supersession-inside-a-transaction-uses-the-embedding-prepared-for-it
+  "A window's transaction prepares the embeddings of its proposals, a correction's included. A
+SUPERSEDE inside the transaction uses the prepared embedding, so the text is embedded once, before
+the transaction takes the store's lock. Before, SUPERSEDE embedded it again, under the lock and,
+on SQLite, the database's write lock (Copilot's review of train 47)."
+  (let ((embedder (make-instance 'call-recording-embedder)))
+    (with-store (store embedder)
+      (let ((porto (mem:remember store "member-4" "Lives in Porto." :provenance (test-provenance 1))))
+        (setf (recorded-calls embedder) '())
+        (mem:with-store-transaction (store :subject "member-4" :contents '("Lives in Lisbon."))
+          (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2)))
+        (is (equal '((:documents "Lives in Lisbon.")) (recorded-calls embedder))
+            "one embedding call, the transaction's: ~S" (recorded-calls embedder))
+        (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-4"))))))))
+
+(defun %refuse-deletes (store)
+  "Make every DELETE from STORE's table fail, with a trigger."
+  (let ((c (mdb::store-source store)) (table (mdb:store-table store)))
+    (if (%sqlite-p)
+        (conn:exec c (format nil "CREATE TRIGGER ~A_no_delete BEFORE DELETE ON ~A BEGIN SELECT RAISE(ABORT, 'no delete'); END" table table))
+        (progn
+          (conn:exec c (format nil "CREATE FUNCTION ~A_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no delete'; END $$" table))
+          (conn:exec c (format nil "CREATE TRIGGER ~A_no_delete BEFORE DELETE ON ~A FOR EACH ROW EXECUTE FUNCTION ~A_no_delete()" table table table))))))
+
+(test forget-unlinks-and-deletes-in-one-transaction
+  "FORGET of a replacement clears its predecessor's link and deletes it, in one transaction. When
+the DELETE fails, the link is restored with it, so the predecessor is still superseded and the
+replacement still current. Before, the UPDATE had committed on its own, and the store held both as
+current, as a reader between the two statements would have seen them (Copilot's review of train
+47)."
+  (with-store (store)
+    (let* ((porto (mem:remember store "member-3" "Lives in Porto." :provenance (test-provenance 1)))
+           (lisbon (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2))))
+      (unwind-protect
+           (progn
+             (%refuse-deletes store)
+             (signals error (mem:forget store lisbon))
+             (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-3")))
+                 "only the replacement is current"))
+        (unless (%sqlite-p)
+          (ignore-errors (conn:exec (mdb::store-source store)
+                                    (format nil "DROP FUNCTION IF EXISTS ~A_no_delete() CASCADE" (mdb:store-table store)))))))))
