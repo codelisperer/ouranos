@@ -216,7 +216,26 @@ link by changing it again. The revert puts back the address the link was sent to
                                                                        :password "old-pw")))))
       (is (string= "owner2@x.com" (auth:user-email (auth:revert-email-change a revert :none))))
       (is (eq :used (%token-reason (lambda () (auth:revert-email-change a hijacker-revert :none))))
-          "the revert cancels every token, the hijacker's revert link included"))))
+          "the owner's revert cancels the newer revert link, which the hijacker holds"))))
+
+(test a-hijacker-who-reverts-first-does-not-cancel-the-owner-s-link
+  "Review of #695: the owner has A; a hijacker changes A to B (R1 to A) and B to C (R2 to B, which
+the hijacker holds), then uses R2. R1 is older than R2, so it survives and still restores A, and
+using it cancels nothing the owner needs. Both changes happen in the same second, so the order
+comes from the tokens' _id."
+  (with-email-auth (a)
+    (let* ((id (%new-user a "owner3@x.com"))
+           (r1 (nth-value 2 (auth:confirm-email-change
+                             a (auth:request-email-change a id "hj-b@x.com" :password "old-pw"))))
+           (r2 (nth-value 2 (auth:confirm-email-change
+                             a (auth:request-email-change a id "hj-c@x.com" :password "old-pw")))))
+      (is (string= "hj-b@x.com" (auth:user-email (auth:revert-email-change a r2 :none)))
+          "the hijacker's revert puts back B")
+      (is (eq :ok (%token-reason (lambda () (auth:revert-email-change a r1 :none))))
+          "the owner's link still works")
+      (is (string= "owner3@x.com" (auth:user-email (auth:find-user-by-id a id))))
+      (is (equal '("changed" "changed" "reverted" "reverted")
+                 (mapcar (lambda (e) (getf e :action)) (auth:email-history a id)))))))
 
 (test a-revert-is-refused-without-a-session-store
   (with-email-auth (a)
@@ -267,13 +286,14 @@ leaves the link usable and the address unchanged, and the retry ends the session
 (defun %concurrent-issues (path rounds)
   "Two stores on two connections to the SQLite file PATH, limit 1. Each round both issue a
 confirmation for a fresh user at once. Returns (values rounds-with-one-token issued refused other)."
+  ;; No PRAGMA here: the connections get only what CONN:CONNECT gives an app, which includes
+  ;; mnemosyne's *SQLITE-BUSY-TIMEOUT-MS* (5000 by default, since #223). That is what lets the
+  ;; second issuer wait at %LOCK-USER instead of failing with BUSY.
   (let* ((ca (conn:connect (be:make-sqlite (namestring path))))
          (cb (conn:connect (be:make-sqlite (namestring path))))
-         (_ (dolist (c (list ca cb)) (conn:exec c "PRAGMA busy_timeout = 5000")))
          (a (auth:make-db-auth ca :dialect :sqlite :token-limit 1 :clock #'%clock))
          (b (auth:make-db-auth cb :dialect :sqlite :token-limit 1 :clock #'%clock))
          (one 0) (issued 0) (refused 0) (other '()))
-    (declare (ignore _))
     (unwind-protect
          (dotimes (i rounds)
            (let* ((id (auth:user-id (auth:create-user a :email (format nil "iss-~D@x.com" i))))
@@ -376,6 +396,18 @@ record a change. The address is moved between the read and the write by wrapping
         (is (eq :used (%token-reason (lambda () (auth:reset-password a token "again")))))
         (is (eq :used (%token-reason (lambda () (auth:reset-password a first-token "again"))))
             "the earlier reset token is cancelled too")))))
+
+(test a-bad-reset-token-is-refused-before-the-password-is-hashed
+  "Review of #695: HASH-PASSWORD is a deliberately slow PBKDF2, so a request carrying a bad token
+must be refused without running it."
+  (with-email-auth (a)
+    (let ((hashes 0))
+      (sb-int:encapsulate 'auth:hash-password 'count-it
+                          (lambda (f plaintext) (incf hashes) (funcall f plaintext)))
+      (unwind-protect
+           (is (eq :unknown (%token-reason (lambda () (auth:reset-password a "not-a-token" "pw")))))
+        (sb-int:unencapsulate 'auth:hash-password 'count-it))
+      (is (= 0 hashes) "the password was hashed ~D time~:P for a bad token" hashes))))
 
 (test a-reset-for-an-unknown-address-returns-nil
   (with-email-auth (a)

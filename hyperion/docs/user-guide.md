@@ -526,7 +526,8 @@ column and tables in `docs/migrations.md` section 5, or `:ensure t`.
 - **A change of address cancels the user's unused confirmation, change and reset tokens**, so a
   link mailed to the old address stops working. It does not cancel the revert link. Whoever
   changed the address could otherwise change it again to cancel the link the owner was sent.
-  A revert cancels every token.
+  A revert cancels the revert link it uses and every revert link sent after it, and keeps the
+  older ones, so a hijacker who uses their own revert link cannot cancel the owner's.
 - **`request-email-change` requires the current password**, so a session someone else has taken
   over cannot start a change. Pass `:password :skip` for an account that signs in without one.
 - **`set-email` is the operator path.** It changes the address at once, requires `:actor`,

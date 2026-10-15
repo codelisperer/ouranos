@@ -21,8 +21,17 @@
 ;;;; the user's outstanding confirm, change and reset tokens: a token mailed to an address the
 ;;;; account no longer has must not keep working. It does NOT cancel revert tokens. A hijacker
 ;;;; who moved the account to an address they hold could otherwise make a second change and so
-;;;; cancel the revert link the owner was sent. A revert cancels every token, revert tokens
-;;;; included, because the hijacker may hold a revert token for their own address.
+;;;; cancel the revert link the owner was sent.
+;;;;
+;;;; WHICH TOKENS A REVERT CANCELS. A revert cancels the user's outstanding confirm, change and
+;;;; reset tokens, the revert token it uses, and every revert token created AFTER that one. It
+;;;; keeps the older revert tokens. Suppose the owner has address A, and a hijacker changes it to
+;;;; B (revert link R1 goes to A) and then to C (R2 goes to B, which the hijacker holds). If the
+;;;; hijacker uses R2 first, the account returns to B, R1 is older and survives, and the owner's
+;;;; R1 still restores A. If the owner uses R1, R2 is newer and is cancelled. Cancelling every
+;;;; revert token, as #695 first did, let the hijacker kill the owner's link by using their own
+;;;; (maintainer's ruling in the review of #695). Tokens are ordered by created_at, then _id, a
+;;;; time-ordered UUID v6, for two created in the same second.
 ;;;;
 ;;;; THE EMAIL_CONFIRMED_AT COLUMN IS NOT IN USERS-DDL, deliberately. docs/migrations.md §8: a
 ;;;; migration that calls USERS-DDL runs it when the migrations run, so adding the column there
@@ -87,7 +96,8 @@ its TOKEN-WINDOW. RETRY-AFTER is the seconds until another may be sent."))
 (define-condition same-email (error)
   ((email :initarg :email :reader same-email-email))
   (:report (lambda (c s)
-             (format s "hyperion/auth-db: the account already has the address ~S." (same-email-email c)))))
+             (declare (ignore c))
+             (format s "hyperion/auth-db: the account already has that address."))))
 
 ;;; --- DDL ----------------------------------------------------------------------------------
 
@@ -232,7 +242,7 @@ one transaction behind %LOCK-USER, so concurrent issuers in other processes take
   "TOKEN's row when it can be used for PURPOSE now, or signal INVALID-TOKEN. Marks nothing."
   (let ((row (and (stringp token)
                   (first (conn:query (conn store)
-                                     (format nil "SELECT _id, user_id, purpose, email, expires_at, used_at FROM ~A WHERE token_hash = ?"
+                                     (format nil "SELECT _id, user_id, purpose, email, created_at, expires_at, used_at FROM ~A WHERE token_hash = ?"
                                              (tokens-table store))
                                      (%token-hash token))))))
     (cond ((or (null row) (not (equal (%rget row :purpose) (%purpose-word purpose))))
@@ -253,13 +263,21 @@ exclusive store connection, so a failure later in the caller's transaction leave
       (error 'invalid-token :reason :used))
     row))
 
-(defun %cancel-tokens (store user-id now &key (include-revert nil))
-  "Mark the user's unused tokens used: all of them with INCLUDE-REVERT, else all but revert
-tokens. See the header for why a change keeps revert tokens."
+(defun %cancel-tokens (store user-id now &key revert-after)
+  "Mark the user's unused confirm, change and reset tokens used. With REVERT-AFTER, the row of the
+revert token being used, also mark the user's revert tokens created after it. See the header for
+which tokens a change and a revert cancel, and why."
   (conn:exec (conn store)
-             (format nil "UPDATE ~A SET used_at = ? WHERE user_id = ? AND used_at IS NULL~:[ AND purpose <> 'revert'~;~]"
-                     (tokens-table store) include-revert)
-             now user-id))
+             (format nil "UPDATE ~A SET used_at = ? WHERE user_id = ? AND used_at IS NULL AND purpose <> 'revert'"
+                     (tokens-table store))
+             now user-id)
+  (when revert-after
+    (let ((created (%to-int (%rget revert-after :created_at)))
+          (id (%rget revert-after :_id)))
+      (conn:exec (conn store)
+                 (format nil "UPDATE ~A SET used_at = ? WHERE user_id = ? AND used_at IS NULL AND purpose = 'revert' AND (created_at > ? OR (created_at = ? AND _id > ?))"
+                         (tokens-table store))
+                 now user-id created created id))))
 
 (defun %record-email-event (store user-id action old new actor now)
   (conn:exec (conn store)
@@ -388,8 +406,8 @@ unused."
 
 (defun revert-email-change (store token session-store &key (session-key :user-id) actor)
   "Undo a change of address with the TOKEN mailed to the old address: move the account back to
-that address, mark it confirmed, cancel every outstanding token of the user (revert tokens
-included), record it, and end every session of the user in SESSION-STORE.
+that address, mark it confirmed, cancel the user's outstanding tokens and every revert token
+created after this one (older revert tokens are kept; see the header), record it, and end every session of the user in SESSION-STORE.
 
 SESSION-STORE is required, because a revert means someone else may hold a session: a
 HYPERION/SESSION store, whose sessions hold the user's id under SESSION-KEY (:USER-ID, as
@@ -423,7 +441,7 @@ address."
                 (when (%email-taken-p store restore user-id) (error 'duplicate-email :email restore))
                 (unless (%write-email store user-id current restore now now)
                   (error 'invalid-token :reason :superseded))
-                (%cancel-tokens store user-id now :include-revert t)
+                (%cancel-tokens store user-id now :revert-after tok)
                 (%record-email-event store user-id "reverted" current restore (or actor user-id) now))))))
       (values (find-user-by-id store user-id) (+ ended (end user-id))))))
 
@@ -479,6 +497,10 @@ have accounts. Signals TOO-MANY-TOKENS past the store's limit."
 other reset tokens. Returns the USER. Signals INVALID-TOKEN, including :SUPERSEDED when the
 account's address has changed since the token was sent. Consider ending the user's other
 sessions afterwards (HYPERION/SESSION:END-SESSIONS)."
+  ;; The token is checked before the deliberately slow hash, so a request with a bad token
+  ;; costs one query rather than a PBKDF2. %TAKE-TOKEN checks it again under the transaction.
+  (with-store-connection (store)
+    (%check-token store token :reset (%now store)))
   (let ((hash (hash-password new-plaintext))
         user-id)
     (with-store-connection (store :exclusive t)

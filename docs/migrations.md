@@ -120,7 +120,7 @@ column and two tables, each with its own steps:
 ```lisp
 (be:make-migration "20261015_001_hyperion_users_email_confirmed" "email confirmed at"
                    (auth:users-email-confirmed-ddl :dialect :sqlite)
-                   "ALTER TABLE hyperion_users DROP COLUMN email_confirmed_at")
+                   "ALTER TABLE hyperion_users DROP COLUMN email_confirmed_at") ; SQLite 3.35 or later
 (be:make-migration "20261015_002_hyperion_email_tokens" "email tokens"
                    (auth:email-tokens-ddl :dialect :sqlite)
                    "DROP TABLE hyperion_email_tokens")
