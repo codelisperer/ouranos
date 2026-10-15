@@ -8,13 +8,15 @@
 ;;;
 ;;; cl+ssl reads the bytes of a certificate's names with ASN1_STRING_data. OpenSSL 4 removed
 ;;; that function. Where the default libcrypto is OpenSSL 4, the first call to it fails, and so
-;;; does every pinned TLS connection (FETCH's :CONNECT-ADDRESS), because checking the host name
-;;; reads the certificate's names. ASN1_STRING_get0_data returns the same pointer and exists in
+;;; does every https request that verifies the server's host name: dexador's own (it calls
+;;; cl+ssl with :VERIFY and :HOSTNAME) and the pinned connections FETCH opens for
+;;; :CONNECT-ADDRESS, because checking the host name reads the certificate's names. ASN1_STRING_get0_data returns the same pointer and exists in
 ;;; OpenSSL 1.1, 3 and 4. cl+ssl calls ASN1-STRING-DATA by name, so pointing that name at
 ;;; ASN1_STRING_get0_data fixes every caller.
 ;;;
-;;; The patch is applied when this file loads, which is after cl+ssl. A later load of cl+ssl
-;;; would put the old definition back; the test above checks that it has not.
+;;; The patch is applied when this file loads, which is after cl+ssl, so it applies only in an
+;;; image that loads aion/http-client. A later load of cl+ssl would put the old definition back;
+;;; the test in aion/tests/http-client.lisp checks that it has not.
 #-os-windows
 (progn
   (cl+ssl::define-crypto-function ("ASN1_STRING_get0_data" cl+ssl::asn1-string-get0-data)
