@@ -267,7 +267,8 @@ its tag.
   the sidecar is declared `:secret t`. A program missing from PATH is logged as a warning, or
   signals `sidecar-not-started` when the sidecar is `:required t`; a sidecar that does not
   become ready signals `sidecar-not-ready`. A sidecar does not outlive an image that is killed:
-  on Windows it runs in a kill-on-close job object, on Linux it is started through
+  on Windows it runs in a kill-on-close job object, and one that cannot be put in a job is not
+  started (`sidecar-not-started`, reason `:no-job`); on Linux it is started through
   `setpriv --pdeathsig KILL` when `setpriv` is installed, and on macOS, or Linux without
   `setpriv`, the next `start-sidecars` ends a sidecar left by an image that has exited, using
   state files under `~/.cache/hyperion-sidecars/`. `hyperion/server:serve-forever` takes no

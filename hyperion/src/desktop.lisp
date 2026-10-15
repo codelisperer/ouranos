@@ -420,7 +420,9 @@ process exiting from another thread, it stops the launcher on the way out (#355)
              (:browser
               (open-in-browser url)
               (%wait-for-interrupt))))
-      (when on-close (funcall on-close))
-      (when set (ignore-errors (sidecar:stop-sidecars set)))
-      (when handler (ignore-errors (hyperion/server:stop handler)))))
+      ;; A nested UNWIND-PROTECT, so an ON-CLOSE that signals or exits non-locally still stops
+      ;; the sidecars and the server (#708's review).
+      (unwind-protect (when on-close (funcall on-close))
+        (when set (ignore-errors (sidecar:stop-sidecars set)))
+        (when handler (ignore-errors (hyperion/server:stop handler))))))
     url))

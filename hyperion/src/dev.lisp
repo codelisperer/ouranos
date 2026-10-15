@@ -51,7 +51,9 @@ and watching it makes the reload loop feed itself.")
   (running t)
   last-error                                ; last compile error string, or NIL
   (failed '())                              ; Lisp files whose last reload failed (#438)
-  sidecars)                                 ; the HYPERION/SIDECAR set, or NIL (#700)
+  sidecars                                  ; the HYPERION/SIDECAR set, or NIL (#700)
+  ;; Taken by UNWATCH and by WATCH adopting the set, so neither misses the other.
+  (sidecar-lock (sb-thread:make-mutex :name "hyperion-dev-sidecars")))
 
 ;;; --- what is watched ------------------------------------------------------
 ;;;
@@ -521,10 +523,15 @@ Returns the dev handle; stop with UNWATCH."
       (when sidecars
         (let ((started nil))
           (unwind-protect
-               (progn (setf (dev-sidecars d)
-                            (sidecar:start-sidecars sidecars
-                                                    :port (srv:handler-port (dev-handler d))))
-                      (setf started t))
+               (let ((set (sidecar:start-sidecars sidecars
+                                                  :port (srv:handler-port (dev-handler d)))))
+                 ;; Adopted under the same lock UNWATCH takes, so an UNWATCH that ran while the
+                 ;; sidecars were starting is not missed: the session has ended, so the new set
+                 ;; is stopped instead of being kept by a handle nothing will stop (#708's review).
+                 (if (sb-thread:with-mutex ((dev-sidecar-lock d))
+                       (when (dev-running d) (setf (dev-sidecars d) set) t))
+                     (setf started t)
+                     (sidecar:stop-sidecars set)))
             (unless started (unwatch d)))))
       (setf (dev-thread d)
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
@@ -572,9 +579,10 @@ one root. A single root with no Lisp has already been warned about."
 (defun unwatch (&optional (d *dev*))
   "Stop the watcher thread, the server it manages, and its sidecars."
   (when d
-    (setf (dev-running d) nil)
-    (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
-    (let ((set (shiftf (dev-sidecars d) nil)))
+    (let ((set (sb-thread:with-mutex ((dev-sidecar-lock d))
+                 (setf (dev-running d) nil)
+                 (shiftf (dev-sidecars d) nil))))
+      (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
       (when set (ignore-errors (sidecar:stop-sidecars set))))
     (when (eq d *dev*) (setf *dev* nil))
     d))

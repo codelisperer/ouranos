@@ -281,6 +281,86 @@ read them from SB-EXT:*POSIX-ARGV*."
     (is (null dev::*dev*))
     (is-true (ports:await-released port) "the server on ~D is still listening" port)))
 
+;;; --- the cases #708's review raised -------------------------------------------------------
+
+(defparameter +grandchild-ready-form+
+  "(progn (let ((g (sb-ext:run-program #+win32 \"ping\" #-win32 \"sleep\" #+win32 (list \"-n\" \"600\" \"127.0.0.1\") #-win32 (list \"600\") :search t :wait nil :output nil))) (format t \"ready grandchild=~D~%\" (sb-ext:process-pid g))) (finish-output) (sleep 600))"
+  "A sidecar that starts a process of its own before it prints its ready line, which captures
+that process's pid.")
+
+(test stopping-a-sidecar-ends-the-process-it-started
+  "On Unix the sidecar's process group is signalled, on Windows its job is terminated, so a
+process the sidecar started does not outlive the stop."
+  ;; On Unix the grandchild is a shell's background job, which stays in the sidecar's process
+  ;; group. A child that makes its own group, as SB-EXT:RUN-PROGRAM's children do, is not
+  ;; reached by a group signal; hyperion/docs/sidecars.md says so.
+  (sc:define-sidecar :test-grandchild
+                     :command #+win32 (%command +grandchild-ready-form+)
+                              #-win32 (list "/bin/sh" "-c" "sleep 600 & echo \"ready grandchild=$!\"; wait")
+                     :ready (sc:token-after "grandchild="))
+  (let ((grandchild nil))
+    (unwind-protect
+         (progn
+           (with-sidecars (set '(:test-grandchild))
+             (setf grandchild (parse-integer (sc:sidecar-value :test-grandchild)))
+             (is-true (%pid-alive-p grandchild)))
+           (is-true (%ends-within-p grandchild 5)
+                    "the sidecar's own process ~D outlived STOP-SIDECARS" grandchild))
+      (%kill-pid grandchild))))
+
+(test work-on-a-stopped-set-is-refused-rather-than-waited-for
+  (sc:define-sidecar :test-noready-2 :command (%command "(sleep 600)"))
+  (let ((set (sc:start-sidecars '(:test-noready-2))))
+    (sc:stop-sidecars set)
+    (signals sc:sidecar-set-stopped (sc::%on-supervisor set (lambda () :ran)))
+    (is (null (sc:stop-sidecars set)) "a second STOP-SIDECARS is not a no-op")))
+
+(test a-port-change-whose-replacement-fails-signals-and-is-tried-again
+  "The replacement exits when it is given port 2. That signals SIDECAR-NOT-READY, as at start, and
+the next port change starts it again."
+  (sc:define-sidecar :test-port-change
+                     :command (%command "(let ((port (car (last sb-ext:*posix-argv*)))) (when (string= port \"2\") (sb-ext:exit :code 4)) (format t \"port=~A~%\" port) (finish-output) (sleep 600))"
+                                        "{port}")
+                     :ready (sc:token-after "port=") :ready-timeout 30)
+  (with-sidecars (set '(:test-port-change) :port 1)
+    (is (equal "1" (sc:sidecar-value :test-port-change)))
+    (handler-case (progn (sc:update-sidecar-port set 2) (fail "the failed replacement was not reported"))
+      (sc:sidecar-not-ready (c)
+        (is (eq :exited (sc:sidecar-not-ready-reason c)))
+        (is (eql 4 (sc:sidecar-not-ready-exit-code c)))))
+    (is (equal '(:test-port-change) (sc:update-sidecar-port set 3)))
+    (is (equal "3" (sc:sidecar-value :test-port-change)))))
+
+#+win32
+(test on-windows-a-sidecar-that-cannot-be-put-in-a-job-is-not-started
+  "In a job or not at all: the job is what ends a sidecar after the image is killed. The process the
+job function saw is ended before it runs."
+  (sc:define-sidecar :test-no-job :command (%command "(sleep 600)"))
+  (let* ((seen nil)
+         (sc::*job-function* (lambda (pid)
+                               (setf seen pid)
+                               (error 'aion/windows:win32-error :code 5 :message "Access is denied."
+                                                                :operation :assign-process-to-job-object))))
+    (handler-case (progn (sc:start-sidecars '(:test-no-job)) (fail "it started"))
+      (sc:sidecar-not-started (c)
+        (is (eq :no-job (sc:sidecar-not-started-reason c)))))
+    (is-true seen)
+    (when seen (is-true (%ends-within-p seen 5) "the refused sidecar ~D is still running" seen))))
+
+#-win32
+(test without-setpriv-a-sidecar-that-cannot-be-recorded-is-not-started
+  "Without setpriv the state file is the only thing that ends a sidecar after a crash. A state
+directory that cannot be created, because a file has its name, stops the sidecar."
+  (sc:define-sidecar :test-no-record :command (%command "(progn (format t \"pid=~D~%\" (sb-unix:unix-getpid)) (finish-output) (sleep 600))"))
+  (let* ((blocker (uiop:tmpize-pathname (merge-pathnames "hyperion-sidecar-blocker" (uiop:temporary-directory))))
+         (sc:*state-directory* (uiop:ensure-directory-pathname blocker))
+         (sc::*setpriv* nil))
+    (unwind-protect
+         (handler-case (progn (sc:start-sidecars '(:test-no-record)) (fail "it started"))
+           (sc:sidecar-not-started (c)
+             (is (eq :no-state-file (sc:sidecar-not-started-reason c)))))
+      (ignore-errors (delete-file blocker)))))
+
 ;;; --- the image dying ----------------------------------------------------------------------
 
 (defun %tree-registry ()
@@ -288,16 +368,12 @@ read them from SB-EXT:*POSIX-ARGV*."
     (format nil "~A//~A" (substitute #\/ #\\ (string-right-trim "/\\" (uiop:native-namestring tree)))
             (if (uiop:os-windows-p) ";" ":"))))
 
-(defparameter +grandchild-form+
-  "(progn (let ((g (sb-ext:run-program #+win32 \"ping\" #-win32 \"sleep\" #+win32 (list \"-n\" \"600\" \"127.0.0.1\") #-win32 (list \"600\") :search t :wait nil :output nil))) (format t \"ready grandchild=~D~%\" (sb-ext:process-pid g))) (finish-output) (sleep 600))"
-  "A sidecar that starts a process of its own before it prints its ready line.")
-
 (defun %image-with-sidecar ()
   "Start an SBCL image that loads hyperion/sidecar and starts one sidecar, which starts a
 grandchild. Returns (values IMAGE SIDECAR-PID GRANDCHILD-PID LOG) once the image reports both."
   (let* ((log (uiop:tmpize-pathname (merge-pathnames "hyperion-sidecar-image.txt" (uiop:temporary-directory))))
          (form (format nil "(progn (hyperion/sidecar:define-sidecar :child :command (list ~{~S~^ ~}) :ready (hyperion/sidecar:token-after \"grandchild=\")) (hyperion/sidecar:start-sidecars '(:child)) (format t \"SIDECAR ~~D~~%GRANDCHILD ~~A~~%\" (hyperion/sidecar::%pid (hyperion/sidecar::sidecar-process (gethash :child hyperion/sidecar::*running*))) (hyperion/sidecar:sidecar-value :child)) (finish-output) (sleep 600))"
-                       (%command +grandchild-form+)))
+                       (%command +grandchild-ready-form+)))
          (image (uiop:launch-program
                  (list (%sbcl) "--dynamic-space-size" "1024" "--noinform" "--no-userinit" "--no-sysinit"
                        "--non-interactive"

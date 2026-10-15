@@ -90,7 +90,9 @@ Declare the sidecar `:required t` to make that an error instead
   restarted server is on a different port.
 - **Stopping.** `hyperion/dev:unwatch`, the end of a blocking `serve`, and the end of
   `run-app` stop the sidecars. On Linux and macOS a sidecar is sent SIGTERM, then SIGKILL after
-  `hyperion/sidecar:*stop-seconds*` (2 by default). On Windows its job object is terminated.
+  `hyperion/sidecar:*stop-seconds*` (2 by default). Each signal goes to the sidecar's process
+  group, so a process it started is stopped too, unless that process made a process group of its
+  own. On Windows its job object is terminated, which ends everything the sidecar started.
 - **Exit hooks.** A normal image exit stops every sidecar still running.
 - **Restarts.** A sidecar declared `:restart t` that exits by itself is started again after 1
   second, then 2, 4 and so on up to 30 seconds, without a limit on attempts. Each attempt is
@@ -106,10 +108,13 @@ A killed image runs no exit hooks. What ends its sidecars depends on the operati
 
 - **Windows.** Each sidecar is started suspended inside a kill-on-close job object, then
   resumed (`aion/windows:spawn-in-job`). Windows ends everything in the job, including processes
-  the sidecar started, when the image ends for any reason. Sidecars run with no console window.
+  the sidecar started, when the image ends for any reason. A sidecar that Windows cannot put in a
+  job object is not started (`sidecar-not-started`, reason `:no-job`), because nothing else would
+  end it. Sidecars run with no console window.
 - **Linux.** Each sidecar is started through `setpriv --pdeathsig KILL` from util-linux, so the
   kernel kills it when the image goes away. Processes the sidecar itself starts are not covered.
-  If `setpriv` is not installed, a warning is logged and the macOS method below is used.
+  If `setpriv` is not installed, a warning is logged and the macOS method below is used, and a
+  sidecar whose state file cannot be written is not started (reason `:no-state-file`).
 - **macOS.** There is no equivalent mechanism. Each sidecar's pid and program are written to a
   file under `~/.cache/hyperion-sidecars/`. The next `start-sidecars`, in any image, ends a
   recorded sidecar whose image is no longer running and which still runs the recorded program,
