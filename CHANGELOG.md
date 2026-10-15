@@ -212,6 +212,30 @@ its tag.
 
 ### Added
 
+- **aion/schedule: a job scheduler, with `mnemosyne/jobs` to keep its jobs in Postgres or
+  SQLite** (#689). An app registers a job function with `define-job`, with a schedule of
+  `(:every seconds)`, `(:daily (hour minute) :zone "Europe/London")`,
+  `(:weekly (:mon :fri) (hour minute) :zone ...)` or `(:once universal-time)`; a daily or
+  weekly slot that falls in a daylight-saving gap runs at the first instant after it, and one
+  that falls in an overlap runs once, at the earlier instant. `schedule-once` stores a one-off
+  run with arguments. Each instance of the app runs a `scheduler` over the same store, and a
+  lease in the store means each slot runs once across all of them; a slot missed while no
+  instance was running runs once when one starts (trigger `:catch-up`). Jobs run on an
+  `aion/pool` pool the scheduler makes for itself, of two workers by default. Every run is
+  recorded with its trigger, outcome (`:completed`, `:completed-with-errors`, `:failed`,
+  `:skipped`, `:abandoned`), the counts plist the job returned, and an error text; a job calls
+  `note-item-error` for an item that failed without failing the run. `run-now` and `run-job`
+  run a job off its schedule. `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the
+  run log. Drive the scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv
+  timer), and end it with `stop`. **A job must tolerate running twice**: when an instance dies
+  during a run, the run is marked `:abandoned` once its lease expires and another instance runs
+  the job again (trigger `:retry`). Lease times come from each instance's own clock, which may
+  differ from another's by up to about a third of `:lease-seconds` (100 seconds at the default
+  of 300), so keep the instances' clocks synchronised. `mnemosyne/jobs:make-db-job-store` keeps
+  jobs in the tables `aion_jobs` and `aion_job_runs`; it refuses to start with
+  `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
+  migrations, or pass `:ensure t`. See `docs/scheduling.md`.
+
 - **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
   `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an
   `openai-compatible` provider with `https://api.meta.ai/v1` as its default base URL and

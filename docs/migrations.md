@@ -119,6 +119,11 @@ A store made with other table names (`make-db-auth … :table "members" :events-
 `users-ddl`, `users-email-index-ddl`, `role-events-ddl` and `role-events-index-ddl` (#378).
 `:ensure t` uses the store's names itself.
 
+`mnemosyne/jobs` (#689) owns two tables, `aion_jobs` and `aion_job_runs`. `jobs-ddl` returns the
+statements that create them and the runs index, as a list, and `make-db-job-store` signals
+`missing-job-tables` at construction when they cannot be read. See
+[scheduling.md](scheduling.md).
+
 `hyperion/auth-db:users-ddl` is the reference for this pattern. **Any aux system that owns
 a table should provide one**: the app's timeline stays the single source of truth for what
 exists in its database, and `schema_migrations` stays an honest record.

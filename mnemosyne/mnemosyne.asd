@@ -83,6 +83,23 @@
                 :components ((:file "changeset-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/examples/contacts/tests :run-tests)))
 
+(defsystem "mnemosyne/jobs"
+  :description "aion/schedule's job store in a database: schedules, leases and the run log on Postgres or SQLite (#689)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; An aux system, so mnemosyne's core does not load the scheduler.
+  :depends-on ("mnemosyne" "aion/schedule")
+  :components ((:file "src/jobs"))
+  :in-order-to ((test-op (test-op "mnemosyne/jobs/tests"))))
+
+(defsystem "mnemosyne/jobs/tests"
+  :description "mnemosyne/jobs on SQLite, and on Postgres when MNEMOSYNE_TEST_PG_URL is set (#689)."
+  ;; aion/schedule/tests for the store contract the in-memory store is held to.
+  :depends-on ("mnemosyne/jobs" "aion/schedule/tests" "fiveam")
+  :components ((:file "tests/jobs-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :mnemosyne/jobs/tests :run-tests)))
+
 (defsystem "mnemosyne/tests"
   :description "Test suite for Mnemosyne."
   :depends-on ("aion/fs" "mnemosyne" "aion/secret" "aion/clock" "aion/log" "fiveam"   ; entity.lisp and backends.lisp
