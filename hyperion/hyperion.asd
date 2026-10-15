@@ -524,20 +524,23 @@
   :description "A mnemosyne-backed identity store: users, PBKDF2 passwords, temp-password flag, roles."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "mnemosyne" "ironclad")
+  :depends-on ("hyperion" "mnemosyne" "ironclad"
+               "aion/random")                         ; #690: email and reset tokens
   :serial t
-  :components ((:file "src/auth-db"))
+  :components ((:file "src/auth-db")
+               (:file "src/auth-email"))  ; #690: confirmation, change of address, reset
   :in-order-to ((test-op (test-op "hyperion/auth-db/tests"))))
 
 (defsystem "hyperion/auth-db/tests"
   :description "Integration tests for the identity store (SQLite, and Postgres when MNEMOSYNE_TEST_PG_URL is set)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/auth-db" "mnemosyne" "fiveam" "bordeaux-threads" "aion/test-threads")  ; auth-db-tests.lisp calls mnemosyne: directly
+  :depends-on ("hyperion/auth-db" "hyperion" "mnemosyne" "fiveam" "bordeaux-threads" "aion/test-threads")  ; auth-db-tests.lisp calls mnemosyne: directly; auth-email-tests.lisp hyperion/session
   ;; The Postgres tests (#371) run when MNEMOSYNE_TEST_PG_URL is set and skip, saying so, when it
   ;; is not; the rest of the suite is in-memory and file SQLite.
   :serial t
-  :components ((:file "tests/auth-db-tests"))
+  :components ((:file "tests/auth-db-tests")
+               (:file "tests/auth-email-tests"))  ; #690
   :perform (test-op (o c) (uiop:symbol-call :hyperion/auth-db/tests :run-tests)))
 
 ;;; Example apps (like praxeon's elise/chat-rbt) -- each a runnable, buildable proof
