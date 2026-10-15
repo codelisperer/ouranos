@@ -16,27 +16,33 @@
 (in-package #:aion/schedule/uv)
 
 (defun start (scheduler)
-  "Tick SCHEDULER from a libuv timer on a loop and loop thread of its own, until S:STOP. Returns
-SCHEDULER."
+  "Tick SCHEDULER once on the calling thread, then from a libuv timer on a loop and loop thread of
+its own, until S:STOP. Returns SCHEDULER."
   (when (s:scheduler-driver-stop scheduler)
     (error "aion/schedule/uv: this scheduler already has a driver."))
   (let* ((loop (uv:make-loop))
          (timer nil)
          (ready (sb-thread:make-semaphore :name "aion/schedule/uv ready")))
-    (labels ((fire (tm)
+    (labels ((tick-once ()
                (handler-case (s:tick scheduler)
-                 (error (e) (log:exception e "aion/schedule/uv: a tick failed")))
-               (let ((delay (handler-case (s:next-wake scheduler)
-                              (error () (max 1 (floor (s:scheduler-lease-seconds scheduler) 3))))))
-                 (uv:start-timer tm :after (* 1000 delay))))
+                 (error (e) (log:exception e "aion/schedule/uv: a tick failed"))))
+             (delay-ms ()
+               (* 1000 (handler-case (s:next-wake scheduler)
+                         (error () (max 1 (floor (s:scheduler-lease-seconds scheduler) 3))))))
+             (fire (tm)
+               (tick-once)
+               (uv:start-timer tm :after (delay-ms)))
              (wake ()
                (handler-case (uv:submit loop (lambda () (when timer (uv:start-timer timer :after 0))))
                  (error () nil))))
+      ;; The first tick is the caller's, as in S:START, so that when START returns the jobs due
+      ;; at that moment have been started; the timer then waits for the next wake.
+      (tick-once)
       (uv:start-loop-thread loop :name "aion/schedule/uv loop")
       (uv:submit loop (lambda ()
                         (unwind-protect
                              (progn (setf timer (uv:make-timer loop #'fire))
-                                    (uv:start-timer timer :after 0))
+                                    (uv:start-timer timer :after (delay-ms)))
                           (sb-thread:signal-semaphore ready))))
       (unless (sb-thread:wait-on-semaphore ready :timeout 10)
         (uv:close-loop loop)

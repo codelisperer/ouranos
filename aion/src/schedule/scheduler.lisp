@@ -424,6 +424,14 @@ an instance holds its lease."
 
 ;;; --- stopping ------------------------------------------------------------------------------
 
+(defun %wait (queue mutex seconds)
+  "Wait on QUEUE for at most SECONDS, and return holding MUTEX. SBCL's CONDITION-WAIT may return
+from a timeout without taking MUTEX back (its documentation says so, and on Windows it does);
+leaving the caller's WITH-MUTEX to release a mutex it does not hold signals an error."
+  (unless (sb-thread:condition-wait queue mutex :timeout seconds)
+    (unless (sb-thread:holding-mutex-p mutex)
+      (sb-thread:grab-mutex mutex))))
+
 (defun stop (scheduler &key (timeout 30))
   "Stop SCHEDULER: stop its driver, start no more runs, make STOP-REQUESTED-P true, and wait up to
 TIMEOUT seconds for the runs in progress to finish. Returns :STOPPED, or (VALUES :TIMED-OUT keys)
@@ -436,7 +444,7 @@ and another instance then runs them again."
     (%with-lock (scheduler)
       (loop for left = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
             while (and (plusp (hash-table-count (%running scheduler))) (plusp left))
-            do (sb-thread:condition-wait (%idle scheduler) (%lock scheduler) :timeout left)))
+            do (%wait (%idle scheduler) (%lock scheduler) left)))
     (let ((still (%with-lock (scheduler)
                    (loop for k being the hash-keys of (%running scheduler) collect k))))
       (cond (still (values :timed-out still))
@@ -447,9 +455,11 @@ and another instance then runs them again."
 ;;; --- the thread driver (ruling R1) ---------------------------------------------------------
 
 (defun start (scheduler)
-  "Tick SCHEDULER from a thread of its own until STOP: tick, then sleep until NEXT-WAKE, or until
-DEFINE-JOB, SCHEDULE-ONCE or RUN-NOW wakes it. Needs nothing beyond SBCL's threads; for a libuv
-timer instead, see aion/schedule/uv. Returns SCHEDULER."
+  "Tick SCHEDULER once on the calling thread, then from a thread of its own until STOP: sleep
+until NEXT-WAKE, or until DEFINE-JOB, SCHEDULE-ONCE or RUN-NOW wakes it, then tick. The first
+tick is the caller's so that when START returns, the jobs due at that moment have been started.
+Needs nothing beyond SBCL's threads; for a libuv timer instead, see aion/schedule/uv. Returns
+SCHEDULER."
   (when (%stopping scheduler) (error 'scheduler-stopped))
   (when (scheduler-driver-stop scheduler) (error "aion/schedule: this scheduler already has a driver."))
   (let ((mutex (sb-thread:make-mutex :name "aion/schedule driver"))
@@ -459,24 +469,33 @@ timer instead, see aion/schedule/uv. Returns SCHEDULER."
     (flet ((wake ()
              (sb-thread:with-mutex (mutex)
                (setf woken t)
-               (sb-thread:condition-broadcast queue))))
+               (sb-thread:condition-broadcast queue)))
+           (tick-once ()
+             (handler-case (tick scheduler)
+               (error (e) (log:exception e "aion/schedule: a tick failed")))))
       (setf (scheduler-wake-function scheduler) #'wake)
+      (tick-once)
       ;; THREAD-LIFETIME: independent. The driver runs for the scheduler's whole life and must
       ;; not carry the request context of whatever thread happened to call START.
       (let ((thread
               (sb-thread:make-thread
                (lambda ()
                  (loop until (sb-thread:with-mutex (mutex) done)
-                       do (handler-case (tick scheduler)
-                            (error (e) (log:exception e "aion/schedule: a tick failed")))
-                          (let ((delay (handler-case (next-wake scheduler)
+                       do (let ((delay (handler-case (next-wake scheduler)
                                          (error () (max 1 (floor (scheduler-lease-seconds
                                                                   scheduler)
                                                                  3))))))
                             (sb-thread:with-mutex (mutex)
-                              (unless (or woken done)
-                                (sb-thread:condition-wait queue mutex :timeout delay))
-                              (setf woken nil)))))
+                              ;; A loop, because a wait may also return when nothing woke it.
+                              (loop with deadline = (+ (get-internal-real-time)
+                                                       (* delay internal-time-units-per-second))
+                                    for left = (/ (- deadline (get-internal-real-time))
+                                                  internal-time-units-per-second)
+                                    until (or woken done (not (plusp left)))
+                                    do (%wait queue mutex left))
+                              (setf woken nil))
+                            (unless (sb-thread:with-mutex (mutex) done)
+                              (tick-once)))))
                :name "aion/schedule driver")))
         (setf (scheduler-driver-stop scheduler)
               (lambda ()
