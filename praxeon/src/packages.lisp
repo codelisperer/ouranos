@@ -103,7 +103,9 @@
            #:observation-supersedes #:observation-superseded-by #:observation-superseded-at
            #:observation-current-p
            #:remember #:supersede #:recall #:recall-similar #:observation->ctx-item
-   #:observations-of #:forget #:forget-subject #:thread-progress #:record-thread-progress))
+   #:observations-of #:forget #:forget-subject #:thread-progress #:record-thread-progress
+   ;; a window's writes and its progress in one transaction (#529)
+   #:store-transactions-p #:call-with-store-transaction #:with-store-transaction))
 
 (defpackage #:praxeon/results
   (:use #:cl)

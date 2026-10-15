@@ -332,6 +332,10 @@ language of columns."
 SUPERSEDE calls under it. The embedding model is a network call, and a request's read waits for
 the lock (#462's third review: 997 ms behind a 1 s embedder).")
 
+(defvar *prepared* nil
+  "A hash table from content to embedding, computed before CALL-WITH-STORE-TRANSACTION took the
+store's lock, for the REMEMBERs inside the transaction (the hub's review of #645), or NIL.")
+
 (defun %embed-before-lock (store content)
   "CONTENT's embedding, as *EMBEDDED* holds it."
   (cons content (first (llm:embed-documents (store-embedder store) (list content)))))
@@ -341,9 +345,9 @@ the lock (#462's third review: 997 ms behind a 1 s embedder).")
   (mem:check-provenance provenance "remember" subject)
   (let* ((id (format nil "obs-~36R-~36R" (get-universal-time) (random (expt 2 32))))
          (now (%now))
-         (embedding (if (and *embedded* (string= (car *embedded*) content))
-                        (cdr *embedded*)
-                        (first (llm:embed-documents (store-embedder store) (list content)))))
+         (embedding (cond ((and *embedded* (string= (car *embedded*) content)) (cdr *embedded*))
+                          ((and *prepared* (gethash content *prepared*)))
+                          (t (first (llm:embed-documents (store-embedder store) (list content))))))
          (observation (mem::%make-observation
                        :id id :subject subject :content content :kind kind :value value
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))
@@ -759,3 +763,40 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                    :do-update (list :observed mark :skipped text :updated_at (get-universal-time)))
              :dialect (store-dialect store))))
   mark)
+
+;;; --- transactions (#529) ---------------------------------------------------------------
+
+(defmethod mem:store-transactions-p ((store db-memory-store)) t)
+
+(defmethod mem:call-with-store-transaction ((store db-memory-store) thunk
+                                            &key subject thread contents)
+  "THUNK in one transaction on STORE's connection, under the store's recursive lock, so a
+callback inside THUNK that reads or writes the store re-enters it (#529). CONTENTS, the texts
+THUNK will write, are embedded before the lock is taken. SUPERSEDE opens a transaction of its
+own, which becomes a savepoint inside this one; the other writes, REMEMBER, FORGET and
+RECORD-THREAD-PROGRESS among them, run in this transaction directly (Copilot's review of #645).
+
+CALLED INSIDE CONN:WITH-TRANSACTION ON THE SAME THREAD, this is a savepoint, and a rollback of
+the outer transaction undoes what it wrote. That holds only on the thread that opened the outer
+transaction: cl-dbi records an open transaction per thread, not per connection. praxeon/observe
+writes on a thread of its own, so its window transaction is never a savepoint inside an app's
+transaction. When an app holds a transaction open on this store's connection while the observer
+writes, the observer's own BEGIN and COMMIT go to the same connection: on Postgres its COMMIT
+commits the app's transaction, and on SQLite its BEGIN is refused and the attempt fails (#651,
+#653). An app that opens its own transactions does not share this store's connection with an
+observer."
+  (declare (ignore subject thread))
+  ;; THE EMBEDDINGS ARE COMPUTED FIRST, outside the lock and the transaction (the hub's review of
+  ;; #645). The embedding model is a network call; inside, every read of the store would wait for
+  ;; it, and on SQLite the database's write lock would be held meanwhile. A REMEMBER inside THUNK
+  ;; whose content is not among CONTENTS still embeds where it is.
+  (let ((*prepared* (let ((unique (remove-duplicates contents :test #'string=)))
+                      (when unique
+                        (let ((table (make-hash-table :test #'equal)))
+                          (loop for content in unique
+                                for embedding in (llm:embed-documents (store-embedder store) unique)
+                                do (setf (gethash content table) embedding))
+                          table)))))
+    (bt:with-recursive-lock-held ((store-lock store))
+      (conn:with-transaction ((store-connection store))
+        (funcall thunk)))))

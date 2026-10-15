@@ -101,9 +101,8 @@ the CLI and as a web app.
 Growing the Coalton typed core; **Kairos** (the bitemporal context engine, #60); the rest of
 observational memory, tracked in #317: a reflector that condenses a scope's observations with
 the app's approval (step B, #464), the thread's observations put into the prompt in place of
-its old messages (step C), and measuring tokens and accuracy together (step D), plus writing a
-window's observations and its progress in one transaction (#529); LLM-layer hardening (streaming, retry/backoff, real token
-counting); model routing; a graphical studio; per-session agents for
+its old messages (step C), and measuring tokens and accuracy together (step D); LLM-layer
+hardening (streaming, retry/backoff, real token counting); model routing; a graphical studio; per-session agents for
 multi-user "as a service"; live-reload layer 3 (conditions with restart selection in the
 browser).
 
@@ -298,11 +297,15 @@ What is on `main`:
   off the request path. It writes into the conversation's own thread scope, and a thread
   observation becomes a fact about the subject only through the app's promote function. It
   keeps its progress (how far it has distilled, and the windows it gave up on) in the store, and
-  a new observer, or one in an app that restarted, starts from there. The progress is written in
-  a separate call after a window's observations. If that write fails, and the observer is
-  stopped or the app restarts before a later turn writes it, the window is distilled again, and
-  a model that words its answer differently leaves both wordings. Writing the two in one
-  transaction is #529.
+  a new observer, or one in an app that restarted, starts from there. On a store with
+  transactions, which both stores in this tree are, a window's observations, its promotions and
+  its progress are written in one transaction (#529): if any of those writes fails, the window's
+  writes are rolled back and the attempt is retried, so the window is written once. The
+  window's embeddings are computed before the transaction takes the store's lock. A store
+  without transactions, such as one an app wrote itself, writes the progress in a separate call
+  after the observations; if that write fails and the observer is stopped or the app restarts
+  before a later turn writes it, the window is distilled again, and a model that words its
+  answer differently leaves both wordings.
 
 Still to come, in #317: a reflector that condenses a scope's observations (step B, #464), the
 thread's observations in the prompt in place of its old messages (step C), and a benchmark that
