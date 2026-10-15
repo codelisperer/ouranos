@@ -63,7 +63,20 @@
    #:create-job-object-w #:open-process #:set-information-job-object
    #:assign-process-to-job-object #:terminate-job-object
    #:+job-object-extended-limit-information+ #:+job-object-limit-kill-on-job-close+
-   #:+process-terminate+ #:+process-set-quota+))
+   #:+process-terminate+ #:+process-set-quota+
+   ;; starting a process (#700)
+   #:security-attributes #:n-length #:lp-security-descriptor #:b-inherit-handle
+   #:startupinfo-w #:cb #:dw-flags #:h-std-input #:h-std-output #:h-std-error
+   #:startupinfoex-w #:startup-info #:lp-attribute-list
+   #:process-information #:h-process #:h-thread #:dw-process-id #:dw-thread-id
+   #:set-handle-information #:initialize-proc-thread-attribute-list
+   #:update-proc-thread-attribute #:delete-proc-thread-attribute-list
+   #:create-process-w #:resume-thread #:terminate-process #:wait-for-single-object
+   #:get-exit-code-process
+   #:+create-suspended+ #:+create-unicode-environment+ #:+extended-startupinfo-present+
+   #:+create-no-window+ #:+startf-usestdhandles+ #:+handle-flag-inherit+
+   #:+proc-thread-attribute-handle-list+ #:+file-append-data+ #:+file-share-read+
+   #:+file-share-write+ #:+wait-object-0+ #:+wait-timeout+ #:+infinite+ #:+still-active+))
 
 (cl:defpackage #:aion/windows
   (:use #:common-lisp)
@@ -89,5 +102,13 @@
    #:handle-valid-p #:close-handle #:with-handle
    ;; job objects (#599)
    #:make-kill-on-close-job #:assign-process-to-job #:terminate-job
+   ;; starting a process in a job, with no console window (#700)
+   #:spawn-in-job #:default-job-function #:find-executable
+   #:quote-windows-argument #:windows-command-line
+   #:process-not-started #:process-not-started-program #:process-not-started-reason
+   #:job-process #:job-process-p #:job-process-pid #:job-process-job
+   #:job-process-input #:job-process-output #:job-process-error
+   #:job-process-alive-p #:job-process-exit-code #:job-process-status #:job-process-wait
+   #:job-process-terminate #:job-process-close
    ;; file attributes, from aion/fs
    #:file-attributes #:file-attributes-error #:file-attributes-error-code))
