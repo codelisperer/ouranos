@@ -910,6 +910,20 @@ its tag.
 
 ### Fixed
 
+- **`aion/platform:shipped-image-p` is false inside `bin/cons`** (#703). `bin/cons` is one dumped
+  file, so its runtime and core are the same file, and an app run under it (`cons test-app`, for
+  example) read it as a shipped Linux build on every OS: `shipped-image-p` returned true and
+  `shipped-image-directory` (and `hyperion/desktop:install-directory`) returned the tree's `bin/`.
+  `bootstrap.lisp` now dumps `bin/cons` with `:development-runner t`, which puts
+  `:ouranos-development-runner` on `*features*`, and `shipped-image-p` returns false while that
+  feature is present. The new `aion/platform:development-runner-p` reports it, and
+  `shipped-image-p` takes `:development-runner` to override it. `scripts/dump-image.lisp`'s
+  `dump-executable` and `dump-core` take `:development-runner` and remove the feature for every
+  other dump, so an app dumped from inside `bin/cons` still reads as shipped. Rebuild `bin/cons`
+  (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`) to get the mark. An app that looks
+  for its assets only in the source tree, because `shipped-image-p` was wrong under `cons`, can
+  use `shipped-image-p` again.
+
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
   `:result-stored`, `:results-cleared`, `:context-trimmed`, `:context-overflow`, `:delegate`,
