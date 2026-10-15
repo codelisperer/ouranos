@@ -561,7 +561,7 @@
 
 (defsystem "aion/schedule/tests"
   :description "Tests for aion/schedule: next due times across daylight-saving changes, and the scheduler on a manual clock over the in-memory store."
-  :depends-on ("aion/schedule" "fiveam" "aion/test-threads")
+  :depends-on ("aion/schedule" "aion/tz" "fiveam" "aion/test-threads")
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -582,7 +582,7 @@
 
 (defsystem "aion/schedule/uv/tests"
   :description "Tests for aion/schedule/uv. Requires a built libuv (scripts/build-libuv.lisp)."
-  :depends-on ("aion/schedule/uv" "fiveam")
+  :depends-on ("aion/schedule/uv" "aion/schedule" "fiveam")
   :components ((:file "tests/schedule-uv"))
   :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
 

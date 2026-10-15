@@ -96,7 +96,7 @@
 (defsystem "mnemosyne/jobs/tests"
   :description "mnemosyne/jobs on SQLite, and on Postgres when MNEMOSYNE_TEST_PG_URL is set (#689)."
   ;; aion/schedule/tests for the store contract the in-memory store is held to.
-  :depends-on ("mnemosyne/jobs" "aion/schedule/tests" "fiveam")
+  :depends-on ("mnemosyne/jobs" "mnemosyne" "aion/schedule" "aion/schedule/tests" "fiveam")
   :components ((:file "tests/jobs-tests"))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/jobs/tests :run-tests)))
 
