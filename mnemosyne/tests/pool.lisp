@@ -358,3 +358,37 @@ from a backend, not from a connection."
            (is (= 0 (conn:pool-open-count pool)) "the slot of the failed connect was given back"))
       (conn:close-pool pool)
       (ignore-errors (delete-file file)))))
+
+(test an-immediate-sqlite-transaction-that-reads-first-waits-for-the-write-lock
+  ;; #653. One connection holds a write transaction on a SQLite file for 1 s. Another opens a
+  ;; transaction that reads, then writes. Begun deferred, its upgrade to a writer fails with BUSY
+  ;; at once, without the busy timeout. Begun IMMEDIATE, it waits for the lock and succeeds.
+  (let ((file (format nil "~Ammn-immediate-~36R.db" (namestring (uiop:temporary-directory))
+                      (random (expt 2 40) (make-random-state t)))))
+    (unwind-protect
+         (let ((backend (be:make-sqlite file)))
+           (conn:with-connection (c backend) (conn:exec c "CREATE TABLE t (n INTEGER)"))
+           (flet ((reader-writer (immediate)
+                    (let* ((holder (bt:make-thread
+                                    (lambda ()
+                                      (conn:with-connection (c backend)
+                                        (conn:with-transaction (c)
+                                          (conn:exec c "INSERT INTO t VALUES (1)")
+                                          (sleep 1))))))
+                           (result (progn
+                                     (sleep 0.2)
+                                     (handler-case
+                                         (conn:with-connection (c backend)
+                                           (conn:with-transaction (c :immediate immediate)
+                                             (conn:query c "SELECT count(*) AS n FROM t")
+                                             (conn:exec c "INSERT INTO t VALUES (2)"))
+                                           :written)
+                                       (conn:db-error (e) e)))))
+                      (bt:join-thread holder)
+                      result)))
+             (is* (typep (reader-writer nil) 'conn:db-error)
+                  "control: begun deferred, the read-then-write transaction fails behind the writer")
+             (is* (eq :written (reader-writer t))
+                  "begun IMMEDIATE, it waits for the writer and succeeds")))
+      (dolist (suffix '("" "-journal" "-wal" "-shm"))
+        (let ((f (probe-file (concatenate 'string file suffix)))) (when f (delete-file f)))))))
