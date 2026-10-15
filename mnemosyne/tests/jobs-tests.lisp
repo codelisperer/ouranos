@@ -136,6 +136,36 @@ MAKE-DB-JOB-STORE's keys."
            (is (null (s:store-runs store "gone"))))
       (s:stop a :timeout 5))))
 
+(backend-test registering-again-recovers-a-row-whose-arguments-could-not-be-read (make-store)
+  (let* ((store (funcall make-store :ensure t))
+         (clock (s:make-manual-clock 3990000000))
+         (n (list 0))
+         (f (lambda (ctx &rest args) (declare (ignore ctx args)) (incf (car n)) nil))
+         (a (s:make-scheduler store :clock clock :dispatch :inline)))
+    (unwind-protect
+         (flet ((insert-unreadable (key schedule)
+                  (conn:exec (jobs::store-source store)
+                             (format nil "INSERT INTO ~A (job_key, function_name, schedule, args, next_due, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+                                     (jobs::jobs-table store))
+                             key "nightly" schedule "(NO-SUCH-PACKAGE-689::X)"
+                             3990000000 3990000000)))
+           (s:define-job a "nightly" f)
+           ;; The schedule and function name read back; only the arguments do not.
+           (insert-unreadable "nightly" "(:EVERY 60)")
+           (is (stringp (s:stored-job-unreadable (s:store-job store "nightly"))))
+           (s:define-job a "nightly" f :schedule '(:every 60))
+           (is (null (s:stored-job-unreadable (s:store-job store "nightly")))
+               "DEFINE-JOB with the same schedule rewrites the row")
+           (insert-unreadable "once" "(:ONCE 3990000000)")
+           (signals s:job-exists (s:schedule-once a "nightly" :key "once" :at 3990000000))
+           (s:schedule-once a "nightly" :key "once" :at 3990000000 :replace t)
+           (is (null (s:stored-job-unreadable (s:store-job store "once")))
+               "SCHEDULE-ONCE with :REPLACE T rewrites a one-off")
+           (s:clock-advance clock 60)
+           (is (= 2 (length (s:tick a))) "and both run")
+           (is (= 2 (car n))))
+      (s:stop a :timeout 5))))
+
 (test the-table-names-are-checked
   (signals error (jobs:jobs-ddl :jobs-table "jobs; DROP TABLE x"))
   (is (= 3 (length (jobs:jobs-ddl)))))

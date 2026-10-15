@@ -118,18 +118,49 @@
   (is (equal "h2" (s:stored-job-lease-holder (s:store-job store "j")))))
 
 (defun %check-remove-on-finish (store)
-  (s:store-put-job store (%job "once" :schedule (list :once (+ +t0+ 5))))
-  (%acquire store "once" "h1" +t0+ :run-id "r1")
-  (%acquire store "once" "h2" (+ +t0+ 31) :run-id "r2" :expected-run "r1")
-  (is (null (s:store-finish store "once" "h1" "r1" :now (+ +t0+ 32) :outcome :completed
-                                                   :remove-job t))
-      "a late finish with REMOVE-JOB does not own the lease")
-  (is (equal "r2" (s:stored-job-current-run (s:store-job store "once")))
-      "and leaves the job, and the run now holding it, alone")
-  (is-true (s:store-finish store "once" "h2" "r2" :now (+ +t0+ 33) :outcome :completed
-                                                  :remove-job t))
+  (let ((once (%job "once" :schedule (list :once (+ +t0+ 5)))))
+    (s:store-put-job store once)
+    (%acquire store "once" "h1" +t0+ :run-id "r1")
+    (%acquire store "once" "h2" (+ +t0+ 31) :run-id "r2" :expected-run "r1")
+    (is (null (s:store-finish store "once" "h1" "r1" :now (+ +t0+ 32) :outcome :completed
+                                                     :remove-job once))
+        "a late finish with REMOVE-JOB does not own the lease")
+    (is (equal "r2" (s:stored-job-current-run (s:store-job store "once")))
+        "and leaves the job, and the run now holding it, alone")
+    (is-true (s:store-finish store "once" "h2" "r2" :now (+ +t0+ 33) :outcome :completed
+                                                    :remove-job once)))
   (is (null (s:store-job store "once")) "the run that holds the lease removes the job")
   (is (eq :completed (s:job-run-outcome (s:store-run store "r2")))))
+
+(defun %check-finish-keeps-a-replaced-job (store)
+  (flet ((replaced-while-running (key old new)
+           ;; OLD is put and acquired; NEW replaces it while the run goes on; the run then
+           ;; finishes asking to remove OLD.
+           (s:store-put-job store old)
+           (%acquire store key "h1" +t0+ :run-id (format nil "r-~A" key))
+           (s:store-put-job store new :replace t)
+           (is-true (s:store-finish store key "h1" (format nil "r-~A" key) :now (+ +t0+ 1)
+                                                                        :outcome :completed
+                                                                        :remove-job old)
+                    "the run still owned the lease (~A)" key)
+           (let ((job (s:store-job store key)))
+             (is-true job "a job replaced while its run went on is kept (~A)" key)
+             (when job
+               (is (equal (s:stored-job-schedule new) (s:stored-job-schedule job)) "~A" key)
+               (is (equal (s:stored-job-args new) (s:stored-job-args job)) "~A" key)
+               (is (null (s:stored-job-lease-holder job)) "and its lease released (~A)" key)
+               (is (null (s:stored-job-current-run job)) "~A" key)))
+           (is (eq :completed (s:job-run-outcome (s:store-run store (format nil "r-~A" key))))
+               "and the run is finished (~A)" key)))
+    (let ((at (list :once (+ +t0+ 5))))
+      (replaced-while-running "recurring" (%job "recurring" :schedule at)
+                              (%job "recurring" :schedule '(:every 60)))
+      (replaced-while-running "other-args" (%job "other-args" :schedule at :args '(1))
+                              (%job "other-args" :schedule at :args '(2)))
+      (replaced-while-running "now-args" (%job "now-args" :schedule at)
+                              (%job "now-args" :schedule at :args '(2)))
+      (replaced-while-running "other-function" (%job "other-function" :schedule at)
+                              (%job "other-function" :schedule at :function-name "f2")))))
 
 (defun %check-abandon (store)
   (s:store-put-job store (%job "j"))
@@ -188,6 +219,7 @@
   "Run the store protocol's checks, each against a fresh store from MAKE-STORE, a function of no
 arguments."
   (dolist (check (list #'%check-put #'%check-data #'%check-acquire #'%check-renew-and-finish
-                       #'%check-takeover #'%check-remove-on-finish #'%check-abandon #'%check-advance
+                       #'%check-takeover #'%check-remove-on-finish
+                       #'%check-finish-keeps-a-replaced-job #'%check-abandon #'%check-advance
                        #'%check-runs-and-prune))
     (funcall check (funcall make-store))))

@@ -49,17 +49,27 @@ once, at the earlier instant. `run-local-date` is the slot's date in the schedul
 `schedule-once` stores a one-off run of a registered job function with arguments, which must be
 plain data (numbers, strings, symbols, lists) because they are stored. A one-off that completes
 is removed from the store; one that fails stays, not due, for an operator to run again with
-`run-job`.
+`run-job`. Given a `:key` that a stored job already has, `schedule-once` signals `job-exists`;
+pass `:replace t` to replace that job. A job that is replaced while a run of it is going, by
+`schedule-once :replace t` or by `define-job` turning a one-off into a recurring job, is kept
+when that run finishes: the run removes a one-off only when its function name, schedule and
+arguments are still the ones the run started from.
 
 `run-now` starts a job off its schedule on the pool and returns its run id, or the id of the run
 already in progress; `run-job` runs it on the calling thread and returns the finished run. Both
-leave the schedule alone.
+leave the schedule alone. Neither starts a run of a job this instance is still running, even when
+that run has outlived its lease: `run-now` returns the running run's id with `:already-running`,
+and `run-job` returns `nil`.
 
 `start` ticks once, then drives the scheduler from a thread; `aion/schedule/uv:start` drives it
 from a libuv timer on a loop of its own. `stop` starts no more runs, stops the driver, and waits
 for the runs in progress, renewing their leases while it waits, all within `:timeout` seconds. It
 returns `:stopped`, or `:timed-out` with the keys of the jobs still running; a driver still busy in
-a tick at the timeout is left in place, and a later `stop` waits for it again.
+a tick at the timeout is left in place, and a later `stop` waits for it again. A lease renewal
+that is waiting on the store when the timeout passes is left to finish on its own thread, so
+`stop` returns at its timeout even when a database renewal is waiting for a connection or a lock.
+A `stop` that begins while `start` is still in its first tick waits for that tick, within its
+timeout, and `start` then starts no driver.
 
 ## Several instances
 
@@ -120,6 +130,7 @@ missing migration stops the app at start. Other table names are passed as `:jobs
 A job row whose schedule or arguments cannot be read back, for example because they name a
 package a later build removed, does not stop the other jobs. `store-jobs` returns it with
 `stored-job-unreadable` set to the reason, and each scheduler logs it once and leaves it in the
-table; `run-now` on it signals `unreadable-job`. Replace it with `define-job` or
-`schedule-once`, or remove it with `store-remove-job`. A job whose function no instance has
+table; `run-now` on it signals `unreadable-job`. Replace it with `define-job` (which rewrites
+the row even when the schedule it gives is the one stored) or `schedule-once :replace t`, or
+remove it with `store-remove-job`. A job whose function no instance has
 registered is treated the same way, and neither kind makes the driver tick more often.
