@@ -48,9 +48,9 @@
 # checkout alone does not prove -- ASDF may resolve elsewhere, or serve stale
 # fasls):  sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
 
-sha     7915fad0
-date    2026-07-29
-subject Add Optional & Result instances for Foldable
+sha     024d0a17
+date    2026-10-12
+subject Check type constructors before matching predicates
 
 # --- staying current -------------------------------------------------------
 #
@@ -60,4 +60,4 @@ subject Add Optional & Result instances for Foldable
 # opts out is a pin nobody reviews, and the exemption outlives the reasoning.
 
 advisories https://github.com/coalton-lang/coalton/security/advisories
-reviewed   2026-09-15
+reviewed   2026-10-15

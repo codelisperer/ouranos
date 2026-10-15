@@ -347,6 +347,26 @@ Coalton reports an unused binding as a full `WARNING` (not a style-warning). ASD
 Fix it the way the compiler says — `_seen?` rather than `seen?` — for any binding a
 `match` pattern introduces but the branch does not read.
 
+**A discarded `Result` is the same kind of warning, since Coalton `024d0a17`** (upstream
+`94cd7f25`, adopted in #697). A form whose value is a `Result` and is thrown away fails the
+build the same way: a non-final form of a body (`progn`, `let`, a function body), or the last
+form of a `when`, `unless` or loop body. Compiling `(check x)` as the first of two forms in
+a function body, with `check` returning `(Result String Unit)`, prints this, and
+`compile-file` returns `failure-p` true:
+
+```
+; caught COMMON-LISP:WARNING:
+;   warn: Discarded Result
+;     --> <macroexpansion>:7:4
+;      |
+;    7 |      (CHECK X)
+;      |      ^^^^^^^^^ the error in this Result is ignored; discard it explicitly with (let _ = ...) to ignore this warning
+```
+
+Handle the `Result`, or, when ignoring the error is intended, bind it to `_`:
+`(let _ = (check x))`, which compiles with no warning. Before `024d0a17` such a form compiled
+silently and its error was lost. When the tree moved to `024d0a17`, no file in it had one.
+
 **Two things make this bite far harder than it should.**
 
 - **`ql:quickload` hides it — with no muffling at all.** This is stronger than it first

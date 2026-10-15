@@ -168,9 +168,39 @@ Upstreaming is cheaper than carrying a fork, and it is the relationship a framew
 
 | | |
 |---|---|
-| **Pinned** ([`coalton.pin`](../coalton.pin)) | **`7915fad0`** — *Add `Optional` & `Result` instances for `Foldable`* |
-| Adopted | 2026-07-29, from `03648698` (18 days of drift) |
-| Behind `origin/main` | **0** |
+| **Pinned** ([`coalton.pin`](../coalton.pin)) | **`024d0a17`** — *Check type constructors before matching predicates* (2026-10-12) |
+| Adopted | 2026-10-15, from `7915fad0` (157 commits), in #697 |
+| Behind `origin/main` | **0** on 2026-10-15 |
+
+### Adoption record — 2026-10-15
+
+157 upstream commits, from `7915fad0` to `024d0a17`. Upstream made no release and published
+no security advisory in that range. What it changes for code built on Coalton:
+
+- `94cd7f25`: discarding a `Result` is a full warning, so it fails an ASDF build. See
+  [`coalton-patterns.md`](coalton-patterns.md) §8a.
+- `5e888bf5`: a toplevel list left open at the end of a file is an error. Before, it was
+  read silently and swallowed every form after it.
+- `587bb8c6`: `unwrap`, `expect` and `error` signal a `Panic` condition that prints the
+  message as written, instead of passing it to `cl:error` as a format string.
+- `846effd1`: `error` takes only a `String`; `Signalable` and `result:ok-or-error` are
+  removed.
+- `8052b977`: the identity `Into`/`Iso` instances, `Cell` to `String`, and the tuple-swap
+  conversions are removed.
+- `coalton` exports `need`, `protect` and `handle`.
+- Wrong-code fixes in argument evaluation order under inlining, match simplification,
+  loop-variable capture, and dictionary hoisting with keyword parameters (`8772d134`,
+  `68ef80f0`, `97e8fb16`, `7abed9f3`, `d18c8b1a`), and soundness fixes that may reject code
+  that compiled before (`df6d1614`, `ffdad0b8`, `68fedb7c`).
+
+None of these needed a change in this tree: every system compiled with no warning, and no
+suite's check count changed.
+
+**Verification** (SBCL 2.6.9, Linux on WSL, x86-64, base `main` 0c69742, fasl cache cleared
+first): `verify-tree.lisp` with every optional axis (base+uv+tls+libgit+view) and Postgres
+passed with 12393 checks. Every suite's count equals the same gate's at `7915fad0` on the
+same commit and host. `check-coalton.lisp` confirmed the Coalton that loaded was `024d0a17`.
+The four CI legs, release mode included, are recorded on #697.
 
 ### Adoption record — 2026-07-29
 

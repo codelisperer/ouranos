@@ -300,7 +300,7 @@ design over convenience** unless the maintainer flags time pressure.
   makes it work on Windows). Cadence, triage classes, and the adoption record live in
   [`docs/coalton-upstream.md`](docs/coalton-upstream.md); build-time enforcement is
   [issue #83](https://github.com/codelisperer/ouranos/issues/83). **Currently pinned:
-  `7915fad0`** (adopted 2026-07-29; 9/9 systems, 506 checks, 0 failures).
+  `024d0a17`** (adopted 2026-10-15 in #697; the whole gate, 12393 checks on Linux, 0 failures).
 - **Publishing (future)** — **Ultralisp** (rolling, fast) for reach + **ocicl** (OCI,
   pinned/reproducible) for consumption. Independent per-lib release, if ever needed,
   via **`git subtree split`** mirrors (the monorepo layout is already split-ready).
