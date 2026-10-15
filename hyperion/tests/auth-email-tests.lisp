@@ -235,7 +235,111 @@ link by changing it again. The revert puts back the address the link was sent to
                                                                       :password "old-pw")))))
       (is (= (+ *now* 604800) revert-expires)))))
 
+;;; A session store whose listing fails the first time it is asked, as a database store does when
+;;; its connection drops.
+(defclass %flaky-sessions (session::memory-store)
+  ((failures :initarg :failures :accessor %failures)))
+
+(defmethod session:store-list ((s %flaky-sessions))
+  (if (plusp (%failures s))
+      (progn (decf (%failures s)) (error "the session store is unreachable"))
+      (call-next-method)))
+
+(test a-revert-whose-session-store-fails-can-be-tried-again
+  "#690 review: the sessions are ended before the token is used, so a session store that fails
+leaves the link usable and the address unchanged, and the retry ends the sessions."
+  (with-email-auth (a)
+    (let* ((sessions (make-instance '%flaky-sessions :failures 1))
+           (id (%new-user a "flaky@x.com"))
+           (revert (nth-value 2 (auth:confirm-email-change
+                                 a (auth:request-email-change a id "fl2@x.com" :password "old-pw")))))
+      (%signed-in sessions id)
+      (signals error (auth:revert-email-change a revert sessions))
+      (is (string= "fl2@x.com" (auth:user-email (auth:find-user-by-id a id)))
+          "the failed attempt changed nothing")
+      (multiple-value-bind (user ended) (auth:revert-email-change a revert sessions)
+        (is (string= "flaky@x.com" (auth:user-email user)))
+        (is (= 1 ended))
+        (is (= 0 (session:store-count sessions)))))))
+
+;;; --- concurrent issuers ----------------------------------------------------------------------
+
+(defun %concurrent-issues (path rounds)
+  "Two stores on two connections to the SQLite file PATH, limit 1. Each round both issue a
+confirmation for a fresh user at once. Returns (values rounds-with-one-token issued refused other)."
+  (let* ((ca (conn:connect (be:make-sqlite (namestring path))))
+         (cb (conn:connect (be:make-sqlite (namestring path))))
+         (_ (dolist (c (list ca cb)) (conn:exec c "PRAGMA busy_timeout = 5000")))
+         (a (auth:make-db-auth ca :dialect :sqlite :token-limit 1 :clock #'%clock))
+         (b (auth:make-db-auth cb :dialect :sqlite :token-limit 1 :clock #'%clock))
+         (one 0) (issued 0) (refused 0) (other '()))
+    (declare (ignore _))
+    (unwind-protect
+         (dotimes (i rounds)
+           (let* ((id (auth:user-id (auth:create-user a :email (format nil "iss-~D@x.com" i))))
+                  (go (sb-thread:make-semaphore))
+                  (outcomes (make-array 2 :initial-element nil))
+                  (threads
+                    (loop for store in (list a b) for k from 0
+                          collect (let ((store store) (k k))
+                                    ;; THREAD-LIFETIME: scoped -- joined below, before the next round.
+                                    (sb-thread:make-thread
+                                     (lambda ()
+                                       (sb-thread:wait-on-semaphore go)
+                                       (setf (aref outcomes k)
+                                             (handler-case (if (auth:issue-confirmation store id)
+                                                               :issued
+                                                               "returned NIL")
+                                               (auth:too-many-tokens () :refused)
+                                               (error (e) (princ-to-string e)))))
+                                     :name "issue")))))
+             (sb-thread:signal-semaphore go 2)
+             (dolist (th threads) (aion/test-threads:join th))
+             (when (= 1 (length (conn:query ca "SELECT _id FROM hyperion_email_tokens WHERE user_id = ?" id)))
+               (incf one))
+             (loop for o across outcomes
+                   do (case o (:issued (incf issued)) (:refused (incf refused))
+                        (t (push o other))))))
+      (conn:disconnect ca) (conn:disconnect cb))
+    (values one issued refused other)))
+
+(test two-stores-issuing-at-once-stay-within-the-limit
+  "#690 review: the store's lock does not reach another store or process. The count and the
+insert run in one transaction behind a lock on the user's row, so the database serialises them."
+  (let ((path (%temp-db-path "issue-race")))
+    (unwind-protect
+         (progn
+           (%with-file-migrated (list path (append (list (%users-migration) (%email-index-migration))
+                                                   (%role-log-migrations) (%email-migrations))))
+           (multiple-value-bind (one issued refused other) (%concurrent-issues path 40)
+             (is (= 40 one) "every user has exactly one token: ~D of 40" one)
+             (is (= 40 issued))
+             (is (= 40 refused))
+             (is (null other) "no other outcome: ~S" (remove-duplicates other :test #'equal))))
+      (ignore-errors (delete-file path)))))
+
 ;;; --- the operator path ---------------------------------------------------------------------
+
+(test set-email-writes-nothing-when-the-address-moved-after-it-was-read
+  "#690 review: when the conditional write matches no row, SET-EMAIL must not cancel tokens or
+record a change. The address is moved between the read and the write by wrapping %USER-ROW."
+  (with-email-auth (a)
+    (let* ((id (%new-user a "moving@x.com"))
+           (reset (auth:issue-password-reset a "moving@x.com")))
+      (sb-int:encapsulate 'auth::%user-row 'move-it
+                          (lambda (f store user-id)
+                            (prog1 (funcall f store user-id)
+                              (conn:exec (auth::conn store)
+                                         "UPDATE hyperion_users SET email = 'moved@x.com' WHERE _id = ?"
+                                         user-id))))
+      (unwind-protect
+           (signals error (auth:set-email a id "target@x.com" :actor "op"))
+        (sb-int:unencapsulate 'auth::%user-row 'move-it))
+      (is (string= "moving@x.com" (auth:user-email (auth:find-user-by-id a id)))
+          "the transaction rolled back, the concurrent move with it")
+      (is (null (auth:email-history a id)) "no change recorded")
+      (is (auth:reset-password a reset "new-pw") "and no token cancelled"))))
+
 
 (test an-operator-change-applies-at-once-and-leaves-the-address-unconfirmed
   (with-email-auth (a)
@@ -298,6 +402,20 @@ link by changing it again. The revert puts back the address the link was sent to
         (is (= 1 (auth:prune-email-tokens a)) "the reset, after its hour"))
       (let ((*now* (+ *now* 86401)))
         (is (= 1 (auth:prune-email-tokens a)) "the used confirmation, after its day")))))
+
+(test prune-keeps-expired-tokens-the-limit-still-counts
+  "#690 review: with a lifetime shorter than the limit's window, pruning expired tokens must not
+make room for more than the limit within one window."
+  (with-email-auth (a :token-limit 2 :token-window 100 :confirm-token-seconds 50)
+    (let ((id (%new-user a "quota@x.com")))
+      (auth:issue-confirmation a id)
+      (auth:issue-confirmation a id)
+      (let ((*now* (+ *now* 51)))
+        (is (= 0 (auth:prune-email-tokens a)) "expired, but still inside the window")
+        (signals auth:too-many-tokens (auth:issue-confirmation a id)))
+      (let ((*now* (+ *now* 101)))
+        (is (= 2 (auth:prune-email-tokens a)))
+        (is (stringp (auth:issue-confirmation a id)))))))
 
 ;;; --- the construction check (E5) -----------------------------------------------------------
 
