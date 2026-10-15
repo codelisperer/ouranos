@@ -49,3 +49,28 @@
                       "STOP ends the loop thread")
              (is (null (s:scheduler-wake-function a)))))
       (s:stop a :timeout 5))))
+
+(defclass gated-store (s:memory-job-store)
+  ((hold :initform nil :accessor hold)
+   (entered :initform (sb-thread:make-semaphore) :reader entered)
+   (gate :initform (sb-thread:make-semaphore) :reader gate)))
+
+(defmethod s:store-jobs :before ((store gated-store))
+  (when (hold store)
+    (setf (hold store) nil)
+    (sb-thread:signal-semaphore (entered store))
+    (sb-thread:wait-on-semaphore (gate store))))
+
+(test stop-keeps-the-loop-while-a-tick-is-still-on-its-thread
+  (let* ((store (make-instance 'gated-store))
+         (a (s:make-scheduler store :clock (s:make-manual-clock 3990000000))))
+    (suv:start a)
+    (let ((thread (driver-thread)))
+      (setf (hold store) t)
+      (funcall (s:scheduler-wake-function a))
+      (sb-thread:wait-on-semaphore (entered store))
+      (is (eq :timed-out (s:stop a :timeout 0.3)) "the tick holds the loop thread")
+      (is-true (sb-thread:thread-alive-p thread))
+      (sb-thread:signal-semaphore (gate store))
+      (is (eq :stopped (s:stop a :timeout 5)) "a later STOP closes the loop")
+      (is-true (wait-until (lambda () (not (sb-thread:thread-alive-p thread))))))))

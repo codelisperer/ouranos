@@ -18,11 +18,13 @@
   (s:make-stored-job :key key :function-name function-name :schedule schedule :args args
                      :next-due next-due :updated-at +t0+))
 
-(defun %acquire (store key holder now &key (expected-due :any) (next-due :keep) (run-id "r1")
-                                          (trigger :schedule) scheduled-for (lease 30))
+(defun %acquire (store key holder now &key (expected-due :any) (expected-run :any)
+                                          (next-due :keep) (run-id "r1") (trigger :schedule)
+                                          scheduled-for (lease 30) args)
   (s:store-acquire store key holder :now now :until (+ now lease) :expected-due expected-due
-                                    :next-due next-due :run-id run-id :trigger trigger
-                                    :scheduled-for scheduled-for))
+                                    :expected-run expected-run :next-due next-due
+                                    :run-id run-id :trigger trigger :scheduled-for scheduled-for
+                                    :args args))
 
 (defun %check-put (store)
   (is (null (s:store-job store "a")) "no job before one is put")
@@ -92,8 +94,15 @@
 
 (defun %check-takeover (store)
   (s:store-put-job store (%job "j"))
-  (%acquire store "j" "h1" +t0+ :run-id "r1" :scheduled-for 77)
+  (%acquire store "j" "h1" +t0+ :run-id "r1" :scheduled-for 77 :args '(7 "seven"))
+  (is (equal '(7 "seven") (s:job-run-args (s:store-run store "r1")))
+      "a run keeps the arguments it was started with")
+  (is (null (%acquire store "j" "h2" (+ +t0+ 31) :run-id "r2" :expected-run "r-other"))
+      "an expired lease is not taken when its run is not the one the caller read")
+  (is (null (%acquire store "j" "h2" (+ +t0+ 31) :run-id "r2" :expected-run nil))
+      "nor when the caller read no run")
   (let ((run (%acquire store "j" "h2" (+ +t0+ 31) :run-id "r2" :trigger :retry
+                                                  :expected-run "r1"
                                                   :expected-due (+ +t0+ 60) :next-due :keep)))
     (is-true run "an expired lease is taken")
     (is (eq :retry (s:job-run-trigger run))))
@@ -107,6 +116,20 @@
   (is (eq :completed (s:job-run-outcome (s:store-run store "r1")))
       "but it does record how the run ended")
   (is (equal "h2" (s:stored-job-lease-holder (s:store-job store "j")))))
+
+(defun %check-remove-on-finish (store)
+  (s:store-put-job store (%job "once" :schedule (list :once (+ +t0+ 5))))
+  (%acquire store "once" "h1" +t0+ :run-id "r1")
+  (%acquire store "once" "h2" (+ +t0+ 31) :run-id "r2" :expected-run "r1")
+  (is (null (s:store-finish store "once" "h1" "r1" :now (+ +t0+ 32) :outcome :completed
+                                                   :remove-job t))
+      "a late finish with REMOVE-JOB does not own the lease")
+  (is (equal "r2" (s:stored-job-current-run (s:store-job store "once")))
+      "and leaves the job, and the run now holding it, alone")
+  (is-true (s:store-finish store "once" "h2" "r2" :now (+ +t0+ 33) :outcome :completed
+                                                  :remove-job t))
+  (is (null (s:store-job store "once")) "the run that holds the lease removes the job")
+  (is (eq :completed (s:job-run-outcome (s:store-run store "r2")))))
 
 (defun %check-advance (store)
   (s:store-put-job store (%job "j"))
@@ -144,5 +167,6 @@
   "Run the store protocol's checks, each against a fresh store from MAKE-STORE, a function of no
 arguments."
   (dolist (check (list #'%check-put #'%check-data #'%check-acquire #'%check-renew-and-finish
-                       #'%check-takeover #'%check-advance #'%check-runs-and-prune))
+                       #'%check-takeover #'%check-remove-on-finish #'%check-advance
+                       #'%check-runs-and-prune))
     (funcall check (funcall make-store))))

@@ -22,6 +22,7 @@ its own, until S:STOP. Returns SCHEDULER."
     (error "aion/schedule/uv: this scheduler already has a driver."))
   (let* ((loop (uv:make-loop))
          (timer nil)
+         (thread nil)
          (ready (sb-thread:make-semaphore :name "aion/schedule/uv ready")))
     (labels ((tick-once ()
                (handler-case (s:tick scheduler)
@@ -38,7 +39,7 @@ its own, until S:STOP. Returns SCHEDULER."
       ;; The first tick is the caller's, as in S:START, so that when START returns the jobs due
       ;; at that moment have been started; the timer then waits for the next wake.
       (tick-once)
-      (uv:start-loop-thread loop :name "aion/schedule/uv loop")
+      (setf thread (uv:start-loop-thread loop :name "aion/schedule/uv loop"))
       (uv:submit loop (lambda ()
                         (unwind-protect
                              (progn (setf timer (uv:make-timer loop #'fire))
@@ -49,10 +50,18 @@ its own, until S:STOP. Returns SCHEDULER."
         (error "aion/schedule/uv: the loop thread did not start the timer within 10 seconds."))
       (setf (s:scheduler-wake-function scheduler) #'wake
             (s:scheduler-driver-stop scheduler)
-            (lambda ()
+            ;; Ends the driver; true once the loop thread has ended, within SECONDS.
+            (lambda (seconds)
               (setf (s:scheduler-wake-function scheduler) nil)
-              ;; CLOSE-LOOP stops the loop thread, then closes the timer with the loop's
-              ;; other handles.
-              (uv:close-loop loop)))
+              (uv:stop-loop-thread loop :timeout seconds)
+              ;; STOP-LOOP-THREAD returns after its timeout whether or not the thread ended,
+              ;; and a tick on that thread may be in a long database call. The loop is closed
+              ;; only once the thread has ended, because closing frees the memory the thread's
+              ;; timer callback would use. Until then the loop is kept, and a later S:STOP
+              ;; waits for the thread again.
+              (sb-thread:join-thread thread :timeout seconds :default nil)
+              (unless (sb-thread:thread-alive-p thread)
+                (uv:close-loop loop)
+                t)))
       (log:info "aion/schedule: started" :holder (s:scheduler-holder scheduler) :driver :uv)
       scheduler)))

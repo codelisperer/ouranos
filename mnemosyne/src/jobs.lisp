@@ -72,7 +72,7 @@ as a list, for an app that folds them into its own migrations instead of calling
         (runs (%check-table-name runs-table)))
     (list
      (format nil "CREATE TABLE IF NOT EXISTS ~A (job_key TEXT PRIMARY KEY, function_name TEXT NOT NULL, schedule TEXT NOT NULL, args TEXT, next_due BIGINT, lease_holder TEXT, lease_until BIGINT, current_run TEXT, updated_at BIGINT NOT NULL)" jobs)
-     (format nil "CREATE TABLE IF NOT EXISTS ~A (id TEXT PRIMARY KEY, job_key TEXT NOT NULL, holder TEXT, run_trigger TEXT NOT NULL, scheduled_for BIGINT, started_at BIGINT NOT NULL, finished_at BIGINT, outcome TEXT NOT NULL, counts TEXT, error TEXT)" runs)
+     (format nil "CREATE TABLE IF NOT EXISTS ~A (id TEXT PRIMARY KEY, job_key TEXT NOT NULL, holder TEXT, run_trigger TEXT NOT NULL, scheduled_for BIGINT, started_at BIGINT NOT NULL, finished_at BIGINT, outcome TEXT NOT NULL, counts TEXT, error TEXT, args TEXT)" runs)
      (format nil "CREATE INDEX IF NOT EXISTS ~A_by_job ON ~A (job_key, started_at)" runs runs))))
 
 (defun ensure-schema (store)
@@ -86,7 +86,7 @@ as a list, for an app that folds them into its own migrations instead of calling
   (handler-case
       (with-connection (c store)
         (conn:query c (format nil "SELECT job_key, function_name, schedule, args, next_due, lease_holder, lease_until, current_run, updated_at FROM ~A WHERE 1 = 0" (jobs-table store)))
-        (conn:query c (format nil "SELECT id, job_key, holder, run_trigger, scheduled_for, started_at, finished_at, outcome, counts, error FROM ~A WHERE 1 = 0" (runs-table store))))
+        (conn:query c (format nil "SELECT id, job_key, holder, run_trigger, scheduled_for, started_at, finished_at, outcome, counts, error, args FROM ~A WHERE 1 = 0" (runs-table store))))
     (error (e)
       (error 'missing-job-tables :tables (list (jobs-table store) (runs-table store)) :cause e))))
 
@@ -138,10 +138,11 @@ ENSURE, creates the tables; without it, signals MISSING-JOB-TABLES when they can
                   :finished-at (%int (param:row-value row :finished_at))
                   :outcome (%keyword (param:row-value row :outcome) +outcomes+)
                   :counts (s:read-data (param:row-value row :counts))
-                  :error (param:row-value row :error)))
+                  :error (param:row-value row :error)
+                  :args (s:read-data (param:row-value row :args))))
 
 (defun %job-columns () "job_key, function_name, schedule, args, next_due, lease_holder, lease_until, current_run, updated_at")
-(defun %run-columns () "id, job_key, holder, run_trigger, scheduled_for, started_at, finished_at, outcome, counts, error")
+(defun %run-columns () "id, job_key, holder, run_trigger, scheduled_for, started_at, finished_at, outcome, counts, error, args")
 
 (defun %equals (column value)
   "A WHERE term matching COLUMN to VALUE, and the parameters it binds. `= NULL' is never true in
@@ -190,13 +191,18 @@ SQL, so a NIL value is matched with IS NULL and binds nothing."
     (plusp (conn:exec c (format nil "DELETE FROM ~A WHERE job_key = ?" (jobs-table store)) key))))
 
 (defmethod s:store-acquire ((store db-job-store) key holder
-                            &key now until expected-due next-due run-id trigger scheduled-for)
+                            &key now until expected-due (expected-run :any) next-due run-id
+                              trigger scheduled-for args)
   (with-connection (c store)
     (conn:with-transaction (c)
       (let ((row (first (conn:query c (format nil "SELECT next_due, current_run FROM ~A WHERE job_key = ?"
                                               (jobs-table store))
                                     key))))
-        (when row
+        (when (and row
+                   (or (eq expected-run :any)
+                       (equal expected-run (param:row-value row :current_run))))
+          ;; The UPDATE below matches the current run read here, so a run that changed since the
+          ;; read (another instance took over, or the run finished) makes it change nothing.
           (let ((old-run (param:row-value row :current_run)))
             (multiple-value-bind (run-term run-params) (%equals "current_run" old-run)
               (multiple-value-bind (due-term due-params)
@@ -217,7 +223,8 @@ SQL, so a NIL value is matched with IS NULL and binds nothing."
                                  now old-run))
                     (let ((run (s:make-job-run :id run-id :job-key key :holder holder
                                                :trigger trigger :scheduled-for scheduled-for
-                                               :started-at now :outcome :running)))
+                                               :started-at now :outcome :running
+                                               :args args)))
                       (%insert-run c store run)
                       run)))))))))))
 
@@ -234,24 +241,32 @@ SQL, so a NIL value is matched with IS NULL and binds nothing."
                                 (jobs-table store))
                       until key holder run-id))))
 
-(defmethod s:store-finish ((store db-job-store) key holder run-id &key now outcome counts error)
+(defmethod s:store-finish ((store db-job-store) key holder run-id
+                           &key now outcome counts error remove-job)
   (with-connection (c store)
     (conn:with-transaction (c)
-      (conn:exec c (format nil "UPDATE ~A SET outcome = ?, finished_at = ?, counts = ?, error = ? WHERE id = ?"
-                           (runs-table store))
-                 (%word outcome) now (s:write-data counts) error run-id)
-      (plusp (conn:exec c (format nil "UPDATE ~A SET lease_holder = NULL, lease_until = NULL, current_run = NULL, updated_at = ? WHERE job_key = ? AND lease_holder = ? AND current_run = ?"
-                                  (jobs-table store))
-                        now key holder run-id)))))
+      ;; The job row first, then the run row: the order STORE-ACQUIRE takes them in, so a
+      ;; takeover and a late finish on Postgres wait for each other instead of deadlocking.
+      (let ((owned (plusp (if remove-job
+                              (conn:exec c (format nil "DELETE FROM ~A WHERE job_key = ? AND lease_holder = ? AND current_run = ?"
+                                                   (jobs-table store))
+                                         key holder run-id)
+                              (conn:exec c (format nil "UPDATE ~A SET lease_holder = NULL, lease_until = NULL, current_run = NULL, updated_at = ? WHERE job_key = ? AND lease_holder = ? AND current_run = ?"
+                                                   (jobs-table store))
+                                         now key holder run-id)))))
+        (conn:exec c (format nil "UPDATE ~A SET outcome = ?, finished_at = ?, counts = ?, error = ? WHERE id = ?"
+                             (runs-table store))
+                   (%word outcome) now (s:write-data counts) error run-id)
+        owned))))
 
 (defun %insert-run (c store run)
-  (conn:exec c (format nil "INSERT INTO ~A (~A) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  (conn:exec c (format nil "INSERT INTO ~A (~A) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                        (runs-table store) (%run-columns))
              (s:job-run-id run) (s:job-run-job-key run) (s:job-run-holder run)
              (%word (s:job-run-trigger run)) (s:job-run-scheduled-for run)
              (s:job-run-started-at run) (s:job-run-finished-at run)
              (%word (s:job-run-outcome run)) (s:write-data (s:job-run-counts run))
-             (s:job-run-error run)))
+             (s:job-run-error run) (s:write-data (s:job-run-args run))))
 
 (defmethod s:store-record-run ((store db-job-store) run)
   (with-connection (c store) (%insert-run c store run))

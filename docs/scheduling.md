@@ -55,9 +55,11 @@ is removed from the store; one that fails stays, not due, for an operator to run
 already in progress; `run-job` runs it on the calling thread and returns the finished run. Both
 leave the schedule alone.
 
-`start` drives the scheduler from a thread; `aion/schedule/uv:start` drives it from a libuv
-timer on a loop of its own. `stop` stops the driver, starts no more runs and waits for the runs
-in progress, up to `:timeout` seconds.
+`start` ticks once, then drives the scheduler from a thread; `aion/schedule/uv:start` drives it
+from a libuv timer on a loop of its own. `stop` starts no more runs, stops the driver, and waits
+for the runs in progress, renewing their leases while it waits, all within `:timeout` seconds. It
+returns `:stopped`, or `:timed-out` with the keys of the jobs still running; a driver still busy in
+a tick at the timeout is left in place, and a later `stop` waits for it again.
 
 ## Several instances
 

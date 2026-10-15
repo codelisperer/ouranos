@@ -26,7 +26,7 @@
    #:stored-job-updated-at
    #:job-run #:make-job-run #:copy-job-run #:job-run-id #:job-run-job-key #:job-run-holder
    #:job-run-trigger #:job-run-scheduled-for #:job-run-started-at #:job-run-finished-at
-   #:job-run-outcome #:job-run-counts #:job-run-error
+   #:job-run-outcome #:job-run-counts #:job-run-error #:job-run-args
    ;; the store protocol
    #:job-store #:store-jobs #:store-job #:store-put-job #:store-remove-job #:store-acquire
    #:store-advance #:store-renew #:store-finish #:store-record-run #:store-runs #:store-run

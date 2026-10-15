@@ -62,6 +62,8 @@
    (tick-lock :initform (sb-thread:make-mutex :name "aion/schedule tick") :reader %tick-lock)
    (created-at :initarg :created-at :reader %created-at)
    (stopping :initform nil :accessor %stopping)
+   ;; Runs between admission and their entry in RUNNING, so STOP waits for them too.
+   (starting :initform 0 :accessor %starting)
    (wake-function :initform nil :accessor scheduler-wake-function)
    (driver-stop :initform nil :accessor scheduler-driver-stop))
   (:documentation "Runs the jobs in a JOB-STORE when they fall due. See MAKE-SCHEDULER."))
@@ -208,10 +210,16 @@ Safe to call from any thread."
                                                 :name "aion-schedule")))))
 
 (defun %submit (scheduler thunk dispatch)
-  "Hand THUNK to DISPATCH; true when it was accepted."
-  (cond ((eq dispatch :inline) (funcall thunk) t)
-        ((eq dispatch :pool) (pool:try-submit (%ensure-pool scheduler) thunk))
-        (t (funcall dispatch thunk))))
+  "Hand THUNK to DISPATCH. Returns NIL when it was accepted, or the reason it was not, as text for
+the run log."
+  (handler-case
+      (cond ((eq dispatch :inline) (funcall thunk) nil)
+            ((eq dispatch :pool) (if (pool:try-submit (%ensure-pool scheduler) thunk)
+                                     nil
+                                     "the worker pool refused the run"))
+            ((funcall dispatch thunk) nil)
+            (t "the worker pool refused the run"))
+    (error (e) (%clip (format nil "the dispatcher signalled ~S: ~A" (type-of e) (%report-of e))))))
 
 (defun %finish (scheduler context job outcome counts error)
   (let ((store (scheduler-store scheduler))
@@ -220,13 +228,16 @@ Safe to call from any thread."
     (unwind-protect
          (handler-case
              (progn
+               ;; A one-off that completed is removed by the same store step that checks the
+               ;; lease is still this run's, so a late finish never removes another run's job.
                (unless (store-finish store key (scheduler-holder scheduler) (run-id context)
-                                     :now now :outcome outcome :counts counts :error error)
+                                     :now now :outcome outcome :counts counts :error error
+                                     :remove-job (and (eq :once (first (stored-job-schedule job)))
+                                                      (member outcome '(:completed
+                                                                        :completed-with-errors))
+                                                      t))
                  (log:warn "aion/schedule: a run finished after its lease was taken over"
                            :job key :run-id (run-id context)))
-               (when (and (eq :once (first (stored-job-schedule job)))
-                          (member outcome '(:completed :completed-with-errors)))
-                 (store-remove-job store key))
                (when (%keep-runs scheduler)
                  (store-prune-runs store :key key :keep (%keep-runs scheduler))))
            (error (e)
@@ -259,31 +270,52 @@ Safe to call from any thread."
                                                      :condition (type-of e)))))
     (%finish scheduler context job outcome counts error)))
 
-(defun %start-run (scheduler job trigger &key expected-due next-due scheduled-for args
-                                             (dispatch (%dispatch scheduler)))
+(defun %admit (scheduler)
+  "Count a run as starting, so STOP waits for it, or signal SCHEDULER-STOPPED when STOP has begun.
+Checked and counted under the scheduler's lock, which STOP takes to set its flag."
+  (%with-lock (scheduler)
+    (when (%stopping scheduler) (error 'scheduler-stopped))
+    (incf (%starting scheduler))))
+
+(defun %admitted (scheduler)
+  (%with-lock (scheduler)
+    (decf (%starting scheduler))
+    (sb-thread:condition-broadcast (%idle scheduler))))
+
+(defun %start-run (scheduler job trigger &key expected-due (expected-run :any) next-due
+                                             scheduled-for args (dispatch (%dispatch scheduler)))
   "Take JOB's lease and start a run with TRIGGER. Returns the run id, or NIL when the lease was
-not this instance's to take."
-  (let* ((key (stored-job-key job))
-         (function (%with-lock (scheduler)
-                     (gethash (stored-job-function-name job) (%functions scheduler))))
-         (now (scheduler-clock-now scheduler))
-         (run-id (%new-id))
-         (run (store-acquire (scheduler-store scheduler) key (scheduler-holder scheduler)
-                             :now now :until (+ now (scheduler-lease-seconds scheduler))
-                             :expected-due expected-due :next-due next-due :run-id run-id
-                             :trigger trigger :scheduled-for scheduled-for)))
-    (when run
-      (let ((context (%make-run-context
-                      :id run-id :key key :trigger trigger :scheduled-for scheduled-for
-                      :local-date (and scheduled-for
-                                       (%local-date-of-slot (stored-job-schedule job)
-                                                            scheduled-for))
-                      :args args :scheduler scheduler)))
-        (%with-lock (scheduler) (setf (gethash key (%running scheduler)) run-id))
-        (log:info "aion/schedule: a run started" :job key :run-id run-id :trigger trigger)
-        (unless (%submit scheduler (lambda () (%execute scheduler context function job)) dispatch)
-          (%finish scheduler context job :failed nil "the worker pool refused the run")))
-      run-id)))
+not this instance's to take. Signals SCHEDULER-STOPPED once STOP has begun."
+  (%admit scheduler)
+  (let ((admitted t))
+    (unwind-protect
+         (let* ((key (stored-job-key job))
+                (function (%with-lock (scheduler)
+                            (gethash (stored-job-function-name job) (%functions scheduler))))
+                (now (scheduler-clock-now scheduler))
+                (run-id (%new-id))
+                (run (store-acquire (scheduler-store scheduler) key (scheduler-holder scheduler)
+                                    :now now :until (+ now (scheduler-lease-seconds scheduler))
+                                    :expected-due expected-due :expected-run expected-run
+                                    :next-due next-due :run-id run-id :trigger trigger
+                                    :scheduled-for scheduled-for :args args)))
+           (when run
+             (let ((context (%make-run-context
+                             :id run-id :key key :trigger trigger :scheduled-for scheduled-for
+                             :local-date (and scheduled-for
+                                              (%local-date-of-slot (stored-job-schedule job)
+                                                                   scheduled-for))
+                             :args args :scheduler scheduler)))
+               (%with-lock (scheduler) (setf (gethash key (%running scheduler)) run-id))
+               (setf admitted nil)
+               (%admitted scheduler)
+               (log:info "aion/schedule: a run started" :job key :run-id run-id :trigger trigger)
+               (let ((refused (%submit scheduler
+                                       (lambda () (%execute scheduler context function job))
+                                       dispatch)))
+                 (when refused (%finish scheduler context job :failed nil refused))))
+             run-id))
+      (when admitted (%admitted scheduler)))))
 
 ;;; --- TICK ----------------------------------------------------------------------------------
 
@@ -313,6 +345,8 @@ and move the next due time past now."
                                             :trigger :schedule :scheduled-for due
                                             :started-at now :finished-at now
                                             :outcome :skipped))
+      (when (%keep-runs scheduler)
+        (store-prune-runs store :key (stored-job-key job) :keep (%keep-runs scheduler)))
       (log:info "aion/schedule: a run was skipped, because the previous one is still going"
                 :job (stored-job-key job)))))
 
@@ -332,13 +366,18 @@ and move the next due time past now."
       ((not (%lease-free-p job now)) nil)
       ;; The lease has expired and still names a run: its instance died mid-run.
       ((stored-job-current-run job)
+       ;; EXPECTED-RUN is the abandoned run this tick read, so if another instance has retried
+       ;; it since, this acquire changes nothing. The retry gets the abandoned run's slot and
+       ;; arguments, which RUN-NOW may have given.
        (let ((old (store-run (scheduler-store scheduler) (stored-job-current-run job))))
-         (%start-run scheduler job :retry :expected-due due :next-due :keep
+         (%start-run scheduler job :retry :expected-due due
+                                          :expected-run (stored-job-current-run job)
+                                          :next-due :keep
                                           :scheduled-for (and old (job-run-scheduled-for old))
-                                          :args (stored-job-args job))))
+                                          :args (if old (job-run-args old) (stored-job-args job)))))
       ((and due (<= due now))
        (%start-run scheduler job (if (< due (%created-at scheduler)) :catch-up :schedule)
-                   :expected-due due
+                   :expected-due due :expected-run nil
                    :next-due (values (next-due (stored-job-schedule job) now :previous due))
                    :scheduled-for due :args (stored-job-args job)))
       (t nil))))
@@ -364,11 +403,13 @@ instance's to run. Returns the ids of the runs started. A driver calls this; so 
       (let ((now (scheduler-clock-now scheduler)))
         (%renew-leases scheduler now)
         (loop for job in (store-jobs (scheduler-store scheduler))
-              for id = (handler-case (%consider scheduler job now)
-                         (error (e)
-                           (log:exception e "aion/schedule: a job could not be started"
-                                          :job (stored-job-key job))
-                           nil))
+              for id = (unless (%stopping scheduler)
+                         (handler-case (%consider scheduler job now)
+                           (scheduler-stopped () nil)
+                           (error (e)
+                             (log:exception e "aion/schedule: a job could not be started"
+                                            :job (stored-job-key job))
+                             nil)))
               when id collect id)))))
 
 (defun next-wake (scheduler)
@@ -383,7 +424,12 @@ leases are renewed in time and jobs written by other instances are noticed."
                 (loop for job in jobs
                       initially (when (null jobs) (return cap))
                       for until = (stored-job-lease-until job)
-                      minimize (cond ((and (stored-job-lease-holder job) until (>= until now))
+                      for due = (stored-job-next-due job)
+                      minimize (cond ((and due (%running-locally-p scheduler (stored-job-key job)))
+                                      ;; Its next slot falls due during its own run, and is
+                                      ;; skipped then, not when the run has ended.
+                                      (- due now))
+                                     ((and (stored-job-lease-holder job) until (>= until now))
                                       (- (1+ until) now))
                                      ((stored-job-current-run job) 0)
                                      ((stored-job-next-due job) (- (stored-job-next-due job) now))
@@ -432,25 +478,40 @@ leaving the caller's WITH-MUTEX to release a mutex it does not hold signals an e
     (unless (sb-thread:holding-mutex-p mutex)
       (sb-thread:grab-mutex mutex))))
 
+(defun %busy-p (scheduler)
+  (%with-lock (scheduler)
+    (or (plusp (%starting scheduler)) (plusp (hash-table-count (%running scheduler))))))
+
 (defun stop (scheduler &key (timeout 30))
-  "Stop SCHEDULER: stop its driver, start no more runs, make STOP-REQUESTED-P true, and wait up to
-TIMEOUT seconds for the runs in progress to finish. Returns :STOPPED, or (VALUES :TIMED-OUT keys)
-naming the jobs still running. Those keep their leases, which expire once the process has gone,
-and another instance then runs them again."
-  (setf (%stopping scheduler) t)
-  (let ((driver-stop (shiftf (scheduler-driver-stop scheduler) nil)))
-    (when driver-stop (funcall driver-stop)))
+  "Stop SCHEDULER: start no more runs, make STOP-REQUESTED-P true, stop its driver, and wait for
+the runs in progress to finish, renewing their leases meanwhile. All of it within TIMEOUT
+seconds. Returns :STOPPED, or (VALUES :TIMED-OUT keys) naming the jobs still running; KEYS is
+empty when it was the driver that did not end in time, and a later STOP tries it again. Runs
+still going keep their leases, which expire once the process has gone, and another instance
+then runs them again."
   (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
-    (%with-lock (scheduler)
-      (loop for left = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
-            while (and (plusp (hash-table-count (%running scheduler))) (plusp left))
-            do (%wait (%idle scheduler) (%lock scheduler) left)))
-    (let ((still (%with-lock (scheduler)
-                   (loop for k being the hash-keys of (%running scheduler) collect k))))
-      (cond (still (values :timed-out still))
-            (t (when (and (%own-pool scheduler) (%pool scheduler))
-                 (pool:stop-pool (%pool scheduler)))
-               :stopped)))))
+    (flet ((left () (/ (- deadline (get-internal-real-time)) internal-time-units-per-second))
+           (running-keys ()
+             (%with-lock (scheduler)
+               (loop for k being the hash-keys of (%running scheduler) collect k))))
+      (%with-lock (scheduler) (setf (%stopping scheduler) t))
+      (let ((driver-stop (shiftf (scheduler-driver-stop scheduler) nil)))
+        (when (and driver-stop (not (funcall driver-stop (max 0.001 (left)))))
+          (setf (scheduler-driver-stop scheduler) driver-stop)
+          (return-from stop (values :timed-out (running-keys)))))
+      ;; TICK starts nothing once STOPPING is set, and renews nothing either, so the drain
+      ;; renews the leases itself, every third of the lease, until its runs have finished.
+      (let ((slice (max 1 (floor (scheduler-lease-seconds scheduler) 3))))
+        (loop while (and (%busy-p scheduler) (plusp (left)))
+              do (%with-lock (scheduler)
+                   (when (%busy-p scheduler)
+                     (%wait (%idle scheduler) (%lock scheduler) (min slice (left)))))
+                 (%renew-leases scheduler (scheduler-clock-now scheduler))))
+      (let ((still (running-keys)))
+        (cond ((or still (%busy-p scheduler)) (values :timed-out still))
+              (t (when (and (%own-pool scheduler) (%pool scheduler))
+                   (pool:stop-pool (%pool scheduler)))
+                 :stopped))))))
 
 ;;; --- the thread driver (ruling R1) ---------------------------------------------------------
 
@@ -498,11 +559,13 @@ SCHEDULER."
                               (tick-once)))))
                :name "aion/schedule driver")))
         (setf (scheduler-driver-stop scheduler)
-              (lambda ()
+              ;; Ends the driver; true once its thread has ended, within SECONDS.
+              (lambda (seconds)
                 (sb-thread:with-mutex (mutex)
                   (setf done t)
                   (sb-thread:condition-broadcast queue))
                 (setf (scheduler-wake-function scheduler) nil)
-                (sb-thread:join-thread thread :default nil))))
+                (sb-thread:join-thread thread :timeout seconds :default nil)
+                (not (sb-thread:thread-alive-p thread)))))
       (log:info "aion/schedule: started" :holder (scheduler-holder scheduler) :driver :thread)
       scheduler)))

@@ -18,10 +18,11 @@ has run). LEASE-HOLDER and LEASE-UNTIL are the lease; CURRENT-RUN is the run hol
 (defstruct job-run
   "One run of a job. TRIGGER is :SCHEDULE, :CATCH-UP, :RETRY or :RUN-NOW. OUTCOME is :RUNNING,
 :COMPLETED, :COMPLETED-WITH-ERRORS, :FAILED, :SKIPPED or :ABANDONED. COUNTS is the plist the job
-returned; ERROR is a string."
+returned; ERROR is a string. ARGS are the arguments the run was started with, which a retry of it
+reuses."
   (id "" :type string)
   (job-key "" :type string)
-  holder trigger scheduled-for started-at finished-at outcome counts error)
+  holder trigger scheduled-for started-at finished-at outcome counts error args)
 
 (defclass job-store () ()
   (:documentation "Where a scheduler keeps its jobs, their leases and their runs."))
@@ -39,15 +40,16 @@ lease alone. Without REPLACE, only when no job has JOB's key. Returns true when 
 (defgeneric store-remove-job (store key)
   (:documentation "Remove the job KEY. Its runs stay. Returns true when there was one."))
 
-(defgeneric store-acquire (store key holder &key now until expected-due next-due run-id trigger
-                                                 scheduled-for)
+(defgeneric store-acquire (store key holder &key now until expected-due expected-run next-due
+                                                 run-id trigger scheduled-for args)
   (:documentation "Take the lease on job KEY for HOLDER until UNTIL and start a run, as one
 atomic step, or return NIL and change nothing.
 
-The lease is taken only when it is free or expired at NOW (its LEASE-UNTIL is before NOW), and
-only when the job's NEXT-DUE equals EXPECTED-DUE, unless EXPECTED-DUE is :ANY. NEXT-DUE becomes
-the new next due time, unless it is :KEEP. A run the expired lease still names is marked
-:ABANDONED, finished at NOW. Returns the new :RUNNING JOB-RUN, with id RUN-ID."))
+The lease is taken only when it is free or expired at NOW (its LEASE-UNTIL is before NOW), only
+when the job's NEXT-DUE equals EXPECTED-DUE, and only when its CURRENT-RUN equals EXPECTED-RUN
+(NIL for none); either may be :ANY, the default for EXPECTED-RUN. NEXT-DUE becomes the new next
+due time, unless it is :KEEP. A run the expired lease still names is marked :ABANDONED, finished
+at NOW. Returns the new :RUNNING JOB-RUN, with id RUN-ID and arguments ARGS."))
 
 (defgeneric store-advance (store key &key expected-due next-due)
   (:documentation "Set job KEY's next due time to NEXT-DUE when it is EXPECTED-DUE, without
@@ -57,10 +59,11 @@ touching its lease. Returns true when it changed."))
   (:documentation "Extend the lease on job KEY to UNTIL when HOLDER holds it for RUN-ID. Returns
 true when it did; NIL means the lease is no longer this run's."))
 
-(defgeneric store-finish (store key holder run-id &key now outcome counts error)
+(defgeneric store-finish (store key holder run-id &key now outcome counts error remove-job)
   (:documentation "Finish run RUN-ID at NOW with OUTCOME, COUNTS and ERROR, and release the lease
-on job KEY when HOLDER still holds it for that run. The run is finished either way. Returns true
-when the lease was still this run's."))
+on job KEY when HOLDER still holds it for that run; with REMOVE-JOB, remove the job instead, in
+the same step, so a job whose lease has passed to another run is never removed. The run is
+finished either way. Returns true when the lease was still this run's."))
 
 (defgeneric store-record-run (store run)
   (:documentation "Add RUN, which holds no lease (a :SKIPPED run). Returns RUN."))
@@ -149,12 +152,14 @@ contents end with the process, so it does not keep schedules across a redeploy."
       (< (stored-job-lease-until job) now)))
 
 (defmethod store-acquire ((store memory-job-store) key holder
-                          &key now until expected-due next-due run-id trigger scheduled-for)
+                          &key now until expected-due (expected-run :any) next-due run-id trigger
+                            scheduled-for args)
   (%with-store-lock (store)
     (let ((job (gethash key (%jobs store))))
       (when (and job
                  (%lease-free-p job now)
-                 (or (eq expected-due :any) (eql expected-due (stored-job-next-due job))))
+                 (or (eq expected-due :any) (eql expected-due (stored-job-next-due job)))
+                 (or (eq expected-run :any) (equal expected-run (stored-job-current-run job))))
         (let ((old-run (and (stored-job-current-run job)
                             (gethash (stored-job-current-run job) (%runs store)))))
           (when (and old-run (eq :running (job-run-outcome old-run)))
@@ -166,7 +171,7 @@ contents end with the process, so it does not keep schedules across a redeploy."
         (unless (eq next-due :keep) (setf (stored-job-next-due job) next-due))
         (let ((run (make-job-run :id run-id :job-key key :holder holder :trigger trigger
                                  :scheduled-for scheduled-for :started-at now
-                                 :outcome :running)))
+                                 :outcome :running :args args)))
           (setf (gethash run-id (%runs store)) run)
           (copy-job-run run))))))
 
@@ -185,7 +190,8 @@ contents end with the process, so it does not keep schedules across a redeploy."
         (setf (stored-job-lease-until job) until)
         t))))
 
-(defmethod store-finish ((store memory-job-store) key holder run-id &key now outcome counts error)
+(defmethod store-finish ((store memory-job-store) key holder run-id
+                         &key now outcome counts error remove-job)
   (%with-store-lock (store)
     (let ((run (gethash run-id (%runs store)))
           (job (gethash key (%jobs store))))
@@ -194,8 +200,10 @@ contents end with the process, so it does not keep schedules across a redeploy."
               (job-run-counts run) counts (job-run-error run) error))
       (when (and job (equal holder (stored-job-lease-holder job))
                  (equal run-id (stored-job-current-run job)))
-        (setf (stored-job-lease-holder job) nil (stored-job-lease-until job) nil
-              (stored-job-current-run job) nil (stored-job-updated-at job) now)
+        (if remove-job
+            (remhash key (%jobs store))
+            (setf (stored-job-lease-holder job) nil (stored-job-lease-until job) nil
+                  (stored-job-current-run job) nil (stored-job-updated-at job) now))
         t))))
 
 (defmethod store-record-run ((store memory-job-store) run)
