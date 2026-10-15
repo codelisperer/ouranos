@@ -41,6 +41,19 @@ it and broke that suite."
 (defun %static-header (response name)
   (getf (second response) name))
 
+(defun %body-text (body)
+  "The octets of a static response's BODY, as a latin-1 string: a function is called with a
+writer that collects them, a stream is read to its end and closed."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (etypecase body
+      (function (funcall body (lambda (chunk)
+                                (loop for octet across chunk do (vector-push-extend octet out)))))
+      (stream (unwind-protect
+                   (loop for octet = (read-byte body nil) while octet
+                         do (vector-push-extend octet out))
+                (close body))))
+    (map 'string #'code-char out)))
+
 ;;; --- content type + traversal (pre-existing behaviour, now pinned) ---------
 
 (test content-type-by-extension
@@ -56,11 +69,15 @@ it and broke that suite."
     (is (null (static:file-response root "")))
     (is (null (static:file-response root "/missing.txt")))))
 
-(test serves-an-existing-file-as-a-pathname
+(test serves-an-existing-file-as-its-open-stream
+  "The body is the open octet stream of the file that was checked (#314), not a pathname for
+the server to open again, and it holds the file's bytes."
   (with-static-root (root ("ok.txt" "fine"))
     (let ((r (static:file-response root "/ok.txt")))
       (is (= 200 (first r)))
-      (is (pathnamep (third r)))                                  ; streamed, not slurped
+      (is (typep (third r) 'file-stream))                         ; streamed, not slurped
+      (is (equal '(unsigned-byte 8) (stream-element-type (third r))))
+      (is (string= "fine" (%body-text (third r))))
       (is (string= "text/plain; charset=utf-8" (%static-header r :content-type))))))
 
 ;;; --- caching headers -------------------------------------------------------
@@ -256,6 +273,101 @@ Control: a link to a file inside the root is served."
                               (namestring (merge-pathnames "alias.css" root))))
       (is-false (%served-p root "/leak.txt"))
       (is-true (%served-p root "/alias.css")))))
+
+(defun %backslash-sibling (root)
+  "A new directory beside ROOT whose native name is ROOT's followed by a backslash and
+\"outside\", holding page.txt. On Linux and macOS a backslash is a filename character, so
+this directory is outside ROOT although its name starts with ROOT's."
+  (let ((dir (sb-ext:parse-native-namestring
+              (concatenate 'string (string-right-trim "/" (sb-ext:native-namestring root))
+                           "\\outside/"))))
+    (ensure-directories-exist dir)
+    (with-open-file (s (merge-pathnames "page.txt" dir) :direction :output :if-exists :supersede)
+      (write-string "outside the root" s))
+    dir))
+
+(test a-directory-swapped-for-a-link-after-the-check-is-not-followed
+  "#314. The path is checked, then a directory on it is replaced by a link to a directory
+outside the root, then the file is opened. The file opened is outside the root, so nothing is
+served. The swap is made between the check and the open by wrapping %OPEN-INSIDE, which is
+where the file is opened. Two outside directories: one elsewhere, and one beside the root whose
+name is the root's followed by a backslash, which a check that took a backslash for a separator
+read as inside (Copilot's review of #684). Control: with the check of the opened handle made
+to accept anything, the same swap serves the outside file, so the test can see the gap it
+closes."
+  #+os-windows (skip "symbolic links need a privilege on Windows")
+  #-os-windows
+  (flet ((swap-then (root outside)
+           ;; sub/ becomes a link to OUTSIDE, which has a file of the same name.
+           (let ((sub (merge-pathnames "sub/" root)))
+             (when (probe-file (merge-pathnames "sub/page.txt" root))
+               (rename-file (merge-pathnames "sub/page.txt" root)
+                            (merge-pathnames "moved-page.txt" root))
+               (uiop:delete-empty-directory sub)
+               (uiop:run-program (list "ln" "-s"
+                                       (string-right-trim "/" (sb-ext:native-namestring outside))
+                                       (string-right-trim "/" (namestring sub))))))))
+    (dolist (sibling '(nil t))
+      (dolist (control '(nil t))
+        (with-static-root (root ("sub/page.txt" "inside the root"))
+          (with-static-root (elsewhere ("page.txt" "outside the root"))
+            (let ((outside (if sibling (%backslash-sibling root) elsewhere))
+                  (open-inside (fdefinition 'static::%open-inside))
+                  (path-inside-p (fdefinition 'static::%path-inside-p)))
+              (unwind-protect
+                   (progn
+                     (setf (fdefinition 'static::%open-inside)
+                           (lambda (file root-real)
+                             (swap-then root outside)
+                             (funcall open-inside file root-real)))
+                     (when control
+                       (setf (fdefinition 'static::%path-inside-p) (constantly t)))
+                     (let ((r (static:file-response root "/sub/page.txt")))
+                       (if control
+                           (is (and r (string= "outside the root" (%body-text (third r))))
+                               "control (~:[elsewhere~;backslash sibling~]): without the handle check the outside file is served"
+                               sibling)
+                           (is (null r) "a file outside the root (~:[elsewhere~;backslash sibling~]) was served: ~S"
+                               sibling (and r (%body-text (third r)))))))
+                (setf (fdefinition 'static::%open-inside) open-inside
+                      (fdefinition 'static::%path-inside-p) path-inside-p)
+                (when sibling
+                  (ignore-errors (delete-file (merge-pathnames "page.txt" outside)))
+                  (ignore-errors (uiop:delete-empty-directory outside)))))))))))
+
+(test a-backslash-is-a-separator-only-on-windows
+  "Copilot's review of #684. On Linux and macOS a backslash is a filename character, so a path
+that continues ROOT's name with a backslash is a sibling of ROOT, not inside it. On Windows it
+is a separator. Control: a path continuing with / is inside on every platform."
+  (is-true (static::%path-inside-p "/srv/public/page.txt" "/srv/public"))
+  (is-true (static::%path-inside-p "/srv/public/page.txt" "/srv/public/"))
+  #-win32 (is-false (static::%path-inside-p "/srv/public\\outside/page.txt" "/srv/public"))
+  #+win32 (is-true (static::%path-inside-p "C:\\srv\\public\\page.txt" "C:\\srv\\public\\")))
+
+(test a-static-file-is-served-on-hunchentoot-with-its-length
+  "#314. A static file's body is an open stream, which no Clack backend takes. Through the
+shim, Hunchentoot sends its bytes with the Content-Length measured from the stream."
+  (with-static-root (root ("ok.txt" "fine, from disk"))
+    (let* ((app (lambda (env)
+                  (or (static:file-response root (getf env :path-info) :env env)
+                      (list 404 nil (list "not found")))))
+           (port nil)
+           (handler (ports:call-with-port
+                     (lambda (p)
+                       (prog1 (srv:start app :port p :server :hunchentoot)
+                         (setf port p))))))
+      (unwind-protect
+           (progn
+             (is-true (%srv-await (lambda () (ports:listening-p port))) "backend came up")
+             (let ((r (%srv-http-get port "/ok.txt")))
+               (is-true (search "200" r) "~S" r)
+               (is-true (search (format nil "Content-Length: 15~C~C" #\Return #\Linefeed) r)
+                        "~S" r)
+               (is (string= "fine, from disk"
+                            (subseq r (+ 4 (search (format nil "~C~C~C~C" #\Return #\Linefeed
+                                                           #\Return #\Linefeed)
+                                                   r)))))))
+        (ignore-errors (srv:stop handler))))))
 
 (test the-static-handler-logs-its-rules-once-and-serves-through-them
   "The effective rules are logged once, when the handler is made, and not per request."

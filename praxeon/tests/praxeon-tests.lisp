@@ -7721,3 +7721,155 @@ pause however the threads are scheduled."
              (is (equal '("A.") (%thread-contents store))))
         (setf obs::*pause-hook* nil)
         (sb-thread:signal-semaphore resume)))))
+
+;;; --------------------------------------------------------------------------
+;;; #339: the list of events at the top of event.lisp names every event praxeon emits.
+;;;
+;;; The list is what a UI author reads to learn what to render, and eleven event types were
+;;; emitted for months without appearing in it. The test reads the source: each (evt:emit :X ..)
+;;; and (apply #'evt:emit :X ..), and, for a function that passes its own argument as the type
+;;; (apply #'evt:emit type ..), each call (that-function :X ..) anywhere under praxeon/src.
+;;; --------------------------------------------------------------------------
+
+(in-suite praxeon)
+
+(defun %token-after (text start)
+  "The symbol name in TEXT that begins at START, up to whitespace or a parenthesis."
+  (let ((end (or (position-if (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return #\( #\))))
+                              text :start start)
+                 (length text))))
+    (subseq text start end)))
+
+(defun %source-at (text start)
+  "Up to 40 characters of TEXT from START, to show where a call is."
+  (subseq text start (min (length text) (+ start 40))))
+
+(defun %positions-after (needle text)
+  "The position just after each occurrence of NEEDLE in TEXT."
+  (loop for p = (search needle text) then (search needle text :start2 (1+ p))
+        while p collect (+ p (length needle))))
+
+(defun %listed-event-types (event-file-text)
+  "The event types the comment at the top of event.lisp lists, as keywords."
+  (remove-duplicates
+   (loop for line in (uiop:split-string event-file-text :separator '(#\Newline))
+         for p = (search "(:type :" line)
+         when (and p (eql 0 (search ";;;;" line)))
+           collect (intern (string-upcase (%token-after line (+ p 8))) :keyword))))
+
+(defun %code-text (text)
+  "TEXT, a Lisp source file, as the scan reads it: comments (; to the end of the line, and
+#| |#, nested) and string literals removed, every run of whitespace one space, no space after
+an open parenthesis, and all of it in lower case. A character literal is kept whole, so #\\;
+and #\\\" do not start a comment or a string."
+  (let ((out (make-string-output-stream)) (i 0) (n (length text)) (space nil))
+    (flet ((emit (c)
+             (cond ((member c '(#\Space #\Tab #\Newline #\Return #\Page))
+                    (setf space t))
+                   (t (when space
+                        (write-char #\Space out)
+                        (setf space nil))
+                      (write-char (char-downcase c) out)))))
+      (loop while (< i n)
+            do (let ((c (char text i)))
+                 (cond
+                   ((char= c #\;)
+                    (setf i (or (position #\Newline text :start i) n)))
+                   ((and (char= c #\#) (< (1+ i) n) (char= (char text (1+ i)) #\|))
+                    (let ((depth 1))
+                      (incf i 2)
+                      (loop while (and (< i n) (plusp depth))
+                            do (cond ((and (< (1+ i) n) (char= (char text i) #\|)
+                                           (char= (char text (1+ i)) #\#))
+                                      (decf depth) (incf i 2))
+                                     ((and (< (1+ i) n) (char= (char text i) #\#)
+                                           (char= (char text (1+ i)) #\|))
+                                      (incf depth) (incf i 2))
+                                     (t (incf i))))
+                      (setf space t)))
+                   ((char= c #\")
+                    (incf i)
+                    (loop while (and (< i n) (char/= (char text i) #\"))
+                          do (incf i (if (char= (char text i) #\\) 2 1)))
+                    (incf i)
+                    (emit #\Space))
+                   ((and (char= c #\#) (< (+ i 2) n) (char= (char text (1+ i)) #\\))
+                    (emit #\#) (emit #\\) (emit (char text (+ i 2)))
+                    (incf i 3))
+                   (t (emit c) (incf i))))))
+    (let ((code (get-output-stream-string out)))
+      ;; "( evt:emit" is the same call as "(evt:emit".
+      (loop for p = (search "( " code) while p
+            do (setf code (concatenate 'string (subseq code 0 (1+ p)) (subseq code (+ p 2)))))
+      code)))
+
+(defun %emitted-event-types (texts)
+  "The event types emitted in TEXTS (source files as strings, read through %CODE-TEXT), as
+keywords; the calls whose type cannot be read from the source; and the functions that pass
+their own argument to EVT:EMIT as the type. A call whose type is not a keyword -- to EVT:EMIT
+or to one of those functions -- is one whose type cannot be read."
+  (let ((codes (mapcar #'%code-text texts))
+        (types '()) (unreadable '()) (wrappers '()))
+    (flet ((take (code p)
+             (if (char= (char code p) #\:)
+                 (push (intern (string-upcase (%token-after code (1+ p))) :keyword) types)
+                 (push (%source-at code p) unreadable))))
+      (dolist (code codes)
+        (dolist (p (%positions-after "(evt:emit " code))
+          (take code p))
+        (dolist (p (%positions-after "#'evt:emit " code))
+          (if (char= (char code p) #\:)
+              (take code p)
+              (let ((defun-at (search "(defun " code :from-end t :end2 p)))
+                (if defun-at
+                    (push (%token-after code (+ defun-at 7)) wrappers)
+                    (push (%source-at code p) unreadable))))))
+      (setf wrappers (remove-duplicates wrappers :test #'string=))
+      (dolist (wrapper wrappers)
+        (dolist (code codes)
+          (dolist (p (%positions-after (format nil "(~A " wrapper) code))
+            (take code p)))))
+    (values (remove-duplicates types) unreadable wrappers)))
+
+(test the-event-scan-reads-calls-the-way-lisp-does
+  "#339, from Copilot's review of #683. The scan behind the completeness test finds a call
+written across lines or in upper case, does not count one in a comment or a string, keeps a
+character literal from starting a comment, and reports a non-keyword type passed to EVT:EMIT
+or to a function that passes its type on."
+  (flet ((scan (&rest texts) (multiple-value-list (%emitted-event-types texts))))
+    (destructuring-bind (types unreadable wrappers)
+        (scan (format nil "(evt:emit~%    :split :x 1)~%(EVT:EMIT :upper)~%( evt:emit :spaced)")
+              (format nil "; (evt:emit :line-comment)~%#| (evt:emit :block #| nested |# ) |#~%(f \"(evt:emit :in-string)\")")
+              "(list #\\; (evt:emit :after-char-literal))")
+      (is (null (set-exclusive-or types '(:split :upper :spaced :after-char-literal)))
+          "types found: ~S" types)
+      (is (null unreadable))
+      (is (null wrappers)))
+    (destructuring-bind (types unreadable wrappers)
+        (scan "(defun w (type more) (apply #'evt:emit type more))"
+              (format nil "(w :named nil)~%(w (if x :handoff :named) nil)~%(evt:emit (if t :a :b))"))
+      (is (equal '(:named) types) "types found: ~S" types)
+      (is (= 2 (length unreadable)) "unreadable: ~S" unreadable)
+      (is (equal '("w") wrappers)))))
+
+(test the-event-list-names-every-event-praxeon-emits
+  "#339. Every event type a praxeon source file emits is in the list at the top of event.lisp,
+and every type in the list is emitted somewhere, so the list is complete and has no stale
+entries. The scan has to reach the MCP files in a subdirectory and the types passed through
+%HELD-EVENT and %TASK-EVENT, so the test checks that it found those first."
+  (let* ((src (asdf:system-relative-pathname :praxeon "src/"))
+         (files (directory (merge-pathnames "**/*.lisp" src)))
+         (listed (%listed-event-types (uiop:read-file-string (merge-pathnames "event.lisp" src)))))
+    (multiple-value-bind (emitted unreadable wrappers)
+        (%emitted-event-types (mapcar #'uiop:read-file-string files))
+      (is (member :task-started emitted) "the scan reached praxeon/src/mcp/ and %TASK-EVENT")
+      (is (member :tool-held emitted) "the scan followed %HELD-EVENT")
+      (is (equal '("%held-event" "%task-event") (sort (copy-list wrappers) #'string<))
+          "the functions that pass their own type to EVT:EMIT: ~S" wrappers)
+      (is (null unreadable) "calls whose event type cannot be read from the source: ~S" unreadable)
+      (is (null (set-difference emitted listed))
+          "emitted but not in the list at the top of event.lisp: ~S"
+          (set-difference emitted listed))
+      (is (null (set-difference listed emitted))
+          "in the list at the top of event.lisp but emitted nowhere: ~S"
+          (set-difference listed emitted)))))
