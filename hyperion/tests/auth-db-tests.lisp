@@ -9,7 +9,8 @@
                     (#:conn #:mnemosyne/conn)
                     (#:q    #:mnemosyne/query)
                     (#:bt   #:bordeaux-threads)
-                    (#:be   #:mnemosyne/backend))
+                    (#:be   #:mnemosyne/backend)
+                    (#:session #:hyperion/session))
   (:export #:run-tests))
 (in-package #:hyperion/auth-db/tests)
 
@@ -469,6 +470,28 @@ disagree on result-key case, so match the column name case-insensitively."
                            (auth:role-events-index-ddl)
                            "DROP INDEX idx_hyperion_role_events_user_at")))
 
+(defun %email-migrations ()
+  "The steps docs/migrations.md §5 gives for the email tables (#690). USERS-DDL does not have the
+column, so on a fresh database the ALTER follows the CREATE, as it does on an old one."
+  (list (be:make-migration "20261015_001_hyperion_users_email_confirmed" "email confirmed at"
+                           (auth:users-email-confirmed-ddl :dialect :sqlite)
+                           "ALTER TABLE hyperion_users DROP COLUMN email_confirmed_at")
+        (be:make-migration "20261015_002_hyperion_email_tokens" "email tokens"
+                           (auth:email-tokens-ddl :dialect :sqlite)
+                           "DROP TABLE hyperion_email_tokens")
+        (be:make-migration "20261015_003_hyperion_email_tokens_hash" "email token lookup"
+                           (auth:email-tokens-hash-index-ddl)
+                           "DROP INDEX idx_hyperion_email_tokens_hash")
+        (be:make-migration "20261015_004_hyperion_email_tokens_user" "email tokens per user"
+                           (auth:email-tokens-user-index-ddl)
+                           "DROP INDEX idx_hyperion_email_tokens_user")
+        (be:make-migration "20261015_005_hyperion_email_events" "email change log"
+                           (auth:email-events-ddl :dialect :sqlite)
+                           "DROP TABLE hyperion_email_events")
+        (be:make-migration "20261015_006_hyperion_email_events_index" "email change log index"
+                           (auth:email-events-index-ddl)
+                           "DROP INDEX idx_hyperion_email_events_user_at")))
+
 (defun %with-file-migrated (path-and-migrations)
   "Apply MIGRATIONS to the SQLite file PATH through MIGRATE, then close the connection."
   (destructuring-bind (path migrations) path-and-migrations
@@ -484,7 +507,8 @@ disagree on result-key case, so match the column name case-insensitively."
        (conn:disconnect ,conn))))
 
 (test the-documented-migration-set-gives-a-store-whose-role-changes-work
-  (%with-migrated (c (list* (%users-migration) (%email-index-migration) (%role-log-migrations)))
+  (%with-migrated (c (append (list (%users-migration) (%email-index-migration))
+                             (%role-log-migrations) (%email-migrations)))
     (let* ((store (auth:make-db-auth c :dialect :sqlite))
            (id (auth:user-id (auth:create-user store :email "doc@x.com" :roles '(:member)))))
       (auth:grant-role store id :moderator :actor "test")
@@ -506,7 +530,9 @@ disagree on result-key case, so match the column name case-insensitively."
 
 (test require-role-log-nil-constructs-without-the-table
   (%with-migrated (c (list (%users-migration)))
-    (is (typep (auth:make-db-auth c :dialect :sqlite :require-role-log nil) 'auth:db-auth))))
+    (is (typep (auth:make-db-auth c :dialect :sqlite :require-role-log nil
+                                    :require-email-tables nil)
+               'auth:db-auth))))
 
 (test ensure-still-creates-the-role-log
   (let ((c (conn:connect (be:make-sqlite ":memory:"))))
@@ -526,7 +552,7 @@ disagree on result-key case, so match the column name case-insensitively."
 (test a-duplicate-email-is-refused-even-without-the-index
   ;; The users table only, as docs/migrations.md used to show, plus the role log so the
   ;; store constructs. The refusal comes from CREATE-USER's own check.
-  (%with-migrated (c (cons (%users-migration) (%role-log-migrations)))
+  (%with-migrated (c (cons (%users-migration) (append (%role-log-migrations) (%email-migrations))))
     (let ((store (auth:make-db-auth c :dialect :sqlite)))
       (auth:create-user store :email "same@x.com")
       (signals auth:duplicate-email (auth:create-user store :email "Same@X.com"))
@@ -579,8 +605,8 @@ up at once. Returns (values pairs-with-exactly-one-row created refused other-err
   (let ((path (%temp-db-path "email-race")))
     (unwind-protect
          (progn
-           (%with-file-migrated (list path (list* (%users-migration) (%email-index-migration)
-                                                   (%role-log-migrations))))
+           (%with-file-migrated (list path (append (list (%users-migration) (%email-index-migration))
+                                                   (%role-log-migrations) (%email-migrations))))
            (multiple-value-bind (one-row created refused other)
                (%concurrent-duplicate-signups path 50)
              (is (= 50 one-row) "every contested address holds exactly one account")
@@ -663,9 +689,16 @@ a request that already holds one from the same pool (WRAP-CONNECTION), it uses t
 (defun %pg-url () (uiop:getenv "MNEMOSYNE_TEST_PG_URL"))
 
 (defun %pg-names ()
+  "Table names for one Postgres test: users, role events, email tokens, email events."
   (let ((suffix (format nil "~36R" (random (expt 2 40) (make-random-state t)))))
     (values (string-downcase (format nil "hyperion_users_~A" suffix))
-            (string-downcase (format nil "hyperion_role_events_~A" suffix)))))
+            (string-downcase (format nil "hyperion_role_events_~A" suffix))
+            (string-downcase (format nil "hyperion_email_tokens_~A" suffix))
+            (string-downcase (format nil "hyperion_email_events_~A" suffix)))))
+
+(defun %drop-tables (c &rest tables)
+  (dolist (tb tables)
+    (when tb (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" tb))))))
 
 (defun %sixty-lookups (store id)
   "Look up user ID from 60 threads at once. Returns the number of lookups that failed or found
@@ -690,33 +723,33 @@ the wrong user, and the first error."
 at once. 9 of 60 failed before #371."
   (if (not (%pg-url))
       (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about Postgres")
-      (multiple-value-bind (users events) (%pg-names)
+      (multiple-value-bind (users events tokens email-events) (%pg-names)
         (let ((c (conn:connect (mnemosyne/url:backend-from-url (%pg-url)))))
           (unwind-protect
                (let* ((a (auth:make-db-auth c :dialect :postgres :table users
-                                              :events-table events :ensure t))
+                                              :events-table events :tokens-table tokens
+                                              :email-events-table email-events :ensure t))
                       (id (auth:user-id (auth:create-user a :email "sixty@x.com"))))
                  (multiple-value-bind (failed first) (%sixty-lookups a id)
                    (is (= 0 failed) "~D of 60 lookups failed, the first with: ~A" failed first)))
-            (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" users)))
-            (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" events)))
+            (%drop-tables c users events tokens email-events)
             (conn:disconnect c))))))
 
 (test sixty-concurrent-lookups-on-a-store-over-a-postgres-pool-all-succeed
   (if (not (%pg-url))
       (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about Postgres")
-      (multiple-value-bind (users events) (%pg-names)
+      (multiple-value-bind (users events tokens email-events) (%pg-names)
         (let ((pool (conn:make-pool (mnemosyne/url:backend-from-url (%pg-url)) :size 8)))
           (unwind-protect
                (let* ((a (auth:make-db-auth pool :dialect :postgres :table users
-                                                 :events-table events :ensure t))
+                                                 :events-table events :tokens-table tokens
+                                                 :email-events-table email-events :ensure t))
                       (id (auth:user-id (auth:create-user a :email "pool60@x.com"))))
                  (multiple-value-bind (failed first) (%sixty-lookups a id)
                    (is (= 0 failed) "~D of 60 lookups failed, the first with: ~A" failed first))
                  (is (<= (conn:pool-open-count pool) 8)))
             (conn:with-connection (c pool)
-              (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" users)))
-              (ignore-errors (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" events))))
+              (%drop-tables c users events tokens email-events))
             (conn:close-pool pool))))))
 
 (test a-write-outside-a-request-and-one-inside-it-do-not-wait-for-each-other
@@ -765,9 +798,12 @@ for the connection that A holds, until B's checkout timeout fails it. Found in r
   (let ((c (conn:connect (be:make-sqlite ":memory:"))))
     (unwind-protect
          (let* ((a (auth:make-db-auth c :dialect :sqlite :table "members" :events-table "member_roles"
+                                        :tokens-table "member_tokens"
+                                        :email-events-table "member_email_events"
                                         :ensure t))
                 (id (auth:user-id (auth:create-user a :email "own@x.com" :password "pw"))))
-           (is (equal '("member_roles" "members") (%table-names c))
+           (is (equal '("member_email_events" "member_roles" "member_tokens" "members")
+                      (%table-names c))
                "the store's names and no others: ~S" (%table-names c))
            (is (auth:authenticate a "own@x.com" "pw"))
            (is (auth:grant-role a id :moderator :actor "test"))
