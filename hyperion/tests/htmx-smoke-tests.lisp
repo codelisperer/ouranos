@@ -140,14 +140,25 @@ if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + ht
                                "--dump-dom" url)
                          :search t :wait nil :input nil :error nil
                          :output (uiop:native-namestring out) :if-output-exists :supersede)))
-           (loop with deadline = (+ (get-universal-time) +smoke-timeout+)
-                 while (sb-ext:process-alive-p process)
-                 do (when (> (get-universal-time) deadline)
-                      (sb-ext:process-kill process 9)
-                      (error "~A did not finish within ~D seconds" browser +smoke-timeout+))
-                    (sleep 0.2))
-           (uiop:read-file-string out))
-      (uiop:delete-directory-tree profile :validate t :if-does-not-exist :ignore))))
+           ;; Done when the browser exits or when the dump is complete. On the macOS CI
+           ;; runner Chrome did not exit within 90 s (#724), so the dump is not made to wait
+           ;; for the exit; the browser is killed once its output ends with </html>.
+           (flet ((dump () (or (ignore-errors (uiop:read-file-string out)) "")))
+             (loop with deadline = (+ (get-universal-time) +smoke-timeout+)
+                   while (and (sb-ext:process-alive-p process)
+                              (not (search "</html>" (dump))))
+                   do (when (> (get-universal-time) deadline)
+                        (sb-ext:process-kill process 9)
+                        (error "~A did not finish within ~D seconds, having written ~D bytes"
+                               browser +smoke-timeout+ (length (dump))))
+                      (sleep 0.2))
+             (when (sb-ext:process-alive-p process)
+               (sb-ext:process-kill process 9)
+               (sb-ext:process-wait process))
+             (dump)))
+      ;; A killed browser's helper processes can still hold files in the profile for a moment.
+      (ignore-errors
+       (uiop:delete-directory-tree profile :validate t :if-does-not-exist :ignore)))))
 
 (defmacro %with-smoke-server ((port) &body body)
   "Run BODY against a live server for the smoke page, with PORT bound to its port."
