@@ -57,6 +57,16 @@ not the server's speed.")
 (defun %html (body &rest headers)
   (list 200 (list* :content-type "text/html; charset=utf-8" headers) (list body)))
 
+(defun %injected-delete-form ()
+  "An hx-delete form with a native POST fallback, rendered by hyperion/csrf's injector with the
+token \"smoke-token\". In the browser its DELETE must carry the token in X-CSRF-Token and leave
+the hidden _csrf field out of the URL (#717, review of #724)."
+  (let ((hyperion/csrf:*token-thunk* (lambda () "smoke-token")))
+    (spinneret:with-html-string
+      (:form :id "f" :method "post" :action "/native" :hx-delete "/item2"
+             :hx-trigger "load" :hx-target "#f-out" :hx-swap "innerHTML"
+        (:input :type "hidden" :name "k" :value "v")))))
+
 (defun %smoke-page ()
   (format nil "<!doctype html>
 <html><head><meta charset=\"utf-8\"><script src=\"~A\"></script></head>
@@ -70,6 +80,8 @@ not the server's speed.")
 <div id=\"r\" hx-get=\"/frag/r\" hx-trigger=\"revealed\" hx-swap=\"innerHTML\">waiting-r</div>
 <div id=\"p\" hx-get=\"/frag/p\" hx-trigger=\"every 1s\" hx-swap=\"innerHTML\">poll-0</div>
 <div id=\"d\" hx-delete=\"/item\" hx-vals='{\"k\": \"v\"}' hx-trigger=\"load\" hx-swap=\"innerHTML\">waiting-d</div>
+~A
+<div id=\"f-out\">waiting-f</div>
 <script>
 document.body.addEventListener(\"smoke-event\", function () {
   document.getElementById(\"ev\").textContent = \"event-ok\";
@@ -77,7 +89,7 @@ document.body.addEventListener(\"smoke-event\", function () {
 if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + htmx.version; }
 </script>
 </body></html>"
-          (assets:url :htmx)))
+          (assets:url :htmx) (%injected-delete-form)))
 
 (defun %smoke-app ()
   (router:to-app
@@ -95,6 +107,11 @@ if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + ht
     (router:route :get "/frag/p"
                   (lambda (env) (declare (ignore env))
                     (%html (format nil "poll-~D" (sb-ext:atomic-incf (car *smoke-polls*))))))
+    (router:route :delete "/item2"
+                  (lambda (env)
+                    (%html (format nil "delete2 query=~A header=~A"
+                                   (or (getf env :query-string) "")
+                                   (or (http:request-header env "x-csrf-token") "")))))
     (router:route :delete "/item"
                   (lambda (env)
                     (%html (format nil "delete query=~A body=~D"
@@ -179,4 +196,8 @@ if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + ht
               ;; The behaviour hyperion/csrf's hx-delete header exists for: htmx 2 puts a
               ;; DELETE's parameters in the URL and sends no body.
               (is (equal "delete query=k=v body=0" (%element-text dom "d"))
-                  "hx-delete: ~S" (%element-text dom "d"))))))))
+                  "hx-delete: ~S" (%element-text dom "d"))
+              ;; The injector's hx-delete form: the token travels in the header, and
+              ;; hx-params keeps the native-POST field out of the URL.
+              (is (equal "delete2 query=k=v header=smoke-token" (%element-text dom "f-out"))
+                  "the injected hx-delete form: ~S" (%element-text dom "f-out"))))))))

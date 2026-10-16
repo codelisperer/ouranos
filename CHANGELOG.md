@@ -26,14 +26,19 @@ its tag.
     urlencoded body. A handler that reads a DELETE's parameters with `hyperion/http:form-param`
     on `body-string` gets NIL; read them from the query string instead, or set
     `htmx.config.methodsThatUseUrlParams` to `["get"]` to restore the 1.x behaviour.
-  - **`hyperion/csrf` sends an `hx-delete` form's token in a header.** A `(:form :hx-delete …)`
-    gets an `hx-headers` attribute carrying `X-CSRF-Token` and no hidden `_csrf` field, which
-    htmx 2 would put in the URL. A form with both `:hx-delete` and its own `:hx-headers` no
-    longer compiles: move the app's `hx-headers` to an element around the form, since htmx
-    merges `hx-headers` from enclosing elements. An `hx-delete` on an element that is not a
-    form gets no token from the injector, as before; give it
-    `:hx-headers (hyperion/csrf:token-headers)`. Do not put an `hx-delete` button inside a
-    POST form, because htmx 2 would put that form's hidden `_csrf` field in the URL.
+  - **`hyperion/csrf` sends an `hx-delete` form's token in a header.** A form whose
+    `:hx-delete` or `:data-hx-delete` has a value when it renders gets an `hx-headers`
+    attribute carrying `X-CSRF-Token`. It has no hidden `_csrf` field, which htmx 2 would put
+    in the URL, unless the form's own `:method` changes state: then the field stays for the
+    browser's native submission without htmx, and `hx-params="not _csrf"` keeps it out of the
+    DELETE. A form whose `:hx-delete` is NIL when it renders is treated as an ordinary form.
+    These no longer compile: a form with `:hx-delete` and its own `:hx-headers` or
+    `:data-hx-headers` (move those to an element around the form, since htmx merges
+    `hx-headers` from enclosing elements), and a form with `:method`, `:hx-delete` and
+    `:hx-params`. An `hx-delete` on an element that is not a form gets no token from the
+    injector, as before; give it `:hx-headers (hyperion/csrf:token-headers)`. Do not put an
+    `hx-delete` button inside a POST form, because htmx 2 would put that form's hidden `_csrf`
+    field in the URL.
   - **`hyperion/http:body-string` returns NIL for a request with neither Content-Length nor
     Transfer-Encoding**, without reading the stream. Before, it read to the end of the stream,
     and under Hunchentoot a bodiless htmx 2 DELETE waited 20 seconds for the socket timeout.

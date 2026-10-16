@@ -269,7 +269,10 @@ requirement, no JS requirement, no ordering requirement on the form."
 ;;;      query string (htmx.config.methodsThatUseUrlParams is ["get", "delete"]), so a
 ;;;      hidden field in an hx-delete form would put the token in the URL, and the body the
 ;;;      check reads would be empty. Such a form carries the token in an hx-headers
-;;;      attribute instead, as *HEADER-NAME*, and has no hidden field.
+;;;      attribute instead, as *HEADER-NAME*. It keeps a hidden field only when its own
+;;;      method changes state, for native submission without htmx, and then hx-params
+;;;      keeps that field out of the DELETE. hx-delete and data-hx-delete are both read,
+;;;      and the choice is made from the attribute's value at render time.
 ;;;
 ;;; All three remain AVAILABILITY bugs rather than security ones, because the check half is
 ;;; authoritative: a form that misses injection has its POST refused and breaks loudly,
@@ -321,22 +324,57 @@ hx-delete, can send the token where htmx 2 will not put it in the URL."
   (let ((tok (current-token)))
     (and tok (format nil "{\"~A\": \"~A\"}" *header-name* tok))))
 
+(defun %attr-key (attrs &rest keys)
+  "The first of KEYS present in the attribute plist ATTRS, or NIL. Presence, not value: the
+value is a form evaluated at render time."
+  (find-if (lambda (k) (loop for (key) on attrs by #'cddr thereis (eq key k))) keys))
+
+(defun %replace-attr (attrs key form)
+  "ATTRS with the value of KEY replaced by FORM."
+  (loop for (k v) on attrs by #'cddr nconc (list k (if (eq k key) form v))))
+
+(defun %delete-field (method delete hx)
+  "The hidden field for a form whose hx-delete evaluated to DELETE.
+
+With no DELETE the usual rule holds. With one, only a form whose own METHOD changes state
+gets the field: it is for the browser's native submission when htmx is not running, and
+HX-PARAMS keeps it out of the DELETE that htmx sends. Returns no values, because Spinneret
+prints a body form's value (#663)."
+  (token-field method (and (not delete) hx))
+  (values))
+
+(defun %delete-params (method delete)
+  "\"not _csrf\" when the form carries both an hx-delete and the hidden field, else NIL."
+  (and delete (%form-changes-state-p method nil) (current-token)
+       (format nil "not ~A" *field-name*)))
+
 (spin:deftag :form (body attrs &key)
-  (let ((method (getf attrs :method))
-        ;; PRESENCE is decided at expansion; the METHOD's VALUE is left to runtime.
-        (hx (and (or (getf attrs :hx-post) (getf attrs :hx-put)
-                     (getf attrs :hx-patch) (getf attrs :hx-delete))
-                 t)))
+  (let* ((method (getf attrs :method))
+         ;; PRESENCE is decided at expansion; the VALUES are left to runtime.
+         (hx (and (%attr-key attrs :hx-post :hx-put :hx-patch
+                             :data-hx-post :data-hx-put :data-hx-patch)
+                  t))
+         (delete-key (%attr-key attrs :hx-delete :data-hx-delete)))
     (cond
-      ((not (getf attrs :hx-delete))
+      ((not delete-key)
        `(spin:dynamic-tag :name "form" ,@attrs
           (token-field ,method ,hx)
           ,@body))
-      ((getf attrs :hx-headers)
+      ((%attr-key attrs :hx-headers :data-hx-headers)
        (error "hyperion/csrf: this form has both hx-delete and hx-headers, so the injector cannot add the CSRF token header. htmx merges hx-headers from enclosing elements, so move this form's hx-headers to an element around it."))
+      ((and method (%attr-key attrs :hx-params :data-hx-params))
+       (error "hyperion/csrf: this form has a method, hx-delete and hx-params, so the injector cannot keep the CSRF field out of the DELETE's URL. Remove the method or the hx-params."))
       (t
-       `(spin:dynamic-tag :name "form" :hx-headers (token-headers) ,@attrs
-          ,@body)))))
+       (let ((delete (gensym "DELETE")))
+         ;; The hx-delete value is evaluated once, here, so the attribute and the choice of
+         ;; header or field agree. htmx 2 puts a DELETE's parameters in the URL (#717).
+         `(let ((,delete ,(getf attrs delete-key)))
+            (spin:dynamic-tag :name "form"
+                              :hx-headers (and ,delete (token-headers))
+                              :hx-params (%delete-params ,method ,delete)
+                              ,@(%replace-attr attrs delete-key delete)
+              (%delete-field ,method ,delete ,hx)
+              ,@body)))))))
 
 ;;; --- the middleware -------------------------------------------------------
 

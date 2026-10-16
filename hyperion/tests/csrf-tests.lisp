@@ -559,16 +559,57 @@ JSON with &quot; for each double quote."
   (let ((html (spin:with-html-string (:form :hx-delete "/item/1" (:button "remove")))))
     (is (not (search "hx-headers" html)) "no token, so no attribute: ~S" html)))
 
+(defun %compile-refusal (form)
+  "The message of the error FORM raises when compiled and run, or NIL if it runs. The
+compiler's own report goes to a null stream: the gate fails a suite whose output carries a
+`caught ERROR' line (#263), and these are expected."
+  (handler-case
+      (let ((*error-output* (make-broadcast-stream)))
+        (eval form)
+        nil)
+    (error (c) (princ-to-string c))))
+
 (test an-hx-delete-form-with-its-own-hx-headers-is-refused-at-compile-time
   ;; The injector cannot merge its header into the author's JSON, which may be computed at
-  ;; run time. A form compiled with an error signals when it runs, and the message names
-  ;; the conflict. The compiler's own report goes to a null stream: the gate fails a suite
-  ;; whose output carries a `caught ERROR' line (#263), and this one is expected.
-  (let ((message (handler-case
-                     (let ((*error-output* (make-broadcast-stream)))
-                       (eval '(spinneret:with-html-string
-                               (:form :hx-delete "/x" :hx-headers "{}" (:span "y"))))
-                       nil)
-                   (error (c) (princ-to-string c)))))
-    (is (stringp message) "the form must not compile")
-    (is (and message (search "hx-delete and hx-headers" message)) "~S" message)))
+  ;; run time. Both spellings htmx reads are refused (review of #724).
+  (dolist (form '((spinneret:with-html-string
+                   (:form :hx-delete "/x" :hx-headers "{}" (:span "y")))
+                  (spinneret:with-html-string
+                   (:form :hx-delete "/x" :data-hx-headers "{}" (:span "y")))))
+    (let ((message (%compile-refusal form)))
+      (is (stringp message) "the form must not compile: ~S" form)
+      (is (and message (search "hx-delete and hx-headers" message)) "~S" message))))
+
+(test a-data-hx-delete-form-carries-its-token-in-a-header
+  ;; htmx reads data-hx-delete as well as hx-delete (review of #724).
+  (let ((html (%rendering ((%csrf-session)) (:form :data-hx-delete "/item/1" (:button "x")))))
+    (is (stringp (%header-token-in html)) "~S" html)
+    (is (null (%token-in html)) "~S" html)))
+
+(test a-post-form-with-hx-delete-keeps-its-field-for-native-submission
+  ;; Without htmx the browser POSTs the form, and that POST needs the field. hx-params keeps
+  ;; the field out of the DELETE htmx sends (review of #724).
+  (let* ((s (%csrf-session))
+         (html (%rendering (s) (:form :method "post" :action "/item/1/delete"
+                                      :hx-delete "/item/1" (:button "x")))))
+    (is (stringp (%token-in html)) "the native POST needs the field: ~S" html)
+    (is (equal (%token-in html) (%header-token-in html)) "and htmx gets the header: ~S" html)
+    (is (search "hx-params=\"not _csrf\"" html) "and htmx leaves the field out: ~S" html)))
+
+(test a-form-whose-hx-delete-is-nil-at-render-time-is-an-ordinary-form
+  ;; The attribute's VALUE decides, not its presence in the source (review of #724).
+  (let* ((delete-p nil)
+         (html (%rendering ((%csrf-session))
+                 (:form :method "post" :action "/item" :hx-delete (when delete-p "/item")
+                   (:button "x")))))
+    (is (stringp (%token-in html)) "a native POST form gets its field: ~S" html)
+    (is (not (search "hx-delete" html)) "~S" html)
+    (is (not (search "hx-headers" html)) "~S" html)
+    (is (not (search "hx-params" html)) "~S" html)))
+
+(test the-hx-delete-value-is-evaluated-once
+  (let* ((calls 0)
+         (html (%rendering ((%csrf-session))
+                 (:form :hx-delete (progn (incf calls) "/item") (:button "x")))))
+    (is (= 1 calls) "~D evaluations" calls)
+    (is (search "hx-delete=\"/item\"" html) "~S" html)))
