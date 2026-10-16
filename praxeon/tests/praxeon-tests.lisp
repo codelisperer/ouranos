@@ -4510,6 +4510,52 @@ they have to meet."
     (is (= (getf (%bench-row uniform :offload) :input-tokens)
            (getf (%bench-row uniform :offload-and-clear) :input-tokens)))))
 
+(defclass sometimes-counted (llm:provider)
+  ((calls :initform 0 :accessor counted-calls)
+   (every-other :initarg :every-other :reader counted-every-other))
+  (:documentation "A provider that answers at once. It reports usage on every other request
+when EVERY-OTHER is true, and never otherwise."))
+
+(defmethod llm:complete ((p sometimes-counted) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (let ((report (and (counted-every-other p) (oddp (incf (counted-calls p))))))
+    (llm:make-completion :text "I could not find it." :stop-reason :end
+                         :input-tokens (and report 10) :output-tokens (and report 5)
+                         :cache-read-tokens (and report 0) :cache-write-tokens nil)))
+
+(test the-tool-results-benchmark-marks-figures-that-not-every-request-reported
+  "The actor emits :USAGE only for a step whose provider reported a count, so a provider that
+reports on some requests gives a sum over those alone. The row carries how many requests
+reported each figure, and the report marks a partial sum with a star."
+  (let* ((out (make-string-output-stream))
+         (rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                       :provider (make-instance 'sometimes-counted :every-other t)))
+         (r (first rows))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (= 10 (getf r :reported-input)))
+    (is (= 1 (getf r :reported-input-requests)) "one of the two requests reported input")
+    (is (= 1 (getf r :input-requests)) "and so the estimate covers one request too")
+    (is (null (getf r :reported-cache-write)))
+    (is (= 0 (getf r :reported-cache-write-requests))
+        "a field the :USAGE event left out is not counted as reported")
+    (is (search "10*" text) "the partial input is marked: ~A" text)
+    (is (search "Fewer requests reported" text)))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                           :provider (make-instance 'sometimes-counted :every-other nil))))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (null (getf r :input-tokens)) "no request reported, so there is no estimate, not 0")
+    (is (null (getf r :reported-input)))
+    (is (null (search "Fewer requests reported" text)) "nothing partial, so no footnote"))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= (getf r :requests) (getf r :input-requests))
+        "control: the scripted model's estimate covers every request")
+    (is (null (search "*" text)) "control: no figure is marked")))
+
 (defclass failing-provider (llm:provider) ()
   (:documentation "A provider whose every request fails, with a message that must not be printed."))
 

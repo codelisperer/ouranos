@@ -23,7 +23,9 @@
 ;;;; cached share is SIMULATED: a request's cached tokens are those of the longest run of
 ;;;; messages it shares, from the start, with the request before it, which is what a provider's
 ;;;; prefix cache could reuse. With a real provider, the estimate is the sum of each step's
-;;;; :ESTIMATED-INPUT from its :USAGE event, and there is no simulated cache share.
+;;;; :ESTIMATED-INPUT from its :USAGE event, and there is no simulated cache share. The actor
+;;;; emits :USAGE only for a step whose provider reported a count, so with a provider that
+;;;; reports none there is no estimate either.
 ;;;;
 ;;;; The provider's counts. The sums of :INPUT, :OUTPUT, :CACHE-READ and :CACHE-WRITE over the
 ;;;; :USAGE events of every task, as the provider reported them. Each is NIL when no step
@@ -32,9 +34,17 @@
 ;;;; server's :INPUT includes its cached tokens. The benchmark adds nothing up across those
 ;;;; fields, and prints them as reported.
 ;;;;
+;;;; A PARTIAL SUM IS MARKED. Each figure taken from :USAGE events comes with the number of
+;;;; requests that reported it, beside the number of requests made. When fewer reported it than
+;;;; were made, the report prints the figure with a `*', because it is the sum over those
+;;;; requests only and the rest are unknown.
+;;;;
 ;;;; Success is read from the answer. A task whose turn signalled an error counts as failed, and
 ;;;; the number of such tasks is reported; the error's text is not, so that nothing a provider
-;;;; put in an error message reaches the output.
+;;;; put in an error message reaches the output. The benchmark does not change logging:
+;;;; praxeon/llm logs a failed request at warn with the error's text, as it does outside the
+;;;; benchmark. For the Anthropic provider that text is the HTTP status and the response body,
+;;;; and the request's headers, where the API key travels, are not in it.
 ;;;;
 ;;;; WITH NO PROVIDER, A SCRIPTED MODEL DRIVES THE TASK, and it knows the task: it fetches each
 ;;;; page, and when the page it needs is a stand-in it calls read-result with a search for
@@ -175,6 +185,17 @@ conversation, or through read-result when the page is a stand-in."))
   "A plus B where NIL means not reported: NIL only when both are."
   (if (or a b) (+ (or a 0) (or b 0)) nil))
 
+(defparameter +usage-fields+ '(:input :output :cache-read :cache-write :estimated-input)
+  "The fields of a :USAGE event the benchmark adds up.")
+
+(defun %tally (tally event)
+  "TALLY with EVENT's fields added: for each field, the sum of the values reported and the
+number of requests that reported one."
+  (loop for key in +usage-fields+
+        for (sum . count) = (getf tally key '(nil . 0))
+        for value = (evt:event-get event key)
+        append (list key (if value (cons (%sum sum value) (1+ count)) (cons sum count)))))
+
 (defun %run-task (configuration task pages random provider)
   (destructuring-bind (name &rest keys) configuration
     (let* ((codes (loop repeat pages collect (%code random)))
@@ -183,8 +204,8 @@ conversation, or through read-result when the page is a stand-in."))
            (target (1+ (random pages random)))
            (model (or provider (make-instance 'scripted-reader :pages pages :target target)))
            (agent (actor:make-agent :provider model :history-budget nil))
-           (steps 0) (batches 0) (estimated 0)
-           (reported (list :input nil :output nil :cache-read nil :cache-write nil))
+           (steps 0) (batches 0)
+           (tally '())
            (outer evt:*observer*))
       (actor:register-means agent "fetch" "Fetch a page by its number, from 1."
                             (lambda (args) (nth (1- (gethash "page" args)) texts)))
@@ -195,11 +216,7 @@ conversation, or through read-result when the page is a stand-in."))
                            (case (evt:event-type event)
                              (:deliberating (incf steps))
                              (:results-cleared (incf batches))
-                             (:usage
-                              (incf estimated (or (evt:event-get event :estimated-input) 0))
-                              (loop for key in '(:input :output :cache-read :cache-write)
-                                    do (setf (getf reported key)
-                                             (%sum (getf reported key) (evt:event-get event key))))))
+                             (:usage (setf tally (%tally tally event))))
                            (when outer (funcall outer event))))
                       (handler-case
                           (actor:run-turn agent
@@ -208,7 +225,7 @@ conversation, or through read-result when the page is a stand-in."))
                         (error () :error)))))
         (let* ((requests (if provider '() (reverse (reader-requests model))))
                (input (if provider
-                          estimated
+                          (car (getf tally :estimated-input))
                           (loop for r in requests sum (prompt:messages-tokens r))))
                (cached (and (not provider)
                             (loop for previous = nil then r
@@ -219,13 +236,14 @@ conversation, or through read-result when the page is a stand-in."))
                 :requests steps
                 :clear-batches batches
                 :input-tokens input
+                :input-requests (if provider (cdr (getf tally :estimated-input '(nil . 0))) steps)
                 :cached-tokens cached
-                :reported reported))))))
+                :tally tally))))))
 
 ;;; --- the benchmark -------------------------------------------------------------
 
 (defun %row (configuration tasks runs)
-  (let ((input (reduce #'+ runs :key (lambda (r) (getf r :input-tokens))))
+  (let ((input (reduce #'%sum runs :key (lambda (r) (getf r :input-tokens)) :initial-value nil))
         (cached (and (getf (first runs) :cached-tokens)
                      (reduce #'+ runs :key (lambda (r) (getf r :cached-tokens))))))
     (list* :configuration (first configuration)
@@ -235,16 +253,34 @@ conversation, or through read-result when the page is a stand-in."))
            :requests (reduce #'+ runs :key (lambda (r) (getf r :requests)))
            :clear-batches (reduce #'+ runs :key (lambda (r) (getf r :clear-batches)))
            :input-tokens input
+           :input-requests (reduce #'+ runs :key (lambda (r) (getf r :input-requests)))
            :cached-share (and cached (if (plusp input) (/ cached input) 0))
-           (loop for (key name) in '((:input :reported-input) (:output :reported-output)
-                                     (:cache-read :reported-cache-read)
-                                     (:cache-write :reported-cache-write))
-                 append (list name (reduce #'%sum runs
-                                           :key (lambda (r) (getf (getf r :reported) key))
-                                           :initial-value nil))))))
+           (loop for (key name requests) in '((:input :reported-input :reported-input-requests)
+                                              (:output :reported-output :reported-output-requests)
+                                              (:cache-read :reported-cache-read
+                                               :reported-cache-read-requests)
+                                              (:cache-write :reported-cache-write
+                                               :reported-cache-write-requests))
+                 for cells = (mapcar (lambda (r) (getf (getf r :tally) key '(nil . 0))) runs)
+                 append (list name (reduce #'%sum cells :key #'car :initial-value nil)
+                              requests (reduce #'+ cells :key #'cdr))))))
 
-(defun %field (value)
-  (if value (format nil "~D" value) "-"))
+(defun %field (value reported requests)
+  "VALUE as printed: `-' when no request reported it, and marked `*' when fewer than REQUESTS
+did, because it is then a partial sum."
+  (cond ((null value) "-")
+        ((< reported requests) (format nil "~D*" value))
+        (t (format nil "~D" value))))
+
+(defun %partial-p (rows)
+  (some (lambda (r)
+          (or (and (getf r :input-tokens) (< (getf r :input-requests) (getf r :requests)))
+              (loop for key in '(:reported-input :reported-cache-read :reported-cache-write
+                                 :reported-output)
+                    for count in '(:reported-input-requests :reported-cache-read-requests
+                                   :reported-cache-write-requests :reported-output-requests)
+                    thereis (and (getf r key) (< (getf r count) (getf r :requests))))))
+        rows))
 
 (defun %report (rows stream task tasks pages seed provider)
   (format stream "~&~A tasks of ~A pages, task ~(~A~), seed ~A, ~:[scripted model; the estimated cache share is simulated~;real provider~]~%"
@@ -252,9 +288,10 @@ conversation, or through read-result when the page is a stand-in."))
   (format stream "~&~18A ~10A ~6A ~8A ~7A ~11A ~7A~%"
           "configuration" "succeeded" "errors" "requests" "batches" "est. input" "cached")
   (dolist (r rows)
-    (format stream "~&~18A ~3D of ~3D ~6D ~8D ~7D ~11D ~7A~%"
+    (format stream "~&~18A ~3D of ~3D ~6D ~8D ~7D ~11@A ~7A~%"
             (string-downcase (getf r :configuration)) (getf r :succeeded) (getf r :tasks)
-            (getf r :errors) (getf r :requests) (getf r :clear-batches) (getf r :input-tokens)
+            (getf r :errors) (getf r :requests) (getf r :clear-batches)
+            (%field (getf r :input-tokens) (getf r :input-requests) (getf r :requests))
             (if (getf r :cached-share)
                 (format nil "~,1F%" (* 100 (float (getf r :cached-share))))
                 "-")))
@@ -263,8 +300,15 @@ conversation, or through read-result when the page is a stand-in."))
   (dolist (r rows)
     (format stream "~&~18A ~11A ~11A ~11A ~11A~%"
             (string-downcase (getf r :configuration))
-            (%field (getf r :reported-input)) (%field (getf r :reported-cache-read))
-            (%field (getf r :reported-cache-write)) (%field (getf r :reported-output)))))
+            (%field (getf r :reported-input) (getf r :reported-input-requests) (getf r :requests))
+            (%field (getf r :reported-cache-read) (getf r :reported-cache-read-requests)
+                    (getf r :requests))
+            (%field (getf r :reported-cache-write) (getf r :reported-cache-write-requests)
+                    (getf r :requests))
+            (%field (getf r :reported-output) (getf r :reported-output-requests)
+                    (getf r :requests))))
+  (when (%partial-p rows)
+    (format stream "~&* Fewer requests reported this figure than were made, so it is the sum over the requests that did.~%")))
 
 (defun run-benchmark (&key (tasks 20) (pages 6) (seed 316) (task :uniform) provider
                            (configurations +configurations+) (stream *standard-output*))

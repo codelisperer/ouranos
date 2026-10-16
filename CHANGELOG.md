@@ -247,7 +247,10 @@ its tag.
   `run-benchmark` now sums `:input`, `:output`, `:cache-read` and `:cache-write` from each
   step's `:usage` event and prints them beside its estimates; a count no step reported is NIL
   and printed as `-`. With a real provider, the estimated input is the sum of the
-  `:estimated-input` of those events. Each row also gives the number of turns that signalled
+  `:estimated-input` of those events. Each figure taken from those events comes with the
+  number of requests that reported it (`:reported-input-requests`, `:input-requests`, and so
+  on), and the report marks a figure with `*` when fewer requests reported it than were made.
+  Each row also gives the number of turns that signalled
   an error (the error text is not printed), the requests, and the clearing batches. New
   configurations `:clear-wide` (`:clear-budget 6000 :keep-recent 2`) and `:offload-and-clear`
   (`:threshold 500 :clear-budget 1200 :keep-recent 1`), and `:task :mixed`, where the
