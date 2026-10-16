@@ -978,6 +978,14 @@ its tag.
   patch is removed once the pinned cl+ssl contains cl-plus-ssl pull request 202, and this file
   will say so then.
 
+- **hyperion/csrf: a protected form no longer shows a stray "T" after its hidden `_csrf`
+  field** (#663). `token-field` returned `T`, and the `:form` deftag calls it inside the
+  form's Spinneret body, which prints a body form's value, so every `post`, `put`, `patch`,
+  `delete` or `hx-post` form rendered with a token read `<input type=hidden name=_csrf …>T`,
+  visible on the page and read aloud by screen readers. `token-field` now returns no values.
+  An app that calls `token-field` itself and read its return value, `T` when a field was
+  written, now gets no value.
+
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
   `:result-stored`, `:results-cleared`, `:context-trimmed`, `:context-overflow`, `:delegate`,
