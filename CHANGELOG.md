@@ -14,6 +14,48 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/assets: the vendored htmx is 2.0.11 and Alpine.js is 3.17.4** (#717), up from
+  htmx 1.9.12 and Alpine.js 3.14.1. `(hyperion/assets:url :htmx)` now serves
+  `htmx-d6fdc75f.min.js` and `(hyperion/assets:url :alpine)` serves `alpine-23251939.min.js`.
+  An app that vendors its own htmx can drop its copy and load this one with
+  `(:script :src (hyperion/assets:url :htmx))`. Hyperion never adds its own htmx to an app's
+  page, so a page loads htmx twice only if the app includes it twice. htmx 2 is a breaking
+  release; see the [htmx 1 to 2 migration guide](https://htmx.org/migration-guide-htmx-1/).
+  What an app's own templates may hit:
+  - **`hx-delete` sends its parameters in the query string and no body.** In 1.9.12 they were a
+    urlencoded body. A handler that reads a DELETE's parameters with `hyperion/http:form-param`
+    on `body-string` gets NIL; read them from the query string instead, or set
+    `htmx.config.methodsThatUseUrlParams` to `["get"]` to restore the 1.x behaviour.
+  - **`hyperion/csrf` sends an `hx-delete` form's token in a header.** A `(:form :hx-delete …)`
+    gets an `hx-headers` attribute carrying `X-CSRF-Token` and no hidden `_csrf` field, which
+    htmx 2 would put in the URL. A form with both `:hx-delete` and its own `:hx-headers` no
+    longer compiles: move the app's `hx-headers` to an element around the form, since htmx
+    merges `hx-headers` from enclosing elements. An `hx-delete` on an element that is not a
+    form gets no token from the injector, as before; give it
+    `:hx-headers (hyperion/csrf:token-headers)`. Do not put an `hx-delete` button inside a
+    POST form, because htmx 2 would put that form's hidden `_csrf` field in the URL.
+  - **`hyperion/http:body-string` returns NIL for a request with neither Content-Length nor
+    Transfer-Encoding**, without reading the stream. Before, it read to the end of the stream,
+    and under Hunchentoot a bodiless htmx 2 DELETE waited 20 seconds for the socket timeout.
+  - **Requests to another origin are refused** (`htmx.config.selfRequestsOnly` is true). Set it
+    to false in the app's own `htmx-config` meta tag if an `hx-get` or `hx-post` names another
+    origin.
+  - **htmx's own extensions are no longer in the core file**, including SSE (`hx-sse`) and
+    WebSockets (`hx-ws`). Hyperion uses none of them. An app that does vendors the 2.x
+    extension itself; `hyperion/sse` on the server side is unchanged.
+  - **`hx-on="event: …"` is gone**; write `hx-on:event-name` (for example
+    `hx-on:htmx:before-request`). Nothing in this tree used the old form.
+  - **Scrolling after a swap is instant** (`htmx.config.scrollBehavior` is `'instant'`, was
+    `'smooth'`).
+
+  Unchanged, and checked in a real browser by the new smoke test in the `hyperion/assets`
+  suite: `hx-get`, `hx-post`, `hx-target`, the `outerHTML` and `innerHTML` swaps,
+  `hx-swap-oob`, the `load`, `revealed` and `every` triggers, and the `HX-Trigger` response
+  header. The interval parser `hyperion/update-ui:*poll-interval*` relies on (ms, s, m) is the
+  same in 2.0.11. The event names `htmx:beforeRequest`, `htmx:afterRequest`, `htmx:sendError`,
+  `htmx:timeout`, `htmx:configRequest` and `htmx:afterSwap`, and the `hx-request` attribute,
+  are unchanged.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or

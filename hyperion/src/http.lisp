@@ -107,7 +107,12 @@ truncated body is indistinguishable from an absent one at every call site.
 
 Signals BODY-TOO-LARGE rather than truncating. A truncated JSON body is a parse error at
 best and a silently different request at worst, and neither is a thing to hand an
-application without telling it."
+application without telling it.
+
+A REQUEST WITH NEITHER CONTENT-LENGTH NOR TRANSFER-ENCODING HAS NO BODY (RFC 9112 6.3), so
+the stream is not read and the result is NIL. Reading it waited for the client to send more
+on a kept-alive connection, which it never does: htmx 2 sends a DELETE that way, and under
+Hunchentoot each one waited 20 seconds for the socket timeout (#717)."
   (let ((cached (getf env +body-string-key+ :%unread)))
     (if (not (eq cached :%unread))
         cached
@@ -118,7 +123,7 @@ application without telling it."
             ;; attack, so rejecting it should be the cheap defence.
             (when (and len (integerp len) (> len max-size))
               (error 'body-too-large :limit max-size :claimed len))
-            (when (or (null len) (plusp len))
+            (when (if len (plusp len) (request-header env "transfer-encoding"))
               (let ((buf (%read-bounded stream max-size :claimed len)))
                 (when (plusp (length buf))
                   (sb-ext:octets-to-string buf :external-format :utf-8)))))))))

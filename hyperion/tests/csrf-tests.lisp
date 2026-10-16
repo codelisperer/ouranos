@@ -494,17 +494,24 @@ with itself by construction."
                   (:form :method "post" :action "/a" (:input :name "x"))
                   (:form :method "get" :action "/search" (:input :name "q"))
                   (:form :hx-post "/c" (:button "go"))
-                  (:form :method "put" :action "/d" (:button "save")))))
+                  (:form :method "put" :action "/d" (:button "save"))
+                  (:form :hx-delete "/e" (:button "remove")))))
          (forms (%forms-in html)))
-    (is (= 4 (length forms)) "precondition: the page really has four forms, got ~D" (length forms))
+    (is (= 5 (length forms)) "precondition: the page really has five forms, got ~D" (length forms))
     (dolist (f forms)
       (let ((state-changing (or (search "hx-post" f) (search "hx-put" f)
                                 (search "hx-patch" f) (search "hx-delete" f)
                                 (and (search "method=" f)
                                      (not (search "method=get" f))))))
-        (if state-changing
-            (is (search "name=_csrf" f) "state-changing form has no token: ~S" f)
-            (is (not (search "name=_csrf" f)) "safe form carries a token it should not: ~S" f))))))
+        (cond
+          ;; htmx 2 puts a DELETE's parameters in the URL, so its token is a header (#717).
+          ((search "hx-delete" f)
+           (is (search "X-CSRF-Token" f) "hx-delete form has no token header: ~S" f)
+           (is (not (search "name=_csrf" f)) "hx-delete form has a field htmx puts in the URL: ~S" f))
+          (state-changing
+           (is (search "name=_csrf" f) "state-changing form has no token: ~S" f))
+          (t
+           (is (not (search "name=_csrf" f)) "safe form carries a token it should not: ~S" f)))))))
 
 (test the-token-the-injector-emits-is-the-one-the-check-accepts
   ;; THE TWO HALVES MUST AGREE, and neither half's own tests can show it. The injector
@@ -517,3 +524,49 @@ with itself by construction."
         "the token the FORM carries must be the token the CHECK accepts")
     (is (eq :mismatch (%csrf-reason (%csrf-env :session s :body "_csrf=something-else&q=1")))
         "and the control: a different token is still refused")))
+
+(defun %header-token-in (html)
+  "The token in the hx-headers attribute of HTML, or NIL. Spinneret writes the attribute's
+JSON with &quot; for each double quote."
+  (let* ((key (format nil "~A&quot;: &quot;" csrf:*header-name*))
+         (at (search key html)))
+    (when at
+      (let* ((start (+ at (length key)))
+             (end (search "&quot;" html :start2 start)))
+        (subseq html start end)))))
+
+(test an-hx-delete-form-carries-its-token-in-a-header-and-not-in-the-url
+  ;; htmx 2 sends a DELETE's parameters in the query string (#717). A hidden field would
+  ;; put the token in the URL and leave the body the check reads empty.
+  (let* ((s (%csrf-session))
+         (html (%rendering (s) (:form :hx-delete "/item/1" (:button "remove"))))
+         (tok (%header-token-in html)))
+    (is (stringp tok) "an hx-delete form must carry the token in hx-headers: ~S" html)
+    (is (null (%token-in html)) "and no hidden field, which htmx 2 would put in the URL: ~S" html)
+    (is (search "<button>remove</button>" html) "and the author's own children survive: ~S" html)
+    (is (null (%csrf-reason (%csrf-env :method :delete :session s :header tok)))
+        "the token the header carries must be the token the CHECK accepts")
+    (is (eq :mismatch (%csrf-reason (%csrf-env :method :delete :session s :header "other")))
+        "and the control: a different token is still refused")))
+
+(test an-hx-post-form-still-carries-a-hidden-field-and-no-header
+  ;; The control for the test above: only DELETE moved to the query string in htmx 2.
+  (let ((html (%rendering ((%csrf-session)) (:form :hx-post "/item" (:button "add")))))
+    (is (stringp (%token-in html)) "~S" html)
+    (is (null (%header-token-in html)) "~S" html)))
+
+(test an-hx-delete-form-outside-a-request-has-no-hx-headers
+  (let ((html (spin:with-html-string (:form :hx-delete "/item/1" (:button "remove")))))
+    (is (not (search "hx-headers" html)) "no token, so no attribute: ~S" html)))
+
+(test an-hx-delete-form-with-its-own-hx-headers-is-refused-at-compile-time
+  ;; The injector cannot merge its header into the author's JSON, which may be computed at
+  ;; run time. A form compiled with an error signals when it runs, and the message names
+  ;; the conflict.
+  (let ((message (handler-case
+                     (progn (eval '(spinneret:with-html-string
+                                    (:form :hx-delete "/x" :hx-headers "{}" (:span "y"))))
+                            nil)
+                   (error (c) (princ-to-string c)))))
+    (is (stringp message) "the form must not compile")
+    (is (and message (search "hx-delete and hx-headers" message)) "~S" message)))

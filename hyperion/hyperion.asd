@@ -329,7 +329,8 @@
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
                (:require "sb-bsd-sockets"))
   :serial t
-  :components ((:file "tests/assets-tests"))
+  :components ((:file "tests/assets-tests")
+               (:file "tests/htmx-smoke-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
 ;;; Durable session store, backed by mnemosyne. A separate system so hyperion core keeps

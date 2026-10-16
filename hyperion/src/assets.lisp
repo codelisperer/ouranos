@@ -21,7 +21,7 @@
 ;;;; This system is OPT-IN (`hyperion/assets`) rather than part of `hyperion`, because
 ;;;; ~770K in every image is not a cost to impose on an app that ships its own CSS.
 ;;;;
-;;;; URLs are content-addressed -- `/_hyperion/assets/htmx-449317ad.min.js` -- so they can
+;;;; URLs are content-addressed -- `/_hyperion/assets/htmx-d6fdc75f.min.js` -- so they can
 ;;;; be served `immutable` for a year. The fingerprint is the head of the sha256 in the
 ;;;; pin file, so the URL changes exactly when the bytes do.
 
@@ -92,11 +92,11 @@ so the loaded image carries them and never consults the source tree again."
   (static:content-type-for (asset-filename asset)))
 
 (defparameter *assets*
-  (list (%asset :key :htmx :version "1.9.12" :filename "htmx.min.js"
-                :fingerprint "449317ad"
+  (list (%asset :key :htmx :version "2.0.11" :filename "htmx.min.js"
+                :fingerprint "d6fdc75f"
                 :bytes (%embed "assets/vendor/htmx.min.js"))
-        (%asset :key :alpine :version "3.14.1" :filename "alpine.min.js"
-                :fingerprint "358d9afb"
+        (%asset :key :alpine :version "3.17.4" :filename "alpine.min.js"
+                :fingerprint "23251939"
                 :bytes (%embed "assets/vendor/alpine.min.js"))
         (%asset :key :bulma :version "1.0.4" :filename "bulma.min.css"
                 :fingerprint "67fa26df"
@@ -132,7 +132,7 @@ or NIL."
 Bind it before calling URL and MOUNT -- both read it, so they cannot disagree.")
 
 (defun %url-name (asset)
-  "FILENAME with the fingerprint spliced before the extension: htmx-449317ad.min.js."
+  "FILENAME with the fingerprint spliced before the extension: htmx-d6fdc75f.min.js."
   (let* ((name (asset-filename asset))
          (dot (position #\. name)))
     (format nil "~a-~a~a"

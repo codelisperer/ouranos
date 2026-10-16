@@ -265,6 +265,11 @@ requirement, no JS requirement, no ordering requirement on the form."
 ;;;      submit (Referer, logs, history) and that a runtime check was needed. It is here:
 ;;;      the method is read at RUNTIME, so a computed one is handled, and a form with no
 ;;;      method at all is GET by HTML default and gets nothing.
+;;;   4. HX-DELETE FORMS -- CLOSED (#717). htmx 2 sends the parameters of a DELETE in the
+;;;      query string (htmx.config.methodsThatUseUrlParams is ["get", "delete"]), so a
+;;;      hidden field in an hx-delete form would put the token in the URL, and the body the
+;;;      check reads would be empty. Such a form carries the token in an hx-headers
+;;;      attribute instead, as *HEADER-NAME*, and has no hidden field.
 ;;;
 ;;; All three remain AVAILABILITY bugs rather than security ones, because the check half is
 ;;; authoritative: a form that misses injection has its POST refused and breaks loudly,
@@ -309,15 +314,29 @@ INTERPRET-HTML-TREE, hole 2 above -- can still be protected by asking for it."
       (spin:with-html (:input :type "hidden" :name *field-name* :value tok))
       t)))
 
+(defun token-headers ()
+  "An hx-headers value carrying this request\'s token as *HEADER-NAME*, or NIL when no token is
+available. Exported so an element the injector does not reach, such as a button with its own
+hx-delete, can send the token where htmx 2 will not put it in the URL."
+  (let ((tok (current-token)))
+    (and tok (format nil "{\"~A\": \"~A\"}" *header-name* tok))))
+
 (spin:deftag :form (body attrs &key)
   (let ((method (getf attrs :method))
         ;; PRESENCE is decided at expansion; the METHOD's VALUE is left to runtime.
         (hx (and (or (getf attrs :hx-post) (getf attrs :hx-put)
                      (getf attrs :hx-patch) (getf attrs :hx-delete))
                  t)))
-    `(spin:dynamic-tag :name "form" ,@attrs
-       (token-field ,method ,hx)
-       ,@body)))
+    (cond
+      ((not (getf attrs :hx-delete))
+       `(spin:dynamic-tag :name "form" ,@attrs
+          (token-field ,method ,hx)
+          ,@body))
+      ((getf attrs :hx-headers)
+       (error "hyperion/csrf: this form has both hx-delete and hx-headers, so the injector cannot add the CSRF token header. htmx merges hx-headers from enclosing elements, so move this form's hx-headers to an element around it."))
+      (t
+       `(spin:dynamic-tag :name "form" :hx-headers (token-headers) ,@attrs
+          ,@body)))))
 
 ;;; --- the middleware -------------------------------------------------------
 

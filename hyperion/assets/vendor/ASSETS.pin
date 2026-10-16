@@ -24,14 +24,14 @@
 # licence, and bump the version here. `scripts/check-assets.lisp` verifies the files on
 # disk still match these hashes.
 
-htmx        1.9.12   sha256 449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452
+htmx        2.0.11   sha256 d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717
             file     htmx.min.js
-            url      https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js
+            url      https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js
             licence  Zero-Clause BSD (htmx.LICENSE)
 
-alpinejs    3.14.1   sha256 358d9afbb1ab5befa2f48061a30776e5bcd7707f410a606ba985f98bc3b1c034
+alpinejs    3.17.4   sha256 232519394c6c8fdba6f362b1d9da16106db513cdbf899011f00daab4051df31c
             file     alpine.min.js
-            url      https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js
+            url      https://unpkg.com/alpinejs@3.17.4/dist/cdn.min.js
             licence  MIT (alpine.LICENSE)
 
 bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee
@@ -56,5 +56,9 @@ bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc6
 # changes. The cost is size: 207K → 678K, which is real but is bytes in an image, not a
 # dependency.
 #
-# htmx stays at 1.9.12. 2.x IS a breaking change and nothing needs it; that is a separate
-# decision with its own testing.
+# HTMX MOVED 1.9.12 → 2.0.11 AND ALPINE.JS 3.14.1 → 3.17.4 on 2026-10-16 (#717), because the
+# maintainer decided to keep both current. Each file is the one in its npm package tarball,
+# which matched the sha512 integrity value the npm registry publishes for that version; the
+# unpkg URL above serves the same bytes. htmx 2 is a breaking change: it sends a DELETE's
+# parameters in the query string, so hyperion/csrf now sends an hx-delete form's token in a
+# header. The full list of what an app may notice is in CHANGELOG.md under #717.

@@ -197,6 +197,22 @@ which is the point: the header is attacker-controlled and the body may not match
   (is (null (http:body-string (list :raw-body nil :content-length nil))))
   (is (null (http:body-string (%body-env (%octets "") :content-length 0)))))
 
+(test a-request-with-no-length-and-no-transfer-encoding-has-no-body
+  ;; htmx 2 sends a DELETE with neither header (#717). Reading its stream waited for bytes
+  ;; that never came, until the socket timed out. The stream here has bytes, so a read would
+  ;; show up as a non-NIL result.
+  (let ((env (list :raw-body (flexi-streams:make-in-memory-input-stream (%octets "k=v"))
+                   :content-length nil :headers (make-hash-table :test #'equal))))
+    (is (null (http:body-string env)) "the stream must not be read")))
+
+(test a-chunked-request-with-no-length-is-still-read
+  ;; The control: Transfer-Encoding is the other way a request says it has a body.
+  (let ((h (make-hash-table :test #'equal)))
+    (setf (gethash "transfer-encoding" h) "chunked")
+    (let ((env (list :raw-body (flexi-streams:make-in-memory-input-stream (%octets "k=v"))
+                     :content-length nil :headers h)))
+      (is (string= "k=v" (http:body-string env))))))
+
 (test the-multipart-ceiling-and-the-body-ceiling-are-now-the-same-knob
   ;; The inconsistency that made this findable: one reader bounded, its neighbour not.
   (is (integerp http:*max-body-size*))
