@@ -4,20 +4,37 @@
 ;;;; Load praxeon, then this file, then call (praxeon/bench/tool-results:run-benchmark).
 ;;;;
 ;;;; THE TASK. The agent is asked for the code written on one of PAGES pages. It fetches every
-;;;; page with a `fetch' tool; each page is about 1,500 estimated tokens and has one line
-;;;; "code: XXXX" at a random place. Then it answers. The task succeeds when the answer holds
-;;;; that page's code.
+;;;; page with a `fetch' tool; each page has one line "code: XXXX" at a random place. Then it
+;;;; answers. The task succeeds when the answer holds that page's code. With :TASK :UNIFORM,
+;;;; every page is about 1,500 estimated tokens. With :TASK :MIXED, the even-numbered pages are
+;;;; about 375 estimated tokens, under the offload threshold, so that offloading and clearing
+;;;; together have something to clear.
 ;;;;
 ;;;; THE CONFIGURATIONS. :FULL keeps every result in the prompt, as praxeon did before #319.
 ;;;; :OFFLOAD keeps results over a threshold outside the prompt, with a stand-in. :CLEAR keeps
 ;;;; each result whole when it arrives and clears older ones once the prompt passes a budget.
+;;;; :CLEAR-WIDE is :CLEAR with a larger budget, so that a batch is not cleared after almost every
+;;;; result. :OFFLOAD-AND-CLEAR does both; on the uniform task its figures are :OFFLOAD's.
 ;;;;
-;;;; WHAT IS MEASURED, AND HOW. Input tokens are the sum, over every request of the task, of the
-;;;; estimated tokens of the messages sent (PRAXEON/PROMPT:MESSAGES-TOKENS), so they are an
-;;;; estimate, not a provider's count. The cached share is SIMULATED: a request's cached tokens
-;;;; are those of the longest run of messages it shares, from the start, with the request
-;;;; before it, which is what a provider's prefix cache could reuse. Success is read from the
-;;;; answer.
+;;;; WHAT IS MEASURED, AND HOW. Two sets of token figures, computed different ways.
+;;;;
+;;;; The estimates. With the scripted model, input tokens are the sum, over every request of the
+;;;; task, of the estimated tokens of the messages sent (PRAXEON/PROMPT:MESSAGES-TOKENS), and the
+;;;; cached share is SIMULATED: a request's cached tokens are those of the longest run of
+;;;; messages it shares, from the start, with the request before it, which is what a provider's
+;;;; prefix cache could reuse. With a real provider, the estimate is the sum of each step's
+;;;; :ESTIMATED-INPUT from its :USAGE event, and there is no simulated cache share.
+;;;;
+;;;; The provider's counts. The sums of :INPUT, :OUTPUT, :CACHE-READ and :CACHE-WRITE over the
+;;;; :USAGE events of every task, as the provider reported them. Each is NIL when no step
+;;;; reported it. Anthropic's :INPUT leaves out the tokens read from and written to the cache,
+;;;; so the whole input of a request there is the sum of the three; an OpenAI-compatible
+;;;; server's :INPUT includes its cached tokens. The benchmark adds nothing up across those
+;;;; fields, and prints them as reported.
+;;;;
+;;;; Success is read from the answer. A task whose turn signalled an error counts as failed, and
+;;;; the number of such tasks is reported; the error's text is not, so that nothing a provider
+;;;; put in an error message reaches the output.
 ;;;;
 ;;;; WITH NO PROVIDER, A SCRIPTED MODEL DRIVES THE TASK, and it knows the task: it fetches each
 ;;;; page, and when the page it needs is a stand-in it calls read-result with a search for
@@ -31,30 +48,40 @@
   (:local-nicknames (#:actor #:praxeon/actor)
                     (#:llm #:praxeon/llm)
                     (#:res #:praxeon/results)
-                    (#:prompt #:praxeon/prompt))
-  (:export #:run-benchmark #:+configurations+))
+                    (#:prompt #:praxeon/prompt)
+                    (#:evt #:praxeon/event))
+  (:export #:run-benchmark #:+configurations+ #:*scripted-usage*))
 
 (in-package #:praxeon/bench/tool-results)
 
 (defparameter +configurations+
   '((:full)
     (:offload :threshold 500)
-    (:clear :threshold nil :clear-budget 3000 :keep-recent 1))
+    (:clear :threshold nil :clear-budget 3000 :keep-recent 1)
+    (:clear-wide :threshold nil :clear-budget 6000 :keep-recent 2)
+    (:offload-and-clear :threshold 500 :clear-budget 1200 :keep-recent 1))
   "Each configuration's name and the keyword arguments given to OFFLOAD-TOOL-RESULTS; :FULL
-calls it not at all. :CLEAR keeps every result in the conversation when it arrives and clears
-older ones in batches. Offloading and clearing together are not a separate configuration here:
-every page of this task is over the offload threshold, so with both there is nothing left to
-clear, and the figures are :OFFLOAD's.")
+calls it not at all. :CLEAR and :CLEAR-WIDE keep every result in the conversation when it
+arrives and clear older ones in batches. On the uniform task every page is over the offload
+threshold, so :OFFLOAD-AND-CLEAR has nothing left to clear there and its figures are
+:OFFLOAD's; run it with :TASK :MIXED.")
+
+(defvar *scripted-usage* nil
+  "When true, the scripted model reports usage on each completion: the request's estimated
+tokens as :INPUT, less the simulated cached tokens, which it reports as :CACHE-READ, the way
+Anthropic counts them. It lets a test check the provider-count path against the estimates
+without a real provider. A real provider ignores it.")
 
 ;;; --- the pages -----------------------------------------------------------------
 
 (defun %code (random) (format nil "~36R" (+ 1000000 (random 50000000 random))))
 
-(defun %page (index code random)
-  "About 6,000 characters of numbered filler lines, with \"code: CODE\" on one of them."
-  (let ((at (random 90 random)))
+(defun %page (index code random &optional (lines 100))
+  "LINES numbered filler lines of about 60 characters, with \"code: CODE\" on one of them. 100
+lines are about 1,500 estimated tokens."
+  (let ((at (random (- lines 10) random)))
     (format nil "~{~A~^~%~}"
-            (loop for line from 0 below 100
+            (loop for line from 0 below lines
                   collect (if (= line at)
                               (format nil "code: ~A" code)
                               (format nil "page ~D, line ~D: ~A" index line
@@ -94,6 +121,17 @@ conversation, or through read-result when the page is a stand-in."))
                                                    text :start (+ at 6))
                                       (length text))))))
 
+(defmethod llm:complete :around ((p scripted-reader) messages &key &allow-other-keys)
+  (let ((completion (call-next-method)))
+    (when *scripted-usage*
+      (let* ((previous (second (reader-requests p)))
+             (cached (%shared-prefix-tokens previous messages)))
+        (setf (llm:completion-input-tokens completion) (- (prompt:messages-tokens messages) cached)
+              (llm:completion-output-tokens completion) (prompt:estimate-tokens (llm:completion-text completion))
+              (llm:completion-cache-read-tokens completion) cached
+              (llm:completion-cache-write-tokens completion) 0)))
+    completion))
+
 (defmethod llm:complete ((p scripted-reader) messages &key system tools max-tokens temperature
                                                          tool-choice)
   (declare (ignore system tools max-tokens temperature tool-choice))
@@ -128,60 +166,123 @@ conversation, or through read-result when the page is a stand-in."))
             while (equal a b)
             sum (prompt:message-tokens b))))
 
-(defun %run-task (configuration pages random provider)
+(defun %page-lines (task index)
+  (ecase task
+    (:uniform 100)
+    (:mixed (if (evenp index) 25 100))))
+
+(defun %sum (a b)
+  "A plus B where NIL means not reported: NIL only when both are."
+  (if (or a b) (+ (or a 0) (or b 0)) nil))
+
+(defun %run-task (configuration task pages random provider)
   (destructuring-bind (name &rest keys) configuration
     (let* ((codes (loop repeat pages collect (%code random)))
-           (texts (loop for i from 1 to pages for c in codes collect (%page i c random)))
+           (texts (loop for i from 1 to pages for c in codes
+                        collect (%page i c random (%page-lines task i))))
            (target (1+ (random pages random)))
            (model (or provider (make-instance 'scripted-reader :pages pages :target target)))
            (agent (actor:make-agent :provider model :history-budget nil))
-           (requests '()))
+           (steps 0) (batches 0) (estimated 0)
+           (reported (list :input nil :output nil :cache-read nil :cache-write nil))
+           (outer evt:*observer*))
       (actor:register-means agent "fetch" "Fetch a page by its number, from 1."
                             (lambda (args) (nth (1- (gethash "page" args)) texts)))
       (unless (eq name :full)
         (apply #'actor:offload-tool-results agent (res:make-memory-result-store) keys))
-      (let ((answer (handler-case
-                        (actor:run-turn agent
-                                        (format nil "Fetch pages 1 to ~D with the fetch tool, one at a time, and then tell me the code written on page ~D." pages target)
-                                        :max-steps (+ pages 4))
-                      (error (e) (format nil "error: ~A" e)))))
-        (setf requests (if provider '() (reverse (reader-requests model))))
-        (let* ((input (loop for r in requests sum (prompt:messages-tokens r)))
-               (cached (loop for previous = nil then r
-                             for r in requests
-                             sum (%shared-prefix-tokens previous r))))
+      (let ((answer (evt:with-observer
+                        ((lambda (event)
+                           (case (evt:event-type event)
+                             (:deliberating (incf steps))
+                             (:results-cleared (incf batches))
+                             (:usage
+                              (incf estimated (or (evt:event-get event :estimated-input) 0))
+                              (loop for key in '(:input :output :cache-read :cache-write)
+                                    do (setf (getf reported key)
+                                             (%sum (getf reported key) (evt:event-get event key))))))
+                           (when outer (funcall outer event))))
+                      (handler-case
+                          (actor:run-turn agent
+                                          (format nil "Fetch pages 1 to ~D with the fetch tool, one at a time, and then tell me the code written on page ~D." pages target)
+                                          :max-steps (+ pages 4))
+                        (error () :error)))))
+        (let* ((requests (if provider '() (reverse (reader-requests model))))
+               (input (if provider
+                          estimated
+                          (loop for r in requests sum (prompt:messages-tokens r))))
+               (cached (and (not provider)
+                            (loop for previous = nil then r
+                                  for r in requests
+                                  sum (%shared-prefix-tokens previous r)))))
           (list :success (and (stringp answer) (search (nth (1- target) codes) answer) t)
-                :requests (length requests)
+                :error (eq answer :error)
+                :requests steps
+                :clear-batches batches
                 :input-tokens input
-                :cached-tokens cached))))))
+                :cached-tokens cached
+                :reported reported))))))
 
 ;;; --- the benchmark -------------------------------------------------------------
 
-(defun run-benchmark (&key (tasks 20) (pages 6) (seed 316) provider
+(defun %row (configuration tasks runs)
+  (let ((input (reduce #'+ runs :key (lambda (r) (getf r :input-tokens))))
+        (cached (and (getf (first runs) :cached-tokens)
+                     (reduce #'+ runs :key (lambda (r) (getf r :cached-tokens))))))
+    (list* :configuration (first configuration)
+           :tasks tasks
+           :succeeded (count-if (lambda (r) (getf r :success)) runs)
+           :errors (count-if (lambda (r) (getf r :error)) runs)
+           :requests (reduce #'+ runs :key (lambda (r) (getf r :requests)))
+           :clear-batches (reduce #'+ runs :key (lambda (r) (getf r :clear-batches)))
+           :input-tokens input
+           :cached-share (and cached (if (plusp input) (/ cached input) 0))
+           (loop for (key name) in '((:input :reported-input) (:output :reported-output)
+                                     (:cache-read :reported-cache-read)
+                                     (:cache-write :reported-cache-write))
+                 append (list name (reduce #'%sum runs
+                                           :key (lambda (r) (getf (getf r :reported) key))
+                                           :initial-value nil))))))
+
+(defun %field (value)
+  (if value (format nil "~D" value) "-"))
+
+(defun %report (rows stream task tasks pages seed provider)
+  (format stream "~&~A tasks of ~A pages, task ~(~A~), seed ~A, ~:[scripted model; the estimated cache share is simulated~;real provider~]~%"
+          tasks pages task seed provider)
+  (format stream "~&~18A ~10A ~6A ~8A ~7A ~11A ~7A~%"
+          "configuration" "succeeded" "errors" "requests" "batches" "est. input" "cached")
+  (dolist (r rows)
+    (format stream "~&~18A ~3D of ~3D ~6D ~8D ~7D ~11D ~7A~%"
+            (string-downcase (getf r :configuration)) (getf r :succeeded) (getf r :tasks)
+            (getf r :errors) (getf r :requests) (getf r :clear-batches) (getf r :input-tokens)
+            (if (getf r :cached-share)
+                (format nil "~,1F%" (* 100 (float (getf r :cached-share))))
+                "-")))
+  (format stream "~&Token counts the provider reported (- where it reported none):~%")
+  (format stream "~&~18A ~11A ~11A ~11A ~11A~%" "configuration" "input" "cache read" "cache write" "output")
+  (dolist (r rows)
+    (format stream "~&~18A ~11A ~11A ~11A ~11A~%"
+            (string-downcase (getf r :configuration))
+            (%field (getf r :reported-input)) (%field (getf r :reported-cache-read))
+            (%field (getf r :reported-cache-write)) (%field (getf r :reported-output)))))
+
+(defun run-benchmark (&key (tasks 20) (pages 6) (seed 316) (task :uniform) provider
                            (configurations +configurations+) (stream *standard-output*))
   "Run TASKS tasks of PAGES pages under each of CONFIGURATIONS and report, for each, how many
-succeeded, the input tokens and the cached share. Returns one plist per configuration.
+succeeded, how many signalled an error, the requests, the clearing batches, the estimated input
+tokens and the simulated cached share, and the token counts the provider reported. TASK is
+:UNIFORM or :MIXED. Returns one plist per configuration.
 
 With PROVIDER NIL a scripted model drives the task; see this file's commentary for what its
-numbers can and cannot say. With a real PROVIDER, the token figures are not collected here:
-read them from the :USAGE events or the provider's own counts."
+numbers can and cannot say. Every configuration starts from the same SEED, so each one is
+given the same pages and is asked for the same page."
+  (check-type task (member :uniform :mixed))
   (let ((rows
           (loop for configuration in configurations
                 collect (let ((random (sb-ext:seed-random-state seed))
                               (runs '()))
-                          (dotimes (i tasks) (push (%run-task configuration pages random provider) runs))
-                          (let ((input (reduce #'+ runs :key (lambda (r) (getf r :input-tokens))))
-                                (cached (reduce #'+ runs :key (lambda (r) (getf r :cached-tokens)))))
-                            (list :configuration (first configuration)
-                                  :tasks tasks
-                                  :succeeded (count-if (lambda (r) (getf r :success)) runs)
-                                  :input-tokens input
-                                  :cached-share (if (plusp input) (/ cached input) 0)))))))
-    (format stream "~&~A tasks of ~A pages, seed ~A, ~:[scripted model; tokens are estimates and the cache is simulated~;real provider~]~%"
-            tasks pages seed provider)
-    (format stream "~&~16A ~10A ~14A ~12A~%" "configuration" "succeeded" "input tokens" "cached share")
-    (dolist (r rows)
-      (format stream "~&~16A ~3D of ~3D ~14D ~11,1F%~%"
-              (string-downcase (getf r :configuration)) (getf r :succeeded) (getf r :tasks) (getf r :input-tokens)
-              (* 100 (float (getf r :cached-share)))))
+                          (dotimes (i tasks)
+                            (push (%run-task configuration task pages random provider) runs))
+                          (%row configuration tasks (reverse runs))))))
+    (%report rows stream task tasks pages seed provider)
     rows))

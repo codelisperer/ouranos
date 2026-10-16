@@ -79,7 +79,8 @@ at the implementation."
   (platform:executable-directory))
 
 (defun shipped-image-p ()
-  "True when this image is a shipped build of an app, and NIL in a developer's REPL (#416).
+  "True when this image is a shipped build of an app, and NIL in a developer's REPL (#416) and
+under bin/cons, which bootstrap.lisp dumps as a development runner (#703).
 
 A shipped build is one dumped file on Linux; on macOS, a launcher, the runtime `sbcl' and
 `sbcl.core' in `<name>.app/Contents/MacOS'; on Windows, `<name>.exe', `sbcl-runtime.exe' and
