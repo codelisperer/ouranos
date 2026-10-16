@@ -54,6 +54,15 @@
       (is (equal "v1" (http:query-param env name)) "query-param finds ~S" name)
       (is (equal '("v1" "v2") (http:query-params env name))))))
 
+(test a-part-that-does-not-decode-is-kept-as-it-arrived
+  "quri signals on a truncated escape even with :LENIENT. The body is client-supplied, so the
+parser keeps that part's raw text instead of signalling."
+  (is (equal '(("x%4" . "1")) (http:form-alist "x%4=1")))
+  (is (equal '(("a" . "%4")) (http:form-alist "a=%4")))
+  (is (equal "1" (http:form-param "x%4=1&ok=1" "ok")) "the pairs after it are still read")
+  (is (equal "1" (http:form-param "%=1" "")) "a lone % decodes to nothing, as quri reads it")
+  (is (equal "x y" (http:form-param "a=x+y" "a")) "control: a part that decodes is decoded"))
+
 (test form-urlencode-round-trips-through-form-alist
   (let ((pairs '(("en:who" . "Zoë & co") ("items[0]" . "a=b") ("a b" . "") ("+" . "%"))))
     (is (equal pairs (http:form-alist (http:form-urlencode pairs))))))

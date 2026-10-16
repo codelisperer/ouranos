@@ -141,6 +141,12 @@ arrives as en%3Awho, items[0] as items%5B0%5D and `a b' as a+b. Before #715 only
 decoded, so FORM-PARAM and QUERY-PARAM never found those names by their real spelling and the
 handler read the field as not sent.
 
+A NAME OR VALUE THAT DOES NOT DECODE IS KEPT AS IT ARRIVED. quri signals
+URL-DECODING-ERROR for a truncated escape such as `x%4', even with :LENIENT, and the body is
+client-supplied, so a parser that let that through would give any client a way to turn a
+form read into an unhandled condition: the CSRF check reads its token through FORM-PARAM.
+The pair is kept rather than dropped, with only the part that failed left undecoded.
+
 URLENCODED ONLY. A multipart/form-data body is a different format entirely and yields
 nothing here; use MULTIPART-P and PARSE-MULTIPART for that.
 
@@ -156,8 +162,14 @@ true, which is a bigger change than it looks and is not what pre-publication iss
     (loop for pair in (uiop:split-string body :separator "&")
           for eq = (position #\= pair)
           when eq
-            collect (cons (quri:url-decode (subseq pair 0 eq) :lenient t)
-                          (quri:url-decode (subseq pair (1+ eq)) :lenient t)))))
+            collect (cons (%form-decode (subseq pair 0 eq))
+                          (%form-decode (subseq pair (1+ eq)))))))
+
+(defun %form-decode (string)
+  "STRING url-decoded with `+' as a space, or STRING itself when it does not decode, such as a
+truncated escape (`a%4'). Never signals: see FORM-ALIST."
+  (handler-case (quri:url-decode string :lenient t)
+    (error () string)))
 
 (defun %form-urlencode-string (string)
   "STRING percent-encoded the way a browser encodes a form field: UTF-8, with ASCII letters,
