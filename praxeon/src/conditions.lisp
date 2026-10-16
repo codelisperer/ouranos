@@ -63,14 +63,23 @@ it may have run, such as after a timeout."))
   (:documentation "A request to a model, embedding or rerank service failed (#719).
 
 STATUS is the HTTP status, or NIL when the request failed before a response arrived.
-ERROR-TYPE and ERROR-CODE are read from the service's error JSON when the body parses as one,
-otherwise NIL. BODY is the whole response body, where the service explains the failure; read
+ERROR-TYPE and ERROR-CODE are read from the service's error JSON when the body parses as one
+and the value is 1 to 64 letters, digits, underscores, dots or hyphens, otherwise NIL (#727). BODY is the whole response body, where the service explains the failure; read
 it here.
 
 The report and DELIBERATION-FAILURE-DETAIL leave the body out and give its length instead,
 because praxeon/llm logs the report of a failed request at warn and a log line never carries a
 payload (docs/logging.md). A service's response body can repeat parts of the request, which
 holds the prompt."))
+
+(define-condition unknown-tool-choice (deliberation-failure)
+  ((value :initarg :value :initform nil :reader unknown-tool-choice-value))
+  (:documentation "A provider was given a tool-choice value it does not recognise (#727).
+
+VALUE is the value as given; read it here. The report and DELIBERATION-FAILURE-DETAIL say only
+what kind of value it was and its length, because praxeon/llm logs the report of a failed
+request at warn, and a tool-choice value can hold a tool name taken from a prompt
+(docs/logging.md)."))
 
 (define-condition output-limit-reached (condition)
   ((max-tokens :initarg :max-tokens :reader output-limit-reached-max-tokens))

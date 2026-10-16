@@ -312,13 +312,35 @@ signals DELIBERATION-FAILURE before anything is sent.")
   "Milliseconds since START (an internal-real-time reading), rounded."
   (round (* 1000 (- (get-internal-real-time) start)) internal-time-units-per-second))
 
+(defun %identifier-char-p (ch)
+  (or (char<= #\a ch #\z) (char<= #\A ch #\Z) (char<= #\0 ch #\9) (find ch "_.-")))
+
 (defun %short-string (x)
-  "X as a string when it is a string or an integer of at most 64 characters, otherwise NIL. An
-error type or code is a short identifier; anything longer is not one, and could be the body."
+  "X as a string when it is a string or an integer of at most 64 characters, each a letter, a
+digit or one of _ . -, otherwise NIL. An error type or code is a short identifier, and both are
+logged; anything else is not one, and could be text from the body or from a proxy between
+praxeon and the service (#727)."
   (let ((s (typecase x
              (string x)
              (integer (princ-to-string x)))))
-    (and s (<= (length s) 64) s)))
+    (and s (<= 1 (length s) 64) (every #'%identifier-char-p s) s)))
+
+(defun %value-shape (value)
+  "What kind of value VALUE is and how long, for a message that is logged: never VALUE itself."
+  (typecase value
+    (keyword (format nil "a keyword of ~D characters" (length (symbol-name value))))
+    (symbol (format nil "a symbol of ~D characters" (length (symbol-name value))))
+    (string (format nil "a string of ~D characters" (length value)))
+    (list (let ((n (ignore-errors (list-length value))))
+            (if n (format nil "a list of ~D elements" n) "a list that is not proper")))
+    (t (format nil "a value of class ~A" (class-name (class-of value))))))
+
+(defun %unknown-tool-choice (value)
+  "The UNKNOWN-TOOL-CHOICE for VALUE (#727). Its detail, which the report prints and the warn
+line logs, gives VALUE's kind and length; a forced tool's name can come from a prompt."
+  (make-condition 'praxeon/conditions:unknown-tool-choice
+                  :value value
+                  :detail (format nil "unknown tool-choice: ~A" (%value-shape value))))
 
 (defun %provider-error-fields (body)
   "The error type and code in BODY, a service's error JSON, as two values, each NIL when absent.
@@ -409,8 +431,7 @@ property that makes every existing agent provably unaffected."
        (setf (gethash "type" ht) "tool"
              (gethash "name" ht) (second tool-choice))
        ht))
-    (t (error 'praxeon/conditions:deliberation-failure
-              :detail (format nil "unknown tool-choice ~S" tool-choice)))))
+    (t (error (%unknown-tool-choice tool-choice)))))
 
 (defun anthropic-request-body (p messages &key system tools
                                             (max-tokens *default-max-tokens*)
@@ -675,8 +696,7 @@ object in every case. That difference is exactly what the neutral value exists t
              (gethash "type" ht) "function"
              (gethash "function" ht) fn)
        ht))
-    (t (error 'praxeon/conditions:deliberation-failure
-              :detail (format nil "unknown tool-choice ~S" tool-choice)))))
+    (t (error (%unknown-tool-choice tool-choice)))))
 
 (defvar *oai-response-format* nil
   "The TOOL-SPEC whose schema the next OPENAI-COMPATIBLE request asks for as response_format, or

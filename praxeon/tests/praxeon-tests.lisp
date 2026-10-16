@@ -4064,6 +4064,63 @@ body, is read as no type at all."
                             (praxeon/llm::%provider-error-fields "{\"error\":{\"type\":\"t\",\"code\":42}}")))
         "control: a short type, and a numeric code, are read")))
 
+;;; #727: a tool-choice value praxeon does not recognise is kept on the condition and left out
+;;; of the warn line. The request body is built before anything is sent, so these providers
+;;; point at a port nothing is serving and never connect.
+
+(defparameter +727-marker+ "summarise-the-patient-notes-727"
+  "A tool name a prompt might have put in a tool-choice value; it must not reach the log.")
+
+(defun %bad-tool-choice-and-log (make-provider tool-choice)
+  "Call the provider MAKE-PROVIDER builds with TOOL-CHOICE, with warn logging captured. Returns
+the condition signalled and the log lines that mention the failure."
+  (let ((out (make-string-output-stream))
+        (condition nil))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :warn :stream out)
+           (handler-case (llm:complete (funcall make-provider 9)
+                                       '((:role :user :content "Hello."))
+                                       :tool-choice tool-choice)
+             (cnd:deliberation-failure (c) (setf condition c))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (values condition
+            (remove-if-not (lambda (line) (search "llm request failed" line))
+                           (uiop:split-string (get-output-stream-string out)
+                                              :separator '(#\Newline))))))
+
+(test an-unknown-tool-choice-is-on-the-condition-and-not-in-the-log
+  (dolist (make (list #'%anthropic-at #'%openai-at))
+    (let ((value (list :forced +727-marker+)))
+      (multiple-value-bind (c lines) (%bad-tool-choice-and-log make value)
+        (is (typep c 'cnd:unknown-tool-choice) "~S" c)
+        (is (eq value (and (typep c 'cnd:unknown-tool-choice) (cnd:unknown-tool-choice-value c)))
+            "the value itself is on the condition")
+        (is (search "a list of 2 elements" (princ-to-string c)) "~A" c)
+        (is (= 1 (length lines)) "one warn line: ~S" lines)
+        (is (null (search +727-marker+ (princ-to-string c))) "the report leaves the value out")
+        (is (null (search +727-marker+ (first lines))) "the log line leaves it out: ~A"
+            (first lines))))))
+
+(test an-unknown-tool-choice-is-described-by-its-kind-and-length
+  (flet ((shape (v) (praxeon/llm::%value-shape v)))
+    (is (equal "a string of 5 characters" (shape "hello")))
+    (is (equal "a keyword of 8 characters" (shape :required)))
+    (is (equal "a symbol of 3 characters" (shape 'cl:car)))
+    (is (equal "a list that is not proper" (shape '(a . b))))
+    (is (equal "a value of class FIXNUM" (shape 3)))))
+
+(test an-error-type-or-code-outside-the-identifier-characters-is-not-taken-as-one
+  "A proxy between praxeon and the service can answer with its own error JSON, so a type or
+code with a space or a quote in it could be a sentence of its text, and is read as none (#727)."
+  (is (equal '(nil nil) (multiple-value-list
+                         (praxeon/llm::%provider-error-fields
+                          "{\"error\":{\"type\":\"see the notes\",\"code\":\"a\\\"b\"}}"))))
+  (is (equal '("rate_limit.v2-x" "E42") (multiple-value-list
+                                         (praxeon/llm::%provider-error-fields
+                                          "{\"error\":{\"type\":\"rate_limit.v2-x\",\"code\":\"E42\"}}")))
+      "control: letters, digits, underscore, dot and hyphen are read"))
+
 (test a-request-that-fails-before-a-response-is-still-a-provider-request-failed
   (let ((c (praxeon/llm::%request-failure "rerank request failed"
                                           (make-condition 'aion/http-client:http-error
