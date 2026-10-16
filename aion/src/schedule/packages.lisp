@@ -36,11 +36,12 @@
    ;; the scheduler
    #:scheduler #:make-scheduler #:scheduler-store #:scheduler-holder #:scheduler-lease-seconds
    #:define-job #:schedule-once #:tick #:run-now #:run-job #:start #:stop #:next-wake
-   #:scheduler-stopped #:unknown-job #:unknown-job-key #:unreadable-job-args
+   #:scheduler-stopped #:unknown-job #:unknown-job-key #:job-exists #:job-exists-key
+   #:unreadable-job-args
    #:unreadable-job #:unreadable-job-key #:unreadable-job-reason
    ;; the run context a job function receives
    #:run-context #:run-id #:run-key #:run-trigger #:run-scheduled-for #:run-local-date
    #:run-args #:note-item-error #:stop-requested-p
    ;; for drivers
    #:scheduler-wake-function #:scheduler-driver-stop #:scheduler-clock-now
-   #:scheduler-stopping-p))
+   #:scheduler-stopping-p #:reserve-driver))

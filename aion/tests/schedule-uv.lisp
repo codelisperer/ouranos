@@ -97,3 +97,34 @@
     (is (eq :stopped (s:stop a :timeout 5)))
     (signals s:scheduler-stopped (suv:start a))
     (is (null (driver-thread)) "and starts no loop thread")))
+
+(defun spawn (name function)
+  ;; THREAD-LIFETIME: a test thread, joined by the test that starts it.
+  (sb-thread:make-thread function :name name))
+
+(test stop-during-start-s-first-tick-waits-for-start
+  (let* ((store (make-instance 'gated-store))
+         (a (s:make-scheduler store :clock (s:make-manual-clock 3990000000))))
+    (setf (hold store) t)
+    (let ((starter (spawn "starter" (lambda () (suv:start a) t))))
+      (sb-thread:wait-on-semaphore (entered store))
+      (let ((stopper (spawn "stopper" (lambda () (s:stop a :timeout 5)))))
+        (sleep 0.3)
+        (is-true (sb-thread:thread-alive-p stopper) "STOP waits for the start in progress")
+        (sb-thread:signal-semaphore (gate store))
+        (is-true (sb-thread:join-thread starter :timeout 10 :default nil))
+        (is (eq :stopped (sb-thread:join-thread stopper :timeout 10 :default nil)))
+        (is-true (wait-until (lambda () (null (driver-thread)))) "with no loop thread left")))))
+
+(test a-start-that-outlasts-a-timed-out-stop-starts-no-loop
+  (let* ((store (make-instance 'gated-store))
+         (a (s:make-scheduler store :clock (s:make-manual-clock 3990000000))))
+    (setf (hold store) t)
+    (let ((starter (spawn "starter" (lambda () (suv:start a) t))))
+      (sb-thread:wait-on-semaphore (entered store))
+      (is (eq :timed-out (s:stop a :timeout 0.3)) "the first tick is still going")
+      (sb-thread:signal-semaphore (gate store))
+      (is-true (sb-thread:join-thread starter :timeout 10 :default nil))
+      (sleep 0.2)
+      (is (null (driver-thread)) "START saw the stop after its tick and started no loop")
+      (is (eq :stopped (s:stop a :timeout 5))))))

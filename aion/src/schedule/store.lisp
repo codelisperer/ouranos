@@ -68,9 +68,12 @@ true when it did; NIL means the lease is no longer this run's."))
 
 (defgeneric store-finish (store key holder run-id &key now outcome counts error remove-job)
   (:documentation "Finish run RUN-ID at NOW with OUTCOME, COUNTS and ERROR, and release the lease
-on job KEY when HOLDER still holds it for that run; with REMOVE-JOB, remove the job instead, in
-the same step, so a job whose lease has passed to another run is never removed. The run is
-finished either way. Returns true when the lease was still this run's."))
+on job KEY when HOLDER still holds it for that run. REMOVE-JOB is NIL or the STORED-JOB the run
+was started from: when it is given, and the stored job's function name, schedule and arguments
+are still that job's, the job is removed instead of released, in the same step. So a job whose
+lease has passed to another run is never removed, and neither is a job that was replaced while
+the run was going (DEFINE-JOB turning a one-off into a recurring job, say): that one is released
+and kept. The run is finished either way. Returns true when the lease was still this run's."))
 
 (defgeneric store-record-run (store run)
   (:documentation "Add RUN, which holds no lease (a :SKIPPED run). Returns RUN."))
@@ -146,11 +149,14 @@ contents end with the process, so it does not keep schedules across a redeploy."
                      new))
              t)
             (replace
+             ;; UNREADABLE too: a database store's replacement rewrites the columns it could not
+             ;; read, so the job is readable again, and this store behaves the same way.
              (setf (stored-job-function-name old) (stored-job-function-name job)
                    (stored-job-schedule old) (stored-job-schedule job)
                    (stored-job-args old) (stored-job-args job)
                    (stored-job-next-due old) (stored-job-next-due job)
-                   (stored-job-updated-at old) (stored-job-updated-at job))
+                   (stored-job-updated-at old) (stored-job-updated-at job)
+                   (stored-job-unreadable old) (stored-job-unreadable job))
              t)
             (t nil)))))
 
@@ -214,6 +220,11 @@ contents end with the process, so it does not keep schedules across a redeploy."
         (setf (stored-job-lease-until job) until)
         t))))
 
+(defun %same-definition-p (a b)
+  (and (equal (stored-job-function-name a) (stored-job-function-name b))
+       (equal (stored-job-schedule a) (stored-job-schedule b))
+       (equal (stored-job-args a) (stored-job-args b))))
+
 (defmethod store-finish ((store memory-job-store) key holder run-id
                          &key now outcome counts error remove-job)
   (%with-store-lock (store)
@@ -224,7 +235,7 @@ contents end with the process, so it does not keep schedules across a redeploy."
               (job-run-counts run) counts (job-run-error run) error))
       (when (and job (equal holder (stored-job-lease-holder job))
                  (equal run-id (stored-job-current-run job)))
-        (if remove-job
+        (if (and remove-job (%same-definition-p remove-job job))
             (remhash key (%jobs store))
             (setf (stored-job-lease-holder job) nil (stored-job-lease-until job) nil
                   (stored-job-current-run job) nil (stored-job-updated-at job) now))

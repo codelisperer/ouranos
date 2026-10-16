@@ -248,22 +248,32 @@ its tag.
   `(:weekly (:mon :fri) (hour minute) :zone ...)` or `(:once universal-time)`; a daily or
   weekly slot that falls in a daylight-saving gap runs at the first instant after it, and one
   that falls in an overlap runs once, at the earlier instant. `schedule-once` stores a one-off
-  run with arguments. Each instance of the app runs a `scheduler` over the same store, and a
+  run with arguments; given a `:key` a stored job already has, it signals `job-exists` unless
+  passed `:replace t`. Each instance of the app runs a `scheduler` over the same store, and a
   lease in the store means each slot runs once across all of them; a slot missed while no
   instance was running runs once when one starts (trigger `:catch-up`). Jobs run on an
   `aion/pool` pool the scheduler makes for itself, of two workers by default. Every run is
   recorded with its trigger, outcome (`:completed`, `:completed-with-errors`, `:failed`,
   `:skipped`, `:abandoned`), the counts plist the job returned, and an error text; a job calls
   `note-item-error` for an item that failed without failing the run. `run-now` and `run-job`
-  run a job off its schedule. `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the
-  run log. Drive the scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv
-  timer), and end it with `stop`. **A job must tolerate running twice**: when an instance dies
+  run a job off its schedule, and start nothing while this instance is still running the job;
+  when a run of the job is still starting here, `run-now` waits for it and returns its id. Each
+  run gets its own copy of the job's arguments.
+  `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the run log. Drive the
+  scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv timer), and end it
+  with `stop`, which returns `:timed-out` while a lease renewal an earlier `stop` started is
+  still using the store. **A job must tolerate running twice**: when an instance dies
   during a run, the run is marked `:abandoned` once its lease expires and another instance runs
   the job again (trigger `:retry`), once per slot: a retry that is abandoned too is not retried.
   A stored job that cannot be read back is returned with `stored-job-unreadable` set, logged
-  once and left alone, and `run-now` on it signals `unreadable-job`. Lease times come from each instance's own clock, which may
-  differ from another's by up to about a third of `:lease-seconds` (100 seconds at the default
-  of 300), so keep the instances' clocks synchronised. `mnemosyne/jobs:make-db-job-store` keeps
+  once and left alone, and `run-now` on it signals `unreadable-job`; `define-job` or
+  `schedule-once :replace t` rewrites it. A driver other than the two here calls
+  `reserve-driver` before its first tick, so that a `stop` during that tick waits for it. A
+  store's `store-finish` takes the stored job the run started from as `:remove-job`, and
+  removes the job only when its definition is unchanged. Lease times come from each
+  instance's own clock, which may differ from another's by up to about a third of
+  `:lease-seconds` (100 seconds at the default of 300), so keep the instances' clocks
+  synchronised. `mnemosyne/jobs:make-db-job-store` keeps
   jobs in the tables `aion_jobs` and `aion_job_runs`; it refuses to start with
   `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
   migrations, or pass `:ensure t`. See `docs/scheduling.md`.
