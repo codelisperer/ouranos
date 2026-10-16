@@ -929,6 +929,13 @@ its tag.
 
 ### Fixed
 
+- **aion/schedule: `run-now` and `run-job` return the id of a run they waited for even when
+  that run finished before they woke** (#723). A call that found a run of the same job still
+  starting on this instance waited for it, as documented. If that run then started and
+  finished before the waiting call took the scheduler's lock again, the call found the job
+  free and started a second run. It now returns `(values run-id :already-running)` for the
+  run it waited for, and tries to start a run itself only when that run did not start.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that

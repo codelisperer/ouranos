@@ -62,8 +62,9 @@ already in progress; `run-job` runs it on the calling thread and returns the fin
 leave the schedule alone. Neither starts a run of a job this instance is still running, even when
 that run has outlived its lease: `run-now` returns the running run's id with `:already-running`,
 and `run-job` returns `nil`. When another call has started a run of the job on this instance and
-the store has not yet recorded it, `run-now` waits until it has, and returns that run's id; if
-that run did not start, `run-now` tries to start one itself.
+the store has not yet recorded it, `run-now` waits until it has, and returns that run's id, even
+when the run has already finished by the time `run-now` wakes (#723). If that run did not start,
+`run-now` tries to start one itself.
 
 `start` ticks once, then drives the scheduler from a thread; `aion/schedule/uv:start` drives it
 from a libuv timer on a loop of its own. `stop` starts no more runs, stops the driver, and waits

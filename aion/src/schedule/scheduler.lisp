@@ -70,7 +70,8 @@
    (functions :initform (make-hash-table :test #'equal) :reader %functions)
    (running :initform (make-hash-table :test #'equal) :reader %running)
    ;; The keys of the jobs this instance is starting or running, from admission until the run
-   ;; finishes. A key here is admitted to no second run, whatever triggered it.
+   ;; finishes, each with its %ADMISSION. A key here is admitted to no second run, whatever
+   ;; triggered it.
    (claimed :initform (make-hash-table :test #'equal) :reader %claimed)
    ;; The thread of STOP's last lease renewal, which may outlive the STOP that started it.
    (renewal :initform nil :accessor %renewal)
@@ -319,24 +320,42 @@ the run log."
               (if (eq t (array-element-type value)) (map-into copy #'%copy-data copy) copy)))
     (t value)))
 
+(defstruct (%admission (:constructor %make-admission ()))
+  "One admission of a run: :STARTING until %START-RUN has either started the run, and then it is
+:STARTED with the run's RUN-ID, or not, and then it is :NOT-STARTED. A caller of %ADMIT that
+waits holds the admission it waited for, so it reads the outcome even after the run has
+finished and its key has been given up (#723)."
+  (state :starting)
+  (run-id nil))
+
 (defun %admit (scheduler key &key wait)
   "Admit a run of job KEY: count it as starting, so STOP waits for it, and claim KEY, so no second
-run of it starts here until this one has finished. Returns true, or NIL and the id of the run
-this instance already has of KEY. While that run is still starting it has no id yet: with WAIT,
-%ADMIT waits until it has started, and returns its id, or until it did not start, and then tries
-to claim KEY again; without WAIT it returns NIL and NIL. Signals SCHEDULER-STOPPED when STOP has
-begun. Checked under the scheduler's lock, which STOP takes to set its flag."
+run of it starts here until this one has finished. Returns true and the new %ADMISSION, which
+%START-RUN settles; or NIL and the id of the run this instance already has of KEY. While that run
+is still starting it has no id yet: with WAIT, %ADMIT waits until its admission is settled. When
+the run started, %ADMIT returns its id, even if the run has finished meanwhile (#723); when it
+did not start, %ADMIT tries to claim KEY again. Without WAIT it returns NIL and NIL. Signals
+SCHEDULER-STOPPED when STOP has begun. Checked under the scheduler's lock, which STOP takes to
+set its flag."
   (%with-lock (scheduler)
     (loop
       (when (%stopping scheduler) (error 'scheduler-stopped))
-      (let ((run (gethash key (%running scheduler))))
-        (cond ((not (gethash key (%claimed scheduler)))
-               (setf (gethash key (%claimed scheduler)) t)
-               (incf (%starting scheduler))
-               (return t))
-              ((or run (not wait)) (return (values nil run)))
-              ;; %START-RUN broadcasts on %IDLE both when the run starts and when it does not.
-              (t (sb-thread:condition-wait (%idle scheduler) (%lock scheduler))))))))
+      (let ((claim (gethash key (%claimed scheduler))))
+        (cond ((null claim)
+               (let ((admission (%make-admission)))
+                 (setf (gethash key (%claimed scheduler)) admission)
+                 (incf (%starting scheduler))
+                 (return (values t admission))))
+              ((eq :started (%admission-state claim))
+               (return (values nil (%admission-run-id claim))))
+              ((not wait) (return (values nil nil)))
+              (t
+               ;; %START-RUN broadcasts on %IDLE when it settles an admission.
+               (loop while (and (eq :starting (%admission-state claim))
+                                (not (%stopping scheduler)))
+                     do (sb-thread:condition-wait (%idle scheduler) (%lock scheduler)))
+               (when (and (eq :started (%admission-state claim)) (not (%stopping scheduler)))
+                 (return (values nil (%admission-run-id claim))))))))))
 
 (defun %start-run (scheduler job trigger &key expected-due (expected-run :any) next-due
                                              scheduled-for args (dispatch (%dispatch scheduler))
@@ -350,8 +369,8 @@ needs the id of a run that is still starting. Signals SCHEDULER-STOPPED once STO
 The run gets its own copy of ARGS, so a job function that changes its arguments changes neither
 the stored job nor the JOB that %FINISH compares with the stored job."
   (let ((key (stored-job-key job)))
-    (multiple-value-bind (admitted local-run) (%admit scheduler key :wait wait)
-      (unless admitted (return-from %start-run (values nil local-run)))
+    (multiple-value-bind (admitted admission-or-run) (%admit scheduler key :wait wait)
+      (unless admitted (return-from %start-run (values nil admission-or-run)))
       (let ((starting t))
         (unwind-protect
              (let* ((function (%with-lock (scheduler)
@@ -376,6 +395,8 @@ the stored job nor the JOB that %FINISH compares with the stored job."
                    ;; From here the claim is the run's, and %FINISH gives it up.
                    (%with-lock (scheduler)
                      (setf (gethash key (%running scheduler)) run-id
+                           (%admission-run-id admission-or-run) run-id
+                           (%admission-state admission-or-run) :started
                            starting nil)
                      (decf (%starting scheduler))
                      (sb-thread:condition-broadcast (%idle scheduler)))
@@ -388,6 +409,7 @@ the stored job nor the JOB that %FINISH compares with the stored job."
                  run-id))
           (when starting
             (%with-lock (scheduler)
+              (setf (%admission-state admission-or-run) :not-started)
               (remhash key (%claimed scheduler))
               (decf (%starting scheduler))
               (sb-thread:condition-broadcast (%idle scheduler)))))))))

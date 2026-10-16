@@ -892,3 +892,46 @@ signalled, after signalling ENTERED."))
                   "the second call names the run the first one started"))))
         (drain box)
         (is (equal '(:completed) (outcomes store "j")))))))
+
+(defclass lock-taking-store (gated-store)
+  ((lock-to-take :initform nil :accessor lock-to-take))
+  (:documentation "A gated store that, once an acquire it held has gone through, takes
+LOCK-TO-TAKE and keeps it. The test's dispatcher gives it back after the run has finished."))
+
+(defmethod s:store-acquire :after ((store lock-taking-store) key holder &key &allow-other-keys)
+  (declare (ignore key holder))
+  (let ((lock (shiftf (lock-to-take store) nil)))
+    (when lock (sb-thread:grab-mutex lock))))
+
+(test run-now-returns-the-id-of-a-run-that-started-and-finished-before-it-woke
+  "#723. The second call waits for the first, which is held in the store's acquire. When it lets
+go, the first call takes the scheduler's lock and keeps it while its run starts, runs and
+finishes, so the second call wakes only after the job's key has been given up. Before #723 it
+then found the key unclaimed and started a second run. The capture-based test above keeps the
+first run unfinished until both calls return, so it cannot see this."
+  (let ((store (make-instance 'lock-taking-store)) (clock (s:make-manual-clock +t0+)) (a nil))
+    (multiple-value-bind (f n) (counter)
+      (with-scheduler (sched store clock
+                       :dispatch (lambda (thunk)
+                                   (unwind-protect (funcall thunk)
+                                     (let ((lock (s::%lock a)))
+                                       (when (eq (sb-thread:mutex-owner lock)
+                                                 sb-thread:*current-thread*)
+                                         (sb-thread:release-mutex lock))))
+                                   t))
+        (setf a sched)
+        (s:define-job a "j" f :schedule '(:every 600))
+        (setf (hold store) :acquire
+              (lock-to-take store) (s::%lock a))
+        (let ((one (spawn "first run-now" (lambda () (multiple-value-list (s:run-now a "j"))))))
+          (sb-thread:wait-on-semaphore (entered store))
+          (let ((two (spawn "second run-now" (lambda () (multiple-value-list (s:run-now a "j"))))))
+            ;; Gives the second call time to find the job claimed by the first and wait.
+            (sleep 0.3)
+            (sb-thread:signal-semaphore (gate store))
+            (let ((started (tt:join one)) (found (tt:join two)))
+              (is (eq :started (second started)))
+              (is (equal (list (first started) :already-running) found)
+                  "the second call names the run the first one started: ~S ~S" started found)
+              (is (= 1 (car n)) "the job ran once")
+              (is (equal '(:completed) (outcomes store "j"))))))))))
