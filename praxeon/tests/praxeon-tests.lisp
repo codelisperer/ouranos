@@ -7909,3 +7909,188 @@ entries. The scan has to reach the MCP files in a subdirectory and the types pas
       (is (null (set-difference listed emitted))
           "in the list at the top of event.lisp but emitted nowhere: ~S"
           (set-difference listed emitted)))))
+
+;;; --------------------------------------------------------------------------
+;;; #529: a window's writes and its progress in one transaction.
+;;; --------------------------------------------------------------------------
+
+;;; THE STORES WHOSE PROGRESS WRITES FAIL, IN THE TESTS ABOVE, HAVE NO TRANSACTIONS. Those tests
+;;; check what the observer does when a window's observations are stored and its progress is
+;;; not, which is the path every store without transactions takes, including an app's own. With
+;;; the in-memory store's transactions that state cannot arise, so the tests would not reach it.
+(defmethod mem:store-transactions-p ((store progress-fails-once-store)) nil)
+(defmethod mem:store-transactions-p ((store flaky-reads-store)) nil)
+(defmethod mem:store-transactions-p ((store selective-progress-store)) nil)
+(defmethod mem:store-transactions-p ((store always-failing-progress-store)) nil)
+
+(defclass progress-switch-store (mem:in-memory-store)
+  ((failing :initform nil :accessor progress-failing))
+  (:documentation "An in-memory store whose progress writes fail while PROGRESS-FAILING is true."))
+
+(defmethod mem:record-thread-progress :before ((store progress-switch-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (when (progress-failing store) (error "the progress write failed")))
+
+(defclass untransacted-switch-store (progress-switch-store) ()
+  (:documentation "The same store, saying it has no transactions: the observer's path for a store
+an app wrote without them."))
+
+(defmethod mem:store-transactions-p ((store untransacted-switch-store)) nil)
+
+(defun %two-observers-after-failed-progress (class first-script later-content)
+  "Observer A distils window 1-6 with FIRST-SCRIPT while every progress write of a store of CLASS
+fails. Then the writes work, and a new observer B distils the thread, its model wording the fact
+as LATER-CONTENT. Returns the thread's observations' contents and the stored progress."
+  (let ((store (make-instance class)))
+    (setf (progress-failing store) t)
+    (%turn (obs:make-observer (apply #'%provider-returning (mapcar (lambda (c) (%call-with (%ob c "fact"))) first-script))
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)
+           6)
+    (setf (progress-failing store) nil)
+    (%turn (obs:make-observer (%provider-returning (%call-with (%ob later-content "fact")))
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)
+           6)
+    (values (%thread-contents store)
+            (multiple-value-list (mem:thread-progress store "member-1" "conv-7")))))
+
+(test a-window-whose-progress-write-fails-leaves-nothing-so-a-new-observer-writes-one-copy
+  "Every progress write fails while observer A distils window 1-6. With the store's transactions
+the window's observations are rolled back with the failed progress write, so the store holds
+neither, and a new observer B, whose model words the fact differently, distils the window once:
+the thread holds one copy (#529). The control is the same store without transactions, today's
+path, where A's observation stays and B adds a reworded second copy."
+  (multiple-value-bind (contents progress)
+      (%two-observers-after-failed-progress 'progress-switch-store
+                                            '("Lives in Lisbon." "Lives in Lisbon.") "Resides in Lisbon.")
+    (is (equal '("Resides in Lisbon.") contents) "one copy: ~S" contents)
+    (is (equal '(6 nil) progress)))
+  (multiple-value-bind (contents progress)
+      (%two-observers-after-failed-progress 'untransacted-switch-store
+                                            '("Lives in Lisbon.") "Resides in Lisbon.")
+    (declare (ignore progress))
+    (is (equal '("Lives in Lisbon." "Resides in Lisbon.") contents)
+        "control, without transactions: two copies, ~S" contents)))
+
+(test the-in-memory-store-rolls-back-a-transaction-that-signals
+  "Inside a transaction that then signals, the store remembers an observation, supersedes another
+and records progress. Afterwards the store is as before: the new observations are gone, the
+superseded one is current again with its own fields as they were, and the progress is as it was
+(#529)."
+  (let* ((store (mem:make-in-memory-store))
+         (old (mem:remember store "member-1" "Lives in Porto." :thread "conv-7"
+                            :provenance (mem:make-provenance "conv-7" 1))))
+    (mem:record-thread-progress store "member-1" "conv-7" 6 '((1 6 1)))
+    (let ((copy (copy-structure old)))
+      (signals simple-error
+        (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+          (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                        :provenance (mem:make-provenance "conv-7" 7))
+          (mem:supersede store old "Lives in Lisbon." :provenance (mem:make-provenance "conv-7" 8))
+          (mem:record-thread-progress store "member-1" "conv-7" 12 nil)
+          (error "the transaction fails")))
+      (is (equal '("Lives in Porto.") (%thread-contents store)))
+      (is (null (mem:observation-superseded-by old)) "the superseded observation is current again")
+      (is (equalp copy old) "with every field as it was")
+      (is (= 1 (length (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t)))))
+    (is (equal '(6 ((1 6 1))) (multiple-value-list (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test a-transaction-that-returns-keeps-its-writes
+  (let ((store (mem:make-in-memory-store)))
+    (is (eq :done (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                    (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                                  :provenance (mem:make-provenance "conv-7" 1))
+                    :done)))
+    (is (equal '("Has a dog.") (%thread-contents store)))))
+
+(test a-promote-function-that-reads-the-store-runs-inside-the-transaction
+  "The app's :PROMOTE function reads the thread's observations from the store while the window's
+transaction holds the store's lock. The store's lock is recursive, so the run finishes, the
+function sees the window's observation that the transaction has written and not yet committed,
+and the fact is promoted (the hub's review of #529's design; Copilot's review of #645: reading
+the subject's facts would read nothing either way)."
+  (let* ((store (mem:make-in-memory-store))
+         (seen nil)
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                      :promote (lambda (o) (declare (ignore o))
+                                                 (setf seen (length (mem:observations-of store "member-1"
+                                                                                         :thread "conv-7")))
+                                                 t))))
+    (is (obs::observer-transactions observer) "precondition: the in-memory store has transactions")
+    (obs:observe-turn observer (%history 6))
+    (is-true (obs:await-observer observer :timeout 10) "the run finished")
+    (is (eql 1 seen) "the :promote function read the window's observation")
+    (is (equal '("Has a dog.") (%facts store)) "and the fact was promoted")))
+
+(test a-store-without-the-transaction-generics-keeps-todays-path
+  "A store written outside this tree, defining neither generic: STORE-TRANSACTIONS-P is NIL, and
+CALL-WITH-STORE-TRANSACTION calls its thunk and returns its values (#529)."
+  (let ((store (make-instance 'reader-only-store)))
+    (is (null (mem:store-transactions-p store)))
+    (is (equal '(1 2) (multiple-value-list (mem:with-store-transaction (store) (values 1 2)))))))
+
+;;; THE PROMOTION-FAILURE STORES ALSO HAVE NO TRANSACTIONS, so their tests above keep checking the
+;;; earlier path, where a thread observation stays written and the next attempt finishes its
+;;; promotion (the hub's review of #645). The versions below check the transaction path.
+(defmethod mem:store-transactions-p ((store promotion-fails-store)) nil)
+(defmethod mem:store-transactions-p ((store promotion-outage-store)) nil)
+
+(defclass transacted-promotion-fails-store (promotion-fails-store) ()
+  (:documentation "PROMOTION-FAILS-STORE with the in-memory store's transactions."))
+(defmethod mem:store-transactions-p ((store transacted-promotion-fails-store)) t)
+
+(defclass transacted-promotion-outage-store (promotion-outage-store) ()
+  (:documentation "PROMOTION-OUTAGE-STORE with the in-memory store's transactions."))
+(defmethod mem:store-transactions-p ((store transacted-promotion-outage-store)) t)
+
+(test with-transactions-a-promotion-that-fails-rolls-back-the-window-and-the-retry-writes-it
+  "The window's thread observation is written, then its promotion fails. With transactions the
+observation is rolled back with it, so the retry writes it again, once, and promotes it (#529;
+the hub's review of #645)."
+  (let* ((store (make-instance 'transacted-promotion-fails-store))
+         (reply (%call-with (%ob "Is vegetarian." "preference")))
+         (observer (obs:make-observer (%provider-returning reply reply) store "member-1" "conv-7"
+                                      :step (%step-for 6) :retry-delay 0 :promote (constantly t))))
+    (is (obs::observer-transactions observer) "precondition: the store has transactions")
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (= 1 (obs:observer-failures observer)))
+    (is (equal '("Is vegetarian.") (%thread-contents store)))
+    (is (= 1 (length (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t)))
+        "one thread observation was ever kept")
+    (is (equal '("Is vegetarian.") (%facts store)))))
+
+(test with-transactions-a-promotion-that-keeps-failing-leaves-no-thread-observation
+  "Promotion fails on both attempts at the window. With transactions each attempt's thread
+observation is rolled back with it, so the window is skipped with nothing written to the thread,
+where without transactions the thread observation was kept (the behaviour change the CHANGELOG
+records). At the next turn, with the store back, the window is written once and promoted."
+  (let* ((store (make-instance 'transacted-promotion-outage-store :failures 2))
+         (reply (%call-with (%ob +allergy+ "fact")))
+         (observer (%allergy-observer store (%provider-returning reply reply reply))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (is (null (%thread-contents store)) "nothing in the thread")
+    (is (null (%facts store)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal (list +allergy+) (%thread-contents store)))
+    (is (equal (list +allergy+) (%facts store)) "promoted once the store is back")))
+
+(test a-transaction-left-by-throw-or-return-from-is-rolled-back
+  "A transaction left by THROW, or by RETURN-FROM, is rolled back as one left by an error is
+(the hub's review of #645)."
+  (let ((store (mem:make-in-memory-store)))
+    (is (eq :thrown (catch 'out
+                      (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                        (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                                      :provenance (mem:make-provenance "conv-7" 1))
+                        (throw 'out :thrown)))))
+    (is (null (%thread-contents store)) "after THROW")
+    (is (eq :returned (block out
+                        (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                          (mem:remember store "member-1" "Has a cat." :thread "conv-7"
+                                        :provenance (mem:make-provenance "conv-7" 1))
+                          (return-from out :returned)))))
+    (is (null (%thread-contents store)) "after RETURN-FROM")))

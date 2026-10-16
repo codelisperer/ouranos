@@ -268,6 +268,15 @@ its tag.
   `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
   migrations, or pass `:ensure t`. See `docs/scheduling.md`.
 
+- **praxeon/memory: `store-transactions-p`, `call-with-store-transaction` and
+  `with-store-transaction`, for writes that take effect together or not at all** (#529). Both
+  generics are optional: their default methods say a store has no transactions and call the
+  thunk as it is, so a store an app wrote itself keeps working unchanged. The in-memory store
+  implements them under its recursive lock, keeping a copy of the subject's observations and the
+  thread's progress to put back on a non-local exit; `praxeon/memory-db` uses
+  `conn:with-transaction` under its recursive lock, a savepoint inside an app's own
+  transaction.
+
 - **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
   `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an
   `openai-compatible` provider with `https://api.meta.ai/v1` as its default base URL and
@@ -909,6 +918,30 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
+  store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
+  store made with another table name and `:ensure t` failed its first operation on a table that
+  did not exist. `db-store-ddl` now builds the DDL under the store's table name, as
+  `hyperion/auth-db` does since #378, and refuses a name that is not letters, digits and
+  underscores. An app that made `hyperion_sessions` by hand because of this, while its store
+  named another table, can drop it.
+
+- **praxeon/observe: on a store with transactions, a window's observations, its promotions and
+  its progress are written in one transaction** (#529). When the progress write failed after
+  the observations were written, the store held observations its progress did not cover, and
+  after a stop, a restart or with a new observer the window was distilled again, so a model that
+  worded its answer differently left a second copy. Now the failed progress write rolls the
+  window's observations back, the attempt is retried, and the window is written once. Both
+  stores in this tree have transactions; a store without them, such as one an app wrote itself,
+  keeps the earlier behaviour, which the observe.lisp header describes. The window's embeddings
+  are computed before the transaction takes the store's lock.
+  - **A promotion that fails now loses the window's thread observations with it.** The
+    transaction covers promotion, so when the app's `:promote` or `:promote-accept`, or the
+    store's write of the promoted fact, signals, the window's thread observations are rolled
+    back too, and the attempt is retried. Before, they stayed written and the next attempt only
+    finished the promotion. A promotion callback that keeps signalling therefore leaves the
+    window skipped with nothing in the thread, where before its thread observations were kept.
 
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,

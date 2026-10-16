@@ -63,6 +63,9 @@ OVER ONE CONNECTION, every operation takes turns on it under the store's lock. P
 backend that connection was opened from, so the store can open a new connection when Postgres
 ends that one; without it, a lost connection fails every later operation until the process
 restarts, as before #636."
+  ;; THE NAME IS CHECKED HERE, NOT ONLY WHEN DDL IS MADE (Copilot's review of #652): with :ENSURE
+  ;; NIL, an app's own migrations path, every operation still writes the name into SQL.
+  (%check-table table)
   (let ((store (make-instance 'db-store :source source :backend backend
                                        :dialect dialect :table table)))
     (when ensure (ensure-schema store))
@@ -137,11 +140,25 @@ and return it. Called with the store's lock held. A generic so a test can count 
   `(call-with-store-connection ,store (lambda (,var) ,@body)))
 
 ;;; --- schema / DDL ---------------------------------------------------------
+(defun %check-table (table)
+  "TABLE, when it is a table name: letters, digits and underscores, not starting with a digit.
+DB-STORE-DDL writes it into SQL, so anything else is refused rather than quoted."
+  (unless (and (stringp table) (plusp (length table))
+               (not (digit-char-p (char table 0)))
+               (every (lambda (ch) (or (alphanumericp ch) (char= ch #\_))) table))
+    (error "hyperion/session-db: ~S is not a table name (letters, digits and underscores)" table))
+  table)
+
 (defun db-store-ddl (store)
-  "The CREATE TABLE DDL for STORE's sessions table under its dialect."
+  "The CREATE TABLE DDL for STORE's sessions table under its dialect, named as the store's :TABLE
+says (#638). The registered schema declares hyperion_sessions; it is copied with the store's
+table name, not changed, as hyperion/auth-db does for its tables (#378). Before #638 this created
+hyperion_sessions whatever :TABLE said, and the store's first operation then failed on a table
+that did not exist."
   ;; The designator goes straight through (pre-publication issue 432, ADR-0003) -- see the note in auth-db.lisp.
-  (schema:schema-ddl (schema:find-schema 'hyperion-session)
-                     :dialect (db-store-dialect store)))
+  (let ((schema (copy-structure (schema:find-schema 'hyperion-session))))
+    (setf (schema:schema-table schema) (%check-table (db-store-table store)))
+    (schema:schema-ddl schema :dialect (db-store-dialect store))))
 
 (defun ensure-schema (store)
   "Create the sessions table if absent. Returns STORE."

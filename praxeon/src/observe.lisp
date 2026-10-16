@@ -63,6 +63,22 @@
 ;;;; failed write also loses a give-up from the record, so more than MAX-ATTEMPTS runs can give
 ;;;; up on one window (#462's ninth review).
 ;;;;
+;;;; ON A STORE WITH TRANSACTIONS NONE OF THAT HAPPENS AFTER A WINDOW IS WRITTEN (#529). Both
+;;;; stores in this tree have them (`praxeon/memory:store-transactions-p'). There a window's
+;;;; observations, its promotions and its progress are one transaction, made after the model
+;;;; call, so a progress write that fails rolls the window's observations back with it: the
+;;;; attempt fails and is retried like any store error, and a later run or a new observer distils
+;;;; the window once and leaves one copy. The closing save before a window's first write and the
+;;;; :UNSAVED outcome are not needed there, because closure, observations and progress commit
+;;;; together. The paragraph above still holds for a store without transactions, such as one an
+;;;; app wrote itself, and for a progress write that fails after a window was given up on. The
+;;;; window's transaction is never a savepoint inside an app's transaction: cl-dbi records an
+;;;; open transaction per thread, and the observer writes on a thread of its own. An app that
+;;;; holds a transaction open on the store's connection while the observer writes has that
+;;;; transaction committed by the observer's COMMIT on Postgres, and the observer's attempt
+;;;; refused on SQLite (#651, #653); such an app does not share the store's connection with an
+;;;; observer.
+;;;;
 ;;;; ONE OBSERVER OF A THREAD RUNS AT A TIME IN A PROCESS, FOR ONE STORE OBJECT. OBSERVE-TURN
 ;;;; starts nothing while another observer of the same store object, subject and thread holds
 ;;;; the thread. Progress is merged, never replaced (%MERGE-PROGRESS): a run starts by merging
@@ -164,6 +180,9 @@ window, Mastra's step.")
    ;; The time source, in universal time. A test replaces it to measure without waiting.
    (clock :initform #'get-universal-time :accessor observer-clock)
    (stopping :initform nil :accessor observer-stopping)
+   ;; Whether the store makes a window's writes and its progress one transaction (#529), read
+   ;; from MEM:STORE-TRANSACTIONS-P when the observer is made.
+   (transactions :initarg :transactions :initform nil :reader observer-transactions)
    (lock :initform (bt:make-lock "praxeon-observer") :reader observer-lock))
   (:documentation "Distils one thread's messages into the thread's observations, a window at a time."))
 
@@ -287,7 +306,8 @@ every window later."
                              :verify verify :distil-options distil-options
                              :max-attempts max-attempts :retry-delay retry-delay
                              :window-timeout window-timeout
-                             :mark (or mark stored 0) :skipped skipped)))
+                             :mark (or mark stored 0) :skipped skipped
+                             :transactions (mem:store-transactions-p store))))
 
 (defun unobserved (observer history)
   "The messages of HISTORY past OBSERVER's mark."
@@ -586,17 +606,21 @@ older progress over newer. A failed read ends the run, rather than letting it co
 mark the store may have passed."
   (%sync-progress observer :read-failure :signal))
 
+(defun %closed-before (skipped start)
+  "SKIPPED with every open window that ends at or before START closed."
+  (mapcar (lambda (e) (if (and (%open-p e) (<= (second e) start))
+                          (list (first e) (second e) (third e) :closed)
+                          e))
+          skipped))
+
 (defun %close-before (observer start)
   "Close every open skipped window that ends at or before START: a window after it was written
 (Copilot's review of #462). Logs each one."
   (let ((closed '()))
     (bt:with-lock-held ((observer-lock observer))
-      (setf (observer-skipped observer)
-            (mapcar (lambda (e) (if (and (%open-p e) (<= (second e) start))
-                                    (progn (push e closed)
-                                           (list (first e) (second e) (third e) :closed))
-                                    e))
-                    (observer-skipped observer))))
+      (setf closed (remove-if-not (lambda (e) (and (%open-p e) (<= (second e) start)))
+                                  (observer-skipped observer))
+            (observer-skipped observer) (%closed-before (observer-skipped observer) start)))
     (dolist (e closed)
       (log:info "memory observer window closed" :thread (observer-thread observer)
                                                 :from (first e) :through (second e)))))
@@ -646,7 +670,10 @@ also closed when a later window is about to be written, even if that write then 
                 (and (not flush) (< (prompt:messages-tokens left) (observer-step observer))))
         (return))
       (let* ((end (%window-end history start (observer-step observer)))
-             (outcome (%observe-window observer (subseq history start end) start end today)))
+             (outcome (%observe-window observer (subseq history start end) start end today
+                                       :progress-after (lambda (mark skipped)
+                                                         (values (max mark end)
+                                                                 (%closed-before skipped start))))))
         (bt:with-lock-held ((observer-lock observer))
           (case outcome
             (:skipped (setf (observer-skipped observer)
@@ -674,7 +701,14 @@ later window's observations reopen one."
       (when (and (%open-p entry) (<= through (length history)) (not (observer-stopping observer))
                  (< tries (observer-max-attempts observer)))
         (let ((outcome (%observe-window observer (subseq history (1- from) through)
-                                        (1- from) through today)))
+                                        (1- from) through today
+                                        :progress-after
+                                        (lambda (mark skipped)
+                                          (values mark
+                                                  (%closed-before
+                                                   (remove-if (lambda (e) (%same-window-p e entry))
+                                                              skipped)
+                                                   (1- from)))))))
           ;; A FAILED CLOSING SAVE ENDS THE RUN (#622), before the next retry or any new window
           ;; can close this one.
           (when (eq outcome :unsaved)
@@ -712,7 +746,7 @@ binding.")
     (loop while (and (< (get-internal-real-time) until) (not (observer-stopping observer)))
           do (sleep 0.05))))
 
-(defun %observe-window (observer window start end today)
+(defun %observe-window (observer window start end today &key progress-after)
   "Distil WINDOW, the messages from position START (from 0) to END, and write what it yields,
 trying up to OBSERVER-MAX-ATTEMPTS times with a pause before each retry. Returns :WRITTEN,
 :SKIPPED when every attempt failed, or :STOPPED when the observer was stopped before the window
@@ -735,7 +769,8 @@ record it closed, so it would never be written. Never raises: this runs on a thr
              ;; #634).
              (unwind-protect
                   (handler-case
-                      (progn (setf written (%distil-and-write observer window start end today))
+                      (progn (setf written (%distil-and-write observer window start end today
+                                                              :progress-after progress-after))
                              (setf outcome :written)
                              (return))
                     (closing-not-saved () (setf outcome :unsaved) (return))
@@ -762,8 +797,32 @@ record it closed, so it would never be written. Never raises: this runs on a thr
                           (eql (mem:provenance-through p) end))))
                  (mem:observations-of store subject :thread thread)))
 
-(defun %distil-and-write (observer window start end today)
-  "One attempt at a window. Returns how many observations it wrote, or signals."
+(defun %commit-progress (observer progress-after)
+  "Inside the window's transaction: the progress PROGRESS-AFTER makes of OBSERVER's, merged with
+the store's (%MERGE-PROGRESS) and recorded. Returns the merged mark and skipped windows. A failed
+read or write signals, which rolls back the window's observations with it (#529)."
+  (multiple-value-bind (mark skipped)
+      (bt:with-lock-held ((observer-lock observer))
+        (funcall progress-after (observer-mark observer) (copy-tree (observer-skipped observer))))
+    (multiple-value-bind (stored stored-skipped)
+        (mem:thread-progress (observer-store observer) (observer-subject observer)
+                             (observer-thread observer))
+      (multiple-value-bind (merged-mark merged-skipped)
+          (%merge-progress mark skipped (or stored 0) stored-skipped)
+        (mem:record-thread-progress (observer-store observer) (observer-subject observer)
+                                    (observer-thread observer) merged-mark merged-skipped)
+        (values merged-mark merged-skipped)))))
+
+(defun %distil-and-write (observer window start end today &key progress-after)
+  "One attempt at a window. Returns how many observations it wrote, or signals.
+
+WITH A STORE THAT HAS TRANSACTIONS (#529), and PROGRESS-AFTER, the function from OBSERVER's mark
+and skipped windows to what they are once this window is written: the writes, the promotions and
+the window's progress are one transaction, after the model call. If any of them fails, none
+takes effect, so a later run or a new observer distils the window once and leaves one copy. The
+observer's own mark and skipped windows change only after the transaction commits. Without
+transactions the window's observations are written first and its progress after, by the caller,
+with the closing save before the first write (%CLOSE-OPEN-WINDOWS-BEFORE)."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer))
          (thread (observer-thread observer))
@@ -792,18 +851,47 @@ record it closed, so it would never be written. Never raises: this runs on a thr
                      (remove-if (lambda (p) (find (distil:proposal-content p) done
                                                   :key #'mem:observation-content :test #'string=))
                                 (distil:distillation-proposals checked))))
-             (written (progn (%close-open-windows-before observer start)
-                             (distil:apply-distillation store fresh
-                                                        :provenance provenance
-                                                        :accept (observer-accept observer)
-                                                        :thread thread))))
-        ;; PROMOTION RUNS OVER EVERY CURRENT OBSERVATION OF THE WINDOW, not only this attempt's
-        ;; writes, so an attempt that failed during promotion is finished by the next one.
-        ;; %MAYBE-PROMOTE leaves alone a fact the subject already holds, so running it again
-        ;; changes nothing that was done.
-        (dolist (o (%window-observations store subject thread start end))
-          (%maybe-promote observer o provenance))
-        (length written)))))
+             (atomic (and progress-after (observer-transactions observer))))
+        (flet ((write-window ()
+                 (prog1 (length (distil:apply-distillation store fresh
+                                                           :provenance provenance
+                                                           :accept (observer-accept observer)
+                                                           :thread thread))
+                   ;; PROMOTION RUNS OVER EVERY CURRENT OBSERVATION OF THE WINDOW, not only this
+                   ;; attempt's writes, so on a store without transactions an attempt that failed
+                   ;; during promotion, whose thread observations stayed written, is finished by
+                   ;; the next one. With transactions a failed promotion rolls the window's thread
+                   ;; observations back too, and the next attempt writes them again (the hub's
+                   ;; review of #645). %MAYBE-PROMOTE leaves alone a fact the subject already
+                   ;; holds, so running it again changes nothing that was done.
+                   (dolist (o (%window-observations store subject thread start end))
+                     (%maybe-promote observer o provenance)))))
+          (if atomic
+              (multiple-value-bind (written mark skipped)
+                  (mem:with-store-transaction
+                      (store :subject subject :thread thread
+                             ;; Every text the transaction can write: the proposals, and the
+                             ;; window's earlier observations that promotion may copy into the
+                             ;; subject's facts, so a store embeds them before it takes its lock.
+                             ;; The cost: each attempt embeds every earlier observation of the
+                             ;; window, whether or not promotion will copy it, which on a retry
+                             ;; means one embedding call per text the window already holds (the
+                             ;; hub's review of #645).
+                             :contents (append (mapcar #'distil:proposal-content
+                                                       (distil:distillation-proposals fresh))
+                                               (mapcar #'mem:observation-content
+                                                       (%window-observations store subject thread
+                                                                             start end))))
+                    (let ((written (write-window)))
+                      (multiple-value-bind (mark skipped) (%commit-progress observer progress-after)
+                        (values written mark skipped))))
+                (bt:with-lock-held ((observer-lock observer))
+                  (setf (observer-mark observer) mark
+                        (observer-skipped observer) skipped
+                        (observer-unsaved observer) nil))
+                written)
+              (progn (%close-open-windows-before observer start)
+                     (write-window))))))))
 
 (defun %current-fact (store subject content)
   "SUBJECT's current fact whose content is CONTENT, whoever wrote it."
