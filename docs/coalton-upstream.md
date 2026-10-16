@@ -78,9 +78,11 @@ honestly; "it works" usually means "it works where I happened to run it."
 | Pin | arm64 macOS | WSL / Windows | **native amd64** |
 |---|---|---|---|
 | `7915fad0` | ✅ 506 checks, whole tree · ✅ 583 checks incl. a consuming app, cold rebuild from a cleared fasl cache (~86s) | ✅ suites green | ❌ **never** |
+| `024d0a17` | ✅ CI leg, run 38776966898 | ✅ 12393 checks, whole tree with every optional axis, cold · ✅ Windows CI leg, run 38776966898 | ✅ Linux CI leg (`ubuntu-latest`), run 38776966898 |
 
 The amd64 gap closes when pre-publication issue 87 lands,
-and until then no pin should be described as fully validated.
+and until then no pin should be described as fully validated. The `024d0a17` row's native
+amd64 result is the Linux leg of the pull-request CI run, on a GitHub-hosted runner.
 
 ## Consuming apps (separate repos)
 

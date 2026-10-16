@@ -21,9 +21,9 @@ its tag.
   `~/.cache/common-lisp` and rebuild `bin/cons`; `scripts/check-coalton.lisp` says which
   Coalton loads. The framework needed no change. An app's own Coalton code may:
   - A discarded `Result` is now a full warning, which fails an ASDF build: a non-final form
-    of a body, or the last form of a `when`, `unless` or loop body, whose value is a `Result`.
-    Handle it, or bind it with `(let _ = …)`. `docs/coalton-patterns.md` §8a shows the
-    message.
+    of a body, or the last form of a `when` or `unless` body or of `protect`'s cleanup, whose
+    value is a `Result`. Handle it, or bind it with `(let _ = …)`.
+    `docs/coalton-patterns.md` §8a shows the message.
   - A toplevel list left open at the end of a file is an error, where before it silently
     swallowed every form after it.
   - `error` takes only a `String`. `Signalable` and `result:ok-or-error` are removed, as are

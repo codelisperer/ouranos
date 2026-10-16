@@ -350,7 +350,7 @@ Fix it the way the compiler says — `_seen?` rather than `seen?` — for any bi
 **A discarded `Result` is the same kind of warning, since Coalton `024d0a17`** (upstream
 `94cd7f25`, adopted in #697). A form whose value is a `Result` and is thrown away fails the
 build the same way: a non-final form of a body (`progn`, `let`, a function body), or the last
-form of a `when`, `unless` or loop body. Compiling `(check x)` as the first of two forms in
+form of a `when` or `unless` body or of `protect`'s cleanup. Compiling `(check x)` as the first of two forms in
 a function body, with `check` returning `(Result String Unit)`, prints this, and
 `compile-file` returns `failure-p` true:
 
