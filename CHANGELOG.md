@@ -919,6 +919,16 @@ its tag.
 
 ### Fixed
 
+- **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
+  decode field names as well as values, with `+` as a space** (#715). A browser
+  percent-encodes a field name when it submits a form, so a field named `en:who` arrives as
+  `en%3Awho`, `items[0]` as `items%5B0%5D` and `a b` as `a+b`. Before this, those names were
+  not decoded, so `(form-param body "en:who")` returned NIL and a handler read the field as
+  not sent, with no error. An app that renamed its fields to avoid these characters can keep
+  or undo that workaround; an app that looked a field up by its encoded spelling, such as
+  `"en%3Awho"`, must use the decoded name. New `hyperion/http:form-urlencode` builds a
+  urlencoded body from `(name . value)` pairs the way a browser does, for tests.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
