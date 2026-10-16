@@ -20,8 +20,11 @@ its tag.
   takes the store's lock after the connection. A write on SQLite runs in a transaction that
   begins IMMEDIATE, or a savepoint inside one already open, and holds the database's write lock
   in place of the store's lock, so an observer that waits for an app's transaction to commit
-  holds nothing the app's next store write needs. `praxeon/observe` writes on a thread of its
-  own, so it gets a connection of its own. Over one connection shared with the app, an app that held a
+  holds nothing the app's next store write needs. Inside an app's `conn:with-transaction` that
+  has not written yet, that transaction began deferred, so the store's write takes the write
+  lock only at its first write, and if the observer commits in between, the write can fail
+  with `SQLITE_BUSY` instead of waiting. `praxeon/observe` writes on a thread of its own, so it
+  gets a connection of its own. Over one connection shared with the app, an app that held a
   transaction open while the observer wrote had that transaction committed by the observer's
   COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
   SQLite (#651). A store call the app makes on its own thread inside its

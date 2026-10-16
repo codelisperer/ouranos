@@ -162,6 +162,10 @@ for how each operation gets its connection."))
 ;;;
 ;;; ON SQLITE OVER A POOL A WRITE TAKES THE DATABASE'S WRITE LOCK, NOT THE STORE'S LOCK. It runs in
 ;;; a transaction that begins IMMEDIATE, or in a savepoint when its connection already has one open.
+;;; A savepoint inside an app's CONN:WITH-TRANSACTION that has not written yet is inside a
+;;; transaction that began deferred, so it takes the write lock only at its first write, and if
+;;; another connection commits a write in between, that write can fail with SQLITE_BUSY instead
+;;; of waiting.
 ;;; SQLite allows one writer at a time, so that lock serializes the store's writes, in this process
 ;;; and in others. Holding the store's lock as well made a cycle that only the busy timeout broke
 ;;; (Copilot's review of train 47): an app's transaction on its own pooled connection keeps the
@@ -189,7 +193,10 @@ store's connection (the hub's review of #654).")
 
 (defun %call-with-write-lock (connection function)
   "FUNCTION in a transaction on CONNECTION that begins IMMEDIATE, so it holds SQLite's write lock,
-or in a savepoint when CONNECTION already has a transaction open on this thread."
+or in a savepoint when CONNECTION already has a transaction open on this thread. When that
+transaction began deferred and has not written yet, the savepoint takes the write lock only at
+its first write, which can fail with SQLITE_BUSY instead of waiting if another connection
+commits a write in between."
   (conn:with-transaction (connection :immediate t) (funcall function)))
 
 (defun %call-with-store (store function exclusive)
