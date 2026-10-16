@@ -937,6 +937,12 @@ its tag.
   underscores. An app that made `hyperion_sessions` by hand because of this, while its store
   named another table, can drop it.
 
+- **aion/schedule: `stop` starts no lease renewal when less than 50 ms of its timeout is left**
+  (#728). A timed wait can return a little before its timeout, by a spurious wakeup or a coarse
+  timer such as Windows' default one. `stop` then started a renewal with a few milliseconds left,
+  which it could not wait for. That renewal kept using the store after `stop` returned, and the
+  next `stop` had to wait for it.
+
 - **praxeon/observe: on a store with transactions, a window's observations, its promotions and
   its progress are written in one transaction** (#529). When the progress write failed after
   the observations were written, the store held observations its progress did not cover, and

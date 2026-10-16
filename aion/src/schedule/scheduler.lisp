@@ -609,6 +609,10 @@ instead of starting a second."
                                :name "aion/schedule renewal")))))))
     (sb-thread:join-thread thread :timeout seconds :default nil)))
 
+(defparameter +renewal-margin+ 1/20
+  "The least time, in seconds, a STOP must have left of its timeout to start a lease renewal
+(#728).")
+
 (defun stop (scheduler &key (timeout 30))
   "Stop SCHEDULER: start no more runs, make STOP-REQUESTED-P true, stop its driver, and wait for
 the runs in progress to finish, renewing their leases meanwhile. All of it within TIMEOUT
@@ -630,13 +634,16 @@ then runs them again."
           (return-from stop (values :timed-out (running-keys)))))
       ;; TICK starts nothing once STOPPING is set, and renews nothing either, so the drain
       ;; renews the leases itself, every third of the lease, until its runs have finished. A
-      ;; renewal is skipped once the timeout has passed, and waited for only until it does.
+      ;; renewal is skipped once less than +RENEWAL-MARGIN+ of the timeout is left, and waited
+      ;; for only until the timeout passes. A timed wait can return a little before its
+      ;; timeout, by a spurious wakeup or a coarse timer, and without the margin the drain
+      ;; then started a renewal it had no time left to wait for (#728).
       (let ((slice (max 1 (floor (scheduler-lease-seconds scheduler) 3))))
         (loop while (and (%busy-p scheduler) (plusp (left)))
               do (%with-lock (scheduler)
                    (when (%busy-p scheduler)
                      (%wait (%idle scheduler) (%lock scheduler) (min slice (left)))))
-                 (when (and (%busy-p scheduler) (plusp (left)))
+                 (when (and (%busy-p scheduler) (> (left) +renewal-margin+))
                    (%renew-within scheduler (left)))))
       (let ((renewal (%with-lock (scheduler) (%renewal scheduler))))
         (when (and renewal (sb-thread:thread-alive-p renewal))

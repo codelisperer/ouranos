@@ -785,6 +785,36 @@ signalled, after signalling ENTERED."))
     (sb-thread:signal-semaphore gate)
     (is (eq :stopped (s:stop a :timeout 5)))))
 
+(test stop-starts-no-renewal-when-its-wait-ends-just-before-the-timeout
+  "#728. A timed wait can return a little before its timeout. A notify of the idle condition
+variable 30 ms before STOP's timeout stands for that. With only that much left, STOP starts no
+renewal. Before #728 it started one whenever any time was left."
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (gate (sb-thread:make-semaphore))
+         (a (s:make-scheduler store :clock clock :lease-seconds 3)))
+    (s:define-job a "slow" (lambda (ctx) (declare (ignore ctx))
+                             (sb-thread:wait-on-semaphore gate) nil)
+                  :schedule '(:every 600))
+    (s:clock-advance clock 600)
+    (s:tick a)
+    (setf (hold store) :renew)
+    (let ((waker (spawn "early wakeup"
+                        (lambda ()
+                          (sleep 0.27)
+                          (sb-thread:with-mutex ((s::%lock a))
+                            (sb-thread:condition-broadcast (s::%idle a)))
+                          t)))
+          ;; Lets a renewal that was held go after 4 seconds, so that the test ends either way.
+          (releaser (spawn "renewal releaser"
+                           (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t))))
+      (is (eq :timed-out (s:stop a :timeout 0.3)))
+      (is (eq :renew (hold store)) "no renewal started in the last 30 ms")
+      (setf (hold store) nil)
+      (tt:join waker :timeout 10)
+      (tt:join releaser :timeout 10))
+    (sb-thread:signal-semaphore gate)
+    (is (eq :stopped (s:stop a :timeout 5)))))
+
 (test stop-gives-up-on-a-lease-renewal-at-its-timeout
   (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
          (gate (sb-thread:make-semaphore))
