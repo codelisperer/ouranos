@@ -63,6 +63,30 @@ its tag.
   other than the one that built it. An app that pins SBCL in its own CI or Dockerfile moves
   that pin to 2.6.9 to build against the same compiler the framework is tested on.
 
+- **praxeon/memory-db: make the store over a mnemosyne pool when the app also uses the
+  database** (#653). `make-db-memory-store` now takes a pool as well as a connection. Over a
+  pool each store operation borrows a connection, and reads take no lock. A write on Postgres
+  takes the store's lock after the connection. A write on SQLite runs in a transaction that
+  begins IMMEDIATE, or a savepoint inside one already open, and holds the database's write lock
+  in place of the store's lock, so an observer that waits for an app's transaction to commit
+  holds nothing the app's next store write needs. Inside an app's `conn:with-transaction` that
+  has not written yet, that transaction began deferred, so the store's write takes the write
+  lock only at its first write, and if the observer commits in between, the write can fail
+  with `SQLITE_BUSY` instead of waiting. `praxeon/observe` writes on a thread of its own, so it
+  gets a connection of its own. Over one connection shared with the app, an app that held a
+  transaction open while the observer wrote had that transaction committed by the observer's
+  COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
+  SQLite (#651). A store call the app makes on its own thread inside its
+  `conn:with-connection` on the same pool uses that connection and is part of its transaction.
+  A store over one connection keeps working when nothing else uses that connection. On SQLite
+  the store's own transactions (a window's, `supersede`'s and `forget-subject`'s) begin
+  IMMEDIATE, so behind an app's write transaction they wait for the write lock, within
+  mnemosyne's busy timeout (5000 ms by default), instead of failing with SQLITE_BUSY at once.
+  `forget` clears the predecessor's link and deletes the observation in one transaction, so a
+  pooled reader never sees both as current. An embedding a transaction computed before taking
+  the lock is used only by the store whose embedder computed it, and `supersede` inside the
+  transaction uses it instead of embedding the text again.
+
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to
   (`F_GETPATH` on macOS, `/proc/self/fd` on Linux, `GetFinalPathNameByHandleW` on Windows) and
@@ -351,6 +375,12 @@ its tag.
   jobs in the tables `aion_jobs` and `aion_job_runs`; it refuses to start with
   `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
   migrations, or pass `:ensure t`. See `docs/scheduling.md`.
+
+- **mnemosyne/conn: `with-transaction` takes `:immediate`** (#653). On SQLite an outermost
+  transaction then begins with BEGIN IMMEDIATE and waits, within `*sqlite-busy-timeout-ms*`, for
+  the database's write lock before it reads. A deferred transaction that reads first and then
+  writes behind another connection's write transaction fails with SQLITE_BUSY at once, without
+  the busy timeout. On Postgres, and for an inner transaction, it changes nothing.
 
 - **praxeon/memory: `store-transactions-p`, `call-with-store-transaction` and
   `with-store-transaction`, for writes that take effect together or not at all** (#529). Both
