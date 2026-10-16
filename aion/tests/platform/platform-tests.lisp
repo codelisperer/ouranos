@@ -219,3 +219,25 @@ answers true for the same two pairs."
   "This suite runs in a development SBCL, whose runtime and core are SBCL's own files."
   (is-false (plat:shipped-image-p))
   (is (null (plat:shipped-image-directory))))
+
+(test a-development-runner-is-not-a-shipped-build
+  "#703: bin/cons is one dumped file, so its runtime and core are the same file, the shape of a
+shipped Linux build. An app it runs must not read it as one. The mark is
+:OURANOS-DEVELOPMENT-RUNNER on *FEATURES*, which scripts/dump-image.lisp puts on bin/cons."
+  (let ((one-file "/home/me/ouranos/bin/cons"))
+    (is-true (plat:shipped-image-p :runtime one-file :core one-file :development-runner nil)
+             "a one-file image is a shipped build")
+    (is-false (plat:shipped-image-p :runtime one-file :core one-file :development-runner t)
+              "unless it is a development runner")
+    (is-false (plat:shipped-image-p :runtime "/Applications/Foo.app/Contents/MacOS/sbcl"
+                                    :core "/Applications/Foo.app/Contents/MacOS/sbcl.core"
+                                    :macos t :windows nil :development-runner t)
+              "whatever shape its files have")
+    (let ((*features* (cons :ouranos-development-runner *features*)))
+      (is-true (plat:development-runner-p) "the mark on *FEATURES* is read")
+      (is-false (plat:shipped-image-p :runtime one-file :core one-file)
+                "and SHIPPED-IMAGE-P reads it by default"))
+    (let ((*features* (remove :ouranos-development-runner *features*)))
+      (is-false (plat:development-runner-p))
+      (is-true (plat:shipped-image-p :runtime one-file :core one-file)
+               "without the mark, the same files are a shipped build"))))
