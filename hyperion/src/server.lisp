@@ -966,6 +966,15 @@ them."
     ((clack-server-p handler) (%stop-clack-server (clack-server-thread handler)) t)
     (t (clack:stop handler))))
 
+(defun handler-port (handler)
+  "The port a server started by START listens on, or NIL when HANDLER does not say. The native
+:uv server reports the port it bound, which is the one the operating system chose when START was
+given port 0. A Clack backend reports the port START was given (#700)."
+  (cond
+    ((%uv-server-p handler) (%uv-call "SERVER-PORT" handler))
+    ((clack-server-p handler) (clack-server-port handler))
+    (t nil)))
+
 ;;; --- running in the foreground --------------------------------------------
 ;;;
 ;;; START is the REPL-friendly primitive: it returns a handler and does not block. Every

@@ -36,6 +36,19 @@ its tag.
 
   An app that pins Coalton in its own build moves that pin to `024d0a17`.
 
+- **praxeon/mcp on Windows: a local server's command must name an `.exe` or `.com` program;
+  a `.bat` or `.cmd` file is refused** (#700). Local MCP servers are now started by
+  `aion/windows:spawn-in-job`, which starts the server suspended inside its kill-on-close job
+  object and with no console window, then lets it run, so every process the server starts is
+  in the job too. Before, `sb-ext:run-program` started it and it was put in the job afterwards,
+  so a process it started in that moment could outlive it. `spawn-in-job` refuses batch files
+  with `aion/windows:process-not-started`, because `cmd.exe` would read the arguments by rules
+  the quoting does not follow; the client logs the failure and the request fails as not run. A
+  bare name was never found as a batch file (`run-program`'s `:search` does not look for one
+  either), so only an app that gave the full path of a `.bat` or `.cmd`, for example
+  `C:\...\npx.cmd`, is affected. Name the program the batch file runs instead, for example
+  `node` with the script's path as its first argument.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
@@ -263,6 +276,45 @@ its tag.
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
 
 ### Added
+
+- **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
+  that start and stop with the dev server** (#700). Declare one with
+  `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
+  `:ready-timeout`, `:secret`, `:required`, `:restart`) and name it in the new `:sidecars`
+  argument of `hyperion/dev:serve`, `hyperion/dev:watch` or `hyperion/desktop:run-app`. The
+  sidecars start once the server has bound its port, with that port in place of `{port}` in the
+  command, and stop when the dev session ends; a dev reload leaves them running.
+  `hyperion/sidecar:token-after` makes a `:ready` function that captures a value from the
+  sidecar's output, and `hyperion/sidecar:sidecar-value` returns it, as an `aion/secret` when
+  the sidecar is declared `:secret t`. A program missing from PATH is logged as a warning, or
+  signals `sidecar-not-started` when the sidecar is `:required t`; a sidecar that does not
+  become ready signals `sidecar-not-ready`. A sidecar does not outlive an image that is killed:
+  on Windows it runs in a kill-on-close job object, and one that cannot be put in a job is not
+  started (`sidecar-not-started`, reason `:no-job`); on Linux it is started through
+  `setpriv --pdeathsig KILL` when `setpriv` is installed, and on macOS, or Linux without
+  `setpriv`, the next `start-sidecars` ends a sidecar left by an image that has exited, using
+  state files under `~/.cache/hyperion-sidecars/`. `hyperion/server:serve-forever` takes no
+  sidecars, and a shipped desktop image ignores them. `:environment` takes only string names and
+  values; any other value, such as NIL from an unset variable, is an error at declaration. At
+  debug level a sidecar's output lines are logged by length and stream, never by text. Core
+  `hyperion` now depends on `hyperion/sidecar`, and through it on `aion/secret` and, on
+  Windows, `aion/windows` and `cffi`. See `hyperion/docs/sidecars.md`.
+
+- **hyperion/server: `handler-port` returns the port a running server listens on** (#700). On
+  the native `:uv` server it is the port that was bound, which is the one the operating system
+  chose when `start` was given port 0; on a Clack backend it is the port `start` was given.
+
+- **aion/windows: `spawn-in-job` starts a process suspended inside a kill-on-close job
+  object, with no console window, then lets it run** (#700). Every process the new process
+  starts is in the job too, which `sb-ext:run-program` followed by `assign-process-to-job`
+  could not ensure. Its standard input, output and error can each be a stream or the NUL
+  device, and standard error can be appended to a file. It returns a `job-process`, read with
+  `job-process-pid`, `job-process-input`, `job-process-output`, `job-process-error`,
+  `job-process-alive-p`, `job-process-exit-code`, `job-process-status` and `job-process-wait`,
+  and ended with `job-process-terminate` and `job-process-close`. `find-executable` finds an
+  `.exe` or `.com` program on PATH, and `quote-windows-argument` and `windows-command-line`
+  build a command line that the Microsoft C runtime splits back into the same arguments. A
+  missing program or a batch file signals `process-not-started`.
 
 - **aion/schedule: a job scheduler, with `mnemosyne/jobs` to keep its jobs in Postgres or
   SQLite** (#689). An app registers a job function with `define-job`, with a schedule of

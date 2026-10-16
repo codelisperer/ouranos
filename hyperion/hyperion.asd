@@ -38,6 +38,7 @@
   :version "0.0.0"
   :depends-on ("coalton"
                "hyperion/http1"                       ; the reason-phrase table (#372); Coalton only
+               "hyperion/sidecar"                    ; dev:serve and dev:watch start the app's dev sidecars (#700)
                "aion/log"                             ; neutral logging facade (leftward dep
                "aion/dynamic"   ; carries the request context across a thread (#158))
                "aion/interceptor"                     ; the typed pipeline (pre-publication issue 177; was a file here)
@@ -306,6 +307,25 @@
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
+(defsystem "hyperion/sidecar"
+  :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; aion/windows on Windows starts each sidecar suspended in a kill-on-close job object with no
+  ;; console window (#700). Nothing here depends on hyperion, so hyperion can depend on this.
+  :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows"))
+  :components ((:file "src/sidecar"))
+  :in-order-to ((test-op (test-op "hyperion/sidecar/tests"))))
+
+(defsystem "hyperion/sidecar/tests"
+  :description "Tests for hyperion/sidecar. Each sidecar is a child SBCL started with --eval."
+  :depends-on ("hyperion/sidecar" "hyperion" "hyperion/test-ports" "aion/secret" "aion/log" "log4cl" "fiveam"
+               "clack-handler-hunchentoot"
+               ;; On Windows, for WIN32-ERROR, which the no-job test signals.
+               (:feature :win32 "aion/windows"))
+  :components ((:file "tests/sidecar-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/sidecar/tests :run-tests)))
+
 (defsystem "hyperion/test-ports"
   :description "Test support: a candidate port for a test server, and a retry when it is taken."
   :author "Bob <eternal.recursion@proton.me>"
@@ -356,7 +376,7 @@
   :description "Run a Hyperion app as a native desktop window (out-of-process OS webview)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "aion/platform" "aion/log" (:require "sb-bsd-sockets"))
+  :depends-on ("hyperion" "hyperion/sidecar" "aion/platform" "aion/log" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "src/desktop")))
 

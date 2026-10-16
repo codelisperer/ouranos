@@ -50,7 +50,10 @@ and watching it makes the reload loop feed itself.")
   (lock (sb-thread:make-mutex :name "hyperion-dev-reload"))
   (running t)
   last-error                                ; last compile error string, or NIL
-  (failed '()))                             ; Lisp files whose last reload failed (#438)
+  (failed '())                              ; Lisp files whose last reload failed (#438)
+  sidecars                                  ; the HYPERION/SIDECAR set, or NIL (#700)
+  ;; Taken by UNWATCH and by WATCH adopting the set, so neither misses the other.
+  (sidecar-lock (sb-thread:make-mutex :name "hyperion-dev-sidecars")))
 
 ;;; --- what is watched ------------------------------------------------------
 ;;;
@@ -345,6 +348,13 @@ refreshed, so the other change shows, and the overlay stays."
                     (setf (dev-last-error d) (princ-to-string e))
                     (format *error-output* "~&[dev] restart failed: ~A~%" e)
                     (return-from reload! :error)))
+                ;; The sidecars keep running across the restart (#700). One whose command uses
+                ;; {port} is restarted only when the restarted server is on another port.
+                (when (dev-sidecars d)
+                  (handler-case (sidecar:update-sidecar-port (dev-sidecars d)
+                                                             (srv:handler-port (dev-handler d)))
+                    (error (e)
+                      (format *error-output* "~&[dev] restarting a sidecar failed: ~A~%" e))))
                 (mark-reloaded)
                 (cond
                   (err
@@ -439,7 +449,8 @@ who wrote one is not describing a definition that can be recompiled."
 
 (defun watch (builder &key paths system systems (interval 0.5)
                            (exclude-directories *watch-excluded-directories*)
-                           (exclude-types *watch-excluded-types*))
+                           (exclude-types *watch-excluded-types*)
+                           sidecars)
   "Start a hot-reload dev server. BUILDER is a thunk returning a fresh Clack
 handler -- call hyperion/server:start (or an app's start-web) inside it, reusing
 *persistent* state so it survives reloads. Watched source roots come from PATHS,
@@ -476,6 +487,11 @@ one layout), and it SELF-HEALS once the last dependent is recompiled -- so an un
 edit clears it and the whole thing reads as intermittent. WATCH now detects the
 redefinition and says all of this on the spot; restart or `ql:quickload' when you see it.
 
+SIDECARS is a list of names declared with HYPERION/SIDECAR:DEFINE-SIDECAR (#700). They start
+once the first build's server has bound its port, with that port for \"{port}\", and WATCH
+returns once each is ready. They keep running across reloads, and stop in UNWATCH. When one
+cannot start, the server is stopped and the sidecar's condition is signalled.
+
 Returns the dev handle; stop with UNWATCH."
   (unwatch)
   (setf builder (%normalize-builder builder "BUILDER"))
@@ -504,6 +520,19 @@ Returns the dev handle; stop with UNWATCH."
                                (setf built t))
           (unless built
             (when (eq *dev* d) (setf *dev* previous)))))
+      (when sidecars
+        (let ((started nil))
+          (unwind-protect
+               (let ((set (sidecar:start-sidecars sidecars
+                                                  :port (srv:handler-port (dev-handler d)))))
+                 ;; Adopted under the same lock UNWATCH takes, so an UNWATCH that ran while the
+                 ;; sidecars were starting is not missed: the session has ended, so the new set
+                 ;; is stopped instead of being kept by a handle nothing will stop (#708's review).
+                 (if (sb-thread:with-mutex ((dev-sidecar-lock d))
+                       (when (dev-running d) (setf (dev-sidecars d) set) t))
+                     (setf started t)
+                     (sidecar:stop-sidecars set)))
+            (unless started (unwatch d)))))
       (setf (dev-thread d)
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
             ;; server, not for the call that started it (#158).
@@ -548,10 +577,13 @@ one root. A single root with no Lisp has already been warned about."
           roots))
 
 (defun unwatch (&optional (d *dev*))
-  "Stop the watcher thread and the server it manages."
+  "Stop the watcher thread, the server it manages, and its sidecars."
   (when d
-    (setf (dev-running d) nil)
-    (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
+    (let ((set (sb-thread:with-mutex ((dev-sidecar-lock d))
+                 (setf (dev-running d) nil)
+                 (shiftf (dev-sidecars d) nil))))
+      (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
+      (when set (ignore-errors (sidecar:stop-sidecars set))))
     (when (eq d *dev*) (setf *dev* nil))
     d))
 
@@ -722,7 +754,7 @@ the others, whose default is the same as production's."
 (defun serve (make-app &key paths system systems (port srv:*default-port*)
                             (host "127.0.0.1") (interval 0.5) block request-guard
                             (server (srv:default-server)) (workers nil workers-p)
-                            (watch-framework t))
+                            (watch-framework t) sidecars)
   "Turnkey hot-reload dev server -- the framework feature. MAKE-APP is a thunk
 returning a fresh Clack app (a handler lambda). SERVE wraps it (WRAP-DEV: reload
 endpoints + poller injection, so the browser auto-refreshes with no app wiring),
@@ -767,6 +799,10 @@ app's. Pass NIL when the framework is a clone that is pulled, not edited: a pull
 dev server recompiles the framework into it, and a structure that gained slots then cannot load
 until a restart (#438). The failed reload says RESTART NEEDED in the console and in the browser.
 
+SIDECARS is passed to WATCH (#700): helper programs declared with
+HYPERION/SIDECAR:DEFINE-SIDECAR, started once the server has bound its port and stopped with the
+dev server, not on each reload.
+
 Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
   (let* ((guard (%dev-request-guard request-guard host))
          (workers (%dev-workers server workers workers-p))
@@ -777,7 +813,8 @@ Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
                   :paths paths
                   :system system
                   :systems (%serve-systems systems watch-framework)
-                  :interval interval)))
+                  :interval interval
+                  :sidecars sidecars)))
     (when block
       ;; Join the watcher rather than sleeping in a loop: the thread already owns the
       ;; lifetime, so UNWATCH from another thread (or the REPL) ends this wait too. The

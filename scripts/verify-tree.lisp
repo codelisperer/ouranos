@@ -164,6 +164,8 @@
     :praxeon/mcp :aion/oauth :hyperion/oauth
     ;; The job scheduler and its database store (#689).
     :aion/schedule :mnemosyne/jobs
+    ;; Dev sidecars (#700).
+    :hyperion/sidecar
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
     :praxeon/elise :praxeon/chat-rbt
     :hyperion/examples/active-search :hyperion/examples/active-search-db
@@ -211,6 +213,10 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The MCP client (#527), registered in the commit that adds it. Its MCP servers run on
     ;; 127.0.0.1 in the test image, so it runs on every leg with no network.
     :praxeon/mcp/tests
+    ;; Dev sidecars (#700). It was left out of the pull request's first commit, and its first CI run
+    ;; reported the same total as main; registered here so that it runs. Each sidecar is a child SBCL,
+    ;; so it needs nothing installed.
+    :hyperion/sidecar/tests
     ;; The OAuth client and its routes (#527 part 2), registered in the commit that adds them.
     ;; Their authorization server runs on 127.0.0.1 in the test image.
     :aion/oauth/tests :hyperion/oauth/tests

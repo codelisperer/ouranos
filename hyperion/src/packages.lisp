@@ -102,7 +102,7 @@
     stays with the caller, and STOP takes whichever handler START returned.")
   (:export #:default-server #:available-servers #:no-server-backend
            #:native-backend-p
-           #:*default-port* #:start #:stop
+           #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
            #:loopback-host-p
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
@@ -531,6 +531,7 @@
 (cl:defpackage #:hyperion/dev
   (:use #:cl)
   (:local-nicknames (#:srv  #:hyperion/server)
+                    (#:sidecar #:hyperion/sidecar)
                     (#:hjs  #:hyperion/js)
                     (#:hlog #:hyperion/logging))
   (:documentation

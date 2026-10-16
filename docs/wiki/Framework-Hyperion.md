@@ -635,4 +635,5 @@ Actionable work lives in GitHub issues and the project board, not in this page.
   distribution & self-update).
 - **Design notes in-repo:** `desktop.md`, `desktop-distribution-design.md`,
   `interceptors-design.md`, `i18n-design.md`, `dynamic-resources.md`,
-  `middleware-security.md`, `compliance-design.md`, `research/multi-target-ux.md`.
+  `middleware-security.md`, `compliance-design.md`, `sidecars.md` (dev sidecars, #700),
+  `research/multi-target-ux.md`.
