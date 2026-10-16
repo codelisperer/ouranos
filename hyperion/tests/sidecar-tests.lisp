@@ -274,8 +274,13 @@ so the log records each line's length and never its text."
            (is-true (%pid-alive-p pid))
            ;; File write dates have a resolution of one second.
            (sleep 1.1)
-           (with-open-file (out asset :direction :output :if-exists :supersede) (write-line "b{}" out))
-           (is (eq :reloaded (dev:reload! d)))
+           (let ((epoch dev:*reload-epoch*))
+             (with-open-file (out asset :direction :output :if-exists :supersede) (write-line "b{}" out))
+             ;; The watcher thread polls every half second and may reload before this call
+             ;; does, in which case this call returns :NO-CHANGE. Either way the server must
+             ;; have been rebuilt, and a successful rebuild bumps the reload epoch.
+             (dev:reload! d)
+             (is (> dev:*reload-epoch* epoch) "changing a watched file did not reload the server"))
            (is (eql pid (%pid-of :test-dev)) "the reload restarted the sidecar")
            (is-true (%pid-alive-p pid))
            (dev:unwatch d)
@@ -288,17 +293,23 @@ so the log records each line's length and never its text."
 (test a-sidecar-that-cannot-start-stops-the-dev-server
   (sc:define-sidecar :test-dev-fails :command (%command "(sb-ext:exit :code 1)")
                      :ready (sc:token-after "never=") :ready-timeout 30)
-  (let ((port nil))
-    (handler-case
-        (ports:call-with-port
-         (lambda (p)
-           (setf port p)
-           (dev:watch (lambda () (srv:start (lambda (env) (declare (ignore env))
-                                              '(200 (:content-type "text/plain") ("ok")))
-                                            :port p :server :hunchentoot))
-                      :paths (list (uiop:temporary-directory)) :sidecars '(:test-dev-fails))
-           (fail "WATCH returned")))
-      (sc:sidecar-not-ready () nil))
+  ;; Watch an empty directory of its own. WATCH snapshots every file under its paths, and the
+  ;; whole temporary directory of a developer's machine can be large enough to exhaust the heap.
+  (let ((port nil)
+        (root (%fresh-directory "hyperion-sidecar-dev-fails")))
+    (ensure-directories-exist root)
+    (unwind-protect
+         (handler-case
+             (ports:call-with-port
+              (lambda (p)
+                (setf port p)
+                (dev:watch (lambda () (srv:start (lambda (env) (declare (ignore env))
+                                                   '(200 (:content-type "text/plain") ("ok")))
+                                                 :port p :server :hunchentoot))
+                           :paths (list root) :sidecars '(:test-dev-fails))
+                (fail "WATCH returned")))
+           (sc:sidecar-not-ready () nil))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))
     (is (null dev::*dev*))
     (is-true (ports:await-released port) "the server on ~D is still listening" port)))
 
