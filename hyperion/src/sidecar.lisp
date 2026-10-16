@@ -94,9 +94,10 @@ the usual way to call this.
 
 COMMAND is a list of strings, the program and its arguments. Each \"{port}\" in an argument is
 replaced with the server's bound port when the sidecar starts. ENVIRONMENT is an alist of names
-and string values added to the image's environment. DIRECTORY is the working directory, or NIL.
-READY is NIL, for a sidecar that is ready once it has started, or a function of one line of its
-standard output or standard error that returns NIL or the captured string; see TOKEN-AFTER.
+and values, all strings, added to the image's environment; anything else is an error. DIRECTORY
+is the working directory, or NIL. READY is NIL, for a sidecar that is ready once it has started,
+or a function of one line of its standard output or standard error that returns NIL or the
+captured string; see TOKEN-AFTER.
 READY-TIMEOUT is how many seconds START-SIDECARS waits for it. SECRET true holds the captured value
 as an AION/SECRET. REQUIRED true makes a program missing from PATH an error rather than a warning.
 RESTART true starts the sidecar again when it exits by itself, after 1 s, then 2, 4 and so on up
@@ -104,6 +105,9 @@ to 30 s, without limit, and reads its value again."
   (check-type name keyword)
   (unless (and (consp command) (every #'stringp command))
     (error "The :COMMAND of sidecar ~S must be a non-empty list of strings." name))
+  (unless (and (listp environment)
+               (every (lambda (e) (and (consp e) (stringp (car e)) (stringp (cdr e)))) environment))
+    (error "The :ENVIRONMENT of sidecar ~S must be a list of (NAME . VALUE) pairs of strings. A value that is not a string, such as NIL from a variable that is not set, is refused." name))
   (setf (gethash name *declarations*)
         (make-declaration :name name :command command :environment environment
                           :directory directory :ready ready :ready-timeout ready-timeout
@@ -180,6 +184,13 @@ replacing any of the same name. NIL, meaning inherit it unchanged, when ALIST is
   *setpriv*)
 
 #+win32
+(define-condition no-job (error)
+  ((cause :initarg :cause :reader no-job-cause))
+  (:documentation "The job function failed, so the sidecar was ended before it ran. CAUSE is the
+condition it signalled. Kept apart from every other Windows error, which means the process could
+not be created at all."))
+
+#+win32
 (defvar *job-function* 'aion/windows:default-job-function
   "The function of a pid that puts a sidecar in its job object, while the sidecar is still
 suspended. The tests bind it to one that fails.")
@@ -196,7 +207,11 @@ standard error are character streams."
                              :environment environment :directory directory
                              :output :stream :error :stream :element-type 'character
                              :external-format '(:utf-8 :replacement #\?)
-                             :job-function *job-function* :if-no-job :error)
+                             :job-function (let ((job-function *job-function*))
+                                             (lambda (pid)
+                                               (handler-case (funcall job-function pid)
+                                                 (error (e) (error 'no-job :cause e)))))
+                             :if-no-job :error)
   #-win32
   (let* ((setpriv (%setpriv))
          (program (or setpriv path))
@@ -352,14 +367,16 @@ held."
   (and (= generation (sidecar-generation s)) (not (sidecar-stopping s))))
 
 (defun %read-lines (s stream which generation)
-  "Read STREAM line by line until it ends. Each line is logged at debug level, and offered to the
-:READY function while the sidecar is starting. The value is published under S's lock, and only
+  "Read STREAM line by line until it ends. Each line's length is logged at debug level, never its
+text, which can be the secret the :READY function captures. Each line is offered to the :READY
+function while the sidecar is starting. The value is published under S's lock, and only
 while GENERATION is current, so a line from a process that has since exited is not published."
   (let ((ready (decl-ready (sidecar-spec s))))
     (handler-case
         (loop for line = (read-line stream nil nil)
               while line
-              do (log:debug "hyperion/sidecar: output" :name (%name s) :stream which :line line)
+              do (log:debug "hyperion/sidecar: output" :name (%name s) :stream which
+                                                        :length (length line))
                  (when (and ready (eq (sidecar-state s) :starting))
                    (let ((value (ignore-errors (funcall ready line))))
                      (when (and value
@@ -481,7 +498,8 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
                      (error (e)
                        ;; The condition's type only: its text can carry the command line.
                        (log:warn "hyperion/sidecar: sidecar could not be started" :name (decl-name d)
-                                 :error (type-of e))
+                                 :error (type-of #+win32 (if (typep e 'no-job) (no-job-cause e) e)
+                                                 #-win32 e))
                        (sb-thread:with-mutex ((sidecar-lock s)) (setf (sidecar-state s) :not-started))
                        (return-from %launch
                          (typecase e
@@ -489,7 +507,7 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
                                     (if (eq (aion/windows:process-not-started-reason e) :batch-file)
                                         :batch-file
                                         :not-found))
-                           #+win32 (aion/windows:windows-error :no-job)
+                           #+win32 (no-job :no-job)
                            (t :spawn-failed)))))))
       #-win32
       (let ((pid (%pid process)))

@@ -37,7 +37,9 @@ forwarder printed.
   actually bound, so this works when the port comes from configuration or is chosen when the
   server starts.
 - `:environment` is added to the image's environment. Here it passes a test-mode key. Without it
-  the Stripe CLI uses the account from `stripe login`.
+  the Stripe CLI uses the account from `stripe login`. Names and values must be strings, so the
+  declaration signals an error when `STRIPE_TEST_SECRET_KEY` is not set, rather than passing a
+  wrong value.
 - `:ready` is a function of one line of the sidecar's output (standard output or standard
   error) that returns the value to capture, or NIL. `token-after` returns the text after the
   marker up to the next space. Any function of a line works.
@@ -124,8 +126,9 @@ A killed image runs no exit hooks. What ends its sidecars depends on the operati
 ## What is logged
 
 Each sidecar's start, readiness, exit, exit code and restarts are logged through `aion/log` at
-info or warn. Every line of its output is logged at debug level only, because a sidecar's output
-can contain secrets; turn it on with `(aion/log:level! :debug)` when a sidecar misbehaves.
+info or warn. At debug level each line of its output is logged by its length and stream, never its
+text, because a sidecar's output can contain secrets; turn it on with `(aion/log:level! :debug)`
+to see whether a sidecar is printing anything.
 Conditions and log fields never include a sidecar's arguments or a captured value.
 
 ## Limits

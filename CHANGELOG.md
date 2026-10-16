@@ -272,9 +272,11 @@ its tag.
   `setpriv --pdeathsig KILL` when `setpriv` is installed, and on macOS, or Linux without
   `setpriv`, the next `start-sidecars` ends a sidecar left by an image that has exited, using
   state files under `~/.cache/hyperion-sidecars/`. `hyperion/server:serve-forever` takes no
-  sidecars, and a shipped desktop image ignores them. Core `hyperion` now depends on
-  `hyperion/sidecar`, and through it on `aion/secret` and, on Windows, `aion/windows` and
-  `cffi`. See `hyperion/docs/sidecars.md`.
+  sidecars, and a shipped desktop image ignores them. `:environment` takes only string names and
+  values; any other value, such as NIL from an unset variable, is an error at declaration. At
+  debug level a sidecar's output lines are logged by length and stream, never by text. Core
+  `hyperion` now depends on `hyperion/sidecar`, and through it on `aion/secret` and, on
+  Windows, `aion/windows` and `cffi`. See `hyperion/docs/sidecars.md`.
 
 - **hyperion/server: `handler-port` returns the port a running server listens on** (#700). On
   the native `:uv` server it is the port that was bound, which is the one the operating system

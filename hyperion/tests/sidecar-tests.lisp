@@ -66,14 +66,14 @@ read them from SB-EXT:*POSIX-ARGV*."
      (unwind-protect (progn ,@body)
        (sc:stop-sidecars ,set))))
 
-(defmacro with-captured-log ((stream) &body body)
-  "Run BODY with the log at :INFO going to STREAM, then put back what was there."
+(defmacro with-captured-log ((stream &key (log-level :info)) &body body)
+  "Run BODY with the log at LOG-LEVEL going to STREAM, then put back what was there."
   (let ((appenders (gensym)) (level (gensym)) (layout (gensym)))
     `(let ((,appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
            (,level (log4cl:logger-log-level log4cl:*root-logger*))
            (,layout aion/log:*layout*))
        (unwind-protect
-            (progn (aion/log:setup :env :dev :level :info :stream ,stream)
+            (progn (aion/log:setup :env :dev :level ,log-level :stream ,stream)
                    ,@body)
          (log4cl:remove-all-appenders log4cl:*root-logger*)
          (dolist (a ,appenders) (log4cl:add-appender log4cl:*root-logger* a))
@@ -91,6 +91,13 @@ read them from SB-EXT:*POSIX-ARGV*."
 (test a-command-must-be-a-list-of-strings
   (signals error (sc:register-sidecar :test-bad :command "not a list"))
   (signals error (sc:register-sidecar :test-bad :command '())))
+
+(test an-environment-value-must-be-a-string
+  (signals error (sc:register-sidecar :test-bad :command '("x") :environment '(("A" . :inherit))))
+  (signals error (sc:register-sidecar :test-bad :command '("x") :environment '(("A" . nil))))
+  (signals error (sc:register-sidecar :test-bad :command '("x") :environment '((:a . "v"))))
+  (signals error (sc:register-sidecar :test-bad :command '("x") :environment :inherit))
+  (is (eq :test-good (sc:register-sidecar :test-good :command '("x") :environment '(("A" . "v"))))))
 
 ;;; --- starting, reading the value, stopping ------------------------------------------------
 
@@ -115,6 +122,20 @@ read them from SB-EXT:*POSIX-ARGV*."
       (is-true (aion/secret:secretp v))
       (is (uiop:string-prefix-p "tok-" (aion/secret:reveal v)))
       (is-false (search "tok-" (princ-to-string v))))))
+
+(test a-debug-log-of-the-output-never-contains-the-captured-value
+  "Every output line is logged at debug level, including the one :READY captures the secret from,
+so the log records each line's length and never its text."
+  (sc:define-sidecar :test-debug-log :command (%command +ready-form+) :ready (sc:token-after "token=")
+                     :secret t)
+  (let* ((value nil)
+         (log (with-output-to-string (out)
+                (with-captured-log (out :log-level :debug)
+                  (with-sidecars (set '(:test-debug-log))
+                    (setf value (aion/secret:reveal (sc:sidecar-value :test-debug-log))))))))
+    (is (uiop:string-prefix-p "tok-" value))
+    (is-true (search "hyperion/sidecar: output" log) "no output line was logged at debug level")
+    (is-false (search value log) "the captured value ~S is in the debug log" value)))
 
 (test a-sidecar-with-no-ready-function-is-ready-once-started
   (sc:define-sidecar :test-noready :command (%command "(sleep 600)"))
@@ -346,6 +367,21 @@ job function saw is ended before it runs."
         (is (eq :no-job (sc:sidecar-not-started-reason c)))))
     (is-true seen)
     (when seen (is-true (%ends-within-p seen 5) "the refused sidecar ~D is still running" seen))))
+
+#+win32
+(test on-windows-a-process-that-cannot-be-created-is-a-spawn-failure-not-a-job-failure
+  "CreateProcessW fails for a working directory that does not exist. That is reported as
+:SPAWN-FAILED, and the job function is never called."
+  (let ((missing (merge-pathnames (format nil "hyperion-sidecar-missing-~36R/" (random (expt 36 8)))
+                                  (uiop:temporary-directory))))
+    (sc:define-sidecar :test-no-create :command (%command "(sleep 600)") :directory missing)
+    (let* ((seen nil)
+           (sc::*job-function* (lambda (pid) (setf seen pid) (aion/windows:default-job-function pid))))
+      (is-false (probe-file missing))
+      (handler-case (progn (sc:start-sidecars '(:test-no-create)) (fail "it started"))
+        (sc:sidecar-not-started (c)
+          (is (eq :spawn-failed (sc:sidecar-not-started-reason c)))))
+      (is-false seen "the job function was called for a process that was never created"))))
 
 #-win32
 (test without-setpriv-a-sidecar-that-cannot-be-recorded-is-not-started
