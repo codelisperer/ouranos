@@ -55,6 +55,23 @@ it may have run, such as after a timeout."))
                      (deliberation-failure-detail c))))
   (:documentation "Signalled when the actor cannot decide on an action."))
 
+(define-condition provider-request-failed (deliberation-failure)
+  ((status :initarg :status :initform nil :reader provider-request-failed-status)
+   (error-type :initarg :error-type :initform nil :reader provider-request-failed-error-type)
+   (error-code :initarg :error-code :initform nil :reader provider-request-failed-error-code)
+   (body :initarg :body :initform nil :reader provider-request-failed-body))
+  (:documentation "A request to a model, embedding or rerank service failed (#719).
+
+STATUS is the HTTP status, or NIL when the request failed before a response arrived.
+ERROR-TYPE and ERROR-CODE are read from the service's error JSON when the body parses as one,
+otherwise NIL. BODY is the whole response body, where the service explains the failure; read
+it here.
+
+The report and DELIBERATION-FAILURE-DETAIL leave the body out and give its length instead,
+because praxeon/llm logs the report of a failed request at warn and a log line never carries a
+payload (docs/logging.md). A service's response body can repeat parts of the request, which
+holds the prompt."))
+
 (define-condition output-limit-reached (condition)
   ((max-tokens :initarg :max-tokens :reader output-limit-reached-max-tokens))
   (:documentation "A model's output stopped at the output limit (stop reason :MAX-TOKENS)

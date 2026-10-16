@@ -278,9 +278,20 @@ signals DELIBERATION-FAILURE before anything is sent.")
                      ;; :warn, not :error -- a provider failure is often retried or falls
                      ;; back to another provider, so it is not by itself an app error. The
                      ;; caller decides; we just make sure it is never silent.
-                     (log:warn "llm request failed" :provider (string (type-of p))
-                                                    :model model :error (princ-to-string c)
-                                                    :ms (%ms-since start)))))
+                     ;;
+                     ;; The report of a PROVIDER-REQUEST-FAILED leaves the response body out,
+                     ;; and its parts are logged as fields: never the body itself (#719).
+                     (if (typep c 'praxeon/conditions:provider-request-failed)
+                         (log:warn "llm request failed" :provider (string (type-of p))
+                                                        :model model :error (princ-to-string c)
+                                                        :status (praxeon/conditions:provider-request-failed-status c)
+                                                        :error-type (praxeon/conditions:provider-request-failed-error-type c)
+                                                        :error-code (praxeon/conditions:provider-request-failed-error-code c)
+                                                        :body-length (length (or (praxeon/conditions:provider-request-failed-body c) ""))
+                                                        :ms (%ms-since start))
+                         (log:warn "llm request failed" :provider (string (type-of p))
+                                                        :model model :error (princ-to-string c)
+                                                        :ms (%ms-since start))))))
       (let ((completion (call-next-method)))
         (log:debug "llm response" :model model
                                   :stop-reason (completion-stop-reason completion)
@@ -301,21 +312,47 @@ signals DELIBERATION-FAILURE before anything is sent.")
   "Milliseconds since START (an internal-real-time reading), rounded."
   (round (* 1000 (- (get-internal-real-time) start)) internal-time-units-per-second))
 
-(defun %http-error-detail (label e)
-  "A detail string for a failed HTTP request E. Includes the status and response body when
-there is one -- the body is where a provider explains a 400, so surfacing it turns an opaque
-failure into an actionable one.
+(defun %short-string (x)
+  "X as a string when it is a string or an integer of at most 64 characters, otherwise NIL. An
+error type or code is a short identifier; anything longer is not one, and could be the body."
+  (let ((s (typecase x
+             (string x)
+             (integer (princ-to-string x)))))
+    (and s (<= (length s) 64) s)))
 
-Reads AION/HTTP-CLIENT:HTTP-ERROR rather than decoding dexador conditions directly (pre-publication issue 202).
-praxeon used to hand-roll that decoding in this function precisely because the shared client
-was not reachable; now the client carries status and body and this only has to phrase them."
-  (typecase e
-    (http:http-error
-     (if (http:http-error-status e)
-         (format nil "~A: HTTP ~A -- ~A" label (http:http-error-status e)
-                 (or (http:http-error-body e) ""))
-         (format nil "~A: ~A" label (or (http:http-error-detail e) e))))
-    (t (format nil "~A: ~A" label e))))
+(defun %provider-error-fields (body)
+  "The error type and code in BODY, a service's error JSON, as two values, each NIL when absent.
+Anthropic sends {\"type\":\"error\",\"error\":{\"type\":..,\"message\":..}}, with no code;
+OpenAI-compatible servers send {\"error\":{\"type\":..,\"code\":..,\"message\":..}}. A body
+that is not JSON, or not of either shape, gives NIL and NIL."
+  (let* ((parsed (and (stringp body)
+                      (handler-case (jzon:parse body) (error () nil))))
+         (err (and (hash-table-p parsed) (gethash "error" parsed))))
+    (if (hash-table-p err)
+        (values (%short-string (gethash "type" err)) (%short-string (gethash "code" err)))
+        (values nil nil))))
+
+(defun %request-failure (label e)
+  "A PROVIDER-REQUEST-FAILED for the failed HTTP request E, whose report starts with LABEL (#719).
+
+Reads AION/HTTP-CLIENT:HTTP-ERROR rather than decoding dexador conditions directly (pre-publication
+issue 202). The response body goes on the condition, where an app reads the service's
+explanation of a 400. The detail, which the report prints and praxeon/llm logs, has the status,
+the error type and code, and the body's length, never the body (#719): docs/logging.md keeps
+payloads out of log lines, and a response body can repeat the request."
+  (if (and (typep e 'http:http-error) (http:http-error-status e))
+      (let ((status (http:http-error-status e))
+            (body (http:http-error-body e)))
+        (multiple-value-bind (type code) (%provider-error-fields body)
+          (make-condition 'praxeon/conditions:provider-request-failed
+                          :status status :error-type type :error-code code :body body
+                          :detail (format nil "~A: HTTP ~A~@[, ~A~]~@[, code ~A~], a response body of ~D characters"
+                                          label status type code (length (or body ""))))))
+      (make-condition 'praxeon/conditions:provider-request-failed
+                      :detail (format nil "~A: ~A" label
+                                      (if (typep e 'http:http-error)
+                                          (or (http:http-error-detail e) "no response")
+                                          e)))))
 
 (defun %post-json (url headers payload)
   "One JSON POST through the shared interceptor client, returning the response body.
@@ -422,8 +459,7 @@ translation happened."
              (handler-case
                  (%post-json (anthropic-endpoint p) (%auth-headers p) payload)
                (error (e)
-                 (error 'praxeon/conditions:deliberation-failure
-                        :detail (%http-error-detail "Anthropic request failed" e))))))
+                 (error (%request-failure "Anthropic request failed" e))))))
       (%parse-completion (jzon:parse response)))))
 
 ;;; --- request translation: neutral -> Anthropic JSON ---------------------
@@ -726,10 +762,8 @@ through response_format (#680)."
              (handler-case
                  (%post-json url headers payload)
                (error (e)
-                 (error 'praxeon/conditions:deliberation-failure
-                        :detail (%http-error-detail
-                                 (format nil "OpenAI-compatible request to ~A failed" url)
-                                 e))))))
+                 (error (%request-failure
+                         (format nil "OpenAI-compatible request to ~A failed" url) e))))))
       (%parse-openai (jzon:parse response)))))
 
 ;;; --- request translation: neutral -> OpenAI JSON ------------------------
