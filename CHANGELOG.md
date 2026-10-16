@@ -14,6 +14,28 @@ its tag.
 
 ### An app may have to act
 
+- **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
+  place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
+  fetch it and check an existing checkout out at it. Re-run the setup script, or run
+  `git fetch origin && git checkout 024d0a17` in the Coalton checkout, then clear
+  `~/.cache/common-lisp` and rebuild `bin/cons`; `scripts/check-coalton.lisp` says which
+  Coalton loads. The framework needed no change. An app's own Coalton code may:
+  - A discarded `Result` is now a full warning, which fails an ASDF build: a non-final form
+    of a body, or the last form of a `when` or `unless` body or of `protect`'s cleanup, whose
+    value is a `Result`. Handle it, or bind it with `(let _ = …)`.
+    `docs/coalton-patterns.md` §8a shows the message.
+  - A toplevel list left open at the end of a file is an error, where before it silently
+    swallowed every form after it.
+  - `error` takes only a `String`. `Signalable` and `result:ok-or-error` are removed, as are
+    the identity `Into`/`Iso` instances, the `Cell` to `String` conversion and the tuple-swap
+    conversions.
+  - `unwrap`, `expect` and `error` signal a `Panic` condition that prints the message as
+    written; it is no longer used as a `format` control string.
+  - `coalton` now exports `need`, `protect` and `handle`, which can collide with an app's
+    own definitions of those names in a package that uses `coalton`.
+
+  An app that pins Coalton in its own build moves that pin to `024d0a17`.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
@@ -985,6 +1007,14 @@ its tag.
   visible on the page and read aloud by screen readers. `token-field` now returns no values.
   An app that calls `token-field` itself and read its return value, `T` when a field was
   written, now gets no value.
+
+- **scripts/setup.ps1: moving to a new Coalton pin fetches it, instead of stopping** (#697).
+  When the Coalton checkout did not contain the pinned commit yet, which is the usual state
+  after `coalton.pin` changes, `git rev-parse` reported an unknown revision and Windows
+  PowerShell treated that message as a terminating error, so `setup.ps1` exited 1 before it
+  fetched. `setup.ps1 -Check` stopped the same way instead of reporting the pin as missing.
+  Both now resolve the commit through `Resolve-GitCommit`, which returns nothing for a
+  revision git cannot resolve. `scripts/setup.sh` was not affected.
 
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
