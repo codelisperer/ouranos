@@ -923,7 +923,15 @@ first run unfinished until both calls return, so it cannot see this."
         (s:define-job a "j" f :schedule '(:every 600))
         (setf (hold store) :acquire
               (lock-to-take store) (s::%lock a))
-        (let ((one (spawn "first run-now" (lambda () (multiple-value-list (s:run-now a "j"))))))
+        (let ((one (spawn "first run-now"
+                          (lambda ()
+                            ;; The store hands this thread the scheduler's lock. Give it back
+                            ;; on any exit, so a failure before the dispatcher runs cannot
+                            ;; leave it held and make the scheduler's STOP wait forever.
+                            (unwind-protect (multiple-value-list (s:run-now a "j"))
+                              (let ((lock (s::%lock a)))
+                                (when (eq (sb-thread:mutex-owner lock) sb-thread:*current-thread*)
+                                  (sb-thread:release-mutex lock))))))))
           (sb-thread:wait-on-semaphore (entered store))
           (let ((two (spawn "second run-now" (lambda () (multiple-value-list (s:run-now a "j"))))))
             ;; Gives the second call time to find the job claimed by the first and wait.

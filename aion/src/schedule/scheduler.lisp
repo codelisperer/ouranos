@@ -573,7 +573,9 @@ leases are renewed in time and jobs written by other instances are noticed."
 time does not change. Returns (VALUES run-id :STARTED), or (VALUES the-current-run-id
 :ALREADY-RUNNING) when an instance holds its lease or this instance is still running the job,
 even past its lease. When a run of KEY is still starting on this instance, RUN-NOW waits until
-it has started and returns its id, or until it did not start and then tries itself. The run
+it has started and returns its id with :ALREADY-RUNNING, or until it did not start and then
+tries itself. That run may have finished by the time the caller reads its id, so read its
+state from the store rather than assuming it is still running (#723). The run
 happens on the pool; poll (STORE-RUN store run-id) for its outcome. ARGS replace the stored
 arguments for this run."
   (let ((job (%job-for-run-now scheduler key)))
@@ -589,7 +591,10 @@ arguments for this run."
 
 (defun run-job (scheduler key &key (args nil args-p))
   "As RUN-NOW, but run the job on the calling thread and return its finished JOB-RUN, or NIL when
-an instance holds its lease or this instance is still running the job."
+an instance holds its lease or this instance is still running the job. It also returns NIL
+after waiting for a run of KEY that was starting on this instance and did start, including one
+that has already finished: that run is the job's run, and RUN-JOB does not start another
+(#723)."
   (let* ((job (%job-for-run-now scheduler key))
          (id (%start-run scheduler job :run-now :expected-due :any :next-due :keep
                          :args (if args-p args (stored-job-args job)) :dispatch :inline
