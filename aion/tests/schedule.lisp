@@ -544,6 +544,10 @@ signalled, after signalling ENTERED."))
 (defmethod s:store-jobs :before ((store gated-store))
   (%held store :jobs))
 
+(defmethod s:store-renew :before ((store gated-store) key holder run-id until)
+  (declare (ignore key holder run-id until))
+  (%held store :renew))
+
 (defun spawn (name function)
   ;; THREAD-LIFETIME: a test thread, joined by the test that starts it.
   (sb-thread:make-thread function :name name))
@@ -684,3 +688,207 @@ signalled, after signalling ENTERED."))
       (is (< (elapsed-seconds start) 3) "STOP returned at its timeout"))
     (sb-thread:signal-semaphore (gate store))
     (is (eq :stopped (s:stop a :timeout 5)) "a later STOP finishes the job")))
+
+;;; --- review fixes from train 46 (#702) ---------------------------------------------------
+
+(defun driver-threads (name)
+  (remove name (sb-thread:list-all-threads) :key #'sb-thread:thread-name :test-not #'equal))
+
+(test a-one-off-replaced-by-a-recurring-job-while-it-runs-is-kept
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (multiple-value-bind (dispatch box) (capture)
+      (with-scheduler (a store clock :dispatch dispatch)
+        (s:define-job a "j" (counter))
+        (s:schedule-once a "j" :key "j" :at +t0+)
+        (is (= 1 (length (s:tick a))) "the one-off starts")
+        (s:define-job a "j" (counter) :schedule '(:every 60))
+        (drain box)
+        (let ((job (s:store-job store "j")))
+          (is-true job "its completion does not remove the recurring job that replaced it")
+          (when job
+            (is (equal '(:every 60) (s:stored-job-schedule job)))
+            (is (null (s:stored-job-lease-holder job)) "whose lease is free")))
+        (is (equal '(:completed) (outcomes store "j")))))))
+
+(test an-operator-call-does-not-start-a-second-run-of-a-job-still-running-here
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (multiple-value-bind (dispatch box) (capture)
+      (with-scheduler (a store clock :dispatch dispatch :lease-seconds 30)
+        (s:define-job a "j" (counter) :schedule '(:every 600))
+        (s:clock-advance clock 600)
+        (let ((first-run (first (s:tick a))))
+          ;; The run outlives its lease: no tick renewed it.
+          (s:clock-advance clock 31)
+          (multiple-value-bind (id status) (s:run-now a "j")
+            (is (eq :already-running status) "RUN-NOW finds the run still going here")
+            (is (equal first-run id) "and names it"))
+          (is (null (s:run-job a "j")) "RUN-JOB starts nothing either")
+          (is (eq :running (s:job-run-outcome (s:store-run store first-run)))
+              "the run is not marked abandoned")
+          (is (= 1 (length (s:store-runs store "j"))) "and no second run was recorded")
+          (drain box)
+          (is (equal '(:completed) (outcomes store "j")))
+          (is (eq :started (nth-value 1 (s:run-now a "j")))
+              "once it has finished, an operator call runs it again")
+          (drain box))))))
+
+(test define-job-recovers-a-stored-job-that-could-not-be-read
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (with-scheduler (a store clock :dispatch :inline)
+      ;; What a database store returns when only the arguments cannot be read: the schedule and
+      ;; the function name are the ones DEFINE-JOB is about to give.
+      (s:store-put-job store (s:make-stored-job :key "j" :function-name "j"
+                                                :schedule '(:every 60) :next-due +t0+
+                                                :updated-at +t0+
+                                                :unreadable "args READER-ERROR: no package"))
+      (s:define-job a "j" (counter) :schedule '(:every 60))
+      (is (null (s:stored-job-unreadable (s:store-job store "j"))) "the job is readable again")
+      (s:clock-advance clock 60)
+      (is (= 1 (length (s:tick a))) "and runs"))))
+
+(test schedule-once-with-a-key-that-exists-signals-unless-it-replaces
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (with-scheduler (a store clock :dispatch :inline)
+      (s:define-job a "send" (counter))
+      (is (equal "k" (s:schedule-once a "send" :key "k" :at (+ +t0+ 5) :args '(1))))
+      (signals s:job-exists (s:schedule-once a "send" :key "k" :at (+ +t0+ 9) :args '(2)))
+      (is (equal '(1) (s:stored-job-args (s:store-job store "k"))) "the first one is kept")
+      (is (equal "k" (s:schedule-once a "send" :key "k" :at (+ +t0+ 9) :args '(2) :replace t)))
+      (let ((job (s:store-job store "k")))
+        (is (equal '(2) (s:stored-job-args job)) ":REPLACE T replaces it")
+        (is (= (+ +t0+ 9) (s:stored-job-next-due job))))
+      (s:store-put-job store (s:make-stored-job :key "u" :function-name "send"
+                                                :schedule (list :once +t0+) :next-due +t0+
+                                                :updated-at +t0+
+                                                :unreadable "args READER-ERROR: no package"))
+      (s:schedule-once a "send" :key "u" :at +t0+ :replace t)
+      (is (null (s:stored-job-unreadable (s:store-job store "u")))
+          "and recovers a one-off that could not be read"))))
+
+(test stop-skips-a-lease-renewal-once-its-timeout-has-passed
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (gate (sb-thread:make-semaphore))
+         (a (s:make-scheduler store :clock clock :lease-seconds 3)))
+    (s:define-job a "slow" (lambda (ctx) (declare (ignore ctx))
+                             (sb-thread:wait-on-semaphore gate) nil)
+                  :schedule '(:every 600))
+    (s:clock-advance clock 600)
+    (s:tick a)
+    (setf (hold store) :renew)
+    ;; Lets a renewal that was held go after 4 seconds, so that the test ends either way.
+    (let ((releaser (spawn "renewal releaser"
+                           (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t))))
+      (is (eq :timed-out (s:stop a :timeout 0.3)))
+      (is (eq :renew (hold store)) "the wait used the whole timeout, and no renewal followed it")
+      (setf (hold store) nil)
+      (tt:join releaser :timeout 10))
+    (sb-thread:signal-semaphore gate)
+    (is (eq :stopped (s:stop a :timeout 5)))))
+
+(test stop-gives-up-on-a-lease-renewal-at-its-timeout
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (gate (sb-thread:make-semaphore))
+         (a (s:make-scheduler store :clock clock :lease-seconds 3)))
+    (s:define-job a "slow" (lambda (ctx) (declare (ignore ctx))
+                             (sb-thread:wait-on-semaphore gate) nil)
+                  :schedule '(:every 600))
+    (s:clock-advance clock 600)
+    (s:tick a)
+    (setf (hold store) :renew)
+    ;; Lets the renewal go after 4 seconds, so that a STOP that waits for it ends the test
+    ;; instead of hanging it.
+    (let ((releaser (spawn "renewal releaser"
+                           (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t)))
+          (start (get-internal-real-time)))
+      ;; A third of the lease is 1 second: the drain waits 1 second, then renews.
+      (is (eq :timed-out (s:stop a :timeout 1.5)))
+      (is (< (elapsed-seconds start) 2.5) "STOP returned at its timeout, with the renewal held")
+      (tt:join releaser :timeout 10))
+    (sb-thread:signal-semaphore gate)
+    (is (eq :stopped (s:stop a :timeout 5)))))
+
+(test stop-during-start-s-first-tick-waits-for-start
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (a (s:make-scheduler store :clock clock)))
+    (setf (hold store) :jobs)
+    (let ((starter (spawn "starter" (lambda () (s:start a) t))))
+      (sb-thread:wait-on-semaphore (entered store))
+      (let ((stopper (spawn "stopper" (lambda () (s:stop a :timeout 5)))))
+        (sleep 0.3)
+        (is-true (sb-thread:thread-alive-p stopper) "STOP waits for the start in progress")
+        (sb-thread:signal-semaphore (gate store))
+        (tt:join starter)
+        (is (eq :stopped (tt:join stopper)) "then reports the scheduler stopped")
+        (is-true (wait-until (lambda () (null (driver-threads "aion/schedule driver"))))
+                 "with no driver thread left")))))
+
+(test a-start-that-outlasts-a-timed-out-stop-starts-no-driver
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (a (s:make-scheduler store :clock clock)))
+    (setf (hold store) :jobs)
+    (let ((starter (spawn "starter" (lambda () (s:start a) t))))
+      (sb-thread:wait-on-semaphore (entered store))
+      (is (eq :timed-out (s:stop a :timeout 0.3)) "the first tick is still going")
+      (sb-thread:signal-semaphore (gate store))
+      (tt:join starter)
+      (sleep 0.2)
+      (is (null (driver-threads "aion/schedule driver"))
+          "START saw the stop after its tick and started no thread")
+      (is (eq :stopped (s:stop a :timeout 5))))))
+
+(test stop-waits-for-a-lease-renewal-an-earlier-stop-left-going
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (gate (sb-thread:make-semaphore))
+         (a (s:make-scheduler store :clock clock :lease-seconds 3)))
+    (s:define-job a "slow" (lambda (ctx) (declare (ignore ctx))
+                             (sb-thread:wait-on-semaphore gate) nil)
+                  :schedule '(:every 600))
+    (s:clock-advance clock 600)
+    (s:tick a)
+    (setf (hold store) :renew)
+    ;; A third of the lease is 1 second: the drain waits 1 second, then renews, and the renewal
+    ;; is held past the timeout.
+    (is (eq :timed-out (s:stop a :timeout 1.5)))
+    (is-true (sb-thread:wait-on-semaphore (entered store) :timeout 5) "a renewal is held")
+    (sb-thread:signal-semaphore gate)
+    (is-true (wait-until (lambda () (equal '(:completed) (outcomes store "slow")))))
+    (is-true (wait-until (lambda () (not (s::%busy-p a)))) "the run has finished")
+    (multiple-value-bind (status keys) (s:stop a :timeout 0.3)
+      (is (eq :timed-out status) "a later STOP reports the renewal still going")
+      (is (null keys) "with no job running"))
+    (sb-thread:signal-semaphore (gate store))
+    (is (eq :stopped (s:stop a :timeout 5)) "and reports the scheduler stopped once it has ended")))
+
+(test a-replacement-is-kept-when-the-run-changes-its-arguments-to-match-it
+  (let ((store (s:make-memory-job-store)) (clock (s:make-manual-clock +t0+)))
+    (with-scheduler (a store clock :dispatch :inline)
+      (s:define-job a "j" (lambda (ctx x) (declare (ignore ctx))
+                            (s:schedule-once a "j" :key "j" :at +t0+ :args (list (list 2))
+                                                   :replace t)
+                            (setf (first x) 2)
+                            nil))
+      (s:schedule-once a "j" :key "j" :at +t0+ :args (list (list 1)))
+      (is (= 1 (length (s:tick a))))
+      (let ((job (s:store-job store "j")))
+        (is-true job "the one-off that replaced it during the run is kept")
+        (when job (is (equal '((2)) (s:stored-job-args job))))))))
+
+(test run-now-returns-the-id-of-a-run-that-was-still-starting-here
+  (let ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+)))
+    (multiple-value-bind (dispatch box) (capture)
+      (with-scheduler (a store clock :dispatch dispatch)
+        (s:define-job a "j" (counter) :schedule '(:every 600))
+        (setf (hold store) :acquire)
+        (let ((one (spawn "first run-now" (lambda () (multiple-value-list (s:run-now a "j"))))))
+          (sb-thread:wait-on-semaphore (entered store))
+          (let ((two (spawn "second run-now" (lambda () (multiple-value-list (s:run-now a "j"))))))
+            ;; Gives the second call time to find the job claimed by the first, which is held
+            ;; in the store's acquire and has no run id yet.
+            (sleep 0.3)
+            (sb-thread:signal-semaphore (gate store))
+            (let ((started (tt:join one)) (found (tt:join two)))
+              (is (eq :started (second started)))
+              (is (equal (list (first started) :already-running) found)
+                  "the second call names the run the first one started"))))
+        (drain box)
+        (is (equal '(:completed) (outcomes store "j")))))))

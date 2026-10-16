@@ -277,17 +277,26 @@ SQL, so a NIL value is matched with IS NULL and binds nothing."
     (conn:with-transaction (c)
       ;; The job row first, then the run row: the order STORE-ACQUIRE takes them in, so a
       ;; takeover and a late finish on Postgres wait for each other instead of deadlocking.
-      (let ((owned (plusp (if remove-job
-                              (conn:exec c (format nil "DELETE FROM ~A WHERE job_key = ? AND lease_holder = ? AND current_run = ?"
-                                                   (jobs-table store))
-                                         key holder run-id)
-                              (conn:exec c (format nil "UPDATE ~A SET lease_holder = NULL, lease_until = NULL, current_run = NULL, updated_at = ? WHERE job_key = ? AND lease_holder = ? AND current_run = ?"
-                                                   (jobs-table store))
-                                         now key holder run-id)))))
-        (conn:exec c (format nil "UPDATE ~A SET outcome = ?, finished_at = ?, counts = ?, error = ? WHERE id = ?"
-                             (runs-table store))
-                   (%word outcome) now (s:write-data counts) error run-id)
-        owned))))
+      ;; REMOVE-JOB deletes only a row whose definition is still the one the run started from,
+      ;; compared as the text WRITE-DATA gives, which is what the row holds. A row replaced
+      ;; meanwhile matches no DELETE and is released by the UPDATE instead.
+      (flet ((remove-unchanged ()
+               (multiple-value-bind (args-term args-params)
+                   (%equals "args" (s:write-data (s:stored-job-args remove-job)))
+                 (plusp (apply #'conn:exec c
+                               (format nil "DELETE FROM ~A WHERE job_key = ? AND lease_holder = ? AND current_run = ? AND function_name = ? AND schedule = ? AND ~A"
+                                       (jobs-table store) args-term)
+                               key holder run-id (s:stored-job-function-name remove-job)
+                               (s:write-data (s:stored-job-schedule remove-job)) args-params))))
+             (release ()
+               (plusp (conn:exec c (format nil "UPDATE ~A SET lease_holder = NULL, lease_until = NULL, current_run = NULL, updated_at = ? WHERE job_key = ? AND lease_holder = ? AND current_run = ?"
+                                           (jobs-table store))
+                                 now key holder run-id))))
+        (let ((owned (or (and remove-job (remove-unchanged)) (release))))
+          (conn:exec c (format nil "UPDATE ~A SET outcome = ?, finished_at = ?, counts = ?, error = ? WHERE id = ?"
+                               (runs-table store))
+                     (%word outcome) now (s:write-data counts) error run-id)
+          owned)))))
 
 (defun %insert-run (c store run)
   (conn:exec c (format nil "INSERT INTO ~A (~A) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"

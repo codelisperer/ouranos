@@ -316,6 +316,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "client")
+                             (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
                              (:file "fetch"))))
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 

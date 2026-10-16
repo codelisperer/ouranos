@@ -248,22 +248,32 @@ its tag.
   `(:weekly (:mon :fri) (hour minute) :zone ...)` or `(:once universal-time)`; a daily or
   weekly slot that falls in a daylight-saving gap runs at the first instant after it, and one
   that falls in an overlap runs once, at the earlier instant. `schedule-once` stores a one-off
-  run with arguments. Each instance of the app runs a `scheduler` over the same store, and a
+  run with arguments; given a `:key` a stored job already has, it signals `job-exists` unless
+  passed `:replace t`. Each instance of the app runs a `scheduler` over the same store, and a
   lease in the store means each slot runs once across all of them; a slot missed while no
   instance was running runs once when one starts (trigger `:catch-up`). Jobs run on an
   `aion/pool` pool the scheduler makes for itself, of two workers by default. Every run is
   recorded with its trigger, outcome (`:completed`, `:completed-with-errors`, `:failed`,
   `:skipped`, `:abandoned`), the counts plist the job returned, and an error text; a job calls
   `note-item-error` for an item that failed without failing the run. `run-now` and `run-job`
-  run a job off its schedule. `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the
-  run log. Drive the scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv
-  timer), and end it with `stop`. **A job must tolerate running twice**: when an instance dies
+  run a job off its schedule, and start nothing while this instance is still running the job;
+  when a run of the job is still starting here, `run-now` waits for it and returns its id. Each
+  run gets its own copy of the job's arguments.
+  `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the run log. Drive the
+  scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv timer), and end it
+  with `stop`, which returns `:timed-out` while a lease renewal an earlier `stop` started is
+  still using the store. **A job must tolerate running twice**: when an instance dies
   during a run, the run is marked `:abandoned` once its lease expires and another instance runs
   the job again (trigger `:retry`), once per slot: a retry that is abandoned too is not retried.
   A stored job that cannot be read back is returned with `stored-job-unreadable` set, logged
-  once and left alone, and `run-now` on it signals `unreadable-job`. Lease times come from each instance's own clock, which may
-  differ from another's by up to about a third of `:lease-seconds` (100 seconds at the default
-  of 300), so keep the instances' clocks synchronised. `mnemosyne/jobs:make-db-job-store` keeps
+  once and left alone, and `run-now` on it signals `unreadable-job`; `define-job` or
+  `schedule-once :replace t` rewrites it. A driver other than the two here calls
+  `reserve-driver` before its first tick, so that a `stop` during that tick waits for it. A
+  store's `store-finish` takes the stored job the run started from as `:remove-job`, and
+  removes the job only when its definition is unchanged. Lease times come from each
+  instance's own clock, which may differ from another's by up to about a third of
+  `:lease-seconds` (100 seconds at the default of 300), so keep the instances' clocks
+  synchronised. `mnemosyne/jobs:make-db-job-store` keeps
   jobs in the tables `aion_jobs` and `aion_job_runs`; it refuses to start with
   `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
   migrations, or pass `:ensure t`. See `docs/scheduling.md`.
@@ -942,6 +952,39 @@ its tag.
     back too, and the attempt is retried. Before, they stayed written and the next attempt only
     finished the promotion. A promotion callback that keeps signalling therefore leaves the
     window skipped with nothing in the thread, where before its thread observations were kept.
+
+- **`aion/platform:shipped-image-p` is false inside `bin/cons`** (#703). `bin/cons` is one dumped
+  file, so its runtime and core are the same file, and an app run under it (`cons test-app`, for
+  example) read it as a shipped Linux build on every OS: `shipped-image-p` returned true and
+  `shipped-image-directory` (and `hyperion/desktop:install-directory`) returned the tree's `bin/`.
+  `bootstrap.lisp` now dumps `bin/cons` with `:development-runner t`, which puts
+  `:ouranos-development-runner` on `*features*`, and `shipped-image-p` returns false while that
+  feature is present. The new `aion/platform:development-runner-p` reports it, and
+  `shipped-image-p` takes `:development-runner` to override it. `scripts/dump-image.lisp`'s
+  `dump-executable` and `dump-core` take `:development-runner` and remove the feature for every
+  other dump, so an app dumped from inside `bin/cons` still reads as shipped. Rebuild `bin/cons`
+  (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`) to get the mark. An app that looks
+  for its assets only in the source tree, because `shipped-image-p` was wrong under `cons`, can
+  use `shipped-image-p` again.
+
+- **`aion/http-client`: verified https requests work when the default libssl is OpenSSL 4**
+  (#706). cl+ssl reads a certificate's names with `ASN1_STRING_data`, which OpenSSL 4 removed,
+  so on a host whose default libcrypto is OpenSSL 4 every https request that verifies the
+  server's host name failed: dexador's own requests, which call cl+ssl with `:verify` and
+  `:hostname`, and those made with `:connect-address`. `aion/http-client` now points
+  `cl+ssl::asn1-string-data` at `ASN1_STRING_get0_data`, which OpenSSL 1.1, 3 and 4 all have,
+  in `aion/src/http-client/openssl.lisp`. The fix applies only in an image that loads
+  `aion/http-client`; an image that uses dexador or cl+ssl without it is still affected. The
+  patch is removed once the pinned cl+ssl contains cl-plus-ssl pull request 202, and this file
+  will say so then.
+
+- **hyperion/csrf: a protected form no longer shows a stray "T" after its hidden `_csrf`
+  field** (#663). `token-field` returned `T`, and the `:form` deftag calls it inside the
+  form's Spinneret body, which prints a body form's value, so every `post`, `put`, `patch`,
+  `delete` or `hx-post` form rendered with a token read `<input type=hidden name=_csrf …>T`,
+  visible on the page and read aloud by screen readers. `token-field` now returns no values.
+  An app that calls `token-field` itself and read its return value, `T` when a field was
+  written, now gets no value.
 
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,
