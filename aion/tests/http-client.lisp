@@ -401,6 +401,18 @@ root: without CA-PATH the self-signed certificate is refused as well."
         (signals http:http-error (get-as "other.test"))
         (signals http:http-error (get-as "pinned.test" :ca nil))))))
 
+(test the-cl+ssl-patch-for-openssl-4-is-in-place
+  "#706: aion/http-client points cl+ssl's ASN1-STRING-DATA at ASN1_STRING_get0_data, because
+OpenSSL 4 removed ASN1_STRING_data, which cl+ssl calls to read a certificate's names. This fails
+when the patch is missing, and when a later load of cl+ssl has put the old definition back. On a
+host whose libcrypto is OpenSSL 4, the pinned test above fails as well. Remove the patch and this
+test once the pinned cl+ssl contains cl-plus-ssl pull request 202."
+  (skip-on-windows "cl+ssl is not used on Windows"
+    ;; Read only off Windows: there is no CL+SSL package on Windows.
+    #-os-windows
+    (is (eq (fdefinition 'cl+ssl::asn1-string-get0-data) (fdefinition 'cl+ssl::asn1-string-data))
+        "cl+ssl::asn1-string-data is the call to ASN1_STRING_get0_data")))
+
 ;;; --- fetch-public ---------------------------------------------------------------------
 
 (defun %resolver (table)
