@@ -112,8 +112,12 @@ if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + ht
     (unwind-protect
          (let ((process (sb-ext:run-program
                          browser
+                         ;; --use-mock-keychain and --password-store=basic: on macOS, headless
+                         ;; Chrome otherwise waits on the keychain and never exits (CI, #724).
                          (list "--headless" "--disable-gpu" "--no-sandbox" "--no-first-run"
-                               "--no-default-browser-check"
+                               "--no-default-browser-check" "--use-mock-keychain"
+                               "--password-store=basic" "--disable-background-networking"
+                               "--disable-component-update" "--disable-extensions"
                                (format nil "--user-data-dir=~A" (uiop:native-namestring profile))
                                (format nil "--virtual-time-budget=~D" +smoke-budget+)
                                "--dump-dom" url)

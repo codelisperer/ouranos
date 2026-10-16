@@ -562,11 +562,13 @@ JSON with &quot; for each double quote."
 (test an-hx-delete-form-with-its-own-hx-headers-is-refused-at-compile-time
   ;; The injector cannot merge its header into the author's JSON, which may be computed at
   ;; run time. A form compiled with an error signals when it runs, and the message names
-  ;; the conflict.
+  ;; the conflict. The compiler's own report goes to a null stream: the gate fails a suite
+  ;; whose output carries a `caught ERROR' line (#263), and this one is expected.
   (let ((message (handler-case
-                     (progn (eval '(spinneret:with-html-string
-                                    (:form :hx-delete "/x" :hx-headers "{}" (:span "y"))))
-                            nil)
+                     (let ((*error-output* (make-broadcast-stream)))
+                       (eval '(spinneret:with-html-string
+                               (:form :hx-delete "/x" :hx-headers "{}" (:span "y"))))
+                       nil)
                    (error (c) (princ-to-string c)))))
     (is (stringp message) "the form must not compile")
     (is (and message (search "hx-delete and hx-headers" message)) "~S" message)))
