@@ -22,8 +22,11 @@
 ;;;;                (:concat SEPARATOR PLACE...) the values of the PLACEs joined by SEPARATOR
 ;;;;   :upstream  where the latest release is published:
 ;;;;                (:github-release "owner/repo") (:github-commit "owner/repo")
-;;;;                (:npm "package") (:sourceforge "project") (:nuget "package")
-;;;;                (:quicklisp-dist) (:docker "image") (:manual "url")
+;;;;                (:github-tag "owner/repo" "prefix") (:npm "package") (:nuget "package")
+;;;;                (:quicklisp-dist) (:docker "image" [suffix]) (:manual "url")
+;;;;              A :github-tag considers only tags starting with prefix that carry a version
+;;;;              number. A :docker entry considers only tags shaped like the pin, and, with a
+;;;;              suffix, only those ending in it (".04" for Ubuntu's long-term releases).
 ;;;;   :reviewed  for :manual entries only: the date (YYYY-MM-DD) somebody last read the URL,
 ;;;;              or :never
 ;;;;   :held      optional: (:reason "why this pin is not on the latest release" :issue N)
@@ -32,7 +35,7 @@
 
 (:name "SBCL" :category :toolchain
  :where ((:env "scripts/versions.env" "SBCL_VERSION"))
- :upstream (:sourceforge "sbcl"))
+ :upstream (:github-tag "sbcl/sbcl" "sbcl-"))
 
 (:name "Coalton" :category :toolchain
  :where ((:field "coalton.pin" "sha"))
@@ -40,7 +43,7 @@
 
 (:name "appimagetool" :category :toolchain
  :where ((:env "scripts/versions.env" "APPIMAGETOOL_VERSION"))
- :upstream (:github-release "AppImage/appimagetool"))
+ :upstream (:github-tag "AppImage/appimagetool" ""))
 
 (:name "WebView2 SDK" :category :toolchain
  :where ((:env "scripts/versions.env" "WEBVIEW2_SDK_VERSION"))
@@ -80,7 +83,7 @@
                   (:text "hyperion/hyperion-view/webview.h" "#define WEBVIEW_VERSION_MINOR " nil)
                   (:text "hyperion/hyperion-view/webview.h" "#define WEBVIEW_VERSION_PATCH " nil))
          (:text "hyperion/hyperion-view/README.md" "webview/webview **v" "**"))
- :upstream (:github-release "webview/webview"))
+ :upstream (:github-tag "webview/webview" ""))
 
 (:name "CLDR plural rules" :category :native
  :where ((:field "hyperion/src/vendor/PLURALS.pin" "version")
@@ -153,13 +156,15 @@
 (:name "actions/checkout" :category :ci
  :where ((:text ".github/workflows/verify.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/checkout@" nil)
-         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/checkout@" nil))
+         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/checkout@" nil)
+         (:text ".github/workflows/upstream.yml" "uses: actions/checkout@" nil))
  :upstream (:github-release "actions/checkout"))
 
 (:name "actions/cache" :category :ci
  :where ((:text ".github/workflows/verify.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/cache@" nil)
-         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/cache@" nil))
+         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/cache@" nil)
+         (:text ".github/workflows/upstream.yml" "uses: actions/cache@" nil))
  :upstream (:github-release "actions/cache"))
 
 (:name "actions/upload-artifact" :category :ci
@@ -188,7 +193,7 @@
 
 (:name "pgvector (Windows CI)" :category :ci
  :where ((:text ".github/workflows/verify.yml" "PGVECTOR_VERSION: \"" "\""))
- :upstream (:github-release "pgvector/pgvector"))
+ :upstream (:github-tag "pgvector/pgvector" "v"))
 
 ;;; --- containers --------------------------------------------------------------------------
 
@@ -198,4 +203,4 @@
 
 (:name "clean-machine base image" :category :container
  :where ((:text "scripts/verify-clean-machine.sh" "image=ubuntu:" nil))
- :upstream (:docker "library/ubuntu"))
+ :upstream (:docker "library/ubuntu" ".04"))

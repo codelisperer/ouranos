@@ -377,7 +377,7 @@ SBCL_SHA256_X86_64_LINUX=39fac28407405841003e4c2abfbe0d96abd93b7701e8b61cdd35e71
 (defparameter +upstream-inventory+
   "(:name \"SBCL\" :category :toolchain
  :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\"))
- :upstream (:sourceforge \"sbcl\"))
+ :upstream (:github-tag \"sbcl/sbcl\" \"sbcl-\"))
 (:name \"libuv\" :category :native
  :where ((:field \"libuv.pin\" \"version\")
          (:text \"scripts/build-libuv.lisp\" \"https://dist.libuv.org/dist/v\" \"/\"))
@@ -462,6 +462,36 @@ where ~A consumes an argument and ~/pkg:fn/ calls a function (the hub's review o
   "A missing inventory is not a clean one."
   (multiple-value-bind (code output) (%run-upstream (%upstream-tree :inventory nil))
     (is (= 2 code) "exit ~D~%~A" code output)))
+
+(test upstream-online-reports-an-unreachable-source-as-unknown
+  "--online with the GitHub API pointed at a port where nothing listens. All three entries are
+GitHub-sourced, so each must be reported as unknown and none as current, and the run still
+exits 0: a lookup that could not be made says nothing about whether a pin is behind (the hub's
+ruling on #716). The child loads aion/http-client from THIS tree, through the source registry."
+  (let* ((tree (%upstream-tree))
+         (script (%install-checker tree "check-upstream.lisp"))
+         (out (make-string-output-stream))
+         (code (nth-value 2 (uiop:run-program
+                             (list (namestring sb-ext:*runtime-pathname*) "--script" (namestring script) "--online")
+                             :output out :error-output out :ignore-error-status t
+                             :environment (append (list (%source-registry-variable)
+                                                        "CHECK_UPSTREAM_GITHUB_API=http://127.0.0.1:9")
+                                                  (remove-if (lambda (v) (or (search "CL_SOURCE_REGISTRY=" v)
+                                                                             (search "CHECK_UPSTREAM_" v)
+                                                                             (search "GITHUB_TOKEN=" v)))
+                                                             (sb-ext:posix-environ))))))
+         (output (get-output-stream-string out)))
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "3 unknown" output) "all three are unknown: ~A" output)
+    (is (not (search " current " output)) "and none is reported current: ~A" output)))
+
+(test upstream-self-test-holds
+  "The comparison rules: a major tag v7 is current against v7.0.1, a pg18 image is compared only
+with pg18 tags, a pre-release is not a latest release."
+  (multiple-value-bind (code output)
+      (%run (%install-checker (%fresh-tree) "check-upstream.lisp") "--self-test")
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "0 failed" output) "~A" output)))
 
 ;;; --- the harness itself -----------------------------------------------------
 

@@ -173,8 +173,13 @@ workflow. A version written anywhere else, such as an image tag in a compose fil
 version string in the source or a `runs-on:` line, is covered only if somebody adds an entry
 for it; nothing finds it missing. It is offline and deterministic, like the rest of the gate.
 
-The online comparison with upstream, and the weekly job that rewrites one tracking issue with
-the result, are the second step of #716 and are PLANNED there.
+`sbcl --script scripts/check-upstream.lisp --online` compares each entry with its upstream
+and prints current, behind, held (behind on purpose, with its reason and issue), manual (an API
+version checked by hand, with its review date) or unknown. **Unknown means the source could not
+be reached or read, and is never reported as current.** It exits 0 whatever it finds.
+`.github/workflows/upstream.yml` runs it every Monday, and on demand, with `issues: write` and no
+other permission, and rewrites the one open issue labelled `upstream` with the result. That
+issue is the list of what is behind; the inventory says where each pin lives.
 
 ### Adopting a new version of a vendored native
 
