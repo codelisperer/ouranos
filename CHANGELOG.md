@@ -328,6 +328,15 @@ its tag.
   or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
   connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+- **praxeon: the default Anthropic model is `claude-sonnet-5-5`** (#764), in place of
+  `claude-sonnet-5`, which Anthropic now lists as a legacy model. `praxeon/llm:*default-model*`
+  holds it. An app that sets neither `PRAXEON_ANTHROPIC_MODEL` nor `PRAXEON_LLM_MODEL` and makes
+  an `anthropic` provider without `:model` now sends `claude-sonnet-5-5`, so its answers, token
+  counts and price per token can change. To keep the old model, set
+  `PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5` or pass `:model "claude-sonnet-5"`.
+  `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
+  unchanged. The documentation's examples now name
+  `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
 

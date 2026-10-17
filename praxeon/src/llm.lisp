@@ -13,9 +13,10 @@
 
 (cl:in-package #:praxeon/llm)
 
-(defparameter *default-model* "claude-sonnet-5"
-  "Default model id. Confirmed a valid Claude API model string; for heavy
-agentic tool-use loops prefer a more capable model such as \"claude-opus-4-8\".")
+(defparameter *default-model* "claude-sonnet-5-5"
+  "Default model id: Claude Sonnet 5.5, the current Sonnet model on Anthropic's models page
+(read 2026-10-17, #764). For heavy agentic tool-use loops prefer a more capable model such as
+\"claude-opus-5-5\".")
 
 (defparameter *default-max-tokens* 8192
   "The output-token limit for a completion when the caller passes no :max-tokens. An agent turn
@@ -31,7 +32,7 @@ written through a tool is output), and, on a model that thinks before answering,
 The default model decides for itself whether to think when a request carries no thinking
 setting, and this client sends none. A consuming app raised the limit to 8,192 after its tool
 calls were cut off at 1,024. The models praxeon names as defaults accept 8,192:
-claude-sonnet-5 (*DEFAULT-MODEL*) and claude-opus-4-8 allow up to 128,000 output tokens, and
+claude-sonnet-5-5 (*DEFAULT-MODEL*) and claude-opus-5-5 allow up to 128,000 output tokens, and
 the model card of qwen2.5 (the default model of OPENAI-COMPATIBLE) gives its generation length
 as 8,192 tokens. For a model whose maximum is lower, pass :max-tokens or bind this lower.
 
