@@ -785,13 +785,15 @@ signalled, after signalling ENTERED."))
     (sb-thread:signal-semaphore gate)
     (is (eq :stopped (s:stop a :timeout 5)))))
 
-(test stop-starts-no-renewal-when-its-wait-ends-just-before-the-timeout
-  "#728. A timed wait can return a little before its timeout. A notify of the idle condition
-variable 30 ms before STOP's timeout stands for that. With only that much left, STOP starts no
-renewal. Before #728 it started one whenever any time was left."
+(defun %stop-after-an-early-wakeup ()
+  "Run STOP with a 0.3 s timeout over a held run, with a notify of the idle condition variable
+255 ms after a start time taken just before STOP is called. Returns four values: true when
+STOP started no renewal, the seconds from START to the notify, what that STOP returned, and what
+a second STOP returned after the run was let go."
   (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
          (gate (sb-thread:make-semaphore))
-         (a (s:make-scheduler store :clock clock :lease-seconds 3)))
+         (a (s:make-scheduler store :clock clock :lease-seconds 3))
+         (skipped nil) (first-stop nil))
     (s:define-job a "slow" (lambda (ctx) (declare (ignore ctx))
                              (sb-thread:wait-on-semaphore gate) nil)
                   :schedule '(:every 600))
@@ -801,12 +803,12 @@ renewal. Before #728 it started one whenever any time was left."
     (let* ((go (sb-thread:make-semaphore))
            (start nil)
            (woke-at nil)
-           ;; Counts from START, taken just before STOP is called, rather than from its own
-           ;; spawn, so the wakeup comes 30 ms before STOP's deadline however late STOP starts.
+           ;; Counts from START rather than from its own spawn, so the wakeup comes 45 ms
+           ;; before STOP's deadline however late STOP starts.
            (waker (spawn "early wakeup"
                          (lambda ()
                            (sb-thread:wait-on-semaphore go)
-                           (let ((until (+ start (* 27/100 internal-time-units-per-second))))
+                           (let ((until (+ start (* 255/1000 internal-time-units-per-second))))
                              (loop for wait = (- until (get-internal-real-time))
                                    while (plusp wait)
                                    do (sleep (/ wait internal-time-units-per-second))))
@@ -814,23 +816,42 @@ renewal. Before #728 it started one whenever any time was left."
                            (sb-thread:with-mutex ((s::%lock a))
                              (sb-thread:condition-broadcast (s::%idle a)))
                            t)))
-           ;; Lets a renewal that was held go after 4 seconds, so that the test ends either way.
+           ;; Lets a renewal that was held go after 4 seconds, so that the attempt ends either way.
            (releaser (spawn "renewal releaser"
                             (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t))))
       (setf start (get-internal-real-time))
       (sb-thread:signal-semaphore go)
-      (is (eq :timed-out (s:stop a :timeout 0.3)))
-      (is (eq :renew (hold store)) "no renewal started in the last 30 ms")
-      (setf (hold store) nil)
+      (setf first-stop (s:stop a :timeout 0.3))
+      (setf skipped (eq :renew (hold store))
+            (hold store) nil)
       (tt:join waker :timeout 10)
       (tt:join releaser :timeout 10)
-      ;; A wakeup after the timeout leaves STOP nothing to decide, and the test would pass with
-      ;; or without the margin.
-      (is (< (- woke-at start) (* 3/10 internal-time-units-per-second))
-          "the wakeup came ~,3F s after STOP was called, which is not before its 0.3 s timeout"
-          (/ (- woke-at start) internal-time-units-per-second)))
-    (sb-thread:signal-semaphore gate)
-    (is (eq :stopped (s:stop a :timeout 5)))))
+      (sb-thread:signal-semaphore gate)
+      (values skipped (/ (- woke-at start) internal-time-units-per-second)
+              first-stop (s:stop a :timeout 5)))))
+
+(test stop-starts-no-renewal-when-its-wait-ends-just-before-the-timeout
+  "#728. A timed wait can return a little before its timeout. A notify of the idle condition
+variable 45 ms before STOP's timeout stands for that. With only that much left, STOP starts no
+renewal. Before #728 it started one whenever any time was left.
+
+An attempt counts only when the notify came within 280 ms, which leaves STOP time to see it
+before its timeout; a later one leaves STOP nothing to decide, and the attempt would pass with
+or without the margin. A loaded machine can oversleep, so the test makes up to five attempts and
+checks the first one that counts."
+  (let ((wakes '()))
+    (loop repeat 5
+          do (multiple-value-bind (skipped wake first-stop second-stop)
+                 (%stop-after-an-early-wakeup)
+               (push wake wakes)
+               (when (< wake 28/100)
+                 (is (eq :timed-out first-stop))
+                 (is (eq :stopped second-stop))
+                 (is (eq t skipped) "a renewal started with ~,3F s of the timeout left"
+                     (- 3/10 wake))
+                 (return)))
+          finally (fail "no attempt's notify came within 280 ms of STOP: ~{~,3F~^, ~} s"
+                        (reverse wakes)))))
 
 (test stop-gives-up-on-a-lease-renewal-at-its-timeout
   (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
