@@ -713,6 +713,13 @@ ITEM-ENDS, each with its own current_period_end."
                               (subseq both 1)))
       (is (= want (%period-end-of both)) "the item's period end, not the subscription's"))))
 
+(test a-subscription-with-no-items-falls-back-to-its-own-period-end
+  (is (= (pay:unix->universal 1800000000)
+         (%period-end-of "{\"id\":\"sub_1\",\"customer\":\"cus_1\",\"status\":\"active\",\"current_period_end\":1800000000,\"items\":{\"data\":[]}}"))
+      "an empty items list uses the subscription's current_period_end")
+  (is (= 0 (%period-end-of "{\"id\":\"sub_1\",\"customer\":\"cus_1\",\"status\":\"active\",\"items\":{\"data\":[]}}"))
+      "with neither, the period end is 0, as before"))
+
 (test a-subscription-ends-at-the-earliest-period-end-among-its-items
   (let ((s (pay:subscription-state
             (%stripe :responses (list (cons "/v1/subscriptions/sub_1"

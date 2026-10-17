@@ -34,8 +34,8 @@ for an absent time, and 0 would otherwise become 1970 rather than nothing."
 ;;; Without a Stripe-Version header, Stripe answers in the version the account was set to
 ;;; when it was created, so the shape of every response depends on the account rather than
 ;;; on this file (#734). Every request sends this version. A webhook payload is the
-;;; exception: Stripe renders it in the version of the webhook endpoint, which is set in the
-;;; dashboard, so VERIFY-WEBHOOK logs a warning when the two differ and the readers below
+;;; exception: Stripe renders it in the version of the webhook endpoint, which is fixed when the
+;;; endpoint is created, so VERIFY-WEBHOOK logs a warning when the two differ and the readers below
 ;;; accept both the shape of this version and the shape from before 2025-03-31.basil.
 
 (defparameter +stripe-api-version+ "2026-09-30.endive"
@@ -361,8 +361,8 @@ be an id or, when expanded, the subscription object."
   "Log a warning when a webhook event's api_version is not +STRIPE-API-VERSION+ (#734).
 
 The event is still parsed: the readers accept both shapes, and refusing it would drop a real
-change to a subscription. The warning tells the operator to move the webhook endpoint to the
-pinned version. A value that does not look like a version is described, not logged."
+change to a subscription. The warning tells the operator to replace the webhook endpoint with one
+created at the pinned version, because Stripe cannot change an existing endpoint's version. A value that does not look like a version is described, not logged."
   (when (and version (not (equal version +stripe-api-version+)))
     (log:warn "stripe webhook api_version differs from the pinned version"
               :event-api-version (if (%version-string-p version)

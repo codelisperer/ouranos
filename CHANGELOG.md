@@ -20,8 +20,11 @@ its tag.
   comes in the version of the webhook endpoint instead, so when an event's `api_version`
   differs, `verify-webhook` logs the warning "stripe webhook api_version differs from the pinned
   version", with `event-api-version` and `pinned-api-version` fields, and still parses the
-  event. To stop the warning, set the endpoint's API version to `2026-09-30.endive` in the
-  Stripe dashboard. Both readers take the newer shape and fall back to the older one: the period
+  event. Stripe cannot change an existing endpoint's API version, so to stop the warning the
+  app creates a new webhook endpoint at `2026-09-30.endive` and then disables the old one;
+  Stripe's guide "Handle webhook versioning" gives the steps. Create it through the API with
+  `api_version=2026-09-30.endive`: the Dashboard creates an endpoint only at the latest
+  version, and a later version also differs from the pin and gets the warning. Both readers take the newer shape and fall back to the older one: the period
   end from `items.data[].current_period_end`, else the subscription's `current_period_end`, and
   an invoice's subscription from `parent.subscription_details.subscription`, else its top-level
   `subscription`.
