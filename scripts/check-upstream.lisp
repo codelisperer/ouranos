@@ -137,7 +137,14 @@ says why the place could not be read at all."
                     (return-from place-values
                       (values nil (format nil "~S gives different values: ~{~A~^, ~}" part found))))
                    (t (push (first found) values)))))
-         (values (list (format nil (format nil "~~{~~A~~^~A~~}" separator) (reverse values))) nil))))
+         ;; Joined with WRITE-STRING, never by splicing SEPARATOR into a FORMAT control string:
+         ;; upstream.sexp is data, and a ~/pkg:fn/ directive in it would call a function
+         ;; (the hub's review of #737).
+         (values (list (with-output-to-string (out)
+                         (loop for (v . more) on (reverse values)
+                               do (write-string v out)
+                                  (when more (write-string separator out)))))
+                 nil))))
     (t (values nil (format nil "unknown place ~S" place)))))
 
 (defun place-file (place)

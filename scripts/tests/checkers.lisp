@@ -450,6 +450,14 @@ SBCL_SHA256_X86_64_LINUX=39fac28407405841003e4c2abfbe0d96abd93b7701e8b61cdd35e71
     (is (= 1 code) "exit ~D~%~A" code output)
     (is (search "Twilio: a :manual upstream needs :reviewed" output) "~A" output)))
 
+(test upstream-joins-a-concat-separator-as-text-not-as-a-format-directive
+  "upstream.sexp is data. A :concat separator was once spliced into a FORMAT control string,
+where ~A consumes an argument and ~/pkg:fn/ calls a function (the hub's review of #737)."
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :inventory (format nil "~A(:name \"joined\" :category :toolchain :where ((:concat \"~~A\" (:env \"scripts/versions.env\" \"SBCL_VERSION\") (:env \"scripts/versions.env\" \"SBCL_VERSION\"))) :upstream (:github-release \"x/y\"))~%" +upstream-inventory+)))
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "2.6.9~A2.6.9" output) "the separator is printed as written: ~A" output)))
+
 (test upstream-exits-2-when-the-inventory-cannot-be-read
   "A missing inventory is not a clean one."
   (multiple-value-bind (code output) (%run-upstream (%upstream-tree :inventory nil))
