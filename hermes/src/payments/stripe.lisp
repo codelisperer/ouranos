@@ -29,6 +29,18 @@ for an absent time, and 0 would otherwise become 1970 rather than nothing."
   (when (and seconds (integerp seconds) (plusp seconds))
     (+ seconds +unix-epoch+)))
 
+;;; --- the API version -------------------------------------------------------
+;;;
+;;; Without a Stripe-Version header, Stripe answers in the version the account was set to
+;;; when it was created, so the shape of every response depends on the account rather than
+;;; on this file (#734). Every request sends this version. A webhook payload is the
+;;; exception: Stripe renders it in the version of the webhook endpoint, which is set in the
+;;; dashboard, so VERIFY-WEBHOOK logs a warning when the two differ and the readers below
+;;; accept both the shape of this version and the shape from before 2025-03-31.basil.
+
+(defparameter +stripe-api-version+ "2026-09-30.endive"
+  "The Stripe API version sent as the Stripe-Version header on every request (#734).")
+
 ;;; --- the provider ---------------------------------------------------------
 
 (defclass stripe-payments (payment-provider)
@@ -68,7 +80,8 @@ ENSURE-2XX carrying Stripe's body, which is where it explains the refusal, and t
 below turns that into a PAYMENT-ERROR."
   (let* ((url (format nil "~A~A" (stripe-api-base p) path))
          (headers (append (list (cons "Authorization"
-                                      (format nil "Bearer ~A" (stripe-api-key p))))
+                                      (format nil "Bearer ~A" (stripe-api-key p)))
+                                (cons "Stripe-Version" +stripe-api-version+))
                           (when idempotency-key
                             (list (cons "Idempotency-Key" idempotency-key)))))
          (req (http:make-request :method method :url url :headers headers :content form
@@ -103,6 +116,22 @@ below turns that into a PAYMENT-ERROR."
     ("incomplete" . :unpaid) ("incomplete_expired" . :unpaid))
   "Stripe subscription status -> the neutral keyword.")
 
+(defun %period-end (o)
+  "The Unix time at which subscription O's current period ends.
+
+From 2025-03-31.basil, Stripe gives the period end on each subscription item
+(items.data[].current_period_end) and no longer on the subscription. When the items carry
+one, this is the earliest among them, so a status that has gone stale cannot keep access open
+past the first item's renewal date (#734). An object in the older shape has none on its
+items, and then the subscription's own current_period_end is used."
+  (let ((ends (loop with data = (%get o "items" "data")
+                    for item across (if (vectorp data) data #())
+                    for end = (%get item "current_period_end")
+                    when (and (integerp end) (plusp end)) collect end)))
+    (if ends
+        (reduce #'min ends)
+        (gethash "current_period_end" o))))
+
 (defun %stripe->subscription (o)
   "A Stripe subscription object as the neutral SUBSCRIPTION."
   (when (hash-table-p o)
@@ -115,7 +144,7 @@ below turns that into a PAYMENT-ERROR."
        :status (or (cdr (assoc (or (gethash "status" o) "") +stripe-status+ :test #'string=))
                    :unpaid)
        ;; UNIX -> UNIVERSAL. See the header: unconverted, everything reads as expired.
-       :current-period-end (or (unix->universal (gethash "current_period_end" o)) 0)
+       :current-period-end (or (unix->universal (%period-end o)) 0)
        :cancel-at-period-end-p (and (gethash "cancel_at_period_end" o) t)
        :trial-end (unix->universal (gethash "trial_end" o))
        ;; The price is what they pay; the product is the TIER. Both, because a price is
@@ -284,6 +313,7 @@ unverified payload is worth reading, including its type."
            (tag (cdr (assoc type +stripe-events+ :test #'string=)))
            (object (%get o "data" "object")))
       (unless tag (error 'unmapped-event :event-type type))
+      (%warn-on-other-api-version (gethash "api_version" o))
       (let ((envelope (list :id (or (gethash "id" o) "")
                             ;; UNIX -> UNIVERSAL again. This is the ordering key that stops a
                             ;; late `updated` overwriting a newer `canceled`, so a wrong base
@@ -307,11 +337,43 @@ unverified payload is worth reading, including its type."
           (:refunded (apply #'make-event :kind kind:Refunded
                             :refund (%stripe->refund object) envelope)))))))
 
+(defun %invoice-subscription-ref (o)
+  "The id of the subscription invoice O bills, or NIL.
+
+From 2025-03-31.basil, Stripe gives it at parent.subscription_details.subscription and no
+longer at the invoice's top-level subscription field. The new place is read first, and the
+old one is the fallback for a webhook endpoint still on an older version (#734). Either may
+be an id or, when expanded, the subscription object."
+  (flet ((ref (s)
+           (cond ((stringp s) s)
+                 ((hash-table-p s) (let ((id (gethash "id" s))) (and (stringp id) id))))))
+    (or (ref (%get o "parent" "subscription_details" "subscription"))
+        (ref (gethash "subscription" o)))))
+
+(defun %version-string-p (v)
+  "True when V looks like a Stripe API version: 1 to 40 characters of [A-Za-z0-9.-]."
+  (and (stringp v) (<= 1 (length v) 40)
+       (every (lambda (c) (or (char<= #\a c #\z) (char<= #\A c #\Z) (char<= #\0 c #\9)
+                              (char= c #\.) (char= c #\-)))
+              v)))
+
+(defun %warn-on-other-api-version (version)
+  "Log a warning when a webhook event's api_version is not +STRIPE-API-VERSION+ (#734).
+
+The event is still parsed: the readers accept both shapes, and refusing it would drop a real
+change to a subscription. The warning tells the operator to move the webhook endpoint to the
+pinned version. A value that does not look like a version is described, not logged."
+  (when (and version (not (equal version +stripe-api-version+)))
+    (log:warn "stripe webhook api_version differs from the pinned version"
+              :event-api-version (if (%version-string-p version)
+                                     version
+                                     "(not a version string)")
+              :pinned-api-version +stripe-api-version+)))
+
 (defun %stripe->payment (o status)
   (when (hash-table-p o)
     (make-payment :ref (or (gethash "id" o) "")
-                  :subscription-ref (let ((s (gethash "subscription" o)))
-                                      (if (stringp s) s nil))
+                  :subscription-ref (%invoice-subscription-ref o)
                   :amount (money:make-money (or (gethash "amount_paid" o)
                                                 (gethash "amount_due" o)
                                                 (gethash "amount" o) 0)

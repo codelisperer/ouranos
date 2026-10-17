@@ -87,7 +87,8 @@
 
 (defsystem "hermes/payments/tests"
   :description "Tests for the neutral payments protocol."
-  :depends-on ("hermes/payments" "aion/secret" "aion/http-client" "fiveam")  ; payments.lisp calls http:
+  :depends-on ("hermes/payments" "aion/secret" "aion/http-client" "fiveam"  ; payments.lisp calls http:
+               "aion/log")          ; the #734 test captures the api_version warning
   :serial t
   :components ((:module "tests"
                 :serial t

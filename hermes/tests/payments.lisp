@@ -662,6 +662,119 @@
                                  (%stripe-sig +stripe-event-json+ "whsec_test"))))
     (is (= (+ 1800000000 pay:+unix-epoch+) (pay:event-occurred-at ev)))))
 
+;;; --- the pinned API version and the two shapes it changed (#734) ----------
+;;;
+;;; From 2025-03-31.basil Stripe moved the period end from the subscription to its items, and
+;;; the invoice's subscription from the top level to parent.subscription_details. Requests get
+;;; the pinned version's shape; a webhook gets the shape of its endpoint's version, which may
+;;; be older, so each reader is tested in both shapes.
+
+(defun %endive-sub-json (&rest item-ends)
+  "A subscription in the 2026-09-30.endive shape: no top-level period end, one item per
+ITEM-ENDS, each with its own current_period_end."
+  (format nil "{\"id\":\"sub_1\",\"customer\":\"cus_1\",\"status\":\"active\",\"cancel_at_period_end\":false,\"trial_end\":null,\"items\":{\"data\":[~{{\"current_period_end\":~D,\"price\":{\"id\":\"price_1\",\"product\":\"prod_pro\"}}~^,~}]}}"
+          item-ends))
+
+(defun %period-end-of (json)
+  (pay:subscription-current-period-end
+   (pay:subscription-state (%stripe :responses (list (cons "/v1/subscriptions/sub_1" json)))
+                           "sub_1")))
+
+(test every-stripe-request-sends-the-pinned-api-version
+  (let ((versions '()))
+    (let ((p (%stripe :perform (lambda (req)
+                                 (push (cdr (assoc "Stripe-Version"
+                                                   (aion/http-client:request-headers req)
+                                                   :test #'string-equal))
+                                       versions)
+                                 (aion/http-client:make-response
+                                  :status 200 :body +stripe-sub-json+)))))
+      (pay:subscription-state p "sub_1")
+      (pay:cancel-subscription p "sub_1"))
+    (is (= 2 (length versions)))
+    (is (equal "2026-09-30.endive" pay:+stripe-api-version+))
+    (is (every (lambda (v) (equal v "2026-09-30.endive")) versions)
+        "Stripe-Version on each request: ~S" versions)))
+
+(test a-subscription-period-end-is-read-in-either-shape
+  (let ((want (pay:unix->universal 1800000000)))
+    (is (= want (%period-end-of (%endive-sub-json 1800000000)))
+        "the endive shape keeps the period end on the item")
+    (is (= want (%period-end-of +stripe-sub-json+))
+        "the older shape keeps it on the subscription")
+    (is (pay:subscription-grants-access-p
+         (pay:subscription-state
+          (%stripe :responses (list (cons "/v1/subscriptions/sub_1" (%endive-sub-json 1800000000))))
+          "sub_1"))
+        "an endive subscription whose period has not ended grants access")
+    ;; When both are present the item wins, because the item is what the pinned version means.
+    (let ((both (%endive-sub-json 1800000000)))
+      (setf both (concatenate 'string (subseq both 0 1) "\"current_period_end\":1900000000,"
+                              (subseq both 1)))
+      (is (= want (%period-end-of both)) "the item's period end, not the subscription's"))))
+
+(test a-subscription-ends-at-the-earliest-period-end-among-its-items
+  (let ((s (pay:subscription-state
+            (%stripe :responses (list (cons "/v1/subscriptions/sub_1"
+                                            (%endive-sub-json 1900000000 1800000000 1850000000))))
+            "sub_1")))
+    (is (= (pay:unix->universal 1800000000) (pay:subscription-current-period-end s))
+        "the earliest of the three items")
+    (is (not (pay:subscription-grants-access-p s (+ (pay:unix->universal 1800000000) 1)))
+        "a second after the first item's period ends, the status no longer grants access")))
+
+(defun %invoice-event-json (subscription-fields)
+  (format nil "{\"id\":\"evt_inv\",\"type\":\"invoice.paid\",\"created\":1800000000,\"data\":{\"object\":{\"id\":\"in_1\",\"amount_paid\":900,\"currency\":\"usd\",~A}}}"
+          subscription-fields))
+
+(test an-invoice-event-names-its-subscription-in-either-shape
+  (let ((p (%stripe)))
+    (flet ((ref (fields)
+             (let ((json (%invoice-event-json fields)))
+               (pay:payment-subscription-ref
+                (pay:event-payment (pay:verify-webhook p json (%stripe-sig json "whsec_test")))))))
+      (is (equal "sub_1" (ref "\"parent\":{\"type\":\"subscription_details\",\"subscription_details\":{\"subscription\":\"sub_1\"}}"))
+          "the endive shape, under parent.subscription_details")
+      (is (equal "sub_1" (ref "\"subscription\":\"sub_1\""))
+          "the older shape, at the top level")
+      (is (equal "sub_1" (ref "\"parent\":{\"subscription_details\":{\"subscription\":{\"id\":\"sub_1\"}}}"))
+          "the endive shape with the subscription expanded")
+      (is (null (ref "\"parent\":null")) "an invoice with no subscription"))))
+
+(defun %webhook-warnings (json)
+  "Verify JSON as a Stripe webhook with warn logging captured. Returns the event and the log
+lines about the API version."
+  (let ((out (make-string-output-stream)) (ev nil))
+    (unwind-protect
+         (progn (aion/log:setup :env :dev :level :warn :stream out)
+                (setf ev (pay:verify-webhook (%stripe) json (%stripe-sig json "whsec_test"))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (values ev (remove-if-not (lambda (line) (search "api_version" line))
+                              (uiop:split-string (get-output-stream-string out)
+                                                 :separator '(#\Newline))))))
+
+(defun %versioned-event-json (version)
+  (format nil "{\"id\":\"evt_v\",\"type\":\"customer.subscription.updated\",\"created\":1800000000,\"api_version\":\"~A\",\"data\":{\"object\":~A}}"
+          version +stripe-sub-json+))
+
+(test a-webhook-from-another-api-version-is-logged-and-still-parsed
+  (multiple-value-bind (ev lines) (%webhook-warnings (%versioned-event-json "2025-02-24.acacia"))
+    (is (= 1 (length lines)) "one warning: ~S" lines)
+    (is (search "2025-02-24.acacia" (first lines)) "names the event's version: ~A" (first lines))
+    (is (search "2026-09-30.endive" (first lines)) "names the pinned version: ~A" (first lines))
+    (is (string= "subscription-changed" (pay:event-kind-name ev)) "and the event still parses")
+    (is (= (pay:unix->universal 1800000000)
+           (pay:subscription-current-period-end (pay:event-subscription ev)))))
+  ;; Control: the pinned version logs nothing.
+  (multiple-value-bind (ev lines) (%webhook-warnings (%versioned-event-json "2026-09-30.endive"))
+    (is (null lines) "no warning for the pinned version: ~S" lines)
+    (is (string= "subscription-changed" (pay:event-kind-name ev))))
+  ;; A value that is not a version string is described, not copied into the log.
+  (multiple-value-bind (ev lines) (%webhook-warnings (%versioned-event-json "x y<734>"))
+    (declare (ignore ev))
+    (is (= 1 (length lines)) "~S" lines)
+    (is (null (search "<734>" (first lines))) "~A" (first lines))))
+
 ;;; --- construction -----------------------------------------------------------
 
 (test a-missing-credential-is-refused-at-construction-not-at-the-till

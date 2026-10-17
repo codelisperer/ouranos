@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **The Stripe backend sends `Stripe-Version: 2026-09-30.endive` on every request** (#734),
+  where it sent no `Stripe-Version` before and Stripe answered in the version the account was
+  created with. `hermes/payments:+stripe-api-version+` names the version. A webhook payload
+  comes in the version of the webhook endpoint instead, so when an event's `api_version`
+  differs, `verify-webhook` logs the warning "stripe webhook api_version differs from the pinned
+  version", with `event-api-version` and `pinned-api-version` fields, and still parses the
+  event. To stop the warning, set the endpoint's API version to `2026-09-30.endive` in the
+  Stripe dashboard. Both readers take the newer shape and fall back to the older one: the period
+  end from `items.data[].current_period_end`, else the subscription's `current_period_end`, and
+  an invoice's subscription from `parent.subscription_details.subscription`, else its top-level
+  `subscription`.
+- **A Stripe subscription's `subscription-current-period-end` is the earliest period end among
+  its items** (#734), when its items carry one, which they do from `2025-03-31.basil`. Before,
+  it was read only from the subscription's own `current_period_end`. An account or webhook
+  endpoint on `2025-03-31.basil` or later does not send that field, so the period end read as 0
+  and `subscription-grants-access-p` granted access on the status alone. A
+  subscription whose items renew on different dates now stops granting access when the first
+  item's period ends, unless a newer event or `subscription-state` brings a later one.
+
 - **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
   place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
   fetch it and check an existing checkout out at it. Re-run the setup script, or run
