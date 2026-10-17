@@ -614,6 +614,11 @@ instead of starting a second."
 (#728). 50 ms is about three ticks of the 15.6 ms timer a timed wait on Windows can return
 early by.")
 
+(defvar *stop-clock* #'get-internal-real-time
+  "The function STOP reads the time from, in internal time units: GET-INTERNAL-REAL-TIME. A test
+binds it to put STOP a set distance from its deadline without waiting for that time to pass
+(#728).")
+
 (defun stop (scheduler &key (timeout 30))
   "Stop SCHEDULER: start no more runs, make STOP-REQUESTED-P true, stop its driver, and wait for
 the runs in progress to finish, renewing their leases meanwhile. All of it within TIMEOUT
@@ -623,8 +628,8 @@ waits for it again. A renewal an earlier STOP left going is waited for too, beca
 uses the store, even when no run is left. Runs
 still going keep their leases, which expire once the process has gone, and another instance
 then runs them again."
-  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
-    (flet ((left () (/ (- deadline (get-internal-real-time)) internal-time-units-per-second))
+  (let ((deadline (+ (funcall *stop-clock*) (* timeout internal-time-units-per-second))))
+    (flet ((left () (/ (- deadline (funcall *stop-clock*)) internal-time-units-per-second))
            (running-keys ()
              (%with-lock (scheduler)
                (loop for k being the hash-keys of (%running scheduler) collect k))))
