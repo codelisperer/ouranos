@@ -54,6 +54,7 @@
    #:provider-request-failed #:provider-request-failed-status
    #:provider-request-failed-error-type #:provider-request-failed-error-code
    #:provider-request-failed-body
+   #:unknown-tool-choice #:unknown-tool-choice-value
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text

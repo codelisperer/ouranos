@@ -66,6 +66,28 @@ its tag.
   `error-code` and `body-length` fields. An app that read the service's explanation from the
   report, the detail or the log line reads it from `provider-request-failed-body`.
 
+- **praxeon: an unrecognised tool-choice value signals `praxeon/conditions:unknown-tool-choice`,
+  and the value is on the condition, not in its report or the log** (#727). Before, the
+  message was `unknown tool-choice` followed by the value, and the `llm request failed` warn
+  line logged it; a forced tool's name can come from a prompt. The new condition is a subclass
+  of `deliberation-failure`, so a handler for that still receives it. Its reader is
+  `unknown-tool-choice-value`. The report and `deliberation-failure-detail` now say what kind of
+  value it was and its length, for example `unknown tool-choice: a list of 2 elements`. An app
+  that read the value from the report, the detail or the log line reads it from
+  `unknown-tool-choice-value`.
+
+- **praxeon: the report of `praxeon/conditions:tool-choice-unsupported` no longer prints the
+  tool choice** (#727). `complete` signals it inside the handler that writes the `llm request
+  failed` warn line, so with the meta impl a forced `(:tool "name")` reached the log. The report
+  now says what kind of value it was and its length, for example `a list of 2 elements`. The
+  value is still in `tool-choice-unsupported-requested`; an app that read it from the report
+  reads it there.
+
+- **praxeon: `provider-request-failed-error-type` and `-error-code` are NIL unless the value is
+  1 to 64 letters, digits, underscores, dots or hyphens** (#727). Both are logged, and a proxy
+  between praxeon and the service can answer with its own error JSON, so a value with other
+  characters could be text of its own. The value is still in `provider-request-failed-body`.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
