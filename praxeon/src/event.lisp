@@ -52,6 +52,15 @@
 ;;;;                           0 that it reported none. ESTIMATED-INPUT is the estimate the
 ;;;;                           history budget was enforced against. Not emitted when the
 ;;;;                           provider reported no counts at all
+;;;;   (:type :image-usage  :provider .. :model .. :count .. :size .. :quality ..
+;;;;                        [:input-tokens ..] [:output-tokens ..] [:cost ..])
+;;;;                        -- an image request succeeded (praxeon/image, #758). PROVIDER and
+;;;;                           MODEL are strings, COUNT the number of images returned, SIZE and
+;;;;                           QUALITY as the provider reported them, or as requested when it
+;;;;                           did not. The token counts and COST are present only when the
+;;;;                           provider reported them: a COST that is absent was not reported,
+;;;;                           and is never sent as 0. Named apart from :USAGE, which carries a
+;;;;                           model step's token counts, until #493 settles one usage interface
 ;;;;   (:type :tool-held    :id .. :held .. :principal .. :name .. :source .. :estimate ..
 ;;;;                        :at .. :agent .. :conversation ..)
 ;;;;                        -- a call to a means registered with :CONFIRM is held, and the turn
