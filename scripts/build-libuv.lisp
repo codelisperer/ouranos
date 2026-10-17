@@ -308,9 +308,9 @@ has fetched a tarball, verified its checksum and unpacked it. So a machine with 
 did two megabytes of work and a SHA-256 to arrive at a message it could have been given
 immediately. Measured on a machine with Visual Studio made invisible:
 
-  libuv 1.53.0 (WINDOWS)
-    fetching https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0.tar.gz
-    sha256 verified (cb0d6dd2128d5a95)
+  libuv 1.52.1 (WINDOWS)
+    fetching https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
+    sha256 verified (66d511b9e6e334c0)
     unpacking
   FAILED: No MSVC C++ toolchain found. ...
 
