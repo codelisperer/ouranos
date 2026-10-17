@@ -28,8 +28,10 @@ provider key (§1) and jump to [Talk to Elise](#4-talk-to-elise). The sections b
 explain each piece for when you want to set things up by hand or need to troubleshoot.
 
 (The framework-local `scripts/setup.sh` still works as an **interim** convenience —
-it clones Coalton, seeds `.env`, and with `--test` compiles + runs the suite — but
-discovery now comes from the bootstrap drop-in, not a `local-projects` symlink.)
+it checks that Coalton is at the commit in the monorepo's `coalton.pin`, seeds `.env`,
+and with `--test` compiles + runs the suite — but discovery now comes from the bootstrap
+drop-in, not a `local-projects` symlink. It does not install Coalton: the monorepo's
+`scripts/setup.sh` or `scripts/setup.ps1` checks out the pinned commit.)
 
 ## Prerequisites
 

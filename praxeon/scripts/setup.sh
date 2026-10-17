@@ -8,7 +8,8 @@
 #
 # Idempotent (safe to re-run). Does NOT install SBCL or Quicklisp -- it checks
 # for them and tells you how to get them. What it does:
-#   1. Clone Coalton (a local checkout; not pulled by Quicklisp).
+#   1. Check that Coalton is checked out at the commit the monorepo's coalton.pin names. The
+#      monorepo's scripts/setup.sh is what clones it and checks that commit out.
 #   2. Create .env from .env.example (never overwriting an existing one).
 #   3. (optional, with --test) compile and run the network-free test suite.
 #
@@ -70,14 +71,22 @@ else
 fi
 
 # --- 1. Coalton (local checkout; Praxeon's typed core needs it) --------------
-COALTON_DIR="$HOME/common-lisp/coalton"
-if [ -d "$COALTON_DIR/.git" ]; then
-  info "Coalton present at $COALTON_DIR (leave as-is; 'git -C $COALTON_DIR pull' to update)."
-else
-  info "Cloning Coalton into $COALTON_DIR ..."
-  mkdir -p "$HOME/common-lisp"
-  git clone --depth 1 https://github.com/coalton-lang/coalton "$COALTON_DIR"
+# The commit comes from the monorepo's coalton.pin. This script only checks it: the monorepo's
+# scripts/setup.sh clones Coalton and checks out the pinned commit, so that is done in one place.
+MONOREPO_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
+PIN_FILE="$MONOREPO_ROOT/coalton.pin"
+COALTON_REF=$(awk '/^sha[[:space:]]/ {print $2; exit}' "$PIN_FILE" 2>/dev/null || true)
+[ -n "$COALTON_REF" ] || die "no 'sha' line in $PIN_FILE."
+COALTON_DIR="${COALTON_DIR:-$HOME/common-lisp/coalton}"
+FIX="Run scripts/setup.sh at the monorepo root ($MONOREPO_ROOT), which checks out the pinned commit."
+[ -d "$COALTON_DIR/.git" ] || die "Coalton is not checked out at $COALTON_DIR. $FIX"
+# coalton.pin carries a short sha, so compare resolved commit ids.
+current=$(git -C "$COALTON_DIR" rev-parse HEAD 2>/dev/null || echo "")
+want=$(git -C "$COALTON_DIR" rev-parse --verify --quiet "$COALTON_REF^{commit}" 2>/dev/null || echo "")
+if [ -z "$want" ] || [ "$current" != "$want" ]; then
+  die "Coalton at $COALTON_DIR is at ${current:0:8}, but coalton.pin names $COALTON_REF. $FIX"
 fi
+info "Coalton at $COALTON_DIR is at the pinned $COALTON_REF."
 
 # --- 2. System discovery (handled by the repo-root bootstrap, not here) -------
 info "Discovery: run \`sbcl --script bootstrap.lisp\` at the repo root (writes the ASDF drop-in)."
