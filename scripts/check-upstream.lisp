@@ -370,11 +370,14 @@ bootstrap.lisp's drop-in registers it, so the client is this tree's own."
         (:github-commit
          (let* ((branch (json (get-json (format nil "~A/repos/~A" (github-api) id)) "default_branch"))
                 (compare (get-json (format nil "~A/repos/~A/compare/~A...~A" (github-api) id pinned branch)))
-                (ahead (json compare "ahead_by"))
-                (head (subseq (json compare "commits" (1- (length (json compare "commits"))) "sha") 0 8)))
+                (ahead (json compare "ahead_by")))
+           ;; AHEAD_BY first: a pin at the branch head has no commits to take the newest from, and
+           ;; reading one anyway reported it unknown instead of current (the hub's review of #738).
            (if (zerop ahead)
                (values pinned :current nil)
-               (values head :behind (format nil "~D commit~:P behind ~A" ahead branch)))))
+               (let ((commits (json compare "commits")))
+                 (values (subseq (json commits (1- (length commits)) "sha") 0 8)
+                         :behind (format nil "~D commit~:P behind ~A" ahead branch))))))
         (:npm (versioned (json (get-json (format nil "~A/~A" (npm-registry) id)) "dist-tags" "latest")))
         (:nuget
          (let ((versions (remove-if-not #'stable-p
@@ -412,10 +415,24 @@ bootstrap.lisp's drop-in registers it, so the client is this tree's own."
         (setf status :held
               detail (format nil "~@[~A; ~]~A (#~D)" detail (getf held :reason) (getf held :issue)))))
     (when (eq status :manual)
-      (let ((r (getf entry :reviewed)))
-        (setf detail (format nil "check ~A by hand; ~A" (second (getf entry :upstream))
-                             (if (eq r :never) "never reviewed" (format nil "reviewed ~A" r))))))
+      (let ((r (getf entry :reviewed))
+            (held (getf entry :held)))
+        ;; A held entry checked by hand shows its hold too, so Stripe's row names #734 (the hub's
+        ;; review of #738).
+        (setf detail (format nil "check ~A by hand; ~A~@[; held: ~A~]" (second (getf entry :upstream))
+                             (if (eq r :never) "never reviewed" (format nil "reviewed ~A" r))
+                             (and held (format nil "~A (#~D)" (getf held :reason) (getf held :issue)))))))
     (list (getf entry :name) (getf entry :category) value latest status detail)))
+
+(defun cell (x)
+  "X as the text of one Markdown table cell: a | inside a tag name or an error would end the cell
+early (the hub's review of #738), so it is escaped, and a line break becomes a space."
+  (with-output-to-string (out)
+    (loop for c across (princ-to-string (or x ""))
+          do (case c
+               (#\| (write-string "\\|" out))
+               ((#\Newline #\Return) (write-char #\Space out))
+               (t (write-char c out))))))
 
 (defun write-markdown (rows stream)
   (format stream "Written by `scripts/check-upstream.lisp --online` (#716). Each row is an entry in `upstream.sexp`.~%~%")
@@ -428,7 +445,7 @@ bootstrap.lisp's drop-in registers it, so the client is this tree's own."
       (when these
         (format stream "## ~A (~D)~%~%| Name | Pinned | Latest | Note |~%|---|---|---|---|~%" (second group) (length these))
         (dolist (r these)
-          (format stream "| ~A | ~A | ~A | ~A |~%" (first r) (third r) (or (fourth r) "") (or (sixth r) "")))
+          (format stream "| ~A | ~A | ~A | ~A |~%" (cell (first r)) (cell (third r)) (cell (fourth r)) (cell (sixth r))))
         (terpri stream)))))
 
 ;;; --- self-test -----------------------------------------------------------------------------

@@ -485,6 +485,81 @@ ruling on #716). The child loads aion/http-client from THIS tree, through the so
     (is (search "3 unknown" output) "all three are unknown: ~A" output)
     (is (not (search " current " output)) "and none is reported current: ~A" output)))
 
+(defun %fake-api (routes)
+  "Serve ROUTES, an alist of (path-prefix . json-string), over HTTP on 127.0.0.1 from a thread.
+Returns (values port stop-function). A path no route matches gets a 404."
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (stop nil))
+    (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+    (sb-bsd-sockets:socket-bind socket #(127 0 0 1) 0)
+    (sb-bsd-sockets:socket-listen socket 8)
+    (let ((port (nth-value 1 (sb-bsd-sockets:socket-name socket)))
+          (thread
+            (sb-thread:make-thread
+             (lambda ()
+               (loop until stop
+                     do (let ((client (ignore-errors (sb-bsd-sockets:socket-accept socket))))
+                          (when client
+                            (ignore-errors
+                             (let* ((stream (sb-bsd-sockets:socket-make-stream
+                                             client :input t :output t :external-format :latin-1
+                                                    :element-type 'character))
+                                    (line (read-line stream nil ""))
+                                    (path (second (uiop:split-string line :separator " ")))
+                                    (route (find-if (lambda (r) (eql 0 (search (car r) path))) routes))
+                                    (body (if route (cdr route) "{\"message\":\"Not Found\"}")))
+                               (loop for h = (read-line stream nil "")
+                                     until (zerop (length (string-trim '(#\Return) h))))
+                               (format stream "HTTP/1.1 ~A~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+                                       (if route "200 OK" "404 Not Found") #\Return #\Linefeed #\Return #\Linefeed
+                                       (length body) #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed body)
+                               (finish-output stream)))
+                            (ignore-errors (sb-bsd-sockets:socket-close client))))))
+             :name "fake-github-api")))
+      (values port
+              (lambda ()
+                (setf stop t)
+                (ignore-errors (sb-bsd-sockets:socket-close socket))
+                (sb-thread:join-thread thread :default nil :timeout 5))))))
+
+(test upstream-online-reads-a-pin-at-the-branch-head-as-current
+  "Against a local server standing in for the GitHub API (the hub's review of #738):
+- a Coalton pin with no commits after it is current. Reading the newest commit before checking
+  ahead_by took an element of an empty list, and the pin was reported unknown;
+- a held :manual entry shows its hold;
+- a | in a note is escaped in the Markdown table, where it would otherwise end the cell."
+  (let ((tree (%upstream-tree
+               :inventory (format nil "~A(:name \"Coalton\" :category :toolchain :where ((:field \"coalton.pin\" \"sha\")) :upstream (:github-commit \"coalton-lang/coalton\"))~%(:name \"Stripe\" :category :api :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\")) :upstream (:manual \"https://example.com\") :reviewed :never :held (:reason \"a | b\" :issue 734))~%" +upstream-inventory+))))
+    (%write (merge-pathnames "coalton.pin" tree)
+            (format nil "sha     024d0a17~%advisories https://github.com/coalton-lang/coalton/security/advisories~%reviewed   2026-10-15~%"))
+    (multiple-value-bind (port stop)
+        (%fake-api '(("/repos/coalton-lang/coalton/compare/" . "{\"ahead_by\":0,\"commits\":[]}")
+                     ("/repos/coalton-lang/coalton" . "{\"default_branch\":\"main\"}")
+                     ("/repos/sbcl/sbcl/tags" . "[{\"name\":\"sbcl-2.6.9\"}]")
+                     ("/repos/libuv/libuv/releases/latest" . "{\"tag_name\":\"v1.52.1\"}")
+                     ("/repos/actions/checkout/releases/latest" . "{\"tag_name\":\"v7.0.1\"}")))
+      (unwind-protect
+           (let* ((script (%install-checker tree "check-upstream.lisp"))
+                  (markdown (merge-pathnames "report.md" tree))
+                  (out (make-string-output-stream))
+                  (code (nth-value 2 (uiop:run-program
+                                      (list (namestring sb-ext:*runtime-pathname*) "--script" (namestring script)
+                                            "--online" "--markdown" (namestring markdown))
+                                      :output out :error-output out :ignore-error-status t
+                                      :environment (append (list (%source-registry-variable)
+                                                                 (format nil "CHECK_UPSTREAM_GITHUB_API=http://127.0.0.1:~D" port))
+                                                           (remove-if (lambda (v) (or (search "CL_SOURCE_REGISTRY=" v)
+                                                                                      (search "CHECK_UPSTREAM_" v)
+                                                                                      (search "GITHUB_TOKEN=" v)))
+                                                                      (sb-ext:posix-environ))))))
+                  (output (get-output-stream-string out))
+                  (report (or (ignore-errors (uiop:read-file-string markdown)) "")))
+             (is (= 0 code) "exit ~D~%~A" code output)
+             (is (search "1 manual, 4 current" output) "Coalton, SBCL, libuv and checkout are current: ~A" output)
+             (is (search "held: a | b (#734)" output) "the manual row shows its hold: ~A" output)
+             (is (search "held: a \\| b (#734)" report) "and the table escapes its |: ~A" report))
+        (funcall stop)))))
+
 (test upstream-self-test-holds
   "The comparison rules: a major tag v7 is current against v7.0.1, a pg18 image is compared only
 with pg18 tags, a pre-release is not a latest release."
