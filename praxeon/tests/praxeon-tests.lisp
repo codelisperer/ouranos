@@ -2937,7 +2937,9 @@ including the two optional breakdowns.")
 
 (defun %answer-one-request (listener reply)
   "Accept one connection on LISTENER within 10 seconds, read its request, and answer with REPLY
-as JSON. Returns the request line, the headers as an alist with lowercased names, and the body."
+as JSON, with status 200; or, when REPLY is a cons (STATUS-LINE . TEXT), answer TEXT with that
+status, such as \"400 Bad Request\" (#719). Returns the request line, the headers as an alist
+with lowercased names, and the body."
   (let* ((socket (loop with deadline = (+ (get-universal-time) 10)
                        for s = (sb-bsd-sockets:socket-accept listener)
                        when s return (progn (setf (sb-bsd-sockets:non-blocking-mode s) nil) s)
@@ -2959,10 +2961,12 @@ as JSON. Returns the request line, the headers as an alist with lowercased names
                                              "0")))
                   (body (make-string length)))
              (read-sequence body stream)
-             (format stream "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
-                     #\Return #\Newline #\Return #\Newline
-                     (length (sb-ext:string-to-octets reply :external-format :utf-8))
-                     #\Return #\Newline #\Return #\Newline #\Return #\Newline reply)
+             (let ((status (if (consp reply) (car reply) "200 OK"))
+                   (text (if (consp reply) (cdr reply) reply)))
+               (format stream "HTTP/1.1 ~A~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+                       status #\Return #\Newline #\Return #\Newline
+                       (length (sb-ext:string-to-octets text :external-format :utf-8))
+                       #\Return #\Newline #\Return #\Newline #\Return #\Newline text))
              (finish-output stream)
              (list request-line headers body)))
       (close stream))))
@@ -3971,6 +3975,105 @@ though it were the cost."
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
 
 ;;; --------------------------------------------------------------------------
+;;; #719: a failed provider request logs the status, the error type and code and the body's
+;;; length, and never the body. The body goes on the condition.
+;;;
+;;; Each reply below carries a marker string in the place a provider puts its explanation, which
+;;; is also where it can repeat the request. The marker must reach the condition's BODY and must
+;;; not reach the log line or the condition's report.
+;;; --------------------------------------------------------------------------
+
+(defparameter +719-marker+ "MARKER-719-the-users-prompt")
+
+(defun %failed-request-and-log (make-provider reply)
+  "Serve REPLY, a (STATUS-LINE . TEXT), to one request from the provider MAKE-PROVIDER builds
+from a port, with warn logging captured. Returns the condition signalled and the log lines that
+mention the failure."
+  (let ((out (make-string-output-stream))
+        (condition nil))
+    (multiple-value-bind (port server) (%serve-replies (list reply))
+      (unwind-protect
+           (progn
+             (aion/log:setup :env :dev :level :warn :stream out)
+             (handler-case (llm:complete (funcall make-provider port)
+                                         '((:role :user :content "Hello.")))
+               (cnd:provider-request-failed (c) (setf condition c)))
+             (aion/test-threads:join server :timeout 10))
+        (aion/log:setup :env :dev :level :warn :stream *standard-output*)))
+    (values condition
+            (remove-if-not (lambda (line) (search "llm request failed" line))
+                           (uiop:split-string (get-output-stream-string out)
+                                              :separator '(#\Newline))))))
+
+(defun %anthropic-at (port)
+  (make-instance 'llm:anthropic :api-key "test-key" :model "m"
+                                :endpoint (format nil "http://127.0.0.1:~D/v1/messages" port)))
+
+(defun %openai-at (port)
+  (make-instance 'llm:openai-compatible :api-key "test-key" :model "m"
+                                        :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+
+(test an-anthropic-failure-logs-the-status-type-and-length-and-not-the-body
+  (let ((body (format nil "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"~A\"}}"
+                      +719-marker+)))
+    (multiple-value-bind (c lines) (%failed-request-and-log #'%anthropic-at (cons "400 Bad Request" body))
+      (is (typep c 'cnd:deliberation-failure) "an app's handler for a failed call still receives it")
+      (is (eql 400 (cnd:provider-request-failed-status c)))
+      (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
+      (is (null (cnd:provider-request-failed-error-code c)) "Anthropic sends no code")
+      (is (equal body (cnd:provider-request-failed-body c)) "the whole body is on the condition")
+      (is (null (search +719-marker+ (princ-to-string c))) "the report leaves the body out")
+      (is (= 1 (length lines)) "one warn line: ~S" lines)
+      (let ((line (first lines)))
+        (is (null (search +719-marker+ line)) "the log line leaves the body out: ~A" line)
+        (is (search "status=400" line) "~A" line)
+        (is (search "error-type=invalid_request_error" line) "~A" line)
+        (is (search (format nil "body-length=~D" (length body)) line) "~A" line)))))
+
+(test an-openai-compatible-failure-logs-the-type-and-code-and-not-the-body
+  (let ((body (format nil "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"~A\"}}"
+                      +719-marker+)))
+    (multiple-value-bind (c lines) (%failed-request-and-log #'%openai-at (cons "404 Not Found" body))
+      (is (eql 404 (cnd:provider-request-failed-status c)))
+      (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
+      (is (equal "model_not_found" (cnd:provider-request-failed-error-code c)))
+      (is (equal body (cnd:provider-request-failed-body c)))
+      (is (= 1 (length lines)))
+      (is (null (search +719-marker+ (first lines))) "~A" (first lines))
+      (is (search "error-code=model_not_found" (first lines)) "~A" (first lines)))))
+
+(test a-failure-whose-body-is-not-json-logs-no-type-or-code-and-not-the-body
+  (let ((body (format nil "<html><body>~A</body></html>" +719-marker+)))
+    (multiple-value-bind (c lines) (%failed-request-and-log #'%anthropic-at (cons "502 Bad Gateway" body))
+      (is (eql 502 (cnd:provider-request-failed-status c)))
+      (is (null (cnd:provider-request-failed-error-type c)))
+      (is (null (cnd:provider-request-failed-error-code c)))
+      (is (equal body (cnd:provider-request-failed-body c)))
+      (is (= 1 (length lines)))
+      (is (null (search +719-marker+ (first lines))) "~A" (first lines))
+      (is (search (format nil "body-length=~D" (length body)) (first lines))))))
+
+(test a-long-error-type-is-not-taken-as-one
+  "The type and code are logged, so a value that is not a short identifier, which could be the
+body, is read as no type at all."
+  (let ((long (make-string 65 :initial-element #\x)))
+    (is (equal '(nil nil) (multiple-value-list
+                           (praxeon/llm::%provider-error-fields
+                            (format nil "{\"error\":{\"type\":\"~A\",\"code\":\"~A\"}}" long long)))))
+    (is (equal '("t" "42") (multiple-value-list
+                            (praxeon/llm::%provider-error-fields "{\"error\":{\"type\":\"t\",\"code\":42}}")))
+        "control: a short type, and a numeric code, are read")))
+
+(test a-request-that-fails-before-a-response-is-still-a-provider-request-failed
+  (let ((c (praxeon/llm::%request-failure "rerank request failed"
+                                          (make-condition 'aion/http-client:http-error
+                                                          :detail "connection refused"))))
+    (is (typep c 'cnd:provider-request-failed))
+    (is (null (cnd:provider-request-failed-status c)))
+    (is (null (cnd:provider-request-failed-body c)))
+    (is (search "connection refused" (princ-to-string c)))))
+
+;;; --------------------------------------------------------------------------
 ;;; #326: a step cut off by the output limit is not used.
 ;;;
 ;;; The scripted provider returns a completion whose stop reason is :max-tokens, which is what
@@ -4459,9 +4562,125 @@ model, which is what the file's commentary is for."
   (let* ((rows (funcall (find-symbol "RUN-BENCHMARK" "PRAXEON/BENCH/TOOL-RESULTS")
                         :tasks 2 :pages 4 :stream (make-broadcast-stream)))
          (by (lambda (name) (find name rows :key (lambda (r) (getf r :configuration))))))
-    (is (equal '(:full :offload :clear) (mapcar (lambda (r) (getf r :configuration)) rows)))
+    (is (equal '(:full :offload :clear :clear-wide :offload-and-clear)
+               (mapcar (lambda (r) (getf r :configuration)) rows)))
     (is (every (lambda (r) (= 2 (getf r :succeeded))) rows) "every task succeeded: ~S" rows)
     (is (< (getf (funcall by :offload) :input-tokens) (getf (funcall by :full) :input-tokens)))))
+
+;;; The benchmark's own reporting (#319): the provider's token counts, the mixed task, and a
+;;; turn that fails. Each test loads the file and calls it by name, as the one above does.
+
+(defun %bench (name &rest args)
+  (load (asdf:system-relative-pathname :praxeon "bench/tool-results.lisp"))
+  (apply (find-symbol name "PRAXEON/BENCH/TOOL-RESULTS") args))
+
+(defun %bench-row (rows name)
+  (find name rows :key (lambda (r) (getf r :configuration))))
+
+(test the-tool-results-benchmark-reports-the-providers-counts-and-they-meet-the-estimates
+  "With *SCRIPTED-USAGE*, the scripted model reports Anthropic-style counts: the request's
+estimated tokens less the simulated cached ones as input, and those cached ones as cache read.
+The two sums are collected different ways, from the :USAGE events and from the requests, so
+they have to meet."
+  (%bench "RUN-BENCHMARK" :tasks 1 :stream (make-broadcast-stream)) ; loads the file, so the variable exists
+  (let* ((usage (find-symbol "*SCRIPTED-USAGE*" "PRAXEON/BENCH/TOOL-RESULTS"))
+         (rows (progv (list usage) '(t)
+                 (%bench "RUN-BENCHMARK" :tasks 2 :pages 4 :stream (make-broadcast-stream)))))
+    (dolist (r rows)
+      (is (= (getf r :input-tokens) (+ (getf r :reported-input) (getf r :reported-cache-read)))
+          "~A: reported input plus cache read is the estimate: ~S" (getf r :configuration) r)
+      (is (= (getf r :cached-share)
+             (/ (getf r :reported-cache-read) (getf r :input-tokens)))
+          "~A: the cache read is the simulated cached share" (getf r :configuration))
+      (is (eql 0 (getf r :reported-cache-write)) "a reported 0 stays 0"))
+    (is (string= "full" (string-downcase (getf (first rows) :configuration)))))
+  (let ((rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 4 :stream (make-broadcast-stream))))
+    (is (every (lambda (r) (and (null (getf r :reported-input)) (null (getf r :reported-cache-read))
+                                (null (getf r :reported-cache-write)) (null (getf r :reported-output))))
+               rows)
+        "control: a model that reports nothing leaves every count NIL, not 0")))
+
+(test the-tool-results-benchmark-mixed-task-gives-offload-and-clear-something-to-clear
+  (let ((uniform (%bench "RUN-BENCHMARK" :tasks 2 :stream (make-broadcast-stream)))
+        (mixed (%bench "RUN-BENCHMARK" :tasks 2 :task :mixed :stream (make-broadcast-stream))))
+    (is (plusp (getf (%bench-row mixed :offload-and-clear) :clear-batches))
+        "on the mixed task, the small pages stay in the prompt and a batch of them is cleared")
+    (is (= 2 (getf (%bench-row mixed :offload-and-clear) :succeeded)))
+    (is (zerop (getf (%bench-row uniform :offload-and-clear) :clear-batches))
+        "control: on the uniform task every page is offloaded, so nothing is cleared")
+    (is (< (getf (%bench-row mixed :full) :input-tokens) (getf (%bench-row uniform :full) :input-tokens))
+        "the mixed task's small pages are smaller")
+    (is (= (getf (%bench-row uniform :offload) :input-tokens)
+           (getf (%bench-row uniform :offload-and-clear) :input-tokens)))))
+
+(defclass sometimes-counted (llm:provider)
+  ((calls :initform 0 :accessor counted-calls)
+   (every-other :initarg :every-other :reader counted-every-other))
+  (:documentation "A provider that answers at once. It reports usage on every other request
+when EVERY-OTHER is true, and never otherwise."))
+
+(defmethod llm:complete ((p sometimes-counted) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (let ((report (and (counted-every-other p) (oddp (incf (counted-calls p))))))
+    (llm:make-completion :text "I could not find it." :stop-reason :end
+                         :input-tokens (and report 10) :output-tokens (and report 5)
+                         :cache-read-tokens (and report 0) :cache-write-tokens nil)))
+
+(test the-tool-results-benchmark-marks-figures-that-not-every-request-reported
+  "The actor emits :USAGE only for a step whose provider reported a count, so a provider that
+reports on some requests gives a sum over those alone. The row carries how many requests
+reported each figure, and the report marks a partial sum with a star."
+  (let* ((out (make-string-output-stream))
+         (rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                       :provider (make-instance 'sometimes-counted :every-other t)))
+         (r (first rows))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (= 10 (getf r :reported-input)))
+    (is (= 1 (getf r :reported-input-requests)) "one of the two requests reported input")
+    (is (= 1 (getf r :input-requests)) "and so the estimate covers one request too")
+    (is (null (getf r :reported-cache-write)))
+    (is (= 0 (getf r :reported-cache-write-requests))
+        "a field the :USAGE event left out is not counted as reported")
+    (is (search "10*" text) "the partial input is marked: ~A" text)
+    (is (search "Fewer requests reported" text)))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                           :provider (make-instance 'sometimes-counted :every-other nil))))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (null (getf r :input-tokens)) "no request reported, so there is no estimate, not 0")
+    (is (null (getf r :reported-input)))
+    (is (null (search "Fewer requests reported" text)) "nothing partial, so no footnote"))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= (getf r :requests) (getf r :input-requests))
+        "control: the scripted model's estimate covers every request")
+    (is (null (search "*" text)) "control: no figure is marked")))
+
+(defclass failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails, with a message that must not be printed."))
+
+(defmethod llm:complete ((p failing-provider) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (error "request refused for key sk-test-0000-not-printed"))
+
+(test the-tool-results-benchmark-counts-failed-turns-and-does-not-print-their-errors
+  (let* ((out (make-string-output-stream))
+         (events 0)
+         (rows (evt:with-observer ((lambda (e) (declare (ignore e)) (incf events)))
+                 (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :provider (make-instance 'failing-provider)
+                                         :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf (first rows) :errors)))
+    (is (= 0 (getf (first rows) :succeeded)))
+    (is (null (search "sk-test" text)) "the error's text is not in the report: ~A" text)
+    (is (search "real provider" text))
+    (is (plusp events) "an observer bound around the benchmark still sees the turns' events"))
+  (let ((rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full))
+                                      :stream (make-broadcast-stream))))
+    (is (= 0 (getf (first rows) :errors)) "control: the scripted model's turns do not fail")))
 
 ;;; --------------------------------------------------------------------------
 ;;; A translation or a structured result cut off at the output limit (#338)

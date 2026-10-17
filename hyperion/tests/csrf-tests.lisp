@@ -130,6 +130,21 @@ production and would bury the suite here."
      (is (= 200 (first (funcall wrapped (%csrf-env :method :get :session s)))))
      (is (= 403 (first (funcall wrapped (%csrf-env :method :post :session s))))))))
 
+(test a-body-with-an-escape-that-does-not-decode-is-refused-with-403
+  "#720's review. Before FORM-ALIST kept a part that does not decode, a POST with `x%4=1' made
+the token lookup signal QURI:URL-DECODING-ERROR, so any client could turn the check into an
+unhandled condition instead of a refusal."
+  (%quietly
+   (let* ((s (%csrf-session "TOK"))
+          (app (lambda (env) (declare (ignore env)) (list 200 nil (list "ok"))))
+          (wrapped (csrf:wrap-csrf app)))
+     (dolist (body '("x%4=1" "a=%4" "%=1" "_csrf=TO%4"))
+       (is (eql 403 (handler-case (first (funcall wrapped (%csrf-env :session s :body body)))
+                      (error (e) (type-of e))))
+           "~S is refused, not an error" body))
+     (is (= 200 (first (funcall wrapped (%csrf-env :session s :body "x%4=1&_csrf=TOK"))))
+         "control: the same body with the right token is accepted"))))
+
 (test every-method-not-named-safe-is-checked
   ;; Exempt-by-omission is the failure mode: a method nobody listed must be CHECKED.
   (%quietly

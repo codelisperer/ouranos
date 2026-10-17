@@ -49,6 +49,23 @@ its tag.
   `C:\...\npx.cmd`, is affected. Name the program the batch file runs instead, for example
   `node` with the script's path as its first argument.
 
+- **hyperion/http: an app that looked up a form or query field by its percent-encoded name
+  must use the decoded name** (#715). `form-param`, `form-params`, `query-param`,
+  `query-params` and `form-alist` now decode names, so `(form-param body "en%3Awho")` no
+  longer finds a field a browser posted as `en%3Awho`; `(form-param body "en:who")` does. The
+  fix itself is under Fixed.
+
+- **praxeon: a failed model, embedding or rerank request signals
+  `praxeon/conditions:provider-request-failed`, and the response body is on the condition,
+  not in its report or the log** (#719). The new condition is a subclass of
+  `deliberation-failure`, so a handler for that still receives it. Its readers are
+  `provider-request-failed-status`, `-error-type`, `-error-code` (read from the service's
+  error JSON when the body parses as one, otherwise NIL) and `-body`. The report and
+  `deliberation-failure-detail` now give the status, the type and code, and the body's length
+  instead of the body, and the `llm request failed` warn line logs `status`, `error-type`,
+  `error-code` and `body-length` fields. An app that read the service's explanation from the
+  report, the detail or the log line reads it from `provider-request-failed-body`.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
@@ -352,6 +369,21 @@ its tag.
   `.exe` or `.com` program on PATH, and `quote-windows-argument` and `windows-command-line`
   build a command line that the Microsoft C runtime splits back into the same arguments. A
   missing program or a batch file signals `process-not-started`.
+
+- **praxeon: the tool-results benchmark reports the token counts the provider reported, and has
+  two more configurations and a second task** (#319). `praxeon/bench/tool-results.lisp`'s
+  `run-benchmark` now sums `:input`, `:output`, `:cache-read` and `:cache-write` from each
+  step's `:usage` event and prints them beside its estimates; a count no step reported is NIL
+  and printed as `-`. With a real provider, the estimated input is the sum of the
+  `:estimated-input` of those events. Each figure taken from those events comes with the
+  number of requests that reported it (`:reported-input-requests`, `:input-requests`, and so
+  on), and the report marks a figure with `*` when fewer requests reported it than were made.
+  Each row also gives the number of turns that signalled
+  an error (the error text is not printed), the requests, and the clearing batches. New
+  configurations `:clear-wide` (`:clear-budget 6000 :keep-recent 2`) and `:offload-and-clear`
+  (`:threshold 500 :clear-budget 1200 :keep-recent 1`), and `:task :mixed`, where the
+  even-numbered pages are under the offload threshold. `*scripted-usage*` makes the scripted
+  model report usage, for tests. Offloading stays opt-in.
 
 - **aion/schedule: a job scheduler, with `mnemosyne/jobs` to keep its jobs in Postgres or
   SQLite** (#689). An app registers a job function with `define-job`, with a schedule of
@@ -1061,6 +1093,27 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
+  decode field names as well as values, with `+` as a space** (#715). A browser
+  percent-encodes a field name when it submits a form, so a field named `en:who` arrives as
+  `en%3Awho`, `items[0]` as `items%5B0%5D` and `a b` as `a+b`. Before this, those names were
+  not decoded, so `(form-param body "en:who")` returned NIL and a handler read the field as
+  not sent, with no error. An app that renamed its fields to avoid these characters can keep
+  or undo that workaround. A name or value that does not decode, such as the truncated escape
+  in `x%4=1`, is kept as it arrived instead of signalling `quri:url-decoding-error`, which a
+  value already did before this change: a client could post such a body to make the CSRF
+  check signal instead of answering 403. New `hyperion/http:form-urlencode` builds a
+  urlencoded body from `(name . value)` pairs the way a browser does, for tests.
+
+- **aion/schedule: `run-now` and `run-job` no longer start a second run when the run they
+  waited for finished before they woke** (#723). A call that found a run of the same job still
+  starting on this instance waited for it, as documented. If that run then started and
+  finished before the waiting call took the scheduler's lock again, the call found the job
+  free and started a second run. Now `run-now` returns `(values run-id :already-running)` with
+  the id of the run it waited for, which may already have finished, and `run-job` returns
+  NIL, as it does whenever another run holds the job. Either one tries to start a run itself
+  only when the run it waited for did not start.
 
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
