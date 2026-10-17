@@ -269,7 +269,7 @@
    ;; the refusal for an app with no session (#293): Host, Sec-Fetch-Site, Origin
    #:check-host #:check-same-origin #:wrap-same-origin #:normalise-origin
    ;; the injector (ADR-0019): a deftag on :form, plus the seam it reads
-   #:*token-thunk* #:current-token #:token-field
+   #:*token-thunk* #:current-token #:token-field #:token-headers
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
 
 (cl:defpackage #:hyperion/ratelimit

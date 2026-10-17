@@ -113,9 +113,9 @@ that issued the request.")
 section 8: the check IS the poll -- there is no separate schedule, and no state kept between
 polls beyond hyperion/update's own.
 
-Six hours is written 360m because htmx 1.9.12, which this tree vendors, knows no hours. Its
-interval parser strips ms, s or m and otherwise calls parseFloat on the whole string, so the
-old default \"6h\" was read as 6 ms, and every page with the banner polled the status route
+Six hours is written 360m because htmx knows no hours: neither 1.9.12 nor 2.0.11, which this
+tree vendors (#717). Its interval parser strips ms, s or m and otherwise calls parseFloat on the
+whole string, so the old default \"6h\" was read as 6 ms, and every page with the banner polled the status route
 many times a second (#422). CHECKED-POLL-INTERVAL refuses such a value before it reaches the
 page.")
 
@@ -137,7 +137,7 @@ decision.")
 would misread, or one that would poll more often than +MINIMUM-POLL-SECONDS+ (#422)."))
 
 (defun %interval-milliseconds (value)
-  "VALUE, a string, in milliseconds as htmx 1.9.12 reads it when its unit is ms, s or m, or
+  "VALUE, a string, in milliseconds as htmx 2.0.11 reads it when its unit is ms, s or m, or
 NIL for anything else: another suffix such as h, which htmx would read as milliseconds by
 parseFloat; no suffix at all; or no plain decimal number before the suffix."
   (flet ((number-of (digits)
@@ -171,7 +171,7 @@ gets an error on the first page, not a flood of requests."
     (cond ((null ms)
            (error 'invalid-poll-interval
                   :value value
-                  :reason "htmx 1.9.12 does not read as intended: it knows only ms, s and m, and reads anything else, such as 6h or a bare number, as milliseconds"))
+                  :reason "htmx does not read as intended: it knows only ms, s and m, and reads anything else, such as 6h or a bare number, as milliseconds"))
           ((< ms (* 1000 +minimum-poll-seconds+))
            (error 'invalid-poll-interval :value value :reason "is shorter than the minimum"))
           (t value))))
