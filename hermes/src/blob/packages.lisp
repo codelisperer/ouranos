@@ -65,6 +65,7 @@
    #:upload-target #:make-upload-target #:upload-target-p #:upload-target-url
    #:upload-target-method #:upload-target-headers #:upload-target-expires-in
    #:upload-target-content-length
+   #:put-bucket-cors #:check-bucket-cors
    ;; blob metadata (what a row should hold)
    #:blob-meta #:make-blob-meta #:blob-meta-p
    #:blob-meta-key #:blob-meta-size #:blob-meta-content-type

@@ -119,6 +119,24 @@ START (default 0). Shorter when the blob ends sooner; empty when START is at or 
 For checking what a client uploaded by its first bytes, without fetching the whole object
 (#770). Signals BLOB-NOT-FOUND."))
 
+(defgeneric put-bucket-cors (store bucket &key origins methods allowed-headers max-age-seconds)
+  (:documentation
+   "Set BUCKET's CORS rule so a browser on one of ORIGINS can upload to it directly (#770).
+
+ORIGINS is a list of origins such as (\"https://app.example.com\"); each may hold one `*'.
+METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\"), MAX-AGE-SECONDS to 3000.
+This REPLACES the bucket's whole CORS configuration, as the S3 API does; a bucket that needs
+other rules too should have them set by whoever owns it. Returns T."))
+
+(defgeneric check-bucket-cors (store bucket origin &key method headers)
+  (:documentation
+   "Whether BUCKET's CORS rules let a browser on ORIGIN send METHOD (default \"PUT\") with HEADERS
+(default (\"Content-Type\")) (#770). A browser upload that fails for this reason reaches the app
+only as a network error, so this is the diagnostic: call it when an upload never arrives.
+
+Returns one of :ALLOWED, :NO-CORS-CONFIGURATION, :ORIGIN-NOT-ALLOWED, :METHOD-NOT-ALLOWED or
+:HEADER-NOT-ALLOWED, the last three naming the first test that no rule passes."))
+
 (defgeneric list-blobs (store bucket &key prefix)
   (:documentation
    "The keys under PREFIX in BUCKET, as a list of strings. Used by SWEEP-ORPHANS.
@@ -185,6 +203,19 @@ passes through."
   (%check-key bucket key)
   (unless (and (integerp start) (>= start 0) (integerp length) (>= length 0))
     (error 'type-error :datum (list start length) :expected-type '(integer 0))))
+
+(defmethod put-bucket-cors :before ((s store) bucket &key origins methods allowed-headers max-age-seconds)
+  (declare (ignore methods allowed-headers))
+  (%check-bucket bucket)
+  (unless (and origins (listp origins) (every (lambda (o) (and (stringp o) (plusp (length o)))) origins))
+    (error 'type-error :datum origins :expected-type '(cons string list)))
+  (when (and max-age-seconds (not (and (integerp max-age-seconds) (>= max-age-seconds 0))))
+    (error 'type-error :datum max-age-seconds :expected-type '(integer 0))))
+
+(defmethod check-bucket-cors :before ((s store) bucket origin &key method headers)
+  (declare (ignore method headers))
+  (%check-bucket bucket)
+  (check-type origin string))
 
 (defmethod list-blobs :before ((s store) bucket &key prefix)
   (declare (ignore prefix))

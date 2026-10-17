@@ -331,6 +331,14 @@ its tag.
 
 ### Added
 
+- **hermes/blob: `put-bucket-cors` sets the CORS rule a browser upload needs, and
+  `check-bucket-cors` says why one would be blocked** (#770).
+  `(put-bucket-cors store bucket :origins '("https://app.example.com"))` allows `PUT` with
+  `Content-Type` from those origins (`:methods`, `:allowed-headers`, `:max-age-seconds` to
+  change them). It replaces the bucket's whole CORS configuration, as the S3 API does.
+  `(check-bucket-cors store bucket origin)` returns `:allowed`, `:no-cors-configuration`,
+  `:origin-not-allowed`, `:method-not-allowed` or `:header-not-allowed`, for an upload that
+  reached the app only as a network error. The filesystem store signals `blob-unsupported`.
 - **hermes/blob: `upload-url` gives a client a presigned PUT for uploading straight to S3 or
   Spaces, and `read-blob-range` reads a blob's first bytes to check what arrived** (#770).
   `(upload-url store bucket key :expires-in :content-type :content-length :max-bytes)` returns
