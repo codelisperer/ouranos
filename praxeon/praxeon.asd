@@ -287,6 +287,7 @@
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
+               "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL

@@ -55,6 +55,17 @@ its tag.
   longer finds a field a browser posted as `en%3Awho`; `(form-param body "en:who")` does. The
   fix itself is under Fixed.
 
+- **praxeon: a failed model, embedding or rerank request signals
+  `praxeon/conditions:provider-request-failed`, and the response body is on the condition,
+  not in its report or the log** (#719). The new condition is a subclass of
+  `deliberation-failure`, so a handler for that still receives it. Its readers are
+  `provider-request-failed-status`, `-error-type`, `-error-code` (read from the service's
+  error JSON when the body parses as one, otherwise NIL) and `-body`. The report and
+  `deliberation-failure-detail` now give the status, the type and code, and the body's length
+  instead of the body, and the `llm request failed` warn line logs `status`, `error-type`,
+  `error-code` and `body-length` fields. An app that read the service's explanation from the
+  report, the detail or the log line reads it from `provider-request-failed-body`.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or

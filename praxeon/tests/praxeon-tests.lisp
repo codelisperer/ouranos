@@ -2937,7 +2937,9 @@ including the two optional breakdowns.")
 
 (defun %answer-one-request (listener reply)
   "Accept one connection on LISTENER within 10 seconds, read its request, and answer with REPLY
-as JSON. Returns the request line, the headers as an alist with lowercased names, and the body."
+as JSON, with status 200; or, when REPLY is a cons (STATUS-LINE . TEXT), answer TEXT with that
+status, such as \"400 Bad Request\" (#719). Returns the request line, the headers as an alist
+with lowercased names, and the body."
   (let* ((socket (loop with deadline = (+ (get-universal-time) 10)
                        for s = (sb-bsd-sockets:socket-accept listener)
                        when s return (progn (setf (sb-bsd-sockets:non-blocking-mode s) nil) s)
@@ -2959,10 +2961,12 @@ as JSON. Returns the request line, the headers as an alist with lowercased names
                                              "0")))
                   (body (make-string length)))
              (read-sequence body stream)
-             (format stream "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
-                     #\Return #\Newline #\Return #\Newline
-                     (length (sb-ext:string-to-octets reply :external-format :utf-8))
-                     #\Return #\Newline #\Return #\Newline #\Return #\Newline reply)
+             (let ((status (if (consp reply) (car reply) "200 OK"))
+                   (text (if (consp reply) (cdr reply) reply)))
+               (format stream "HTTP/1.1 ~A~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+                       status #\Return #\Newline #\Return #\Newline
+                       (length (sb-ext:string-to-octets text :external-format :utf-8))
+                       #\Return #\Newline #\Return #\Newline #\Return #\Newline text))
              (finish-output stream)
              (list request-line headers body)))
       (close stream))))
@@ -3969,6 +3973,105 @@ though it were the cost."
              (is (every (lambda (l) (search "workflow=fan-160" l)) lines)
                  "and the rest of the caller's context: ~S" lines)))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
+
+;;; --------------------------------------------------------------------------
+;;; #719: a failed provider request logs the status, the error type and code and the body's
+;;; length, and never the body. The body goes on the condition.
+;;;
+;;; Each reply below carries a marker string in the place a provider puts its explanation, which
+;;; is also where it can repeat the request. The marker must reach the condition's BODY and must
+;;; not reach the log line or the condition's report.
+;;; --------------------------------------------------------------------------
+
+(defparameter +719-marker+ "MARKER-719-the-users-prompt")
+
+(defun %failed-request-and-log (make-provider reply)
+  "Serve REPLY, a (STATUS-LINE . TEXT), to one request from the provider MAKE-PROVIDER builds
+from a port, with warn logging captured. Returns the condition signalled and the log lines that
+mention the failure."
+  (let ((out (make-string-output-stream))
+        (condition nil))
+    (multiple-value-bind (port server) (%serve-replies (list reply))
+      (unwind-protect
+           (progn
+             (aion/log:setup :env :dev :level :warn :stream out)
+             (handler-case (llm:complete (funcall make-provider port)
+                                         '((:role :user :content "Hello.")))
+               (cnd:provider-request-failed (c) (setf condition c)))
+             (aion/test-threads:join server :timeout 10))
+        (aion/log:setup :env :dev :level :warn :stream *standard-output*)))
+    (values condition
+            (remove-if-not (lambda (line) (search "llm request failed" line))
+                           (uiop:split-string (get-output-stream-string out)
+                                              :separator '(#\Newline))))))
+
+(defun %anthropic-at (port)
+  (make-instance 'llm:anthropic :api-key "test-key" :model "m"
+                                :endpoint (format nil "http://127.0.0.1:~D/v1/messages" port)))
+
+(defun %openai-at (port)
+  (make-instance 'llm:openai-compatible :api-key "test-key" :model "m"
+                                        :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+
+(test an-anthropic-failure-logs-the-status-type-and-length-and-not-the-body
+  (let ((body (format nil "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"~A\"}}"
+                      +719-marker+)))
+    (multiple-value-bind (c lines) (%failed-request-and-log #'%anthropic-at (cons "400 Bad Request" body))
+      (is (typep c 'cnd:deliberation-failure) "an app's handler for a failed call still receives it")
+      (is (eql 400 (cnd:provider-request-failed-status c)))
+      (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
+      (is (null (cnd:provider-request-failed-error-code c)) "Anthropic sends no code")
+      (is (equal body (cnd:provider-request-failed-body c)) "the whole body is on the condition")
+      (is (null (search +719-marker+ (princ-to-string c))) "the report leaves the body out")
+      (is (= 1 (length lines)) "one warn line: ~S" lines)
+      (let ((line (first lines)))
+        (is (null (search +719-marker+ line)) "the log line leaves the body out: ~A" line)
+        (is (search "status=400" line) "~A" line)
+        (is (search "error-type=invalid_request_error" line) "~A" line)
+        (is (search (format nil "body-length=~D" (length body)) line) "~A" line)))))
+
+(test an-openai-compatible-failure-logs-the-type-and-code-and-not-the-body
+  (let ((body (format nil "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"~A\"}}"
+                      +719-marker+)))
+    (multiple-value-bind (c lines) (%failed-request-and-log #'%openai-at (cons "404 Not Found" body))
+      (is (eql 404 (cnd:provider-request-failed-status c)))
+      (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
+      (is (equal "model_not_found" (cnd:provider-request-failed-error-code c)))
+      (is (equal body (cnd:provider-request-failed-body c)))
+      (is (= 1 (length lines)))
+      (is (null (search +719-marker+ (first lines))) "~A" (first lines))
+      (is (search "error-code=model_not_found" (first lines)) "~A" (first lines)))))
+
+(test a-failure-whose-body-is-not-json-logs-no-type-or-code-and-not-the-body
+  (let ((body (format nil "<html><body>~A</body></html>" +719-marker+)))
+    (multiple-value-bind (c lines) (%failed-request-and-log #'%anthropic-at (cons "502 Bad Gateway" body))
+      (is (eql 502 (cnd:provider-request-failed-status c)))
+      (is (null (cnd:provider-request-failed-error-type c)))
+      (is (null (cnd:provider-request-failed-error-code c)))
+      (is (equal body (cnd:provider-request-failed-body c)))
+      (is (= 1 (length lines)))
+      (is (null (search +719-marker+ (first lines))) "~A" (first lines))
+      (is (search (format nil "body-length=~D" (length body)) (first lines))))))
+
+(test a-long-error-type-is-not-taken-as-one
+  "The type and code are logged, so a value that is not a short identifier, which could be the
+body, is read as no type at all."
+  (let ((long (make-string 65 :initial-element #\x)))
+    (is (equal '(nil nil) (multiple-value-list
+                           (praxeon/llm::%provider-error-fields
+                            (format nil "{\"error\":{\"type\":\"~A\",\"code\":\"~A\"}}" long long)))))
+    (is (equal '("t" "42") (multiple-value-list
+                            (praxeon/llm::%provider-error-fields "{\"error\":{\"type\":\"t\",\"code\":42}}")))
+        "control: a short type, and a numeric code, are read")))
+
+(test a-request-that-fails-before-a-response-is-still-a-provider-request-failed
+  (let ((c (praxeon/llm::%request-failure "rerank request failed"
+                                          (make-condition 'aion/http-client:http-error
+                                                          :detail "connection refused"))))
+    (is (typep c 'cnd:provider-request-failed))
+    (is (null (cnd:provider-request-failed-status c)))
+    (is (null (cnd:provider-request-failed-body c)))
+    (is (search "connection refused" (princ-to-string c)))))
 
 ;;; --------------------------------------------------------------------------
 ;;; #326: a step cut off by the output limit is not used.

@@ -301,9 +301,7 @@ as a generic function so that a test can answer in its place without a network."
     (handler-case (jzon:parse (%post-json url headers payload))
       (praxeon/conditions:praxeon-error (e) (error e))
       (error (e)
-        (error 'praxeon/conditions:deliberation-failure
-               :detail (%http-error-detail
-                        (format nil "embeddings request to ~A failed" url) e))))))
+        (error (%request-failure (format nil "embeddings request to ~A failed" url) e))))))
 
 (defun %embedding-vectors (parsed)
   "The embeddings from a parsed reply, in the order the API reported, as a list of vectors.

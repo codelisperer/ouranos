@@ -51,6 +51,9 @@
    #:means-failure #:means-failure-means #:means-failure-cause
    #:tool-error-result #:tool-error-result-text #:tool-error-result-outcome
    #:deliberation-failure
+   #:provider-request-failed #:provider-request-failed-status
+   #:provider-request-failed-error-type #:provider-request-failed-error-code
+   #:provider-request-failed-body
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text
