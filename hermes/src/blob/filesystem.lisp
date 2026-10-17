@@ -190,6 +190,14 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
         ;; READ-SEQUENCE's count is what arrived; FILE-LENGTH is only what the file claimed.
         (subseq buffer 0 (read-sequence buffer in))))))
 
+(defmethod put-bucket-cors ((s filesystem-store) bucket &key origins methods allowed-headers max-age-seconds)
+  (declare (ignore origins methods allowed-headers max-age-seconds))
+  (error 'blob-unsupported :bucket bucket :operation "CORS rules (the filesystem store takes no browser uploads)"))
+
+(defmethod check-bucket-cors ((s filesystem-store) bucket origin &key method headers)
+  (declare (ignore origin method headers))
+  (error 'blob-unsupported :bucket bucket :operation "CORS rules (the filesystem store takes no browser uploads)"))
+
 (defmethod list-blobs ((s filesystem-store) bucket &key prefix)
   ;; A KEY IS PROTOCOL, not an implementation detail. S3 keys are `/'-separated by
   ;; definition, so a key this backend invents with a `\' would mean the two backends

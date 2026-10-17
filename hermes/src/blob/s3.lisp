@@ -439,3 +439,92 @@ for no behaviour we would gain."
               (setf token next)
               (return)))))
     keys))
+
+;;; --- CORS (#770) -----------------------------------------------------------
+;;;
+;;; A browser upload to a bucket is a cross-origin PUT, so the bucket needs a CORS rule naming
+;;; the app's origin. Without one the browser stops the request and the app sees a network
+;;; error and nothing else, which is why CHECK-BUCKET-CORS exists.
+
+(defun %base64 (octets)
+  "OCTETS in standard base64 with padding (RFC 4648 section 4). S3's Content-MD5 needs it, and
+this module declares no base64 dependency for one call."
+  (let ((alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"))
+    (with-output-to-string (out)
+      (loop for i from 0 below (length octets) by 3
+            for n = (- (length octets) i)
+            for b0 = (aref octets i)
+            for b1 = (if (> n 1) (aref octets (+ i 1)) 0)
+            for b2 = (if (> n 2) (aref octets (+ i 2)) 0)
+            for triple = (logior (ash b0 16) (ash b1 8) b2)
+            do (write-char (char alphabet (ldb (byte 6 18) triple)) out)
+               (write-char (char alphabet (ldb (byte 6 12) triple)) out)
+               (write-char (if (> n 1) (char alphabet (ldb (byte 6 6) triple)) #\=) out)
+               (write-char (if (> n 2) (char alphabet (ldb (byte 6 0) triple)) #\=) out)))))
+
+(defun %xml-escape (string)
+  (%replace-all (%replace-all (%replace-all (%replace-all (%replace-all string "&" "&amp;") "<" "&lt;")
+                                            ">" "&gt;") "\"" "&quot;") "'" "&apos;"))
+
+(defun %cors-xml (origins methods allowed-headers max-age-seconds)
+  "The CORSConfiguration document for one rule."
+  (with-output-to-string (out)
+    (format out "<CORSConfiguration><CORSRule>")
+    (dolist (o origins) (format out "<AllowedOrigin>~A</AllowedOrigin>" (%xml-escape o)))
+    (dolist (m methods) (format out "<AllowedMethod>~A</AllowedMethod>" (%xml-escape m)))
+    (dolist (h allowed-headers) (format out "<AllowedHeader>~A</AllowedHeader>" (%xml-escape h)))
+    (format out "<MaxAgeSeconds>~D</MaxAgeSeconds></CORSRule></CORSConfiguration>" max-age-seconds)))
+
+(defmethod put-bucket-cors ((s s3-store) bucket &key origins (methods '("PUT"))
+                                                      (allowed-headers '("Content-Type"))
+                                                      (max-age-seconds 3000))
+  (let* ((body (%octets (%cors-xml origins methods allowed-headers max-age-seconds)))
+         (md5 (%base64 (ironclad:digest-sequence :md5 body))))
+    ;; PutBucketCors requires Content-MD5 (or an x-amz-checksum header) over the body.
+    (%s3-request s bucket nil :put :query "cors=" :content body :content-type "application/xml"
+                                   :payload-hash (%sha256-hex body)
+                                   :extra-headers (list (cons "content-md5" md5)))
+    (log:info "bucket CORS rule set" :backend "s3" :bucket bucket :origins (length origins))
+    t))
+
+(defun %wildcard-match-p (pattern string &key case-insensitive)
+  "Does STRING match PATTERN, where PATTERN may hold one `*' standing for any run of characters,
+as S3 allows in AllowedOrigin and AllowedHeader?"
+  (let* ((test (if case-insensitive #'char-equal #'char=))
+         (star (position #\* pattern)))
+    (if (null star)
+        (and (= (length pattern) (length string)) (every test pattern string))
+        (let ((head (subseq pattern 0 star))
+              (tail (subseq pattern (1+ star))))
+          (and (>= (length string) (+ (length head) (length tail)))
+               (every test head (subseq string 0 (length head)))
+               (every test tail (subseq string (- (length string) (length tail)))))))))
+
+(defun %cors-rules (xml)
+  "Each <CORSRule> in XML as a plist (:origins :methods :headers)."
+  (loop for rule in (%xml-values xml "CORSRule")
+        collect (list :origins (%xml-values rule "AllowedOrigin")
+                      :methods (%xml-values rule "AllowedMethod")
+                      :headers (%xml-values rule "AllowedHeader"))))
+
+(defun %cors-verdict (rules origin method headers)
+  "The CHECK-BUCKET-CORS answer for parsed RULES. Pure, so each verdict is tested directly."
+  (flet ((origin-ok (r) (some (lambda (p) (%wildcard-match-p p origin)) (getf r :origins)))
+         (method-ok (r) (member method (getf r :methods) :test #'string=))
+         (headers-ok (r) (every (lambda (h) (some (lambda (p) (%wildcard-match-p p h :case-insensitive t))
+                                                  (getf r :headers)))
+                                headers)))
+    (cond ((null rules) :no-cors-configuration)
+          ((some (lambda (r) (and (origin-ok r) (method-ok r) (headers-ok r))) rules) :allowed)
+          ((notany #'origin-ok rules) :origin-not-allowed)
+          ((notany (lambda (r) (and (origin-ok r) (method-ok r))) rules) :method-not-allowed)
+          (t :header-not-allowed))))
+
+(defmethod check-bucket-cors ((s s3-store) bucket origin &key (method "PUT") (headers '("Content-Type")))
+  (let ((xml (handler-case
+                 (let ((body (%s3-request s bucket nil :get :query "cors=")))
+                   (if (stringp body) body (sb-ext:octets-to-string body :external-format :utf-8)))
+               ;; A bucket with no CORS configuration answers 404 NoSuchCORSConfiguration,
+               ;; which %S3-REQUEST reports as BLOB-NOT-FOUND.
+               (blob-not-found () ""))))
+    (%cors-verdict (%cors-rules xml) origin method headers)))

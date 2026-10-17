@@ -71,8 +71,21 @@ and `blob-metadata` work on both stores, so the checking step is the same.
 
 A browser upload to a bucket needs a CORS rule on the bucket allowing `PUT` from the app's origin,
 with the `Content-Type` header. Without one, the browser blocks the request before it reaches the
-store, and the app sees only a network error. A helper to set the rule, and a diagnostic for this
-case, are the next step of #770.
+store, and the app sees only a network error.
+
+- **To set the rule:** `(hermes/blob:put-bucket-cors store "media" :origins '("https://app.example.com"))`.
+  `:methods` defaults to `("PUT")`, `:allowed-headers` to `("Content-Type")` and `:max-age-seconds`
+  to 3000. It **replaces** the bucket's whole CORS configuration, as the S3 API does, so a bucket that
+  needs other rules as well should have them all set together, by whoever owns the bucket.
+- **To find out why an upload never arrived:**
+  `(hermes/blob:check-bucket-cors store "media" "https://app.example.com")` reads the bucket's rules and
+  returns `:allowed`, `:no-cors-configuration`, `:origin-not-allowed`, `:method-not-allowed` or
+  `:header-not-allowed`. Pass `:method` and `:headers` when the upload sends something other than a
+  `PUT` with `Content-Type`. `:no-cors-configuration` is also what a missing bucket reads as.
+
+Both use S3's PutBucketCors and GetBucketCors calls, which DigitalOcean Spaces documents as supported.
+Neither has been run against a live store yet; the tests check the request each one sends and the
+answer each one reads. Neither applies to the filesystem store, which signals `blob-unsupported`.
 
 ## Not yet
 
