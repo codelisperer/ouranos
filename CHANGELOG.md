@@ -353,6 +353,21 @@ its tag.
   build a command line that the Microsoft C runtime splits back into the same arguments. A
   missing program or a batch file signals `process-not-started`.
 
+- **praxeon: the tool-results benchmark reports the token counts the provider reported, and has
+  two more configurations and a second task** (#319). `praxeon/bench/tool-results.lisp`'s
+  `run-benchmark` now sums `:input`, `:output`, `:cache-read` and `:cache-write` from each
+  step's `:usage` event and prints them beside its estimates; a count no step reported is NIL
+  and printed as `-`. With a real provider, the estimated input is the sum of the
+  `:estimated-input` of those events. Each figure taken from those events comes with the
+  number of requests that reported it (`:reported-input-requests`, `:input-requests`, and so
+  on), and the report marks a figure with `*` when fewer requests reported it than were made.
+  Each row also gives the number of turns that signalled
+  an error (the error text is not printed), the requests, and the clearing batches. New
+  configurations `:clear-wide` (`:clear-budget 6000 :keep-recent 2`) and `:offload-and-clear`
+  (`:threshold 500 :clear-budget 1200 :keep-recent 1`), and `:task :mixed`, where the
+  even-numbered pages are under the offload threshold. `*scripted-usage*` makes the scripted
+  model report usage, for tests. Offloading stays opt-in.
+
 - **aion/schedule: a job scheduler, with `mnemosyne/jobs` to keep its jobs in Postgres or
   SQLite** (#689). An app registers a job function with `define-job`, with a schedule of
   `(:every seconds)`, `(:daily (hour minute) :zone "Europe/London")`,

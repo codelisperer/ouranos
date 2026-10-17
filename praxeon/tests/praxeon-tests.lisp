@@ -4459,9 +4459,125 @@ model, which is what the file's commentary is for."
   (let* ((rows (funcall (find-symbol "RUN-BENCHMARK" "PRAXEON/BENCH/TOOL-RESULTS")
                         :tasks 2 :pages 4 :stream (make-broadcast-stream)))
          (by (lambda (name) (find name rows :key (lambda (r) (getf r :configuration))))))
-    (is (equal '(:full :offload :clear) (mapcar (lambda (r) (getf r :configuration)) rows)))
+    (is (equal '(:full :offload :clear :clear-wide :offload-and-clear)
+               (mapcar (lambda (r) (getf r :configuration)) rows)))
     (is (every (lambda (r) (= 2 (getf r :succeeded))) rows) "every task succeeded: ~S" rows)
     (is (< (getf (funcall by :offload) :input-tokens) (getf (funcall by :full) :input-tokens)))))
+
+;;; The benchmark's own reporting (#319): the provider's token counts, the mixed task, and a
+;;; turn that fails. Each test loads the file and calls it by name, as the one above does.
+
+(defun %bench (name &rest args)
+  (load (asdf:system-relative-pathname :praxeon "bench/tool-results.lisp"))
+  (apply (find-symbol name "PRAXEON/BENCH/TOOL-RESULTS") args))
+
+(defun %bench-row (rows name)
+  (find name rows :key (lambda (r) (getf r :configuration))))
+
+(test the-tool-results-benchmark-reports-the-providers-counts-and-they-meet-the-estimates
+  "With *SCRIPTED-USAGE*, the scripted model reports Anthropic-style counts: the request's
+estimated tokens less the simulated cached ones as input, and those cached ones as cache read.
+The two sums are collected different ways, from the :USAGE events and from the requests, so
+they have to meet."
+  (%bench "RUN-BENCHMARK" :tasks 1 :stream (make-broadcast-stream)) ; loads the file, so the variable exists
+  (let* ((usage (find-symbol "*SCRIPTED-USAGE*" "PRAXEON/BENCH/TOOL-RESULTS"))
+         (rows (progv (list usage) '(t)
+                 (%bench "RUN-BENCHMARK" :tasks 2 :pages 4 :stream (make-broadcast-stream)))))
+    (dolist (r rows)
+      (is (= (getf r :input-tokens) (+ (getf r :reported-input) (getf r :reported-cache-read)))
+          "~A: reported input plus cache read is the estimate: ~S" (getf r :configuration) r)
+      (is (= (getf r :cached-share)
+             (/ (getf r :reported-cache-read) (getf r :input-tokens)))
+          "~A: the cache read is the simulated cached share" (getf r :configuration))
+      (is (eql 0 (getf r :reported-cache-write)) "a reported 0 stays 0"))
+    (is (string= "full" (string-downcase (getf (first rows) :configuration)))))
+  (let ((rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 4 :stream (make-broadcast-stream))))
+    (is (every (lambda (r) (and (null (getf r :reported-input)) (null (getf r :reported-cache-read))
+                                (null (getf r :reported-cache-write)) (null (getf r :reported-output))))
+               rows)
+        "control: a model that reports nothing leaves every count NIL, not 0")))
+
+(test the-tool-results-benchmark-mixed-task-gives-offload-and-clear-something-to-clear
+  (let ((uniform (%bench "RUN-BENCHMARK" :tasks 2 :stream (make-broadcast-stream)))
+        (mixed (%bench "RUN-BENCHMARK" :tasks 2 :task :mixed :stream (make-broadcast-stream))))
+    (is (plusp (getf (%bench-row mixed :offload-and-clear) :clear-batches))
+        "on the mixed task, the small pages stay in the prompt and a batch of them is cleared")
+    (is (= 2 (getf (%bench-row mixed :offload-and-clear) :succeeded)))
+    (is (zerop (getf (%bench-row uniform :offload-and-clear) :clear-batches))
+        "control: on the uniform task every page is offloaded, so nothing is cleared")
+    (is (< (getf (%bench-row mixed :full) :input-tokens) (getf (%bench-row uniform :full) :input-tokens))
+        "the mixed task's small pages are smaller")
+    (is (= (getf (%bench-row uniform :offload) :input-tokens)
+           (getf (%bench-row uniform :offload-and-clear) :input-tokens)))))
+
+(defclass sometimes-counted (llm:provider)
+  ((calls :initform 0 :accessor counted-calls)
+   (every-other :initarg :every-other :reader counted-every-other))
+  (:documentation "A provider that answers at once. It reports usage on every other request
+when EVERY-OTHER is true, and never otherwise."))
+
+(defmethod llm:complete ((p sometimes-counted) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (let ((report (and (counted-every-other p) (oddp (incf (counted-calls p))))))
+    (llm:make-completion :text "I could not find it." :stop-reason :end
+                         :input-tokens (and report 10) :output-tokens (and report 5)
+                         :cache-read-tokens (and report 0) :cache-write-tokens nil)))
+
+(test the-tool-results-benchmark-marks-figures-that-not-every-request-reported
+  "The actor emits :USAGE only for a step whose provider reported a count, so a provider that
+reports on some requests gives a sum over those alone. The row carries how many requests
+reported each figure, and the report marks a partial sum with a star."
+  (let* ((out (make-string-output-stream))
+         (rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                       :provider (make-instance 'sometimes-counted :every-other t)))
+         (r (first rows))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (= 10 (getf r :reported-input)))
+    (is (= 1 (getf r :reported-input-requests)) "one of the two requests reported input")
+    (is (= 1 (getf r :input-requests)) "and so the estimate covers one request too")
+    (is (null (getf r :reported-cache-write)))
+    (is (= 0 (getf r :reported-cache-write-requests))
+        "a field the :USAGE event left out is not counted as reported")
+    (is (search "10*" text) "the partial input is marked: ~A" text)
+    (is (search "Fewer requests reported" text)))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                           :provider (make-instance 'sometimes-counted :every-other nil))))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (null (getf r :input-tokens)) "no request reported, so there is no estimate, not 0")
+    (is (null (getf r :reported-input)))
+    (is (null (search "Fewer requests reported" text)) "nothing partial, so no footnote"))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= (getf r :requests) (getf r :input-requests))
+        "control: the scripted model's estimate covers every request")
+    (is (null (search "*" text)) "control: no figure is marked")))
+
+(defclass failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails, with a message that must not be printed."))
+
+(defmethod llm:complete ((p failing-provider) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (error "request refused for key sk-test-0000-not-printed"))
+
+(test the-tool-results-benchmark-counts-failed-turns-and-does-not-print-their-errors
+  (let* ((out (make-string-output-stream))
+         (events 0)
+         (rows (evt:with-observer ((lambda (e) (declare (ignore e)) (incf events)))
+                 (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :provider (make-instance 'failing-provider)
+                                         :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf (first rows) :errors)))
+    (is (= 0 (getf (first rows) :succeeded)))
+    (is (null (search "sk-test" text)) "the error's text is not in the report: ~A" text)
+    (is (search "real provider" text))
+    (is (plusp events) "an observer bound around the benchmark still sees the turns' events"))
+  (let ((rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full))
+                                      :stream (make-broadcast-stream))))
+    (is (= 0 (getf (first rows) :errors)) "control: the scripted model's turns do not fail")))
 
 ;;; --------------------------------------------------------------------------
 ;;; A translation or a structured result cut off at the output limit (#338)
