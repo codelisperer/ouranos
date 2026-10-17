@@ -1047,7 +1047,64 @@ finds it. The clearing row shows a setting to avoid: when each result is about h
 a batch runs after almost every result, and each batch changes the start of the prompt, so the
 cached share falls.
 
-## 14. Run the tests
+## 14. Let an agent create images (`praxeon/image`, #758)
+
+`praxeon/image` gives an agent the means `generate-image`. The model calls it with a prompt and,
+optionally, a shape (`square`, `portrait`, `landscape`) and a quality (`low`, `medium`,
+`high`). The image goes to your app, never to the model: a means returns a string to the model,
+and the bytes are yours to store and serve. Praxeon keeps nothing.
+
+```lisp
+(ql:quickload :praxeon/image)
+
+(praxeon/image:register-openai-image
+ agent
+ :api-key (user-openai-key user)          ; the user's key first; omit to read the environment
+ :on-image (lambda (image)
+             ;; IMAGE is an IMAGE-RESULT: its octets, media type, revised prompt, size, quality.
+             (let ((id (store-image! (praxeon/image:image-result-octets image)
+                                     (praxeon/image:image-result-media-type image))))
+               ;; What you return is shown to the model as the image's reference, or NIL.
+               id)))
+```
+
+`register-openai-image` returns the means' name, or NIL when there is no key, in which case it
+registers nothing. Use it rather than `register`, so an agent never has a means that can only
+fail. With no `:api-key` it reads `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an
+`:api-key` you pass is used even when it is NIL. `PRAXEON_IMAGE_MODEL` and
+`PRAXEON_IMAGE_BASE_URL` override the model (default `gpt-image-2.5-flare`) and the endpoint.
+
+The model is told the image's media type, its size in bytes, your reference and the prompt the
+provider says it used. The bytes are passed to `:on-image` as the provider sent them and are
+never re-encoded, so provenance metadata embedded in the file, such as C2PA, is kept.
+
+**A refusal is a result, not a crash.** When the provider refuses a prompt under its content
+policy, the means signals `praxeon/image:image-refused`, a `tool-error-result`. The model is
+told the request was refused, with the provider's code, stage and categories, and the turn goes
+on, so the agent can explain it. Any other failed request is `provider-request-failed`, as for
+the chat providers.
+
+**Usage.** Each request that succeeds emits one `:image-usage` event through `praxeon/event`,
+with `:provider`, `:model`, `:count`, `:size` and `:quality`, plus `:input-tokens`,
+`:output-tokens` and `:cost` when the provider reports them. OpenAI reports token counts and
+no cost, so `:cost` is absent rather than 0. The model's call and its result arrive as the
+usual `:tool-call` and `:tool-result` events, so a status line can say an image is being made.
+
+**Logging** records the provider, model, count, size, quality, byte count, status and duration,
+never the prompt, the revised prompt or the image.
+
+To call the provider outside a turn, use `generate-image`:
+
+```lisp
+(praxeon/image:generate-image (praxeon/image:make-openai-images :api-key key)
+                              "a red fox at dusk" :size :landscape :quality :high)
+;; => a list of IMAGE-RESULTs
+```
+
+Generating from a reference image (an edit or a variation) is not supported yet; it is the
+follow-up to #758.
+
+## 15. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 
