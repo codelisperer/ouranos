@@ -201,15 +201,30 @@ from the connected database. The store checks pg_extension and never runs CREATE
 needs a key and none of the variables that apply to it is set. VARIABLES lists them, most
 specific first."))
 
+(defun %value-shape (value)
+  "What kind of value VALUE is and how long, for a message that is logged: never VALUE itself.
+PRAXEON/LLM's UNKNOWN-TOOL-CHOICE detail uses it too (#727)."
+  (typecase value
+    (keyword (format nil "a keyword of ~D characters" (length (symbol-name value))))
+    (symbol (format nil "a symbol of ~D characters" (length (symbol-name value))))
+    (string (format nil "a string of ~D characters" (length value)))
+    (list (let ((n (ignore-errors (list-length value))))
+            (if n (format nil "a list of ~D elements" n) "a list that is not proper")))
+    (t (format nil "a value of class ~A" (class-name (class-of value))))))
+
 (define-condition tool-choice-unsupported (praxeon-error)
   ((provider :initarg :provider :initform nil :reader tool-choice-unsupported-provider)
    (requested :initarg :requested :initform nil :reader tool-choice-unsupported-requested))
   (:report
    (lambda (c s)
-     (format s "~A cannot honour the tool choice ~S.~%~%This is signalled rather than falling back to :auto on purpose. A caller that forced a tool is about to treat the reply as a record; letting the model answer freely instead returns prose, and nothing downstream can tell the difference until it is stored."
+     (format s "~A cannot honour the tool choice it was given, ~A; read the value from TOOL-CHOICE-UNSUPPORTED-REQUESTED.~%~%This is signalled rather than falling back to :auto on purpose. A caller that forced a tool is about to treat the reply as a record; letting the model answer freely instead returns prose, and nothing downstream can tell the difference until it is stored."
              (or (tool-choice-unsupported-provider c) "This provider")
-             (tool-choice-unsupported-requested c))))
-  (:documentation "Signalled when a forced TOOL-CHOICE reaches a provider that cannot do it."))
+             (%value-shape (tool-choice-unsupported-requested c)))))
+  (:documentation "Signalled when a forced TOOL-CHOICE reaches a provider that cannot do it.
+
+REQUESTED is the tool choice as given. The report says only what kind of value it was and its
+length, because COMPLETE signals this inside the handler that logs a failed request at warn,
+and a forced tool's name can come from a prompt (#727)."))
 (define-condition parallel-child-failure (praxeon-error)
   ((failures :initarg :failures :initform nil :reader parallel-child-failure-failures)
    (completed :initarg :completed :initform nil :reader parallel-child-failure-completed))

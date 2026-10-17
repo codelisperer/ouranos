@@ -76,6 +76,13 @@ its tag.
   that read the value from the report, the detail or the log line reads it from
   `unknown-tool-choice-value`.
 
+- **praxeon: the report of `praxeon/conditions:tool-choice-unsupported` no longer prints the
+  tool choice** (#727). `complete` signals it inside the handler that writes the `llm request
+  failed` warn line, so with the meta impl a forced `(:tool "name")` reached the log. The report
+  now says what kind of value it was and its length, for example `a list of 2 elements`. The
+  value is still in `tool-choice-unsupported-requested`; an app that read it from the report
+  reads it there.
+
 - **praxeon: `provider-request-failed-error-type` and `-error-code` are NIL unless the value is
   1 to 64 letters, digits, underscores, dots or hyphens** (#727). Both are logged, and a proxy
   between praxeon and the service can answer with its own error JSON, so a value with other

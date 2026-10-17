@@ -325,22 +325,13 @@ praxeon and the service (#727)."
              (integer (princ-to-string x)))))
     (and s (<= 1 (length s) 64) (every #'%identifier-char-p s) s)))
 
-(defun %value-shape (value)
-  "What kind of value VALUE is and how long, for a message that is logged: never VALUE itself."
-  (typecase value
-    (keyword (format nil "a keyword of ~D characters" (length (symbol-name value))))
-    (symbol (format nil "a symbol of ~D characters" (length (symbol-name value))))
-    (string (format nil "a string of ~D characters" (length value)))
-    (list (let ((n (ignore-errors (list-length value))))
-            (if n (format nil "a list of ~D elements" n) "a list that is not proper")))
-    (t (format nil "a value of class ~A" (class-name (class-of value))))))
-
 (defun %unknown-tool-choice (value)
   "The UNKNOWN-TOOL-CHOICE for VALUE (#727). Its detail, which the report prints and the warn
 line logs, gives VALUE's kind and length; a forced tool's name can come from a prompt."
   (make-condition 'praxeon/conditions:unknown-tool-choice
                   :value value
-                  :detail (format nil "unknown tool-choice: ~A" (%value-shape value))))
+                  :detail (format nil "unknown tool-choice: ~A"
+                                  (praxeon/conditions::%value-shape value))))
 
 (defun %provider-error-fields (body)
   "The error type and code in BODY, a service's error JSON, as two values, each NIL when absent.
