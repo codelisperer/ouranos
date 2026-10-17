@@ -34,7 +34,7 @@
 ;;;;
 ;;;; THE METHOD IS A SET COMPARISON, NOT A DIFF, and a reader arriving from build-libuv.lisp
 ;;;; needs to know that before looking for a list that does not exist. libuv's comment says
-;;;; "verified against 1.52.1" and means "our transcription matches upstream's three named
+;;;; "verified against 1.53.0" and means "our transcription matches upstream's three named
 ;;;; lists at that version". Here there is no upstream list, so the manifest is compared
 ;;;; against a RE-GLOB of the pinned tree -- it verifies that the set we compile is the set
 ;;;; we recorded, which is a weaker claim than libuv's and the strongest one available.
