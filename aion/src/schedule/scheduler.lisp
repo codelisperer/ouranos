@@ -609,9 +609,10 @@ instead of starting a second."
                                :name "aion/schedule renewal")))))))
     (sb-thread:join-thread thread :timeout seconds :default nil)))
 
-(defparameter +renewal-margin+ 1/20
+(defconstant +renewal-margin+ 1/20
   "The least time, in seconds, a STOP must have left of its timeout to start a lease renewal
-(#728).")
+(#728). 50 ms is about three ticks of the 15.6 ms timer a timed wait on Windows can return
+early by.")
 
 (defun stop (scheduler &key (timeout 30))
   "Stop SCHEDULER: start no more runs, make STOP-REQUESTED-P true, stop its driver, and wait for

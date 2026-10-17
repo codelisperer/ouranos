@@ -798,20 +798,37 @@ renewal. Before #728 it started one whenever any time was left."
     (s:clock-advance clock 600)
     (s:tick a)
     (setf (hold store) :renew)
-    (let ((waker (spawn "early wakeup"
-                        (lambda ()
-                          (sleep 0.27)
-                          (sb-thread:with-mutex ((s::%lock a))
-                            (sb-thread:condition-broadcast (s::%idle a)))
-                          t)))
-          ;; Lets a renewal that was held go after 4 seconds, so that the test ends either way.
-          (releaser (spawn "renewal releaser"
-                           (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t))))
+    (let* ((go (sb-thread:make-semaphore))
+           (start nil)
+           (woke-at nil)
+           ;; Counts from START, taken just before STOP is called, rather than from its own
+           ;; spawn, so the wakeup comes 30 ms before STOP's deadline however late STOP starts.
+           (waker (spawn "early wakeup"
+                         (lambda ()
+                           (sb-thread:wait-on-semaphore go)
+                           (let ((until (+ start (* 27/100 internal-time-units-per-second))))
+                             (loop for wait = (- until (get-internal-real-time))
+                                   while (plusp wait)
+                                   do (sleep (/ wait internal-time-units-per-second))))
+                           (setf woke-at (get-internal-real-time))
+                           (sb-thread:with-mutex ((s::%lock a))
+                             (sb-thread:condition-broadcast (s::%idle a)))
+                           t)))
+           ;; Lets a renewal that was held go after 4 seconds, so that the test ends either way.
+           (releaser (spawn "renewal releaser"
+                            (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t))))
+      (setf start (get-internal-real-time))
+      (sb-thread:signal-semaphore go)
       (is (eq :timed-out (s:stop a :timeout 0.3)))
       (is (eq :renew (hold store)) "no renewal started in the last 30 ms")
       (setf (hold store) nil)
       (tt:join waker :timeout 10)
-      (tt:join releaser :timeout 10))
+      (tt:join releaser :timeout 10)
+      ;; A wakeup after the timeout leaves STOP nothing to decide, and the test would pass with
+      ;; or without the margin.
+      (is (< (- woke-at start) (* 3/10 internal-time-units-per-second))
+          "the wakeup came ~,3F s after STOP was called, which is not before its 0.3 s timeout"
+          (/ (- woke-at start) internal-time-units-per-second)))
     (sb-thread:signal-semaphore gate)
     (is (eq :stopped (s:stop a :timeout 5)))))
 
