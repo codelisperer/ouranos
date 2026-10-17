@@ -14,6 +14,41 @@ its tag.
 
 ### An app may have to act
 
+- **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
+  place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
+  fetch it and check an existing checkout out at it. Re-run the setup script, or run
+  `git fetch origin && git checkout 024d0a17` in the Coalton checkout, then clear
+  `~/.cache/common-lisp` and rebuild `bin/cons`; `scripts/check-coalton.lisp` says which
+  Coalton loads. The framework needed no change. An app's own Coalton code may:
+  - A discarded `Result` is now a full warning, which fails an ASDF build: a non-final form
+    of a body, or the last form of a `when` or `unless` body or of `protect`'s cleanup, whose
+    value is a `Result`. Handle it, or bind it with `(let _ = …)`.
+    `docs/coalton-patterns.md` §8a shows the message.
+  - A toplevel list left open at the end of a file is an error, where before it silently
+    swallowed every form after it.
+  - `error` takes only a `String`. `Signalable` and `result:ok-or-error` are removed, as are
+    the identity `Into`/`Iso` instances, the `Cell` to `String` conversion and the tuple-swap
+    conversions.
+  - `unwrap`, `expect` and `error` signal a `Panic` condition that prints the message as
+    written; it is no longer used as a `format` control string.
+  - `coalton` now exports `need`, `protect` and `handle`, which can collide with an app's
+    own definitions of those names in a package that uses `coalton`.
+
+  An app that pins Coalton in its own build moves that pin to `024d0a17`.
+
+- **praxeon/mcp on Windows: a local server's command must name an `.exe` or `.com` program;
+  a `.bat` or `.cmd` file is refused** (#700). Local MCP servers are now started by
+  `aion/windows:spawn-in-job`, which starts the server suspended inside its kill-on-close job
+  object and with no console window, then lets it run, so every process the server starts is
+  in the job too. Before, `sb-ext:run-program` started it and it was put in the job afterwards,
+  so a process it started in that moment could outlive it. `spawn-in-job` refuses batch files
+  with `aion/windows:process-not-started`, because `cmd.exe` would read the arguments by rules
+  the quoting does not follow; the client logs the failure and the request fails as not run. A
+  bare name was never found as a batch file (`run-program`'s `:search` does not look for one
+  either), so only an app that gave the full path of a `.bat` or `.cmd`, for example
+  `C:\...\npx.cmd`, is affected. Name the program the batch file runs instead, for example
+  `node` with the script's path as its first argument.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
@@ -27,6 +62,43 @@ its tag.
   Then clear `~/.cache/common-lisp` and rebuild `bin/cons`, which refuses to run under an SBCL
   other than the one that built it. An app that pins SBCL in its own CI or Dockerfile moves
   that pin to 2.6.9 to build against the same compiler the framework is tested on.
+
+- **praxeon/memory-db: make the store over a mnemosyne pool when the app also uses the
+  database** (#653). `make-db-memory-store` now takes a pool as well as a connection. Over a
+  pool each store operation borrows a connection, and reads take no lock. A write on Postgres
+  takes the store's lock after the connection. A write on SQLite runs in a transaction that
+  begins IMMEDIATE, or a savepoint inside one already open, and holds the database's write lock
+  in place of the store's lock, so an observer that waits for an app's transaction to commit
+  holds nothing the app's next store write needs. Inside an app's `conn:with-transaction` that
+  has not written yet, that transaction began deferred, so the store's write takes the write
+  lock only at its first write, and if the observer commits in between, the write can fail
+  with `SQLITE_BUSY` instead of waiting. `praxeon/observe` writes on a thread of its own, so it
+  gets a connection of its own. Over one connection shared with the app, an app that held a
+  transaction open while the observer wrote had that transaction committed by the observer's
+  COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
+  SQLite (#651). A store call the app makes on its own thread inside its
+  `conn:with-connection` on the same pool uses that connection and is part of its transaction.
+  A store over one connection keeps working when nothing else uses that connection. On SQLite
+  the store's own transactions (a window's, `supersede`'s and `forget-subject`'s) begin
+  IMMEDIATE, so behind an app's write transaction they wait for the write lock, within
+  mnemosyne's busy timeout (5000 ms by default), instead of failing with SQLITE_BUSY at once.
+  `forget` clears the predecessor's link and deletes the observation in one transaction, so a
+  pooled reader never sees both as current. An embedding a transaction computed before taking
+  the lock is used only by the store whose embedder computed it, and `supersede` inside the
+  transaction uses it instead of embedding the text again.
+
+- **hyperion/auth-db: `make-db-auth` refuses to start unless the users table has the column
+  `email_confirmed_at` and the tables `hyperion_email_tokens` and `hyperion_email_events`
+  exist** (#690). Without them it signals `missing-email-tables`, whose report names the
+  migrations to add: `users-email-confirmed-ddl` (an `ALTER TABLE … ADD COLUMN`),
+  `email-tokens-ddl`, `email-tokens-hash-index-ddl`, `email-tokens-user-index-ddl`,
+  `email-events-ddl` and `email-events-index-ddl`, in that order. `docs/migrations.md` section 5
+  lists them as `make-migration` steps. The column is not in `users-ddl`, so a new timeline adds
+  it with the same `ALTER` step as an existing one. Existing accounts start unconfirmed; to mark
+  them confirmed, add `UPDATE hyperion_users SET email_confirmed_at = created_at WHERE
+  email_confirmed_at IS NULL` after the `ALTER`. An app that uses none of the new functions
+  below can pass `:require-email-tables nil` instead. `:ensure t` and `ensure-schema` create
+  all of it. A store with its own table names passes `:tokens-table` and `:email-events-table`.
 
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to
@@ -242,6 +314,45 @@ its tag.
 
 ### Added
 
+- **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
+  that start and stop with the dev server** (#700). Declare one with
+  `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
+  `:ready-timeout`, `:secret`, `:required`, `:restart`) and name it in the new `:sidecars`
+  argument of `hyperion/dev:serve`, `hyperion/dev:watch` or `hyperion/desktop:run-app`. The
+  sidecars start once the server has bound its port, with that port in place of `{port}` in the
+  command, and stop when the dev session ends; a dev reload leaves them running.
+  `hyperion/sidecar:token-after` makes a `:ready` function that captures a value from the
+  sidecar's output, and `hyperion/sidecar:sidecar-value` returns it, as an `aion/secret` when
+  the sidecar is declared `:secret t`. A program missing from PATH is logged as a warning, or
+  signals `sidecar-not-started` when the sidecar is `:required t`; a sidecar that does not
+  become ready signals `sidecar-not-ready`. A sidecar does not outlive an image that is killed:
+  on Windows it runs in a kill-on-close job object, and one that cannot be put in a job is not
+  started (`sidecar-not-started`, reason `:no-job`); on Linux it is started through
+  `setpriv --pdeathsig KILL` when `setpriv` is installed, and on macOS, or Linux without
+  `setpriv`, the next `start-sidecars` ends a sidecar left by an image that has exited, using
+  state files under `~/.cache/hyperion-sidecars/`. `hyperion/server:serve-forever` takes no
+  sidecars, and a shipped desktop image ignores them. `:environment` takes only string names and
+  values; any other value, such as NIL from an unset variable, is an error at declaration. At
+  debug level a sidecar's output lines are logged by length and stream, never by text. Core
+  `hyperion` now depends on `hyperion/sidecar`, and through it on `aion/secret` and, on
+  Windows, `aion/windows` and `cffi`. See `hyperion/docs/sidecars.md`.
+
+- **hyperion/server: `handler-port` returns the port a running server listens on** (#700). On
+  the native `:uv` server it is the port that was bound, which is the one the operating system
+  chose when `start` was given port 0; on a Clack backend it is the port `start` was given.
+
+- **aion/windows: `spawn-in-job` starts a process suspended inside a kill-on-close job
+  object, with no console window, then lets it run** (#700). Every process the new process
+  starts is in the job too, which `sb-ext:run-program` followed by `assign-process-to-job`
+  could not ensure. Its standard input, output and error can each be a stream or the NUL
+  device, and standard error can be appended to a file. It returns a `job-process`, read with
+  `job-process-pid`, `job-process-input`, `job-process-output`, `job-process-error`,
+  `job-process-alive-p`, `job-process-exit-code`, `job-process-status` and `job-process-wait`,
+  and ended with `job-process-terminate` and `job-process-close`. `find-executable` finds an
+  `.exe` or `.com` program on PATH, and `quote-windows-argument` and `windows-command-line`
+  build a command line that the Microsoft C runtime splits back into the same arguments. A
+  missing program or a batch file signals `process-not-started`.
+
 - **aion/schedule: a job scheduler, with `mnemosyne/jobs` to keep its jobs in Postgres or
   SQLite** (#689). An app registers a job function with `define-job`, with a schedule of
   `(:every seconds)`, `(:daily (hour minute) :zone "Europe/London")`,
@@ -278,6 +389,12 @@ its tag.
   `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
   migrations, or pass `:ensure t`. See `docs/scheduling.md`.
 
+- **mnemosyne/conn: `with-transaction` takes `:immediate`** (#653). On SQLite an outermost
+  transaction then begins with BEGIN IMMEDIATE and waits, within `*sqlite-busy-timeout-ms*`, for
+  the database's write lock before it reads. A deferred transaction that reads first and then
+  writes behind another connection's write transaction fails with SQLITE_BUSY at once, without
+  the busy timeout. On Postgres, and for an inner transaction, it changes nothing.
+
 - **praxeon/memory: `store-transactions-p`, `call-with-store-transaction` and
   `with-store-transaction`, for writes that take effect together or not at all** (#529). Both
   generics are optional: their default methods say a store has no transactions and call the
@@ -286,6 +403,22 @@ its tag.
   thread's progress to put back on a non-local exit; `praxeon/memory-db` uses
   `conn:with-transaction` under its recursive lock, a savepoint inside an app's own
   transaction.
+
+- **hyperion/auth-db: email confirmation, change of address and password reset** (#690).
+  `issue-confirmation` and `confirm-email` confirm an account's address, and `email-confirmed-p`
+  and `user-email-confirmed-at` report it. `request-email-change` (which requires the current
+  password unless `:password :skip`), `confirm-email-change` and `revert-email-change` move an
+  account to a new address, with a revert link to the old one that ends every session of the
+  account. `set-email` is the operator path and requires `:actor`. `issue-password-reset` and
+  `reset-password` reset a password. A change of address cancels the account's unused
+  confirmation, change and reset tokens. Tokens are stored as SHA-256 hashes, and a failed one
+  signals `invalid-token` with a reason. A user is sent at most 5 tokens of one purpose an hour
+  (`too-many-tokens`); the limit and the lifetimes (24 hours, 1 hour for a reset, 7 days for a
+  revert) are `make-db-auth` keys. `email-history` reads the log of confirmations and changes,
+  and `prune-email-tokens` deletes expired tokens. The functions return the tokens and the app
+  sends the mail.
+- **hyperion/session: `end-sessions`** ends every session that holds a given value under a
+  key, such as one user's sessions under `:user-id`, except the one named by `:except` (#690).
 
 - **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
   `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an
@@ -985,6 +1118,14 @@ its tag.
   visible on the page and read aloud by screen readers. `token-field` now returns no values.
   An app that calls `token-field` itself and read its return value, `T` when a field was
   written, now gets no value.
+
+- **scripts/setup.ps1: moving to a new Coalton pin fetches it, instead of stopping** (#697).
+  When the Coalton checkout did not contain the pinned commit yet, which is the usual state
+  after `coalton.pin` changes, `git rev-parse` reported an unknown revision and Windows
+  PowerShell treated that message as a terminating error, so `setup.ps1` exited 1 before it
+  fetched. `setup.ps1 -Check` stopped the same way instead of reporting the pin as missing.
+  Both now resolve the commit through `Resolve-GitCommit`, which returns nothing for a
+  revision git cannot resolve. `scripts/setup.sh` was not affected.
 
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,

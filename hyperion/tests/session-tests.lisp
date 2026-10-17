@@ -93,6 +93,33 @@
         (is (= 1 (session:store-count store)))
         (is (eq keep (session:store-ref store (session:session-id keep))))))))
 
+(test end-sessions-ends-one-user-s-sessions-except-the-one-named
+  "#690: after a change of address the app ends the user's other sessions and keeps the current
+one."
+  (let* ((store (session:make-memory-store))
+         (current (session:ensure-session (%env) store))
+         (other (session:ensure-session (%env) store))
+         (someone-else (session:ensure-session (%env) store))
+         (anonymous (session:ensure-session (%env) store)))
+    (declare (ignore anonymous))
+    (session:session-set current :user-id "u1")
+    (session:session-set other :user-id "u1")
+    (session:session-set someone-else :user-id "u2")
+    (is (= 1 (session:end-sessions store :user-id "u1" :except current)))
+    (is (null (session:store-ref store (session:session-id other))))
+    (is (eq current (session:store-ref store (session:session-id current))))
+    (is (= 3 (session:store-count store)) "the other user's and the anonymous session stay")
+    (is (= 1 (session:end-sessions store :user-id "u1" :except "not-a-session-id"))
+        "EXCEPT names a session by id too, and an id that matches none keeps none")
+    (is (= 2 (session:store-count store)))))
+
+(test end-sessions-refuses-nil
+  "A NIL value would match every session that never had the key, the anonymous ones included."
+  (let* ((store (session:make-memory-store)))
+    (session:ensure-session (%env) store)
+    (signals error (session:end-sessions store :user-id nil))
+    (is (= 1 (session:store-count store)))))
+
 (test session-summary-shape
   (let* ((store (session:make-memory-store))
          (s (session:ensure-session (%env) store)))

@@ -102,7 +102,7 @@
     stays with the caller, and STOP takes whichever handler START returned.")
   (:export #:default-server #:available-servers #:no-server-backend
            #:native-backend-p
-           #:*default-port* #:start #:stop
+           #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
            #:loopback-host-p
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
@@ -222,7 +222,9 @@
            #:session-cookie-not-attachable #:session-cookie-not-attachable-response
            ;; dev/REPL session management
            #:sessions #:session-summary #:describe-sessions
-           #:kill-session #:kill-sessions))
+           #:kill-session #:kill-sessions
+           ;; #690: end every session of one user, after a change of address or a revert.
+           #:end-sessions))
 
 (cl:defpackage #:hyperion/csrf
   (:use #:cl)
@@ -531,6 +533,7 @@
 (cl:defpackage #:hyperion/dev
   (:use #:cl)
   (:local-nicknames (#:srv  #:hyperion/server)
+                    (#:sidecar #:hyperion/sidecar)
                     (#:hjs  #:hyperion/js)
                     (#:hlog #:hyperion/logging))
   (:documentation
