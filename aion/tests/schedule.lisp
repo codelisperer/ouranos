@@ -793,12 +793,18 @@ renewal. Before #728 it started one whenever any time was left.
 STOP reads the time through *STOP-CLOCK*, which here adds an offset to the real time. Its first
 reading is the one STOP computes its deadline from, so the waker knows the deadline exactly and
 moves the clock to 45 ms before it, however late the waker itself runs. STOP's 30-second timeout
-is then never waited out."
+is then never waited out.
+
+A lease of 300 seconds makes STOP's wait slice 100 seconds, so its wait is limited only by the
+time left, and it does not wake on its own and renew before the waker has moved the clock. The
+waker broadcasts every 10 ms until STOP returns, so a broadcast sent before STOP reached its wait
+does not leave STOP waiting out the 45 ms in real time."
   (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
          (gate (sb-thread:make-semaphore))
-         (a (s:make-scheduler store :clock clock :lease-seconds 3))
+         (a (s:make-scheduler store :clock clock :lease-seconds 300))
          (offset 0)
          (first-reading nil)
+         (stopped nil)
          (stop-clock (lambda ()
                        (let ((now (+ (get-internal-real-time) offset)))
                          (or first-reading (setf first-reading now))
@@ -820,13 +826,16 @@ is then never waited out."
                                            (* 30 internal-time-units-per-second)
                                            (- (* 45/1000 internal-time-units-per-second)))))
                             (setf offset (- target (get-internal-real-time))))
-                          (sb-thread:with-mutex ((s::%lock a))
-                            (sb-thread:condition-broadcast (s::%idle a)))
+                          (loop until stopped
+                                do (sb-thread:with-mutex ((s::%lock a))
+                                     (sb-thread:condition-broadcast (s::%idle a)))
+                                   (sleep 0.01))
                           t)))
           ;; Lets a renewal that was held go after 4 seconds, so that the test ends either way.
           (releaser (spawn "renewal releaser"
                            (lambda () (sleep 4) (sb-thread:signal-semaphore (gate store)) t))))
-      (is (eq :timed-out (let ((s::*stop-clock* stop-clock)) (s:stop a :timeout 30))))
+      (is (eq :timed-out (unwind-protect (let ((s::*stop-clock* stop-clock)) (s:stop a :timeout 30))
+                           (setf stopped t))))
       (is (eq :renew (hold store)) "no renewal started with 45 ms left")
       (setf (hold store) nil)
       (tt:join waker :timeout 10)
