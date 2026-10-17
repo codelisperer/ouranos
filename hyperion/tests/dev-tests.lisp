@@ -430,6 +430,11 @@ stylesheet change clears the error while the file still has never loaded -- the 
     (is (null (hyperion/dev::dev-last-error d)))))
 
 ;;; --- #730: a limit on how many files are watched ------------------------------------------
+
+(defun %occurrences (needle haystack)
+  "How many times NEEDLE occurs in HAYSTACK, not overlapping."
+  (loop with start = 0 for at = (search needle haystack :start2 start)
+        while at count t do (setf start (+ at (length needle)))))
 ;;;
 ;;; The watcher snapshots every file under its roots on every poll. A test that watched the
 ;;; whole temporary directory exhausted a 4 GB heap on a developer's Mac, and the backtrace
@@ -455,7 +460,9 @@ stylesheet change clears the error while the file still has never loaded -- the 
              (is (eql 4 (hyperion/dev:watch-too-large-count c)) "counting stops just past the limit")
              (is (eql 3 (hyperion/dev:watch-too-large-limit c)))
              (is (search (namestring (truename root)) (princ-to-string c))
-                 "the message names the root: ~A" c)))
+                 "the message names the root: ~A" c)
+             (is (search "watched roots have more than 3 files" (princ-to-string c))
+                 "the message says the limit is on all the roots together: ~A" c)))
       (ignore-errors (aion/fs:delete-tree root)))))
 
 (test a-root-at-the-file-limit-is-watched
@@ -490,6 +497,18 @@ stylesheet change clears the error while the file still has never loaded -- the 
            (is (eq before hyperion/dev::*dev*) "a refused watch was left as the active one"))
       (ignore-errors (aion/fs:delete-tree root)))))
 
+(test a-refused-watch-leaves-the-previous-dev-server-running
+  (let* ((root (%dev-root-of 5))
+         (previous (hyperion/dev::make-dev :builder (lambda () nil) :paths (list root)))
+         (hyperion/dev::*dev* previous))
+    (unwind-protect
+         (progn
+           (signals hyperion/dev:watch-too-large
+             (hyperion/dev:watch (lambda () nil) :paths (list root) :file-limit 3))
+           (is (eq previous hyperion/dev::*dev*) "the refused watch replaced the previous one")
+           (is-true (hyperion/dev::dev-running previous) "the refused watch stopped the previous one"))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
 (test a-root-that-grows-past-the-limit-keeps-the-last-snapshot-and-reports-it
   (%with-dev-reloader (d root)
     (setf (hyperion/dev::dev-file-limit d) 3)
@@ -506,6 +525,37 @@ stylesheet change clears the error while the file still has never loaded -- the 
       (delete-file (merge-pathnames "d.css" root))
       (hyperion/dev:reload! d)
       (is (null (hyperion/dev::dev-last-error d)) "back within the limit, the error is cleared"))))
+
+(test the-file-limit-message-is-printed-once-while-over-the-limit
+  (%with-dev-reloader (d root)
+    (setf (hyperion/dev::dev-file-limit d) 1)
+    (dolist (name '("a.css" "b.css"))
+      (with-open-file (s (merge-pathnames name root) :direction :output) (write-string "a{}" s)))
+    (let ((printed (with-output-to-string (*error-output*)
+                     (hyperion/dev:reload! d)
+                     (hyperion/dev:reload! d)
+                     (hyperion/dev:reload! d))))
+      (is (= 1 (%occurrences "watched roots have more than" printed))
+          "three polls over the limit printed: ~A" printed))))
+
+(test a-compile-error-is-shown-again-once-back-within-the-file-limit
+  (%with-dev-reloader (d root)
+    (setf (hyperion/dev::dev-file-limit d) 3)
+    (%write-dev-file root "app.lisp" +dev-438-bad+)
+    (is (eq :error (hyperion/dev:reload! d)))
+    (let ((compile-error (hyperion/dev::dev-last-error d)))
+      (is (and compile-error (search "app.lisp did not reload" compile-error)))
+      (dolist (name '("b.css" "c.css" "d.css"))
+        (with-open-file (s (merge-pathnames name root) :direction :output) (write-string "b{}" s)))
+      (is (eq :error (hyperion/dev:reload! d)))
+      (is (search "watched roots have more than" (hyperion/dev::dev-last-error d))
+          "over the limit, the overlay shows the limit")
+      ;; Remove every file added since, so the next snapshot equals the one kept and nothing
+      ;; is recompiled: the error can only come back from what was saved, not from a new compile.
+      (dolist (name '("b.css" "c.css" "d.css")) (delete-file (merge-pathnames name root)))
+      (is (eq :no-change (hyperion/dev:reload! d)))
+      (is (equal compile-error (hyperion/dev::dev-last-error d))
+          "back within the limit, the compile error is shown again"))))
 
 (test the-default-file-limit-is-set
   (is (integerp hyperion/dev:*watch-file-limit*))

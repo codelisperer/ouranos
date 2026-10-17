@@ -50,9 +50,9 @@ otherwise fill the heap with no warning. The default is far above the size of a 
    (limit :initarg :limit :reader watch-too-large-limit))
   (:report
    (lambda (c stream)
-     (format stream "hyperion/dev: ~A has more than ~D watched files (~D counted when the watcher stopped counting), so it is not watched. Pass narrower :PATHS, add its large subdirectories to :EXCLUDE-DIRECTORIES, or raise :FILE-LIMIT or *WATCH-FILE-LIMIT*."
-             (namestring (watch-too-large-root c)) (watch-too-large-limit c)
-             (watch-too-large-count c))))
+     (format stream "hyperion/dev: the watched roots have more than ~D files between them, so they are not watched. The count passed the limit at ~D files while walking ~A. Pass narrower :PATHS, add large subdirectories to :EXCLUDE-DIRECTORIES, or raise :FILE-LIMIT or *WATCH-FILE-LIMIT*."
+             (watch-too-large-limit c) (watch-too-large-count c)
+             (namestring (watch-too-large-root c)))))
   (:documentation "The watched roots hold more files than the limit allows (#730). ROOT is the
 root being walked when the count passed LIMIT, and COUNT is the number of files counted by then,
 across this root and the ones walked before it."))
@@ -67,6 +67,7 @@ across this root and the ones walked before it."))
   (file-limit *watch-file-limit*)           ; most files watched, or NIL (#730)
   snapshot                                  ; namestring -> file-write-date
   snapshot-error                            ; WATCH-TOO-LARGE's text while over the limit
+  error-before-limit                        ; the error it replaced, restored on recovery
   thread
   (lock (sb-thread:make-mutex :name "hyperion-dev-reload"))
   (running t)
@@ -334,7 +335,8 @@ failed one UNWATCH, or the next restart, can still try to stop that server."
   "A new snapshot of D's roots. When the roots have grown past D's file limit while it was
 watching (#730), the previous snapshot is kept, the condition's text becomes D's error, so the
 browser overlay shows it, and it is printed once rather than on every poll, and NIL is returned,
-for which RELOAD! returns :ERROR. The next snapshot within the limit clears that error."
+for which RELOAD! returns :ERROR. The error it replaced, such as a Lisp file that still fails to
+compile, is kept, and the next snapshot within the limit puts it back."
   (handler-case
       (prog1 (%snapshot (dev-paths d)
                         :excluded-dirs (dev-excluded-dirs d)
@@ -342,12 +344,15 @@ for which RELOAD! returns :ERROR. The next snapshot within the limit clears that
                         :limit (dev-file-limit d))
         (when (dev-snapshot-error d)
           (when (equal (dev-last-error d) (dev-snapshot-error d))
-            (setf (dev-last-error d) nil))
-          (setf (dev-snapshot-error d) nil)
+            (setf (dev-last-error d) (dev-error-before-limit d)))
+          (setf (dev-snapshot-error d) nil
+                (dev-error-before-limit d) nil)
           (format *error-output* "~&[dev] the watched roots are within the file limit again~%")
           (finish-output *error-output*)))
     (watch-too-large (e)
       (let ((text (princ-to-string e)))
+        (unless (dev-snapshot-error d)
+          (setf (dev-error-before-limit d) (dev-last-error d)))
         (unless (equal text (dev-snapshot-error d))
           (format *error-output* "~&[dev] ~A~%" text)
           (finish-output *error-output*))
@@ -530,7 +535,8 @@ the next reload, forever.
 
 FILE-LIMIT, defaulting to *WATCH-FILE-LIMIT*, is the most files watched across the roots, or NIL
 for no limit (#730). Past it WATCH signals WATCH-TOO-LARGE, naming the root and the count, before
-the builder runs, so nothing is started. It refuses rather than watching part of the tree,
+the builder runs, so nothing is started. The roots are walked before a previous WATCH is stopped,
+so a refused WATCH leaves the previous dev server, if any, running. It refuses rather than watching part of the tree,
 because a partial watch would leave some edits without a reload and give no sign of which. If
 the roots grow past the limit while watching, the previous snapshot is kept and the condition is
 shown as the reload error until they are back within it.
@@ -558,7 +564,6 @@ returns once each is ready. They keep running across reloads, and stop in UNWATC
 cannot start, the server is stopped and the sidecar's condition is signalled.
 
 Returns the dev handle; stop with UNWATCH."
-  (unwatch)
   (setf builder (%normalize-builder builder "BUILDER"))
   (flet ((system-src (s) (merge-pathnames "src/" (asdf:system-source-directory s))))
     (let* ((roots (mapcar #'truename
@@ -574,6 +579,8 @@ Returns the dev handle; stop with UNWATCH."
       (setf (dev-snapshot d) (%snapshot roots :excluded-dirs exclude-directories
                                               :excluded-types exclude-types
                                               :limit file-limit))
+      ;; Only once the roots are within the limit, so a refused WATCH stops nothing (#730).
+      (unwatch)
       ;; *DEV* IS SET BEFORE THE BUILDER RUNS (#159). HYPERION/SERVER:START now returns only
       ;; once the port is listening, so the port can answer a moment before the builder
       ;; returns. Set afterwards, an UNWATCH arriving in that moment found *DEV* NIL and did

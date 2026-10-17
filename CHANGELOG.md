@@ -1070,10 +1070,11 @@ its tag.
   `:file-limit` (default `hyperion/dev:*watch-file-limit*`, `nil` for no limit), and past it
   signals `hyperion/dev:watch-too-large` (readers `watch-too-large-root`,
   `watch-too-large-count`, `watch-too-large-limit`) before the builder runs, so nothing is
-  started. It refuses rather than watching part of the tree, because a partial watch leaves some
+  started, and a dev server that `watch` started earlier keeps running. It refuses rather than watching part of the tree, because a partial watch leaves some
   edits without a reload and gives no sign of which. If the roots grow past the limit while
   watching, the previous snapshot is kept and the condition is shown as the reload error, in the
-  browser overlay, until they are back within it. `hyperion/dev:serve` callers set the limit by
+  browser overlay, until they are back within it; an error it replaced, such as a Lisp file that
+  still fails to compile, is shown again then. `hyperion/dev:serve` callers set the limit by
   binding `*watch-file-limit*`.
 
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
