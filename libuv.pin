@@ -22,13 +22,14 @@
 #      versions is a matrix we would be debugging rather than using.
 #   3. It is the same artifact CI publishes and the installers bundle (#78).
 #
-# 1.52.1 is the current stable release, and is also what MSYS2/ucrt64 ships on
-# Windows -- so the Windows machine can cross-check our build against a prebuilt
+# 1.53.0 is the current stable release (2026-09-24), and is also what MSYS2/ucrt64
+# ships on Windows (packages.msys2.org lists mingw-w64-ucrt-x86_64-libuv 1.53.0-1,
+# 2026-10-17) -- so the Windows machine can cross-check our build against a prebuilt
 # of the identical version.
 
-version 1.52.1
-sha256  66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7
-url     https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
+version 1.53.0
+sha256  cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64
+url     https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0.tar.gz
 
 # On the checksum. Recorded trust-on-first-use: fetched over TLS from the
 # official host (dist.libuv.org) and hashed here. Every later fetch on every
@@ -36,7 +37,7 @@ url     https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
 # turns a silent substitution into a loud failure.
 #
 # Upstream also publishes a detached GPG signature next to the tarball
-# (libuv-v1.52.1.tar.gz.sign). Verifying it requires the release key and a trust
+# (libuv-v1.53.0.tar.gz.sign). Verifying it requires the release key and a trust
 # decision about that key, so it is deliberately NOT in the build path; anyone
 # who wants that stronger guarantee can take it by hand.
 #
@@ -59,4 +60,4 @@ url     https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
 # Bump it when you look, even when the answer is "nothing to do".
 
 advisories https://github.com/libuv/libuv/security/advisories
-reviewed   2026-09-15
+reviewed   2026-10-17

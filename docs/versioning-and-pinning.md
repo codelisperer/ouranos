@@ -166,7 +166,7 @@ which is a thing to build when there is a pin whose cadence justifies it.
 
 1. **Re-check the transcribed source list.** `scripts/build-libuv.lisp` compiles a list of
    `.c` files copied by hand from upstream's build files — its own header says *"Transcribed
-   from libuv's CMakeLists.txt … Verified against 1.52.1."* A new release can add, remove or
+   from libuv's CMakeLists.txt … Verified against 1.53.0."* A new release can add, remove or
    move sources, and the failure mode is not a build error: it is a library missing a file
    it needed, or built without a feature it should have had. **The list is version-specific
    and must be re-verified on every bump**, not just when the build breaks.

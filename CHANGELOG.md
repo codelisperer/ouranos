@@ -14,6 +14,18 @@ its tag.
 
 ### An app may have to act
 
+- **Native: the pinned libuv is 1.53.0** (#739), released 2026-09-24, in place of 1.52.1.
+  `libuv.pin` names it with its sha256, and `scripts/build-libuv.lisp` builds it. A tree whose
+  `vendor/libuv/` was built from 1.52.1 keeps loading that copy until it is rebuilt: delete
+  `vendor/libuv/` and run `sbcl --script scripts/build-libuv.lisp`. A desktop bundle that carries
+  `libuv.dll`, `libuv.so.1` or `libuv.1.dylib` carries the rebuilt copy only once it is rebuilt.
+  `aion/uv:version` returns the version that loaded. On Windows the build now also links
+  `synchronization`, because 1.53.0's `src/win/pipe.c` calls `WaitOnAddress`. The public
+  struct layouts `aion/uv` writes by hand (`uv_buf_t`, `uv_stat_t`, `uv_dirent_t`,
+  `uv_timespec_t`, `uv_stdio_container_t`, `uv_process_options_t`) did not change, and request
+  structs keep their size: `UV_REQ_FIELDS` gives up one reserved pointer to a union of the same
+  size in the private fields.
+
 - **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
   place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
   fetch it and check an existing checkout out at it. Re-run the setup script, or run

@@ -100,7 +100,7 @@
 ;;; ------------------------------------------------------- platform knowledge
 ;;;
 ;;; Transcribed from libuv's CMakeLists.txt. `uv_sources` is common to every platform;
-;;; the rest is selected by OS. Verified against 1.52.1.
+;;; the rest is selected by OS. Verified against 1.53.0.
 
 (defparameter *common-sources*
   '("src/fs-poll.c" "src/idna.c" "src/inet.c" "src/random.c" "src/strscpy.c"
@@ -160,7 +160,9 @@
      (values (append *common-sources* *windows-sources*)
              '("WIN32_LEAN_AND_MEAN" "_WIN32_WINNT=0x0A00" "_CRT_DECLARE_NONSTDC_NAMES=0")
              '("-lpsapi" "-luser32" "-ladvapi32" "-liphlpapi" "-luserenv" "-lws2_32"
-               "-ldbghelp" "-lole32" "-lshell32")
+               "-ldbghelp" "-lole32" "-lshell32"
+               ;; From 1.53.0: src/win/pipe.c calls WaitOnAddress and WakeByAddressSingle.
+               "-lsynchronization")
              "libuv.dll"))))
 
 (defun library-path ()
@@ -306,9 +308,9 @@ has fetched a tarball, verified its checksum and unpacked it. So a machine with 
 did two megabytes of work and a SHA-256 to arrive at a message it could have been given
 immediately. Measured on a machine with Visual Studio made invisible:
 
-  libuv 1.52.1 (WINDOWS)
-    fetching https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
-    sha256 verified (66d511b9e6e334c0)
+  libuv 1.53.0 (WINDOWS)
+    fetching https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0.tar.gz
+    sha256 verified (cb0d6dd2128d5a95)
     unpacking
   FAILED: No MSVC C++ toolchain found. ...
 
