@@ -79,10 +79,14 @@ constructed, not at first use, so a misconfigured deploy fails at boot."))
                         (format nil "a size limit (~:D bytes) needs the upload's declared content-length"
                                 (blob-upload-refused-limit c)))
                        (:bad-content-length "the content-length is not a non-negative integer")
-                       (:bad-expiry "expires-in must be an integer number of seconds from 1 to 604800")))))
+                       (:bad-expiry "expires-in must be an integer number of seconds from 1 to 604800")
+                       (:bad-part-number "a part number must be an integer from 1 to 10000")
+                       (:bad-upload-id "the upload id must be a non-empty string")
+                       (:bad-parts "parts must be a non-empty list of (part-number . etag)")))))
   (:documentation
-   "UPLOAD-URL refused to sign (#770). REASON is :TOO-LARGE, :CONTENT-LENGTH-REQUIRED,
-:BAD-CONTENT-LENGTH or :BAD-EXPIRY, so a caller branches on the reason and not on the message."))
+   "UPLOAD-URL or a multipart call refused to sign or send (#770). REASON is :TOO-LARGE,
+:CONTENT-LENGTH-REQUIRED, :BAD-CONTENT-LENGTH, :BAD-EXPIRY, :BAD-PART-NUMBER, :BAD-UPLOAD-ID or
+:BAD-PARTS, so a caller branches on the reason and not on the message."))
 
 (define-condition blob-unsupported (blob-error)
   ((operation :initarg :operation :initform nil :reader blob-unsupported-operation))

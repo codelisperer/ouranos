@@ -119,12 +119,14 @@ START (default 0). Shorter when the blob ends sooner; empty when START is at or 
 For checking what a client uploaded by its first bytes, without fetching the whole object
 (#770). Signals BLOB-NOT-FOUND."))
 
-(defgeneric put-bucket-cors (store bucket &key origins methods allowed-headers max-age-seconds)
+(defgeneric put-bucket-cors (store bucket &key origins methods allowed-headers max-age-seconds expose-headers)
   (:documentation
    "Set BUCKET's CORS rule so a browser on one of ORIGINS can upload to it directly (#770).
 
 ORIGINS is a list of origins such as (\"https://app.example.com\"); each may hold one `*'.
 METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\"), MAX-AGE-SECONDS to 3000.
+EXPOSE-HEADERS lists response headers a browser script may read; a multipart upload from a
+browser needs (\"ETag\"), because the client completes the upload with each part's ETag.
 This REPLACES the bucket's whole CORS configuration, as the S3 API does; a bucket that needs
 other rules too should have them set by whoever owns it. Returns T."))
 
@@ -136,6 +138,39 @@ only as a network error, so this is the diagnostic: call it when an upload never
 
 Returns one of :ALLOWED, :NO-CORS-CONFIGURATION, :ORIGIN-NOT-ALLOWED, :METHOD-NOT-ALLOWED or
 :HEADER-NOT-ALLOWED, the last three naming the first test that no rule passes."))
+
+;;; Multipart uploads (#770): for a file over the 5 GB a single PUT can carry, or an upload that
+;;; must resume after a dropped connection. The server starts the upload, hands the client one
+;;; presigned URL per part, and completes it with the parts' ETags. Each part but the last must
+;;; be at least 5 MiB; the provider refuses to complete an upload that breaks that.
+
+(defgeneric start-multipart-upload (store bucket key &key content-type)
+  (:documentation
+   "Start a multipart upload of BUCKET/KEY and return its upload id, a string. CONTENT-TYPE is the
+completed object's type. An upload that is never completed or aborted keeps its parts, and the
+provider bills for them, so pair every start with a COMPLETE- or ABORT-MULTIPART-UPLOAD."))
+
+(defgeneric multipart-part-url (store bucket key upload-id part-number &key expires-in content-length)
+  (:documentation
+   "An UPLOAD-TARGET for part PART-NUMBER (1 to 10000) of UPLOAD-ID. The part number and upload id
+are signed into the URL. CONTENT-LENGTH, when given, is signed, so the provider refuses a part
+of any other size. EXPIRES-IN is required, as for UPLOAD-URL. The client keeps the ETag header
+of each part's response for COMPLETE-MULTIPART-UPLOAD."))
+
+(defgeneric complete-multipart-upload (store bucket key upload-id parts)
+  (:documentation
+   "Join the parts of UPLOAD-ID into the object at BUCKET/KEY. PARTS is a list of
+(part-number . etag), the ETag as the part's response gave it. Returns T. Check the result with
+BLOB-METADATA and READ-BLOB-RANGE, as for a single upload."))
+
+(defgeneric abort-multipart-upload (store bucket key upload-id)
+  (:documentation
+   "Abandon UPLOAD-ID and free its parts. Idempotent: an upload already gone is aborted."))
+
+(defgeneric list-multipart-parts (store bucket key upload-id)
+  (:documentation
+   "The parts of UPLOAD-ID uploaded so far, as a list of (part-number etag size), in order, for
+resuming an upload: the client uploads only the parts that are missing."))
 
 (defgeneric list-blobs (store bucket &key prefix)
   (:documentation
@@ -204,8 +239,8 @@ passes through."
   (unless (and (integerp start) (>= start 0) (integerp length) (>= length 0))
     (error 'type-error :datum (list start length) :expected-type '(integer 0))))
 
-(defmethod put-bucket-cors :before ((s store) bucket &key origins methods allowed-headers max-age-seconds)
-  (declare (ignore methods allowed-headers))
+(defmethod put-bucket-cors :before ((s store) bucket &key origins methods allowed-headers max-age-seconds expose-headers)
+  (declare (ignore methods allowed-headers expose-headers))
   (%check-bucket bucket)
   (unless (and origins (listp origins) (every (lambda (o) (and (stringp o) (plusp (length o)))) origins))
     (error 'type-error :datum origins :expected-type '(cons string list)))
@@ -216,6 +251,40 @@ passes through."
   (declare (ignore method headers))
   (%check-bucket bucket)
   (check-type origin string))
+
+(defun %check-upload-id (bucket key upload-id)
+  (unless (and (stringp upload-id) (plusp (length upload-id)))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-upload-id)))
+
+(defmethod start-multipart-upload :before ((s store) bucket key &key content-type)
+  (declare (ignore content-type))
+  (%check-key bucket key))
+
+(defmethod multipart-part-url :before ((s store) bucket key upload-id part-number &key expires-in content-length)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id)
+  (unless (and (integerp part-number) (<= 1 part-number 10000))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-part-number))
+  (unless (and (integerp expires-in) (<= 1 expires-in +max-presign-seconds+))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-expiry))
+  (when (and content-length (not (and (integerp content-length) (>= content-length 0))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-length)))
+
+(defmethod complete-multipart-upload :before ((s store) bucket key upload-id parts)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id)
+  (unless (and parts (every (lambda (p) (and (consp p) (integerp (car p)) (<= 1 (car p) 10000)
+                                             (stringp (cdr p)) (plusp (length (cdr p)))))
+                            parts))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-parts)))
+
+(defmethod abort-multipart-upload :before ((s store) bucket key upload-id)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id))
+
+(defmethod list-multipart-parts :before ((s store) bucket key upload-id)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id))
 
 (defmethod list-blobs :before ((s store) bucket &key prefix)
   (declare (ignore prefix))
