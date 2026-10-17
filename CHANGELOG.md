@@ -378,6 +378,15 @@ its tag.
 
 ### Added
 
+- **`scripts/build-installer.ps1` checks the WebView2 bootstrapper's signature, and takes
+  `-RequireWebView2`** (#736). Before it embeds `MicrosoftEdgeWebview2Setup.exe`, the new
+  `scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature whose
+  signer has the relative distinguished name `O=Microsoft Corporation`, compared exactly, on a
+  cached copy as well as a fresh download, and prints the file's version and sha256. A copy that fails is deleted from `scripts/installers/.cache`. Without
+  `-RequireWebView2` a failed download or check still builds the installer without the
+  bootstrapper, with a warning, as before; with it, the build stops. An app that builds its own
+  release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
+  a release never ships without a way to install the WebView2 runtime.
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
   `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,

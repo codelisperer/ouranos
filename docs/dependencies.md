@@ -122,6 +122,28 @@ and MSYS2 carry; (3) it is the same artifact CI publishes and installers will sh
 The build needs only a C compiler — no cmake, no make — so the "no external build tools"
 rule survives intact.
 
+### Supplied by the operating system, deliberately (#736)
+
+Three native libraries in the table above have no pinned version on Linux and macOS. That is a
+decision, recorded on #736, not something nobody has looked at:
+
+| Library | Who supplies it | Why it is not pinned |
+|---|---|---|
+| OpenSSL 3 | the distribution, or Homebrew's `openssl@3` on macOS; not loaded on Windows | Its security releases are the reason to take it from the operating system: a pinned copy would be one that this repository has to notice and replace, and the system's is replaced by the system's own updates. cl+ssl needs OpenSSL 3 or later, and `aion/src/http-client/openssl.lisp` patches it for OpenSSL 4 (#706). |
+| libsqlite3 | the distribution on Linux; macOS ships it | Windows is pinned (`SQLITE_VERSION` in `scripts/versions.env`), because Windows has no system copy. The copy that loaded is reported on every gate run (#129). |
+| libev | the distribution, or Homebrew | Only an app that declares `clack-handler-woo` loads it, and that app owns bundling it (row above). |
+
+They have **no entry in [`upstream.sexp`](../upstream.sexp)**, because there is no pinned version
+to compare with a release. This section is where they are accounted for.
+
+**The WebView2 Evergreen bootstrapper** is the other unversioned download.
+`scripts/build-installer.ps1` embeds it in the Windows installer, fetched from Microsoft's
+fwlink, which has no version, so it cannot be pinned by checksum. Instead
+`scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature from
+`O=Microsoft Corporation` on every build, cached copy or fresh download, and prints the file's
+version and sha256. `desktop-release.yml` passes `-RequireWebView2`, so a release stops rather
+than ship an installer without it (#736).
+
 ### Database server extensions
 
 Not loaded into any image: they are installed in the Postgres server an app connects to, and a
