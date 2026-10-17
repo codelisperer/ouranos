@@ -25,36 +25,10 @@ $QlSetup = Join-Path $QlHome 'setup.lisp'
 if (-not (Test-Path $QlSetup)) { Die "Quicklisp not found at $QlSetup (https://www.quicklisp.org/beta/)." }
 Info "SBCL present  |  Quicklisp at $QlHome"
 
-# The commit comes from the monorepo's coalton.pin. This script only checks it: the monorepo's
-# scripts/setup.ps1 clones Coalton and checks out the pinned commit, so that is done in one place.
-$MonorepoRoot = Split-Path -Parent $RepoRoot
-$PinFile = Join-Path $MonorepoRoot 'coalton.pin'
-$CoaltonRef = $null
-if (Test-Path $PinFile) {
-  foreach ($line in Get-Content $PinFile) {
-    if ($line -match '^\s*sha\s+(\S+)') { $CoaltonRef = $matches[1]; break }
-  }
-}
-if (-not $CoaltonRef) { Die "no 'sha' line in $PinFile." }
-$CoaltonDir = if ($env:COALTON_DIR) { $env:COALTON_DIR } else { Join-Path $HOME 'common-lisp\coalton' }
-$Fix = "Run scripts\setup.ps1 at the monorepo root ($MonorepoRoot), which checks out the pinned commit."
-# The commit REV names in the checkout at DIR, or $null. Under ErrorActionPreference 'Stop', git's
-# "unknown revision" on stderr would otherwise end the script before the message below (#697).
-function Resolve-GitCommit($dir, $rev) {
-  $ErrorActionPreference = 'Continue'
-  $out = (& git -C $dir rev-parse --verify --quiet "$rev^{commit}" 2>$null)
-  if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
-  return ([string]$out).Trim()
-}
-if (-not (Test-Path (Join-Path $CoaltonDir '.git'))) { Die "Coalton is not checked out at $CoaltonDir. $Fix" }
-# coalton.pin carries a short sha, so compare resolved commit ids.
-$current = Resolve-GitCommit $CoaltonDir 'HEAD'
-$want = Resolve-GitCommit $CoaltonDir $CoaltonRef
-if (-not $want -or $current -ne $want) {
-  $shown = if ($current) { $current.Substring(0, 8) } else { 'no commit' }
-  Die "Coalton at $CoaltonDir is at $shown, but coalton.pin names $CoaltonRef. $Fix"
-}
-Info "Coalton at $CoaltonDir is at the pinned $CoaltonRef."
+# Coalton: checked here, never cloned. scripts\coalton-pin.ps1 at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+& (Join-Path $PSScriptRoot '..\..\scripts\coalton-pin.ps1')
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
 # System discovery is handled by the repo-root bootstrap, not here.
 Info "Discovery: run 'sbcl --script bootstrap.lisp' at the repo root (writes the ASDF drop-in)."
