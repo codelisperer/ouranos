@@ -130,6 +130,8 @@
     query param, read a request header or cookie, negotiate JSON, and
     encode/decode JSON. Domain-neutral -- the caller supplies its own keys.")
   (:export #:body-string #:form-alist #:form-param #:form-params
+           ;; a body encoded as a browser encodes a form, for tests (#715)
+           #:form-urlencode
            ;; a body is a stream and is read once; a middleware that must look
            ;; inside it caches the result here rather than spending it (pre-publication issue 280)
            #:+body-string-key+ #:cache-body-string
