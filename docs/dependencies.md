@@ -277,11 +277,17 @@ only — and it made the Coalton REPL *desktop app*, which we ship as an install
 nothing without internet. The bytes now live in `hyperion/assets/vendor/` and are compiled
 **into the image** by the opt-in `hyperion/assets` system.
 
-| Asset | Version | Size | Licence |
-|---|---|---|---|
-| htmx | 1.9.12 | 48K | Zero-Clause BSD |
-| Alpine.js | 3.14.1 | 44K | MIT |
-| Bulma | 1.0.4 | 678K | MIT |
+| Asset | Version | Size | Licence | sha256 | From |
+|---|---|---|---|---|---|
+| htmx | 2.0.11 | 51K | Zero-Clause BSD | `d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717` | `dist/htmx.min.js` of npm `htmx.org@2.0.11` |
+| Alpine.js | 3.17.4 | 55K | MIT | `232519394c6c8fdba6f362b1d9da16106db513cdbf899011f00daab4051df31c` | `dist/cdn.min.js` of npm `alpinejs@3.17.4` |
+| Bulma | 1.0.4 | 678K | MIT | `67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee` | the jsdelivr URL in `ASSETS.pin` (not re-checked in #717) |
+
+htmx and Alpine.js moved from 1.9.12 and 3.14.1 on 2026-10-16 (#717), on the maintainer's
+decision to keep both current. Each file was taken from its npm package tarball after the
+tarball matched the sha512 `integrity` value the npm registry publishes for that version, and
+is byte-identical to the unpkg URL recorded in `ASSETS.pin`. What htmx 2 changes for an app is
+in the `CHANGELOG.md` entry for #717.
 
 - **Pinned by version + sha256** in [`hyperion/assets/vendor/ASSETS.pin`](../hyperion/assets/vendor/ASSETS.pin),
   same doctrine as `libuv.pin`. `scripts/check-assets.lisp` proves the files on disk still
