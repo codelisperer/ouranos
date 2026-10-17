@@ -232,32 +232,17 @@ $viversion = ($parts[0..3] -join '.')
 $wv2Args = @()
 if ($NoWebView2 -and $RequireWebView2) { Die "-NoWebView2 and -RequireWebView2 ask for opposite things" }
 if (-not $NoWebView2) {
-  $cache = Join-Path $Here 'installers\.cache'
-  $boot = Join-Path $cache 'MicrosoftEdgeWebview2Setup.exe'
-  if (-not (Test-Path $boot)) {
-    Info "fetching the WebView2 Evergreen bootstrapper (once; cached)"
-    New-Item -ItemType Directory -Force -Path $cache | Out-Null
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-    try {
-      Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
-        -OutFile $boot -UseBasicParsing -MaximumRedirection 10
-    } catch {
-      Remove-Item $boot -Force -ErrorAction SilentlyContinue
-      if ($RequireWebView2) { Die "could not fetch the WebView2 bootstrapper ($($_.Exception.Message)), and -RequireWebView2 was given" }
-      Write-Host "WARNING: could not fetch the WebView2 bootstrapper ($($_.Exception.Message))." -ForegroundColor Yellow
-      Write-Host "         Building without it; use -NoWebView2 to make that explicit." -ForegroundColor DarkGray
-    }
-  }
-  if (Test-Path $boot) {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Here 'check-webview2-bootstrapper.ps1') $boot
-    if ($LASTEXITCODE -ne 0) {
-      Remove-Item $boot -Force -ErrorAction SilentlyContinue
-      if ($RequireWebView2) { Die "the WebView2 bootstrapper failed its signature check, and -RequireWebView2 was given" }
-      Write-Host "WARNING: the WebView2 bootstrapper failed its signature check and was deleted from the cache." -ForegroundColor Yellow
-      Write-Host "         Building without it; the next build fetches it again." -ForegroundColor DarkGray
-    } else {
-      $wv2Args = @("/DWV2BOOTSTRAPPER=$boot") ; Note "WebView2 bootstrapper: embedded"
-    }
+  $boot = Join-Path (Join-Path $Here 'installers\.cache') 'MicrosoftEdgeWebview2Setup.exe'
+  # Fetches when there is no cached copy, checks either way, and deletes a copy that fails.
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Here 'check-webview2-bootstrapper.ps1') $boot -Fetch
+  $wv2Status = $LASTEXITCODE
+  if ($wv2Status -eq 0) {
+    $wv2Args = @("/DWV2BOOTSTRAPPER=$boot") ; Note "WebView2 bootstrapper: embedded"
+  } elseif ($RequireWebView2) {
+    Die "no WebView2 bootstrapper that passes its signature check (check-webview2-bootstrapper.ps1 exited $wv2Status), and -RequireWebView2 was given"
+  } else {
+    Write-Host "WARNING: no WebView2 bootstrapper that passes its signature check (exit $wv2Status)." -ForegroundColor Yellow
+    Write-Host "         Building without it; use -NoWebView2 to make that explicit." -ForegroundColor DarkGray
   }
 } else {
   Note "WebView2 bootstrapper: skipped (-NoWebView2)"
