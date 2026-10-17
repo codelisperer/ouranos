@@ -88,14 +88,14 @@ jobs:
         # The same triple desktop-release.yml builds, deliberately: two workflows
         # disagreeing about which platforms are supported is worse than either answer. The
         # Linux floor is set by SBCL's own binary -- 2.6.9 needs GLIBC_2.38 and
-        # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-14+
-        # are arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
+        # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-26
+        # is arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
         # matters.
         include:
           - os: ubuntu-24.04
             platform: linux-x86-64
             fasl: "~/.cache/common-lisp"
-          - os: macos-14
+          - os: macos-26
             platform: macos-arm64
             fasl: "~/.cache/common-lisp"
           - os: windows-2022

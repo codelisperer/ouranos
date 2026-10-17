@@ -80,8 +80,8 @@ jobs:
           - os: windows-2022
             platform: windows-x86-64
             cache: ~/AppData/Local/cache/common-lisp
-          # macos-14+ are arm64; macos-13 is the last x86_64 image if Intel support is wanted.
-          - os: macos-14
+          # macos-26 is arm64; GitHub retires macos-14 on 2026-11-02 (#763).
+          - os: macos-26
             platform: macos-arm64
             cache: ~/.cache/common-lisp
 
