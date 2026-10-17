@@ -331,6 +331,17 @@ its tag.
 
 ### Added
 
+- **hermes/blob: `upload-url` gives a client a presigned PUT for uploading straight to S3 or
+  Spaces, and `read-blob-range` reads a blob's first bytes to check what arrived** (#770).
+  `(upload-url store bucket key :expires-in :content-type :content-length :max-bytes)` returns
+  an `upload-target` (`upload-target-url`, `-method`, `-headers`, `-expires-in`,
+  `-content-length`). Content-Type and Content-Length are signed, so the store refuses another
+  type or size. `:max-bytes` refuses to sign a declared size over it, or no declared size at all,
+  with the new condition `blob-upload-refused` (`blob-upload-refused-reason`: `:too-large`,
+  `:content-length-required`, `:bad-content-length`, `:bad-expiry`). The filesystem store
+  signals `blob-unsupported`, so a development app proxies through `put-blob`.
+  `blob-meta-etag` carries S3's ETag from `blob-metadata`. The URL is never logged. Usage,
+  checking an upload and the security notes are in `hermes/docs/blob-direct-uploads.md`.
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
   `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
