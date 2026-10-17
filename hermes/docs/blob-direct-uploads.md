@@ -61,9 +61,39 @@ for it. Smaller files can still go through `put-blob`.
 - **A presigned URL is a credential.** `upload-url` logs the bucket, key, expiry, declared size and
   cap, never the URL or its signature. An app should not log it either, and should not store it.
 
+## Multipart uploads
+
+A single presigned PUT carries at most 5 GB, and a dropped connection starts it again from the
+first byte. A multipart upload sends the file in parts, each with its own URL, so a large file fits
+and an interrupted upload resumes from the parts that already arrived.
+
+1. **The app starts the upload:** `(start-multipart-upload store bucket key :content-type "video/mp4")`
+   returns an upload id.
+2. **For each part, the app issues a URL:**
+   `(multipart-part-url store bucket key upload-id part-number :expires-in 900 :content-length size)`.
+   Part numbers run from 1 to 10000. The part number and the upload id are signed into the URL, and
+   so is the size when given. Every part but the last must be at least 5 MiB, or completing fails.
+3. **The client PUTs each part** and keeps the `ETag` header of each response. A browser script can
+   read that header only if the bucket's CORS rule exposes it, so set the rule with
+   `:expose-headers '("ETag")`. The server can also read the ETags with `list-multipart-parts`.
+4. **The app completes the upload** with `(complete-multipart-upload store bucket key upload-id parts)`,
+   PARTS being `((1 . etag) (2 . etag) …)`. A complete that S3 answers with an `<Error>` in a 200
+   (a part too small, a wrong ETag) signals `blob-backend-error` with the S3 error code as its detail.
+5. **Then the app checks the object** as for a single upload: `blob-metadata` and `read-blob-range`.
+
+To resume, `(list-multipart-parts store bucket key upload-id)` returns `((part-number etag size) …)`
+for the parts already stored; the client uploads only the missing ones. To give up,
+`abort-multipart-upload` frees the parts. **An upload that is neither completed nor aborted keeps its
+parts, and the provider bills for them,** so an app should abort what it abandons, and a bucket
+lifecycle rule that aborts incomplete uploads after a few days catches the rest.
+
+There is no total size cap on a multipart upload as there is for `upload-url`: the app holds it by
+issuing no more part URLs than the size it accepts, each with a signed size, and by checking
+`blob-metadata` after completing.
+
 ## On the filesystem store
 
-The filesystem store cannot check a signature, so `upload-url` signals `blob-unsupported`. In
+The filesystem store cannot check a signature, so `upload-url` and the multipart calls signal `blob-unsupported`. In
 development an app catches that and proxies the upload through `put-blob` instead. `read-blob-range`
 and `blob-metadata` work on both stores, so the checking step is the same.
 
@@ -89,6 +119,5 @@ answer each one reads. Neither applies to the filesystem store, which signals `b
 
 ## Not yet
 
-- **Multipart uploads,** for files over 5 GB and for resuming on a bad connection, are planned on #770.
 - **A browser form upload with a POST policy,** which can carry a size range instead of an exact size,
   is not built; the exact signed size covers the case #770 describes.

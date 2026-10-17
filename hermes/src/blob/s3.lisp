@@ -283,13 +283,15 @@ knows it for free."
                       (let ((etag (hdr "etag"))) (and etag (string-trim "\"" etag)))))))
 
 (defun %presign (&key method host path access-key secret-key session-token region
-                      amz-date date expires-in headers)
+                      amz-date date expires-in headers query-params)
   "A query-signed SigV4 URL's path and query, as (values path-and-query canonical-request).
 
 PURE: every input is an argument, the clock included (AMZ-DATE and DATE), so it can be checked
 against AWS's published example rather than only for shape (#770). HEADERS is an alist of the
 headers the client will send besides host, such as content-type and content-length; each one
-is signed, so the provider refuses the request if the client sends a different value."
+is signed, so the provider refuses the request if the client sends a different value.
+QUERY-PARAMS is an alist of further query parameters, signed with the rest: a multipart part's
+partNumber and uploadId, so a part URL cannot be pointed at another part or upload."
   (let* ((scope (%credential-scope date region))
          (all-headers (sort (cons (cons "host" host)
                                   (mapcar (lambda (h) (cons (string-downcase (car h)) (cdr h))) headers))
@@ -301,7 +303,8 @@ is signed, so the provider refuses the request if the client sends a different v
                                (cons "X-Amz-Expires" (princ-to-string expires-in))
                                (cons "X-Amz-SignedHeaders" signed-list))
                          (when session-token
-                           (list (cons "X-Amz-Security-Token" session-token)))))
+                           (list (cons "X-Amz-Security-Token" session-token)))
+                         query-params))
          (query (%canonical-query params))
          (canonical-headers (format nil "~{~A~}"
                                     (mapcar (lambda (h) (format nil "~A:~A~%" (car h) (string-trim " " (cdr h))))
@@ -314,7 +317,8 @@ is signed, so the provider refuses the request if the client sends a different v
     (values (format nil "~A?~A&X-Amz-Signature=~A" path query signature)
             canonical-request)))
 
-(defun %presigned-url (store bucket key method expires-in &key headers (universal-time (get-universal-time)))
+(defun %presigned-url (store bucket key method expires-in &key headers query-params
+                                                                 (universal-time (get-universal-time)))
   "A presigned URL for METHOD on BUCKET/KEY, valid for EXPIRES-IN seconds from UNIVERSAL-TIME."
   (multiple-value-bind (amz-date date) (%amz-dates universal-time)
     (format nil "~A://~A~A"
@@ -323,7 +327,8 @@ is signed, so the provider refuses the request if the client sends a different v
             (%presign :method method :host (%s3-host store bucket) :path (%s3-path store bucket key)
                       :access-key (s3-access-key store) :secret-key (s3-secret-key store)
                       :session-token (s3-session-token store) :region (s3-region store)
-                      :amz-date amz-date :date date :expires-in expires-in :headers headers))))
+                      :amz-date amz-date :date date :expires-in expires-in :headers headers
+                      :query-params query-params))))
 
 (defmethod blob-url ((s s3-store) bucket key &key expires-in)
   (if (null expires-in)
@@ -466,19 +471,20 @@ this module declares no base64 dependency for one call."
   (%replace-all (%replace-all (%replace-all (%replace-all (%replace-all string "&" "&amp;") "<" "&lt;")
                                             ">" "&gt;") "\"" "&quot;") "'" "&apos;"))
 
-(defun %cors-xml (origins methods allowed-headers max-age-seconds)
+(defun %cors-xml (origins methods allowed-headers max-age-seconds &optional expose-headers)
   "The CORSConfiguration document for one rule."
   (with-output-to-string (out)
     (format out "<CORSConfiguration><CORSRule>")
     (dolist (o origins) (format out "<AllowedOrigin>~A</AllowedOrigin>" (%xml-escape o)))
     (dolist (m methods) (format out "<AllowedMethod>~A</AllowedMethod>" (%xml-escape m)))
     (dolist (h allowed-headers) (format out "<AllowedHeader>~A</AllowedHeader>" (%xml-escape h)))
+    (dolist (h expose-headers) (format out "<ExposeHeader>~A</ExposeHeader>" (%xml-escape h)))
     (format out "<MaxAgeSeconds>~D</MaxAgeSeconds></CORSRule></CORSConfiguration>" max-age-seconds)))
 
 (defmethod put-bucket-cors ((s s3-store) bucket &key origins (methods '("PUT"))
                                                       (allowed-headers '("Content-Type"))
-                                                      (max-age-seconds 3000))
-  (let* ((body (%octets (%cors-xml origins methods allowed-headers max-age-seconds)))
+                                                      (max-age-seconds 3000) expose-headers)
+  (let* ((body (%octets (%cors-xml origins methods allowed-headers max-age-seconds expose-headers)))
          (md5 (%base64 (ironclad:digest-sequence :md5 body))))
     ;; PutBucketCors requires Content-MD5 (or an x-amz-checksum header) over the body.
     (%s3-request s bucket nil :put :query "cors=" :content body :content-type "application/xml"
@@ -528,3 +534,80 @@ as S3 allows in AllowedOrigin and AllowedHeader?"
                ;; which %S3-REQUEST reports as BLOB-NOT-FOUND.
                (blob-not-found () ""))))
     (%cors-verdict (%cors-rules xml) origin method headers)))
+
+;;; --- multipart uploads (#770) ----------------------------------------------
+
+(defun %body-text (body)
+  (if (stringp body) body (sb-ext:octets-to-string body :external-format :utf-8)))
+
+(defmethod start-multipart-upload ((s s3-store) bucket key &key (content-type "application/octet-stream"))
+  (let* ((text (%body-text (%s3-request s bucket key :post :query "uploads="
+                                        :content (make-array 0 :element-type '(unsigned-byte 8))
+                                        :content-type content-type
+                                        :payload-hash (%sha256-hex ""))))
+         (upload-id (first (%xml-values text "UploadId"))))
+    (unless upload-id
+      (error 'blob-backend-error :bucket bucket :key key :detail "CreateMultipartUpload returned no UploadId"))
+    (log:info "multipart upload started" :backend "s3" :bucket bucket :key key)
+    upload-id))
+
+(defmethod multipart-part-url ((s s3-store) bucket key upload-id part-number &key expires-in content-length)
+  ;; partNumber and uploadId are SIGNED query parameters, so this URL carries this part of this
+  ;; upload and nothing else. As for UPLOAD-URL, the URL itself is never logged.
+  (let ((url (%presigned-url s bucket key "PUT" expires-in
+                             :headers (when content-length
+                                        (list (cons "content-length" (princ-to-string content-length))))
+                             :query-params (list (cons "partNumber" (princ-to-string part-number))
+                                                 (cons "uploadId" upload-id)))))
+    (log:debug "multipart part URL issued" :backend "s3" :bucket bucket :key key
+                                           :part part-number :expires-in expires-in
+                                           :content-length content-length)
+    (make-upload-target url "PUT" nil expires-in content-length)))
+
+(defun %complete-xml (parts)
+  "The CompleteMultipartUpload document, parts in ascending order as S3 requires."
+  (with-output-to-string (out)
+    (format out "<CompleteMultipartUpload>")
+    (dolist (p (sort (copy-list parts) #'< :key #'car))
+      (format out "<Part><PartNumber>~D</PartNumber><ETag>~A</ETag></Part>" (car p) (%xml-escape (cdr p))))
+    (format out "</CompleteMultipartUpload>")))
+
+(defmethod complete-multipart-upload ((s s3-store) bucket key upload-id parts)
+  (let* ((body (%octets (%complete-xml parts)))
+         (text (%body-text (%s3-request s bucket key :post
+                                        :query (%canonical-query (list (cons "uploadId" upload-id)))
+                                        :content body :content-type "application/xml"
+                                        :payload-hash (%sha256-hex body)))))
+    ;; CompleteMultipartUpload can answer 200 and still fail, with an <Error> document as the body
+    ;; (a part too small, a wrong ETag). A 200 is not success until the body says so.
+    (when (search "<Error>" text)
+      (error 'blob-backend-error :bucket bucket :key key :status 200
+                                 :detail (first (%xml-values text "Code"))))
+    (log:info "multipart upload completed" :backend "s3" :bucket bucket :key key :parts (length parts))
+    t))
+
+(defmethod abort-multipart-upload ((s s3-store) bucket key upload-id)
+  (handler-case (progn (%s3-request s bucket key :delete
+                                    :query (%canonical-query (list (cons "uploadId" upload-id))))
+                       t)
+    ;; NoSuchUpload: already completed or aborted, which is the outcome asked for.
+    (blob-not-found () t)))
+
+(defmethod list-multipart-parts ((s s3-store) bucket key upload-id)
+  (let ((parts '()) (marker nil))
+    (loop
+      (let* ((text (%body-text (%s3-request s bucket key :get
+                                            :query (%canonical-query
+                                                    (append (list (cons "uploadId" upload-id))
+                                                            (when marker (list (cons "part-number-marker" marker))))))))
+             (truncated (first (%xml-values text "IsTruncated")))
+             (next (first (%xml-values text "NextPartNumberMarker"))))
+        (dolist (part (%xml-values text "Part"))
+          (push (list (parse-integer (first (%xml-values part "PartNumber")))
+                      (first (%xml-values part "ETag"))
+                      (parse-integer (first (%xml-values part "Size"))))
+                parts))
+        (if (and truncated (string-equal truncated "true") next (not (equal next marker)))
+            (setf marker next)
+            (return))))
+    (sort (nreverse parts) #'< :key #'first)))

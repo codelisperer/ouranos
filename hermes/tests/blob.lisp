@@ -978,6 +978,12 @@ Returns (values result range-header) so a test sees the Range that was signed."
            (values (funcall fn) (nreverse calls)))
       (setf (fdefinition 'b::%s3-request) original))))
 
+(test s3-cors-document-exposes-headers-when-asked
+  "A browser completing a multipart upload reads each part's ETag, which it can only do when the
+rule exposes it (#770)."
+  (is (search "<AllowedHeader>Content-Type</AllowedHeader><ExposeHeader>ETag</ExposeHeader><MaxAgeSeconds>"
+              (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type") 3000 '("ETag")))))
+
 (test s3-put-bucket-cors-sends-the-rule-with-its-content-md5
   (multiple-value-bind (result calls)
       (call-with-recorded-s3 "" (lambda () (b:put-bucket-cors (test-s3-store) "media" :origins '("https://app.example.com"))))
@@ -1038,3 +1044,116 @@ Returns (values result range-header) so a test sees the Range that was signed."
   (signals type-error (b:put-bucket-cors (test-s3-store) "media" :origins '()))
   (signals type-error (b:put-bucket-cors (test-s3-store) "media" :origins '("")))
   (signals b:blob-invalid-key (b:put-bucket-cors (test-s3-store) "a/b" :origins '("https://x"))))
+
+;;; === 12. multipart uploads (#770) =============================================
+
+(defun call-with-answering-s3 (answers fn)
+  "Call FN with %S3-REQUEST answering from ANSWERS in turn (a body string, or :NOT-FOUND), and
+recording each call. Returns (values result calls)."
+  (let ((original (fdefinition 'b::%s3-request))
+        (remaining answers)
+        (calls '()))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'b::%s3-request)
+                 (lambda (store bucket key method &rest args)
+                   (declare (ignore store))
+                   (push (list* :bucket bucket :key key :method method args) calls)
+                   (let ((answer (if remaining (pop remaining) (error "more S3 requests than this test answers"))))
+                     (if (eq answer :not-found)
+                         (error 'b:blob-not-found :bucket bucket :key key)
+                         (values (octets answer) 200 (make-hash-table :test #'equal))))))
+           (values (funcall fn) (nreverse calls)))
+      (setf (fdefinition 'b::%s3-request) original))))
+
+(test s3-multipart-part-url-signs-the-part-number-and-the-upload-id
+  (flet ((presign (part)
+           (b::%presign :method "PUT" :host "media.s3.amazonaws.com" :path "/big.mp4"
+                        :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                        :region "us-east-1" :amz-date "20130524T000000Z" :date "20130524" :expires-in 900
+                        :query-params (list (cons "partNumber" (princ-to-string part)) (cons "uploadId" "u-1")))))
+    (multiple-value-bind (url canonical) (presign 3)
+      (is (search "partNumber=3" url) "~A" url)
+      (is (search "uploadId=u-1" url) "~A" url)
+      (is (search "partNumber=3&uploadId=u-1" canonical) "the canonical query carries both: ~A" canonical))
+    (is (string/= (subseq (presign 3) (search "X-Amz-Signature=" (presign 3)))
+                  (subseq (presign 4) (search "X-Amz-Signature=" (presign 4))))
+        "another part is another signature"))
+  (let ((target (b:multipart-part-url (test-s3-store) "media" "big.mp4" "u-1" 7 :expires-in 900 :content-length 5242880)))
+    (is (string= "PUT" (b:upload-target-method target)))
+    (is (= 5242880 (b:upload-target-content-length target)))
+    (is (search "partNumber=7" (b:upload-target-url target)))
+    (is (search "content-length%3Bhost" (b:upload-target-url target)) "the part's size is signed")))
+
+(defun multipart-refusal (thunk)
+  (handler-case (progn (funcall thunk) nil)
+    (b:blob-upload-refused (c) (b:blob-upload-refused-reason c))))
+
+(test s3-multipart-calls-refuse-bad-arguments
+  (let ((s (test-s3-store)))
+    (is (eq :bad-part-number (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 0 :expires-in 900)))))
+    (is (eq :bad-part-number (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 10001 :expires-in 900)))))
+    (is (eq :bad-upload-id (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "" 1 :expires-in 900)))))
+    (is (eq :bad-expiry (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 1)))))
+    (is (eq :bad-parts (multipart-refusal (lambda () (b:complete-multipart-upload s "media" "big.mp4" "u-1" '())))))
+    (is (eq :bad-parts (multipart-refusal (lambda () (b:complete-multipart-upload s "media" "big.mp4" "u-1" '((1 . "")))))))
+    (is (null (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 10000 :expires-in 900))))
+        "part 10000 is allowed")))
+
+(test s3-start-multipart-upload-returns-the-upload-id
+  (multiple-value-bind (id calls)
+      (call-with-answering-s3 (list "<InitiateMultipartUploadResult><Bucket>media</Bucket><Key>big.mp4</Key><UploadId>VXBsb2FkIElE</UploadId></InitiateMultipartUploadResult>")
+                              (lambda () (b:start-multipart-upload (test-s3-store) "media" "big.mp4" :content-type "video/mp4")))
+    (is (string= "VXBsb2FkIElE" id))
+    (is (eq :post (getf (first calls) :method)))
+    (is (string= "uploads=" (getf (first calls) :query)))
+    (is (string= "video/mp4" (getf (first calls) :content-type))))
+  (signals b:blob-backend-error
+    (call-with-answering-s3 (list "<InitiateMultipartUploadResult></InitiateMultipartUploadResult>")
+                            (lambda () (b:start-multipart-upload (test-s3-store) "media" "big.mp4")))))
+
+(test s3-complete-multipart-upload-sends-the-parts-in-order-and-reads-an-error-in-a-200
+  (is (string= "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>&quot;a&quot;</ETag></Part><Part><PartNumber>2</PartNumber><ETag>&quot;b&quot;</ETag></Part></CompleteMultipartUpload>"
+               (b::%complete-xml '((2 . "\"b\"") (1 . "\"a\""))))
+      "ascending part numbers, ETags escaped")
+  (multiple-value-bind (result calls)
+      (call-with-answering-s3 (list "<CompleteMultipartUploadResult><ETag>\"x-2\"</ETag></CompleteMultipartUploadResult>")
+                              (lambda () (b:complete-multipart-upload (test-s3-store) "media" "big.mp4" "u-1" '((1 . "\"a\"") (2 . "\"b\"")))))
+    (is (eq t result))
+    (is (eq :post (getf (first calls) :method)))
+    (is (string= "uploadId=u-1" (getf (first calls) :query))))
+  (is (string= "InvalidPart"
+               (handler-case
+                   (progn (call-with-answering-s3 (list "<Error><Code>InvalidPart</Code><Message>m</Message></Error>")
+                                                  (lambda () (b:complete-multipart-upload (test-s3-store) "media" "big.mp4" "u-1" '((1 . "\"a\"")))))
+                          nil)
+                 (b:blob-backend-error (c) (b:blob-backend-error-detail c))))
+      "a 200 whose body is an <Error> is a failure"))
+
+(test s3-abort-multipart-upload-is-idempotent
+  (multiple-value-bind (result calls)
+      (call-with-answering-s3 (list "") (lambda () (b:abort-multipart-upload (test-s3-store) "media" "big.mp4" "u-1")))
+    (is (eq t result))
+    (is (eq :delete (getf (first calls) :method)))
+    (is (string= "uploadId=u-1" (getf (first calls) :query))))
+  (is (eq t (call-with-answering-s3 (list :not-found) (lambda () (b:abort-multipart-upload (test-s3-store) "media" "big.mp4" "u-1"))))
+      "NoSuchUpload is aborted"))
+
+(test s3-list-multipart-parts-follows-the-pages
+  (multiple-value-bind (parts calls)
+      (call-with-answering-s3
+       (list "<ListPartsResult><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><ETag>\"b\"</ETag><Size>5242880</Size></Part><Part><PartNumber>1</PartNumber><ETag>\"a\"</ETag><Size>5242880</Size></Part></ListPartsResult>"
+             "<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>3</PartNumber><ETag>\"c\"</ETag><Size>100</Size></Part></ListPartsResult>")
+       (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.mp4" "u-1")))
+    (is (equal '((1 "\"a\"" 5242880) (2 "\"b\"" 5242880) (3 "\"c\"" 100)) parts))
+    (is (= 2 (length calls)))
+    (is (string= "uploadId=u-1" (getf (first calls) :query)))
+    (is (string= "part-number-marker=2&uploadId=u-1" (getf (second calls) :query)) "the marker is followed")))
+
+(test multipart-on-the-filesystem-store-is-unsupported
+  (with-temp-store (store)
+    (signals b:blob-unsupported (b:start-multipart-upload store "media" "a"))
+    (signals b:blob-unsupported (b:multipart-part-url store "media" "a" "u" 1 :expires-in 900))
+    (signals b:blob-unsupported (b:complete-multipart-upload store "media" "a" "u" '((1 . "e"))))
+    (signals b:blob-unsupported (b:abort-multipart-upload store "media" "a" "u"))
+    (signals b:blob-unsupported (b:list-multipart-parts store "media" "a" "u"))))
