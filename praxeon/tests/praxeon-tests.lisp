@@ -7574,25 +7574,50 @@ With a failed closing save counted as a failed attempt, 7-12 and 13-18 were lost
     (obs:await-observer observer :timeout 10)
     (is (equal '("B." "C." "D." "E.") (%thread-contents store)))))
 
+(define-condition %step-deadline (error) ()
+  (:documentation "The deadline A-DEADLINE-DEFERRED-IN-THE-STEP-LEAVES-THE-WORKER-STOPPABLE sends
+into OBSERVE-TURN's step."))
+
 (test a-deadline-deferred-in-the-step-leaves-the-worker-stoppable
-  "%CLAIM is made to take 30 ms, so a 5 ms deadline around OBSERVE-TURN arrives inside the step
-and is deferred until it ends, while the worker is made. The model call blocks until the test
-releases it. STOP-OBSERVER with a timeout of 0.2 still ends the worker within a second, gives
-back the claim, and nothing is written after the call is released (the second review of #533).
-A worker made with the deferrable signals blocked could not be ended: the stop took 5.2 seconds,
-the worker lived on, and the window was written after the stop returned."
+  "A deadline arrives while OBSERVE-TURN's step runs with interrupts deferred, and is taken when
+the step ends, after the worker is made. The model call blocks until the test releases it.
+STOP-OBSERVER with a timeout of 0.2 still ends the worker within a second, gives back the claim,
+and nothing is written after the call is released (the second review of #533). A worker made with
+the deferrable signals blocked could not be ended: the stop took 5.2 seconds, the worker lived
+on, and the window was written after the stop returned.
+
+THE DEADLINE IS SENT FROM INSIDE THE STEP, not timed (#726). %CLAIM is made to say that the step
+has started and to wait until a helper thread has interrupted this one, which is how
+SB-EXT:WITH-TIMEOUT's timer delivers a deadline. A 5 ms WITH-TIMEOUT around a step slowed to
+30 ms had to wake inside those 30 ms; on Windows under load it did not in 11 of 200 trials, and
+OBSERVE-TURN returned first."
   (let* ((store (mem:make-in-memory-store))
          (provider (make-instance 'blocking-scripted :script (list (%call-with (%ob "Has a dog." "fact")))))
          (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
          (claim (fdefinition 'obs::%claim))
+         (target sb-thread:*current-thread*)
+         (in-step (sb-thread:make-semaphore :name "in-step"))
+         (sent (sb-thread:make-semaphore :name "deadline-sent"))
+         (sender (sb-thread:make-thread
+                  (lambda ()
+                    (when (sb-thread:wait-on-semaphore in-step :timeout 10)
+                      (sb-thread:interrupt-thread target (lambda () (error '%step-deadline)))
+                      (sb-thread:signal-semaphore sent)))
+                  :name "deadline-sender"))
          (how nil))
     (unwind-protect
          (progn
-           (setf (fdefinition 'obs::%claim) (lambda (o) (sleep 0.03) (funcall claim o)))
-           (setf how (handler-case (sb-ext:with-timeout 0.005 (obs:observe-turn observer (%history 6)) :returned)
-                       (sb-ext:timeout () :timeout))))
-      (setf (fdefinition 'obs::%claim) claim))
-    (is (eq :timeout how) "precondition: the deadline fired, after the step")
+           (setf (fdefinition 'obs::%claim)
+                 (lambda (o)
+                   (sb-thread:signal-semaphore in-step)
+                   (sb-thread:wait-on-semaphore sent :timeout 10)
+                   (funcall claim o)))
+           (setf how (handler-case (progn (obs:observe-turn observer (%history 6)) :returned)
+                       (%step-deadline () :deadline))))
+      (setf (fdefinition 'obs::%claim) claim)
+      (sb-thread:signal-semaphore in-step)
+      (sb-thread:join-thread sender :default nil :timeout 10))
+    (is (eq :deadline how) "precondition: the deadline fired, after the step")
     (loop repeat 1000 until (blocking-entered provider) do (sleep 0.005))
     (is-true (blocking-entered provider) "precondition: the worker is in the model call")
     (let* ((t0 (get-internal-real-time))
