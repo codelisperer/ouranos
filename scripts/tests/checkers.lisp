@@ -348,6 +348,121 @@ than about the checker rejecting every fixture it is handed."
         (%run (%install-checker tree "check-pins.lisp"))
       (is (= 0 code) "a complete pin must pass; exit was ~D~%~A" code output))))
 
+;;; --- check-upstream (#716) -----------------------------------------------------
+;;;
+;;; What it exists to detect: a pin in the tree with no entry in upstream.sexp, and an entry
+;;; whose place no longer finds its pin or disagrees with its other places. The fixtures are a
+;;; real .pin, a real versions.env line and a real workflow line, in the files those live in.
+
+(defparameter +upstream-pin+
+  "version 1.52.1
+sha256  66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7
+advisories https://github.com/libuv/libuv/security/advisories
+reviewed   2026-09-15
+")
+
+(defparameter +upstream-env+
+  "# toolchain pins
+SBCL_VERSION=2.6.9
+SBCL_SHA256_X86_64_LINUX=39fac28407405841003e4c2abfbe0d96abd93b7701e8b61cdd35e713943b46d6
+")
+
+(defparameter +upstream-workflow+
+  "jobs:
+  verify:
+    steps:
+      - uses: actions/checkout@v7
+")
+
+(defparameter +upstream-inventory+
+  "(:name \"SBCL\" :category :toolchain
+ :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\"))
+ :upstream (:sourceforge \"sbcl\"))
+(:name \"libuv\" :category :native
+ :where ((:field \"libuv.pin\" \"version\")
+         (:text \"scripts/build-libuv.lisp\" \"https://dist.libuv.org/dist/v\" \"/\"))
+ :upstream (:github-release \"libuv/libuv\"))
+(:name \"actions/checkout\" :category :ci
+ :where ((:text \".github/workflows/verify.yml\" \"uses: actions/checkout@\" nil))
+ :upstream (:github-release \"actions/checkout\"))
+")
+
+(defun %upstream-tree (&key (inventory +upstream-inventory+) (env +upstream-env+)
+                            (build-libuv "  (fetch \"https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz\")
+"))
+  "A fresh tree whose pins all have entries, unless a keyword replaces one of its files."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "libuv.pin" tree) +upstream-pin+)
+    (%write (merge-pathnames "scripts/versions.env" tree) env)
+    (%write (merge-pathnames "scripts/build-libuv.lisp" tree) build-libuv)
+    (%write (merge-pathnames ".github/workflows/verify.yml" tree) +upstream-workflow+)
+    (when inventory (%write (merge-pathnames "upstream.sexp" tree) inventory))
+    tree))
+
+(defun %run-upstream (tree)
+  (%run (%install-checker tree "check-upstream.lisp")))
+
+(test upstream-passes-when-every-pin-has-an-entry
+  "The control for the tests below: the same fixture, unchanged, passes."
+  (multiple-value-bind (code output) (%run-upstream (%upstream-tree))
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "3 pins in the tree" output) "the three pins were found: ~A" output)))
+
+(test upstream-fails-on-a-pin-file-with-no-entry
+  (let ((tree (%upstream-tree)))
+    (%write (merge-pathnames "mbedtls.pin" tree) (format nil "version 4.1.1~%advisories x~%reviewed 2026-09-15~%"))
+    (multiple-value-bind (code output) (%run-upstream tree)
+      (is (= 1 code) "exit ~D~%~A" code output)
+      (is (search "mbedtls.pin version has no entry" output) "~A" output))))
+
+(test upstream-fails-on-a-versions-env-key-with-no-entry
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :env (format nil "~ALIBFOO_VERSION=1.0~%" +upstream-env+)))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "LIBFOO_VERSION has no entry" output) "~A" output)))
+
+(test upstream-fails-on-a-workflow-action-with-no-entry
+  (let ((tree (%upstream-tree)))
+    (%write (merge-pathnames ".github/workflows/verify.yml" tree)
+            (format nil "~A      - uses: actions/cache@v6~%" +upstream-workflow+))
+    (multiple-value-bind (code output) (%run-upstream tree)
+      (is (= 1 code) "exit ~D~%~A" code output)
+      (is (search "uses: actions/cache@ has no entry" output) "~A" output))))
+
+(test upstream-fails-when-an-entry-no-longer-finds-its-pin
+  "The pin moved: versions.env renamed the key the entry names."
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :env (format nil "SBCL_RELEASE=2.6.9~%")))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "SBCL: (:ENV \"scripts/versions.env\" \"SBCL_VERSION\") no longer finds its pin" output)
+        "~A" output)))
+
+(test upstream-fails-when-two-places-of-an-entry-disagree
+  "libuv.pin moved to a new release and the build script's URL did not."
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :build-libuv (format nil "  (fetch \"https://dist.libuv.org/dist/v1.51.0/libuv-v1.51.0.tar.gz\")~%")))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "libuv: its places disagree: 1.52.1, 1.51.0" output) "~A" output)))
+
+(test upstream-fails-on-a-manual-entry-with-no-review-date
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :inventory (format nil "~A(:name \"Twilio\" :category :api :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\")) :upstream (:manual \"https://example.com\"))~%" +upstream-inventory+)))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "Twilio: a :manual upstream needs :reviewed" output) "~A" output)))
+
+(test upstream-joins-a-concat-separator-as-text-not-as-a-format-directive
+  "upstream.sexp is data. A :concat separator was once spliced into a FORMAT control string,
+where ~A consumes an argument and ~/pkg:fn/ calls a function (the hub's review of #737)."
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :inventory (format nil "~A(:name \"joined\" :category :toolchain :where ((:concat \"~~A\" (:env \"scripts/versions.env\" \"SBCL_VERSION\") (:env \"scripts/versions.env\" \"SBCL_VERSION\"))) :upstream (:github-release \"x/y\"))~%" +upstream-inventory+)))
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "2.6.9~A2.6.9" output) "the separator is printed as written: ~A" output)))
+
+(test upstream-exits-2-when-the-inventory-cannot-be-read
+  "A missing inventory is not a clean one."
+  (multiple-value-bind (code output) (%run-upstream (%upstream-tree :inventory nil))
+    (is (= 2 code) "exit ~D~%~A" code output)))
+
 ;;; --- the harness itself -----------------------------------------------------
 
 (test the-harness-runs-the-real-script-in-the-fixture

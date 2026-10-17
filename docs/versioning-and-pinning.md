@@ -157,8 +157,24 @@ author did not cause is a build people learn to ignore — which costs more than
 was ever worth.
 
 **The "is upstream ahead of us?" question needs the network**, so it does not belong in a
-gate that must be reproducible offline. It belongs in a scheduled job that opens an issue,
-which is a thing to build when there is a pin whose cadence justifies it.
+gate that must be reproducible offline. It belongs in a scheduled job that opens an issue.
+
+### The inventory: `upstream.sexp` (#716)
+
+Every pinned version of an external dependency or API has an entry in
+[`upstream.sexp`](../upstream.sexp) at the repository root. The entry says **where** the
+version is written and where its latest release is published, not what the version is, so it
+cannot disagree with the pin. `scripts/check-upstream.lisp`, run by `verify-tree.lisp`, fails
+when an entry no longer finds its pin, or when two places an entry names disagree (for example
+`libuv.pin` and the URL in `build-libuv.lisp`). It also fails when a pin in one of the places it
+scans has no entry. It scans three places: the identity lines of every `*.pin` file, the
+`*_VERSION` keys and `QUICKLISP_DIST` in `scripts/versions.env`, and the `uses:` lines of every
+workflow. A version written anywhere else, such as an image tag in a compose file, an API
+version string in the source or a `runs-on:` line, is covered only if somebody adds an entry
+for it; nothing finds it missing. It is offline and deterministic, like the rest of the gate.
+
+The online comparison with upstream, and the weekly job that rewrites one tracking issue with
+the result, are the second step of #716 and are PLANNED there.
 
 ### Adopting a new version of a vendored native
 
