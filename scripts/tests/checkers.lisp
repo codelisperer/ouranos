@@ -348,6 +348,62 @@ than about the checker rejecting every fixture it is handed."
         (%run (%install-checker tree "check-pins.lisp"))
       (is (= 0 code) "a complete pin must pass; exit was ~D~%~A" code output))))
 
+(defparameter +good-assets-pin+
+  "# Vendored browser assets.
+
+htmx        2.0.11   sha256 d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717
+            file     htmx.min.js
+            url      https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js
+            licence  Zero-Clause BSD (htmx.LICENSE)
+            advisories https://github.com/bigskysoftware/htmx/security/advisories
+            reviewed   2026-10-17
+
+bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee
+            file     bulma.min.css
+            url      https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css
+            licence  MIT (bulma.LICENSE)
+            advisories https://github.com/jgthms/bulma/security/advisories
+            reviewed   2026-10-17
+")
+
+(test pins-detects-a-pin-below-the-root-with-no-advisory-source
+  "Before #735 only the repository root was read, so a pin in a subdirectory, like
+hyperion/src/vendor/PLURALS.pin, was never checked at all."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "hyperion/src/vendor/PLURALS.pin" tree) (%without-line +good-pin+ "advisories"))
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-pins.lisp"))
+      (is (/= 0 code) "a pin below the root missing `advisories' must fail; exit was ~D~%~A" code output)
+      (is (search "hyperion/src/vendor/PLURALS.pin" output) "and the failure names it: ~A" output))))
+
+(test pins-detects-an-asset-block-with-no-review-date
+  "Each asset in an ASSETS.pin-style file is a pin of its own, so one block missing `reviewed'
+fails even when its neighbour has the field (#735)."
+  (let ((tree (%fresh-tree))
+        (pin (let ((at (search "            reviewed   2026-10-17
+" +good-assets-pin+ :from-end t)))
+               (concatenate 'string (subseq +good-assets-pin+ 0 at)
+                            (subseq +good-assets-pin+ (+ at (length "            reviewed   2026-10-17
+")))))))
+    (is (= 1 (loop with start = 0 for at = (search "reviewed" pin :start2 start)
+                   while at count t do (setf start (1+ at))))
+        "precondition: the fixture has one `reviewed' line, the htmx block's")
+    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) pin)
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-pins.lisp"))
+      (is (/= 0 code) "the bulma block has no `reviewed'; exit was ~D~%~A" code output)
+      (is (search "ASSETS.pin bulma" output) "the failure names the asset: ~A" output)
+      (is (search "ASSETS.pin htmx" output) "and the complete block is still checked: ~A" output))))
+
+(test pins-passes-complete-asset-blocks
+  "The control for the test above."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) +good-assets-pin+)
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-pins.lisp"))
+      (is (= 0 code) "complete asset blocks must pass; exit was ~D~%~A" code output)
+      (is (search "All 2 pins" output) "two assets are two pins: ~A" output))))
+
 ;;; --- the harness itself -----------------------------------------------------
 
 (test the-harness-runs-the-real-script-in-the-fixture
