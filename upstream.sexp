@@ -59,9 +59,11 @@
 
 ;;; --- native libraries --------------------------------------------------------------------
 
+;; One place. scripts/build-libuv.lisp reads the version, sha256 and URL from libuv.pin; the
+;; only dist.libuv.org URL written in it is a recorded transcript in a docstring, which keeps
+;; the version it was measured with (1.52.1) and is not a pin.
 (:name "libuv" :category :native
- :where ((:field "libuv.pin" "version")
-         (:text "scripts/build-libuv.lisp" "https://dist.libuv.org/dist/v" "/"))
+ :where ((:field "libuv.pin" "version"))
  :upstream (:github-release "libuv/libuv"))
 
 (:name "mbedTLS" :category :native
