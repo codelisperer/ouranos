@@ -417,10 +417,23 @@ directory that cannot be created, because a file has its name, stops the sidecar
 
 (defun %image-with-sidecar ()
   "Start an SBCL image that loads hyperion/sidecar and starts one sidecar, which starts a
-grandchild. Returns (values IMAGE SIDECAR-PID GRANDCHILD-PID LOG) once the image reports both."
+grandchild. Returns (values IMAGE SIDECAR-PID GRANDCHILD-PID LOG PIDS) once the image reports
+both. LOG holds the image's standard output and standard error, for a failure message. PIDS is
+the file the image writes the two pids to.
+
+The pids go to a file of their own, written under a temporary name and renamed into place
+(#774). They used to be printed on standard output, which the image's logger also writes to
+from the sidecar's reader thread, and two threads writing to one stream at once can corrupt
+each other's output: a run printed \"SIDECAR 30232\" and the log held \"R 30232\", so the test
+reported a sidecar the image had in fact named, in about one run in ten on Windows. The rename
+means the test never reads a file that is half written."
   (let* ((log (uiop:tmpize-pathname (merge-pathnames "hyperion-sidecar-image.txt" (uiop:temporary-directory))))
-         (form (format nil "(progn (hyperion/sidecar:define-sidecar :child :command (list ~{~S~^ ~}) :ready (hyperion/sidecar:token-after \"grandchild=\")) (hyperion/sidecar:start-sidecars '(:child)) (format t \"SIDECAR ~~D~~%GRANDCHILD ~~A~~%\" (hyperion/sidecar::%pid (hyperion/sidecar::sidecar-process (gethash :child hyperion/sidecar::*running*))) (hyperion/sidecar:sidecar-value :child)) (finish-output) (sleep 600))"
-                       (%command +grandchild-ready-form+)))
+         (pids (uiop:tmpize-pathname (merge-pathnames "hyperion-sidecar-pids.txt" (uiop:temporary-directory))))
+         (partial (make-pathname :type "partial" :defaults pids))
+         (form (format nil "(progn (hyperion/sidecar:define-sidecar :child :command (list ~{~S~^ ~}) :ready (hyperion/sidecar:token-after \"grandchild=\")) (hyperion/sidecar:start-sidecars '(:child)) (with-open-file (o ~S :direction :output :if-exists :supersede) (format o \"SIDECAR ~~D~~%GRANDCHILD ~~A~~%\" (hyperion/sidecar::%pid (hyperion/sidecar::sidecar-process (gethash :child hyperion/sidecar::*running*))) (hyperion/sidecar:sidecar-value :child))) (rename-file ~S ~S) (sleep 600))"
+                       (%command +grandchild-ready-form+)
+                       (uiop:native-namestring partial) (uiop:native-namestring partial)
+                       (uiop:native-namestring pids)))
          (image (uiop:launch-program
                  (list (%sbcl) "--dynamic-space-size" "1024" "--noinform" "--no-userinit" "--no-sysinit"
                        "--non-interactive"
@@ -437,14 +450,14 @@ grandchild. Returns (values IMAGE SIDECAR-PID GRANDCHILD-PID LOG) once the image
              (let ((line (find-if (lambda (l) (uiop:string-prefix-p prefix l)) lines)))
                (and line (parse-integer line :start (length prefix) :junk-allowed t)))))
       (loop repeat 480
-            for lines = (ignore-errors (uiop:read-file-lines log))
+            for lines = (and (probe-file pids) (ignore-errors (uiop:read-file-lines pids)))
             for sidecar = (after "SIDECAR " lines)
             for grandchild = (after "GRANDCHILD " lines)
             when (and sidecar grandchild)
-              do (return-from %image-with-sidecar (values image sidecar grandchild log))
+              do (return-from %image-with-sidecar (values image sidecar grandchild log pids))
             while (uiop:process-alive-p image)
             do (sleep 0.25))
-      (values image nil nil log))))
+      (values image nil nil log pids))))
 
 (defun %kill-image (image)
   #+win32 (uiop:run-program (list "taskkill" "/PID" (princ-to-string (uiop:process-info-pid image)) "/F")
@@ -458,10 +471,12 @@ grandchild. Returns (values IMAGE SIDECAR-PID GRANDCHILD-PID LOG) once the image
 grandchild. On Linux the parent-death signal ends the sidecar; its grandchild is not covered there."
   (if #+linux (null (sc::%find-program "setpriv")) #-linux nil
       (skip "setpriv is not installed")
-  (multiple-value-bind (image sidecar grandchild log) (%image-with-sidecar)
+  (multiple-value-bind (image sidecar grandchild log pids) (%image-with-sidecar)
     (unwind-protect
          (progn
-           (is-true sidecar "the image did not report its sidecar: ~S" (ignore-errors (uiop:read-file-lines log)))
+           (is-true sidecar "the image did not report its sidecar: ~S~%its output: ~S"
+                    (ignore-errors (uiop:read-file-lines pids))
+                    (ignore-errors (uiop:read-file-lines log)))
            (when sidecar
              (%kill-image image)
              (is-true (%ends-within-p sidecar 5) "the sidecar ~D outlived the image" sidecar)
@@ -469,7 +484,8 @@ grandchild. On Linux the parent-death signal ends the sidecar; its grandchild is
       (when (uiop:process-alive-p image) (%kill-image image))
       (%kill-pid sidecar)
       (%kill-pid grandchild)
-      (ignore-errors (delete-file log))))))
+      (ignore-errors (delete-file log))
+      (ignore-errors (delete-file pids))))))
 
 #-win32
 (test the-next-start-ends-a-sidecar-left-by-a-dead-image
