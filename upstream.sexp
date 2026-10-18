@@ -116,8 +116,8 @@
 
 (:name "Anthropic default model" :category :api
  :where ((:text "praxeon/src/llm.lisp" "(defparameter *default-model* \"" "\""))
- :upstream (:manual "https://platform.claude.com/docs/en/models/overview")
- :reviewed "2026-10-17")
+ :upstream (:manual "https://docs.anthropic.com/en/docs/about-claude/models")
+ :reviewed :never)
 
 (:name "MCP protocol revision" :category :api
  :where ((:text "praxeon/src/mcp/client.lisp" "(defparameter +protocol-version+ \"" "\""))
