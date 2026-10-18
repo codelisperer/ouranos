@@ -387,6 +387,14 @@ its tag.
   or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
   connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+- **Desktop: a macOS app from `scripts/build-dmg.sh` says it needs macOS 15.0, and
+  `desktop-release.yml` builds it on `macos-15`** (#763). `LSMinimumSystemVersion` in the app's
+  `Info.plist` was 11.0, which was never true: the bundle carries Homebrew's `sbcl` and
+  `libzstd`, which need at least the macOS they were built on, so an app built on `macos-14`
+  needed macOS 14. `scripts/verify-bundle-macos.sh` now fails a `.app` that has a binary needing
+  a later macOS than its `LSMinimumSystemVersion` (check 0), and prints the OpenSSL the app
+  loaded. An app that builds its own `.app` with `build-dmg.sh` on a newer macOS than 15 will
+  fail that check until it builds on `macos-15` or older.
 
 ### Added
 
