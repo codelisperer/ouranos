@@ -61,7 +61,7 @@
 
 (:name "libuv" :category :native
  :where ((:field "libuv.pin" "version")
-         (:text "scripts/build-libuv.lisp" "https://dist.libuv.org/dist/v" "/"))
+         (:text "libuv.pin" "url     https://dist.libuv.org/dist/v" "/"))
  :upstream (:github-release "libuv/libuv"))
 
 (:name "mbedTLS" :category :native
