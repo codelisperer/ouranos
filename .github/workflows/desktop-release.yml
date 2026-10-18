@@ -80,8 +80,11 @@ jobs:
           - os: windows-2022
             platform: windows-x86-64
             cache: ~/AppData/Local/cache/common-lisp
-          # macos-14+ are arm64; macos-13 is the last x86_64 image if Intel support is wanted.
-          - os: macos-14
+          # macos-15, not macos-26 as in verify.yml (#763). Homebrew's sbcl and libzstd, which
+          # the bundle carries, target the macOS they were built on, so an app built on
+          # macos-26 needs macOS 26 to run. build-dmg.sh writes 15.0 as the app's minimum, and
+          # verify-bundle-macos.sh fails if a binary in the bundle needs a later macOS.
+          - os: macos-15
             platform: macos-arm64
             cache: ~/.cache/common-lisp
 
@@ -313,6 +316,15 @@ jobs:
       - name: Verify the .app loads the libraries it carries (macOS)
         if: runner.os == 'macOS'
         run: ./scripts/verify-bundle-macos.sh --seconds 20 --require-carried libuv "dist/Coalton REPL.app"
+
+      # The app needs Homebrew's OpenSSL to start (#191), and the image's default OpenSSL
+      # can change between images (#763). This prints which OpenSSL formulas the image has;
+      # verify-bundle-macos.sh prints the libssl and libcrypto the app actually loaded.
+      - name: Report Homebrew's OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew list --versions openssl@3 openssl@4 openssl || true
+          ls -l "$(brew --prefix)/opt" | grep -i openssl || true
 
       - uses: actions/upload-artifact@v7
         with:

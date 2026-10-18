@@ -186,6 +186,13 @@
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-18")
 
+(:name "macOS desktop build image" :category :ci
+ :where ((:text ".github/workflows/desktop-release.yml" "- os: macos-" nil))
+ :upstream (:manual "https://github.com/actions/runner-images")
+ :reviewed "2026-10-18"
+ :held (:reason "the macOS app needs the macOS of its build image or later, because Homebrew's sbcl and libzstd in the bundle target it; the maintainer chose macos-15 so the app runs on macOS 15, while verify.yml tests on macos-26"
+        :issue 763))
+
 (:name "Windows runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
