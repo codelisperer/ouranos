@@ -1233,6 +1233,21 @@ its tag.
   one, and say to run the monorepo's `scripts/setup.sh` or `scripts/setup.ps1`, which clones
   Coalton and checks out the pinned commit. Both honour `COALTON_DIR`, as the root scripts do.
 
+- **hyperion/dev: `watch` refuses to watch more files than `*watch-file-limit*` allows,
+  100000 by default, and names the root that passed it** (#730). The watcher snapshots every
+  file under its roots on every poll, and nothing limited that snapshot, so a root that was a
+  very large tree, such as a home or temporary directory, filled the heap and ended in heap
+  exhaustion with a backtrace that did not mention the watched path. `watch` now takes
+  `:file-limit` (default `hyperion/dev:*watch-file-limit*`, `nil` for no limit), and past it
+  signals `hyperion/dev:watch-too-large` (readers `watch-too-large-root`,
+  `watch-too-large-count`, `watch-too-large-limit`) before the builder runs, so nothing is
+  started, and a dev server that `watch` started earlier keeps running. It refuses rather than watching part of the tree, because a partial watch leaves some
+  edits without a reload and gives no sign of which. If the roots grow past the limit while
+  watching, the previous snapshot is kept and the condition is shown as the reload error, in the
+  browser overlay, until they are back within it; an error it replaced, such as a Lisp file that
+  still fails to compile, is shown again then. `hyperion/dev:serve` callers set the limit by
+  binding `*watch-file-limit*`.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
