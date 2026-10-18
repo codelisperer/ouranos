@@ -465,8 +465,10 @@ its tag.
   - `edit-sent-message` (`:part :text` or `:caption`) and `delete-sent-message`, which take a
     `delivery-result`; the email and SMS backends signal `unsupported-message` for them;
   - `telegram-can-post`, which answers `:yes`, `:not-member` or `:not-permitted`;
-  - the conditions `telegram-chat-unreachable` and `telegram-not-permitted`, subtypes of
-    `delivery-failure`;
+  - the conditions `telegram-chat-unreachable`, `telegram-not-permitted` and
+    `telegram-chat-migrated`, subtypes of `delivery-failure`. `telegram-chat-migrated` is a
+    group that became a supergroup; `telegram-chat-migrated-migrate-to-chat-id` is the new
+    chat id to send to;
   - `delivery-rate-limited`, a `delivery-failure` subtype for a provider's rate limit (HTTP
     429), whose `delivery-rate-limited-retry-after` is the number of seconds asked for, or
     NIL. hermes does not wait or retry; the hermes README shows a retry stored with

@@ -13,6 +13,13 @@
 ;;;; therefore has the token replaced by "<redacted>" before it is signalled, and the token
 ;;;; itself is held as an AION/SECRET:SECRET, so the provider prints without it.
 ;;;;
+;;;; A backtrace is the other way out. A request middleware that logs an uncaught error with
+;;;; AION/LOG:EXCEPTION prints the backtrace from a HANDLER-BIND, while every frame between the
+;;;; signal and the handler is live and printed with its arguments. So no function here takes
+;;;; the plain token as an argument and then signals, and every error raised while the request
+;;;; is being made (when SEND-REQUEST's frames hold the request, and so the URL) is caught by
+;;;; %TELEGRAM-CALL's HANDLER-CASE, which unwinds those frames before anything is signalled.
+;;;;
 ;;;; Telegram's version is not in the URL, so +TELEGRAM-BOT-API-VERSION+ records the Bot API
 ;;;; version this was written against; the "Telegram Bot API" entry in upstream.sexp reads it.
 
@@ -52,8 +59,8 @@ a transport failure whose text names the URL. NIL makes the real call.")
   "The most of a response body the backend reads. Telegram's answers to these methods are a
 few kilobytes; a longer body signals RESPONSE-TOO-LARGE, which arrives as DELIVERY-FAILURE.")
 
-(defun %redact (text secret-text)
-  "TEXT with every occurrence of SECRET-TEXT replaced by \"<redacted>\". TEXT may be NIL."
+(defun %redact-one (text secret-text)
+  "TEXT with every occurrence of SECRET-TEXT replaced by \"<redacted>\"."
   (if (and (stringp text) (plusp (length secret-text)))
       (with-output-to-string (out)
         (loop with start = 0
@@ -64,6 +71,27 @@ few kilobytes; a longer body signals RESPONSE-TOO-LARGE, which arrives as DELIVE
                             (setf start (+ hit (length secret-text))))
                      (loop-finish))))
       text))
+
+(defun %percent-encode-colons (text)
+  (with-output-to-string (out)
+    (loop for ch across text
+          do (if (char= ch #\:) (write-string "%3A" out) (write-char ch out)))))
+
+(defun %lowercase-escapes (text)
+  "TEXT with each \"%3A\" written \"%3a\"."
+  (with-output-to-string (out)
+    (loop with i = 0
+          while (< i (length text))
+          do (if (and (<= (+ i 3) (length text)) (string= "%3A" text :start2 i :end2 (+ i 3)))
+                 (progn (write-string "%3a" out) (incf i 3))
+                 (progn (write-char (char text i) out) (incf i))))))
+
+(defun %redact (text token)
+  "TEXT with TOKEN replaced by \"<redacted>\", as written and with its colon percent-encoded
+(\"%3A\" or \"%3a\"), the form a URL in an error report may take. TEXT may be NIL."
+  (let ((encoded (%percent-encode-colons token)))
+    (%redact-one (%redact-one (%redact-one text token) encoded)
+                 (%lowercase-escapes encoded))))
 
 (defun %telegram-failure-class (status description)
   "The condition class for a refused Telegram call with HTTP STATUS and Telegram's DESCRIPTION.
@@ -77,7 +105,10 @@ plain DELIVERY-FAILURE."
             ((and (eql status 400) (has "chat not found")) 'telegram-chat-unreachable)
             ((and (eql status 400)
                   (or (has "not enough rights") (has "need administrator rights")
-                      (has "have no rights") (has "chat_write_forbidden")))
+                      (has "have no rights") (has "chat_write_forbidden")
+                      ;; CHAT_SEND_PLAIN_FORBIDDEN, CHAT_SEND_PHOTOS_FORBIDDEN and the other
+                      ;; per-kind permissions a group can take away.
+                      (and (has "chat_send_") (has "_forbidden"))))
              'telegram-not-permitted)
             (t 'delivery-failure)))))
 
@@ -86,23 +117,32 @@ plain DELIVERY-FAILURE."
   (let ((v (ignore-errors (jzon:parse text))))
     (and (hash-table-p v) v)))
 
-(defun %telegram-refusal (status body token)
-  "Signal the condition for a Telegram call refused with HTTP STATUS and response BODY."
+(defun %telegram-refusal (status body redact)
+  "The condition, not yet signalled, for a Telegram call refused with HTTP STATUS and response
+BODY. REDACT is a function that removes the token from a string; it is a closure rather than the
+token so that no frame printed in a backtrace shows the token. Telegram's description is the
+detail; a group that became a supergroup gives TELEGRAM-CHAT-MIGRATED with the new chat id."
   (let* ((json (%parse-object body))
          (description (and json (gethash "description" json)))
          (parameters (and json (gethash "parameters" json)))
          (retry-after (and (hash-table-p parameters) (gethash "retry_after" parameters)))
-         (class (%telegram-failure-class status description))
-         (detail (%redact (or description body) token)))
-    (if (eq class 'delivery-rate-limited)
-        (error class :provider :telegram :status status :detail detail
-                     :retry-after (and (integerp retry-after) retry-after))
-        (error class :provider :telegram :status status :detail detail))))
+         (migrate-to (and (hash-table-p parameters) (gethash "migrate_to_chat_id" parameters)))
+         (detail (funcall redact (or description body))))
+    (cond ((and (eql status 400) (integerp migrate-to))
+           (make-condition 'telegram-chat-migrated :provider :telegram :status status
+                                                   :detail detail :migrate-to-chat-id migrate-to))
+          (t (let ((class (%telegram-failure-class status description)))
+               (if (eq class 'delivery-rate-limited)
+                   (make-condition class :provider :telegram :status status :detail detail
+                                         :retry-after (and (integerp retry-after) retry-after))
+                   (make-condition class :provider :telegram :status status :detail detail)))))))
 
 (defun %telegram-call (p method params)
   "Call Bot API METHOD with PARAMS (a string-keyed hash table) and return the response's
 \"result\". Signals CONFIGURATION-ERROR without a token, and on a refusal or a transport
-failure the condition %TELEGRAM-REFUSAL chooses, with the token removed from its text."
+failure the condition %TELEGRAM-REFUSAL chooses, with the token removed from its text. Every
+error raised while the request is being made is caught here, so its frames are unwound before
+anything is signalled (see this file's header)."
   (let* ((secret (%telegram-token p))
          (token (%require (if (secret:secretp secret) (secret:reveal secret) secret)
                           "TELEGRAM_BOT_TOKEN"))
@@ -110,18 +150,26 @@ failure the condition %TELEGRAM-REFUSAL chooses, with the token removed from its
                             :url (format nil "~A/bot~A/~A" (telegram-api-base p) token method)
                             :content (jzon:stringify params)
                             :max-body-bytes +telegram-max-response-bytes+))
+         (redact (lambda (text) (%redact text token)))
          (resp (handler-case
                    (apply #'send-request req
                           (list (add-header "Content-Type" "application/json")
                                 (ensure-2xx :telegram))
                           (when *telegram-perform* (list :perform *telegram-perform*)))
                  (http-error (c)
-                   (if (http-error-status c)
-                       (%telegram-refusal (http-error-status c) (http-error-body c) token)
-                       (error 'delivery-failure
-                              :provider :telegram
-                              :detail (%redact (or (http-error-detail c) (http-error-body c))
-                                               token))))))
+                   (error (if (http-error-status c)
+                              (%telegram-refusal (http-error-status c) (http-error-body c) redact)
+                              (make-condition 'delivery-failure
+                                              :provider :telegram
+                                              :detail (funcall redact
+                                                               (or (http-error-detail c)
+                                                                   (http-error-body c)))))))
+                 ;; Anything else -- a defect in a stage, a network library's own condition --
+                 ;; would otherwise reach an outer handler with the request's frames live.
+                 (cl:error (c)
+                   (error 'delivery-failure
+                          :provider :telegram
+                          :detail (funcall redact (format nil "~A: ~A" (type-of c) c))))))
          (json (%parse-object (response-body resp))))
     (unless (and json (eq t (gethash "ok" json)))
       (error 'delivery-failure :provider :telegram :status (response-status resp)
@@ -173,8 +221,7 @@ failure the condition %TELEGRAM-REFUSAL chooses, with the token removed from its
 
 (defmethod edit-sent-message ((p telegram) result text &key parse-mode (link-preview :show) (part :text))
   (multiple-value-bind (chat id) (%sent-message-ref result)
-    (unless (member part '(:text :caption))
-      (error 'invalid-message :problem "it needs a :part of :TEXT or :CAPTION"))
+    (%check-edit text parse-mode link-preview part)
     (let ((params (%telegram-text-params chat text parse-mode link-preview nil)))
       (setf (gethash "message_id" params) id)
       (when (eq part :caption)

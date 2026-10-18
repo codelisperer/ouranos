@@ -61,6 +61,13 @@ chat does not exist, the bot was never added to it, or the bot was removed or bl
 there, for example a channel where the bot is not an administrator with the right to post
 (#778)."))
 
+(define-condition telegram-chat-migrated (delivery-failure)
+  ((migrate-to-chat-id :initarg :migrate-to-chat-id :initform nil
+                       :reader telegram-chat-migrated-migrate-to-chat-id))
+  (:documentation "Telegram refused the message because the group became a supergroup, which has
+a new chat id. MIGRATE-TO-CHAT-ID is that id; send to it instead, and store it in place of the
+old one (#778)."))
+
 (define-condition unsupported-message (hermes-error)
   ((provider :initarg :provider :reader unsupported-message-provider)
    (message :initarg :message :reader unsupported-message-message))

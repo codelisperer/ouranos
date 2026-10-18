@@ -69,17 +69,31 @@ its attachments included (#366). DEV-LAST-TELEGRAM is the last TELEGRAM-MESSAGE 
   (make-delivery-result :provider :dev :id (%dev-id) :status :logged
                         :destination (telegram-message-chat m) :raw m))
 
-(defmethod edit-sent-message ((p dev-transport) result text &key parse-mode link-preview (part :text))
-  (declare (ignore link-preview))
+(defun %dev-telegram-ref (p result)
+  "Check RESULT the way the Telegram backend would: UNSUPPORTED-MESSAGE for a result that is not
+of a Telegram message (an email or SMS result, which the SendGrid and Twilio backends cannot
+edit either), and INVALID-MESSAGE for one without a destination or id."
+  (unless (and (delivery-result-p result) (telegram-message-p (delivery-result-raw result)))
+    (error 'unsupported-message :provider (class-name (class-of p)) :message result))
+  (unless (and (delivery-result-destination result) (delivery-result-id result))
+    (error 'invalid-message
+           :problem "it needs a DELIVERY-RESULT that carries a destination and an id")))
+
+(defmethod edit-sent-message ((p dev-transport) result text &key parse-mode (link-preview :show) (part :text))
+  (%dev-telegram-ref p result)
+  (%check-edit text parse-mode link-preview part)
   (%dev-render (dev-stream p) "TELEGRAM EDIT"
                (list "Chat:" (delivery-result-destination result)
                      "Message:" (delivery-result-id result)
                      "Parse mode:" parse-mode
                      (if (eq part :caption) "Caption:" "Body:") text))
+  ;; RAW stays the message that was sent, so the edited result can be edited or deleted too.
   (make-delivery-result :provider :dev :id (delivery-result-id result) :status :edited
-                        :destination (delivery-result-destination result) :raw text))
+                        :destination (delivery-result-destination result)
+                        :raw (delivery-result-raw result)))
 
 (defmethod delete-sent-message ((p dev-transport) result)
+  (%dev-telegram-ref p result)
   (%dev-render (dev-stream p) "TELEGRAM DELETE"
                (list "Chat:" (delivery-result-destination result)
                      "Message:" (delivery-result-id result)))

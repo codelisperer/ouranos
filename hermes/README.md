@@ -62,9 +62,14 @@ administrator allowed to post in a channel.
   `delete-sent-message` take that result, for example
   `(hermes:edit-sent-message provider result "new text")`, with `:part :caption` for a
   photo's caption.
-- **Failures** are `delivery-failure`s, with three subtypes: `telegram-chat-unreachable` (the
+- **Failures** are `delivery-failure`s, with four subtypes: `telegram-chat-unreachable` (the
   chat does not exist, or the bot is not in it or was removed), `telegram-not-permitted` (the
-  bot may not post there), and `delivery-rate-limited`, for Telegram's flood limit.
+  bot may not post there), `telegram-chat-migrated` (the group became a supergroup;
+  `telegram-chat-migrated-migrate-to-chat-id` is its new id), and `delivery-rate-limited`, for
+  Telegram's flood limit.
+- **Length is not checked.** Telegram allows 4096 characters of text and 1024 of caption,
+  counted after it has parsed the markup out, so it refuses a longer message with a
+  `delivery-failure`.
 - **`(hermes:telegram-can-post provider chat)`** answers `:yes`, `:not-member` or
   `:not-permitted`, for a settings screen.
 - `HERMES_TELEGRAM_IMPL` picks the backend (default `telegram`); `HERMES_TRANSPORT=dev` renders

@@ -71,13 +71,15 @@ default); TEXT is the message body."
 
 (defun %telegram-chat-p (chat)
   "True for a Telegram chat: an integer chat id, or a public username written \"@name\" with 5 to
-32 letters, digits and underscores."
-  (or (integerp chat)
-      (and (stringp chat)
-           (<= 6 (length chat) 33)
-           (char= (char chat 0) #\@)
-           (every (lambda (ch) (or (char= ch #\_) (and (char< ch (code-char 128)) (alphanumericp ch))))
-                  (subseq chat 1)))))
+32 letters, digits and underscores, starting with a letter."
+  (flet ((ascii-letter-p (ch) (and (char< ch (code-char 128)) (alpha-char-p ch))))
+    (or (integerp chat)
+        (and (stringp chat)
+             (<= 6 (length chat) 33)
+             (char= (char chat 0) #\@)
+             (ascii-letter-p (char chat 1))
+             (every (lambda (ch) (or (char= ch #\_) (ascii-letter-p ch) (digit-char-p ch)))
+                    (subseq chat 1))))))
 
 (defstruct (telegram-message (:constructor %make-telegram-message
                                  (chat text parse-mode link-preview photo)))
@@ -86,7 +88,11 @@ the message, or the caption when PHOTO is given. PARSE-MODE is NIL (plain text),
 :MARKDOWN-V2; text in those modes must be escaped with ESCAPE-TELEGRAM-HTML or
 ESCAPE-MARKDOWN-V2. LINK-PREVIEW is :SHOW or :HIDE. PHOTO, when given, is an HTTP URL or a
 Telegram file_id, and the message is sent as a photo with TEXT as its caption. Built with
-MAKE-TELEGRAM-MESSAGE, which checks each of them."
+MAKE-TELEGRAM-MESSAGE, which checks each of them.
+
+TEXT's length is not checked here. Telegram allows 4096 characters of text and 1024 of caption,
+counted after it has parsed the markup out, so the length of the string sent is not the length
+Telegram checks; a message over the limit is refused by Telegram with a DELIVERY-FAILURE."
   chat text parse-mode link-preview photo)
 
 (defun make-telegram-message (&key chat (text "") parse-mode (link-preview :show) photo)
@@ -105,6 +111,18 @@ INVALID-MESSAGE otherwise, before anything is sent."
     (unless (or (null photo) (%header-safe-p photo))
       (bad "a :photo that is a URL or file_id (a non-empty string with no control characters)"))
     (%make-telegram-message chat text parse-mode link-preview photo)))
+
+(defun %check-edit (text parse-mode link-preview part)
+  "Signal INVALID-MESSAGE unless the arguments of an EDIT-SENT-MESSAGE are ones it can send:
+PART :TEXT or :CAPTION, TEXT a string (not empty for :TEXT), PARSE-MODE and LINK-PREVIEW as for
+MAKE-TELEGRAM-MESSAGE."
+  (flet ((bad (what) (error 'invalid-message :problem (format nil "it needs ~A" what))))
+    (unless (member part '(:text :caption)) (bad "a :part of :TEXT or :CAPTION"))
+    (unless (stringp text) (bad "a string text"))
+    (when (and (eq part :text) (zerop (length text))) (bad "a non-empty text"))
+    (unless (member parse-mode '(nil :html :markdown-v2))
+      (bad "a :parse-mode of NIL, :HTML or :MARKDOWN-V2"))
+    (unless (member link-preview '(:show :hide)) (bad "a :link-preview of :SHOW or :HIDE"))))
 
 (defparameter +markdown-v2-special+ "\\_*[]()~`>#+-=|{}.!"
   "The characters Telegram's MarkdownV2 requires to be escaped with a backslash in ordinary

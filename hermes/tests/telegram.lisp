@@ -51,7 +51,10 @@ pointed at it."
     (%bot-reply stream status json)))
 
 (defun %no-token-p (text)
-  (not (search +bot-token+ (princ-to-string text))))
+  "True when TEXT shows the token neither as written nor with its colon percent-encoded."
+  (let ((s (princ-to-string text)))
+    (not (or (search +bot-token+ s)
+             (search "123456%3ATEST-token-must-not-leak" s :test #'char-equal)))))
 
 ;;; --- sending --------------------------------------------------------------
 
@@ -98,6 +101,8 @@ pointed at it."
   (dolist (bad (list (list :chat "news" :text "x")             ; no @
                      (list :chat "@abcd" :text "x")            ; too short
                      (list :chat "@has space" :text "x")
+                     (list :chat "@1abcde" :text "x")          ; must start with a letter
+                     (list :chat "@_abcde" :text "x")
                      (list :chat 1.5 :text "x")
                      (list :chat "@news_channel" :text "")     ; empty, and no photo
                      (list :chat "@news_channel" :text "x" :parse-mode :markdown)
@@ -132,6 +137,8 @@ pointed at it."
           (400 "Bad Request: chat not found" h:telegram-chat-unreachable)
           (400 "Bad Request: not enough rights to send text messages to the chat" h:telegram-not-permitted)
           (400 "Bad Request: need administrator rights in the channel chat" h:telegram-not-permitted)
+          (400 "Bad Request: CHAT_SEND_PLAIN_FORBIDDEN" h:telegram-not-permitted)
+          (400 "Bad Request: CHAT_SEND_PHOTOS_FORBIDDEN" h:telegram-not-permitted)
           (400 "Bad Request: message text is empty" h:delivery-failure))
         do (let ((c (%refusal status (%bot-error status description))))
              (is (eq class (type-of c)) "~A ~S should be ~S, was ~S" status description class (type-of c))
@@ -149,6 +156,13 @@ pointed at it."
   (let ((c (%refusal 429 (%bot-error 429 "Too Many Requests"))))
     (is (typep c 'h:delivery-rate-limited))
     (is (null (h:delivery-rate-limited-retry-after c)))))
+
+(test a-group-that-became-a-supergroup-gives-its-new-chat-id
+  (let ((c (%refusal 400 (%bot-error 400 "Bad Request: group chat was upgraded to a supergroup chat"
+                                     "{\"migrate_to_chat_id\":-1009876543210}"))))
+    (is (typep c 'h:telegram-chat-migrated))
+    (is (typep c 'h:delivery-failure))
+    (is (eql -1009876543210 (h:telegram-chat-migrated-migrate-to-chat-id c)))))
 
 (test an-answer-that-is-not-ok-is-a-delivery-failure
   (let ((c (%refusal 200 "not json")))
@@ -171,9 +185,12 @@ pointed at it."
   ;; underlying report that does.
   (let* ((hermes::*telegram-perform*
            (lambda (req)
-             (error 'aion/http-client:http-error
-                    :detail (format nil "transport error: cannot reach ~A"
-                                    (aion/http-client:request-url req)))))
+             ;; The URL as written and percent-encoded, both of which a report may carry.
+             (let ((url (aion/http-client:request-url req)))
+               (error 'aion/http-client:http-error
+                      :detail (format nil "transport error: cannot reach ~A (~A, ~A)" url
+                                      (hermes::%percent-encode-colons url)
+                                      (hermes::%lowercase-escapes (hermes::%percent-encode-colons url)))))))
          (p (h:make-telegram :token +bot-token+))
          (c (handler-case (progn (h:deliver p (h:make-telegram-message :chat -1 :text "x")) nil)
               (h:delivery-failure (c) c))))
@@ -205,6 +222,44 @@ pointed at it."
   (let ((p (h:make-telegram :token +bot-token+)))
     (is (aion/secret:secretp (hermes::%telegram-token p)))
     (is (%no-token-p (format nil "~S ~A" p (hermes::%telegram-token p))))))
+
+;;; An app's request middleware (hyperion's, for one) logs an uncaught error with
+;;; AION/LOG:EXCEPTION from a HANDLER-BIND, which prints a backtrace while the frames between
+;;; the signal and the handler are still live, arguments included. No such frame may hold the
+;;; token or a request carrying the URL.
+
+(defun %logged-exception (thunk)
+  "Call THUNK inside a HANDLER-BIND that logs any error with AION/LOG:EXCEPTION, the way a
+request middleware does, and return the log text."
+  (let ((out (make-string-output-stream)))
+    (unwind-protect
+         (progn (aion/log:setup :env :dev :level :error :stream out)
+                (handler-case
+                    (handler-bind ((cl:error (lambda (c) (aion/log:exception c "request failed"))))
+                      (funcall thunk))
+                  (cl:error () nil)))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (get-output-stream-string out)))
+
+(test a-refusal-logged-with-its-backtrace-does-not-show-the-token
+  (with-bot (s p (%always 403 (%bot-error 403 "Forbidden: bot was kicked from the channel chat")))
+    (declare (ignorable s))
+    (let ((log (%logged-exception
+                (lambda () (h:deliver p (h:make-telegram-message :chat -1 :text "x"))))))
+      (is (search "TELEGRAM-CHAT-UNREACHABLE" log) "the refusal was logged, backtrace and all")
+      (is (search "DELIVER" log) "the backtrace reached the frames inside hermes")
+      (is (%no-token-p log)))))
+
+(test an-unexpected-error-inside-the-request-is-logged-without-the-token
+  ;; An error that is not an HTTP-ERROR, raised while the request is being made: before it is
+  ;; converted, the frames holding the request (and so the URL) are live.
+  (let* ((hermes::*telegram-perform* (lambda (req) (declare (ignore req)) (cl:error "unexpected")))
+         (p (h:make-telegram :token +bot-token+))
+         (log (%logged-exception
+               (lambda () (h:deliver p (h:make-telegram-message :chat -1 :text "x"))))))
+    (is (search "DELIVERY-FAILURE" log) "it arrives as a DELIVERY-FAILURE")
+    (is (search "unexpected" log) "with the original report as its detail")
+    (is (%no-token-p log))))
 
 ;;; --- edit, delete, can-post -----------------------------------------------
 
@@ -247,6 +302,31 @@ pointed at it."
   (signals h:unsupported-message
     (h:delete-sent-message (make-instance 'h:email-provider)
                            (h:make-delivery-result :id "1" :destination "x"))))
+
+(test an-edit-with-arguments-it-cannot-send-is-refused-before-any-request
+  (with-bot (s p (%always 200 (%bot-ok +sent-message+)))
+    (let ((sent (h:make-delivery-result :provider :telegram :id "42" :destination -100)))
+      (signals h:invalid-message (h:edit-sent-message p sent 42))
+      (signals h:invalid-message (h:edit-sent-message p sent ""))
+      (signals h:invalid-message (h:edit-sent-message p sent "x" :parse-mode :markdown))
+      (signals h:invalid-message (h:edit-sent-message p sent "x" :link-preview nil))
+      (signals h:invalid-message (h:edit-sent-message p sent "x" :part :body)))
+    (is (null (%requests s)))))
+
+(test the-dev-transport-refuses-the-edits-the-real-backends-refuse
+  (let* ((dev (h:make-dev-transport :stream (make-broadcast-stream)))
+         (sent (h:deliver dev (h:make-telegram-message :chat "@news_channel" :text "hi")))
+         (email (h:deliver dev (h:make-email :to "a@example.com" :from "b@example.com"
+                                             :subject "s" :text "t"))))
+    (signals h:unsupported-message (h:edit-sent-message dev email "x"))
+    (signals h:unsupported-message (h:delete-sent-message dev email))
+    (let ((no-destination (h:make-delivery-result :provider :dev :id "1"
+                                                  :raw (h:delivery-result-raw sent))))
+      (signals h:invalid-message (h:edit-sent-message dev no-destination "x")))
+    (signals h:invalid-message (h:edit-sent-message dev sent "x" :part :body))
+    (signals h:invalid-message (h:edit-sent-message dev sent "x" :parse-mode :markdown))
+    (let ((edited (h:edit-sent-message dev sent "edited")))
+      (is (eq t (h:delete-sent-message dev edited)) "an edited result can be deleted"))))
 
 (defun %member (&rest kvs) (apply #'hermes::%obj kvs))
 

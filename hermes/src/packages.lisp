@@ -59,6 +59,7 @@
    #:delivery-failure-detail #:unsupported-message
    #:delivery-rate-limited #:delivery-rate-limited-retry-after
    #:telegram-chat-unreachable #:telegram-not-permitted
+   #:telegram-chat-migrated #:telegram-chat-migrated-migrate-to-chat-id
    #:version))
 
 (cl:defpackage #:hermes/inbound
