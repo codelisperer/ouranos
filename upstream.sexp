@@ -75,7 +75,7 @@
 (:name "SQLite (Windows)" :category :native
  :where ((:env "scripts/versions.env" "SQLITE_VERSION"))
  :upstream (:manual "https://sqlite.org/download.html")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "webview (hyperion-view)" :category :native
  :where ((:concat "."
@@ -111,13 +111,13 @@
 
 (:name "Anthropic API version" :category :api
  :where ((:text "praxeon/src/llm.lisp" "(version :initarg :version :initform \"" "\""))
- :upstream (:manual "https://docs.anthropic.com/en/api/versioning")
- :reviewed :never)
+ :upstream (:manual "https://platform.claude.com/docs/en/api/versioning")
+ :reviewed "2026-10-17")
 
 (:name "Anthropic default model" :category :api
  :where ((:text "praxeon/src/llm.lisp" "(defparameter *default-model* \"" "\""))
- :upstream (:manual "https://docs.anthropic.com/en/docs/about-claude/models")
- :reviewed :never)
+ :upstream (:manual "https://platform.claude.com/docs/en/models/overview")
+ :reviewed "2026-10-17")
 
 (:name "MCP protocol revision" :category :api
  :where ((:text "praxeon/src/mcp/client.lisp" "(defparameter +protocol-version+ \"" "\""))
@@ -127,22 +127,22 @@
 (:name "Voyage default embedding model" :category :api
  :where ((:text "praxeon/src/embedding.lisp" "((model :initform \"" "\""))
  :upstream (:manual "https://docs.voyageai.com/docs/embeddings")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "OpenAI-compatible default embedding model" :category :api
  :where ((:text "praxeon/src/embedding.lisp" "(%getenv \"PRAXEON_EMBED_MODEL\") \"" "\""))
- :upstream (:manual "https://platform.openai.com/docs/models")
- :reviewed :never)
+ :upstream (:manual "https://developers.openai.com/api/docs/models")
+ :reviewed "2026-10-17")
 
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "SendGrid API version" :category :api
  :where ((:text "hermes/src/sendgrid.lisp" "https://api.sendgrid.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/sendgrid/api-reference")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "Stripe API version" :category :api
  :where ((:text "hermes/src/payments/stripe.lisp" "(%stripe-call p :post \"/" "/"))
@@ -179,7 +179,7 @@
 (:name "Linux runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "macOS runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil))
@@ -189,7 +189,7 @@
 (:name "Windows runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "pgvector (Windows CI)" :category :ci
  :where ((:text ".github/workflows/verify.yml" "PGVECTOR_VERSION: \"" "\""))
