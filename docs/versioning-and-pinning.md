@@ -166,7 +166,7 @@ Every pinned version of an external dependency or API has an entry in
 version is written and where its latest release is published, not what the version is, so it
 cannot disagree with the pin. `scripts/check-upstream.lisp`, run by `verify-tree.lisp`, fails
 when an entry no longer finds its pin, or when two places an entry names disagree (for example
-`libuv.pin` and the URL in `build-libuv.lisp`). It also fails when a pin in one of the places it
+`libuv.pin`'s `version` line and its `url` line). It also fails when a pin in one of the places it
 scans has no entry. It scans three places: the identity lines of every `*.pin` file, the
 `*_VERSION` keys and `QUICKLISP_DIST` in `scripts/versions.env`, and the `uses:` lines of every
 workflow. A version written anywhere else, such as an image tag in a compose file, an API
