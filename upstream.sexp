@@ -134,6 +134,16 @@
  :upstream (:manual "https://platform.openai.com/docs/models")
  :reviewed :never)
 
+(:name "OpenAI default image model" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-image-model* \"" "\""))
+ :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
+ :reviewed "2026-10-18")
+
+(:name "OpenAI Image API version" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-images-base-url* \"https://api.openai.com/" "\""))
+ :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
+ :reviewed "2026-10-18")
+
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")

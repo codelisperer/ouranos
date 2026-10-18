@@ -168,8 +168,11 @@ PROVIDER-REQUEST-FAILED for any other failure."
 
 (defparameter *openai-image-model* "gpt-image-2.5-flare"
   "The OpenAI image model used when none is given. GPT Image 2.5 Flare, the variant OpenAI's
-image-generation guide recommends for everyday generation. gpt-image-1 shuts down on
-2026-10-23, and gpt-image-1.5 and gpt-image-1-mini on 2026-12-01.")
+image-generation guide recommends for everyday generation, confirmed by the maintainer as praxeon's
+default (2026-10-18). An app can pass any other model id as :MODEL, or set PRAXEON_IMAGE_MODEL: for
+example gpt-image-1-mini, at about a quarter of the per-token price, until OpenAI shuts it down
+on 2026-12-01. gpt-image-1 shuts down on 2026-10-23, and gpt-image-1.5 and chatgpt-image-latest
+on 2026-12-01; OpenAI lists the 2.5 models as their replacements. upstream.sexp pins this value.")
 
 (defparameter *openai-images-base-url* "https://api.openai.com/v1"
   "OpenAI's API base URL. The provider appends /images/generations to it.")

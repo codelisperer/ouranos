@@ -1074,6 +1074,14 @@ fail. With no `:api-key` it reads `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_
 `:api-key` you pass is used even when it is NIL. `PRAXEON_IMAGE_MODEL` and
 `PRAXEON_IMAGE_BASE_URL` override the model (default `gpt-image-2.5-flare`) and the endpoint.
 
+**Another model.** Pass any OpenAI image model id as `:model`, or set `PRAXEON_IMAGE_MODEL`. For
+example, `gpt-image-1-mini` costs about a quarter as much per token as the default. OpenAI shuts
+it down on 2026-12-01, along with `gpt-image-1.5` and `chatgpt-image-latest`; `gpt-image-1`
+shuts down on 2026-10-23. OpenAI names `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` as
+their replacements: Sunburst is the variant for work where editing precision matters most. The
+quality the model is asked for is a parameter too, so an app can trade cost for detail on each
+call.
+
 The model is told the image's media type, its size in bytes, your reference and the prompt the
 provider says it used. The bytes are passed to `:on-image` as the provider sent them and are
 never re-encoded, so provenance metadata embedded in the file, such as C2PA, is kept.
