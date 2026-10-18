@@ -184,7 +184,7 @@
 (:name "macOS runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed :never)
+ :reviewed "2026-10-18")
 
 (:name "Windows runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil))
