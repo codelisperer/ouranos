@@ -71,22 +71,9 @@ else
 fi
 
 # --- 1. Coalton (local checkout; Praxeon's typed core needs it) --------------
-# The commit comes from the monorepo's coalton.pin. This script only checks it: the monorepo's
-# scripts/setup.sh clones Coalton and checks out the pinned commit, so that is done in one place.
-MONOREPO_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
-PIN_FILE="$MONOREPO_ROOT/coalton.pin"
-COALTON_REF=$(awk '/^sha[[:space:]]/ {print $2; exit}' "$PIN_FILE" 2>/dev/null || true)
-[ -n "$COALTON_REF" ] || die "no 'sha' line in $PIN_FILE."
-COALTON_DIR="${COALTON_DIR:-$HOME/common-lisp/coalton}"
-FIX="Run scripts/setup.sh at the monorepo root ($MONOREPO_ROOT), which checks out the pinned commit."
-[ -d "$COALTON_DIR/.git" ] || die "Coalton is not checked out at $COALTON_DIR. $FIX"
-# coalton.pin carries a short sha, so compare resolved commit ids.
-current=$(git -C "$COALTON_DIR" rev-parse HEAD 2>/dev/null || echo "")
-want=$(git -C "$COALTON_DIR" rev-parse --verify --quiet "$COALTON_REF^{commit}" 2>/dev/null || echo "")
-if [ -z "$want" ] || [ "$current" != "$want" ]; then
-  die "Coalton at $COALTON_DIR is at ${current:0:8}, but coalton.pin names $COALTON_REF. $FIX"
-fi
-info "Coalton at $COALTON_DIR is at the pinned $COALTON_REF."
+# Coalton: checked here, never cloned. scripts/coalton-pin.sh at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+bash "$(dirname "${BASH_SOURCE[0]}")/../../scripts/coalton-pin.sh" || exit 1
 
 # --- 2. System discovery (handled by the repo-root bootstrap, not here) -------
 info "Discovery: run \`sbcl --script bootstrap.lisp\` at the repo root (writes the ASDF drop-in)."

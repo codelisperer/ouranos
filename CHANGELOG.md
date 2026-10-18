@@ -1191,6 +1191,18 @@ its tag.
   NIL, as it does whenever another run holds the job. Either one tries to start a run itself
   only when the run it waited for did not start.
 
+- **aion, elenchon, hyperion and mnemosyne: `scripts/setup.sh` and `scripts/setup.ps1` check
+  that Coalton is at the commit `coalton.pin` names, and no longer clone it** (#751). Like
+  praxeon's before #733, they ran `git clone --depth 1` on Coalton's latest commit when
+  `~/common-lisp/coalton` was missing, and accepted any commit when it was present. All five
+  frameworks' setup scripts now run the new `scripts/coalton-pin.sh` or
+  `scripts/coalton-pin.ps1` at the monorepo root. It exits 0 when the checkout at `COALTON_DIR`
+  (default `~/common-lisp/coalton`) is at the pinned commit, and otherwise names the checkout's
+  commit (or "no commit") and the pinned one, says to run the root `scripts/setup.sh` or
+  `scripts/setup.ps1`, and exits 1. It warns when the checkout's `origin` differs from the pin's
+  `repo` line, as the root scripts do. The root setup scripts are now the only ones that clone
+  Coalton.
+
 - **praxeon: `praxeon/scripts/setup.sh` and `setup.ps1` check that Coalton is at the commit
   `coalton.pin` names, and no longer clone it** (#733). They ran `git clone --depth 1` on
   Coalton's latest commit when `~/common-lisp/coalton` was missing, and accepted any commit
