@@ -636,6 +636,16 @@ instead of starting a second."
                                :name "aion/schedule renewal")))))))
     (sb-thread:join-thread thread :timeout seconds :default nil)))
 
+(defconstant +renewal-margin+ 1/20
+  "The least time, in seconds, a STOP must have left of its timeout to start a lease renewal
+(#728). 50 ms is about three ticks of the 15.6 ms timer a timed wait on Windows can return
+early by.")
+
+(defvar *stop-clock* #'get-internal-real-time
+  "The function STOP reads the time from, in internal time units: GET-INTERNAL-REAL-TIME. A test
+binds it to put STOP a set distance from its deadline without waiting for that time to pass
+(#728).")
+
 (defun stop (scheduler &key (timeout 30))
   "Stop SCHEDULER: start no more runs, make STOP-REQUESTED-P true, stop its driver, and wait for
 the runs in progress to finish, renewing their leases meanwhile. All of it within TIMEOUT
@@ -645,8 +655,8 @@ waits for it again. A renewal an earlier STOP left going is waited for too, beca
 uses the store, even when no run is left. Runs
 still going keep their leases, which expire once the process has gone, and another instance
 then runs them again."
-  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
-    (flet ((left () (/ (- deadline (get-internal-real-time)) internal-time-units-per-second))
+  (let ((deadline (+ (funcall *stop-clock*) (* timeout internal-time-units-per-second))))
+    (flet ((left () (/ (- deadline (funcall *stop-clock*)) internal-time-units-per-second))
            (running-keys ()
              (%with-lock (scheduler)
                (loop for k being the hash-keys of (%running scheduler) collect k))))
@@ -657,13 +667,16 @@ then runs them again."
           (return-from stop (values :timed-out (running-keys)))))
       ;; TICK starts nothing once STOPPING is set, and renews nothing either, so the drain
       ;; renews the leases itself, every third of the lease, until its runs have finished. A
-      ;; renewal is skipped once the timeout has passed, and waited for only until it does.
+      ;; renewal is skipped once less than +RENEWAL-MARGIN+ of the timeout is left, and waited
+      ;; for only until the timeout passes. A timed wait can return a little before its
+      ;; timeout, by a spurious wakeup or a coarse timer, and without the margin the drain
+      ;; then started a renewal it had no time left to wait for (#728).
       (let ((slice (max 1 (floor (scheduler-lease-seconds scheduler) 3))))
         (loop while (and (%busy-p scheduler) (plusp (left)))
               do (%with-lock (scheduler)
                    (when (%busy-p scheduler)
                      (%wait (%idle scheduler) (%lock scheduler) (min slice (left)))))
-                 (when (and (%busy-p scheduler) (plusp (left)))
+                 (when (and (%busy-p scheduler) (> (left) +renewal-margin+))
                    (%renew-within scheduler (left)))))
       (let ((renewal (%with-lock (scheduler) (%renewal scheduler))))
         (when (and renewal (sb-thread:thread-alive-p renewal))
