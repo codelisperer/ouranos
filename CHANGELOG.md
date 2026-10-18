@@ -1191,6 +1191,14 @@ its tag.
   NIL, as it does whenever another run holds the job. Either one tries to start a run itself
   only when the run it waited for did not start.
 
+- **praxeon: `praxeon/scripts/setup.sh` and `setup.ps1` check that Coalton is at the commit
+  `coalton.pin` names, and no longer clone it** (#733). They ran `git clone --depth 1` on
+  Coalton's latest commit when `~/common-lisp/coalton` was missing, and accepted any commit
+  when it was present, so a machine set up through them could build against a Coalton the tree
+  is not tested with. They now stop with an error naming the checkout's commit and the pinned
+  one, and say to run the monorepo's `scripts/setup.sh` or `scripts/setup.ps1`, which clones
+  Coalton and checks out the pinned commit. Both honour `COALTON_DIR`, as the root scripts do.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
