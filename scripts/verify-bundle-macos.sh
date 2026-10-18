@@ -261,7 +261,7 @@ done
 
 # Which OpenSSL the app loaded, for the record. It comes from Homebrew, not the bundle (#191),
 # and its major version can change with the build image (#763). Not a pass or fail.
-SSL=$(grep -E 'libssl\.|libcrypto\.' "$LOG" | grep dyld | sed 's/^.*dyld[^/]*//' | sort -u || true)
+SSL=$(grep -E 'libssl\.|libcrypto\.' "$LOG" | grep dyld | sed 's/^.*dyld[^/]*//' | grep -v '^ *$' | sort -u || true)
 if [ -n "$SSL" ]; then
   echo "  info -- OpenSSL loaded from:"
   echo "$SSL" | sed 's/^/         /'
