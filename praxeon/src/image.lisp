@@ -189,10 +189,17 @@ gpt-image models send moderation_blocked; content_policy_violation is DALL-E's."
   ((api-key :initarg :api-key :reader openai-images-api-key)
    (model :initarg :model :initform *openai-image-model* :reader image-model-of)
    (base-url :initarg :base-url :initform *openai-images-base-url* :reader openai-images-base-url)
-   (read-timeout :initarg :read-timeout :initform 300 :reader openai-images-read-timeout))
+   (read-timeout :initarg :read-timeout :initform 300 :reader openai-images-read-timeout)
+   (connect-timeout :initarg :connect-timeout :initform 30 :reader openai-images-connect-timeout))
   (:documentation "OpenAI's Image API, POST BASE-URL/images/generations, as an image provider.
-API-KEY is sent as a bearer token. READ-TIMEOUT is in seconds: a high-quality image can take
-over a minute."))
+API-KEY is sent as a bearer token. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds: a
+high-quality image can take over a minute to arrive. A reply is read up to
+*MAX-BYTES-PER-IMAGE* for each image asked for; a longer one is PROVIDER-REQUEST-FAILED."))
+
+(defparameter *max-bytes-per-image* (* 64 1024 1024)
+  "The most bytes of reply read for each image requested. An image arrives as base64 inside JSON,
+so the reply is about a third larger than the file; 64 MB is far above the largest file the
+API's documented sizes produce, and stops a reply that never ends from filling the heap.")
 
 (defmethod image-provider-name ((p openai-images)) "openai")
 
@@ -268,10 +275,21 @@ identifiers are kept, because anything longer could carry the request."
                     (and (vectorp cats) (remove nil (map 'list #'short cats)))))
           (values nil '())))))
 
+(defun %unexpected-reply (what)
+  "A PROVIDER-REQUEST-FAILED for a 2xx reply that is not the documented shape. WHAT says how; it
+never quotes the reply, which can repeat the request."
+  (make-condition 'cnd:provider-request-failed
+                  :detail (format nil "openai images: the reply ~A" what)))
+
+(defun %parse-reply (text)
+  "TEXT, a reply body, parsed as JSON, or PROVIDER-REQUEST-FAILED when it is not JSON."
+  (handler-case (jzon:parse text)
+    (error () (error (%unexpected-reply (format nil "is not JSON (~D characters)" (length text)))))))
+
 (defmethod image-post ((p openai-images) body)
   (let ((url (concatenate 'string (openai-images-base-url p) "/images/generations")))
     (handler-case
-        (jzon:parse
+        (%parse-reply
          (http:response-body
           (http:send-request
            (http:make-request :method :post :url url
@@ -279,7 +297,10 @@ identifiers are kept, because anything longer could carry the request."
                                              (cons "authorization"
                                                    (format nil "Bearer ~A" (openai-images-api-key p))))
                               :content (jzon:stringify body)
-                              :read-timeout (openai-images-read-timeout p))
+                              :read-timeout (openai-images-read-timeout p)
+                              :connect-timeout (openai-images-connect-timeout p)
+                              :max-body-bytes (* *max-bytes-per-image*
+                                                 (max 1 (or (gethash "n" body) 1))))
            (list (http:ensure-2xx "openai images")))))
       (http:http-error (e)
         (let ((failure (llm:request-failure "openai images" e)))
@@ -302,25 +323,32 @@ identifiers are kept, because anything longer could carry the request."
   (let ((v (gethash key parsed)))
     (and (stringp v) v)))
 
+(defun %decode-image (encoded)
+  "The octets ENCODED, a base64 string, stands for, or PROVIDER-REQUEST-FAILED when it is not
+base64."
+  (handler-case (b64:base64-string-to-usb8-array encoded)
+    (error () (error (%unexpected-reply "has an image that is not valid base64")))))
+
 (defmethod generate-images ((p openai-images) request)
   (let* ((parsed (image-post p (openai-image-request-body p request)))
+         (parsed (if (hash-table-p parsed)
+                     parsed
+                     (error (%unexpected-reply "is not a JSON object"))))
          (data (gethash "data" parsed))
          (usage (gethash "usage" parsed))
          (media-type (%media-type (%reported parsed "output_format")))
          (size (%reported parsed "size"))
          (quality (%reported parsed "quality")))
-    (unless (and (vectorp data) (plusp (length data)))
-      (error 'cnd:provider-request-failed
-             :detail "openai images: the reply has no images in data"))
+    (unless (and (vectorp data) (not (stringp data)) (plusp (length data)))
+      (error (%unexpected-reply "has no images in data")))
     (values
      (map 'list
           (lambda (item)
-            (let ((encoded (gethash "b64_json" item)))
+            (let ((encoded (and (hash-table-p item) (gethash "b64_json" item))))
               (unless (stringp encoded)
-                (error 'cnd:provider-request-failed
-                       :detail "openai images: an image in the reply has no b64_json"))
+                (error (%unexpected-reply "has an image with no b64_json")))
               (%make-image-result
-               :octets (b64:base64-string-to-usb8-array encoded)
+               :octets (%decode-image encoded)
                :media-type media-type
                :revised-prompt (let ((r (gethash "revised_prompt" item)))
                                  (and (stringp r) (plusp (length r)) r))
@@ -375,10 +403,18 @@ not one of them."
              (find v allowed :key #'symbol-name :test #'string-equal))
         :auto)))
 
+(defparameter *revised-prompt-chars* 400
+  "The most characters of the provider's revised prompt the model is shown. The model wrote the
+prompt, so it needs only enough to see what changed; the whole of it is in the IMAGE-RESULT.")
+
 (defun %summary (result reference)
-  (format nil "Created an image (~A, ~D bytes~@[, ~A~])~@[ and delivered it as ~A~].~@[ The provider revised the prompt to: ~A~]"
-          (image-result-media-type result) (length (image-result-octets result))
-          (image-result-size result) reference (image-result-revised-prompt result)))
+  (let* ((revised (image-result-revised-prompt result))
+         (cut (and revised (> (length revised) *revised-prompt-chars*))))
+    (format nil "Created an image (~A, ~D bytes~@[, ~A~])~@[ and delivered it as ~A~].~@[ The provider revised the prompt to: ~A~]~:[~;… (cut at ~D of ~D characters)~]"
+            (image-result-media-type result) (length (image-result-octets result))
+            (image-result-size result) reference
+            (if cut (subseq revised 0 *revised-prompt-chars*) revised)
+            cut *revised-prompt-chars* (and revised (length revised)))))
 
 (defun register (agent provider &key on-image (name "generate-image") capability source)
   "Register the generate-image means on AGENT, generating with PROVIDER, an IMAGE-PROVIDER.
@@ -399,7 +435,9 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
      (let ((prompt (gethash "prompt" args)))
        ;; Refused before any request, as an error result the model can correct: an empty
        ;; prompt would cost a round trip and come back as a failed request that ends the turn.
-       (unless (and (stringp prompt) (plusp (length (string-trim " " prompt))))
+       (unless (and (stringp prompt)
+                    (plusp (length (string-trim '(#\Space #\Tab #\Newline #\Return #\Page)
+                                                prompt))))
          (error 'cnd:tool-error-result :outcome :not-run
                                        :text "generate-image needs a prompt describing the image."))
      (let* ((results (generate-image provider prompt

@@ -204,7 +204,8 @@ for the prompt, the revised prompt and the image's base64. The log must still sh
       (is (search "image response" logged) "the successful request was not logged")
       (is (search "image request refused" logged) "the refusal was not logged")
       (is-false (search +image-prompt-marker+ logged) "the prompt reached the log")
-      (is-false (search (subseq encoded 0 16) logged) "the image's base64 reached the log"))))
+      (is-false (search (subseq encoded 0 16) logged) "the image's base64 reached the log")
+      (is-false (search "sk-test-758" logged) "the API key reached the log"))))
 
 ;;; --- keys and registration ----------------------------------------------------------------
 
@@ -310,6 +311,54 @@ as the provider's answer. Returns the final text, the events, and the images ON-
       (let ((result (find :tool-result events :key #'evt:event-type)))
         (is (and result (getf result :is-error)))
         (is (and result (eq :not-run (getf result :outcome))))))))
+
+(defun %unexpected-reply-condition (reply)
+  "Serve REPLY and return the condition GENERATE-IMAGE signals, or NIL when it signals none."
+  (%with-image-server (list reply)
+                      (lambda (p)
+                        (handler-case (progn (praxeon/image:generate-image p "x") nil)
+                          (error (c) c)))))
+
+(test a-reply-of-an-unexpected-shape-is-provider-request-failed
+  "Each of these 200 replies is not what OpenAI documents. Each must be PROVIDER-REQUEST-FAILED,
+which praxeon handles, never an untyped error that ends the turn."
+  (dolist (reply (list "{\"created\":1,\"data\":[]}"              ; no images
+                       "{\"created\":1}"                           ; no data at all
+                       "{\"data\":\"not a list\"}"
+                       "{\"data\":[\"not an object\"]}"
+                       "{\"data\":[{\"b64_json\":\"%%% not base64 %%%\"}]}"
+                       "[1,2,3]"
+                       "<html>not JSON</html>"))
+    (let ((c (%unexpected-reply-condition reply)))
+      (is (typep c 'cnd:provider-request-failed) "~S gave ~S" reply c))))
+
+(test a-long-revised-prompt-is-cut-in-what-the-model-sees
+  (let ((long (make-string 2000 :initial-element #\a)))
+    (multiple-value-bind (text events received)
+        (%image-turn (%image-reply :revised-prompt long) (constantly "img-1"))
+      (declare (ignore text))
+      (is (equal long (praxeon/image:image-result-revised-prompt (first received)))
+          "the app gets the whole revised prompt")
+      (let ((content (getf (find :tool-result events :key #'evt:event-type) :content)))
+        (is (< (length content) 1000) "~D characters reached the model" (length content))
+        (is (search "cut at 400 of 2000 characters" content) "~A" content)))))
+
+(test a-prompt-of-only-whitespace-is-refused-before-any-request
+  (let ((ag (actor:make-agent
+             :name "designer"
+             :provider (make-instance 'scripted
+                                      :script (list (%call-completion
+                                                     "generate-image"
+                                                     (%args "prompt" (format nil " ~C~C~C " #\Tab #\Newline #\Return)))
+                                                    (llm:make-completion :text "Sorry."
+                                                                         :stop-reason :end))))))
+    (praxeon/image:register ag (praxeon/image:make-openai-images
+                                :api-key "k" :base-url "http://127.0.0.1:9/v1")
+                            :on-image #'identity)
+    (let ((result (find :tool-result (nth-value 1 (%collecting-events
+                                                   (lambda () (actor:run-turn ag "draw"))))
+                        :key #'evt:event-type)))
+      (is (and result (eq :not-run (getf result :outcome)))))))
 
 (test the-default-model-is-the-current-gpt-image-model
   "gpt-image-1 shuts down on 2026-10-23. The default must not be a model OpenAI has retired."
