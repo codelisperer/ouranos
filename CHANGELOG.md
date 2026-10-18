@@ -452,6 +452,33 @@ its tag.
 
 ### Added
 
+- **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
+  `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
+  `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
+  `:hide`, `:photo` a URL or file_id), is sent by `hermes:send` or by `deliver` to a
+  `hermes:telegram` provider (`make-telegram`). The bot token is `TELEGRAM_BOT_TOKEN` or
+  `:token`, held as an `aion/secret` secret, and replaced by `<redacted>` in the text of every
+  failure the backend signals. `HERMES_TELEGRAM_IMPL` picks the backend, default `telegram`;
+  `HERMES_TRANSPORT=dev` renders Telegram messages, and `dev-last-telegram` reads the last one.
+  New with it:
+  - `escape-markdown-v2` and `escape-telegram-html`, for text in those parse modes;
+  - `edit-sent-message` (`:part :text` or `:caption`) and `delete-sent-message`, which take a
+    `delivery-result`; the email and SMS backends signal `unsupported-message` for them;
+  - `telegram-can-post`, which answers `:yes`, `:not-member` or `:not-permitted`;
+  - the conditions `telegram-chat-unreachable` and `telegram-not-permitted`, subtypes of
+    `delivery-failure`;
+  - `delivery-rate-limited`, a `delivery-failure` subtype for a provider's rate limit (HTTP
+    429), whose `delivery-rate-limited-retry-after` is the number of seconds asked for, or
+    NIL. hermes does not wait or retry; the hermes README shows a retry stored with
+    `aion/schedule:schedule-once`. Only the Telegram backend signals it so far; SendGrid and
+    Twilio still signal a plain `delivery-failure` for a 429;
+  - `delivery-result-destination`, a new slot of `delivery-result`, NIL by default. Only the
+    Telegram backend fills it, with the chat id.
+
+  The log lines `hermes:send` writes are unchanged except that `hermes: sent` now carries
+  `:channel` like `hermes: sending`; neither carries a message's text or recipient. Core
+  `hermes` now loads `aion/secret`. upstream.sexp records Bot API 10.3.
+
 - **`scripts/build-installer.ps1` checks the WebView2 bootstrapper's signature, and takes
   `-RequireWebView2`** (#736). Before it embeds `MicrosoftEdgeWebview2Setup.exe`, the new
   `scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature whose

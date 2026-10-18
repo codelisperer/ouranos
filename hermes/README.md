@@ -8,7 +8,7 @@ hyperion/mnemosyne/praxeon, so apps consume it and nothing core depends on it.
 **The vision: hermes handles all the messaging an app needs.** Named for the messenger — one
 neutral protocol for every channel an app uses to reach a person, so an app writes `send`
 once and the channel/vendor is a configuration detail. **Email + SMS ship today** (send *and*
-receive); push notifications, in-app/web push, and richer channels (voice, chat) join the
+receive), and **Telegram** groups and channels (send, edit, delete); push notifications, in-app/web push, and richer channels (voice, chat) join the
 same `deliver` protocol as they land — each a backend, never a new API for the app to learn.
 Payments (Stripe) is a **separate module** under the same "third-party services behind thin
 neutral protocols" doctrine — see the roadmap issues (`pkg:hermes`).
@@ -26,16 +26,67 @@ env-configured provider for the channel:
 (hermes:send (hermes:make-sms :to "+15551234567" :text "Your code is 123456"))  ; Twilio (or dev)
 ```
 
-Returns a `delivery-result` (`provider`, `id`, `status`, `raw`); signals `delivery-failure`
+Returns a `delivery-result` (`provider`, `id`, `status`, `raw`, and `destination`, which only
+the Telegram backend fills); signals `delivery-failure`
 (carries the provider's HTTP status + body), `unsupported-message`, or `configuration-error`.
 For an explicit provider, `(hermes:deliver (hermes:make-sendgrid) email)`.
 
 **Transport selection (env):**
-- `HERMES_TRANSPORT=dev` → the **dev transport** for both channels: *renders* the message
+- `HERMES_TRANSPORT=dev` → the **dev transport** for every channel: *renders* the message
   (recipient/subject/body — so links are visible) instead of sending. The local-dev default.
 - else `HERMES_EMAIL_IMPL` (default `sendgrid`) / `HERMES_SMS_IMPL` (default `twilio`).
 - Backends read their own creds: `SENDGRID_API_KEY`, `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`
   / `TWILIO_FROM`. See [`.env.example`](.env.example).
+
+## Send to Telegram groups and channels
+
+A `telegram-message` goes to a chat through the Telegram Bot API (#778). The chat is an
+integer chat id or a public `@username`; the bot has to be a member of a group, or an
+administrator allowed to post in a channel.
+
+```lisp
+(hermes:send (hermes:make-telegram-message
+              :chat "@example_news"
+              :text (format nil "*New post:* ~A" (hermes:escape-markdown-v2 title))
+              :parse-mode :markdown-v2      ; or :html with hermes:escape-telegram-html, or NIL
+              :link-preview :hide))          ; :show is the default
+(hermes:send (hermes:make-telegram-message :chat -1001234567890 :text "Caption"
+                                           :photo "https://example.com/cover.jpg"))
+```
+
+- **The token** is `TELEGRAM_BOT_TOKEN`, or `:token` to `make-telegram` (a string or an
+  `aion/secret` secret). It is held as a secret, and because Telegram puts it in the URL path,
+  it is replaced by `<redacted>` in the text of every failure the backend signals.
+- **The result** is a `delivery-result` whose `id` is Telegram's message id and whose
+  `destination` is the chat id Telegram answered with. `edit-sent-message` and
+  `delete-sent-message` take that result, for example
+  `(hermes:edit-sent-message provider result "new text")`, with `:part :caption` for a
+  photo's caption.
+- **Failures** are `delivery-failure`s, with three subtypes: `telegram-chat-unreachable` (the
+  chat does not exist, or the bot is not in it or was removed), `telegram-not-permitted` (the
+  bot may not post there), and `delivery-rate-limited`, for Telegram's flood limit.
+- **`(hermes:telegram-can-post provider chat)`** answers `:yes`, `:not-member` or
+  `:not-permitted`, for a settings screen.
+- `HERMES_TELEGRAM_IMPL` picks the backend (default `telegram`); `HERMES_TRANSPORT=dev` renders
+  Telegram messages instead of sending them, like email and SMS.
+
+**A flood limit is retried by the app, later, not by hermes.** `delivery-rate-limited` carries
+`delivery-rate-limited-retry-after`, the number of seconds Telegram asked for, or NIL. hermes
+does not wait or retry. An app that runs `aion/schedule` can store the retry as a one-off job;
+the job's arguments are stored, so they are the message's fields rather than the message:
+
+```lisp
+(aion/schedule:define-job scheduler "announce"
+  (lambda (context chat text)
+    (declare (ignore context))
+    (handler-case (hermes:send (hermes:make-telegram-message :chat chat :text text))
+      (hermes:delivery-rate-limited (c)
+        (aion/schedule:schedule-once
+         scheduler "announce"
+         :at (+ (aion/schedule:scheduler-clock-now scheduler)
+                (or (hermes:delivery-rate-limited-retry-after c) 60))
+         :args (list chat text))))))
+```
 
 ## Receive (inbound SMS) — `hermes/inbound`
 
