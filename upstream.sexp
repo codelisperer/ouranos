@@ -145,11 +145,9 @@
  :reviewed "2026-10-17")
 
 (:name "Stripe API version" :category :api
- :where ((:text "hermes/src/payments/stripe.lisp" "(%stripe-call p :post \"/" "/"))
+ :where ((:text "hermes/src/payments/stripe.lisp" "(defparameter +stripe-api-version+ \"" "\""))
  :upstream (:manual "https://docs.stripe.com/upgrades")
- :reviewed :never
- :held (:reason "only the URL path version is pinned: no Stripe-Version header is sent, so each account's default API version applies"
-        :issue 734))
+ :reviewed "2026-10-18")
 
 ;;; --- CI ----------------------------------------------------------------------------------
 
