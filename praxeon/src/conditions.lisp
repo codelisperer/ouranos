@@ -201,9 +201,10 @@ from the connected database. The store checks pg_extension and never runs CREATE
 needs a key and none of the variables that apply to it is set. VARIABLES lists them, most
 specific first."))
 
-(defun %value-shape (value)
+(defun value-shape (value)
   "What kind of value VALUE is and how long, for a message that is logged: never VALUE itself.
-PRAXEON/LLM's UNKNOWN-TOOL-CHOICE detail uses it too (#727)."
+PRAXEON/LLM uses it for the UNKNOWN-TOOL-CHOICE detail (#727) and for the tool spec named in
+COMPLETE-WITH-SCHEMA's refusal (#760)."
   (typecase value
     (keyword (format nil "a keyword of ~D characters" (length (symbol-name value))))
     (symbol (format nil "a symbol of ~D characters" (length (symbol-name value))))
@@ -219,7 +220,7 @@ PRAXEON/LLM's UNKNOWN-TOOL-CHOICE detail uses it too (#727)."
    (lambda (c s)
      (format s "~A cannot honour the tool choice it was given, ~A; read the value from TOOL-CHOICE-UNSUPPORTED-REQUESTED.~%~%This is signalled rather than falling back to :auto on purpose. A caller that forced a tool is about to treat the reply as a record; letting the model answer freely instead returns prose, and nothing downstream can tell the difference until it is stored."
              (or (tool-choice-unsupported-provider c) "This provider")
-             (%value-shape (tool-choice-unsupported-requested c)))))
+             (value-shape (tool-choice-unsupported-requested c)))))
   (:documentation "Signalled when a forced TOOL-CHOICE reaches a provider that cannot do it.
 
 REQUESTED is the tool choice as given. The report says only what kind of value it was and its

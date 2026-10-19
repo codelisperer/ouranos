@@ -4126,12 +4126,23 @@ handler that logs a failed request. The forced tool's name stays in the REQUESTE
       (is (null (search +727-marker+ logged)) "nothing logged holds it: ~A" logged))))
 
 (test an-unknown-tool-choice-is-described-by-its-kind-and-length
-  (flet ((shape (v) (praxeon/conditions::%value-shape v)))
+  (flet ((shape (v) (praxeon/conditions:value-shape v)))
     (is (equal "a string of 5 characters" (shape "hello")))
     (is (equal "a keyword of 8 characters" (shape :required)))
     (is (equal "a symbol of 3 characters" (shape 'cl:car)))
     (is (equal "a list that is not proper" (shape '(a . b))))
     (is (equal "a value of class FIXNUM" (shape 3)))))
+
+(test a-provider-without-response-format-does-not-print-the-schema-name
+  "COMPLETE-WITH-SCHEMA's default refusal describes the tool spec's name by its kind and length,
+as UNKNOWN-TOOL-CHOICE does for its value (#760)."
+  (let* ((name "x727-marker-schema-name")
+         (spec (llm:make-tool-spec :name name :description "d"))
+         (c (handler-case (progn (llm:complete-with-schema (make-instance 'llm:provider) '() spec) nil)
+              (cnd:deliberation-failure (c) c))))
+    (is (typep c 'cnd:deliberation-failure))
+    (is (search "a string of 23 characters" (princ-to-string c)) "~A" c)
+    (is (null (search name (princ-to-string c))) "the report leaves the name out")))
 
 (test an-error-type-or-code-outside-the-identifier-characters-is-not-taken-as-one
   "A proxy between praxeon and the service can answer with its own error JSON, so a type or
