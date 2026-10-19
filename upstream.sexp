@@ -144,6 +144,11 @@
  :upstream (:manual "https://www.twilio.com/docs/sendgrid/api-reference")
  :reviewed "2026-10-17")
 
+(:name "Telegram Bot API" :category :api
+ :where ((:text "hermes/src/telegram.lisp" "(defparameter +telegram-bot-api-version+ \"" "\""))
+ :upstream (:manual "https://core.telegram.org/bots/api-changelog")
+ :reviewed "2026-10-18")
+
 (:name "Stripe API version" :category :api
  :where ((:text "hermes/src/payments/stripe.lisp" "(defparameter +stripe-api-version+ \"" "\""))
  :upstream (:manual "https://docs.stripe.com/upgrades")
