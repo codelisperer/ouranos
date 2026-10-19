@@ -203,8 +203,7 @@ specific first."))
 
 (defun value-shape (value)
   "What kind of value VALUE is and how long, for a message that is logged: never VALUE itself.
-PRAXEON/LLM uses it for the UNKNOWN-TOOL-CHOICE detail (#727) and for the tool spec named in
-COMPLETE-WITH-SCHEMA's refusal (#760)."
+PRAXEON/LLM uses it for the UNKNOWN-TOOL-CHOICE detail (#727)."
   (typecase value
     (keyword (format nil "a keyword of ~D characters" (length (symbol-name value))))
     (symbol (format nil "a symbol of ~D characters" (length (symbol-name value))))

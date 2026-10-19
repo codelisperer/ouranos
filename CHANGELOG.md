@@ -1224,12 +1224,9 @@ its tag.
 
 ### Fixed
 
-- **praxeon: `complete-with-schema`'s default refusal no longer prints the tool spec's name**
-  (follow-up to #760). A provider that does not support `response_format` signals
-  `praxeon/conditions:deliberation-failure` with a detail such as "… cannot be asked for a reply
-  in a schema (the tool spec's name is a string of 12 characters)" instead of the name itself,
-  as the `unknown-tool-choice` detail does for its value. The helper that describes a value
-  by its kind and length is now exported as `praxeon/conditions:value-shape`.
+- **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
+  value by its kind and length ("a string of 12 characters") without printing it, as the
+  `unknown-tool-choice` detail does; it was the internal `%value-shape`.
 
 - **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
   decode field names as well as values, with `+` as a space** (#715). A browser

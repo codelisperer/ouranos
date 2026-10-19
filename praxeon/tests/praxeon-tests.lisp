@@ -4133,16 +4133,15 @@ handler that logs a failed request. The forced tool's name stays in the REQUESTE
     (is (equal "a list that is not proper" (shape '(a . b))))
     (is (equal "a value of class FIXNUM" (shape 3)))))
 
-(test a-provider-without-response-format-does-not-print-the-schema-name
-  "COMPLETE-WITH-SCHEMA's default refusal describes the tool spec's name by its kind and length,
-as UNKNOWN-TOOL-CHOICE does for its value (#760)."
-  (let* ((name "x727-marker-schema-name")
+(test a-provider-without-response-format-names-the-tool-spec-it-was-asked-for
+  "COMPLETE-WITH-SCHEMA's default refusal names the tool spec, which is the app developer's own
+identifier and the detail that says which call reached a provider without response_format."
+  (let* ((name "summarise-ticket")
          (spec (llm:make-tool-spec :name name :description "d"))
          (c (handler-case (progn (llm:complete-with-schema (make-instance 'llm:provider) '() spec) nil)
               (cnd:deliberation-failure (c) c))))
     (is (typep c 'cnd:deliberation-failure))
-    (is (search "a string of 23 characters" (princ-to-string c)) "~A" c)
-    (is (null (search name (princ-to-string c))) "the report leaves the name out")))
+    (is (search "\"summarise-ticket\"" (princ-to-string c)) "~A" c)))
 
 (test an-error-type-or-code-outside-the-identifier-characters-is-not-taken-as-one
   "A proxy between praxeon and the service can answer with its own error JSON, so a type or

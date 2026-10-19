@@ -229,13 +229,14 @@ No tools are offered. The text is returned as the provider sent it: checking it 
 schema is the caller's job, as GENERATE-STRUCTURED does (#680).
 
 Only a provider whose SUPPORTS-RESPONSE-FORMAT-P is true implements this. The default method
-signals DELIBERATION-FAILURE before anything is sent. Its detail, which the report prints,
-describes SPEC's name by its kind and length rather than printing it (#760).")
+signals DELIBERATION-FAILURE before anything is sent. Its detail names SPEC, so a developer can
+tell which call reached a provider without response_format; the name is the app's own
+identifier, not a value from a provider or a user.")
   (:method ((p provider) messages spec &key system max-tokens temperature)
     (declare (ignore messages system max-tokens temperature))
     (error 'praxeon/conditions:deliberation-failure
-           :detail (format nil "~A cannot be asked for a reply in a schema (the tool spec's name is ~A)"
-                           (type-of p) (praxeon/conditions:value-shape (tool-spec-name spec))))))
+           :detail (format nil "~A cannot be asked for a reply in the schema of ~S"
+                           (type-of p) (tool-spec-name spec)))))
 
 (defun check-tool-choice (provider tool-choice)
   "Signal unless PROVIDER can honour TOOL-CHOICE. Returns the choice."
