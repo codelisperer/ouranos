@@ -1253,6 +1253,10 @@ its tag.
 
 ### Fixed
 
+- **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
+  value by its kind and length ("a string of 12 characters") without printing it, as the
+  `unknown-tool-choice` detail does; it was the internal `%value-shape`.
+
 - **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
   decode field names as well as values, with `+` as a space** (#715). A browser
   percent-encodes a field name when it submits a form, so a field named `en:who` arrives as
