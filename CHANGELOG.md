@@ -26,6 +26,28 @@ its tag.
   structs keep their size: `UV_REQ_FIELDS` gives up one reserved pointer to a union of the same
   size in the private fields.
 
+- **The Stripe backend sends `Stripe-Version: 2026-09-30.endive` on every request** (#734),
+  where it sent no `Stripe-Version` before and Stripe answered in the version the account was
+  created with. `hermes/payments:+stripe-api-version+` names the version. A webhook payload
+  comes in the version of the webhook endpoint instead, so when an event's `api_version`
+  differs, `verify-webhook` logs the warning "stripe webhook api_version differs from the pinned
+  version", with `event-api-version` and `pinned-api-version` fields, and still parses the
+  event. Stripe cannot change an existing endpoint's API version, so to stop the warning the
+  app creates a new webhook endpoint at `2026-09-30.endive` and then disables the old one;
+  Stripe's guide "Handle webhook versioning" gives the steps. Create it through the API with
+  `api_version=2026-09-30.endive`: the Dashboard creates an endpoint only at the latest
+  version, and a later version also differs from the pin and gets the warning. Both readers take the newer shape and fall back to the older one: the period
+  end from `items.data[].current_period_end`, else the subscription's `current_period_end`, and
+  an invoice's subscription from `parent.subscription_details.subscription`, else its top-level
+  `subscription`.
+- **A Stripe subscription's `subscription-current-period-end` is the earliest period end among
+  its items** (#734), when its items carry one, which they do from `2025-03-31.basil`. Before,
+  it was read only from the subscription's own `current_period_end`. An account or webhook
+  endpoint on `2025-03-31.basil` or later does not send that field, so the period end read as 0
+  and `subscription-grants-access-p` granted access on the status alone. A
+  subscription whose items renew on different dates now stops granting access when the first
+  item's period ends, unless a newer event or `subscription-state` brings a later one.
+
 - **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
   place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
   fetch it and check an existing checkout out at it. Re-run the setup script, or run
@@ -124,6 +146,28 @@ its tag.
   same in 2.0.11. The event names `htmx:beforeRequest`, `htmx:afterRequest`, `htmx:sendError`,
   `htmx:timeout`, `htmx:configRequest` and `htmx:afterSwap`, and the `hx-request` attribute,
   are unchanged.
+
+- **praxeon: an unrecognised tool-choice value signals `praxeon/conditions:unknown-tool-choice`,
+  and the value is on the condition, not in its report or the log** (#727). Before, the
+  message was `unknown tool-choice` followed by the value, and the `llm request failed` warn
+  line logged it; a forced tool's name can come from a prompt. The new condition is a subclass
+  of `deliberation-failure`, so a handler for that still receives it. Its reader is
+  `unknown-tool-choice-value`. The report and `deliberation-failure-detail` now say what kind of
+  value it was and its length, for example `unknown tool-choice: a list of 2 elements`. An app
+  that read the value from the report, the detail or the log line reads it from
+  `unknown-tool-choice-value`.
+
+- **praxeon: the report of `praxeon/conditions:tool-choice-unsupported` no longer prints the
+  tool choice** (#727). `complete` signals it inside the handler that writes the `llm request
+  failed` warn line, so with the meta impl a forced `(:tool "name")` reached the log. The report
+  now says what kind of value it was and its length, for example `a list of 2 elements`. The
+  value is still in `tool-choice-unsupported-requested`; an app that read it from the report
+  reads it there.
+
+- **praxeon: `provider-request-failed-error-type` and `-error-code` are NIL unless the value is
+  1 to 64 letters, digits, underscores, dots or hyphens** (#727). Both are logged, and a proxy
+  between praxeon and the service can answer with its own error JSON, so a value with other
+  characters could be text of its own. The value is still in `provider-request-failed-body`.
 
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
@@ -395,6 +439,16 @@ its tag.
   a later macOS than its `LSMinimumSystemVersion` (check 0), and prints the OpenSSL the app
   loaded. An app that builds its own `.app` with `build-dmg.sh` on a newer macOS than 15 will
   fail that check until it builds on `macos-15` or older.
+
+- **praxeon: the default Anthropic model is `claude-sonnet-5-5`** (#764), in place of
+  `claude-sonnet-5`, which Anthropic now lists as a legacy model. `praxeon/llm:*default-model*`
+  holds it. An app that sets neither `PRAXEON_ANTHROPIC_MODEL` nor `PRAXEON_LLM_MODEL` and makes
+  an `anthropic` provider without `:model` now sends `claude-sonnet-5-5`, so its answers, token
+  counts and price per token can change. To keep the old model, set
+  `PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5` or pass `:model "claude-sonnet-5"`.
+  `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
+  unchanged. The documentation's examples now name
+  `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
 
@@ -1191,6 +1245,41 @@ its tag.
   NIL, as it does whenever another run holds the job. Either one tries to start a run itself
   only when the run it waited for did not start.
 
+- **aion, elenchon, hyperion and mnemosyne: `scripts/setup.sh` and `scripts/setup.ps1` check
+  that Coalton is at the commit `coalton.pin` names, and no longer clone it** (#751). Like
+  praxeon's before #733, they ran `git clone --depth 1` on Coalton's latest commit when
+  `~/common-lisp/coalton` was missing, and accepted any commit when it was present. All five
+  frameworks' setup scripts now run the new `scripts/coalton-pin.sh` or
+  `scripts/coalton-pin.ps1` at the monorepo root. It exits 0 when the checkout at `COALTON_DIR`
+  (default `~/common-lisp/coalton`) is at the pinned commit, and otherwise names the checkout's
+  commit (or "no commit") and the pinned one, says to run the root `scripts/setup.sh` or
+  `scripts/setup.ps1`, and exits 1. It warns when the checkout's `origin` differs from the pin's
+  `repo` line, as the root scripts do. The root setup scripts are now the only ones that clone
+  Coalton.
+
+- **praxeon: `praxeon/scripts/setup.sh` and `setup.ps1` check that Coalton is at the commit
+  `coalton.pin` names, and no longer clone it** (#733). They ran `git clone --depth 1` on
+  Coalton's latest commit when `~/common-lisp/coalton` was missing, and accepted any commit
+  when it was present, so a machine set up through them could build against a Coalton the tree
+  is not tested with. They now stop with an error naming the checkout's commit and the pinned
+  one, and say to run the monorepo's `scripts/setup.sh` or `scripts/setup.ps1`, which clones
+  Coalton and checks out the pinned commit. Both honour `COALTON_DIR`, as the root scripts do.
+
+- **hyperion/dev: `watch` refuses to watch more files than `*watch-file-limit*` allows,
+  100000 by default, and names the root that passed it** (#730). The watcher snapshots every
+  file under its roots on every poll, and nothing limited that snapshot, so a root that was a
+  very large tree, such as a home or temporary directory, filled the heap and ended in heap
+  exhaustion with a backtrace that did not mention the watched path. `watch` now takes
+  `:file-limit` (default `hyperion/dev:*watch-file-limit*`, `nil` for no limit), and past it
+  signals `hyperion/dev:watch-too-large` (readers `watch-too-large-root`,
+  `watch-too-large-count`, `watch-too-large-limit`) before the builder runs, so nothing is
+  started, and a dev server that `watch` started earlier keeps running. It refuses rather than watching part of the tree, because a partial watch leaves some
+  edits without a reload and gives no sign of which. If the roots grow past the limit while
+  watching, the previous snapshot is kept and the condition is shown as the reload error, in the
+  browser overlay, until they are back within it; an error it replaced, such as a Lisp file that
+  still fails to compile, is shown again then. `hyperion/dev:serve` callers set the limit by
+  binding `*watch-file-limit*`.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
@@ -1198,6 +1287,12 @@ its tag.
   `hyperion/auth-db` does since #378, and refuses a name that is not letters, digits and
   underscores. An app that made `hyperion_sessions` by hand because of this, while its store
   named another table, can drop it.
+
+- **aion/schedule: `stop` starts no lease renewal when less than 50 ms of its timeout is left**
+  (#728). A timed wait can return a little before its timeout, by a spurious wakeup or a coarse
+  timer such as Windows' default one. `stop` then started a renewal with a few milliseconds left,
+  which it could not wait for. That renewal kept using the store after `stop` returned, and the
+  next `stop` had to wait for it.
 
 - **praxeon/observe: on a store with transactions, a window's observations, its promotions and
   its progress are written in one transaction** (#529). When the progress write failed after
