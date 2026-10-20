@@ -719,6 +719,8 @@ surfaces -- it just is not confused with a failing test."
      "the Coalton that LOADS is the pinned one")
     ("check-assets.lisp" () nil
      "vendored browser assets still hash to ASSETS.pin")
+    ("check-upstream.lisp" () nil
+     "every pinned version has an entry in upstream.sexp, and every entry finds its pin (#716)")
     ("check-deps.lisp" () t
      "docs/dependencies.md's rows and Headline counts match the .asd files (#118)")
     ("check-asd-collisions.lisp" () nil

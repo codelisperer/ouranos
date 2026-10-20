@@ -14,6 +14,40 @@ its tag.
 
 ### An app may have to act
 
+- **Native: the pinned libuv is 1.53.0** (#739), released 2026-09-24, in place of 1.52.1.
+  `libuv.pin` names it with its sha256, and `scripts/build-libuv.lisp` builds it. A tree whose
+  `vendor/libuv/` was built from 1.52.1 keeps loading that copy until it is rebuilt: delete
+  `vendor/libuv/` and run `sbcl --script scripts/build-libuv.lisp`. A desktop bundle that carries
+  `libuv.dll`, `libuv.so.1` or `libuv.1.dylib` carries the rebuilt copy only once it is rebuilt.
+  `aion/uv:version` returns the version that loaded. On Windows the build now also links
+  `synchronization`, because 1.53.0's `src/win/pipe.c` calls `WaitOnAddress`. The public
+  struct layouts `aion/uv` writes by hand (`uv_buf_t`, `uv_stat_t`, `uv_dirent_t`,
+  `uv_timespec_t`, `uv_stdio_container_t`, `uv_process_options_t`) did not change, and request
+  structs keep their size: `UV_REQ_FIELDS` gives up one reserved pointer to a union of the same
+  size in the private fields.
+
+- **The Stripe backend sends `Stripe-Version: 2026-09-30.endive` on every request** (#734),
+  where it sent no `Stripe-Version` before and Stripe answered in the version the account was
+  created with. `hermes/payments:+stripe-api-version+` names the version. A webhook payload
+  comes in the version of the webhook endpoint instead, so when an event's `api_version`
+  differs, `verify-webhook` logs the warning "stripe webhook api_version differs from the pinned
+  version", with `event-api-version` and `pinned-api-version` fields, and still parses the
+  event. Stripe cannot change an existing endpoint's API version, so to stop the warning the
+  app creates a new webhook endpoint at `2026-09-30.endive` and then disables the old one;
+  Stripe's guide "Handle webhook versioning" gives the steps. Create it through the API with
+  `api_version=2026-09-30.endive`: the Dashboard creates an endpoint only at the latest
+  version, and a later version also differs from the pin and gets the warning. Both readers take the newer shape and fall back to the older one: the period
+  end from `items.data[].current_period_end`, else the subscription's `current_period_end`, and
+  an invoice's subscription from `parent.subscription_details.subscription`, else its top-level
+  `subscription`.
+- **A Stripe subscription's `subscription-current-period-end` is the earliest period end among
+  its items** (#734), when its items carry one, which they do from `2025-03-31.basil`. Before,
+  it was read only from the subscription's own `current_period_end`. An account or webhook
+  endpoint on `2025-03-31.basil` or later does not send that field, so the period end read as 0
+  and `subscription-grants-access-p` granted access on the status alone. A
+  subscription whose items renew on different dates now stops granting access when the first
+  item's period ends, unless a newer event or `subscription-state` brings a later one.
+
 - **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
   place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
   fetch it and check an existing checkout out at it. Re-run the setup script, or run
@@ -65,6 +99,75 @@ its tag.
   instead of the body, and the `llm request failed` warn line logs `status`, `error-type`,
   `error-code` and `body-length` fields. An app that read the service's explanation from the
   report, the detail or the log line reads it from `provider-request-failed-body`.
+
+- **hyperion/assets: the vendored htmx is 2.0.11 and Alpine.js is 3.17.4** (#717), up from
+  htmx 1.9.12 and Alpine.js 3.14.1. `(hyperion/assets:url :htmx)` now serves
+  `htmx-d6fdc75f.min.js` and `(hyperion/assets:url :alpine)` serves `alpine-23251939.min.js`.
+  An app that vendors its own htmx can drop its copy and load this one with
+  `(:script :src (hyperion/assets:url :htmx))`. Hyperion never adds its own htmx to an app's
+  page, so a page loads htmx twice only if the app includes it twice. htmx 2 is a breaking
+  release; see the [htmx 1 to 2 migration guide](https://htmx.org/migration-guide-htmx-1/).
+  What an app's own templates may hit:
+  - **`hx-delete` sends its parameters in the query string and no body.** In 1.9.12 they were a
+    urlencoded body. A handler that reads a DELETE's parameters with `hyperion/http:form-param`
+    on `body-string` gets NIL; read them from the query string instead, or set
+    `htmx.config.methodsThatUseUrlParams` to `["get"]` to restore the 1.x behaviour.
+  - **`hyperion/csrf` sends an `hx-delete` form's token in a header.** A form whose
+    `:hx-delete` or `:data-hx-delete` has a value when it renders gets an `hx-headers`
+    attribute carrying `X-CSRF-Token`. It has no hidden `_csrf` field, which htmx 2 would put
+    in the URL, unless the form's own `:method` changes state: then the field stays for the
+    browser's native submission without htmx, and `hx-params="not _csrf"` keeps it out of the
+    DELETE. A form whose `:hx-delete` is NIL when it renders is treated as an ordinary form.
+    These no longer compile: a form with `:hx-delete` and its own `:hx-headers` or
+    `:data-hx-headers` (move those to an element around the form, since htmx merges
+    `hx-headers` from enclosing elements), and a form with `:method`, `:hx-delete` and
+    `:hx-params`. An `hx-delete` on an element that is not a form gets no token from the
+    injector, as before; give it `:hx-headers (hyperion/csrf:token-headers)`. Do not put an
+    `hx-delete` button inside a POST form, because htmx 2 would put that form's hidden `_csrf`
+    field in the URL.
+  - **`hyperion/http:body-string` returns NIL for a request with neither Content-Length nor
+    Transfer-Encoding**, without reading the stream. Before, it read to the end of the stream,
+    and under Hunchentoot a bodiless htmx 2 DELETE waited 20 seconds for the socket timeout.
+  - **Requests to another origin are refused** (`htmx.config.selfRequestsOnly` is true). Set it
+    to false in the app's own `htmx-config` meta tag if an `hx-get` or `hx-post` names another
+    origin.
+  - **htmx's own extensions are no longer in the core file**, including SSE (`hx-sse`) and
+    WebSockets (`hx-ws`). Hyperion uses none of them. An app that does vendors the 2.x
+    extension itself; `hyperion/sse` on the server side is unchanged.
+  - **`hx-on="event: …"` is gone**; write `hx-on:event-name` (for example
+    `hx-on:htmx:before-request`). Nothing in this tree used the old form.
+  - **Scrolling after a swap is instant** (`htmx.config.scrollBehavior` is `'instant'`, was
+    `'smooth'`).
+
+  Unchanged, and checked in a real browser by the new smoke test in the `hyperion/assets`
+  suite: `hx-get`, `hx-post`, `hx-target`, the `outerHTML` and `innerHTML` swaps,
+  `hx-swap-oob`, the `load`, `revealed` and `every` triggers, and the `HX-Trigger` response
+  header. The interval parser `hyperion/update-ui:*poll-interval*` relies on (ms, s, m) is the
+  same in 2.0.11. The event names `htmx:beforeRequest`, `htmx:afterRequest`, `htmx:sendError`,
+  `htmx:timeout`, `htmx:configRequest` and `htmx:afterSwap`, and the `hx-request` attribute,
+  are unchanged.
+
+- **praxeon: an unrecognised tool-choice value signals `praxeon/conditions:unknown-tool-choice`,
+  and the value is on the condition, not in its report or the log** (#727). Before, the
+  message was `unknown tool-choice` followed by the value, and the `llm request failed` warn
+  line logged it; a forced tool's name can come from a prompt. The new condition is a subclass
+  of `deliberation-failure`, so a handler for that still receives it. Its reader is
+  `unknown-tool-choice-value`. The report and `deliberation-failure-detail` now say what kind of
+  value it was and its length, for example `unknown tool-choice: a list of 2 elements`. An app
+  that read the value from the report, the detail or the log line reads it from
+  `unknown-tool-choice-value`.
+
+- **praxeon: the report of `praxeon/conditions:tool-choice-unsupported` no longer prints the
+  tool choice** (#727). `complete` signals it inside the handler that writes the `llm request
+  failed` warn line, so with the meta impl a forced `(:tool "name")` reached the log. The report
+  now says what kind of value it was and its length, for example `a list of 2 elements`. The
+  value is still in `tool-choice-unsupported-requested`; an app that read it from the report
+  reads it there.
+
+- **praxeon: `provider-request-failed-error-type` and `-error-code` are NIL unless the value is
+  1 to 64 letters, digits, underscores, dots or hyphens** (#727). Both are logged, and a proxy
+  between praxeon and the service can answer with its own error JSON, so a value with other
+  characters could be text of its own. The value is still in `provider-request-failed-body`.
 
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
@@ -328,6 +431,24 @@ its tag.
   or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
   connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+- **Desktop: a macOS app from `scripts/build-dmg.sh` says it needs macOS 15.0, and
+  `desktop-release.yml` builds it on `macos-15`** (#763). `LSMinimumSystemVersion` in the app's
+  `Info.plist` was 11.0, which was never true: the bundle carries Homebrew's `sbcl` and
+  `libzstd`, which need at least the macOS they were built on, so an app built on `macos-14`
+  needed macOS 14. `scripts/verify-bundle-macos.sh` now fails a `.app` that has a binary needing
+  a later macOS than its `LSMinimumSystemVersion` (check 0), and prints the OpenSSL the app
+  loaded. An app that builds its own `.app` with `build-dmg.sh` on a newer macOS than 15 will
+  fail that check until it builds on `macos-15` or older.
+
+- **praxeon: the default Anthropic model is `claude-sonnet-5-5`** (#764), in place of
+  `claude-sonnet-5`, which Anthropic now lists as a legacy model. `praxeon/llm:*default-model*`
+  holds it. An app that sets neither `PRAXEON_ANTHROPIC_MODEL` nor `PRAXEON_LLM_MODEL` and makes
+  an `anthropic` provider without `:model` now sends `claude-sonnet-5-5`, so its answers, token
+  counts and price per token can change. To keep the old model, set
+  `PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5` or pass `:model "claude-sonnet-5"`.
+  `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
+  unchanged. The documentation's examples now name
+  `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
 
@@ -342,6 +463,15 @@ its tag.
   signals `blob-unsupported`, so a development app proxies through `put-blob`.
   `blob-meta-etag` carries S3's ETag from `blob-metadata`. The URL is never logged. Usage,
   checking an upload and the security notes are in `hermes/docs/blob-direct-uploads.md`.
+- **`scripts/build-installer.ps1` checks the WebView2 bootstrapper's signature, and takes
+  `-RequireWebView2`** (#736). Before it embeds `MicrosoftEdgeWebview2Setup.exe`, the new
+  `scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature whose
+  signer has the relative distinguished name `O=Microsoft Corporation`, compared exactly, on a
+  cached copy as well as a fresh download, and prints the file's version and sha256. A copy that fails is deleted from `scripts/installers/.cache`. Without
+  `-RequireWebView2` a failed download or check still builds the installer without the
+  bootstrapper, with a warning, as before; with it, the build stops. An app that builds its own
+  release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
+  a release never ships without a way to install the WebView2 runtime.
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
   `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
@@ -1126,6 +1256,41 @@ its tag.
   NIL, as it does whenever another run holds the job. Either one tries to start a run itself
   only when the run it waited for did not start.
 
+- **aion, elenchon, hyperion and mnemosyne: `scripts/setup.sh` and `scripts/setup.ps1` check
+  that Coalton is at the commit `coalton.pin` names, and no longer clone it** (#751). Like
+  praxeon's before #733, they ran `git clone --depth 1` on Coalton's latest commit when
+  `~/common-lisp/coalton` was missing, and accepted any commit when it was present. All five
+  frameworks' setup scripts now run the new `scripts/coalton-pin.sh` or
+  `scripts/coalton-pin.ps1` at the monorepo root. It exits 0 when the checkout at `COALTON_DIR`
+  (default `~/common-lisp/coalton`) is at the pinned commit, and otherwise names the checkout's
+  commit (or "no commit") and the pinned one, says to run the root `scripts/setup.sh` or
+  `scripts/setup.ps1`, and exits 1. It warns when the checkout's `origin` differs from the pin's
+  `repo` line, as the root scripts do. The root setup scripts are now the only ones that clone
+  Coalton.
+
+- **praxeon: `praxeon/scripts/setup.sh` and `setup.ps1` check that Coalton is at the commit
+  `coalton.pin` names, and no longer clone it** (#733). They ran `git clone --depth 1` on
+  Coalton's latest commit when `~/common-lisp/coalton` was missing, and accepted any commit
+  when it was present, so a machine set up through them could build against a Coalton the tree
+  is not tested with. They now stop with an error naming the checkout's commit and the pinned
+  one, and say to run the monorepo's `scripts/setup.sh` or `scripts/setup.ps1`, which clones
+  Coalton and checks out the pinned commit. Both honour `COALTON_DIR`, as the root scripts do.
+
+- **hyperion/dev: `watch` refuses to watch more files than `*watch-file-limit*` allows,
+  100000 by default, and names the root that passed it** (#730). The watcher snapshots every
+  file under its roots on every poll, and nothing limited that snapshot, so a root that was a
+  very large tree, such as a home or temporary directory, filled the heap and ended in heap
+  exhaustion with a backtrace that did not mention the watched path. `watch` now takes
+  `:file-limit` (default `hyperion/dev:*watch-file-limit*`, `nil` for no limit), and past it
+  signals `hyperion/dev:watch-too-large` (readers `watch-too-large-root`,
+  `watch-too-large-count`, `watch-too-large-limit`) before the builder runs, so nothing is
+  started, and a dev server that `watch` started earlier keeps running. It refuses rather than watching part of the tree, because a partial watch leaves some
+  edits without a reload and gives no sign of which. If the roots grow past the limit while
+  watching, the previous snapshot is kept and the condition is shown as the reload error, in the
+  browser overlay, until they are back within it; an error it replaced, such as a Lisp file that
+  still fails to compile, is shown again then. `hyperion/dev:serve` callers set the limit by
+  binding `*watch-file-limit*`.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
@@ -1133,6 +1298,12 @@ its tag.
   `hyperion/auth-db` does since #378, and refuses a name that is not letters, digits and
   underscores. An app that made `hyperion_sessions` by hand because of this, while its store
   named another table, can drop it.
+
+- **aion/schedule: `stop` starts no lease renewal when less than 50 ms of its timeout is left**
+  (#728). A timed wait can return a little before its timeout, by a spurious wakeup or a coarse
+  timer such as Windows' default one. `stop` then started a renewal with a few milliseconds left,
+  which it could not wait for. That renewal kept using the store after `stop` returned, and the
+  next `stop` had to wait for it.
 
 - **praxeon/observe: on a store with transactions, a window's observations, its promotions and
   its progress are written in one transaction** (#529). When the progress write failed after

@@ -28,8 +28,10 @@ provider key (§1) and jump to [Talk to Elise](#4-talk-to-elise). The sections b
 explain each piece for when you want to set things up by hand or need to troubleshoot.
 
 (The framework-local `scripts/setup.sh` still works as an **interim** convenience —
-it clones Coalton, seeds `.env`, and with `--test` compiles + runs the suite — but
-discovery now comes from the bootstrap drop-in, not a `local-projects` symlink.)
+it checks that Coalton is at the commit in the monorepo's `coalton.pin`, seeds `.env`,
+and with `--test` compiles + runs the suite — but discovery now comes from the bootstrap
+drop-in, not a `local-projects` symlink. It does not install Coalton: the monorepo's
+`scripts/setup.sh` or `scripts/setup.ps1` checks out the pinned commit.)
 
 ## Prerequisites
 
@@ -63,7 +65,7 @@ Minimum to talk to Elise via **Anthropic**:
 
 ```sh
 PRAXEON_LLM_IMPL=anthropic
-PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5        # or claude-opus-4-8
+PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5-5      # or claude-opus-5-5
 PRAXEON_ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -378,8 +380,8 @@ signals `praxeon/conditions:missing-provider-key`, which names both variables.
 So one process runs several agents, each on its own model/vendor:
 
 ```sh
-PRAXEON_LLM_MODEL=claude-sonnet-5                  # shared default (any role)
-PRAXEON_ELISE_MODEL=claude-opus-4-8                # Elise deliberates (therapist)
+PRAXEON_LLM_MODEL=claude-sonnet-5-5                # shared default (any role)
+PRAXEON_ELISE_MODEL=claude-opus-5-5                # Elise deliberates (therapist)
 PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 # PRAXEON_SCRIBE_MODEL=...                          # a future agent: just add a var
 ```

@@ -75,7 +75,8 @@ that is waiting on the store when the timeout passes is left to finish on its ow
 `stop` returns at its timeout even when a database renewal is waiting for a connection or a lock.
 A later `stop` waits for that renewal too, within its own timeout, even when no run is left, and
 returns `:timed-out` with no keys while the renewal is still going, so an app does not close the
-database under it.
+database under it. `stop` starts no renewal once less than 50 ms of its timeout is left, because
+it could not wait for one (#728).
 A `stop` that begins while `start` is still in its first tick waits for that tick, within its
 timeout, and `start` then starts no driver.
 

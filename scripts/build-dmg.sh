@@ -213,8 +213,11 @@ if [ -n "$ICON" ] && [ -f "$ICON" ]; then
 fi
 
 # --- Info.plist ------------------------------------------------------------------------
-# LSMinimumSystemVersion is a claim we should not invent: 11.0 is the floor for Apple
-# silicon, which is the only arch we build here.
+# LSMinimumSystemVersion is the oldest macOS the app runs on. It is not the floor for Apple
+# silicon (11.0): the bundle carries Homebrew's sbcl and libzstd, whose minimum is the macOS
+# of the machine that built them, so the app cannot run on anything older than the build
+# image. desktop-release.yml builds on macos-15 (#763), and verify-bundle-macos.sh fails when
+# a binary in the bundle needs a later macOS than this.
 # NSHighResolutionCapable matters for a webview app -- without it the window renders
 # upscaled and blurry on a Retina display.
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -229,7 +232,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key>           <string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
-  <key>LSMinimumSystemVersion</key>    <string>11.0</string>
+  <key>LSMinimumSystemVersion</key>    <string>15.0</string>
   <key>NSHighResolutionCapable</key>   <true/>
 $( [ -n "$ICON_NAME" ] && printf '  <key>CFBundleIconFile</key>          <string>%s</string>\n' "$ICON_NAME" )
 </dict>

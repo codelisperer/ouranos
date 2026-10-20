@@ -43,7 +43,10 @@ that hides which scripts it is about.")
                ;; To COMPUTE a fixture's sha256 rather than hand-write one. A hand-written
                ;; hash is a second copy of a fact, and the test would then be checking that
                ;; two hand-written things agree (pre-publication issue 466).
-               "ironclad")
+               "ironclad"
+               ;; A local HTTP server standing in for the GitHub API in check-upstream's
+               ;; --online test (the hub's review of #738).
+               (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests"
                 :serial t

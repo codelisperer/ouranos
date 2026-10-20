@@ -3987,8 +3987,10 @@ though it were the cost."
 
 (defun %failed-request-and-log (make-provider reply)
   "Serve REPLY, a (STATUS-LINE . TEXT), to one request from the provider MAKE-PROVIDER builds
-from a port, with warn logging captured. Returns the condition signalled and the log lines that
-mention the failure."
+from a port, with warn logging captured. Returns the condition signalled, the log lines that
+mention the failure, and everything logged. A field value can hold a newline, which the logger
+writes as it is, so a check for something that must not be logged searches everything logged,
+not only the line that names the failure."
   (let ((out (make-string-output-stream))
         (condition nil))
     (multiple-value-bind (port server) (%serve-replies (list reply))
@@ -4000,10 +4002,11 @@ mention the failure."
                (cnd:provider-request-failed (c) (setf condition c)))
              (aion/test-threads:join server :timeout 10))
         (aion/log:setup :env :dev :level :warn :stream *standard-output*)))
-    (values condition
-            (remove-if-not (lambda (line) (search "llm request failed" line))
-                           (uiop:split-string (get-output-stream-string out)
-                                              :separator '(#\Newline))))))
+    (let ((logged (get-output-stream-string out)))
+      (values condition
+              (remove-if-not (lambda (line) (search "llm request failed" line))
+                             (uiop:split-string logged :separator '(#\Newline)))
+              logged))))
 
 (defun %anthropic-at (port)
   (make-instance 'llm:anthropic :api-key "test-key" :model "m"
@@ -4016,7 +4019,7 @@ mention the failure."
 (test an-anthropic-failure-logs-the-status-type-and-length-and-not-the-body
   (let ((body (format nil "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"~A\"}}"
                       +719-marker+)))
-    (multiple-value-bind (c lines) (%failed-request-and-log #'%anthropic-at (cons "400 Bad Request" body))
+    (multiple-value-bind (c lines logged) (%failed-request-and-log #'%anthropic-at (cons "400 Bad Request" body))
       (is (typep c 'cnd:deliberation-failure) "an app's handler for a failed call still receives it")
       (is (eql 400 (cnd:provider-request-failed-status c)))
       (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
@@ -4025,7 +4028,7 @@ mention the failure."
       (is (null (search +719-marker+ (princ-to-string c))) "the report leaves the body out")
       (is (= 1 (length lines)) "one warn line: ~S" lines)
       (let ((line (first lines)))
-        (is (null (search +719-marker+ line)) "the log line leaves the body out: ~A" line)
+        (is (null (search +719-marker+ logged)) "nothing logged holds the body: ~A" logged)
         (is (search "status=400" line) "~A" line)
         (is (search "error-type=invalid_request_error" line) "~A" line)
         (is (search (format nil "body-length=~D" (length body)) line) "~A" line)))))
@@ -4033,24 +4036,24 @@ mention the failure."
 (test an-openai-compatible-failure-logs-the-type-and-code-and-not-the-body
   (let ((body (format nil "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"~A\"}}"
                       +719-marker+)))
-    (multiple-value-bind (c lines) (%failed-request-and-log #'%openai-at (cons "404 Not Found" body))
+    (multiple-value-bind (c lines logged) (%failed-request-and-log #'%openai-at (cons "404 Not Found" body))
       (is (eql 404 (cnd:provider-request-failed-status c)))
       (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
       (is (equal "model_not_found" (cnd:provider-request-failed-error-code c)))
       (is (equal body (cnd:provider-request-failed-body c)))
       (is (= 1 (length lines)))
-      (is (null (search +719-marker+ (first lines))) "~A" (first lines))
+      (is (null (search +719-marker+ logged)) "~A" logged)
       (is (search "error-code=model_not_found" (first lines)) "~A" (first lines)))))
 
 (test a-failure-whose-body-is-not-json-logs-no-type-or-code-and-not-the-body
   (let ((body (format nil "<html><body>~A</body></html>" +719-marker+)))
-    (multiple-value-bind (c lines) (%failed-request-and-log #'%anthropic-at (cons "502 Bad Gateway" body))
+    (multiple-value-bind (c lines logged) (%failed-request-and-log #'%anthropic-at (cons "502 Bad Gateway" body))
       (is (eql 502 (cnd:provider-request-failed-status c)))
       (is (null (cnd:provider-request-failed-error-type c)))
       (is (null (cnd:provider-request-failed-error-code c)))
       (is (equal body (cnd:provider-request-failed-body c)))
       (is (= 1 (length lines)))
-      (is (null (search +719-marker+ (first lines))) "~A" (first lines))
+      (is (null (search +719-marker+ logged)) "~A" logged)
       (is (search (format nil "body-length=~D" (length body)) (first lines))))))
 
 (test a-long-error-type-is-not-taken-as-one
@@ -4063,6 +4066,83 @@ body, is read as no type at all."
     (is (equal '("t" "42") (multiple-value-list
                             (praxeon/llm::%provider-error-fields "{\"error\":{\"type\":\"t\",\"code\":42}}")))
         "control: a short type, and a numeric code, are read")))
+
+;;; #727: a tool-choice value praxeon does not recognise is kept on the condition and left out
+;;; of the warn line. The request body is built before anything is sent, so these providers
+;;; point at a port nothing is serving and never connect.
+
+(defparameter +727-marker+ "summarise-the-patient-notes-727"
+  "A tool name a prompt might have put in a tool-choice value; it must not reach the log.")
+
+(defun %bad-tool-choice-and-log (make-provider tool-choice)
+  "Call the provider MAKE-PROVIDER builds with TOOL-CHOICE, with warn logging captured. Returns
+the condition signalled, the log lines that mention the failure, and everything logged, which is
+what a check for a leaked value searches (see %FAILED-REQUEST-AND-LOG)."
+  (let ((out (make-string-output-stream))
+        (condition nil))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :warn :stream out)
+           (handler-case (llm:complete (funcall make-provider 9)
+                                       '((:role :user :content "Hello."))
+                                       :tool-choice tool-choice)
+             (cnd:praxeon-error (c) (setf condition c))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (let ((logged (get-output-stream-string out)))
+      (values condition
+              (remove-if-not (lambda (line) (search "llm request failed" line))
+                             (uiop:split-string logged :separator '(#\Newline)))
+              logged))))
+
+(test an-unknown-tool-choice-is-on-the-condition-and-not-in-the-log
+  (dolist (make (list #'%anthropic-at #'%openai-at))
+    (let ((value (list :forced +727-marker+)))
+      (multiple-value-bind (c lines logged) (%bad-tool-choice-and-log make value)
+        (is (typep c 'cnd:unknown-tool-choice) "~S" c)
+        (is (eq value (and (typep c 'cnd:unknown-tool-choice) (cnd:unknown-tool-choice-value c)))
+            "the value itself is on the condition")
+        (is (search "a list of 2 elements" (princ-to-string c)) "~A" c)
+        (is (= 1 (length lines)) "one warn line: ~S" lines)
+        (is (null (search +727-marker+ (princ-to-string c))) "the report leaves the value out")
+        (is (null (search +727-marker+ logged)) "nothing logged holds it: ~A" logged)))))
+
+(test a-tool-choice-a-provider-cannot-honour-is-on-the-condition-and-not-in-the-log
+  "The meta impl cannot force a tool, so COMPLETE signals TOOL-CHOICE-UNSUPPORTED inside the
+handler that logs a failed request. The forced tool's name stays in the REQUESTED slot."
+  (let ((value (list :tool +727-marker+)))
+    (multiple-value-bind (c lines logged)
+        (%bad-tool-choice-and-log
+         (lambda (port)
+           (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                 :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+         value)
+      (is (typep c 'cnd:tool-choice-unsupported) "~S" c)
+      (is (eq value (and (typep c 'cnd:tool-choice-unsupported)
+                         (cnd:tool-choice-unsupported-requested c)))
+          "the value itself is on the condition")
+      (is (search "a list of 2 elements" (princ-to-string c)) "~A" c)
+      (is (= 1 (length lines)) "one warn line: ~S" lines)
+      (is (null (search +727-marker+ (princ-to-string c))) "the report leaves the value out")
+      (is (null (search +727-marker+ logged)) "nothing logged holds it: ~A" logged))))
+
+(test an-unknown-tool-choice-is-described-by-its-kind-and-length
+  (flet ((shape (v) (praxeon/conditions::%value-shape v)))
+    (is (equal "a string of 5 characters" (shape "hello")))
+    (is (equal "a keyword of 8 characters" (shape :required)))
+    (is (equal "a symbol of 3 characters" (shape 'cl:car)))
+    (is (equal "a list that is not proper" (shape '(a . b))))
+    (is (equal "a value of class FIXNUM" (shape 3)))))
+
+(test an-error-type-or-code-outside-the-identifier-characters-is-not-taken-as-one
+  "A proxy between praxeon and the service can answer with its own error JSON, so a type or
+code with a space or a quote in it could be a sentence of its text, and is read as none (#727)."
+  (is (equal '(nil nil) (multiple-value-list
+                         (praxeon/llm::%provider-error-fields
+                          "{\"error\":{\"type\":\"see the notes\",\"code\":\"a\\\"b\"}}"))))
+  (is (equal '("rate_limit.v2-x" "E42") (multiple-value-list
+                                         (praxeon/llm::%provider-error-fields
+                                          "{\"error\":{\"type\":\"rate_limit.v2-x\",\"code\":\"E42\"}}")))
+      "control: letters, digits, underscore, dot and hyphen are read"))
 
 (test a-request-that-fails-before-a-response-is-still-a-provider-request-failed
   (let ((c (praxeon/llm::%request-failure "rerank request failed"

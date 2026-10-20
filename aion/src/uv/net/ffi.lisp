@@ -100,7 +100,7 @@ big enough for any family; we allocate it and never look inside, except for the 
 
 ;;; uv_ip_name (libuv >= 1.44) renders either family without us having to read sa_family
 ;;; -- which is the one part of sockaddr whose layout genuinely differs (BSD spends a byte
-;;; on sa_len). libuv.pin is 1.52.1, so it is always present.
+;;; on sa_len). libuv.pin is 1.53.0, so it is always present.
 (cffi:defcfun ("uv_ip_name" uv-ip-name) :int (src :pointer) (dst :pointer) (size :size))
 
 (defun sockaddr-port (addr)
