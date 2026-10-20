@@ -309,7 +309,11 @@ those are checked against the deadline when they return, so they can overrun it 
 resolver's own time and CONNECT-TIMEOUT. NIL, the default, sets no deadline.
 
 On Windows the pinned connection is not available and this signals
-PINNED-CONNECT-UNSUPPORTED. RESOLVE, ADDRESS-POLICY and PERFORM are parameters for tests."
+PINNED-CONNECT-UNSUPPORTED.
+
+RESOLVE, ADDRESS-POLICY and PERFORM are for tests. ADDRESS-POLICY decides which addresses count
+as public, so a policy other than the default turns off the check that keeps this from reaching
+internal addresses. Never pass one derived from a setting or from user input."
   (let* ((current url)
          (watch (and deadline #-os-windows (%make-watch)))
          ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.

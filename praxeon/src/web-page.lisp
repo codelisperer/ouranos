@@ -192,6 +192,11 @@ document, without scripts, styles, navigation, headers, footers, asides and form
     (values (%tidy (with-output-to-string (out) (%write-text root out)))
             (and title (plusp (length title)) title))))
 
+(defvar *%address-policy* #'http:address-category
+  "The address policy a reader made now will check hosts with. Only this system's tests bind it,
+to let the test server's 127.0.0.1 through. It is not an initarg, so no app setting or argument
+can turn off the check that a page's host is a public address (#807).")
+
 ;;; --- PUBLIC-FETCH -------------------------------------------------------------------------
 
 (defclass public-fetch (page-reader)
@@ -200,12 +205,11 @@ document, without scripts, styles, navigation, headers, footers, asides and form
    (deadline :initarg :deadline :initform 30 :reader %fetch-deadline)
    (max-bytes :initarg :max-bytes :initform *max-page-bytes* :reader %max-bytes)
    (resolve :initarg :resolve :initform #'http:resolve-host :reader %resolve)
-   (address-policy :initarg :address-policy :initform #'http:address-category
-                   :reader %address-policy))
+   (address-policy :initform *%address-policy* :reader %address-policy))
   (:documentation "Reads a page from this machine with aion/http-client's FETCH-PUBLIC and
 extracts its text here. CONNECT-TIMEOUT and READ-TIMEOUT are seconds, for each hop. DEADLINE is
-seconds for the whole read, redirects included (#807). RESOLVE and
-ADDRESS-POLICY are FETCH-PUBLIC's, for tests."))
+seconds for the whole read, redirects included (#807). RESOLVE is FETCH-PUBLIC's, for tests. The
+address policy is always ADDRESS-CATEGORY outside this system's tests (*%ADDRESS-POLICY*)."))
 
 (defun make-public-fetch (&rest initargs)
   (apply #'make-instance 'public-fetch initargs))
@@ -326,11 +330,10 @@ bytes have no NUL or other control byte apart from whitespace, else NIL."
    (timeout :initarg :timeout :initform 20 :reader %timeout)
    (max-bytes :initarg :max-bytes :initform *max-page-bytes* :reader %max-bytes)
    (resolve :initarg :resolve :initform #'http:resolve-host :reader %resolve)
-   (address-policy :initarg :address-policy :initform #'http:address-category
-                   :reader %address-policy))
+   (address-policy :initform *%address-policy* :reader %address-policy))
   (:documentation "Reads a page through Tavily's /extract. API-KEY is the Tavily key. TIMEOUT is
 the seconds Tavily may spend reading the page, from 1 to 60; this client waits that long plus
-ten seconds. RESOLVE and ADDRESS-POLICY check the URL's host before it is sent, as for
+ten seconds. RESOLVE and the address policy check the URL's host before it is sent, as for
 PUBLIC-FETCH."))
 
 (defun make-tavily-extract (&rest initargs &key (api-key (uiop:getenv "TAVILY_API_KEY")) &allow-other-keys)

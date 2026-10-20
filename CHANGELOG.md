@@ -477,6 +477,9 @@ its tag.
     `Content-Type` is read when it is text. The whole read has a 30-second deadline
     (`make-public-fetch`'s `:deadline`), reported as the reason `:timeout`. A redirect to a
     URL that is not http or https is reported as `:invalid-url` (#807).
+  - `make-public-fetch` and `make-tavily-extract` no longer take `:address-policy`; passing it
+    is an error. The check that a page's host is a public address cannot be changed by an app
+    (#807).
 - **praxeon: `praxeon/source:quote-source`** wraps outside text, such as a fetched page or a
   retrieved document, between markers carrying a random nonce, after a sentence saying it is
   quoted material and not instructions (#757). `read-web-page` uses it, and

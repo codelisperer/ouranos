@@ -30,11 +30,12 @@
   (if (equalp address #(127 0 0 1)) :public (aion/http-client:address-category address)))
 
 (defun %fetcher (&rest initargs)
-  (apply #'wp:make-public-fetch
-         :resolve (%page-resolver :site.test "127.0.0.1" :metadata.test "169.254.169.254"
-                                  :intranet.test "10.0.0.5")
-         :address-policy #'%loopback-is-public
-         initargs))
+  "A PUBLIC-FETCH that resolves the test names and lets the test server's 127.0.0.1 through."
+  (let ((wp::*%address-policy* #'%loopback-is-public))
+    (apply #'wp:make-public-fetch
+           :resolve (%page-resolver :site.test "127.0.0.1" :metadata.test "169.254.169.254"
+                                    :intranet.test "10.0.0.5")
+           initargs)))
 
 (defparameter +page-html+
   "<!doctype html><html><head><title>  Terms &amp; Conditions </title>
@@ -207,6 +208,20 @@ that were there before (#807)."
     (dolist (url '("file:///etc/passwd" "ftp://site.test/x" "not a url" ""))
       (is (eq :invalid-url (%unreadable-reason (lambda () (wp:read-web-page (%fetcher) url))))
           "~S" url))))
+
+(test an-app-cannot-give-a-reader-its-own-address-policy
+  "The address policy is not an initarg, so an app cannot pass one that lets an internal address
+through (#807). The URL is the test server's own; had a reader been made and the policy been
+used, the server would have been reached."
+  (%with-pages (s)
+    (dolist (make (list #'wp:make-public-fetch
+                        (lambda (&rest args) (apply #'wp:make-tavily-extract :api-key "tvly-k" args))))
+      (let ((reader (handler-case (funcall make :address-policy (constantly :public))
+                      (error () nil))))
+        (is (null reader) "the :address-policy initarg is refused")
+        (when reader
+          (ignore-errors (wp:read-web-page reader (aion/test-http:server-url s "/terms"))))))
+    (is (null (aion/test-http:server-requests s)) "nothing reached the server")))
 
 (test a-redirect-to-an-internal-address-is-refused
   (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
