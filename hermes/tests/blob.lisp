@@ -1446,6 +1446,7 @@ URL: no query parameter, no credential scope, no access key id and no signature.
   "An error response's body is kept as DETAIL. A streamed one is read up to 64 KiB and closed, so
 it does not hold the connection; anything else passes through (#796)."
   (is (equalp (octets "<Error/>") (b::%error-body (octets "<Error/>"))))
+  (is (string= "<Error/>" (b::%error-body "<Error/>")) "a string body passes through as it is")
   (is (null (b::%error-body nil)))
   (let ((small (make-instance 'counting-octet-stream :data (octets "<Error><Code>InvalidRange</Code></Error>"))))
     (is (equalp (octets "<Error><Code>InvalidRange</Code></Error>") (b::%error-body small)))
@@ -1461,6 +1462,7 @@ it does not hold the connection; anything else passes through (#796)."
 stream; %S3-REQUEST closes it, and READ-BLOB-RANGE returns no bytes."
   (let ((original (fdefinition 'dex:request))
         (body (make-instance 'counting-octet-stream :data (octets "<Error><Code>InvalidRange</Code></Error>"))))
+    (is (open-stream-p body) "precondition: the stub's body starts open")
     (unwind-protect
          (progn
            (setf (fdefinition 'dex:request)
@@ -1471,3 +1473,36 @@ stream; %S3-REQUEST closes it, and READ-BLOB-RANGE returns no bytes."
            (is (equalp #() (b:read-blob-range (test-s3-store) "media" "a" :start 99 :length 4))))
       (setf (fdefinition 'dex:request) original))
     (is (not (open-stream-p body)) "the 416 body is closed")))
+
+(defclass failing-octet-stream (sb-gray:fundamental-binary-input-stream) ()
+  (:documentation "An octet input stream whose every read signals, standing in for a connection
+that drops while an error response's body is being read."))
+
+(defmethod stream-element-type ((s failing-octet-stream)) '(unsigned-byte 8))
+(defmethod sb-gray:stream-read-sequence ((s failing-octet-stream) seq &optional start end)
+  (declare (ignore seq start end))
+  (error "connection reset"))
+
+(test s3-unreadable-error-body-is-still-a-backend-error
+  "%ERROR-BODY runs inside %S3-REQUEST's handler clause, which the sibling ERROR clause does not
+cover. A body that fails to read must still surface as BLOB-BACKEND-ERROR with its status, not as
+the stream's own error (#796)."
+  (let ((body (make-instance 'failing-octet-stream)))
+    (let ((detail (b::%error-body body)))
+      (is (stringp detail))
+      (is (search "could not be read" detail) "~A" detail))
+    (is (not (open-stream-p body)) "and the stream is closed"))
+  (let ((original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (declare (ignore args))
+                   (error 'dex:http-request-failed :body (make-instance 'failing-octet-stream) :status 500
+                                                   :headers (make-hash-table) :uri url :method :get)))
+           (let ((c (handler-case (progn (b:read-blob-range (test-s3-store) "media" "a") nil)
+                      (b:blob-backend-error (c) c)
+                      (error (e) e))))
+             (is (typep c 'b:blob-backend-error) "got ~S" (and c (type-of c)))
+             (is (eql 500 (and (typep c 'b:blob-backend-error) (b:blob-backend-error-status c))))))
+      (setf (fdefinition 'dex:request) original))))

@@ -44,6 +44,15 @@ MAKE-S3-STORE."))
                            (secure t) path-style public-base-url upload-acl)
   "An S3-STORE, defaulting every setting from the environment.
 
+ENDPOINT is MNEMOSYNE_S3_ENDPOINT (default \"s3.amazonaws.com\"), REGION is MNEMOSYNE_S3_REGION
+(default \"us-east-1\"), ACCESS-KEY and SECRET-KEY are MNEMOSYNE_S3_ACCESS_KEY and
+MNEMOSYNE_S3_SECRET_KEY, SESSION-TOKEN is MNEMOSYNE_S3_SESSION_TOKEN, PATH-STYLE is
+MNEMOSYNE_S3_PATH_STYLE=true and PUBLIC-BASE-URL is MNEMOSYNE_S3_PUBLIC_BASE_URL.
+UPLOAD-ACL is :NONE (the default) or :PRIVATE, or MNEMOSYNE_S3_UPLOAD_ACL: whether UPLOAD-URL
+signs `x-amz-acl: private'. Set :PRIVATE for a bucket that honours ACLs, such as DigitalOcean
+Spaces or an AWS bucket with ACLs enabled, and leave :NONE for an AWS bucket with ACLs disabled
+or Cloudflare R2; see %UPLOAD-ACL-SETTING (#796).
+
 Credentials are checked HERE rather than at first use, so a deploy missing a secret dies
 at boot with the variable's name instead of on the first upload a member attempts."
   (let ((endpoint (or endpoint (uiop:getenv "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
@@ -219,13 +228,20 @@ few hundred bytes; this bounds what a misbehaving store or proxy can make the im
 
 (defun %error-body (body)
   "BODY as an error response's DETAIL. A stream is read up to +MAX-ERROR-BODY-BYTES+ and closed;
-anything else is returned as it is."
+anything else is returned as it is.
+
+Never signals. It runs inside %S3-REQUEST's handler for an HTTP error, where an error from
+reading or closing the stream would escape as itself rather than as BLOB-BACKEND-ERROR, so a
+body that cannot be read becomes a DETAIL saying so (#796)."
   (if (streamp body)
-      (unwind-protect
-           (let* ((buffer (make-array +max-error-body-bytes+ :element-type '(unsigned-byte 8)))
-                  (n (read-sequence buffer body)))
-             (subseq buffer 0 n))
-        (close body))
+      (handler-case
+          (unwind-protect
+               (let* ((buffer (make-array +max-error-body-bytes+ :element-type '(unsigned-byte 8)))
+                      (n (read-sequence buffer body)))
+                 (subseq buffer 0 n))
+            (ignore-errors (close body :abort t)))
+        (error (e)
+          (format nil "the error response's body could not be read: ~A" e)))
       body))
 
 (defun %s3-request (store bucket key method &key content content-type query
