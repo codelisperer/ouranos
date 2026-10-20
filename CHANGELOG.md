@@ -490,6 +490,36 @@ its tag.
   bootstrapper, with a warning, as before; with it, the build stops. An app that builds its own
   release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
   a release never ships without a way to install the WebView2 runtime.
+
+- **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
+  image protocol, with OpenAI's Image API as its first provider** (#758). Load
+  `praxeon/image` and call `praxeon/image:register-openai-image` with `:on-image`, a function that
+  receives each `image-result` (`image-result-octets`, `image-result-media-type`,
+  `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
+  `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
+  nothing when there is no key; the key is `:api-key` when given, otherwise
+  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
+  `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
+  and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
+  `:read-timeout` (default 120 seconds, `praxeon/image:*openai-images-read-timeout*`) signals
+  `praxeon/image:image-request-failed` (`image-request-failed-kind` is `:rate-limited`,
+  `:server-error` or `:no-answer`; `image-request-failed-retry-after` is the Retry-After seconds),
+  a `provider-request-failed`; inside a turn the model is told to try again later and the turn
+  goes on, with no automatic retry. A reply is read up to 24 MB per image
+  (`praxeon/image:*max-bytes-per-image*`), and `:count` is 1 to 10. The default model is
+  `gpt-image-2.5-flare` (`praxeon/image:*openai-image-model*`, or `PRAXEON_IMAGE_MODEL`). The bytes
+  reach the app as the provider sent them, and the model never sees them. A content-policy
+  refusal signals `praxeon/image:image-refused`, a `tool-error-result` with
+  `image-refused-code`, `image-refused-stage` and `image-refused-categories`, so the agent is told
+  and the turn goes on. **New event kind `:image-usage`**, one for each request that succeeds,
+  with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
+  `:size` and `:quality`, and `:input-tokens`, `:output-tokens` and `:cost` only when the
+  provider reports them (`:cost` is absent, never 0, when not reported). A refused or failed
+  request emits no `:image-usage`. `generate-image` calls a provider outside a turn. `praxeon/llm` now exports
+  `request-failure`, the #719 mapping of a failed HTTP request to `provider-request-failed`.
+  Generating from a reference image is not supported yet.
+
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
   `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,

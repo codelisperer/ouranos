@@ -189,7 +189,9 @@
    #:*default-model* #:*default-max-tokens*
    #:*connect-timeout* #:*read-timeout*
    ;; environment-driven provider selection
-   #:make-provider-from-env #:register-provider-impl #:env-setting))
+   #:make-provider-from-env #:register-provider-impl #:env-setting
+   ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
+   #:request-failure))
 
 (defpackage #:praxeon/distil
   (:use #:cl)

@@ -370,6 +370,12 @@ payloads out of log lines, and a response body can repeat the request."
                                           (or (http:http-error-detail e) "no response")
                                           e)))))
 
+(defun request-failure (label e)
+  "The PROVIDER-REQUEST-FAILED for the failed HTTP request E, as %REQUEST-FAILURE builds it, for a
+praxeon module that calls a service itself rather than through COMPLETE (#758). Its report starts
+with LABEL and carries the status, error type and code and the body's length, never the body."
+  (%request-failure label e))
+
 (defun %post-json (url headers payload)
   "One JSON POST through the shared interceptor client, returning the response body.
 
