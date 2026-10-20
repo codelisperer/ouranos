@@ -387,14 +387,33 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
 ;;; --- listing ---------------------------------------------------------------
 
 (defun %xml-decode (string)
-  "Decode the five XML predefined entities. Keys we write cannot contain them (the key
-alphabet excludes `&' and `<'), but a bucket may hold objects written by something else,
-and the sweep must not mistake a mis-decoded key for an orphan."
-  (let ((s string))
-    (dolist (pair '(("&lt;" . "<") ("&gt;" . ">") ("&quot;" . "\"")
-                    ("&apos;" . "'") ("&amp;" . "&"))
-                  s)
-      (setf s (%replace-all s (car pair) (cdr pair))))))
+  "Decode the five XML predefined entities and numeric character references (&#34; and &#x22;),
+in one pass, so `&amp;lt;' becomes `&lt;' and not `<'. Keys we write cannot contain them (the
+key alphabet excludes `&' and `<'), but a bucket may hold objects written by something else,
+and the sweep must not mistake a mis-decoded key for an orphan. MinIO writes the quotes around
+an ETag as `&#34;' (measured on MinIO 2025-04-22), so an ETag read without this is not the ETag."
+  (with-output-to-string (out)
+    (loop with i = 0
+          while (< i (length string))
+          do (let* ((amp (position #\& string :start i))
+                    (semi (and amp (position #\; string :start amp))))
+               (write-string string out :start i :end (or amp (length string)))
+               (unless amp (return))
+               (let* ((name (and semi (subseq string (1+ amp) semi)))
+                      (char (cond ((null name) nil)
+                                  ((string= name "lt") #\<) ((string= name "gt") #\>)
+                                  ((string= name "quot") #\") ((string= name "apos") #\')
+                                  ((string= name "amp") #\&)
+                                  ((and (> (length name) 2) (char-equal #\x (char name 1)) (char= #\# (char name 0)))
+                                   (let ((code (parse-integer name :start 2 :radix 16 :junk-allowed t)))
+                                     (and code (< code char-code-limit) (code-char code))))
+                                  ((and (> (length name) 1) (char= #\# (char name 0)))
+                                   (let ((code (parse-integer name :start 1 :junk-allowed t)))
+                                     (and code (< code char-code-limit) (code-char code)))))))
+                 (if char
+                     (progn (write-char char out) (setf i (1+ semi)))
+                     ;; Not an entity we know: keep the `&' as it is and go on after it.
+                     (progn (write-char #\& out) (setf i (1+ amp)))))))))
 
 (defun %replace-all (string part replacement)
   (with-output-to-string (out)

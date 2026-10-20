@@ -1318,6 +1318,13 @@ its tag.
 
 ### Fixed
 
+- **hermes/blob: on the S3 store, `list-multipart-parts` returns usable ETags from MinIO**. MinIO
+  writes the quotes around an ETag in its XML as the numeric reference `&#34;`, and the S3
+  store's XML reader decoded only the five named entities, so each ETag came back as
+  `&#34;...&#34;`. Completing an upload with those ETags fails with 400, so resuming a multipart
+  upload on MinIO did not work. The reader now decodes numeric references (`&#34;`, `&#x22;`)
+  and does it in one pass, so `&amp;lt;` becomes `&lt;` rather than `<`.
+
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the
   `unknown-tool-choice` detail does; it was the internal `%value-shape`.

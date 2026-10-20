@@ -1210,3 +1210,21 @@ recording each call. Returns (values result calls)."
     (signals b:blob-unsupported (b:complete-multipart-upload store "media" "a" "u" '((1 . "e"))))
     (signals b:blob-unsupported (b:abort-multipart-upload store "media" "a" "u"))
     (signals b:blob-unsupported (b:list-multipart-parts store "media" "a" "u"))))
+
+;;; === 13. XML numeric character references ======================================
+
+(test s3-xml-decode-reads-numeric-references-in-one-pass
+  "MinIO writes an ETag's quotes as &#34; (measured on MinIO 2025-04-22). Read without decoding it, a part's
+ETag is not the ETag, and completing the upload fails with 400."
+  (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
+  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#X22;")))
+  (is (string= "<>\"'&" (b::%xml-decode "&lt;&gt;&quot;&apos;&amp;")))
+  (is (string= "&lt;" (b::%xml-decode "&amp;lt;")) "one pass: an escaped entity stays escaped once")
+  (is (string= "a & b &unknown; &#zz;" (b::%xml-decode "a & b &unknown; &#zz;")) "anything else is kept")
+  (is (string= "plain" (b::%xml-decode "plain"))))
+
+(test s3-list-multipart-parts-reads-minio-etags
+  (is (equal '((1 "\"e1\"" 5242880))
+             (call-with-recorded-s3
+              (octets "<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>&#34;e1&#34;</ETag><Size>5242880</Size></Part><IsTruncated>false</IsTruncated></ListPartsResult>")
+              (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.bin" "u-1"))))))
