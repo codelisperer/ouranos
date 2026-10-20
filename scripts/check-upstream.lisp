@@ -15,7 +15,7 @@
 ;;;;      when the upstream is :MANUAL.
 ;;;;   2. Every place an entry names still yields a value, and all of them yield the same one.
 ;;;;      A pin that moved, or a second copy of a version that was not updated with the first
-;;;;      (libuv.pin and build-libuv.lisp, ASSETS.pin and assets.lisp), fails here.
+;;;;      (libuv.pin's version and url lines, ASSETS.pin and assets.lisp), fails here.
 ;;;;   3. Every pin in the tree has an entry: each identity line of each *.pin file (`version'
 ;;;;      or `sha', or an ASSETS.pin-style `NAME VERSION sha256 HASH' line), each *_VERSION key
 ;;;;      and QUICKLISP_DIST in scripts/versions.env, and each `uses: ACTION@' in each workflow.

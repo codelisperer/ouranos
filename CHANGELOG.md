@@ -26,6 +26,28 @@ its tag.
   structs keep their size: `UV_REQ_FIELDS` gives up one reserved pointer to a union of the same
   size in the private fields.
 
+- **The Stripe backend sends `Stripe-Version: 2026-09-30.endive` on every request** (#734),
+  where it sent no `Stripe-Version` before and Stripe answered in the version the account was
+  created with. `hermes/payments:+stripe-api-version+` names the version. A webhook payload
+  comes in the version of the webhook endpoint instead, so when an event's `api_version`
+  differs, `verify-webhook` logs the warning "stripe webhook api_version differs from the pinned
+  version", with `event-api-version` and `pinned-api-version` fields, and still parses the
+  event. Stripe cannot change an existing endpoint's API version, so to stop the warning the
+  app creates a new webhook endpoint at `2026-09-30.endive` and then disables the old one;
+  Stripe's guide "Handle webhook versioning" gives the steps. Create it through the API with
+  `api_version=2026-09-30.endive`: the Dashboard creates an endpoint only at the latest
+  version, and a later version also differs from the pin and gets the warning. Both readers take the newer shape and fall back to the older one: the period
+  end from `items.data[].current_period_end`, else the subscription's `current_period_end`, and
+  an invoice's subscription from `parent.subscription_details.subscription`, else its top-level
+  `subscription`.
+- **A Stripe subscription's `subscription-current-period-end` is the earliest period end among
+  its items** (#734), when its items carry one, which they do from `2025-03-31.basil`. Before,
+  it was read only from the subscription's own `current_period_end`. An account or webhook
+  endpoint on `2025-03-31.basil` or later does not send that field, so the period end read as 0
+  and `subscription-grants-access-p` granted access on the status alone. A
+  subscription whose items renew on different dates now stops granting access when the first
+  item's period ends, unless a newer event or `subscription-state` brings a later one.
+
 - **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
   place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
   fetch it and check an existing checkout out at it. Re-run the setup script, or run
@@ -124,6 +146,28 @@ its tag.
   same in 2.0.11. The event names `htmx:beforeRequest`, `htmx:afterRequest`, `htmx:sendError`,
   `htmx:timeout`, `htmx:configRequest` and `htmx:afterSwap`, and the `hx-request` attribute,
   are unchanged.
+
+- **praxeon: an unrecognised tool-choice value signals `praxeon/conditions:unknown-tool-choice`,
+  and the value is on the condition, not in its report or the log** (#727). Before, the
+  message was `unknown tool-choice` followed by the value, and the `llm request failed` warn
+  line logged it; a forced tool's name can come from a prompt. The new condition is a subclass
+  of `deliberation-failure`, so a handler for that still receives it. Its reader is
+  `unknown-tool-choice-value`. The report and `deliberation-failure-detail` now say what kind of
+  value it was and its length, for example `unknown tool-choice: a list of 2 elements`. An app
+  that read the value from the report, the detail or the log line reads it from
+  `unknown-tool-choice-value`.
+
+- **praxeon: the report of `praxeon/conditions:tool-choice-unsupported` no longer prints the
+  tool choice** (#727). `complete` signals it inside the handler that writes the `llm request
+  failed` warn line, so with the meta impl a forced `(:tool "name")` reached the log. The report
+  now says what kind of value it was and its length, for example `a list of 2 elements`. The
+  value is still in `tool-choice-unsupported-requested`; an app that read it from the report
+  reads it there.
+
+- **praxeon: `provider-request-failed-error-type` and `-error-code` are NIL unless the value is
+  1 to 64 letters, digits, underscores, dots or hyphens** (#727). Both are logged, and a proxy
+  between praxeon and the service can answer with its own error JSON, so a value with other
+  characters could be text of its own. The value is still in `provider-request-failed-body`.
 
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
@@ -387,8 +431,55 @@ its tag.
   or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
   connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+- **Desktop: a macOS app from `scripts/build-dmg.sh` says it needs macOS 15.0, and
+  `desktop-release.yml` builds it on `macos-15`** (#763). `LSMinimumSystemVersion` in the app's
+  `Info.plist` was 11.0, which was never true: the bundle carries Homebrew's `sbcl` and
+  `libzstd`, which need at least the macOS they were built on, so an app built on `macos-14`
+  needed macOS 14. `scripts/verify-bundle-macos.sh` now fails a `.app` that has a binary needing
+  a later macOS than its `LSMinimumSystemVersion` (check 0), and prints the OpenSSL the app
+  loaded. An app that builds its own `.app` with `build-dmg.sh` on a newer macOS than 15 will
+  fail that check until it builds on `macos-15` or older.
+
+- **praxeon: the default Anthropic model is `claude-sonnet-5-5`** (#764), in place of
+  `claude-sonnet-5`, which Anthropic now lists as a legacy model. `praxeon/llm:*default-model*`
+  holds it. An app that sets neither `PRAXEON_ANTHROPIC_MODEL` nor `PRAXEON_LLM_MODEL` and makes
+  an `anthropic` provider without `:model` now sends `claude-sonnet-5-5`, so its answers, token
+  counts and price per token can change. To keep the old model, set
+  `PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5` or pass `:model "claude-sonnet-5"`.
+  `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
+  unchanged. The documentation's examples now name
+  `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
+  `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
+  `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
+  `:hide`, `:photo` a URL or file_id), is sent by `hermes:send` or by `deliver` to a
+  `hermes:telegram` provider (`make-telegram`). The bot token is `TELEGRAM_BOT_TOKEN` or
+  `:token`, held as an `aion/secret` secret, and replaced by `<redacted>` in the text of every
+  failure the backend signals. `HERMES_TELEGRAM_IMPL` picks the backend, default `telegram`;
+  `HERMES_TRANSPORT=dev` renders Telegram messages, and `dev-last-telegram` reads the last one.
+  New with it:
+  - `escape-markdown-v2` and `escape-telegram-html`, for text in those parse modes;
+  - `edit-sent-message` (`:part :text` or `:caption`) and `delete-sent-message`, which take a
+    `delivery-result`; the email and SMS backends signal `unsupported-message` for them;
+  - `telegram-can-post`, which answers `:yes`, `:not-member` or `:not-permitted`;
+  - the conditions `telegram-chat-unreachable`, `telegram-not-permitted` and
+    `telegram-chat-migrated`, subtypes of `delivery-failure`. `telegram-chat-migrated` is a
+    group that became a supergroup; `telegram-chat-migrated-migrate-to-chat-id` is the new
+    chat id to send to;
+  - `delivery-rate-limited`, a `delivery-failure` subtype for a provider's rate limit (HTTP
+    429), whose `delivery-rate-limited-retry-after` is the number of seconds asked for, or
+    NIL. hermes does not wait or retry; the hermes README shows a retry stored with
+    `aion/schedule:schedule-once`. Only the Telegram backend signals it so far; SendGrid and
+    Twilio still signal a plain `delivery-failure` for a 429;
+  - `delivery-result-destination`, a new slot of `delivery-result`, NIL by default. Only the
+    Telegram backend fills it, with the chat id.
+
+  The log lines `hermes:send` writes are unchanged except that `hermes: sent` now carries
+  `:channel` like `hermes: sending`; neither carries a message's text or recipient. Core
+  `hermes` now loads `aion/secret`. upstream.sexp records Bot API 10.3.
 
 - **`scripts/build-installer.ps1` checks the WebView2 bootstrapper's signature, and takes
   `-RequireWebView2`** (#736). Before it embeds `MicrosoftEdgeWebview2Setup.exe`, the new
@@ -399,6 +490,36 @@ its tag.
   bootstrapper, with a warning, as before; with it, the build stops. An app that builds its own
   release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
   a release never ships without a way to install the WebView2 runtime.
+
+- **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
+  image protocol, with OpenAI's Image API as its first provider** (#758). Load
+  `praxeon/image` and call `praxeon/image:register-openai-image` with `:on-image`, a function that
+  receives each `image-result` (`image-result-octets`, `image-result-media-type`,
+  `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
+  `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
+  nothing when there is no key; the key is `:api-key` when given, otherwise
+  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
+  `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
+  and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
+  `:read-timeout` (default 120 seconds, `praxeon/image:*openai-images-read-timeout*`) signals
+  `praxeon/image:image-request-failed` (`image-request-failed-kind` is `:rate-limited`,
+  `:server-error` or `:no-answer`; `image-request-failed-retry-after` is the Retry-After seconds),
+  a `provider-request-failed`; inside a turn the model is told to try again later and the turn
+  goes on, with no automatic retry. A reply is read up to 24 MB per image
+  (`praxeon/image:*max-bytes-per-image*`), and `:count` is 1 to 10. The default model is
+  `gpt-image-2.5-flare` (`praxeon/image:*openai-image-model*`, or `PRAXEON_IMAGE_MODEL`). The bytes
+  reach the app as the provider sent them, and the model never sees them. A content-policy
+  refusal signals `praxeon/image:image-refused`, a `tool-error-result` with
+  `image-refused-code`, `image-refused-stage` and `image-refused-categories`, so the agent is told
+  and the turn goes on. **New event kind `:image-usage`**, one for each request that succeeds,
+  with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
+  `:size` and `:quality`, and `:input-tokens`, `:output-tokens` and `:cost` only when the
+  provider reports them (`:cost` is absent, never 0, when not reported). A refused or failed
+  request emits no `:image-usage`. `generate-image` calls a provider outside a turn. `praxeon/llm` now exports
+  `request-failure`, the #719 mapping of a failed HTTP request to `provider-request-failed`.
+  Generating from a reference image is not supported yet.
+
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
   `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
@@ -1162,6 +1283,10 @@ its tag.
 
 ### Fixed
 
+- **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
+  value by its kind and length ("a string of 12 characters") without printing it, as the
+  `unknown-tool-choice` detail does; it was the internal `%value-shape`.
+
 - **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
   decode field names as well as values, with `+` as a space** (#715). A browser
   percent-encodes a field name when it submits a form, so a field named `en:who` arrives as
@@ -1183,6 +1308,41 @@ its tag.
   NIL, as it does whenever another run holds the job. Either one tries to start a run itself
   only when the run it waited for did not start.
 
+- **aion, elenchon, hyperion and mnemosyne: `scripts/setup.sh` and `scripts/setup.ps1` check
+  that Coalton is at the commit `coalton.pin` names, and no longer clone it** (#751). Like
+  praxeon's before #733, they ran `git clone --depth 1` on Coalton's latest commit when
+  `~/common-lisp/coalton` was missing, and accepted any commit when it was present. All five
+  frameworks' setup scripts now run the new `scripts/coalton-pin.sh` or
+  `scripts/coalton-pin.ps1` at the monorepo root. It exits 0 when the checkout at `COALTON_DIR`
+  (default `~/common-lisp/coalton`) is at the pinned commit, and otherwise names the checkout's
+  commit (or "no commit") and the pinned one, says to run the root `scripts/setup.sh` or
+  `scripts/setup.ps1`, and exits 1. It warns when the checkout's `origin` differs from the pin's
+  `repo` line, as the root scripts do. The root setup scripts are now the only ones that clone
+  Coalton.
+
+- **praxeon: `praxeon/scripts/setup.sh` and `setup.ps1` check that Coalton is at the commit
+  `coalton.pin` names, and no longer clone it** (#733). They ran `git clone --depth 1` on
+  Coalton's latest commit when `~/common-lisp/coalton` was missing, and accepted any commit
+  when it was present, so a machine set up through them could build against a Coalton the tree
+  is not tested with. They now stop with an error naming the checkout's commit and the pinned
+  one, and say to run the monorepo's `scripts/setup.sh` or `scripts/setup.ps1`, which clones
+  Coalton and checks out the pinned commit. Both honour `COALTON_DIR`, as the root scripts do.
+
+- **hyperion/dev: `watch` refuses to watch more files than `*watch-file-limit*` allows,
+  100000 by default, and names the root that passed it** (#730). The watcher snapshots every
+  file under its roots on every poll, and nothing limited that snapshot, so a root that was a
+  very large tree, such as a home or temporary directory, filled the heap and ended in heap
+  exhaustion with a backtrace that did not mention the watched path. `watch` now takes
+  `:file-limit` (default `hyperion/dev:*watch-file-limit*`, `nil` for no limit), and past it
+  signals `hyperion/dev:watch-too-large` (readers `watch-too-large-root`,
+  `watch-too-large-count`, `watch-too-large-limit`) before the builder runs, so nothing is
+  started, and a dev server that `watch` started earlier keeps running. It refuses rather than watching part of the tree, because a partial watch leaves some
+  edits without a reload and gives no sign of which. If the roots grow past the limit while
+  watching, the previous snapshot is kept and the condition is shown as the reload error, in the
+  browser overlay, until they are back within it; an error it replaced, such as a Lisp file that
+  still fails to compile, is shown again then. `hyperion/dev:serve` callers set the limit by
+  binding `*watch-file-limit*`.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
@@ -1190,6 +1350,12 @@ its tag.
   `hyperion/auth-db` does since #378, and refuses a name that is not letters, digits and
   underscores. An app that made `hyperion_sessions` by hand because of this, while its store
   named another table, can drop it.
+
+- **aion/schedule: `stop` starts no lease renewal when less than 50 ms of its timeout is left**
+  (#728). A timed wait can return a little before its timeout, by a spurious wakeup or a coarse
+  timer such as Windows' default one. `stop` then started a renewal with a few milliseconds left,
+  which it could not wait for. That renewal kept using the store after `stop` returned, and the
+  next `stop` had to wait for it.
 
 - **praxeon/observe: on a store with transactions, a window's observations, its promotions and
   its progress are written in one transaction** (#529). When the progress write failed after

@@ -548,6 +548,9 @@
   (:export #:*reload-epoch* #:mark-reloaded
            ;; what the watcher watches (pre-publication issue 134): a denylist, pruning directories
            #:*watch-excluded-directories* #:*watch-excluded-types*
+           ;; #730: the most files watched, and what is signalled past it
+           #:*watch-file-limit* #:watch-too-large #:watch-too-large-root
+           #:watch-too-large-count #:watch-too-large-limit
            #:watch #:unwatch #:reload! #:dev-error
            #:serve #:wrap-dev
            ;; pre-publication issue 235: the guard is only useful if a caller can name what it signals.

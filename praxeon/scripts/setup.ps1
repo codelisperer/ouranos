@@ -5,7 +5,8 @@
 #
 # scripts/setup.ps1 -- convenience provisioning for a fresh clone of Praxeon (Windows).
 # Idempotent. Does NOT install SBCL/Quicklisp -- checks and tells you how.
-#   1. Clone Coalton (local checkout; not pulled by Quicklisp).
+#   1. Check that Coalton is checked out at the commit the monorepo's coalton.pin names. The
+#      monorepo's scripts/setup.ps1 is what clones it and checks that commit out.
 #   2. Create .env from .env.example (never overwriting an existing one).
 # System discovery (finding praxeon.asd) is NOT done here: run
 # `sbcl --script bootstrap.lisp` at the monorepo root once (writes the ASDF drop-in).
@@ -24,10 +25,10 @@ $QlSetup = Join-Path $QlHome 'setup.lisp'
 if (-not (Test-Path $QlSetup)) { Die "Quicklisp not found at $QlSetup (https://www.quicklisp.org/beta/)." }
 Info "SBCL present  |  Quicklisp at $QlHome"
 
-$CoaltonDir = Join-Path $HOME 'common-lisp\coalton'
-if (Test-Path (Join-Path $CoaltonDir '.git')) { Info "Coalton present at $CoaltonDir." }
-else { Info "Cloning Coalton into $CoaltonDir ..."; New-Item -ItemType Directory -Force -Path (Split-Path $CoaltonDir) | Out-Null
-       git clone --depth 1 https://github.com/coalton-lang/coalton $CoaltonDir }
+# Coalton: checked here, never cloned. scripts\coalton-pin.ps1 at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+& (Join-Path $PSScriptRoot '..\..\scripts\coalton-pin.ps1')
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
 # System discovery is handled by the repo-root bootstrap, not here.
 Info "Discovery: run 'sbcl --script bootstrap.lisp' at the repo root (writes the ASDF drop-in)."

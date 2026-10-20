@@ -582,8 +582,8 @@ A minimal `.env` — note that per-agent **roles** override the shared default:
 
 ```sh
 PRAXEON_LLM_IMPL=anthropic
-PRAXEON_LLM_MODEL=claude-sonnet-5                  # shared default (any role)
-PRAXEON_ELISE_MODEL=claude-opus-4-8                # the deliberating agent
+PRAXEON_LLM_MODEL=claude-sonnet-5-5                # shared default (any role)
+PRAXEON_ELISE_MODEL=claude-opus-5-5                # the deliberating agent
 PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 ```
 

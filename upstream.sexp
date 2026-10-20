@@ -61,7 +61,7 @@
 
 (:name "libuv" :category :native
  :where ((:field "libuv.pin" "version")
-         (:text "scripts/build-libuv.lisp" "https://dist.libuv.org/dist/v" "/"))
+         (:text "libuv.pin" "url     https://dist.libuv.org/dist/v" "/"))
  :upstream (:github-release "libuv/libuv"))
 
 (:name "mbedTLS" :category :native
@@ -75,7 +75,7 @@
 (:name "SQLite (Windows)" :category :native
  :where ((:env "scripts/versions.env" "SQLITE_VERSION"))
  :upstream (:manual "https://sqlite.org/download.html")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "webview (hyperion-view)" :category :native
  :where ((:concat "."
@@ -111,13 +111,13 @@
 
 (:name "Anthropic API version" :category :api
  :where ((:text "praxeon/src/llm.lisp" "(version :initarg :version :initform \"" "\""))
- :upstream (:manual "https://docs.anthropic.com/en/api/versioning")
- :reviewed :never)
+ :upstream (:manual "https://platform.claude.com/docs/en/api/versioning")
+ :reviewed "2026-10-17")
 
 (:name "Anthropic default model" :category :api
  :where ((:text "praxeon/src/llm.lisp" "(defparameter *default-model* \"" "\""))
- :upstream (:manual "https://docs.anthropic.com/en/docs/about-claude/models")
- :reviewed :never)
+ :upstream (:manual "https://platform.claude.com/docs/en/models/overview")
+ :reviewed "2026-10-17")
 
 (:name "MCP protocol revision" :category :api
  :where ((:text "praxeon/src/mcp/client.lisp" "(defparameter +protocol-version+ \"" "\""))
@@ -127,29 +127,42 @@
 (:name "Voyage default embedding model" :category :api
  :where ((:text "praxeon/src/embedding.lisp" "((model :initform \"" "\""))
  :upstream (:manual "https://docs.voyageai.com/docs/embeddings")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "OpenAI-compatible default embedding model" :category :api
  :where ((:text "praxeon/src/embedding.lisp" "(%getenv \"PRAXEON_EMBED_MODEL\") \"" "\""))
- :upstream (:manual "https://platform.openai.com/docs/models")
- :reviewed :never)
+ :upstream (:manual "https://developers.openai.com/api/docs/models")
+ :reviewed "2026-10-17")
+
+(:name "OpenAI default image model" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-image-model* \"" "\""))
+ :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
+ :reviewed "2026-10-18")
+
+(:name "OpenAI Image API version" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-images-base-url* \"https://api.openai.com/" "\""))
+ :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
+ :reviewed "2026-10-18")
 
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "SendGrid API version" :category :api
  :where ((:text "hermes/src/sendgrid.lisp" "https://api.sendgrid.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/sendgrid/api-reference")
- :reviewed :never)
+ :reviewed "2026-10-17")
+
+(:name "Telegram Bot API" :category :api
+ :where ((:text "hermes/src/telegram.lisp" "(defparameter +telegram-bot-api-version+ \"" "\""))
+ :upstream (:manual "https://core.telegram.org/bots/api-changelog")
+ :reviewed "2026-10-18")
 
 (:name "Stripe API version" :category :api
- :where ((:text "hermes/src/payments/stripe.lisp" "(%stripe-call p :post \"/" "/"))
+ :where ((:text "hermes/src/payments/stripe.lisp" "(defparameter +stripe-api-version+ \"" "\""))
  :upstream (:manual "https://docs.stripe.com/upgrades")
- :reviewed :never
- :held (:reason "only the URL path version is pinned: no Stripe-Version header is sent, so each account's default API version applies"
-        :issue 734))
+ :reviewed "2026-10-18")
 
 ;;; --- CI ----------------------------------------------------------------------------------
 
@@ -179,17 +192,24 @@
 (:name "Linux runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "macOS runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed :never)
+ :reviewed "2026-10-18")
+
+(:name "macOS desktop build image" :category :ci
+ :where ((:text ".github/workflows/desktop-release.yml" "- os: macos-" nil))
+ :upstream (:manual "https://github.com/actions/runner-images")
+ :reviewed "2026-10-18"
+ :held (:reason "the macOS app needs the macOS of its build image or later, because Homebrew's sbcl and libzstd in the bundle target it; the maintainer chose macos-15 so the app runs on macOS 15, while verify.yml tests on macos-26"
+        :issue 763))
 
 (:name "Windows runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed :never)
+ :reviewed "2026-10-17")
 
 (:name "pgvector (Windows CI)" :category :ci
  :where ((:text ".github/workflows/verify.yml" "PGVECTOR_VERSION: \"" "\""))
