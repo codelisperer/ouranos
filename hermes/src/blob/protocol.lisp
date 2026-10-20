@@ -188,6 +188,37 @@ BLOB-METADATA and READ-BLOB-RANGE, as for a single upload."))
    "The parts of UPLOAD-ID uploaded so far, as a list of (part-number etag size), in order, for
 resuming an upload: the client uploads only the parts that are missing."))
 
+(defgeneric copy-blob (store src-bucket src-key dst-bucket dst-key &key content-type metadata)
+  (:documentation
+   "Copy the blob at SRC-BUCKET/SRC-KEY to DST-BUCKET/DST-KEY inside STORE, without the bytes
+passing through this process (#804). Returns the destination's BLOB-META. Overwrites an existing
+destination, as PUT-BLOB does.
+
+With neither CONTENT-TYPE nor METADATA, the copy keeps the source's content type, metadata and
+checksum. CONTENT-TYPE replaces the content type; METADATA replaces the app's metadata, and is
+checked as PUT-BLOB checks it (\"sha256\" is reserved). The checksum is kept either way.
+
+When source and destination are the same, a copy with no changes returns the blob's BLOB-META
+and copies nothing; with changes it rewrites the content type or metadata in place.
+
+A missing source signals BLOB-NOT-FOUND naming the source. On S3 a source that changes while it
+is being copied signals BLOB-SOURCE-CHANGED. A store that cannot copy server-side signals
+BLOB-UNSUPPORTED, and the caller copies through GET-BLOB and PUT-BLOB. On an S3 store made with
+:UPLOAD-ACL :PRIVATE the copy is sent with `x-amz-acl: private'; otherwise it gets the bucket's
+default ACL, because S3 never copies an object's ACL."))
+
+(defgeneric move-blob (store src-bucket src-key dst-bucket dst-key &key content-type metadata)
+  (:documentation
+   "COPY-BLOB, then DELETE-BLOB on the source (#804). Returns the destination's BLOB-META.
+
+NOT ATOMIC on S3, which has no rename: if the copy succeeds and the delete fails, the
+destination holds the blob AND the source is still there, and the delete's own condition is
+signalled, normally BLOB-BACKEND-ERROR naming the source. Retrying the move is safe, because a
+copy overwrites. A quarantine sweep must expect a source left behind this way. If the copy
+fails, nothing was deleted. On the filesystem store a move is a rename within one root.
+
+When source and destination are the same, it returns the blob's BLOB-META and deletes nothing."))
+
 (defgeneric list-blobs (store bucket &key prefix)
   (:documentation
    "The keys under PREFIX in BUCKET, as a list of strings. Used by SWEEP-ORPHANS.
@@ -344,6 +375,28 @@ values. Names and values go into request headers on S3, so a control character i
   (declare (ignore prefix))
   (%check-bucket bucket))
 
+(defun %check-copy (src-bucket src-key dst-bucket dst-key content-type metadata)
+  "The checks COPY-BLOB and MOVE-BLOB share: both locations, the content type as UPLOAD-URL checks
+it, and the metadata as PUT-BLOB checks it."
+  (%check-key src-bucket src-key)
+  (%check-key dst-bucket dst-key)
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-invalid-metadata :bucket dst-bucket :key dst-key
+                                  :fault "the content type is empty, not a string, or holds a control character"))
+  (%check-metadata dst-bucket dst-key metadata))
+
+(defmethod copy-blob :before ((s store) src-bucket src-key dst-bucket dst-key &key content-type metadata)
+  (%check-copy src-bucket src-key dst-bucket dst-key content-type metadata))
+
+(defmethod move-blob :before ((s store) src-bucket src-key dst-bucket dst-key &key content-type metadata)
+  (%check-copy src-bucket src-key dst-bucket dst-key content-type metadata))
+
+(defun %same-location-p (src-bucket src-key dst-bucket dst-key)
+  (and (string= src-bucket dst-bucket) (string= src-key dst-key)))
+
 ;;; --- streaming + digest, implemented once ----------------------------------
 
 (defconstant +copy-buffer-size+ 65536
@@ -386,6 +439,24 @@ bug at the call site. Prefer this."
 ;;;
 ;;; An app can define its own STORE subclass. Without these, calling UPLOAD-URL or
 ;;; READ-BLOB-RANGE on one signals NO-APPLICABLE-METHOD instead of what the docstrings promise.
+
+(defmethod copy-blob ((s store) src-bucket src-key dst-bucket dst-key &key content-type metadata)
+  (declare (ignore src-key dst-bucket dst-key content-type metadata))
+  (error 'blob-unsupported :bucket src-bucket
+                           :operation "server-side copy (copy through get-blob and put-blob)"))
+
+(defmethod move-blob ((s store) src-bucket src-key dst-bucket dst-key &key content-type metadata)
+  ;; Any store that can copy can move: copy, then delete the source. The filesystem store
+  ;; overrides this with a rename. The order matters: the source is deleted only once the
+  ;; destination exists, so a failure leaves two copies, never none.
+  (if (%same-location-p src-bucket src-key dst-bucket dst-key)
+      (if (or content-type metadata)
+          (copy-blob s src-bucket src-key dst-bucket dst-key :content-type content-type :metadata metadata)
+          (blob-metadata s src-bucket src-key))
+      (let ((meta (copy-blob s src-bucket src-key dst-bucket dst-key
+                             :content-type content-type :metadata metadata)))
+        (delete-blob s src-bucket src-key)
+        meta)))
 
 (defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes)
   (declare (ignore expires-in content-type content-length max-bytes))
