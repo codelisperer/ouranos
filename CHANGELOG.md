@@ -452,6 +452,27 @@ its tag.
 
 ### Added
 
+- **praxeon: an agent can read a web page the user gives it, through the new
+  `read-web-page` means** (#757). It is in the opt-in system `praxeon/web-page`, registered
+  with `register-read-web-page`.
+  - It returns the page's main text, trimmed to `*budget*` characters, with its title and the
+    URL it was read from after redirects.
+  - The backend is Tavily's `/extract` when `TAVILY_API_KEY` is set. Otherwise the page is
+    fetched with `aion/http-client:fetch-public` and its text extracted with plump. On Windows
+    without a Tavily key nothing is registered, and the reason is logged.
+  - A URL whose host is a private, loopback, link-local or other internal address is refused
+    before any request.
+  - A failure is the condition `web-page-unreadable`, a `tool-error-result`, so the turn goes
+    on.
+  - `status-line` turns the means' `:tool-call` event into "Reading example.com…".
+- **praxeon: `praxeon/source:quote-source`** wraps outside text, such as a fetched page or a
+  retrieved document, between markers carrying a random nonce, after a sentence saying it is
+  quoted material and not instructions (#757). `read-web-page` uses it, and
+  `praxeon/retrieval` can.
+- **aion/http-client: `fetch-public` returns the URL of the last hop as a second value**
+  (#757). After a redirect this differs from the URL it was given. A caller that uses only
+  the first value is unaffected.
+
 - **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
   `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
   `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
