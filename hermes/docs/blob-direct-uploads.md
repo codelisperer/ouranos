@@ -36,7 +36,7 @@ for it. Smaller files can still go through `put-blob`.
    ```
 
    If the size or the real file type is not what was asked for, delete it with `delete-blob`.
-   Otherwise move it out of quarantine and record it.
+   Otherwise move it out of quarantine with `move-blob` (below) and record it.
 
 ## What is enforced, and where
 
@@ -123,6 +123,42 @@ lifecycle rule that aborts incomplete uploads after a few days catches the rest.
 There is no total size cap on a multipart upload as there is for `upload-url`: the app holds it by
 issuing no more part URLs than the size it accepts, each with a signed size, and by checking
 `blob-metadata` after completing.
+
+## Leaving quarantine: copy-blob and move-blob
+
+Once an upload is verified, move it to its final key with
+`(hermes/blob:move-blob store "media" quarantine-key "media" final-key)`. The bytes do not pass
+through the app (#804). On S3 the store copies the object server-side and then deletes the
+source; on the filesystem store it renames the file. `copy-blob` takes the same arguments and
+leaves the source where it is. Both return the destination's `blob-meta`.
+
+- **What the copy keeps.** By default the content type, the app's metadata and the checksum are
+  copied as they are. `:content-type` replaces the type, and `:metadata` replaces the app's
+  metadata (checked as `put-blob` checks it, so `sha256` is refused); the checksum is kept
+  either way.
+- **The ACL.** S3 never copies an object's ACL. A copied object gets the bucket's default ACL,
+  unless the store is made with `:upload-acl :private`, in which case the copy is sent with
+  `x-amz-acl: private`.
+- **Only the object that was verified is copied.** Every copy request is conditional on the
+  source's ETag as read at the start of the copy. If the source is replaced in the meantime,
+  the copy fails with `blob-source-changed` (a `blob-backend-error` with status 412, naming the
+  source), nothing is copied and a move deletes nothing. Verify the object again before retrying.
+- **Large objects.** Above 5 GiB, the most a single S3 copy can carry, the copy is made in parts
+  of at least 512 MiB. A part that fails aborts the copy, so no parts are left to be billed.
+  Whether DigitalOcean Spaces supports this part copy (UploadPartCopy) has not been measured
+  yet; it works on MinIO.
+- **A move is not atomic on S3.** If the copy succeeds and deleting the source fails, the
+  delete's own condition is signalled, normally `blob-backend-error` naming the source. The
+  destination then exists and holds the blob, and the source is still there. Retrying the move
+  is safe, because a copy overwrites. A sweep of the quarantine prefix should expect a source
+  left behind this way.
+- **The same location.** A move whose source and destination are the same deletes nothing and
+  returns the blob's metadata. A copy to the same location with no changes does the same; with
+  `:content-type` or `:metadata` it rewrites them in place.
+- **Errors.** A missing source is `blob-not-found` naming the source. A provider that cannot
+  copy server-side answers 501, which is `blob-unsupported`; the app then copies through
+  `get-blob` and `put-blob`. A store class an app defines itself gets `blob-unsupported` too,
+  until it implements `copy-blob`.
 
 ## On the filesystem store
 

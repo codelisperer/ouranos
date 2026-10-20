@@ -463,6 +463,21 @@ its tag.
 
 ### Added
 
+- **hermes/blob: `copy-blob` and `move-blob` copy or move a blob inside a store without the
+  bytes passing through the app** (#804), so a verified upload leaves quarantine without being
+  downloaded and uploaded again. `(copy-blob store src-bucket src-key dst-bucket dst-key
+  &key content-type metadata)` returns the destination's `blob-meta`; `move-blob` copies and
+  then deletes the source. On S3 a copy is CopyObject up to 5 GiB and a multipart copy
+  (UploadPartCopy) above it, every request conditional on the source's ETag, so a source
+  replaced during the copy signals the new condition `blob-source-changed`, a
+  `blob-backend-error` subclass. The content type, the app's metadata and the checksum are kept
+  unless `:content-type` or `:metadata` replace them. A copied object gets the bucket's default
+  ACL, or `x-amz-acl: private` on a store made with `:upload-acl :private`. A move is not atomic on S3:
+  if deleting the source fails, the destination exists and the delete's condition is
+  signalled. On the filesystem store a move is a rename. A missing source is `blob-not-found`
+  naming it; a provider that cannot copy, or a store class that does not implement it, signals
+  `blob-unsupported`. See "Leaving quarantine" in `hermes/docs/blob-direct-uploads.md`.
+
 - **hermes/blob: an S3 store can sign `x-amz-acl: private` into upload URLs, for a bucket that
   honours ACLs** (#796). `make-s3-store` takes `:upload-acl`, `:none` (the default) or `:private`,
   or reads `MNEMOSYNE_S3_UPLOAD_ACL` (`private` or `none`); any other value signals
