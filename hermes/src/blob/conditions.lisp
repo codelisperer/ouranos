@@ -84,7 +84,6 @@ constructed, not at first use, so a misconfigured deploy fails at boot."))
                        (:bad-content-length "the content-length is not a non-negative integer")
                        (:bad-max-bytes "max-bytes is not a non-negative integer")
                        (:bad-content-type "the content-type is empty, not a string, or contains a control character")
-                       (:bad-acl "acl must be :private or :none")
                        (:bad-expiry "expires-in must be an integer number of seconds from 1 to 604800")
                        (:bad-part-number "a part number must be an integer from 1 to 10000")
                        (:bad-upload-id "the upload id must be a non-empty string")
@@ -92,8 +91,8 @@ constructed, not at first use, so a misconfigured deploy fails at boot."))
   (:documentation
    "UPLOAD-URL or a multipart call refused to sign or send (#770). REASON is :TOO-LARGE,
 :TOO-LARGE-FOR-SINGLE-PUT, :CONTENT-LENGTH-REQUIRED, :BAD-CONTENT-LENGTH, :BAD-MAX-BYTES,
-:BAD-CONTENT-TYPE, :BAD-ACL, :BAD-EXPIRY, :BAD-PART-NUMBER, :BAD-UPLOAD-ID or :BAD-PARTS, so a
-caller branches on the reason and not on the message."))
+:BAD-CONTENT-TYPE, :BAD-EXPIRY, :BAD-PART-NUMBER, :BAD-UPLOAD-ID or :BAD-PARTS, so a caller
+branches on the reason and not on the message."))
 
 (define-condition blob-unsupported (blob-error)
   ((operation :initarg :operation :initform nil :reader blob-unsupported-operation))
