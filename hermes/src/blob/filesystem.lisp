@@ -170,6 +170,26 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
     (let ((sep (if (eql #\/ (char base (1- (length base)))) "" "/")))
       (format nil "~A~A~A/~A" base sep bucket key))))
 
+(defmethod upload-url ((s filesystem-store) bucket key &key expires-in content-type content-length max-bytes)
+  (declare (ignore expires-in content-type content-length max-bytes))
+  ;; Nothing serves this directory that could check a signature, the same reason BLOB-URL
+  ;; refuses to sign. A typed refusal lets a development app fall back to proxying the upload
+  ;; through PUT-BLOB, which is the shape the issue asked for (#770).
+  (error 'blob-unsupported :bucket bucket :key key
+                           :operation "presigned uploads (proxy the upload through put-blob)"))
+
+(defmethod read-blob-range ((s filesystem-store) bucket key &key (start 0) (length 512))
+  (let ((path (%blob-path s bucket key "objects")))
+    (unless (probe-file path)
+      (error 'blob-not-found :bucket bucket :key key))
+    (with-open-file (in path :element-type '(unsigned-byte 8))
+      (let* ((size (file-length in))
+             (from (min start size))
+             (buffer (make-array (max 0 (min length (- size from))) :element-type '(unsigned-byte 8))))
+        (file-position in from)
+        ;; READ-SEQUENCE's count is what arrived; FILE-LENGTH is only what the file claimed.
+        (subseq buffer 0 (read-sequence buffer in))))))
+
 (defmethod list-blobs ((s filesystem-store) bucket &key prefix)
   ;; A KEY IS PROTOCOL, not an implementation detail. S3 keys are `/'-separated by
   ;; definition, so a key this backend invents with a `\' would mean the two backends

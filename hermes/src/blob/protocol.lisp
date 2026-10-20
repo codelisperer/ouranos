@@ -19,7 +19,7 @@
 ;;; --- what a row should hold ------------------------------------------------
 
 (defstruct (blob-meta (:constructor make-blob-meta (key size content-type checksum
-                                                   &optional last-modified)))
+                                                   &optional last-modified etag)))
   "Everything about a blob EXCEPT its bytes -- i.e. exactly what belongs in a database
 row. The bytes are referenced by (bucket, KEY) and never embedded.
 
@@ -29,7 +29,37 @@ PUT-BLOB, so it costs nothing extra and is available to store alongside the row.
   (size 0 :type (or null integer))
   (content-type nil :type (or null string))
   (checksum nil :type (or null string))
-  (last-modified nil :type (or null integer)))
+  (last-modified nil :type (or null integer))
+  ;; The provider's entity tag, without its quotes, where the backend has one: S3's ETag,
+  ;; which is the MD5 of a single-part upload and not a content hash for a multipart one.
+  ;; NIL on the filesystem store. For checking a browser's upload after the fact (#770).
+  (etag nil :type (or null string)))
+
+(defstruct (upload-target (:constructor make-upload-target (url method headers expires-in
+                                                            &optional content-length)))
+  "Where and how a client uploads one blob directly to the store, returned by UPLOAD-URL (#770).
+
+URL is presigned and stops working after EXPIRES-IN seconds. METHOD is the HTTP method, \"PUT\".
+HEADERS is an alist of (name . value) the client MUST send exactly as given, or the provider
+refuses the request; it holds Content-Type when one was signed. CONTENT-LENGTH, when non-NIL,
+is the exact size the URL was signed for: a browser sets that header itself from the body, and
+the provider refuses a body of any other length.
+
+A presigned URL is a credential. Do not log it or store it."
+  (url nil :type string)
+  (method "PUT" :type string)
+  (headers nil :type list)
+  (expires-in 0 :type integer)
+  (content-length nil :type (or null integer)))
+
+(defmethod print-object ((target upload-target) stream)
+  ;; The default structure printer prints every slot, so a log line, a condition report with
+  ;; ~A or a backtrace would carry the whole presigned URL and its signature. Print the method,
+  ;; expiry and size only; the URL is read with UPLOAD-TARGET-URL where it is needed.
+  (print-unreadable-object (target stream :type t :identity t)
+    (format stream "~A expires-in ~D~@[ content-length ~D~]"
+            (upload-target-method target) (upload-target-expires-in target)
+            (upload-target-content-length target))))
 
 ;;; --- the store protocol ----------------------------------------------------
 
@@ -73,6 +103,30 @@ EXPIRES-IN is seconds; when non-NIL the URL is SIGNED and stops working when it 
 When NIL the store must be configured public, and the URL is permanent and unauthenticated
 -- so NIL is a decision about the blob, not a convenience default, and a store with no
 public base URL signals BLOB-UNSUPPORTED rather than inventing one."))
+
+(defgeneric upload-url (store bucket key &key expires-in content-type content-length max-bytes)
+  (:documentation
+   "An UPLOAD-TARGET a client can use to upload the blob at BUCKET/KEY straight to the store,
+without the bytes passing through this process (#770).
+
+EXPIRES-IN is required: seconds, from 1 to 604800 (seven days, SigV4's limit). Keep it short.
+CONTENT-TYPE, when given, is signed, so the client cannot store the object under another type.
+CONTENT-LENGTH, when given, is signed, so the provider refuses a body of any other size. It is
+the size the client declares for its file before uploading.
+MAX-BYTES is the largest upload this URL may carry. It needs CONTENT-LENGTH, because a single
+presigned PUT can be held to an exact size but not to a range; a CONTENT-LENGTH over it, or a
+MAX-BYTES with no CONTENT-LENGTH, signals BLOB-UPLOAD-REFUSED rather than signing.
+
+KEY should be chosen by the server, never taken from the client, and one URL should serve one
+upload. Check the result with BLOB-METADATA and READ-BLOB-RANGE before trusting it.
+A store that cannot presign signals BLOB-UNSUPPORTED, and the caller proxies with PUT-BLOB."))
+
+(defgeneric read-blob-range (store bucket key &key start length)
+  (:documentation
+   "An octet vector of at most LENGTH bytes (default 512) of the blob at BUCKET/KEY, from byte
+START (default 0). Shorter when the blob ends sooner; empty when START is at or past its end.
+For checking what a client uploaded by its first bytes, without fetching the whole object
+(#770). Signals BLOB-NOT-FOUND."))
 
 (defgeneric list-blobs (store bucket &key prefix)
   (:documentation
@@ -118,6 +172,42 @@ passes through."
   (declare (ignore expires-in))
   (%check-key bucket key))
 
+(defconstant +max-presign-seconds+ 604800
+  "Seven days, the longest expiry SigV4 accepts.")
+
+(defun %control-char-p (char)
+  "True for an ASCII control character, CR, LF and tab included."
+  (let ((code (char-code char)))
+    (or (< code 32) (= code 127))))
+
+(defmethod upload-url :before ((s store) bucket key &key expires-in content-type content-length max-bytes)
+  (%check-key bucket key)
+  (unless (and (integerp expires-in) (<= 1 expires-in +max-presign-seconds+))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-expiry))
+  ;; A CR or LF in a header value would let the value start a second header, and the client
+  ;; is told to send these headers exactly as given. Refuse it rather than sign it.
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-type))
+  (when (and content-length (not (and (integerp content-length) (>= content-length 0))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-length))
+  (when (and max-bytes (not (and (integerp max-bytes) (>= max-bytes 0))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-max-bytes))
+  (when max-bytes
+    (cond ((null content-length)
+           (error 'blob-upload-refused :bucket bucket :key key :reason :content-length-required
+                                       :limit max-bytes))
+          ((> content-length max-bytes)
+           (error 'blob-upload-refused :bucket bucket :key key :reason :too-large
+                                       :size content-length :limit max-bytes)))))
+
+(defmethod read-blob-range :before ((s store) bucket key &key (start 0) (length 512))
+  (%check-key bucket key)
+  (unless (and (integerp start) (>= start 0) (integerp length) (>= length 0))
+    (error 'type-error :datum (list start length) :expected-type '(integer 0))))
+
 (defmethod list-blobs :before ((s store) bucket &key prefix)
   (declare (ignore prefix))
   (%check-bucket bucket))
@@ -159,6 +249,29 @@ bug at the call site. Prefer this."
     `(let ((,s (get-blob ,store ,bucket ,key)))
        (unwind-protect (let ((,var ,s)) ,@body)
          (close ,s)))))
+
+;;; --- defaults for a store that does not implement an operation --------------
+;;;
+;;; An app can define its own STORE subclass. Without these, calling UPLOAD-URL or
+;;; READ-BLOB-RANGE on one signals NO-APPLICABLE-METHOD instead of what the docstrings promise.
+
+(defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes)
+  (declare (ignore expires-in content-type content-length max-bytes))
+  (error 'blob-unsupported :bucket bucket :key key
+                           :operation "presigned uploads (proxy the upload through put-blob)"))
+
+(defmethod read-blob-range ((s store) bucket key &key (start 0) (length 512))
+  ;; Reads through GET-BLOB: skips START bytes in bounded chunks, then reads at most LENGTH.
+  (with-blob-stream (in s bucket key)
+    (let ((skip (make-array (min start +copy-buffer-size+) :element-type '(unsigned-byte 8)))
+          (remaining start))
+      (loop while (plusp remaining)
+            do (let ((n (read-sequence skip in :end (min remaining (length skip)))))
+                 (when (zerop n) (return))
+                 (decf remaining n)))
+      (let ((buffer (make-array length :element-type '(unsigned-byte 8))))
+        ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
+        (subseq buffer 0 (read-sequence buffer in))))))
 
 ;;; --- the registry + environment selection ----------------------------------
 ;;;

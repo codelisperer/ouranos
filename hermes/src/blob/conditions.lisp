@@ -65,6 +65,31 @@ S3-compatible backend and NIL for the filesystem."))
    "A credential or setting the backend cannot run without. Signalled when the store is
 constructed, not at first use, so a misconfigured deploy fails at boot."))
 
+(define-condition blob-upload-refused (blob-error)
+  ((reason :initarg :reason :reader blob-upload-refused-reason)
+   (size :initarg :size :initform nil :reader blob-upload-refused-size)
+   (limit :initarg :limit :initform nil :reader blob-upload-refused-limit))
+  (:report (lambda (c s)
+             (format s "no upload URL issued for bucket ~A: ~A"
+                     (or (blob-error-bucket c) "?")
+                     (ecase (blob-upload-refused-reason c)
+                       (:too-large (format nil "the declared size ~:D bytes is over the limit of ~:D"
+                                           (blob-upload-refused-size c) (blob-upload-refused-limit c)))
+                       (:content-length-required
+                        (format nil "a size limit (~:D bytes) needs the upload's declared content-length"
+                                (blob-upload-refused-limit c)))
+                       (:too-large-for-single-put
+                        (format nil "the declared size ~:D bytes is over the ~:D-byte limit of a single PUT; use a multipart upload"
+                                (blob-upload-refused-size c) (blob-upload-refused-limit c)))
+                       (:bad-content-length "the content-length is not a non-negative integer")
+                       (:bad-max-bytes "max-bytes is not a non-negative integer")
+                       (:bad-content-type "the content-type is empty, not a string, or contains a control character")
+                       (:bad-expiry "expires-in must be an integer number of seconds from 1 to 604800")))))
+  (:documentation
+   "UPLOAD-URL refused to sign (#770). REASON is :TOO-LARGE, :TOO-LARGE-FOR-SINGLE-PUT,
+:CONTENT-LENGTH-REQUIRED, :BAD-CONTENT-LENGTH, :BAD-MAX-BYTES, :BAD-CONTENT-TYPE or :BAD-EXPIRY,
+so a caller branches on the reason and not on the message."))
+
 (define-condition blob-unsupported (blob-error)
   ((operation :initarg :operation :initform nil :reader blob-unsupported-operation))
   (:report (lambda (c s)

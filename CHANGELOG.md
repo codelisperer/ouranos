@@ -481,6 +481,24 @@ its tag.
   `:channel` like `hermes: sending`; neither carries a message's text or recipient. Core
   `hermes` now loads `aion/secret`. upstream.sexp records Bot API 10.3.
 
+- **hermes/blob: `upload-url` gives a client a presigned PUT for uploading straight to S3 or
+  Spaces, and `read-blob-range` reads a blob's first bytes to check what arrived** (#770).
+  `(upload-url store bucket key :expires-in :content-type :content-length :max-bytes)` returns
+  an `upload-target` (`upload-target-url`, `-method`, `-headers`, `-expires-in`,
+  `-content-length`). Content-Type and Content-Length are signed, so the store refuses another
+  type or size. `:max-bytes` refuses to sign a declared size over it, or no declared size at all,
+  with the new condition `blob-upload-refused` (`blob-upload-refused-reason`: `:too-large`,
+  `:content-length-required`, `:bad-content-length`, `:bad-max-bytes`, `:bad-content-type`,
+  `:bad-expiry`). A content type containing a control character, CR and LF included, is
+  refused, and `upload-target-headers` returns the trimmed value that was signed. On S3 a
+  declared size over 5 GiB, the single-PUT limit, is refused with `:too-large-for-single-put`.
+  The app must still check the declared content type against its own allow-list: signing
+  only binds the type the app passes in. The filesystem store, and any store class that does
+  not implement `upload-url`, signals `blob-unsupported`, so a development app proxies through
+  `put-blob`; a store class that does not implement `read-blob-range` reads the range through
+  `get-blob`. `blob-meta-etag` carries S3's ETag from `blob-metadata`. The URL is never
+  logged, and an `upload-target` prints without it. Usage, checking an upload and the
+  security notes are in `hermes/docs/blob-direct-uploads.md`.
 - **`scripts/build-installer.ps1` checks the WebView2 bootstrapper's signature, and takes
   `-RequireWebView2`** (#736). Before it embeds `MicrosoftEdgeWebview2Setup.exe`, the new
   `scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature whose
