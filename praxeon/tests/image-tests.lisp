@@ -682,3 +682,14 @@ rate a row lists must be a positive rational."
         (is (stringp (getf entry :reviewed)) "~S has no :reviewed date" name)
         (dolist (key '(:text-input :image-input :image-output))
           (is (typep (getf (cdr row) key) '(rational (0))) "~A ~S" (car row) key))))))
+
+(test a-model-past-its-shutdown-date-is-still-priced
+  "A cost is worked out for a request that already happened, so a shutdown date in upstream.sexp
+does not stop a model being priced. gpt-image-1's entry says it shuts down on 2026-10-23.
+100 input tokens unsplit at the higher input rate, 10, and 1000 output at 40:
+(1000 + 40000) / 10^6 = 41/1000 dollars."
+  (let ((entry (find "OpenAI image prices: gpt-image-1" (%upstream-entries)
+                     :key (lambda (e) (getf e :name)) :test #'equal)))
+    (is (equal "2026-10-23" (getf entry :retires)) "~S" entry))
+  (is (eql 41/1000 (praxeon/image:openai-image-cost "gpt-image-1"
+                                                    '(:input-tokens 100 :output-tokens 1000)))))
