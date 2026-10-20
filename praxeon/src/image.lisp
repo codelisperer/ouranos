@@ -13,12 +13,21 @@
 ;;;; A CONTENT-POLICY REFUSAL IS A TYPED RESULT. IMAGE-REFUSED is a TOOL-ERROR-RESULT, so inside a
 ;;;; turn the model is told the request was refused and can explain that, and the turn goes on.
 ;;;; A caller of GENERATE-IMAGE outside a turn handles IMAGE-REFUSED like any condition. Any other
-;;;; failed request is PROVIDER-REQUEST-FAILED, as for the chat providers (#719).
+;;;; failed request is PROVIDER-REQUEST-FAILED, as for the chat providers (#719). When the
+;;;; service is busy (429), fails on its side (5xx) or does not answer, the failure is an
+;;;; IMAGE-REQUEST-FAILED, and inside a turn the means turns it into an error result that tells
+;;;; the model to try again later, so the turn goes on. Nothing is retried automatically.
 ;;;;
-;;;; USAGE. Each request emits one :IMAGE-USAGE event through praxeon/event, with the provider,
-;;;; the model, the number of images, the size and quality the provider reports, the token counts
-;;;; it reports, and :COST only when the provider reports a cost. OpenAI reports none, so :COST is
-;;;; absent rather than 0.
+;;;; COST. The app chooses which qualities the model may ask for (REGISTER's :QUALITIES), and the
+;;;; tool schema offers only those. A request for any other quality is refused before it is sent.
+;;;;
+;;;; USAGE. Each request that succeeds emits one :IMAGE-USAGE event through praxeon/event, with
+;;;; the provider, the model, the number of images, the size and quality the provider reports, the
+;;;; token counts it reports, :COST only when the provider reports a cost, and the call's :ID,
+;;;; :PRINCIPAL and :AGENT as on :TOOL-RESULT. OpenAI reports no cost, so :COST is absent rather
+;;;; than 0. A refused or failed request emits no :IMAGE-USAGE event, because the provider reports
+;;;; no usage with an error; whether a provider charges for a refused request is its own policy,
+;;;; which praxeon cannot see.
 ;;;;
 ;;;; LOGGING follows docs/logging.md: kinds, counts, lengths, status and durations. The prompt,
 ;;;; the revised prompt and the image bytes are never logged.
@@ -48,9 +57,12 @@
    ;; a refusal
    #:image-refused #:image-refused-provider #:image-refused-code #:image-refused-stage
    #:image-refused-categories
+   ;; the service busy, failing or not answering
+   #:image-request-failed #:image-request-failed-kind #:image-request-failed-retry-after
    ;; OpenAI
    #:openai-images #:make-openai-images #:openai-images-from-env #:image-post
    #:openai-image-request-body #:*openai-image-model* #:*openai-images-base-url*
+   #:*openai-images-read-timeout* #:*max-bytes-per-image*
    ;; the means
    #:register #:register-openai-image #:*description*))
 
@@ -109,6 +121,20 @@ It is a TOOL-ERROR-RESULT, so when the generate-image means signals it inside a 
 is told, in TEXT, that the request was refused and why, and the turn goes on. A caller of
 GENERATE-IMAGE outside a turn handles it as any condition."))
 
+(define-condition image-request-failed (cnd:provider-request-failed)
+  ((kind :initarg :kind :initform nil :reader image-request-failed-kind)
+   (retry-after :initarg :retry-after :initform nil :reader image-request-failed-retry-after))
+  (:documentation "An image request failed in a way that may pass if it is tried again later.
+
+KIND is :RATE-LIMITED for a 429, :SERVER-ERROR for a 5xx, and :NO-ANSWER when no response
+arrived, such as after the read timeout or when the connection failed. RETRY-AFTER is the number
+of seconds the service's Retry-After header asked the caller to wait, or NIL when it sent none or
+sent a date.
+
+It is a PROVIDER-REQUEST-FAILED, so a caller outside a turn handles it as before. Inside a turn
+the generate-image means turns it into a TOOL-ERROR-RESULT, so the model can tell the user to try
+again and the turn goes on. Praxeon does not retry the request."))
+
 (defun %refusal-text (provider code stage categories)
   (format nil "The ~A image provider refused to create this image under its content policy~@[ (code ~A)~]~@[ at the ~A stage~]~@[; categories: ~{~A~^, ~}~]. No image was made. Tell the user it was refused, and do not retry the same request."
           provider code stage categories))
@@ -117,15 +143,20 @@ GENERATE-IMAGE outside a turn handles it as any condition."))
   "SIZE as text for an event or a log: a keyword downcased, a string as is."
   (if (keywordp size) (string-downcase (symbol-name size)) size))
 
-(defun generate-image (provider prompt &key (size :auto) (quality :auto) (count 1))
+(defun generate-image (provider prompt &key (size :auto) (quality :auto) (count 1)
+                                            (id actor:*tool-call-id*)
+                                            (principal actor:*principal*) agent)
   "Generate COUNT images from PROMPT with PROVIDER. Returns a list of IMAGE-RESULTs.
 
 SIZE is :SQUARE, :PORTRAIT, :LANDSCAPE, :AUTO or a \"WIDTHxHEIGHT\" string; QUALITY is :LOW,
-:MEDIUM, :HIGH or :AUTO, or a string the provider accepts. Emits one :IMAGE-USAGE event for a
-request that succeeded. Signals IMAGE-REFUSED for a content-policy refusal and
-PROVIDER-REQUEST-FAILED for any other failure."
+:MEDIUM, :HIGH or :AUTO, or a string the provider accepts. COUNT is from 1 to 10, the range OpenAI's Image API accepts.
+Emits one :IMAGE-USAGE event for a request that succeeded, carrying ID, PRINCIPAL and AGENT
+(the agent's name) as a :TOOL-RESULT event does; ID and PRINCIPAL default to the running tool
+call's. Signals IMAGE-REFUSED for a content-policy refusal, IMAGE-REQUEST-FAILED when the
+service is busy, fails on its side or does not answer, and PROVIDER-REQUEST-FAILED for any other
+failure."
   (check-type prompt string)
-  (check-type count (integer 1))
+  (check-type count (integer 1 10))
   (let ((request (make-image-request :prompt prompt :size size :quality quality :count count))
         (name (image-provider-name provider))
         (model (image-model-of provider))
@@ -156,6 +187,7 @@ PROVIDER-REQUEST-FAILED for any other failure."
                                    :media-type (and results (image-result-media-type (first results)))
                                    :ms (ms))
         (apply #'evt:emit :image-usage
+               :id id :principal principal :agent agent
                :provider name :model model :count (length results)
                (append (list :size (or (getf reported :size) (%size-name size))
                              :quality (or (getf reported :quality) (%size-name quality)))
@@ -185,21 +217,29 @@ on 2026-12-01; OpenAI lists the 2.5 models as their replacements. upstream.sexp 
   "The error codes with which OpenAI's image API refuses a request under its content policy.
 gpt-image models send moderation_blocked; content_policy_violation is DALL-E's.")
 
+(defparameter *openai-images-read-timeout* 120
+  "Seconds to wait for OpenAI's reply before the request is IMAGE-REQUEST-FAILED with kind
+:NO-ANSWER. A high-quality image can take over a minute; inside a turn the user is waiting, so
+the wait is bounded. MAKE-OPENAI-IMAGES and REGISTER-OPENAI-IMAGE take :READ-TIMEOUT.")
+
 (defclass openai-images (image-provider)
   ((api-key :initarg :api-key :reader openai-images-api-key)
    (model :initarg :model :initform *openai-image-model* :reader image-model-of)
    (base-url :initarg :base-url :initform *openai-images-base-url* :reader openai-images-base-url)
-   (read-timeout :initarg :read-timeout :initform 300 :reader openai-images-read-timeout)
+   (read-timeout :initarg :read-timeout :initform *openai-images-read-timeout*
+                 :reader openai-images-read-timeout)
    (connect-timeout :initarg :connect-timeout :initform 30 :reader openai-images-connect-timeout))
   (:documentation "OpenAI's Image API, POST BASE-URL/images/generations, as an image provider.
-API-KEY is sent as a bearer token. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds: a
-high-quality image can take over a minute to arrive. A reply is read up to
-*MAX-BYTES-PER-IMAGE* for each image asked for; a longer one is PROVIDER-REQUEST-FAILED."))
+API-KEY is sent as a bearer token. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds; READ-TIMEOUT
+defaults to *OPENAI-IMAGES-READ-TIMEOUT*. A reply is read up to *MAX-BYTES-PER-IMAGE* for each
+image asked for; a longer one is PROVIDER-REQUEST-FAILED."))
 
-(defparameter *max-bytes-per-image* (* 64 1024 1024)
+(defparameter *max-bytes-per-image* (* 24 1024 1024)
   "The most bytes of reply read for each image requested. An image arrives as base64 inside JSON,
-so the reply is about a third larger than the file; 64 MB is far above the largest file the
-API's documented sizes produce, and stops a reply that never ends from filling the heap.")
+so the reply is about a third larger than the file. The largest documented size, 1536x1024, is
+6.3 MB at four bytes a pixel before any compression and about 8.4 MB as base64, so 24 MB is far
+above any image the API's documented sizes produce, and stops a reply that never ends from
+filling the heap.")
 
 (defmethod image-provider-name ((p openai-images)) "openai")
 
@@ -212,13 +252,20 @@ API's documented sizes produce, and stops a reply that never ends from filling t
 NIL when neither is set."
   (or (%getenv "PRAXEON_IMAGE_API_KEY") (%getenv "PRAXEON_OPENAI_API_KEY")))
 
-(defun make-openai-images (&key (api-key nil api-key-p) model base-url)
-  "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
-is read only when none is given (PRAXEON_IMAGE_API_KEY, then PRAXEON_OPENAI_API_KEY). MODEL
-defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*; BASE-URL to PRAXEON_IMAGE_BASE_URL,
-then *OPENAI-IMAGES-BASE-URL*. Signals MISSING-PROVIDER-KEY when there is no key, because every
-request would fail."
+(defun %key (api-key api-key-p)
+  "The key to use: API-KEY when given, otherwise the environment's. A given key that is NIL or
+the empty string is no key; it never falls back to the environment, because the app chose it."
   (let ((key (if api-key-p api-key (%env-key))))
+    (and (stringp key) (plusp (length key)) key)))
+
+(defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout)
+  "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
+is read only when none is given (PRAXEON_IMAGE_API_KEY, then PRAXEON_OPENAI_API_KEY). A given
+key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
+BASE-URL to PRAXEON_IMAGE_BASE_URL, then *OPENAI-IMAGES-BASE-URL*; READ-TIMEOUT, in seconds, to
+*OPENAI-IMAGES-READ-TIMEOUT*. Signals MISSING-PROVIDER-KEY when there is no key, because every
+request would fail."
+  (let ((key (%key api-key api-key-p)))
     (unless key
       (error 'cnd:missing-provider-key
              :impl "openai images"
@@ -229,13 +276,15 @@ request would fail."
                    :api-key key
                    :model (or model (%getenv "PRAXEON_IMAGE_MODEL") *openai-image-model*)
                    :base-url (or base-url (%getenv "PRAXEON_IMAGE_BASE_URL")
-                                 *openai-images-base-url*))))
+                                 *openai-images-base-url*)
+                   :read-timeout (or read-timeout *openai-images-read-timeout*))))
 
-(defun openai-images-from-env (&key (api-key nil api-key-p) model base-url)
+(defun openai-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout)
   "An OPENAI-IMAGES provider as MAKE-OPENAI-IMAGES builds it, or NIL when there is no key, so a
 caller can leave the means unregistered rather than register one that cannot work."
-  (let ((key (if api-key-p api-key (%env-key))))
-    (and key (make-openai-images :api-key key :model model :base-url base-url))))
+  (let ((key (%key api-key api-key-p)))
+    (and key (make-openai-images :api-key key :model model :base-url base-url
+                                 :read-timeout read-timeout))))
 
 (defun openai-image-request-body (provider request)
   "The JSON body, as a hash table, of the request for REQUEST. Separate from the POST so a test
@@ -286,8 +335,39 @@ never quotes the reply, which can repeat the request."
   (handler-case (jzon:parse text)
     (error () (error (%unexpected-reply (format nil "is not JSON (~D characters)" (length text)))))))
 
+(defun %retry-after-seconds (value)
+  "The Retry-After header VALUE as a whole number of seconds, or NIL when it is absent or is an
+HTTP date rather than a number of seconds."
+  (and (stringp value)
+       (let ((n (ignore-errors (parse-integer (string-trim " " value)))))
+         (and n (>= n 0) n))))
+
+(defun %failure-kind (e status)
+  "The IMAGE-REQUEST-FAILED kind for the HTTP-ERROR E with STATUS, or NIL when trying again
+later would not help, such as for a 400 or a reply over the size limit."
+  (cond ((eql status 429) :rate-limited)
+        ((and status (<= 500 status 599)) :server-error)
+        ((and (null status) (not (typep e 'http:response-too-large))) :no-answer)))
+
+(defun %request-failed (e retry-after)
+  "The condition to signal for the failed HTTP request E that is not a refusal: an
+IMAGE-REQUEST-FAILED when trying again later may help, otherwise PROVIDER-REQUEST-FAILED."
+  (let* ((failure (llm:request-failure "openai images" e))
+         (status (cnd:provider-request-failed-status failure))
+         (kind (%failure-kind e status)))
+    (if kind
+        (make-condition 'image-request-failed
+                        :kind kind :retry-after (%retry-after-seconds retry-after)
+                        :status status
+                        :error-type (cnd:provider-request-failed-error-type failure)
+                        :error-code (cnd:provider-request-failed-error-code failure)
+                        :body (cnd:provider-request-failed-body failure)
+                        :detail (cnd:praxeon-error-detail failure))
+        failure)))
+
 (defmethod image-post ((p openai-images) body)
-  (let ((url (concatenate 'string (openai-images-base-url p) "/images/generations")))
+  (let ((url (concatenate 'string (openai-images-base-url p) "/images/generations"))
+        (retry-after nil))
     (handler-case
         (%parse-reply
          (http:response-body
@@ -301,7 +381,14 @@ never quotes the reply, which can repeat the request."
                               :connect-timeout (openai-images-connect-timeout p)
                               :max-body-bytes (* *max-bytes-per-image*
                                                  (max 1 (or (gethash "n" body) 1))))
-           (list (http:ensure-2xx "openai images")))))
+           ;; Leave stages run last to first, so the header is read before ENSURE-2XX signals.
+           (list (http:ensure-2xx "openai images")
+                 (http:make-interceptor
+                  "retry-after"
+                  :leave (lambda (resp)
+                           (setf retry-after (http:header-value (http:response-headers resp)
+                                                                "retry-after"))
+                           resp))))))
       (http:http-error (e)
         (let ((failure (llm:request-failure "openai images" e)))
           (if (member (cnd:provider-request-failed-error-code failure) *refusal-codes*
@@ -312,7 +399,7 @@ never quotes the reply, which can repeat the request."
                   (error 'image-refused :provider "openai" :code code :stage stage
                                         :categories categories :outcome :error
                                         :text (%refusal-text "openai" code stage categories))))
-              (error failure)))))))
+              (error (%request-failed e retry-after))))))))
 
 (defun %media-type (format)
   (cond ((equal format "jpeg") "image/jpeg")
@@ -368,8 +455,17 @@ base64."
 (defparameter *description*
   "Create an image from a text description. Describe the image fully in the prompt: subject,
 style, composition, colours and any text it must contain. The image is delivered to the user;
-you are told only that it was made. Optionally choose a shape (square, portrait or landscape)
-and a quality (low, medium or high).")
+you are told only that it was made. Optionally choose a shape and a quality from the values the
+input schema lists.")
+
+(defparameter *sizes* '(:square :portrait :landscape :auto)
+  "The shapes the means can offer the model.")
+
+(defparameter *qualities* '(:low :medium :high :auto)
+  "The qualities the means can offer the model. REGISTER's :QUALITIES picks among them.")
+
+(defun %names (keywords)
+  (mapcar (lambda (k) (string-downcase (symbol-name k))) keywords))
 
 (defun %enum (values description)
   (let ((h (make-hash-table :test 'equal)))
@@ -378,30 +474,51 @@ and a quality (low, medium or high).")
           (gethash "description" h) description)
     h))
 
-(defun %schema ()
-  "The JSON input schema: a required PROMPT, and an optional SIZE and QUALITY."
+(defun %schema (qualities default-size default-quality)
+  "The JSON input schema: a required PROMPT, an optional SIZE, and an optional QUALITY offering
+only QUALITIES. Each description names the value used when the model gives none."
   (let ((prompt (make-hash-table :test 'equal))
         (props (make-hash-table :test 'equal))
         (schema (make-hash-table :test 'equal)))
     (setf (gethash "type" prompt) "string"
           (gethash "description" prompt) "A full description of the image to create.")
     (setf (gethash "prompt" props) prompt
-          (gethash "size" props) (%enum '("square" "portrait" "landscape" "auto")
-                                        "The image's shape. auto lets the provider choose.")
-          (gethash "quality" props) (%enum '("low" "medium" "high" "auto")
-                                           "Higher quality takes longer and costs more."))
+          (gethash "size" props)
+          (%enum (%names *sizes*)
+                 (format nil "The image's shape. auto lets the provider choose. Default: ~(~A~)."
+                         default-size))
+          (gethash "quality" props)
+          (%enum (%names qualities)
+                 (format nil "Higher quality takes longer and costs more. Default: ~(~A~)."
+                         default-quality)))
     (setf (gethash "type" schema) "object"
           (gethash "properties" schema) props
           (gethash "required" schema) (vector "prompt"))
     schema))
 
-(defun %keyword-arg (args name allowed)
-  "The argument NAME from the tool ARGS as a keyword in ALLOWED, or :AUTO when it is absent or
-not one of them."
+(defun %choice (args name allowed default)
+  "The argument NAME from the tool ARGS as a keyword in ALLOWED, or DEFAULT when it is absent.
+Any other value is refused with an error result naming the allowed values, before any request,
+so a quality the app did not allow is never sent."
   (let ((v (gethash name args)))
-    (or (and (stringp v)
-             (find v allowed :key #'symbol-name :test #'string-equal))
-        :auto)))
+    (if (null v)
+        default
+        (or (and (stringp v) (find v allowed :key #'symbol-name :test #'string-equal))
+            (error 'cnd:tool-error-result
+                   :outcome :not-run
+                   :text (format nil "generate-image: ~A must be one of ~{~A~^, ~}. No image was made."
+                                 name (%names allowed)))))))
+
+(defun %retry-text (c)
+  "What the model is told when the image request failed with the IMAGE-REQUEST-FAILED C."
+  (let ((wait (image-request-failed-retry-after c)))
+    (format nil "~A No image was made. ~:[Try again shortly~;Try again in about ~:*~D seconds~], and tell the user if it keeps failing."
+            (ecase (image-request-failed-kind c)
+              (:rate-limited "The image service is busy and refused the request for now (HTTP 429).")
+              (:server-error (format nil "The image service failed on its side (HTTP ~A)."
+                                     (cnd:provider-request-failed-status c)))
+              (:no-answer "The image service did not answer in time, or could not be reached."))
+            wait)))
 
 (defparameter *revised-prompt-chars* 400
   "The most characters of the provider's revised prompt the model is shown. The model wrote the
@@ -416,7 +533,8 @@ prompt, so it needs only enough to see what changed; the whole of it is in the I
             (if cut (subseq revised 0 *revised-prompt-chars*) revised)
             cut *revised-prompt-chars* (and revised (length revised)))))
 
-(defun register (agent provider &key on-image (name "generate-image") capability source)
+(defun register (agent provider &key on-image (name "generate-image") capability source
+                                     (qualities *qualities*) default-quality (default-size :auto))
   "Register the generate-image means on AGENT, generating with PROVIDER, an IMAGE-PROVIDER.
 Returns NAME.
 
@@ -425,10 +543,33 @@ a short string the model may see as a reference to it, such as an id, or NIL. Th
 the media type, the size in bytes, that reference and the revised prompt, never the bytes.
 CAPABILITY and SOURCE are as for ACTOR:REGISTER-MEANS.
 
+QUALITIES is the list of qualities the model may ask for, from :LOW, :MEDIUM, :HIGH and :AUTO,
+so an app can bound what an image costs: '(:LOW :MEDIUM) never sends :HIGH. The tool schema
+offers only these, and a call asking for any other is refused before a request is made.
+DEFAULT-QUALITY is used when the model names none; it must be in QUALITIES, and defaults to
+:AUTO when :AUTO is allowed and otherwise to the first of QUALITIES. DEFAULT-SIZE, one of
+:SQUARE, :PORTRAIT, :LANDSCAPE and :AUTO, is used when the model names no shape.
+
+When the service is busy, fails on its side or does not answer (IMAGE-REQUEST-FAILED), the
+model is told so in an error result and the turn goes on; the request is not retried.
+
 An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there is no key."
   (check-type provider image-provider)
   (unless (functionp on-image)
     (error "REGISTER needs :ON-IMAGE, a function that receives each generated image; without one the image would be made, paid for and lost."))
+  (unless (and qualities (listp qualities) (subsetp qualities *qualities*))
+    (error "REGISTER's :QUALITIES must be a non-empty list of ~{~S~^, ~}, not ~S." *qualities* qualities))
+  (let ((default-quality (or default-quality
+                             (if (member :auto qualities) :auto (first qualities)))))
+    (unless (member default-quality qualities)
+      (error "REGISTER's :DEFAULT-QUALITY ~S is not one of its :QUALITIES ~S." default-quality qualities))
+    (unless (member default-size *sizes*)
+      (error "REGISTER's :DEFAULT-SIZE must be one of ~{~S~^, ~}, not ~S." *sizes* default-size))
+    (%register agent provider on-image name capability source
+               qualities default-quality default-size)))
+
+(defun %register (agent provider on-image name capability source
+                  qualities default-quality default-size)
   (actor:register-means
    agent name *description*
    (lambda (args)
@@ -440,27 +581,49 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                                 prompt))))
          (error 'cnd:tool-error-result :outcome :not-run
                                        :text "generate-image needs a prompt describing the image."))
-     (let* ((results (generate-image provider prompt
-                                     :size (%keyword-arg args "size"
-                                                         '(:square :portrait :landscape :auto))
-                                     :quality (%keyword-arg args "quality"
-                                                            '(:low :medium :high :auto)))))
+     (let* ((size (%choice args "size" *sizes* default-size))
+            (quality (%choice args "quality" qualities default-quality))
+            (results
+              (handler-bind
+                  ((image-request-failed
+                     (lambda (c)
+                       ;; :UNKNOWN when the request may have reached the service and been
+                       ;; charged; a 429 was refused before any work was done.
+                       (error 'cnd:tool-error-result
+                              :outcome (if (eq :rate-limited (image-request-failed-kind c))
+                                           :not-run
+                                           :unknown)
+                              :text (%retry-text c)))))
+                (generate-image provider prompt :size size :quality quality
+                                                :agent (actor:agent-name agent)))))
        (format nil "~{~A~^~%~}"
                (mapcar (lambda (r) (%summary r (funcall on-image r))) results)))))
-   :schema (%schema) :capability capability :source source))
+   :schema (%schema qualities default-size default-quality)
+   :capability capability :source source))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
-                                         (name "generate-image") capability source)
+                                         read-timeout (name "generate-image") capability source
+                                         (qualities *qualities*) default-quality
+                                         (default-size :auto))
   "Register the generate-image means on AGENT with OpenAI's Image API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
 
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_IMAGE_API_KEY, then
-PRAXEON_OPENAI_API_KEY. ON-IMAGE is as for REGISTER. MODEL and BASE-URL are as for
-MAKE-OPENAI-IMAGES."
+PRAXEON_OPENAI_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
+empty string is logged at warn, because it usually means the app's key setting is blank.
+ON-IMAGE, QUALITIES, DEFAULT-QUALITY and DEFAULT-SIZE are as for REGISTER. MODEL, BASE-URL and
+READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."
+  (when (and api-key-p (equal api-key ""))
+    (log:warn "generate-image not registered: the :api-key given is the empty string"
+              :name name))
   (let ((provider (if api-key-p
-                      (openai-images-from-env :api-key api-key :model model :base-url base-url)
-                      (openai-images-from-env :model model :base-url base-url))))
+                      (openai-images-from-env :api-key api-key :model model :base-url base-url
+                                              :read-timeout read-timeout)
+                      (openai-images-from-env :model model :base-url base-url
+                                              :read-timeout read-timeout))))
     (and provider
          (register agent provider :on-image on-image :name name
-                                  :capability capability :source source))))
+                                  :capability capability :source source
+                                  :qualities qualities :default-quality default-quality
+                                  :default-size default-size))))

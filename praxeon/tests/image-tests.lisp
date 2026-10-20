@@ -238,28 +238,31 @@ for the prompt, the revised prompt and the image's base64. The log must still sh
 
 ;;; --- the means in a turn ------------------------------------------------------------------
 
-(defun %image-turn (reply on-image)
-  "Run a turn in which the model calls generate-image once and then answers, with REPLY served
-as the provider's answer. Returns the final text, the events, and the images ON-IMAGE received."
-  (let ((received '()))
+(defun %image-turn (reply on-image &key (call-args (list "prompt" "a red fox" "size" "landscape"))
+                                         register-args)
+  "Run a turn in which the model calls generate-image once, with CALL-ARGS, and then answers,
+with REPLY served as the provider's answer. REGISTER-ARGS go to REGISTER. Returns the final
+text, the events, the images ON-IMAGE received, and the requests the server received."
+  (let ((received '()) (value nil))
     (multiple-value-bind (port server) (%serve-replies (list reply))
-      (unwind-protect
-           (let ((ag (actor:make-agent
-                      :name "designer"
-                      :provider (make-instance
-                                 'scripted
-                                 :script (list (%call-completion "generate-image"
-                                                                 (%args "prompt" "a red fox"
-                                                                        "size" "landscape"))
-                                               (llm:make-completion :text "Here it is."
-                                                                    :stop-reason :end))))))
-             (praxeon/image:register ag (%image-provider port)
-                                     :on-image (lambda (r) (push r received)
-                                                 (funcall on-image r)))
-             (multiple-value-bind (text events)
-                 (%collecting-events (lambda () (actor:run-turn ag "draw a fox")))
-               (values text events (reverse received))))
-        (aion/test-threads:join server :timeout 10)))))
+      (let ((requests nil))
+        (unwind-protect
+             (let ((ag (actor:make-agent
+                        :name "designer"
+                        :provider (make-instance
+                                   'scripted
+                                   :script (list (%call-completion "generate-image"
+                                                                   (apply #'%args call-args))
+                                                 (llm:make-completion :text "Here it is."
+                                                                      :stop-reason :end))))))
+               (apply #'praxeon/image:register ag (%image-provider port)
+                      :on-image (lambda (r) (push r received)
+                                  (funcall on-image r))
+                      register-args)
+               (setf value (multiple-value-list
+                            (%collecting-events (lambda () (actor:run-turn ag "draw a fox"))))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (values (first value) (second value) (reverse received) requests)))))
 
 (test in-a-turn-the-app-gets-the-image-and-the-model-gets-a-summary
   (multiple-value-bind (text events received)
@@ -363,3 +366,215 @@ which praxeon handles, never an untyped error that ends the turn."
 (test the-default-model-is-the-current-gpt-image-model
   "gpt-image-1 shuts down on 2026-10-23. The default must not be a model OpenAI has retired."
   (is (equal "gpt-image-2.5-flare" praxeon/image:*openai-image-model*)))
+
+;;; --- the app bounds the cost (review of #775) ---------------------------------------------
+
+(defun %schema-enum (agent property)
+  (coerce (gethash "enum" (gethash property (gethash "properties"
+                                                     (actor::means-entry-schema
+                                                      (gethash "generate-image"
+                                                               (actor:agent-means agent))))))
+          'list))
+
+(test the-schema-offers-only-the-qualities-the-app-allows
+  (let ((ag (actor:make-agent :name "a" :provider (make-instance 'scripted :script '()))))
+    (praxeon/image:register ag (praxeon/image:make-openai-images :api-key "k")
+                            :on-image #'identity :qualities '(:low :medium)
+                            :default-quality :low :default-size :square)
+    (is (equal '("low" "medium") (%schema-enum ag "quality")))
+    (is (equal '("square" "portrait" "landscape" "auto") (%schema-enum ag "size")))))
+
+(test registering-a-default-quality-the-app-does-not-allow-is-refused
+  (let ((ag (actor:make-agent :name "a" :provider (make-instance 'scripted :script '())))
+        (p (praxeon/image:make-openai-images :api-key "k")))
+    (signals error (praxeon/image:register ag p :on-image #'identity :qualities '(:low)
+                                                :default-quality :high))
+    (signals error (praxeon/image:register ag p :on-image #'identity :qualities '(:ultra)))
+    (signals error (praxeon/image:register ag p :on-image #'identity :qualities '()))
+    (signals error (praxeon/image:register ag p :on-image #'identity :default-size :huge))
+    (is (zerop (hash-table-count (actor:agent-means ag))) "nothing was registered")))
+
+(test a-quality-the-app-does-not-allow-is-refused-before-any-request
+  "No server is started: the provider points at a closed port, so a request would end the turn
+with a failure to connect rather than the :NOT-RUN result asserted here."
+  (let ((ag (actor:make-agent
+             :name "designer"
+             :provider (make-instance 'scripted
+                                      :script (list (%call-completion
+                                                     "generate-image"
+                                                     (%args "prompt" "a fox" "quality" "high"))
+                                                    (llm:make-completion :text "Sorry."
+                                                                         :stop-reason :end)))))
+        (calls 0))
+    (praxeon/image:register ag (praxeon/image:make-openai-images
+                                :api-key "k" :base-url "http://127.0.0.1:9/v1")
+                            :on-image (lambda (r) (declare (ignore r)) (incf calls) nil)
+                            :qualities '(:low :medium))
+    (multiple-value-bind (text events)
+        (%collecting-events (lambda () (actor:run-turn ag "draw a fox")))
+      (is (equal "Sorry." text) "the turn goes on")
+      (is (zerop calls))
+      (let ((result (find :tool-result events :key #'evt:event-type)))
+        (is (and result (getf result :is-error)))
+        (is (and result (eq :not-run (getf result :outcome))))
+        (is (and result (search "low, medium" (getf result :content)))
+            "the model is told the allowed values: ~S" result))
+      (is-false (find :image-usage events :key #'evt:event-type)))))
+
+(test with-no-quality-named-the-app-default-is-sent
+  (multiple-value-bind (text events received requests)
+      (%image-turn (%image-reply) (constantly nil)
+                   :call-args (list "prompt" "a fox")
+                   :register-args (list :qualities '(:low :medium) :default-quality :low
+                                        :default-size :portrait))
+    (declare (ignore text events received))
+    (let ((body (jzon:parse (third (first requests)))))
+      (is (equal "low" (gethash "quality" body)))
+      (is (equal "1024x1536" (gethash "size" body))))))
+
+;;; --- a busy, failing or silent service keeps the turn alive -------------------------------
+
+(defparameter +image-rate-limited+
+  (list "429 Too Many Requests"
+        "{\"error\":{\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}"
+        '(("Retry-After" . "30"))))
+
+(test a-429-is-image-request-failed-with-the-retry-after-seconds
+  (let ((c (%with-image-server (list +image-rate-limited+)
+                               (lambda (p)
+                                 (handler-case (progn (praxeon/image:generate-image p "x") nil)
+                                   (praxeon/image:image-request-failed (c) c))))))
+    (is-true c "no IMAGE-REQUEST-FAILED was signalled")
+    (when c
+      (is (typep c 'cnd:provider-request-failed) "a caller that handled the old condition still does")
+      (is (eq :rate-limited (praxeon/image:image-request-failed-kind c)))
+      (is (eql 30 (praxeon/image:image-request-failed-retry-after c)))
+      (is (eql 429 (cnd:provider-request-failed-status c))))))
+
+(test a-5xx-is-image-request-failed-of-kind-server-error
+  (let ((c (%with-image-server
+            (list (cons "503 Service Unavailable" "{\"error\":{\"type\":\"server_error\"}}"))
+            (lambda (p)
+              (handler-case (progn (praxeon/image:generate-image p "x") nil)
+                (praxeon/image:image-request-failed (c) c))))))
+    (is-true c)
+    (when c
+      (is (eq :server-error (praxeon/image:image-request-failed-kind c)))
+      (is (null (praxeon/image:image-request-failed-retry-after c))))))
+
+(test a-400-that-is-not-a-refusal-is-not-image-request-failed
+  "Trying again later would not fix a bad request, so it stays a plain PROVIDER-REQUEST-FAILED
+and still ends the turn."
+  (let ((c (%with-image-server
+            (list (cons "400 Bad Request"
+                        "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"invalid_value\"}}"))
+            (lambda (p)
+              (handler-case (progn (praxeon/image:generate-image p "x") nil)
+                (cnd:provider-request-failed (c) c))))))
+    (is (typep c 'cnd:provider-request-failed))
+    (is-false (typep c 'praxeon/image:image-request-failed))))
+
+(test in-a-turn-a-429-is-an-error-result-that-names-the-wait
+  (multiple-value-bind (text events received) (%image-turn +image-rate-limited+ (constantly nil))
+    (is (equal "Here it is." text) "the turn goes on after a 429")
+    (is (null received))
+    (let ((result (find :tool-result events :key #'evt:event-type)))
+      (is-true result)
+      (when result
+        (is (getf result :is-error))
+        (is (eq :not-run (getf result :outcome)) "a 429 did no work")
+        (is (search "busy" (getf result :content)) "~A" (getf result :content))
+        (is (search "about 30 seconds" (getf result :content)) "~A" (getf result :content))))
+    (is-false (find :image-usage events :key #'evt:event-type))))
+
+(defun %serve-silence (seconds)
+  "Listen on 127.0.0.1 at a free port, accept one connection, and hold it for SECONDS without
+answering. Returns the port and the thread."
+  (let ((listener (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address listener) t)
+    (sb-bsd-sockets:socket-bind listener #(127 0 0 1) 0)
+    (sb-bsd-sockets:socket-listen listener 1)
+    (values
+     (nth-value 1 (sb-bsd-sockets:socket-name listener))
+     (sb-thread:make-thread
+      (lambda ()
+        (unwind-protect
+             (let ((socket (sb-bsd-sockets:socket-accept listener)))
+               (sleep seconds)
+               (sb-bsd-sockets:socket-close socket)
+               :held)
+          (sb-bsd-sockets:socket-close listener)))
+      :name "praxeon-tests image silence"))))
+
+(test a-service-that-does-not-answer-in-the-read-timeout-keeps-the-turn-alive
+  "The server accepts and never answers. With a read timeout of 1 second the request must fail
+well before the server lets go after 9, so the elapsed time shows the timeout was what ended it."
+  (multiple-value-bind (port server) (%serve-silence 9)
+    (let* ((ag (actor:make-agent
+                :name "designer"
+                :provider (make-instance 'scripted
+                                         :script (list (%call-completion "generate-image"
+                                                                         (%args "prompt" "a fox"))
+                                                       (llm:make-completion :text "Here it is."
+                                                                            :stop-reason :end)))))
+           (start (get-internal-real-time)))
+      (unwind-protect
+           (progn
+             (praxeon/image:register ag (praxeon/image:make-openai-images
+                                         :api-key "k" :read-timeout 1
+                                         :base-url (format nil "http://127.0.0.1:~D/v1" port))
+                                     :on-image #'identity)
+             (multiple-value-bind (text events)
+                 (%collecting-events (lambda () (actor:run-turn ag "draw a fox")))
+               (let ((seconds (/ (- (get-internal-real-time) start)
+                                 internal-time-units-per-second))
+                     (result (find :tool-result events :key #'evt:event-type)))
+                 (is (equal "Here it is." text) "the turn goes on after a timeout")
+                 (is (< seconds 7) "the request took ~,1F seconds; the read timeout did not end it"
+                     seconds)
+                 (is (and result (getf result :is-error)))
+                 (is (and result (eq :unknown (getf result :outcome)))
+                     "the request may have reached the service: ~S" result)
+                 (is (and result (search "did not answer" (getf result :content)))))))
+        (aion/test-threads:join server :timeout 15)))))
+
+;;; --- bounds -------------------------------------------------------------------------------
+
+(test count-is-bounded-to-one-through-ten
+  (let ((p (praxeon/image:make-openai-images :api-key "k" :base-url "http://127.0.0.1:9/v1")))
+    (signals type-error (praxeon/image:generate-image p "x" :count 0))
+    (signals type-error (praxeon/image:generate-image p "x" :count 11))))
+
+(test a-reply-is-read-up-to-24-mb-per-image
+  (is (= (* 24 1024 1024) praxeon/image:*max-bytes-per-image*)))
+
+(test the-read-timeout-defaults-to-120-seconds-and-can-be-set
+  (is (= 120 (praxeon/image::openai-images-read-timeout
+              (praxeon/image:make-openai-images :api-key "k"))))
+  (is (= 7 (praxeon/image::openai-images-read-timeout
+            (praxeon/image:make-openai-images :api-key "k" :read-timeout 7)))))
+
+;;; --- usage names the call, the principal and the agent ------------------------------------
+
+(test in-a-turn-image-usage-carries-the-call-id-and-the-agent
+  (multiple-value-bind (text events) (%image-turn (%image-reply) (constantly nil))
+    (declare (ignore text))
+    (let ((usage (find :image-usage events :key #'evt:event-type))
+          (result (find :tool-result events :key #'evt:event-type)))
+      (is-true usage)
+      (when (and usage result)
+        (is (equal "c1" (getf usage :id)))
+        (is (equal (getf result :id) (getf usage :id)) "the same id as the call's :tool-result")
+        (is (equal "designer" (getf usage :agent)))
+        (is (member :principal usage) "a :principal key, as on :tool-result: ~S" usage)))))
+
+;;; --- an empty key is no key ---------------------------------------------------------------
+
+(test an-empty-api-key-is-no-key
+  (with-emb-env (("PRAXEON_IMAGE_API_KEY" "from-the-environment"))
+    (signals cnd:missing-provider-key (praxeon/image:make-openai-images :api-key ""))
+    (is (null (praxeon/image:openai-images-from-env :api-key "")))
+    (let ((ag (actor:make-agent :name "a" :provider (make-instance 'scripted :script '()))))
+      (is (null (praxeon/image:register-openai-image ag :api-key "" :on-image #'identity)))
+      (is (zerop (hash-table-count (actor:agent-means ag)))
+          "an empty key does not fall back to the environment's"))))
