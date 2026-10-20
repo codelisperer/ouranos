@@ -452,6 +452,13 @@ its tag.
 
 ### Added
 
+- **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
+  (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
+  invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
+  `-date`) from the bot's `my_chat_member` updates. By default it leaves the updates pending;
+  `:confirm t` confirms them. A bot with a webhook gets the new condition
+  `telegram-webhook-active`. The dev transport returns no chats.
+
 - **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
   `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
   `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or

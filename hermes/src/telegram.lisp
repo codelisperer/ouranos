@@ -103,6 +103,7 @@ plain DELIVERY-FAILURE. A DESCRIPTION that is not a string is treated as absent.
       (cond ((eql status 429) 'delivery-rate-limited)
             ((eql status 403) 'telegram-chat-unreachable)
             ((and (eql status 400) (has "chat not found")) 'telegram-chat-unreachable)
+            ((and (eql status 409) (has "webhook")) 'telegram-webhook-active)
             ((and (eql status 400)
                   (or (has "not enough rights") (has "need administrator rights")
                       (has "have no rights") (has "chat_write_forbidden")
@@ -294,5 +295,66 @@ the condition carries the new chat id, which the app needs to store in place of 
                         (or (gethash "permissions" info) (%obj "can_send_messages" t))
                         member))
     (telegram-chat-unreachable () :not-member)))
+
+(defstruct (telegram-added-chat (:constructor %make-telegram-added-chat
+                                    (id type title status date)))
+  "A chat the bot was added to or removed from, from a my_chat_member update (#794). ID is the
+numeric chat id to send to. TYPE is :GROUP, :SUPERGROUP, :CHANNEL or :PRIVATE. TITLE is the
+group's or channel's title, or NIL. STATUS is the bot's membership after the change: :CREATOR,
+:ADMINISTRATOR, :MEMBER, :RESTRICTED, :LEFT or :KICKED. DATE is when it changed, in Unix seconds."
+  id type title status date)
+
+(defun %telegram-keyword (text choices)
+  "The keyword in CHOICES whose lowercase name is TEXT, or NIL."
+  (find-if (lambda (k) (equal text (string-downcase (symbol-name k)))) choices))
+
+(defun %telegram-updates (result)
+  "The Update objects in getUpdates' RESULT, a JSON array, as a list."
+  (and (vectorp result) (not (stringp result))
+       (remove-if-not #'hash-table-p (coerce result 'list))))
+
+(defun %added-chats (updates)
+  "One TELEGRAM-ADDED-CHAT for each chat in the my_chat_member UPDATES, from its latest update,
+oldest first. Other kinds of update are ignored."
+  (let ((latest (make-hash-table)) (order '()))
+    (dolist (u updates)
+      (let* ((m (gethash "my_chat_member" u))
+             (chat (and (hash-table-p m) (gethash "chat" m)))
+             (id (and (hash-table-p chat) (gethash "id" chat)))
+             (member (and (hash-table-p m) (gethash "new_chat_member" m))))
+        (when (integerp id)
+          (setf order (cons id (remove id order))
+                (gethash id latest)
+                (%make-telegram-added-chat
+                 id
+                 (%telegram-keyword (gethash "type" chat) '(:group :supergroup :channel :private))
+                 (let ((title (gethash "title" chat))) (and (stringp title) title))
+                 (%telegram-keyword (and (hash-table-p member) (gethash "status" member))
+                                    '(:creator :administrator :member :restricted :left :kicked))
+                 (let ((date (gethash "date" m))) (and (integerp date) date)))))))
+    (mapcar (lambda (id) (gethash id latest)) (reverse order))))
+
+(defparameter +telegram-updates-page+ 100
+  "The most updates getUpdates returns in one call, Telegram's default and maximum limit.")
+
+(defmethod telegram-added-chats ((p telegram) &key confirm)
+  ;; No allowed_updates is sent: Telegram stores it for the bot and applies it to every later
+  ;; getUpdates and webhook delivery, so passing it here would change what other readers get.
+  (if (not confirm)
+      (%added-chats (%telegram-updates (%telegram-call p "getUpdates" (%obj))))
+      ;; An offset confirms every update below it. Read a page, move the offset past it, and
+      ;; stop after a short page with one more call that only confirms; the update that call
+      ;; may return is left pending.
+      (let ((all '()) (offset nil))
+        (loop
+          (let* ((page (%telegram-updates
+                        (%telegram-call p "getUpdates" (if offset (%obj "offset" offset) (%obj)))))
+                 (ids (remove-if-not #'integerp
+                                     (mapcar (lambda (u) (gethash "update_id" u)) page))))
+            (setf all (append all page))
+            (when ids (setf offset (1+ (reduce #'max ids))))
+            (when (< (length page) +telegram-updates-page+)
+              (when ids (%telegram-call p "getUpdates" (%obj "offset" offset "limit" 1)))
+              (return (%added-chats all))))))))
 
 (register-impl :telegram "telegram" (lambda () (make-telegram)))

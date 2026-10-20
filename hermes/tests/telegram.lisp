@@ -431,6 +431,69 @@ CL:ERROR), and return the log text."
       (is (typep c 'h:telegram-chat-migrated))
       (is (eql -1009876543210 (and c (h:telegram-chat-migrated-migrate-to-chat-id c)))))))
 
+;;; --- the chats the bot was added to (#794) --------------------------------
+
+(defun %member-update (update-id chat-id type title status date)
+  "A getUpdates entry for a my_chat_member update, the way Telegram sends one."
+  (format nil "{\"update_id\":~D,\"my_chat_member\":{\"chat\":{\"id\":~D,\"type\":~S,\"title\":~S},\"from\":{\"id\":1,\"is_bot\":false,\"first_name\":\"Op\"},\"date\":~D,\"old_chat_member\":{\"user\":{\"id\":777,\"is_bot\":true,\"first_name\":\"Bot\"},\"status\":\"left\"},\"new_chat_member\":{\"user\":{\"id\":777,\"is_bot\":true,\"first_name\":\"Bot\"},\"status\":~S}}}"
+          update-id chat-id type title date status))
+
+(defun %updates-json (&rest entries)
+  (%bot-ok (format nil "[~{~A~^,~}]" entries)))
+
+(test the-chats-the-bot-was-added-to-are-read-from-its-updates-without-confirming-them
+  (with-bot (s p (%always 200
+                          (%updates-json
+                           (%member-update 10 -1001 "supergroup" "Ops room" "member" 1760000000)
+                           "{\"update_id\":11,\"message\":{\"message_id\":5,\"date\":1760000001,\"chat\":{\"id\":-1001,\"type\":\"supergroup\"},\"text\":\"hello\"}}"
+                           (%member-update 12 -1002 "channel" "Announcements" "administrator" 1760000002)
+                           (%member-update 13 -1001 "supergroup" "Ops room" "administrator" 1760000003))))
+    (let ((chats (h:telegram-added-chats p))
+          (requests (%requests s)))
+      (is (equal '(-1002 -1001) (mapcar #'h:telegram-added-chat-id chats))
+          "one entry per chat, ordered by its latest change; the message update is ignored")
+      (is (equal '(:channel :supergroup) (mapcar #'h:telegram-added-chat-type chats)))
+      (is (equal '("Announcements" "Ops room") (mapcar #'h:telegram-added-chat-title chats)))
+      (is (equal '(:administrator :administrator) (mapcar #'h:telegram-added-chat-status chats))
+          "the group's entry is from its later update")
+      (is (equal '(1760000002 1760000003) (mapcar #'h:telegram-added-chat-date chats)))
+      (is (= 1 (length requests)))
+      (is (search "/getUpdates" (aion/test-http:request-path (first requests))))
+      (let ((json (%request-json (first requests))))
+        (is (null (nth-value 1 (gethash "offset" json))) "no offset, so nothing is confirmed")
+        (is (null (nth-value 1 (gethash "allowed_updates" json)))
+            "no allowed_updates, which Telegram would store for the bot")))))
+
+(test confirming-reads-every-page-and-then-confirms-the-last-update
+  (with-bot (s p (lambda (method request stream)
+                   (declare (ignore method))
+                   (let ((offset (gethash "offset" (%request-json request))))
+                     (%bot-reply stream 200
+                                 (if offset
+                                     (%updates-json)
+                                     (%updates-json
+                                      (%member-update 20 -1003 "group" "Night shift" "member" 1760000010)
+                                      (%member-update 21 -1004 "group" "Day shift" "kicked" 1760000011)))))))
+    (let ((chats (h:telegram-added-chats p :confirm t))
+          (requests (%requests s)))
+      (is (equal '(-1003 -1004) (mapcar #'h:telegram-added-chat-id chats)))
+      (is (equal '(:member :kicked) (mapcar #'h:telegram-added-chat-status chats)))
+      (is (= 2 (length requests)) "one page, then one call that only confirms")
+      (is (eql 22 (gethash "offset" (%request-json (second requests))))
+          "the offset is one past the last update read"))))
+
+(test a-bot-with-a-webhook-cannot-list-its-chats-and-its-webhook-is-left-alone
+  (with-bot (s p (%always 409 (%bot-error 409 "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first")))
+    (let ((c (handler-case (progn (h:telegram-added-chats p) nil)
+               (h:delivery-failure (c) c))))
+      (is (eq 'h:telegram-webhook-active (type-of c)))
+      (is (%no-token-p c))
+      (is (every (lambda (r) (search "/getUpdates" (aion/test-http:request-path r))) (%requests s))
+          "no deleteWebhook, or any other method"))))
+
+(test the-dev-transport-was-added-to-no-chats
+  (is (null (h:telegram-added-chats (h:make-dev-transport :stream (make-broadcast-stream))))))
+
 ;;; --- escaping -------------------------------------------------------------
 
 (test markdown-v2-escaping-puts-a-backslash-before-every-special-character

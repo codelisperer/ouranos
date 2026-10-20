@@ -68,6 +68,12 @@ there, for example a channel where the bot is not an administrator with the righ
 a new chat id. MIGRATE-TO-CHAT-ID is that id; send to it instead, and store it in place of the
 old one (#778)."))
 
+(define-condition telegram-webhook-active (delivery-failure)
+  ()
+  (:documentation "Telegram refused getUpdates because the bot has a webhook set; the two cannot
+be used together (#794). TELEGRAM-ADDED-CHATS signals it. The bot's updates, my_chat_member
+included, then arrive at the webhook instead. hermes never deletes a webhook."))
+
 (define-condition unsupported-message (hermes-error)
   ((provider :initarg :provider :reader unsupported-message-provider)
    (message :initarg :message :reader unsupported-message-message))
