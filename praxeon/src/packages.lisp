@@ -54,7 +54,7 @@
    #:provider-request-failed #:provider-request-failed-status
    #:provider-request-failed-error-type #:provider-request-failed-error-code
    #:provider-request-failed-body
-   #:unknown-tool-choice #:unknown-tool-choice-value
+   #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text
@@ -189,7 +189,9 @@
    #:*default-model* #:*default-max-tokens*
    #:*connect-timeout* #:*read-timeout*
    ;; environment-driven provider selection
-   #:make-provider-from-env #:register-provider-impl #:env-setting))
+   #:make-provider-from-env #:register-provider-impl #:env-setting
+   ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
+   #:request-failure))
 
 (defpackage #:praxeon/distil
   (:use #:cl)

@@ -134,6 +134,16 @@
  :upstream (:manual "https://developers.openai.com/api/docs/models")
  :reviewed "2026-10-17")
 
+(:name "OpenAI default image model" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-image-model* \"" "\""))
+ :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
+ :reviewed "2026-10-18")
+
+(:name "OpenAI Image API version" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-images-base-url* \"https://api.openai.com/" "\""))
+ :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
+ :reviewed "2026-10-18")
+
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")
@@ -143,6 +153,11 @@
  :where ((:text "hermes/src/sendgrid.lisp" "https://api.sendgrid.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/sendgrid/api-reference")
  :reviewed "2026-10-17")
+
+(:name "Telegram Bot API" :category :api
+ :where ((:text "hermes/src/telegram.lisp" "(defparameter +telegram-bot-api-version+ \"" "\""))
+ :upstream (:manual "https://core.telegram.org/bots/api-changelog")
+ :reviewed "2026-10-18")
 
 (:name "Stripe API version" :category :api
  :where ((:text "hermes/src/payments/stripe.lisp" "(defparameter +stripe-api-version+ \"" "\""))
