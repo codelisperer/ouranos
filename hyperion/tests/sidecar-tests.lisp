@@ -485,7 +485,9 @@ grandchild. On Linux the parent-death signal ends the sidecar; its grandchild is
       (%kill-pid sidecar)
       (%kill-pid grandchild)
       (ignore-errors (delete-file log))
-      (ignore-errors (delete-file pids))))))
+      (ignore-errors (delete-file pids))
+      ;; Left behind when the image dies between writing the pids and renaming the file.
+      (ignore-errors (delete-file (make-pathname :type "partial" :defaults pids)))))))
 
 #-win32
 (test the-next-start-ends-a-sidecar-left-by-a-dead-image
