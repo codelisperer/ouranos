@@ -71,7 +71,8 @@ administrator allowed to post in a channel.
   counted after it has parsed the markup out, so it refuses a longer message with a
   `delivery-failure`.
 - **`(hermes:telegram-can-post provider chat)`** answers `:yes`, `:not-member` or
-  `:not-permitted`, for a settings screen.
+  `:not-permitted`, for a settings screen. For a group that became a supergroup it signals
+  `telegram-chat-migrated` instead of answering, so the app can store the new chat id.
 - `HERMES_TELEGRAM_IMPL` picks the backend (default `telegram`); `HERMES_TRANSPORT=dev` renders
   Telegram messages instead of sending them, like email and SMS.
 

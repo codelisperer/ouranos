@@ -47,7 +47,9 @@ missing, and DELIVERY-FAILURE when the provider refuses (#778)."))
 (defgeneric telegram-can-post (provider chat)
   (:documentation "Whether the bot behind PROVIDER can post to CHAT (an integer chat id or an
 \"@username\"), for an admin screen: :YES, :NOT-MEMBER (the bot is not in the chat, or cannot
-see it), or :NOT-PERMITTED (it is in the chat but may not post there) (#778)."))
+see it), or :NOT-PERMITTED (it is in the chat but may not post there) (#778). A group that became
+a supergroup is not answered: the Telegram backend signals TELEGRAM-CHAT-MIGRATED, whose
+TELEGRAM-CHAT-MIGRATED-MIGRATE-TO-CHAT-ID is the chat id to store instead (#788)."))
 
 (defmethod edit-sent-message ((p provider) result text &key parse-mode link-preview part)
   "Default: the provider cannot edit a sent message."

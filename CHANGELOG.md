@@ -1318,6 +1318,21 @@ its tag.
 
 ### Fixed
 
+- **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
+  - A refusal whose `description` is not a string is reported with its class and the response
+    body as detail. Before, it signalled a `type-error`.
+  - `make-telegram-message` refuses an `@username` that ends with an underscore, as Telegram
+    does.
+  - `telegram-can-post` signals `telegram-chat-migrated` for a group that became a supergroup,
+    as before; that is now documented and tested.
+  - An error raised during the request whose report cannot be printed still arrives as a
+    `delivery-failure`, whose detail names the error's type.
+  - A serious condition that is not an error, such as a timeout, is signalled again unchanged
+    after the request is unwound. Before, it propagated with the request, and so the token in
+    its URL, in live frames, which hyperion's dev server prints for any serious condition.
+  - The dev transport edits and deletes a result from the real Telegram backend instead of
+    refusing it with `unsupported-message`.
+
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the
   `unknown-tool-choice` detail does; it was the internal `%value-shape`.

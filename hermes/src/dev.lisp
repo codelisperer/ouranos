@@ -72,8 +72,12 @@ its attachments included (#366). DEV-LAST-TELEGRAM is the last TELEGRAM-MESSAGE 
 (defun %dev-telegram-ref (p result)
   "Check RESULT the way the Telegram backend would: UNSUPPORTED-MESSAGE for a result that is not
 of a Telegram message (an email or SMS result, which the SendGrid and Twilio backends cannot
-edit either), and INVALID-MESSAGE for one without a destination or id."
-  (unless (and (delivery-result-p result) (telegram-message-p (delivery-result-raw result)))
+edit either), and INVALID-MESSAGE for one without a destination or id. A result from the real
+Telegram backend is accepted too: its raw value is Telegram's Message object, not the
+TELEGRAM-MESSAGE sent, so it is recognised by its provider."
+  (unless (and (delivery-result-p result)
+               (or (telegram-message-p (delivery-result-raw result))
+                   (eq :telegram (delivery-result-provider result))))
     (error 'unsupported-message :provider (class-name (class-of p)) :message result))
   (unless (and (delivery-result-destination result) (delivery-result-id result))
     (error 'invalid-message
