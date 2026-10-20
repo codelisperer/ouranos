@@ -474,14 +474,17 @@ not looking further keeps decoding linear in a string with many `&' and no `;'."
 
 (defun %numeric-reference (name)
   "The character the numeric reference NAME stands for (NAME is the text between `&' and `;',
-starting with `#'), or NIL. Only `#' and decimal digits, or `#x' and hex digits, with no sign
-and no space, and only a code point XML allows: not 0, not a surrogate (D800-DFFF), which has no
-UTF-8 encoding, and not beyond the last code point (#813)."
-  (let* ((hex (and (>= (length name) 2) (char-equal #\x (char name 1))))
+starting with `#'), or NIL. Only `#' and ASCII decimal digits, or `#x' (a lowercase x, as XML
+requires) and ASCII hex digits, with no sign and no space, and only a code point XML allows:
+not 0, not a surrogate (D800-DFFF), which has no UTF-8 encoding, and not beyond the last code
+point (#813)."
+  (let* ((hex (and (>= (length name) 2) (char= #\x (char name 1))))
          (radix (if hex 16 10))
          (digits (subseq name (if hex 2 1))))
+    ;; ASCII digits only: on SBCL DIGIT-CHAR-P and PARSE-INTEGER also accept other Unicode
+    ;; decimal digits, such as Arabic-Indic ones, which XML does not.
     (when (and (plusp (length digits))
-               (every (lambda (c) (digit-char-p c radix)) digits))
+               (every (lambda (c) (find c (if hex "0123456789abcdefABCDEF" "0123456789"))) digits))
       (let ((code (parse-integer digits :radix radix)))
         (when (and (< 0 code char-code-limit) (not (<= #xD800 code #xDFFF)))
           (code-char code))))))

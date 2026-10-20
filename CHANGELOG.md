@@ -1387,8 +1387,9 @@ its tag.
   `&#34;...&#34;`. Completing an upload with those ETags fails with 400, so resuming a multipart
   upload on MinIO did not work (#813). The reader now decodes numeric references (`&#34;`,
   `&#x22;`) in one pass, so an escaped reference such as `&amp;#34;` is decoded once, to
-  `&#34;`. Only exact references are decoded: no sign, space or trailing characters, and not 0
-  or a surrogate code point, which XML does not allow. Anything else is kept as written, so a
+  `&#34;`. Only exact references are decoded: ASCII digits only, a lowercase `x` for hex, no
+  sign, space or trailing characters, and not 0 or a surrogate code point, which XML does not
+  allow. Anything else is kept as written, so a
   key that holds such text is listed as it is.
 
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a

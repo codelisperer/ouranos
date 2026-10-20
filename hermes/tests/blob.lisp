@@ -1916,7 +1916,7 @@ GET-BLOB and PUT-BLOB, and a move deletes nothing."
   "MinIO writes an ETag's quotes as &#34; (measured on MinIO 2025-04-22). Read without decoding
 it, a part's ETag is not the ETag, and completing the upload fails with 400."
   (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
-  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#X22;")))
+  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#x22;")))
   (is (string= "<>\"'&" (b::%xml-decode "&lt;&gt;&quot;&apos;&amp;")))
   (is (string= "&#34;" (b::%xml-decode "&amp;#34;"))
       "one pass: an escaped reference is decoded once")
@@ -1928,13 +1928,24 @@ it, a part's ETag is not the ETag, and completing the upload fails with 400."
   "Only `#' and decimal digits, or `#x' and hex digits, between `&' and `;'. A sign, a space,
 trailing junk, or no `;' near enough keeps the text as written, so a key that holds such text is
 listed as it is (#813). Each case sits beside the control it differs from."
-  (dolist (pair '(("&#34;" . "\"")
+  (dolist (pair `(("&#34;" . "\"")
                   ("&#-1;" . "&#-1;") ("&#x-1;" . "&#x-1;") ("&#+34;" . "&#+34;")
                   ("&# 34;" . "&# 34;")
                   ("&#34abc;" . "&#34abc;") ("&#x22zz;" . "&#x22zz;")
                   ("&#34 abc; tail" . "&#34 abc; tail")
-                  ("&#;" . "&#;") ("&#x;" . "&#x;")))
+                  ("&#;" . "&#;") ("&#x;" . "&#x;")
+                  ("&#x22;" . "\"") ("&#X22;" . "&#X22;") ("&#xAB;" . ,(string (code-char #xAB)))))
     (is (string= (cdr pair) (b::%xml-decode (car pair))) "~S" (car pair))))
+
+(test s3-xml-decode-reads-only-ascii-digits
+  "On SBCL DIGIT-CHAR-P and PARSE-INTEGER accept any Unicode decimal digit, so Arabic-Indic or
+fullwidth digits for 3 and 4 would read as 34, a quote (#813). XML allows only ASCII digits, so
+such text is kept as written. The ASCII form beside it is the control."
+  (let ((arabic (format nil "&#~C~C;" (code-char #x0663) (code-char #x0664)))
+        (fullwidth (format nil "&#~C~C;" (code-char #xFF13) (code-char #xFF14))))
+    (is (string= arabic (b::%xml-decode arabic)))
+    (is (string= fullwidth (b::%xml-decode fullwidth)))
+    (is (string= "\"" (b::%xml-decode "&#34;")) "the control")))
 
 (test s3-xml-decode-keeps-code-points-xml-does-not-allow
   "0 and the surrogates D800-DFFF are kept as written: XML allows neither, a surrogate has no
