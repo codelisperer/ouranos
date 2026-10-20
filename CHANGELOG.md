@@ -526,6 +526,19 @@ its tag.
   release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
   a release never ships without a way to install the WebView2 runtime.
 
+- **praxeon/image: `:image-usage` carries an estimated `:cost` for OpenAI's image models, from a
+  pinned price table** (#758, part two). OpenAI reports token counts and no cost, so for a model
+  in `praxeon/image:*openai-image-prices*` the event's `:cost` is computed from the reported
+  tokens and OpenAI's published per-million-token prices, in US dollars as an exact rational,
+  with `:estimated t`. `image-result-cost` is each image's share and
+  `image-result-cost-estimated-p` is true. `praxeon/image:openai-image-cost` computes the same
+  figure. The table covers `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1.5`,
+  `gpt-image-1-mini`, `gpt-image-1` and `chatgpt-image-latest`, and `upstream.sexp` records the
+  date each row was read from OpenAI's pricing page ("OpenAI image prices: MODEL"). Where praxeon
+  approximates (cached input, a token count the reply does not split), it uses the higher rate.
+  For a model not in the table `:cost` is still absent.
+  An app that kept its own per-image price list can compare it with this one.
+
 - **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
   image protocol, with OpenAI's Image API as its first provider** (#758). Load
   `praxeon/image` and call `praxeon/image:register-openai-image` with `:on-image`, a function that
