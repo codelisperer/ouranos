@@ -2938,7 +2938,8 @@ including the two optional breakdowns.")
 (defun %answer-one-request (listener reply)
   "Accept one connection on LISTENER within 10 seconds, read its request, and answer with REPLY
 as JSON, with status 200; or, when REPLY is a cons (STATUS-LINE . TEXT), answer TEXT with that
-status, such as \"400 Bad Request\" (#719). Returns the request line, the headers as an alist
+status, such as \"400 Bad Request\" (#719); or, when REPLY is a list (STATUS-LINE TEXT HEADERS),
+also send HEADERS, an alist of names and values (#758). Returns the request line, the headers as an alist
 with lowercased names, and the body."
   (let* ((socket (loop with deadline = (+ (get-universal-time) 10)
                        for s = (sb-bsd-sockets:socket-accept listener)
@@ -2961,10 +2962,17 @@ with lowercased names, and the body."
                                              "0")))
                   (body (make-string length)))
              (read-sequence body stream)
-             (let ((status (if (consp reply) (car reply) "200 OK"))
-                   (text (if (consp reply) (cdr reply) reply)))
-               (format stream "HTTP/1.1 ~A~C~CContent-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
-                       status #\Return #\Newline #\Return #\Newline
+             ;; A REPLY of (STATUS-LINE TEXT HEADERS) also sends HEADERS, an alist (#758).
+             (let* ((extra (and (consp reply) (consp (cdr reply)) (third reply)))
+                    (status (if (consp reply) (car reply) "200 OK"))
+                    (text (cond ((not (consp reply)) reply)
+                                ((consp (cdr reply)) (second reply))
+                                (t (cdr reply)))))
+               (format stream "HTTP/1.1 ~A~C~C" status #\Return #\Newline)
+               (loop for (name . value) in extra
+                     do (format stream "~A: ~A~C~C" name value #\Return #\Newline))
+               (format stream "Content-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+                       #\Return #\Newline
                        (length (sb-ext:string-to-octets text :external-format :utf-8))
                        #\Return #\Newline #\Return #\Newline #\Return #\Newline text))
              (finish-output stream)
@@ -4126,12 +4134,22 @@ handler that logs a failed request. The forced tool's name stays in the REQUESTE
       (is (null (search +727-marker+ logged)) "nothing logged holds it: ~A" logged))))
 
 (test an-unknown-tool-choice-is-described-by-its-kind-and-length
-  (flet ((shape (v) (praxeon/conditions::%value-shape v)))
+  (flet ((shape (v) (praxeon/conditions:value-shape v)))
     (is (equal "a string of 5 characters" (shape "hello")))
     (is (equal "a keyword of 8 characters" (shape :required)))
     (is (equal "a symbol of 3 characters" (shape 'cl:car)))
     (is (equal "a list that is not proper" (shape '(a . b))))
     (is (equal "a value of class FIXNUM" (shape 3)))))
+
+(test a-provider-without-response-format-names-the-tool-spec-it-was-asked-for
+  "COMPLETE-WITH-SCHEMA's default refusal names the tool spec, which is the app developer's own
+identifier and the detail that says which call reached a provider without response_format."
+  (let* ((name "summarise-ticket")
+         (spec (llm:make-tool-spec :name name :description "d"))
+         (c (handler-case (progn (llm:complete-with-schema (make-instance 'llm:provider) '() spec) nil)
+              (cnd:deliberation-failure (c) c))))
+    (is (typep c 'cnd:deliberation-failure))
+    (is (search "\"summarise-ticket\"" (princ-to-string c)) "~A" c)))
 
 (test an-error-type-or-code-outside-the-identifier-characters-is-not-taken-as-one
   "A proxy between praxeon and the service can answer with its own error JSON, so a type or
