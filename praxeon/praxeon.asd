@@ -311,6 +311,7 @@
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
+               "log4cl"               ; the #807 test puts the log's setup back after capturing it
                "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
                "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection

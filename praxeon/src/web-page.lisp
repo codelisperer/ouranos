@@ -96,7 +96,7 @@ or NIL. TEXT is its readable text."
    (reason :initarg :reason :reader web-page-unreadable-reason))
   (:documentation "The page could not be read (#757). REASON is a keyword: :INVALID-URL,
 :NOT-PUBLIC, :UNRESOLVABLE, :TOO-LARGE, :TOO-MANY-REDIRECTS, :STATUS, :NOT-TEXT, :EMPTY,
-:UNAVAILABLE or :PROVIDER. It is a TOOL-ERROR-RESULT, so inside a turn the model is told why and
+:TIMEOUT, :UNAVAILABLE or :PROVIDER. It is a TOOL-ERROR-RESULT, so inside a turn the model is told why and
 the turn goes on. Its text names the URL and the reason, and holds no page content."))
 
 (defun %unreadable (url reason explanation &key (outcome :error))
@@ -197,12 +197,14 @@ document, without scripts, styles, navigation, headers, footers, asides and form
 (defclass public-fetch (page-reader)
   ((connect-timeout :initarg :connect-timeout :initform 10 :reader %connect-timeout)
    (read-timeout :initarg :read-timeout :initform 15 :reader %read-timeout)
+   (deadline :initarg :deadline :initform 30 :reader %fetch-deadline)
    (max-bytes :initarg :max-bytes :initform *max-page-bytes* :reader %max-bytes)
    (resolve :initarg :resolve :initform #'http:resolve-host :reader %resolve)
    (address-policy :initarg :address-policy :initform #'http:address-category
                    :reader %address-policy))
   (:documentation "Reads a page from this machine with aion/http-client's FETCH-PUBLIC and
-extracts its text here. CONNECT-TIMEOUT and READ-TIMEOUT are seconds, for each hop. RESOLVE and
+extracts its text here. CONNECT-TIMEOUT and READ-TIMEOUT are seconds, for each hop. DEADLINE is
+seconds for the whole read, redirects included (#807). RESOLVE and
 ADDRESS-POLICY are FETCH-PUBLIC's, for tests."))
 
 (defun make-public-fetch (&rest initargs)
@@ -215,6 +217,61 @@ ADDRESS-POLICY are FETCH-PUBLIC's, for tests."))
     (and (stringp v)
          (string-downcase (string-trim " " (subseq v 0 (or (position #\; v) (length v))))))))
 
+(defun %charset-in (text)
+  "The charset named by the first charset= in TEXT, lowercased, or NIL."
+  (let ((at (search "charset=" text :test #'char-equal)))
+    (when at
+      (let* ((start (+ at (length "charset=")))
+             (start (if (and (< start (length text)) (member (char text start) '(#\" #\')))
+                        (1+ start) start))
+             (end (or (position-if-not (lambda (ch) (or (alphanumericp ch) (find ch "-_.:")))
+                                       text :start start)
+                      (length text))))
+        (and (< start end) (string-downcase (subseq text start end)))))))
+
+(defun %external-format (charset)
+  "The SBCL external format for CHARSET, or :UTF-8 when there is none or SBCL does not know it.
+Latin-1 and ASCII labels are read as windows-1252, as browsers do: pages labelled Latin-1 are
+usually windows-1252, and it decodes Latin-1 text the same way. Only existing keywords are
+looked up, so a page cannot make this intern a symbol."
+  (cond ((null charset) :utf-8)
+        ((member charset '("iso-8859-1" "iso8859-1" "latin1" "latin-1" "l1" "us-ascii" "ascii"
+                           "cp819" "iso_8859-1")
+                 :test #'string=)
+         :cp1252)
+        (t (let ((k (and (<= (length charset) 32) (find-symbol (string-upcase charset) :keyword))))
+             (if (and k (ignore-errors (sb-ext:octets-to-string
+                                        (make-array 0 :element-type '(unsigned-byte 8))
+                                        :external-format k)))
+                 k
+                 :utf-8)))))
+
+(defun %head-text (bytes)
+  "The first 1024 bytes of BYTES as Latin-1 text, for looking for a <meta charset>."
+  (sb-ext:octets-to-string bytes :end (min 1024 (length bytes)) :external-format :latin-1))
+
+(defun %decode (bytes headers html-p)
+  "BYTES as a string, in the charset Content-Type names, else, for HTML, the charset a <meta>
+in the first 1024 bytes names, else UTF-8 (#807). A byte the charset cannot decode becomes
+U+FFFD."
+  (let ((charset (or (let ((v (http:header-value headers "content-type")))
+                       (and (stringp v) (%charset-in v)))
+                     (and html-p (%charset-in (%head-text bytes))))))
+    (sb-ext:octets-to-string bytes :external-format (list (%external-format charset)
+                                                          :replacement #\Replacement_Character))))
+
+(defun %sniffed-type (bytes)
+  "For a response with no Content-Type: \"text/html\" or \"text/plain\" when its first 1024
+bytes have no NUL or other control byte apart from whitespace, else NIL."
+  (let ((end (min 1024 (length bytes))))
+    (when (and (plusp end)
+               (loop for i below end
+                     for b = (aref bytes i)
+                     never (or (< b 9) (< 13 b 27) (< 27 b 32))))
+      (let ((head (string-left-trim '(#\Space #\Tab #\Newline #\Return #\Page)
+                                    (%head-text bytes))))
+        (if (and (plusp (length head)) (char= #\< (char head 0))) "text/html" "text/plain")))))
+
 (defmethod read-page ((r public-fetch) url)
   (multiple-value-bind (response final-url)
       (handler-case
@@ -222,12 +279,22 @@ ADDRESS-POLICY are FETCH-PUBLIC's, for tests."))
                                  :max-body-bytes (%max-bytes r)
                                  :connect-timeout (%connect-timeout r)
                                  :read-timeout (%read-timeout r)
+                                 :deadline (%fetch-deadline r)
                                  :resolve (%resolve r)
                                  :address-policy (%address-policy r))
         (http:fetch-refused (c)
-          (if (eq :unresolvable (http:fetch-refused-reason c))
-              (%unreadable url :unresolvable "a host it redirects to does not resolve.")
-              (%unreadable url :not-public "it redirects to a private, loopback, link-local or other internal address, which is not read.")))
+          (case (http:fetch-refused-reason c)
+            (:unresolvable
+             (%unreadable url :unresolvable "a host it redirects to does not resolve."))
+            ((:scheme :no-host)
+             (%unreadable url :invalid-url "it redirects to a URL that is not an http or https URL with a host, which is not read."))
+            (t
+             (%unreadable url :not-public "it redirects to a private, loopback, link-local or other internal address, which is not read."))))
+        (http:fetch-deadline-exceeded ()
+          (%unreadable url :timeout
+                       (format nil "the site did not send the whole page within ~D seconds."
+                               (%fetch-deadline r))
+                       :outcome :unknown))
         (http:too-many-redirects ()
           (%unreadable url :too-many-redirects "it redirects too many times."))
         (http:response-too-large ()
@@ -236,17 +303,19 @@ ADDRESS-POLICY are FETCH-PUBLIC's, for tests."))
         (cl:error ()
           (%unreadable url :unavailable "the site did not answer, or the connection failed."
                        :outcome :unknown)))
-    (let ((status (http:response-status response))
-          (type (%media-type (http:response-headers response))))
+    (let* ((status (http:response-status response))
+           (headers (http:response-headers response))
+           (bytes (http:response-bytes response))
+           (type (or (%media-type headers) (%sniffed-type bytes))))
       (unless (<= 200 status 299)
         (%unreadable url :status (format nil "the site answered with HTTP status ~D." status)))
       (cond ((member type '("text/html" "application/xhtml+xml") :test #'equal)
-             (multiple-value-bind (text title) (html-text (http:response-body response))
+             (multiple-value-bind (text title) (html-text (%decode bytes headers t))
                (make-page :url final-url :title title :text text)))
             ((equal type "text/plain")
-             (make-page :url final-url :text (%tidy (http:response-body response))))
+             (make-page :url final-url :text (%tidy (%decode bytes headers nil))))
             (t (%unreadable url :not-text
-                            (format nil "it is ~:[of no stated type~;~:*~A~], and only HTML and plain text are read."
+                            (format nil "it is ~:[of no stated type and not text~;~:*~A~], and only HTML and plain text are read."
                                     type)))))))
 
 ;;; --- TAVILY-EXTRACT -----------------------------------------------------------------------

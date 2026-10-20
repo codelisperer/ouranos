@@ -472,6 +472,11 @@ its tag.
   - A failure is the condition `web-page-unreadable`, a `tool-error-result`, so the turn goes
     on.
   - `status-line` turns the means' `:tool-call` event into "Reading example.com…".
+  - When fetched, a page is decoded in the charset its `Content-Type` names, or, for HTML, the
+    charset a `<meta>` in its first 1024 bytes names, else UTF-8. A response with no
+    `Content-Type` is read when it is text. The whole read has a 30-second deadline
+    (`make-public-fetch`'s `:deadline`), reported as the reason `:timeout`. A redirect to a
+    URL that is not http or https is reported as `:invalid-url` (#807).
 - **praxeon: `praxeon/source:quote-source`** wraps outside text, such as a fetched page or a
   retrieved document, between markers carrying a random nonce, after a sentence saying it is
   quoted material and not instructions (#757). `read-web-page` uses it, and
@@ -479,6 +484,14 @@ its tag.
 - **aion/http-client: `fetch-public` returns the URL of the last hop as a second value**
   (#757). After a redirect this differs from the URL it was given. A caller that uses only
   the first value is unaffected.
+- **aion/http-client: `fetch-public` takes `:deadline`, seconds for the whole fetch over every
+  hop** (#807). When it passes, the socket in use is shut down and `fetch-public` signals the
+  new condition `fetch-deadline-exceeded` (a subtype of `http-error`; readers
+  `fetch-deadline-exceeded-url` and `-deadline`), so a server that sends a byte now and then
+  can no longer hold the caller for as long as it likes. It covers the TLS handshake, the
+  request, the headers and the body, but not resolving the host name or opening the TCP
+  connection, which are checked when they return. The default, `nil`, sets no deadline, so
+  existing callers are unchanged.
 
 - **hermes/blob: an S3 store can sign `x-amz-acl: private` into upload URLs, for a bucket that
   honours ACLs** (#796). `make-s3-store` takes `:upload-acl`, `:none` (the default) or `:private`,

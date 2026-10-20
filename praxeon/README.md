@@ -167,8 +167,11 @@ gets back the page's main text, its title and the URL it was read from after red
   internal address is refused before any request. `fetch-public` checks every redirect
   again. For Tavily the check runs here too, so an internal URL is never sent to Tavily.
 - **Limits.** `fetch-public` reads at most 2 MiB (`*max-page-bytes*`) and follows at most 5
-  redirects, with a 10-second connect timeout and a 15-second read timeout on each hop. Only
-  HTML, XHTML and plain text are read. The model is given at most 12000 characters
+  redirects, with a 10-second connect timeout and a 15-second read timeout on each hop, and a
+  30-second deadline for the whole read (`make-public-fetch`'s `:deadline`). Only HTML, XHTML
+  and plain text are read; a response with no `Content-Type` is read when it is text. A page is
+  decoded in the charset its `Content-Type` names, or, for HTML, the charset a `<meta>` in its
+  first 1024 bytes names, else UTF-8. The model is given at most 12000 characters
   (`*budget*`, or `register`'s `:budget`), followed by a line saying how many were left out.
 - **Quoted source.** The text reaches the model through `praxeon/source:quote-source`. It is
   placed between `<<<SOURCE n>>>` and `<<<END SOURCE n>>>`, where `n` is a random nonce, after a
@@ -179,7 +182,7 @@ gets back the page's main text, its title and the URL it was read from after red
 - **Failures** are `web-page-unreadable`, a `tool-error-result`, so the model is told why the
   page could not be read and the turn goes on. The reasons are `:invalid-url`, `:not-public`,
   `:unresolvable`, `:too-large`, `:too-many-redirects`, `:status`, `:not-text`, `:empty`,
-  `:unavailable` and `:provider`.
+  `:timeout`, `:unavailable` and `:provider`.
 
 **A one-line status.** Every means call emits `:tool-call` and `:tool-result` events through
 `praxeon/event`. `status-line` turns the `read-web-page` call into a status for the user. It shows the
