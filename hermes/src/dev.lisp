@@ -107,6 +107,11 @@ TELEGRAM-MESSAGE sent, so it is recognised by its provider."
   (declare (ignore chat))
   :yes)
 
+(defmethod telegram-added-chats ((p dev-transport) &key confirm)
+  "The dev transport has no bot, so it was added to no chats."
+  (declare (ignore confirm))
+  '())
+
 (register-impl :email "dev" (lambda () (make-dev-transport)))
 (register-impl :sms   "dev" (lambda () (make-dev-transport)))
 (register-impl :telegram "dev" (lambda () (make-dev-transport)))
