@@ -16,9 +16,12 @@ its tag.
 
 - **hermes/blob: `put-blob` refuses metadata named `sha256`, and malformed metadata, with the new
   condition `blob-invalid-metadata`** (#810). `sha256`, in any case, is reserved for the checksum
-  the S3 store now records. A name must be a non-empty string without a colon or a control
-  character, a value a string without a control character, because both go into request headers
-  on S3. `blob-invalid-metadata-name` names the offending entry. The check runs on every store,
+  the S3 store now records. Names and values become request headers on S3, so a name must be a
+  non-empty HTTP header token (ASCII letters, digits and ``!#$%&'*+-.^_`|~``), a value must be
+  printable ASCII, and two names that differ only in case are refused, because they would be
+  the same header. S3 expects a non-ASCII value RFC 2047-encoded; hermes does not encode, so
+  encode one yourself or keep it in your own row. `blob-invalid-metadata-name` names the
+  offending entry. The check runs on every store,
   so an app that passed `("sha256" . ...)` in `:metadata` to keep its own checksum must rename
   that entry; the store's own checksum is in `blob-meta-checksum`.
 
@@ -1360,7 +1363,8 @@ its tag.
   `blob-meta-checksum` is read from. Before, it was sent only as the payload hash, so
   `blob-metadata` returned NIL for the checksum of every blob on S3; `put-blob`'s own return value
   was always right. Objects stored before this change, and objects a client uploaded directly
-  through `upload-url`, still report NIL.
+  through `upload-url` or through a multipart upload started with `start-multipart-upload`, still
+  report NIL, because their bytes never pass through hermes.
 
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the

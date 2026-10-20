@@ -1562,5 +1562,28 @@ on S3. The refusal is in PUT-BLOB's :BEFORE method, so the filesystem store refu
          (is (equal "owner" (metadata-refusal store (list (cons "owner" (format nil "1~C~CX-Evil: 2" #\Return #\Linefeed))))))
          (is (eq :no-name (metadata-refusal store '(("owner" . 42)))))
          (is (eq :no-name (metadata-refusal store '("owner"))))
+         (is (equal "my owner" (metadata-refusal store '(("my owner" . "x")))) "a space is not a header token")
+         (is (equal (format nil "propri~Ctaire" (code-char 233))
+                    (metadata-refusal store (list (cons (format nil "propri~Ctaire" (code-char 233)) "x")))))
+         (is (equal "owner" (metadata-refusal store (list (cons "owner" (format nil "Ren~C" (code-char 233))))))
+             "a non-ASCII value")
+         (is (equal "owner" (metadata-refusal store '(("Owner" . "1") ("owner" . "2"))))
+             "two names that differ only in case are one header")
          (is (null (metadata-refusal store '(("owner" . "42") ("sha256-of-thumbnail" . "x"))))
-             "the control: ordinary names, and one that only starts with sha256, are accepted"))))))
+             "the control: ordinary names, and one that only starts with sha256, are accepted")
+         (is (null (metadata-refusal store '(("x-thumb.v2_a~b" . "A value, with spaces & symbols!"))))
+             "every token character in a name, and any printable ASCII in a value"))))))
+
+(test s3-blob-metadata-without-a-stored-checksum-reports-nil
+  "An object stored before #810, or uploaded directly by a client, has no x-amz-meta-sha256.
+BLOB-METADATA reports NIL for its checksum rather than signalling."
+  (let ((headers (make-hash-table :test #'equal)))
+    (setf (gethash "content-length" headers) "5" (gethash "content-type" headers) "text/plain")
+    (let ((original (fdefinition 'b::%s3-request)))
+      (unwind-protect
+           (progn (setf (fdefinition 'b::%s3-request)
+                        (lambda (&rest args) (declare (ignore args)) (values "" 200 headers)))
+                  (let ((meta (b:blob-metadata (test-s3-store) "media" "old.txt")))
+                    (is (null (b:blob-meta-checksum meta)))
+                    (is (= 5 (b:blob-meta-size meta)) "the rest of the metadata is still read")))
+        (setf (fdefinition 'b::%s3-request) original)))))
