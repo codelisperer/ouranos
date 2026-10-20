@@ -457,7 +457,10 @@ its tag.
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
   `-date`) from the bot's `my_chat_member` updates. By default it leaves the updates pending;
   `:confirm t` confirms them. A bot with a webhook gets the new condition
-  `telegram-webhook-active`. The dev transport returns no chats.
+  `telegram-webhook-active`. The dev transport returns no chats. With `:confirm t`, a full page
+  of updates that carries no `update_id` ends the read instead of being asked for again (#805).
+  The README says what happens when the app's own `getUpdates` poll runs at the same time, and
+  when the bot's stored `allowed_updates` leaves out `my_chat_member`.
 
 - **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
   `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or

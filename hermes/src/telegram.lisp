@@ -183,6 +183,9 @@ anything is signalled (see this file's header)."
                  ;; again unchanged, but only after this HANDLER-CASE has unwound the request's
                  ;; frames: hyperion's dev server prints a backtrace for any SERIOUS-CONDITION.
                  ;; Signalled again with ERROR, an interrupt loses its CONTINUE restart.
+                 ;; Its report is NOT redacted. None of the conditions SBCL signals here
+                 ;; (timeouts, storage and stack exhaustion, interrupts) prints the request URL
+                 ;; today; a change that adds one that does has to redact it first.
                  (serious-condition (c)
                    (error c))))
          (json (%parse-object (response-body resp))))
@@ -350,11 +353,18 @@ oldest first. Other kinds of update are ignored."
           (let* ((page (%telegram-updates
                         (%telegram-call p "getUpdates" (if offset (%obj "offset" offset) (%obj)))))
                  (ids (remove-if-not #'integerp
-                                     (mapcar (lambda (u) (gethash "update_id" u)) page))))
+                                     (mapcar (lambda (u) (gethash "update_id" u)) page)))
+                 (next (and ids (1+ (reduce #'max ids)))))
             (setf all (append all page))
-            (when ids (setf offset (1+ (reduce #'max ids))))
-            (when (< (length page) +telegram-updates-page+)
-              (when ids (%telegram-call p "getUpdates" (%obj "offset" offset "limit" 1)))
-              (return (%added-chats all))))))))
+            (cond
+              ;; A page with no integer update_id, or none past the offset already sent, cannot
+              ;; move the offset, so asking again would return the same page forever. Stop with
+              ;; what was read; this page's updates stay pending.
+              ((or (null next) (and offset (<= next offset)))
+               (return (%added-chats all)))
+              ((< (length page) +telegram-updates-page+)
+               (%telegram-call p "getUpdates" (%obj "offset" next "limit" 1))
+               (return (%added-chats all)))
+              (t (setf offset next))))))))
 
 (register-impl :telegram "telegram" (lambda () (make-telegram)))
