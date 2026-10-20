@@ -481,6 +481,15 @@ its tag.
   `:channel` like `hermes: sending`; neither carries a message's text or recipient. Core
   `hermes` now loads `aion/secret`. upstream.sexp records Bot API 10.3.
 
+- **hermes/blob: multipart uploads for files over 5 GB and for resuming a dropped upload** (#770).
+  `start-multipart-upload` returns an upload id, `multipart-part-url` returns an `upload-target`
+  for one part (part number and upload id signed, the size signed when given),
+  `complete-multipart-upload` joins the parts from a list of `(part-number . etag)`,
+  `abort-multipart-upload` frees them, and `list-multipart-parts` lists what has arrived, for
+  resuming. A complete that S3 answers with an `<Error>` in a 200 signals `blob-backend-error`.
+  `blob-upload-refused` gains the reasons `:bad-part-number`, `:bad-upload-id` and `:bad-parts`.
+  The filesystem store signals `blob-unsupported`. `put-bucket-cors` takes `:expose-headers`;
+  a browser completing a multipart upload needs `'("ETag")` there to read each part's ETag.
 - **hermes/blob: `put-bucket-cors` sets the CORS rule a browser upload needs, and
   `check-bucket-cors` says why one would be blocked** (#770).
   `(put-bucket-cors store bucket :origins '("https://app.example.com"))` allows `PUT` with
