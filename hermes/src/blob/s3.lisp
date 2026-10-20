@@ -375,17 +375,20 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
 
 (defmethod read-blob-range ((s s3-store) bucket key &key (start 0) (length 512))
   (if (zerop length)
-      (make-array 0 :element-type '(unsigned-byte 8))
+      ;; No range asks for zero bytes, so ask whether the blob exists instead: a missing key
+      ;; signals BLOB-NOT-FOUND here as it does on every other store (#796).
+      (if (blob-exists-p s bucket key)
+          (make-array 0 :element-type '(unsigned-byte 8))
+          (error 'blob-not-found :bucket bucket :key key))
       (handler-case
           (multiple-value-bind (body status)
-              (%s3-request s bucket key :get
+              (%s3-request s bucket key :get :want-stream t
                            :extra-headers (list (cons "range" (format nil "bytes=~D-~D" start (+ start length -1)))))
-            ;; 206 is the range; 200 means the store ignored Range and sent the whole object,
-            ;; so cut it down here rather than hand back more than was asked for.
-            (let ((octets (coerce body '(simple-array (unsigned-byte 8) (*)))))
-              (if (= status 206)
-                  octets
-                  (subseq octets (min start (length octets)) (min (+ start length) (length octets))))))
+            ;; 206 is the range. 200 means the store, or a proxy in front of it, ignored Range
+            ;; and is sending the whole object, so skip to START and read only LENGTH bytes;
+            ;; closing the stream then drops the rest unread (#796).
+            (unwind-protect (%read-range body (if (= status 206) 0 start) length)
+              (close body)))
         (blob-backend-error (e)
           ;; 416: START is at or past the end, including any START on an empty object.
           (if (eql 416 (blob-backend-error-status e))

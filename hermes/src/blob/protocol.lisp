@@ -287,8 +287,13 @@ passes through."
     (error 'blob-upload-refused :bucket bucket :key key :reason :bad-upload-id)))
 
 (defmethod start-multipart-upload :before ((s store) bucket key &key content-type)
-  (declare (ignore content-type))
-  (%check-key bucket key))
+  (%check-key bucket key)
+  ;; The same check as UPLOAD-URL's: the content type goes into a request header (#796).
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-type)))
 
 (defmethod multipart-part-url :before ((s store) bucket key upload-id part-number &key expires-in content-length)
   (%check-key bucket key)
@@ -368,18 +373,23 @@ bug at the call site. Prefer this."
   (error 'blob-unsupported :bucket bucket :key key
                            :operation "presigned uploads (proxy the upload through put-blob)"))
 
+(defun %read-range (in start length)
+  "At most LENGTH octets of the octet input stream IN, from byte START. Skips START bytes in
+bounded chunks and then reads only LENGTH, so a long stream is never held in memory."
+  (let ((skip (make-array (min start +copy-buffer-size+) :element-type '(unsigned-byte 8)))
+        (remaining start))
+    (loop while (plusp remaining)
+          do (let ((n (read-sequence skip in :end (min remaining (length skip)))))
+               (when (zerop n) (return))
+               (decf remaining n)))
+    (let ((buffer (make-array length :element-type '(unsigned-byte 8))))
+      ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
+      (subseq buffer 0 (read-sequence buffer in)))))
+
 (defmethod read-blob-range ((s store) bucket key &key (start 0) (length 512))
-  ;; Reads through GET-BLOB: skips START bytes in bounded chunks, then reads at most LENGTH.
+  ;; Reads through GET-BLOB.
   (with-blob-stream (in s bucket key)
-    (let ((skip (make-array (min start +copy-buffer-size+) :element-type '(unsigned-byte 8)))
-          (remaining start))
-      (loop while (plusp remaining)
-            do (let ((n (read-sequence skip in :end (min remaining (length skip)))))
-                 (when (zerop n) (return))
-                 (decf remaining n)))
-      (let ((buffer (make-array length :element-type '(unsigned-byte 8))))
-        ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
-        (subseq buffer 0 (read-sequence buffer in))))))
+    (%read-range in start length)))
 
 ;;; --- the registry + environment selection ----------------------------------
 ;;;
