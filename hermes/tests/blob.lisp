@@ -1000,3 +1000,94 @@ to send is the trimmed value, so the client sends exactly what was signed."
   (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
                               :expires-in 900 :content-type "  video/mp4 ")))
     (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))))
+
+;;; === 11. bucket CORS for browser uploads (#770) ===============================
+
+(test s3-base64-matches-rfc-4648-vectors
+  "RFC 4648 section 10's test vectors, and the MD5 of nothing as S3's Content-MD5 sees it."
+  (loop for (in out) in '(("" "") ("f" "Zg==") ("fo" "Zm8=") ("foo" "Zm9v") ("foob" "Zm9vYg==")
+                          ("fooba" "Zm9vYmE=") ("foobar" "Zm9vYmFy"))
+        do (is (string= out (b::%base64 (octets in))) "~S" in))
+  (is (string= "1B2M2Y8AsgTpgAmY7PhCfg==" (b::%base64 (ironclad:digest-sequence :md5 (octets ""))))))
+
+(test s3-cors-document-is-one-escaped-rule
+  (is (string= "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedOrigin>https://a&amp;b.example</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>Content-Type</AllowedHeader><MaxAgeSeconds>3000</MaxAgeSeconds></CORSRule></CORSConfiguration>"
+               (b::%cors-xml '("https://app.example.com" "https://a&b.example") '("PUT") '("Content-Type") 3000))))
+
+(defun call-with-recorded-s3 (answer fn)
+  "Call FN with %S3-REQUEST recording each call's arguments and answering ANSWER (a body, or
+:NOT-FOUND to signal BLOB-NOT-FOUND). Returns (values result calls)."
+  (let ((original (fdefinition 'b::%s3-request))
+        (calls '()))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'b::%s3-request)
+                 (lambda (store bucket key method &rest args)
+                   (declare (ignore store))
+                   (push (list* :bucket bucket :key key :method method args) calls)
+                   (if (eq answer :not-found)
+                       (error 'b:blob-not-found :bucket bucket :key key)
+                       (values answer 200 (make-hash-table :test #'equal)))))
+           (values (funcall fn) (nreverse calls)))
+      (setf (fdefinition 'b::%s3-request) original))))
+
+(test s3-put-bucket-cors-sends-the-rule-with-its-content-md5
+  (multiple-value-bind (result calls)
+      (call-with-recorded-s3 "" (lambda () (b:put-bucket-cors (test-s3-store) "media" :origins '("https://app.example.com"))))
+    (is (eq t result))
+    (is (= 1 (length calls)))
+    (let* ((call (first calls))
+           (body (getf call :content)))
+      (is (eq :put (getf call :method)))
+      (is (null (getf call :key)) "a bucket-level request")
+      (is (string= "cors=" (getf call :query)))
+      (is (string= "application/xml" (getf call :content-type)))
+      (is (string= (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type") 3000)
+                   (sb-ext:octets-to-string body :external-format :utf-8)))
+      (is (string= (b::%base64 (ironclad:digest-sequence :md5 body))
+                   (cdr (assoc "content-md5" (getf call :extra-headers) :test #'string=)))
+          "Content-MD5 is the body's, which PutBucketCors requires"))))
+
+(test s3-cors-wildcards-match-as-s3-does
+  (is (b::%wildcard-match-p "https://app.example.com" "https://app.example.com"))
+  (is (not (b::%wildcard-match-p "https://app.example.com" "https://evil.example.com")))
+  (is (b::%wildcard-match-p "*" "https://anything.example"))
+  (is (b::%wildcard-match-p "https://*.example.com" "https://app.example.com"))
+  (is (not (b::%wildcard-match-p "https://*.example.com" "https://example.org")))
+  (is (not (b::%wildcard-match-p "https://*.example.com" "http://app.example.com")))
+  (is (b::%wildcard-match-p "content-type" "Content-Type" :case-insensitive t))
+  (is (not (b::%wildcard-match-p "content-type" "Content-Type"))))
+
+(test s3-cors-verdict-names-the-first-test-no-rule-passes
+  (let ((rule '(:origins ("https://app.example.com") :methods ("PUT") :headers ("Content-Type"))))
+    (is (eq :allowed (b::%cors-verdict (list rule) "https://app.example.com" "PUT" '("Content-Type"))))
+    (is (eq :allowed (b::%cors-verdict (list rule) "https://app.example.com" "PUT" '("content-type")))
+        "header names are compared without case")
+    (is (eq :no-cors-configuration (b::%cors-verdict '() "https://app.example.com" "PUT" '("Content-Type"))))
+    (is (eq :origin-not-allowed (b::%cors-verdict (list rule) "https://other.example" "PUT" '("Content-Type"))))
+    (is (eq :method-not-allowed (b::%cors-verdict (list rule) "https://app.example.com" "POST" '("Content-Type"))))
+    (is (eq :header-not-allowed (b::%cors-verdict (list rule) "https://app.example.com" "PUT" '("Content-Type" "X-Extra"))))
+    (is (eq :allowed (b::%cors-verdict (list '(:origins ("*") :methods ("GET")) rule)
+                                       "https://app.example.com" "PUT" '("Content-Type")))
+        "any one rule that passes every test is enough")))
+
+(test s3-check-bucket-cors-reads-the-bucket-rules
+  (let ((xml "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>*</AllowedHeader></CORSRule></CORSConfiguration>"))
+    (multiple-value-bind (verdict calls)
+        (call-with-recorded-s3 (octets xml) (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://app.example.com")))
+      (is (eq :allowed verdict))
+      (is (string= "cors=" (getf (first calls) :query)))
+      (is (eq :get (getf (first calls) :method))))
+    (is (eq :origin-not-allowed
+            (call-with-recorded-s3 (octets xml) (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://evil.example"))))))
+  (is (eq :no-cors-configuration
+          (call-with-recorded-s3 :not-found (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://app.example.com"))))
+      "NoSuchCORSConfiguration, a 404, is no configuration"))
+
+(test cors-on-the-filesystem-store-is-unsupported-and-arguments-are-checked
+  (with-temp-store (store)
+    (signals b:blob-unsupported (b:put-bucket-cors store "media" :origins '("https://app.example.com")))
+    (signals b:blob-unsupported (b:check-bucket-cors store "media" "https://app.example.com")))
+  (signals type-error (b:put-bucket-cors (test-s3-store) "media" :origins '()))
+  (signals type-error (b:put-bucket-cors (test-s3-store) "media" :origins '("")))
+  (signals b:blob-invalid-key (b:put-bucket-cors (test-s3-store) "a/b" :origins '("https://x"))))
