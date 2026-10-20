@@ -1587,3 +1587,341 @@ BLOB-METADATA reports NIL for its checksum rather than signalling."
                     (is (null (b:blob-meta-checksum meta)))
                     (is (= 5 (b:blob-meta-size meta)) "the rest of the metadata is still read")))
         (setf (fdefinition 'b::%s3-request) original)))))
+
+;;; === 16. server-side copy and move (#804) ====================================
+
+(defun header-table (&rest pairs)
+  (let ((h (make-hash-table :test #'equal)))
+    (loop for (name value) on pairs by #'cddr do (setf (gethash name h) value))
+    h))
+
+(defparameter +copy-source-headers+
+  (header-table "content-length" "10" "etag" "\"src-etag\"" "content-type" "text/plain"
+                "x-amz-meta-sha256" "0123abcd" "x-amz-meta-owner" "42")
+  "What a HEAD of the source answers in the copy tests.")
+
+(defun call-with-scripted-s3 (answer fn)
+  "Call FN with %S3-REQUEST answered by ANSWER, a function of (method key query) returning a list
+(body status headers), or signalling. Returns (values result calls), each call a plist."
+  (let ((original (fdefinition 'b::%s3-request))
+        (calls '()))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'b::%s3-request)
+                 (lambda (store bucket key method &rest args)
+                   (declare (ignore store))
+                   (push (list* :bucket bucket :key key :method method args) calls)
+                   (values-list (funcall answer method key (getf args :query)))))
+           (values (funcall fn) (nreverse calls)))
+      (setf (fdefinition 'b::%s3-request) original))))
+
+(defun copy-answer (&key (put '("<CopyObjectResult><ETag>\"new\"</ETag></CopyObjectResult>" 200)))
+  "An ANSWER for a single-part copy of src.txt: the source and destination HEADs, and PUT answering
+PUT (a list, or a function to call)."
+  (lambda (method key query)
+    (declare (ignore query))
+    (case method
+      (:head (if (equal key "src.txt")
+                 (list "" 200 +copy-source-headers+)
+                 (list "" 200 (header-table "content-length" "10" "content-type" "text/plain"))))
+      (:put (if (functionp put) (funcall put) put))
+      (t (list "" 200 (header-table))))))
+
+(defun extra (call name) (cdr (assoc name (getf call :extra-headers) :test #'string-equal)))
+(defun calls-of (calls method) (remove method calls :key (lambda (c) (getf c :method)) :test-not #'eq))
+
+(test s3-copy-source-is-percent-encoded-and-signed
+  "x-amz-copy-source is /bucket/key with the key encoded as a canonical URI: a space, a plus, a
+percent sign and non-ASCII are percent-encoded, a slash is kept. It is signed like every extra
+header."
+  (let ((key (format nil "a b+c/d%e/~C.txt" (code-char 233))))
+    (is (string= "/media/a%20b%2Bc/d%25e/%C3%A9.txt" (b::%copy-source "media" key)))
+    (let* ((headers (b::%signed-headers (test-s3-store) "media" "dst.txt" "PUT"
+                                        :extra-headers (list (cons "x-amz-copy-source" (b::%copy-source "media" key)))))
+           (auth (cdr (assoc "Authorization" headers :test #'string=))))
+      (is (search "SignedHeaders=host;x-amz-content-sha256;x-amz-copy-source;x-amz-date," auth) "~A" auth))))
+
+(test s3-copy-blob-keeps-the-source-metadata-with-the-copy-directive
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")))
+    (is (equal '(:head :put :head) (mapcar (lambda (c) (getf c :method)) calls)) "HEAD source, copy, HEAD copy")
+    (let ((put (first (calls-of calls :put))))
+      (is (equal "dst.txt" (getf put :key)))
+      (is (equal "/media/src.txt" (extra put "x-amz-copy-source")))
+      (is (equal "\"src-etag\"" (extra put "x-amz-copy-source-if-match")) "conditional on the ETag read")
+      (is (equal "COPY" (extra put "x-amz-metadata-directive")))
+      (is (null (getf put :content-type)))
+      (is (notany (lambda (h) (search "x-amz-meta-" (car h))) (getf put :extra-headers)) "COPY sends no metadata")
+      (is (null (extra put "x-amz-acl")) "a default store sends no ACL"))
+    (is (equal "dst.txt" (b:blob-meta-key meta)) "the destination's metadata is returned")))
+
+(test s3-copy-blob-sends-the-acl-on-a-private-store
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:copy-blob (test-s3-store :upload-acl :private) "media" "src.txt" "media" "dst.txt")))
+    (declare (ignore meta))
+    (is (equal "private" (extra (first (calls-of calls :put)) "x-amz-acl")))))
+
+(test s3-copy-blob-with-changes-replaces-and-keeps-the-checksum
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt"
+                                                     :content-type "video/mp4")))
+    (declare (ignore meta))
+    (let ((put (first (calls-of calls :put))))
+      (is (equal "REPLACE" (extra put "x-amz-metadata-directive")))
+      (is (equal "video/mp4" (getf put :content-type)))
+      (is (equal "0123abcd" (extra put "x-amz-meta-sha256")) "the source's checksum is sent again")
+      (is (equal "42" (extra put "x-amz-meta-owner")) "with only the type changed, the app's metadata is kept")))
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt"
+                                                     :metadata '(("stage" . "verified")))))
+    (declare (ignore meta))
+    (let ((put (first (calls-of calls :put))))
+      (is (equal "REPLACE" (extra put "x-amz-metadata-directive")))
+      (is (equal "text/plain" (getf put :content-type)) "the type is kept")
+      (is (equal "verified" (extra put "x-amz-meta-stage")))
+      (is (null (extra put "x-amz-meta-owner")) "METADATA replaces the app's metadata")
+      (is (equal "0123abcd" (extra put "x-amz-meta-sha256")) "and the checksum is still kept"))))
+
+(test copy-and-move-refuse-reserved-metadata-before-any-request
+  (with-temp-store (fs)
+    (dolist (store (list fs (test-s3-store)))
+      (dolist (op (list #'b:copy-blob #'b:move-blob))
+        (multiple-value-bind (result calls)
+            (call-with-scripted-s3 (copy-answer)
+                                   (lambda ()
+                                     (handler-case (funcall op store "media" "src.txt" "media" "dst.txt"
+                                                            :metadata '(("SHA256" . "forged")))
+                                       (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c)))))
+          (is (equal "SHA256" result) "~A" (b:store-name store))
+          (is (null calls) "no request was made"))))))
+
+(test s3-copy-to-the-same-location
+  "With no changes: the blob's metadata, from one HEAD and nothing else. With a change: a REPLACE
+copy of the object onto itself."
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "src.txt")))
+    (is (equal "src.txt" (b:blob-meta-key meta)))
+    (is (equal '(:head) (mapcar (lambda (c) (getf c :method)) calls))))
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "src.txt"
+                                                     :content-type "text/markdown")))
+    (declare (ignore meta))
+    (let ((put (first (calls-of calls :put))))
+      (is (equal "src.txt" (getf put :key)))
+      (is (equal "/media/src.txt" (extra put "x-amz-copy-source")))
+      (is (equal "REPLACE" (extra put "x-amz-metadata-directive"))))))
+
+(defun copy-failure (put)
+  "The condition COPY-BLOB signals when the copy's PUT answers PUT, or NIL."
+  (handler-case (progn (call-with-scripted-s3 (copy-answer :put put)
+                                              (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")))
+                       nil)
+    (error (c) c)))
+
+(test s3-copy-blob-failures-are-typed
+  (let ((c (copy-failure (lambda () (error 'b:blob-backend-error :bucket "media" :key "dst.txt" :status 412)))))
+    (is (typep c 'b:blob-source-changed) "412 is the source changing: ~S" c)
+    (is (typep c 'b:blob-backend-error) "and a backend error, so existing handlers catch it")
+    (is (and (typep c 'b:blob-error) (equal "src.txt" (b:blob-error-key c))) "naming the source")
+    (is (eql 412 (and (typep c 'b:blob-backend-error) (b:blob-backend-error-status c)))))
+  (is (typep (copy-failure '("<Error><Code>PreconditionFailed</Code></Error>" 200)) 'b:blob-source-changed)
+      "the same as a 200 with an <Error>")
+  (let ((c (copy-failure '("<Error><Code>InternalError</Code></Error>" 200))))
+    (is (and (typep c 'b:blob-backend-error) (not (typep c 'b:blob-source-changed))))
+    (is (equal "InternalError" (and (typep c 'b:blob-backend-error) (b:blob-backend-error-detail c)))))
+  (is (typep (copy-failure (lambda () (error 'b:blob-backend-error :bucket "media" :key "dst.txt" :status 501)))
+             'b:blob-unsupported)
+      "501 means the provider cannot copy, so the app falls back")
+  (is (typep (copy-failure '("<CopyObjectResult/>" 200)) 'null) "the control: a copy that succeeds"))
+
+(test s3-copy-blob-names-the-missing-object
+  "A missing source is BLOB-NOT-FOUND naming it, before any copy is sent. A 404 on the copy itself
+names the source if it has gone since, and otherwise the destination, whose bucket is missing."
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (lambda (method key query)
+                               (declare (ignore method query))
+                               (error 'b:blob-not-found :bucket "media" :key key))
+                             (lambda ()
+                               (handler-case (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")
+                                 (b:blob-not-found (c) c))))
+    (is (equal "src.txt" (b:blob-error-key c)))
+    (is (equal '(:head) (mapcar (lambda (c) (getf c :method)) calls)) "no copy was sent"))
+  (let ((heads 0))
+    (flet ((answer (source-still-there)
+             (lambda (method key query)
+               (declare (ignore query))
+               (case method
+                 (:head (incf heads)
+                  (if (or (= heads 1) source-still-there)
+                      (list "" 200 +copy-source-headers+)
+                      (error 'b:blob-not-found :bucket "media" :key key)))
+                 (:put (error 'b:blob-not-found :bucket "other" :key "dst.txt"))))))
+      (is (equal "src.txt" (b:blob-error-key (handler-case (call-with-scripted-s3 (answer nil) (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "other" "dst.txt")))
+                                                (b:blob-not-found (c) c)))))
+      (setf heads 0)
+      (is (equal "dst.txt" (b:blob-error-key (handler-case (call-with-scripted-s3 (answer t) (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "other" "dst.txt")))
+                                                (b:blob-not-found (c) c))))))))
+
+(test s3-copy-part-ranges-cover-the-object
+  (is (equal '((0 . 3) (4 . 7) (8 . 9)) (b::%copy-part-ranges 10 4)))
+  (let* ((size (* 12 1024 1024 1024)) (ranges (b::%copy-part-ranges size (* 512 1024 1024))))
+    (is (= 24 (length ranges)))
+    (is (= 0 (car (first ranges))))
+    (is (= (1- size) (cdr (car (last ranges)))))
+    (is (loop for (a b) on ranges while b always (= (1+ (cdr a)) (car b))) "contiguous"))
+  (let ((ranges (b::%copy-part-ranges (* 5 1024 1024 1024 1024) (* 512 1024 1024))))
+    (is (<= (length ranges) 10000) "a 5 TiB object needs no more than 10000 parts: ~D" (length ranges))))
+
+(defun multipart-copy-answer (&key fail-part)
+  (lambda (method key query)
+    (cond ((eq method :head)
+           (list "" 200 (if (equal key "src.txt") +copy-source-headers+ (header-table "content-length" "10"))))
+          ((and (eq method :post) (equal query "uploads="))
+           (list "<InitiateMultipartUploadResult><UploadId>u-1</UploadId></InitiateMultipartUploadResult>" 200))
+          ((eq method :put)
+           (let ((n (parse-integer (subseq query (+ (search "partNumber=" query) 11)) :junk-allowed t)))
+             (if (eql n fail-part)
+                 (error 'b:blob-backend-error :bucket "media" :key key :status 500)
+                 (list (format nil "<CopyPartResult><ETag>&quot;e~D&quot;</ETag></CopyPartResult>" n) 200))))
+          ((eq method :post) (list "<CompleteMultipartUploadResult/>" 200))
+          ((eq method :delete) (list "" 204))
+          (t (error "unexpected ~S" method)))))
+
+(test s3-copy-blob-above-the-threshold-copies-in-parts
+  (let ((b::*%copy-multipart-threshold* 5) (b::*%copy-part-size* 4))
+    (multiple-value-bind (meta calls)
+        (call-with-scripted-s3 (multipart-copy-answer)
+                               (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")))
+      (declare (ignore meta))
+      (let ((create (find "uploads=" calls :key (lambda (c) (getf c :query)) :test #'equal))
+            (parts (calls-of calls :put))
+            (complete (find-if (lambda (c) (and (eq :post (getf c :method)) (search "uploadId" (or (getf c :query) "")))) calls)))
+        (is (equal "text/plain" (getf create :content-type)))
+        (is (equal "0123abcd" (extra create "x-amz-meta-sha256")) "the checksum is set on the new object")
+        (is (equal "42" (extra create "x-amz-meta-owner")))
+        (is (equal '("bytes=0-3" "bytes=4-7" "bytes=8-9") (mapcar (lambda (c) (extra c "x-amz-copy-source-range")) parts)))
+        (is (every (lambda (c) (equal "\"src-etag\"" (extra c "x-amz-copy-source-if-match"))) parts)
+            "every part is conditional on the same source ETag")
+        (is (every (lambda (c) (search "uploadId=u-1" (getf c :query))) parts))
+        (is (search "<Part><PartNumber>3</PartNumber><ETag>&quot;e3&quot;</ETag></Part>"
+                    (sb-ext:octets-to-string (getf complete :content) :external-format :utf-8))
+            "completed with the ETags the parts returned")
+        (is (null (calls-of calls :delete)) "nothing aborted")))))
+
+(test s3-multipart-copy-aborts-when-a-part-fails
+  "A part that fails leaves no upload behind to be billed: the copy aborts it, then signals."
+  (let ((b::*%copy-multipart-threshold* 5) (b::*%copy-part-size* 4) (calls '()))
+    (is (typep (handler-case
+                   (progn (call-with-scripted-s3 (let ((answer (multipart-copy-answer :fail-part 2)))
+                                                   (lambda (method key query)
+                                                     (push (list :method method :query query) calls)
+                                                     (funcall answer method key query)))
+                                                 (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")))
+                          nil)
+                 (b:blob-backend-error (c) c))
+               'b:blob-backend-error))
+    (let ((delete (find :delete calls :key (lambda (c) (getf c :method)))))
+      (is (not (null delete)) "the upload was aborted")
+      (is (search "uploadId=u-1" (or (getf delete :query) ""))))
+    (is (notany (lambda (c) (and (eq :post (getf c :method)) (search "uploadId" (or (getf c :query) "")))) calls)
+        "and never completed")))
+
+(test s3-move-blob-copies-then-deletes-the-source
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:move-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")))
+    (is (equal "dst.txt" (b:blob-meta-key meta)))
+    (is (equal '(:head :put :head :delete) (mapcar (lambda (c) (getf c :method)) calls)))
+    (is (equal "src.txt" (getf (car (last calls)) :key)) "the source is deleted, last"))
+  (multiple-value-bind (meta calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (b:move-blob (test-s3-store) "media" "src.txt" "media" "src.txt")))
+    (declare (ignore meta))
+    (is (null (calls-of calls :delete)) "a move to the same location deletes nothing"))
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (let ((copy (copy-answer)))
+                               (lambda (method key query)
+                                 (if (eq method :delete)
+                                     (error 'b:blob-backend-error :bucket "media" :key key :status 503)
+                                     (funcall copy method key query))))
+                             (lambda () (handler-case (b:move-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")
+                                          (b:blob-backend-error (c) c))))
+    (is (and (typep c 'b:blob-backend-error) (equal "src.txt" (b:blob-error-key c)) (eql 503 (b:blob-backend-error-status c)))
+        "a failed delete signals its own condition, naming the source")
+    (is (calls-of calls :put) "and the copy had been made")))
+
+(test filesystem-copy-blob-copies-bytes-type-metadata-and-checksum
+  (with-temp-store (store)
+    (let ((src (put-string store "media" "quarantine/a.txt" "hello" :content-type "text/plain"
+                           :metadata '(("owner" . "42")))))
+      (let ((copy (b:copy-blob store "media" "quarantine/a.txt" "final" "a.txt")))
+        (is (string= "hello" (get-string store "final" "a.txt")))
+        (is (string= "text/plain" (b:blob-meta-content-type copy)))
+        (is (string= (b:blob-meta-checksum src) (b:blob-meta-checksum copy)) "the checksum of the same bytes")
+        (is (equal '(("owner" . "42")) (b::%read-user-metadata (b::%blob-path store "final" "a.txt" "meta"))))
+        (is (string= "hello" (get-string store "media" "quarantine/a.txt")) "the source is untouched"))
+      (let ((copy (b:copy-blob store "media" "quarantine/a.txt" "final" "b.txt"
+                               :content-type "text/markdown" :metadata '(("stage" . "verified")))))
+        (is (string= "text/markdown" (b:blob-meta-content-type copy)))
+        (is (equal '(("stage" . "verified")) (b::%read-user-metadata (b::%blob-path store "final" "b.txt" "meta"))))))
+    (handler-case (progn (b:copy-blob store "media" "missing.txt" "final" "c.txt") (is nil "no condition"))
+      (b:blob-not-found (c) (is (equal "missing.txt" (b:blob-error-key c)) "names the source")))
+    (is (not (b:blob-exists-p store "final" "c.txt")))))
+
+(test filesystem-copy-blob-to-the-same-location
+  (with-temp-store (store)
+    (put-string store "media" "a.txt" "hello" :content-type "text/plain")
+    (let ((before (b:blob-metadata store "media" "a.txt")))
+      (is (equalp before (b:copy-blob store "media" "a.txt" "media" "a.txt")) "no change, nothing written")
+      (let ((after (b:copy-blob store "media" "a.txt" "media" "a.txt" :content-type "text/markdown")))
+        (is (string= "text/markdown" (b:blob-meta-content-type after)))
+        (is (string= (b:blob-meta-checksum before) (b:blob-meta-checksum after)))
+        (is (string= "hello" (get-string store "media" "a.txt")))))))
+
+(test filesystem-move-blob-renames-and-keeps-metadata
+  (with-temp-store (store)
+    (let ((src (put-string store "media" "quarantine/a.txt" "hello" :content-type "text/plain"
+                           :metadata '(("owner" . "42")))))
+      (let ((moved (b:move-blob store "media" "quarantine/a.txt" "final" "a.txt")))
+        (is (string= "hello" (get-string store "final" "a.txt")))
+        (is (string= (b:blob-meta-checksum src) (b:blob-meta-checksum moved)))
+        (is (string= "text/plain" (b:blob-meta-content-type moved)))
+        (is (equal '(("owner" . "42")) (b::%read-user-metadata (b::%blob-path store "final" "a.txt" "meta"))))
+        (is (not (b:blob-exists-p store "media" "quarantine/a.txt")) "the source is gone")
+        (is (not (probe-file (b::%blob-path store "media" "quarantine/a.txt" "meta"))) "and so is its sidecar")))
+    (put-string store "media" "same.txt" "x")
+    (b:move-blob store "media" "same.txt" "media" "same.txt")
+    (is (string= "x" (get-string store "media" "same.txt")) "a move to the same location deletes nothing")
+    (signals b:blob-not-found (b:move-blob store "media" "missing.txt" "final" "m.txt"))))
+
+(test a-store-without-copy-signals-unsupported-for-copy-and-move
+  "The default methods: an app's own store class gets BLOB-UNSUPPORTED, so it can fall back to
+GET-BLOB and PUT-BLOB, and a move deletes nothing."
+  (with-temp-store (inner)
+    (put-string inner "media" "a.txt" "x")
+    (let ((store (make-instance 'get-only-store :inner inner)))
+      (signals b:blob-unsupported (b:copy-blob store "media" "a.txt" "media" "b.txt"))
+      (signals b:blob-unsupported (b:move-blob store "media" "a.txt" "media" "b.txt"))
+      (is (b:blob-exists-p inner "media" "a.txt") "the move deleted nothing"))))
+
+(test s3-xml-decode-reads-numeric-references-in-one-pass
+  "MinIO writes an ETag's quotes as &#34; (measured on #804). Read without decoding it, a part's
+ETag is not the ETag, and completing the upload fails with 400."
+  (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
+  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#X22;")))
+  (is (string= "<>\"'&" (b::%xml-decode "&lt;&gt;&quot;&apos;&amp;")))
+  (is (string= "&lt;" (b::%xml-decode "&amp;lt;")) "one pass: an escaped entity stays escaped once")
+  (is (string= "a & b &unknown; &#zz;" (b::%xml-decode "a & b &unknown; &#zz;")) "anything else is kept")
+  (is (string= "plain" (b::%xml-decode "plain"))))
+
+(test s3-list-multipart-parts-reads-minio-etags
+  (is (equal '((1 "\"e1\"" 5242880))
+             (call-with-recorded-s3
+              (octets "<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>&#34;e1&#34;</ETag><Size>5242880</Size></Part><IsTruncated>false</IsTruncated></ListPartsResult>")
+              (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.bin" "u-1"))))))
