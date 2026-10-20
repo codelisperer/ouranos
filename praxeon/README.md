@@ -99,7 +99,7 @@ A minimal `.env`:
 
 ```sh
 PRAXEON_LLM_IMPL=anthropic
-PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5
+PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5-5
 PRAXEON_ANTHROPIC_API_KEY=sk-ant-...
 # Cheaper/free alternative: PRAXEON_LLM_IMPL=openrouter + PRAXEON_OPENROUTER_* vars.
 ```
@@ -112,8 +112,8 @@ user guide, §8. So one process runs several agents, each on its own
 model — e.g. Elise deliberating on a strong model while a fast one translates:
 
 ```sh
-PRAXEON_LLM_MODEL=claude-sonnet-5                  # shared default
-PRAXEON_ELISE_MODEL=claude-opus-4-8                # the therapist agent
+PRAXEON_LLM_MODEL=claude-sonnet-5-5                # shared default
+PRAXEON_ELISE_MODEL=claude-opus-5-5                # the therapist agent
 PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 ```
 

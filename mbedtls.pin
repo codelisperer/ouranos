@@ -70,7 +70,7 @@ reviewed   2026-09-15
 # mbedTLS 4.x does NOT name its sources. The crypto is a second project inside
 # the tarball whose CMake says `file(GLOB src_crypto "*.c")`, so there is no
 # upstream list to diff ours against -- which is the check libuv.pin's
-# "verified against 1.52.1" relies on and this pin cannot have.
+# "verified against 1.53.0" relies on and this pin cannot have.
 #
 # So the property is different: DID THE SET CHANGE BETWEEN PINS. mbedtls.sources
 # is the committed answer for 4.1.1, and scripts/mbedtls-sources.lisp re-globs a

@@ -6,7 +6,8 @@
 #
 # scripts/setup.sh -- one-time provisioning so a fresh clone of Hyperion loads and runs.
 # Idempotent. Does NOT install SBCL/Quicklisp -- checks and tells you how.
-#   1. Clone Coalton (local checkout; not pulled by Quicklisp).
+#   1. Check that Coalton is at the commit coalton.pin names (scripts/coalton-pin.sh).
+#      The monorepo's scripts/setup.sh is what clones it.
 #   2. Ensure libev is present (Woo's event loop).
 # Discovery of the frameworks is NOT this script's job -- run
 # `sbcl --script bootstrap.lisp` at the repo root once (writes the ASDF drop-in).
@@ -40,11 +41,9 @@ elif command -v brew >/dev/null 2>&1; then
   info "libev not found -- installing with Homebrew ..."; brew install libev || warn "'brew install libev' failed."
 else warn "libev not found -- Woo needs it. macOS: brew install libev | Debian: sudo apt-get install libev-dev"; fi
 
-# Coalton local checkout (Hyperion's typed core).
-COALTON_DIR="$HOME/common-lisp/coalton"
-if [ -d "$COALTON_DIR/.git" ]; then info "Coalton present at $COALTON_DIR."
-else info "Cloning Coalton into $COALTON_DIR ..."; mkdir -p "$HOME/common-lisp"
-  git clone --depth 1 https://github.com/coalton-lang/coalton "$COALTON_DIR"; fi
+# Coalton: checked here, never cloned. scripts/coalton-pin.sh at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+bash "$(dirname "${BASH_SOURCE[0]}")/../../scripts/coalton-pin.sh" || exit 1
 
 # Discovery: framework discovery is via bootstrap.lisp's ASDF source-registry drop-in
 # -- run `sbcl --script bootstrap.lisp` at the repo root once. No local-projects symlink.

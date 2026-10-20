@@ -269,7 +269,7 @@
    ;; the refusal for an app with no session (#293): Host, Sec-Fetch-Site, Origin
    #:check-host #:check-same-origin #:wrap-same-origin #:normalise-origin
    ;; the injector (ADR-0019): a deftag on :form, plus the seam it reads
-   #:*token-thunk* #:current-token #:token-field
+   #:*token-thunk* #:current-token #:token-field #:token-headers
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
 
 (cl:defpackage #:hyperion/ratelimit
@@ -548,6 +548,9 @@
   (:export #:*reload-epoch* #:mark-reloaded
            ;; what the watcher watches (pre-publication issue 134): a denylist, pruning directories
            #:*watch-excluded-directories* #:*watch-excluded-types*
+           ;; #730: the most files watched, and what is signalled past it
+           #:*watch-file-limit* #:watch-too-large #:watch-too-large-root
+           #:watch-too-large-count #:watch-too-large-limit
            #:watch #:unwatch #:reload! #:dev-error
            #:serve #:wrap-dev
            ;; pre-publication issue 235: the guard is only useful if a caller can name what it signals.

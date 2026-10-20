@@ -63,14 +63,23 @@ it may have run, such as after a timeout."))
   (:documentation "A request to a model, embedding or rerank service failed (#719).
 
 STATUS is the HTTP status, or NIL when the request failed before a response arrived.
-ERROR-TYPE and ERROR-CODE are read from the service's error JSON when the body parses as one,
-otherwise NIL. BODY is the whole response body, where the service explains the failure; read
+ERROR-TYPE and ERROR-CODE are read from the service's error JSON when the body parses as one
+and the value is 1 to 64 letters, digits, underscores, dots or hyphens, otherwise NIL (#727). BODY is the whole response body, where the service explains the failure; read
 it here.
 
 The report and DELIBERATION-FAILURE-DETAIL leave the body out and give its length instead,
 because praxeon/llm logs the report of a failed request at warn and a log line never carries a
 payload (docs/logging.md). A service's response body can repeat parts of the request, which
 holds the prompt."))
+
+(define-condition unknown-tool-choice (deliberation-failure)
+  ((value :initarg :value :initform nil :reader unknown-tool-choice-value))
+  (:documentation "A provider was given a tool-choice value it does not recognise (#727).
+
+VALUE is the value as given; read it here. The report and DELIBERATION-FAILURE-DETAIL say only
+what kind of value it was and its length, because praxeon/llm logs the report of a failed
+request at warn, and a tool-choice value can hold a tool name taken from a prompt
+(docs/logging.md)."))
 
 (define-condition output-limit-reached (condition)
   ((max-tokens :initarg :max-tokens :reader output-limit-reached-max-tokens))
@@ -192,15 +201,30 @@ from the connected database. The store checks pg_extension and never runs CREATE
 needs a key and none of the variables that apply to it is set. VARIABLES lists them, most
 specific first."))
 
+(defun %value-shape (value)
+  "What kind of value VALUE is and how long, for a message that is logged: never VALUE itself.
+PRAXEON/LLM's UNKNOWN-TOOL-CHOICE detail uses it too (#727)."
+  (typecase value
+    (keyword (format nil "a keyword of ~D characters" (length (symbol-name value))))
+    (symbol (format nil "a symbol of ~D characters" (length (symbol-name value))))
+    (string (format nil "a string of ~D characters" (length value)))
+    (list (let ((n (ignore-errors (list-length value))))
+            (if n (format nil "a list of ~D elements" n) "a list that is not proper")))
+    (t (format nil "a value of class ~A" (class-name (class-of value))))))
+
 (define-condition tool-choice-unsupported (praxeon-error)
   ((provider :initarg :provider :initform nil :reader tool-choice-unsupported-provider)
    (requested :initarg :requested :initform nil :reader tool-choice-unsupported-requested))
   (:report
    (lambda (c s)
-     (format s "~A cannot honour the tool choice ~S.~%~%This is signalled rather than falling back to :auto on purpose. A caller that forced a tool is about to treat the reply as a record; letting the model answer freely instead returns prose, and nothing downstream can tell the difference until it is stored."
+     (format s "~A cannot honour the tool choice it was given, ~A; read the value from TOOL-CHOICE-UNSUPPORTED-REQUESTED.~%~%This is signalled rather than falling back to :auto on purpose. A caller that forced a tool is about to treat the reply as a record; letting the model answer freely instead returns prose, and nothing downstream can tell the difference until it is stored."
              (or (tool-choice-unsupported-provider c) "This provider")
-             (tool-choice-unsupported-requested c))))
-  (:documentation "Signalled when a forced TOOL-CHOICE reaches a provider that cannot do it."))
+             (%value-shape (tool-choice-unsupported-requested c)))))
+  (:documentation "Signalled when a forced TOOL-CHOICE reaches a provider that cannot do it.
+
+REQUESTED is the tool choice as given. The report says only what kind of value it was and its
+length, because COMPLETE signals this inside the handler that logs a failed request at warn,
+and a forced tool's name can come from a prompt (#727)."))
 (define-condition parallel-child-failure (praxeon-error)
   ((failures :initarg :failures :initform nil :reader parallel-child-failure-failures)
    (completed :initarg :completed :initform nil :reader parallel-child-failure-completed))
