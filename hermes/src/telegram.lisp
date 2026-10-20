@@ -97,8 +97,8 @@ few kilobytes; a longer body signals RESPONSE-TOO-LARGE, which arrives as DELIVE
   "The condition class for a refused Telegram call with HTTP STATUS and Telegram's DESCRIPTION.
 Telegram answers 400 for an unknown chat, for missing rights, and for a malformed request
 alike, so those are told apart by the description's text; a 400 not recognised here stays a
-plain DELIVERY-FAILURE."
-  (let ((d (string-downcase (or description ""))))
+plain DELIVERY-FAILURE. A DESCRIPTION that is not a string is treated as absent."
+  (let ((d (string-downcase (if (stringp description) description ""))))
     (flet ((has (s) (search s d)))
       (cond ((eql status 429) 'delivery-rate-limited)
             ((eql status 403) 'telegram-chat-unreachable)
@@ -121,9 +121,11 @@ plain DELIVERY-FAILURE."
   "The condition, not yet signalled, for a Telegram call refused with HTTP STATUS and response
 BODY. REDACT is a function that removes the token from a string; it is a closure rather than the
 token so that no frame printed in a backtrace shows the token. Telegram's description is the
-detail; a group that became a supergroup gives TELEGRAM-CHAT-MIGRATED with the new chat id."
+detail, and the body when Telegram sent no description as a string; a group that became a
+supergroup gives TELEGRAM-CHAT-MIGRATED with the new chat id."
   (let* ((json (%parse-object body))
-         (description (and json (gethash "description" json)))
+         (description (let ((d (and json (gethash "description" json))))
+                        (and (stringp d) d)))
          (parameters (and json (gethash "parameters" json)))
          (retry-after (and (hash-table-p parameters) (gethash "retry_after" parameters)))
          (migrate-to (and (hash-table-p parameters) (gethash "migrate_to_chat_id" parameters)))
@@ -165,11 +167,23 @@ anything is signalled (see this file's header)."
                                                                (or (http-error-detail c)
                                                                    (http-error-body c)))))))
                  ;; Anything else -- a defect in a stage, a network library's own condition --
-                 ;; would otherwise reach an outer handler with the request's frames live.
+                 ;; would otherwise reach an outer handler with the request's frames live. The
+                 ;; report is printed under IGNORE-ERRORS: a report that fails to print would
+                 ;; otherwise signal from here, unredacted, instead of the DELIVERY-FAILURE.
                  (cl:error (c)
                    (error 'delivery-failure
                           :provider :telegram
-                          :detail (funcall redact (format nil "~A: ~A" (type-of c) c))))))
+                          :detail (or (ignore-errors
+                                       (funcall redact (format nil "~A: ~A" (type-of c) c)))
+                                      (format nil "~A, whose report could not be printed"
+                                              (type-of c)))))
+                 ;; A serious condition that is not an error -- a timeout, a heap or stack
+                 ;; exhaustion, an interrupt -- is not a delivery failure, so it is signalled
+                 ;; again unchanged, but only after this HANDLER-CASE has unwound the request's
+                 ;; frames: hyperion's dev server prints a backtrace for any SERIOUS-CONDITION.
+                 ;; Signalled again with ERROR, an interrupt loses its CONTINUE restart.
+                 (serious-condition (c)
+                   (error c))))
          (json (%parse-object (response-body resp))))
     (unless (and json (eq t (gethash "ok" json)))
       (error 'delivery-failure :provider :telegram :status (response-status resp)
@@ -266,6 +280,8 @@ permissions or the bot's own restriction take can_send_messages away."
             (t :not-permitted)))))
 
 (defmethod telegram-can-post ((p telegram) chat)
+  "Signals TELEGRAM-CHAT-MIGRATED for a group that became a supergroup, rather than answering:
+the condition carries the new chat id, which the app needs to store in place of CHAT."
   (unless (%telegram-chat-p chat)
     (error 'invalid-message :problem "it needs a Telegram chat (an integer chat id or \"@username\")"))
   (handler-case
