@@ -50,10 +50,10 @@ Signalled at the protocol seam, before any backend sees it."))
                      (or (blob-error-bucket c) "?") (blob-invalid-metadata-name c)
                      (blob-invalid-metadata-fault c))))
   (:documentation
-   "The METADATA passed to PUT-BLOB is not an alist of string names to string values, or a name
-is empty, holds a control character or a colon, or is reserved. \"sha256\", in any case, is
-reserved: the S3 store keeps the blob's checksum under it (#810). Signalled at the protocol seam,
-before any backend sees it."))
+   "The METADATA passed to PUT-BLOB is not an alist of string names to string values, a name is
+empty or not an HTTP header token, a value is not printable ASCII, two names differ only in
+case, or a name is reserved. \"sha256\", in any case, is reserved: the S3 store keeps the blob's
+checksum under it (#810). Signalled at the protocol seam, before any backend sees it."))
 
 (define-condition blob-backend-error (blob-error)
   ((status :initarg :status :initform nil :reader blob-backend-error-status)
