@@ -17,7 +17,8 @@
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
                "ironclad"          ; HMAC-SHA1 for X-Twilio-Signature verification
-               "aion/log")         ; framework logging facade (send attempts/failures)
+               "aion/log"          ; framework logging facade (send attempts/failures)
+               "aion/secret")      ; the Telegram bot token, held so it cannot be printed (#778)
   :serial t
   :components ((:module "src"
                 :serial t
@@ -28,17 +29,20 @@
                              (:file "dev")        ; the dev/log transport (render, don't send)
                              (:file "sendgrid")   ; SendGrid email backend
                              (:file "twilio")     ; Twilio SMS backend (outbound)
+                             (:file "telegram")   ; Telegram Bot API backend (#778)
                              (:file "inbound")    ; inbound SMS: neutral event + Twilio webhook
                              (:file "hermes"))))
   :in-order-to ((test-op (test-op "hermes/tests"))))
 
 (defsystem "hermes/tests"
   :description "Test suite for hermes."
-  :depends-on ("hermes" "aion/http-client" "fiveam")  ; hermes.lisp calls http: directly
+  :depends-on ("hermes" "aion/http-client" "fiveam"   ; hermes.lisp calls http: directly
+               "aion/test-http" "aion/log" "aion/secret")  ; telegram.lisp: a local Bot API server, log lines, the token
   :serial t
   :components ((:module "tests"
                 :serial t
-                :components ((:file "hermes"))))
+                :components ((:file "hermes")
+                             (:file "telegram"))))
   :perform (test-op (o c) (uiop:symbol-call :hermes/tests :run-tests)))
 
 ;;; The blob store. Bytes belong in object storage; a row holds a key and metadata, never

@@ -452,6 +452,35 @@ its tag.
 
 ### Added
 
+- **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
+  `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
+  `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
+  `:hide`, `:photo` a URL or file_id), is sent by `hermes:send` or by `deliver` to a
+  `hermes:telegram` provider (`make-telegram`). The bot token is `TELEGRAM_BOT_TOKEN` or
+  `:token`, held as an `aion/secret` secret, and replaced by `<redacted>` in the text of every
+  failure the backend signals. `HERMES_TELEGRAM_IMPL` picks the backend, default `telegram`;
+  `HERMES_TRANSPORT=dev` renders Telegram messages, and `dev-last-telegram` reads the last one.
+  New with it:
+  - `escape-markdown-v2` and `escape-telegram-html`, for text in those parse modes;
+  - `edit-sent-message` (`:part :text` or `:caption`) and `delete-sent-message`, which take a
+    `delivery-result`; the email and SMS backends signal `unsupported-message` for them;
+  - `telegram-can-post`, which answers `:yes`, `:not-member` or `:not-permitted`;
+  - the conditions `telegram-chat-unreachable`, `telegram-not-permitted` and
+    `telegram-chat-migrated`, subtypes of `delivery-failure`. `telegram-chat-migrated` is a
+    group that became a supergroup; `telegram-chat-migrated-migrate-to-chat-id` is the new
+    chat id to send to;
+  - `delivery-rate-limited`, a `delivery-failure` subtype for a provider's rate limit (HTTP
+    429), whose `delivery-rate-limited-retry-after` is the number of seconds asked for, or
+    NIL. hermes does not wait or retry; the hermes README shows a retry stored with
+    `aion/schedule:schedule-once`. Only the Telegram backend signals it so far; SendGrid and
+    Twilio still signal a plain `delivery-failure` for a 429;
+  - `delivery-result-destination`, a new slot of `delivery-result`, NIL by default. Only the
+    Telegram backend fills it, with the chat id.
+
+  The log lines `hermes:send` writes are unchanged except that `hermes: sent` now carries
+  `:channel` like `hermes: sending`; neither carries a message's text or recipient. Core
+  `hermes` now loads `aion/secret`. upstream.sexp records Bot API 10.3.
+
 - **hermes/blob: `put-bucket-cors` sets the CORS rule a browser upload needs, and
   `check-bucket-cors` says why one would be blocked** (#770).
   `(put-bucket-cors store bucket :origins '("https://app.example.com"))` allows `PUT` with
@@ -487,6 +516,36 @@ its tag.
   bootstrapper, with a warning, as before; with it, the build stops. An app that builds its own
   release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
   a release never ships without a way to install the WebView2 runtime.
+
+- **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
+  image protocol, with OpenAI's Image API as its first provider** (#758). Load
+  `praxeon/image` and call `praxeon/image:register-openai-image` with `:on-image`, a function that
+  receives each `image-result` (`image-result-octets`, `image-result-media-type`,
+  `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
+  `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
+  nothing when there is no key; the key is `:api-key` when given, otherwise
+  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
+  `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
+  and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
+  `:read-timeout` (default 120 seconds, `praxeon/image:*openai-images-read-timeout*`) signals
+  `praxeon/image:image-request-failed` (`image-request-failed-kind` is `:rate-limited`,
+  `:server-error` or `:no-answer`; `image-request-failed-retry-after` is the Retry-After seconds),
+  a `provider-request-failed`; inside a turn the model is told to try again later and the turn
+  goes on, with no automatic retry. A reply is read up to 24 MB per image
+  (`praxeon/image:*max-bytes-per-image*`), and `:count` is 1 to 10. The default model is
+  `gpt-image-2.5-flare` (`praxeon/image:*openai-image-model*`, or `PRAXEON_IMAGE_MODEL`). The bytes
+  reach the app as the provider sent them, and the model never sees them. A content-policy
+  refusal signals `praxeon/image:image-refused`, a `tool-error-result` with
+  `image-refused-code`, `image-refused-stage` and `image-refused-categories`, so the agent is told
+  and the turn goes on. **New event kind `:image-usage`**, one for each request that succeeds,
+  with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
+  `:size` and `:quality`, and `:input-tokens`, `:output-tokens` and `:cost` only when the
+  provider reports them (`:cost` is absent, never 0, when not reported). A refused or failed
+  request emits no `:image-usage`. `generate-image` calls a provider outside a turn. `praxeon/llm` now exports
+  `request-failure`, the #719 mapping of a failed HTTP request to `provider-request-failed`.
+  Generating from a reference image is not supported yet.
+
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
   `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
@@ -1249,6 +1308,10 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
+  value by its kind and length ("a string of 12 characters") without printing it, as the
+  `unknown-tool-choice` detail does; it was the internal `%value-shape`.
 
 - **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
   decode field names as well as values, with `+` as a space** (#715). A browser
