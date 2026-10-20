@@ -763,3 +763,450 @@ gets wrong."
              (call-with-stubbed-s3-request
               (list (s3-list-page '("c/1.txt") nil))
               (lambda () (b:list-blobs (test-s3-store) "media"))))))
+
+;;; === 10. direct uploads from a client (#770) =================================
+;;;
+;;; The signature is checked against AWS's PUBLISHED example, now that %PRESIGN takes the
+;;; clock as an argument: "Authenticating Requests: Using Query Parameters (AWS Signature
+;;; Version 4)", which presigns GET examplebucket/test.txt at 20130524T000000Z for 86400 s with
+;;; AWS's documentation credentials. That closes the gap section 5 of this file's header names.
+
+(defparameter +aws-example-signature+
+  "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+  "The signature AWS publishes for its query-auth example.")
+
+(defun aws-example-store (&rest args)
+  (apply #'b:make-s3-store
+         (append args (list :endpoint "s3.amazonaws.com" :region "us-east-1"
+                            :access-key "AKIAIOSFODNN7EXAMPLE"
+                            :secret-key "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))))
+
+(defparameter +aws-example-time+ (encode-universal-time 0 0 0 24 5 2013 0)
+  "2013-05-24T00:00:00Z, the moment AWS's example is signed at.")
+
+(test s3-presign-matches-aws-published-query-auth-example
+  (multiple-value-bind (path-and-query canonical)
+      (b::%presign :method "GET" :host "examplebucket.s3.amazonaws.com" :path "/test.txt"
+                   :access-key "AKIAIOSFODNN7EXAMPLE"
+                   :secret-key "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                   :region "us-east-1" :amz-date "20130524T000000Z" :date "20130524"
+                   :expires-in 86400)
+    (is (string= (format nil "/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=~A" +aws-example-signature+)
+                 path-and-query)
+        "~A" path-and-query)
+    (is (string= (format nil "GET~%/test.txt~%X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host~%host:examplebucket.s3.amazonaws.com~%~%host~%UNSIGNED-PAYLOAD")
+                 canonical)
+        "the canonical request is AWS's, line for line")))
+
+(test s3-presigned-get-url-is-the-aws-example-through-the-store
+  "BLOB-URL's signing path, %PRESIGNED-URL, given AWS's moment and store: the published URL,
+addressing and scheme included."
+  (is (string= (format nil "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=~A" +aws-example-signature+)
+               (b::%presigned-url (aws-example-store) "examplebucket" "test.txt" "GET" 86400
+                                  :universal-time +aws-example-time+))))
+
+(defun upload-canonical (&key (content-type "video/mp4") (content-length 1234))
+  "The canonical request and URL UPLOAD-URL's signing produces at AWS's moment."
+  (b::%presign :method "PUT" :host "media.s3.amazonaws.com" :path "/uploads/a.mp4"
+               :access-key "AKIAIOSFODNN7EXAMPLE"
+               :secret-key "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+               :region "us-east-1" :amz-date "20130524T000000Z" :date "20130524"
+               :expires-in 900
+               :headers (append (when content-type (list (cons "Content-Type" content-type)))
+                                (when content-length (list (cons "Content-Length" (princ-to-string content-length)))))))
+
+(test s3-upload-url-signs-the-content-type-and-the-content-length
+  "A presigned PUT signs both headers, so S3 refuses a request that sends another type or
+another size. The canonical request carries them, lower-cased and sorted with host."
+  (multiple-value-bind (url canonical) (upload-canonical)
+    (is (search "X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost" url) "~A" url)
+    (is (search (format nil "PUT~%/uploads/a.mp4~%") canonical) "~A" canonical)
+    (is (search (format nil "content-length:1234~%content-type:video/mp4~%host:media.s3.amazonaws.com~%~%content-length;content-type;host~%UNSIGNED-PAYLOAD") canonical)
+        "~A" canonical))
+  (flet ((signature (url) (subseq url (+ (search "X-Amz-Signature=" url) 16))))
+    (let ((base (signature (upload-canonical))))
+      (is (string/= base (signature (upload-canonical :content-type "text/html")))
+          "another content type is another signature")
+      (is (string/= base (signature (upload-canonical :content-length 1235)))
+          "another size is another signature"))))
+
+(test s3-upload-url-returns-a-target-with-the-headers-the-client-must-send
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4"
+                              :content-length 1234 :max-bytes 400000000)))
+    (is (typep target 'b:upload-target))
+    (is (string= "PUT" (b:upload-target-method target)))
+    (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))
+    (is (= 900 (b:upload-target-expires-in target)))
+    (is (= 1234 (b:upload-target-content-length target)))
+    (is (eql 0 (search "https://media.s3.amazonaws.com/uploads/a.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&"
+                       (b:upload-target-url target)))
+        "~A" (b:upload-target-url target))
+    (is (search "X-Amz-Expires=900" (b:upload-target-url target)))))
+
+(defun upload-refusal (&rest args)
+  "The REASON of the BLOB-UPLOAD-REFUSED that UPLOAD-URL signals for ARGS, or NIL."
+  (handler-case (progn (apply #'b:upload-url (test-s3-store) "media" "uploads/a.mp4" args) nil)
+    (b:blob-upload-refused (c) (b:blob-upload-refused-reason c))))
+
+(test s3-upload-url-refuses-instead-of-signing
+  "The size cap is checked before anything is signed: a declared size over MAX-BYTES, or a
+MAX-BYTES with no declared size, gets no URL at all. So does an expiry SigV4 would reject."
+  (is (eq :too-large (upload-refusal :expires-in 900 :content-length 400000001 :max-bytes 400000000)))
+  (is (eq :content-length-required (upload-refusal :expires-in 900 :max-bytes 400000000)))
+  (is (eq :bad-expiry (upload-refusal)))
+  (is (eq :bad-expiry (upload-refusal :expires-in 0)))
+  (is (eq :bad-expiry (upload-refusal :expires-in 604801)))
+  (is (eq :bad-content-length (upload-refusal :expires-in 900 :content-length -1)))
+  (is (null (upload-refusal :expires-in 900 :content-length 400000000 :max-bytes 400000000))
+      "the limit itself is allowed")
+  (is (null (upload-refusal :expires-in 604800)) "seven days is allowed")
+  (signals b:blob-invalid-key (b:upload-url (test-s3-store) "media" "../etc/passwd" :expires-in 900)))
+
+(defmacro with-captured-log ((stream) &body body)
+  "Run BODY with the log at :INFO going to STREAM, then put back the appenders, level and layout
+that were there before."
+  (let ((appenders (gensym "APPENDERS")) (level (gensym "LEVEL")) (layout (gensym "LAYOUT")))
+    `(let ((,appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+           (,level (log4cl:logger-log-level log4cl:*root-logger*))
+           (,layout aion/log:*layout*))
+       (unwind-protect
+            (progn (aion/log:setup :env :dev :level :info :stream ,stream)
+                   ,@body)
+         (log4cl:remove-all-appenders log4cl:*root-logger*)
+         (dolist (appender ,appenders)
+           (log4cl:add-appender log4cl:*root-logger* appender))
+         (log4cl:set-log-level log4cl:*root-logger* ,level)
+         (setf aion/log:*layout* ,layout)))))
+
+(test s3-upload-url-logs-the-key-expiry-and-cap-but-never-the-url
+  "A presigned URL is a credential, so neither it nor its signature may reach a log (#770)."
+  (let* ((log (make-string-output-stream))
+         (target (with-captured-log (log)
+                   (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                                 :expires-in 900 :content-length 1234 :max-bytes 400000000)))
+         (text (get-output-stream-string log))
+         (url (b:upload-target-url target))
+         (signature (subseq url (+ (search "X-Amz-Signature=" url) 16))))
+    (is (search "blob upload URL issued" text) "the issue is logged: ~A" text)
+    (is (search "uploads/a.mp4" text) "with the key: ~A" text)
+    (is (search "900" text) "the expiry: ~A" text)
+    (is (search "400000000" text) "and the cap: ~A" text)
+    (is (not (search signature text)) "never the signature: ~A" text)
+    (is (not (search "X-Amz-" text)) "and no part of the query string: ~A" text)))
+
+(defun call-with-ranged-s3 (answer fn)
+  "Call FN with %S3-REQUEST answering ANSWER, a list (body status) or a status to signal.
+Returns (values result range-header) so a test sees the Range that was signed."
+  (let ((original (fdefinition 'b::%s3-request))
+        (range nil))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'b::%s3-request)
+                 (lambda (store bucket key method &key extra-headers &allow-other-keys)
+                   (declare (ignore store method))
+                   (setf range (cdr (assoc "range" extra-headers :test #'string-equal)))
+                   (if (integerp answer)
+                       (error 'b:blob-backend-error :bucket bucket :key key :status answer)
+                       (values (first answer) (second answer) (make-hash-table :test #'equal)))))
+           (values (funcall fn) range))
+      (setf (fdefinition 'b::%s3-request) original))))
+
+(test s3-read-blob-range-asks-for-the-range-and-handles-the-edges
+  (multiple-value-bind (bytes range)
+      (call-with-ranged-s3 (list (octets "fLaC") 206)
+                           (lambda () (b:read-blob-range (test-s3-store) "media" "a.flac" :start 0 :length 4)))
+    (is (equalp (octets "fLaC") bytes))
+    (is (string= "bytes=0-3" range)))
+  (is (equalp (octets "cd")
+              (call-with-ranged-s3 (list (octets "abcdef") 200)
+                                   (lambda () (b:read-blob-range (test-s3-store) "media" "a" :start 2 :length 2))))
+      "a store that ignores Range and answers 200 is cut down to the range")
+  (is (equalp #() (call-with-ranged-s3 416 (lambda () (b:read-blob-range (test-s3-store) "media" "a" :start 99))))
+      "416, a start past the end, is no bytes")
+  (is (equalp #() (b:read-blob-range (test-s3-store) "media" "a" :length 0)) "length 0 asks for nothing")
+  (signals b:blob-backend-error
+    (call-with-ranged-s3 500 (lambda () (b:read-blob-range (test-s3-store) "media" "a")))))
+
+(test filesystem-upload-url-is-unsupported-so-the-app-proxies
+  (with-temp-store (store)
+    (is (search "presigned uploads"
+                (handler-case (progn (b:upload-url store "media" "a.mp4" :expires-in 900) nil)
+                  (b:blob-unsupported (c) (b:blob-unsupported-operation c)))))))
+
+(test filesystem-read-blob-range-reads-what-is-there
+  (with-temp-store (store)
+    (put-string store "media" "a.txt" "abcdef")
+    (is (equalp (octets "abc") (b:read-blob-range store "media" "a.txt" :length 3)))
+    (is (equalp (octets "def") (b:read-blob-range store "media" "a.txt" :start 3 :length 10))
+        "shorter when the blob ends sooner")
+    (is (equalp #() (b:read-blob-range store "media" "a.txt" :start 6)) "empty at the end")
+    (is (equalp #() (b:read-blob-range store "media" "a.txt" :start 100)) "and past it")
+    (signals b:blob-not-found (b:read-blob-range store "media" "missing.txt"))))
+
+(test blob-meta-carries-an-etag-and-old-constructor-calls-still-work
+  (is (null (b:blob-meta-etag (b:make-blob-meta "k" 1 "text/plain" nil))))
+  (is (string= "abc" (b:blob-meta-etag (b:make-blob-meta "k" 1 "text/plain" nil nil "abc")))))
+
+;;; --- review fixes to #772 ---------------------------------------------------
+
+(test upload-target-prints-without-its-url
+  "A target printed into a log line, an error message or a backtrace must not carry the
+presigned URL or its signature."
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4" :content-length 1234)))
+    (is (search "X-Amz-Signature" (b:upload-target-url target)) "the URL itself is signed")
+    (dolist (printed (list (prin1-to-string target) (princ-to-string target)
+                           (format nil "~A ~S" target target)))
+      (is (not (search "X-Amz-Signature" printed)) "~A" printed)
+      (is (not (search "amazonaws" printed)) "~A" printed))
+    (is (search "expires-in 900" (princ-to-string target)) "~A" target)))
+
+(defclass get-only-store (b:store)
+  ((inner :initarg :inner :reader get-only-inner))
+  (:documentation "A store an app might define, implementing GET-BLOB and nothing for #770."))
+
+(defmethod b:get-blob ((s get-only-store) bucket key)
+  (b:get-blob (get-only-inner s) bucket key))
+
+(test a-store-without-the-new-methods-gets-the-documented-defaults
+  "UPLOAD-URL signals BLOB-UNSUPPORTED and READ-BLOB-RANGE reads through GET-BLOB, rather than
+NO-APPLICABLE-METHOD, on a store class that implements neither."
+  (with-temp-store (inner)
+    (put-string inner "media" "a.txt" "abcdef")
+    (let ((store (make-instance 'get-only-store :inner inner)))
+      (signals b:blob-unsupported (b:upload-url store "media" "a.mp4" :expires-in 900))
+      (is (equalp (octets "abc") (b:read-blob-range store "media" "a.txt" :length 3)))
+      (is (equalp (octets "def") (b:read-blob-range store "media" "a.txt" :start 3 :length 10))
+          "shorter when the blob ends sooner")
+      (is (equalp #() (b:read-blob-range store "media" "a.txt" :start 100)) "empty past the end")
+      (signals b:blob-not-found (b:read-blob-range store "media" "missing.txt")))))
+
+(test s3-upload-url-refuses-a-bad-content-type-max-bytes-or-oversized-put
+  (dolist (bad (list (format nil "text/html~C~CX-Evil: 1" #\Return #\Linefeed)
+                     (format nil "video/mp4~C" #\Linefeed)
+                     (format nil "video/mp4~Cx" #\Tab)
+                     "" "   " :video))
+    (is (eq :bad-content-type (upload-refusal :expires-in 900 :content-type bad)) "~S" bad))
+  (is (eq :bad-max-bytes (upload-refusal :expires-in 900 :content-length 10 :max-bytes -1)))
+  (is (eq :bad-max-bytes (upload-refusal :expires-in 900 :content-length 10 :max-bytes "100")))
+  (let ((five-gib (* 5 1024 1024 1024)))
+    (is (null (upload-refusal :expires-in 900 :content-length five-gib)) "5 GiB itself is allowed")
+    (is (eq :too-large-for-single-put (upload-refusal :expires-in 900 :content-length (1+ five-gib))))))
+
+(test s3-upload-url-returns-the-content-type-it-signed
+  "Spaces around the content type are trimmed before signing, and the header the client is told
+to send is the trimmed value, so the client sends exactly what was signed."
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "  video/mp4 ")))
+    (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))))
+
+;;; === 11. bucket CORS for browser uploads (#770) ===============================
+
+(test s3-base64-matches-rfc-4648-vectors
+  "RFC 4648 section 10's test vectors, and the MD5 of nothing as S3's Content-MD5 sees it."
+  (loop for (in out) in '(("" "") ("f" "Zg==") ("fo" "Zm8=") ("foo" "Zm9v") ("foob" "Zm9vYg==")
+                          ("fooba" "Zm9vYmE=") ("foobar" "Zm9vYmFy"))
+        do (is (string= out (b::%base64 (octets in))) "~S" in))
+  (is (string= "1B2M2Y8AsgTpgAmY7PhCfg==" (b::%base64 (ironclad:digest-sequence :md5 (octets ""))))))
+
+(test s3-cors-document-is-one-escaped-rule
+  (is (string= "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedOrigin>https://a&amp;b.example</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>Content-Type</AllowedHeader><MaxAgeSeconds>3000</MaxAgeSeconds></CORSRule></CORSConfiguration>"
+               (b::%cors-xml '("https://app.example.com" "https://a&b.example") '("PUT") '("Content-Type") 3000))))
+
+(defun call-with-recorded-s3 (answer fn)
+  "Call FN with %S3-REQUEST recording each call's arguments and answering ANSWER (a body, or
+:NOT-FOUND to signal BLOB-NOT-FOUND). Returns (values result calls)."
+  (let ((original (fdefinition 'b::%s3-request))
+        (calls '()))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'b::%s3-request)
+                 (lambda (store bucket key method &rest args)
+                   (declare (ignore store))
+                   (push (list* :bucket bucket :key key :method method args) calls)
+                   (if (eq answer :not-found)
+                       (error 'b:blob-not-found :bucket bucket :key key)
+                       (values answer 200 (make-hash-table :test #'equal)))))
+           (values (funcall fn) (nreverse calls)))
+      (setf (fdefinition 'b::%s3-request) original))))
+
+(test s3-cors-document-exposes-headers-when-asked
+  "A browser completing a multipart upload reads each part's ETag, which it can only do when the
+rule exposes it (#770)."
+  (is (search "<AllowedHeader>Content-Type</AllowedHeader><ExposeHeader>ETag</ExposeHeader><MaxAgeSeconds>"
+              (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type") 3000 '("ETag")))))
+
+(test s3-put-bucket-cors-sends-the-rule-with-its-content-md5
+  (multiple-value-bind (result calls)
+      (call-with-recorded-s3 "" (lambda () (b:put-bucket-cors (test-s3-store) "media" :origins '("https://app.example.com"))))
+    (is (eq t result))
+    (is (= 1 (length calls)))
+    (let* ((call (first calls))
+           (body (getf call :content)))
+      (is (eq :put (getf call :method)))
+      (is (null (getf call :key)) "a bucket-level request")
+      (is (string= "cors=" (getf call :query)))
+      (is (string= "application/xml" (getf call :content-type)))
+      (is (string= (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type") 3000)
+                   (sb-ext:octets-to-string body :external-format :utf-8)))
+      (is (string= (b::%base64 (ironclad:digest-sequence :md5 body))
+                   (cdr (assoc "content-md5" (getf call :extra-headers) :test #'string=)))
+          "Content-MD5 is the body's, which PutBucketCors requires"))))
+
+(test s3-cors-wildcards-match-as-s3-does
+  (is (b::%wildcard-match-p "https://app.example.com" "https://app.example.com"))
+  (is (not (b::%wildcard-match-p "https://app.example.com" "https://evil.example.com")))
+  (is (b::%wildcard-match-p "*" "https://anything.example"))
+  (is (b::%wildcard-match-p "https://*.example.com" "https://app.example.com"))
+  (is (not (b::%wildcard-match-p "https://*.example.com" "https://example.org")))
+  (is (not (b::%wildcard-match-p "https://*.example.com" "http://app.example.com")))
+  (is (b::%wildcard-match-p "content-type" "Content-Type" :case-insensitive t))
+  (is (not (b::%wildcard-match-p "content-type" "Content-Type"))))
+
+(test s3-cors-verdict-names-the-first-test-no-rule-passes
+  (let ((rule '(:origins ("https://app.example.com") :methods ("PUT") :headers ("Content-Type"))))
+    (is (eq :allowed (b::%cors-verdict (list rule) "https://app.example.com" "PUT" '("Content-Type"))))
+    (is (eq :allowed (b::%cors-verdict (list rule) "https://app.example.com" "PUT" '("content-type")))
+        "header names are compared without case")
+    (is (eq :no-cors-configuration (b::%cors-verdict '() "https://app.example.com" "PUT" '("Content-Type"))))
+    (is (eq :origin-not-allowed (b::%cors-verdict (list rule) "https://other.example" "PUT" '("Content-Type"))))
+    (is (eq :method-not-allowed (b::%cors-verdict (list rule) "https://app.example.com" "POST" '("Content-Type"))))
+    (is (eq :header-not-allowed (b::%cors-verdict (list rule) "https://app.example.com" "PUT" '("Content-Type" "X-Extra"))))
+    (is (eq :allowed (b::%cors-verdict (list '(:origins ("*") :methods ("GET")) rule)
+                                       "https://app.example.com" "PUT" '("Content-Type")))
+        "any one rule that passes every test is enough")))
+
+(test s3-check-bucket-cors-reads-the-bucket-rules
+  (let ((xml "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>*</AllowedHeader></CORSRule></CORSConfiguration>"))
+    (multiple-value-bind (verdict calls)
+        (call-with-recorded-s3 (octets xml) (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://app.example.com")))
+      (is (eq :allowed verdict))
+      (is (string= "cors=" (getf (first calls) :query)))
+      (is (eq :get (getf (first calls) :method))))
+    (is (eq :origin-not-allowed
+            (call-with-recorded-s3 (octets xml) (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://evil.example"))))))
+  (is (eq :no-cors-configuration
+          (call-with-recorded-s3 :not-found (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://app.example.com"))))
+      "NoSuchCORSConfiguration, a 404, is no configuration"))
+
+(test cors-on-the-filesystem-store-is-unsupported-and-arguments-are-checked
+  (with-temp-store (store)
+    (signals b:blob-unsupported (b:put-bucket-cors store "media" :origins '("https://app.example.com")))
+    (signals b:blob-unsupported (b:check-bucket-cors store "media" "https://app.example.com")))
+  (signals type-error (b:put-bucket-cors (test-s3-store) "media" :origins '()))
+  (signals type-error (b:put-bucket-cors (test-s3-store) "media" :origins '("")))
+  (signals b:blob-invalid-key (b:put-bucket-cors (test-s3-store) "a/b" :origins '("https://x"))))
+
+;;; === 12. multipart uploads (#770) =============================================
+
+(defun call-with-answering-s3 (answers fn)
+  "Call FN with %S3-REQUEST answering from ANSWERS in turn (a body string, or :NOT-FOUND), and
+recording each call. Returns (values result calls)."
+  (let ((original (fdefinition 'b::%s3-request))
+        (remaining answers)
+        (calls '()))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'b::%s3-request)
+                 (lambda (store bucket key method &rest args)
+                   (declare (ignore store))
+                   (push (list* :bucket bucket :key key :method method args) calls)
+                   (let ((answer (if remaining (pop remaining) (error "more S3 requests than this test answers"))))
+                     (if (eq answer :not-found)
+                         (error 'b:blob-not-found :bucket bucket :key key)
+                         (values (octets answer) 200 (make-hash-table :test #'equal))))))
+           (values (funcall fn) (nreverse calls)))
+      (setf (fdefinition 'b::%s3-request) original))))
+
+(test s3-multipart-part-url-signs-the-part-number-and-the-upload-id
+  (flet ((presign (part)
+           (b::%presign :method "PUT" :host "media.s3.amazonaws.com" :path "/big.mp4"
+                        :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                        :region "us-east-1" :amz-date "20130524T000000Z" :date "20130524" :expires-in 900
+                        :query-params (list (cons "partNumber" (princ-to-string part)) (cons "uploadId" "u-1")))))
+    (multiple-value-bind (url canonical) (presign 3)
+      (is (search "partNumber=3" url) "~A" url)
+      (is (search "uploadId=u-1" url) "~A" url)
+      (is (search "partNumber=3&uploadId=u-1" canonical) "the canonical query carries both: ~A" canonical))
+    (is (string/= (subseq (presign 3) (search "X-Amz-Signature=" (presign 3)))
+                  (subseq (presign 4) (search "X-Amz-Signature=" (presign 4))))
+        "another part is another signature"))
+  (let ((target (b:multipart-part-url (test-s3-store) "media" "big.mp4" "u-1" 7 :expires-in 900 :content-length 5242880)))
+    (is (string= "PUT" (b:upload-target-method target)))
+    (is (= 5242880 (b:upload-target-content-length target)))
+    (is (search "partNumber=7" (b:upload-target-url target)))
+    (is (search "content-length%3Bhost" (b:upload-target-url target)) "the part's size is signed")))
+
+(defun multipart-refusal (thunk)
+  (handler-case (progn (funcall thunk) nil)
+    (b:blob-upload-refused (c) (b:blob-upload-refused-reason c))))
+
+(test s3-multipart-calls-refuse-bad-arguments
+  (let ((s (test-s3-store)))
+    (is (eq :bad-part-number (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 0 :expires-in 900)))))
+    (is (eq :bad-part-number (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 10001 :expires-in 900)))))
+    (is (eq :bad-upload-id (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "" 1 :expires-in 900)))))
+    (is (eq :bad-expiry (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 1)))))
+    (is (eq :bad-parts (multipart-refusal (lambda () (b:complete-multipart-upload s "media" "big.mp4" "u-1" '())))))
+    (is (eq :bad-parts (multipart-refusal (lambda () (b:complete-multipart-upload s "media" "big.mp4" "u-1" '((1 . "")))))))
+    (is (null (multipart-refusal (lambda () (b:multipart-part-url s "media" "big.mp4" "u-1" 10000 :expires-in 900))))
+        "part 10000 is allowed")))
+
+(test s3-start-multipart-upload-returns-the-upload-id
+  (multiple-value-bind (id calls)
+      (call-with-answering-s3 (list "<InitiateMultipartUploadResult><Bucket>media</Bucket><Key>big.mp4</Key><UploadId>VXBsb2FkIElE</UploadId></InitiateMultipartUploadResult>")
+                              (lambda () (b:start-multipart-upload (test-s3-store) "media" "big.mp4" :content-type "video/mp4")))
+    (is (string= "VXBsb2FkIElE" id))
+    (is (eq :post (getf (first calls) :method)))
+    (is (string= "uploads=" (getf (first calls) :query)))
+    (is (string= "video/mp4" (getf (first calls) :content-type))))
+  (signals b:blob-backend-error
+    (call-with-answering-s3 (list "<InitiateMultipartUploadResult></InitiateMultipartUploadResult>")
+                            (lambda () (b:start-multipart-upload (test-s3-store) "media" "big.mp4")))))
+
+(test s3-complete-multipart-upload-sends-the-parts-in-order-and-reads-an-error-in-a-200
+  (is (string= "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>&quot;a&quot;</ETag></Part><Part><PartNumber>2</PartNumber><ETag>&quot;b&quot;</ETag></Part></CompleteMultipartUpload>"
+               (b::%complete-xml '((2 . "\"b\"") (1 . "\"a\""))))
+      "ascending part numbers, ETags escaped")
+  (multiple-value-bind (result calls)
+      (call-with-answering-s3 (list "<CompleteMultipartUploadResult><ETag>\"x-2\"</ETag></CompleteMultipartUploadResult>")
+                              (lambda () (b:complete-multipart-upload (test-s3-store) "media" "big.mp4" "u-1" '((1 . "\"a\"") (2 . "\"b\"")))))
+    (is (eq t result))
+    (is (eq :post (getf (first calls) :method)))
+    (is (string= "uploadId=u-1" (getf (first calls) :query))))
+  (is (string= "InvalidPart"
+               (handler-case
+                   (progn (call-with-answering-s3 (list "<Error><Code>InvalidPart</Code><Message>m</Message></Error>")
+                                                  (lambda () (b:complete-multipart-upload (test-s3-store) "media" "big.mp4" "u-1" '((1 . "\"a\"")))))
+                          nil)
+                 (b:blob-backend-error (c) (b:blob-backend-error-detail c))))
+      "a 200 whose body is an <Error> is a failure"))
+
+(test s3-abort-multipart-upload-is-idempotent
+  (multiple-value-bind (result calls)
+      (call-with-answering-s3 (list "") (lambda () (b:abort-multipart-upload (test-s3-store) "media" "big.mp4" "u-1")))
+    (is (eq t result))
+    (is (eq :delete (getf (first calls) :method)))
+    (is (string= "uploadId=u-1" (getf (first calls) :query))))
+  (is (eq t (call-with-answering-s3 (list :not-found) (lambda () (b:abort-multipart-upload (test-s3-store) "media" "big.mp4" "u-1"))))
+      "NoSuchUpload is aborted"))
+
+(test s3-list-multipart-parts-follows-the-pages
+  (multiple-value-bind (parts calls)
+      (call-with-answering-s3
+       (list "<ListPartsResult><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><ETag>\"b\"</ETag><Size>5242880</Size></Part><Part><PartNumber>1</PartNumber><ETag>\"a\"</ETag><Size>5242880</Size></Part></ListPartsResult>"
+             "<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>3</PartNumber><ETag>\"c\"</ETag><Size>100</Size></Part></ListPartsResult>")
+       (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.mp4" "u-1")))
+    (is (equal '((1 "\"a\"" 5242880) (2 "\"b\"" 5242880) (3 "\"c\"" 100)) parts))
+    (is (= 2 (length calls)))
+    (is (string= "uploadId=u-1" (getf (first calls) :query)))
+    (is (string= "part-number-marker=2&uploadId=u-1" (getf (second calls) :query)) "the marker is followed")))
+
+(test multipart-on-the-filesystem-store-is-unsupported
+  (with-temp-store (store)
+    (signals b:blob-unsupported (b:start-multipart-upload store "media" "a"))
+    (signals b:blob-unsupported (b:multipart-part-url store "media" "a" "u" 1 :expires-in 900))
+    (signals b:blob-unsupported (b:complete-multipart-upload store "media" "a" "u" '((1 . "e"))))
+    (signals b:blob-unsupported (b:abort-multipart-upload store "media" "a" "u"))
+    (signals b:blob-unsupported (b:list-multipart-parts store "media" "a" "u"))))
