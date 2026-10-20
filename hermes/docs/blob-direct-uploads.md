@@ -7,7 +7,10 @@ for it. Smaller files can still go through `put-blob`.
 
 ## The flow
 
-1. **The client asks the app for an upload,** saying the file's size and type.
+1. **The client asks the app for an upload,** saying the file's size and type. The app checks the
+   declared type against its own list of the types it accepts before it asks for a URL. Signing
+   holds the client to the type the app passes in; it does not decide whether that type is
+   acceptable.
 2. **The app chooses the key** and asks the store for a URL:
 
    ```lisp
@@ -37,12 +40,21 @@ for it. Smaller files can still go through `put-blob`.
 ## What is enforced, and where
 
 - **The content type is signed.** S3 refuses a PUT whose `Content-Type` differs from the one in the
-  URL, so a client cannot store an HTML page under a URL issued for a video.
+  URL, so a client cannot store an HTML page under a URL issued for a video. This only binds the
+  type the app passed to `upload-url`. If the app passes on whatever type the client declared, the
+  client can declare `text/html` and get a valid URL for it, so the app must check the declared
+  type against its own allow-list first (step 1). A content type that is empty or contains a
+  control character, CR and LF included, is refused (`blob-upload-refused`, reason
+  `:bad-content-type`). Surrounding spaces are trimmed, and `upload-target-headers` returns the
+  trimmed value, which is the one that was signed.
 - **The size is signed.** With `:content-length`, S3 refuses a body of any other length. With
   `:max-bytes`, `upload-url` refuses to sign a declared size over the limit, and refuses to sign
   at all when no size is declared (`blob-upload-refused`, reason `:content-length-required`). A
   single presigned PUT can be held to an exact size but not to a range, so the cap works by
-  checking the declared size and then signing exactly that size.
+  checking the declared size and then signing exactly that size. A `:max-bytes` or
+  `:content-length` that is not a non-negative integer is refused (reasons `:bad-max-bytes` and
+  `:bad-content-length`). On S3 a declared size over 5 GiB, the largest single PUT S3 accepts, is
+  refused with reason `:too-large-for-single-put`; such a file needs a multipart upload.
 - **The expiry must be from 1 second to 7 days,** SigV4's limit; anything else is
   `blob-upload-refused` with reason `:bad-expiry`.
 - **The key is validated** like every other blob operation, so `..` and the other faults in
@@ -59,7 +71,9 @@ for it. Smaller files can still go through `put-blob`.
 - **Upload into a quarantine prefix** and move the blob only after checking its size and first bytes
   (step 4). Until then nothing should serve it.
 - **A presigned URL is a credential.** `upload-url` logs the bucket, key, expiry, declared size and
-  cap, never the URL or its signature. An app should not log it either, and should not store it.
+  cap, never the URL or its signature. An `upload-target` prints its method, expiry and size only,
+  so printing one in a log line, an error message or a backtrace does not show the URL. An app
+  should not log the URL itself either, and should not store it.
 
 ## Multipart uploads
 
@@ -93,9 +107,11 @@ issuing no more part URLs than the size it accepts, each with a signed size, and
 
 ## On the filesystem store
 
-The filesystem store cannot check a signature, so `upload-url` and the multipart calls signal `blob-unsupported`. In
+The filesystem store cannot check a signature, so `upload-url` and the multipart calls signal
+`blob-unsupported`, as `upload-url` does on any store class that does not implement it. In
 development an app catches that and proxies the upload through `put-blob` instead. `read-blob-range`
-and `blob-metadata` work on both stores, so the checking step is the same.
+and `blob-metadata` work on both stores, so the checking step is the same. A store class that does
+not implement `read-blob-range` gets a default that reads the range through `get-blob`.
 
 ## CORS
 

@@ -948,6 +948,59 @@ Returns (values result range-header) so a test sees the Range that was signed."
   (is (null (b:blob-meta-etag (b:make-blob-meta "k" 1 "text/plain" nil))))
   (is (string= "abc" (b:blob-meta-etag (b:make-blob-meta "k" 1 "text/plain" nil nil "abc")))))
 
+;;; --- review fixes to #772 ---------------------------------------------------
+
+(test upload-target-prints-without-its-url
+  "A target printed into a log line, an error message or a backtrace must not carry the
+presigned URL or its signature."
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4" :content-length 1234)))
+    (is (search "X-Amz-Signature" (b:upload-target-url target)) "the URL itself is signed")
+    (dolist (printed (list (prin1-to-string target) (princ-to-string target)
+                           (format nil "~A ~S" target target)))
+      (is (not (search "X-Amz-Signature" printed)) "~A" printed)
+      (is (not (search "amazonaws" printed)) "~A" printed))
+    (is (search "expires-in 900" (princ-to-string target)) "~A" target)))
+
+(defclass get-only-store (b:store)
+  ((inner :initarg :inner :reader get-only-inner))
+  (:documentation "A store an app might define, implementing GET-BLOB and nothing for #770."))
+
+(defmethod b:get-blob ((s get-only-store) bucket key)
+  (b:get-blob (get-only-inner s) bucket key))
+
+(test a-store-without-the-new-methods-gets-the-documented-defaults
+  "UPLOAD-URL signals BLOB-UNSUPPORTED and READ-BLOB-RANGE reads through GET-BLOB, rather than
+NO-APPLICABLE-METHOD, on a store class that implements neither."
+  (with-temp-store (inner)
+    (put-string inner "media" "a.txt" "abcdef")
+    (let ((store (make-instance 'get-only-store :inner inner)))
+      (signals b:blob-unsupported (b:upload-url store "media" "a.mp4" :expires-in 900))
+      (is (equalp (octets "abc") (b:read-blob-range store "media" "a.txt" :length 3)))
+      (is (equalp (octets "def") (b:read-blob-range store "media" "a.txt" :start 3 :length 10))
+          "shorter when the blob ends sooner")
+      (is (equalp #() (b:read-blob-range store "media" "a.txt" :start 100)) "empty past the end")
+      (signals b:blob-not-found (b:read-blob-range store "media" "missing.txt")))))
+
+(test s3-upload-url-refuses-a-bad-content-type-max-bytes-or-oversized-put
+  (dolist (bad (list (format nil "text/html~C~CX-Evil: 1" #\Return #\Linefeed)
+                     (format nil "video/mp4~C" #\Linefeed)
+                     (format nil "video/mp4~Cx" #\Tab)
+                     "" "   " :video))
+    (is (eq :bad-content-type (upload-refusal :expires-in 900 :content-type bad)) "~S" bad))
+  (is (eq :bad-max-bytes (upload-refusal :expires-in 900 :content-length 10 :max-bytes -1)))
+  (is (eq :bad-max-bytes (upload-refusal :expires-in 900 :content-length 10 :max-bytes "100")))
+  (let ((five-gib (* 5 1024 1024 1024)))
+    (is (null (upload-refusal :expires-in 900 :content-length five-gib)) "5 GiB itself is allowed")
+    (is (eq :too-large-for-single-put (upload-refusal :expires-in 900 :content-length (1+ five-gib))))))
+
+(test s3-upload-url-returns-the-content-type-it-signed
+  "Spaces around the content type are trimmed before signing, and the header the client is told
+to send is the trimmed value, so the client sends exactly what was signed."
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "  video/mp4 ")))
+    (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))))
+
 ;;; === 11. bucket CORS for browser uploads (#770) ===============================
 
 (test s3-base64-matches-rfc-4648-vectors

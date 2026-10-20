@@ -6,7 +6,8 @@
 #
 # scripts/setup.sh -- one-time provisioning so a fresh clone of Mnemosyne loads.
 # Idempotent. Does NOT install SBCL/Quicklisp -- checks and tells you how.
-#   1. Clone Coalton (local checkout; not pulled by Quicklisp).
+#   1. Check that Coalton is at the commit coalton.pin names (scripts/coalton-pin.sh).
+#      The monorepo's scripts/setup.sh is what clones it.
 # A SQLite file (then Postgres / XTDB 2) is needed later for the connection work.
 #
 # Usage:  scripts/setup.sh [--test]
@@ -24,11 +25,9 @@ QL_HOME="${QUICKLISP_HOME:-$HOME/quicklisp}"
 [ -f "$QL_HOME/setup.lisp" ] || die "Quicklisp not found at $QL_HOME/setup.lisp (https://www.quicklisp.org/beta/)."
 info "SBCL $(sbcl --version | awk '{print $2}')  |  Quicklisp at $QL_HOME"
 
-# Coalton local checkout (Mnemosyne's typed core).
-COALTON_DIR="$HOME/common-lisp/coalton"
-if [ -d "$COALTON_DIR/.git" ]; then info "Coalton present at $COALTON_DIR."
-else info "Cloning Coalton into $COALTON_DIR ..."; mkdir -p "$HOME/common-lisp"
-  git clone --depth 1 https://github.com/coalton-lang/coalton "$COALTON_DIR"; fi
+# Coalton: checked here, never cloned. scripts/coalton-pin.sh at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+bash "$(dirname "${BASH_SOURCE[0]}")/../../scripts/coalton-pin.sh" || exit 1
 
 info "Discovery: run \`sbcl --script bootstrap.lisp\` at the repo root (writes the ASDF drop-in)."
 

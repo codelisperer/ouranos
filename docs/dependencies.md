@@ -107,7 +107,7 @@ error, a missing shared library is a loader failure at some unrelated later mome
 
 | Dep | Role | Used by | How it is obtained |
 |---|---|---|---|
-| `libuv` 1.52.1 | event loop, async/sync fs, timers, fs watching | `aion/uv` (opt-in) | **Built from source** by `scripts/build-libuv.lisp` against the root `libuv.pin` (version + sha256 + url). Not a distro package: see below. In a desktop bundle the loader uses only the carried copy, the override variable and the system's search, never the tree's `vendor/` copy: `aion/platform:*search-source-tree*`, which is why `aion/uv` depends on `aion/platform` (#472, no new external dependency). |
+| `libuv` 1.53.0 | event loop, async/sync fs, timers, fs watching | `aion/uv` (opt-in) | **Built from source** by `scripts/build-libuv.lisp` against the root `libuv.pin` (version + sha256 + url). Not a distro package: see below. In a desktop bundle the loader uses only the carried copy, the override variable and the system's search, never the tree's `vendor/` copy: `aion/platform:*search-source-tree*`, which is why `aion/uv` depends on `aion/platform` (#472, no new external dependency). |
 | `mbedTLS` 4.1.1 | TLS and the crypto under it, for `aion/tls` (#125) | `aion/tls` (opt-in) | **Built from source** by `scripts/build-mbedtls.lisp` against the root `mbedtls.pin` (version, sha256, url, and the source-set digest), with our `aion/src/tls/c/` compiled into the same library. Apache-2.0. The release is published only as `.tar.bz2`, and Windows' own bsdtar cannot be relied on to decompress bzip2 (the windows-2022 runner's 3.8.4 has no bz2lib, #273), so the script decodes it with **`chipz`** through Quicklisp and extracts a plain tar. `chipz` is **not a new dependency**: it is already in the tree as a dependency of `dexador`. This is a build-script use, not a load-time one; nothing that loads a system gets `chipz` from it. In a desktop bundle the loader uses only the carried copy, the override variable and the system's search, never the tree's `vendor/` copy: `aion/platform:*search-source-tree*`, which is why `aion/tls` depends on `aion/platform` (#472, no new external dependency). |
 | `libgit2` 1.9.7 | versioned local data (#429): repositories, commits, history, diffs, content at a revision; fetch, fast-forward pull and push | `aion/libgit` (opt-in). A desktop bundle that carries it also carries its pinned source tarball under `SOURCES/` and `COPYING` under `LICENSES/` (ADR-0013's amendment of 2026-10-01) | **Built from source** by `scripts/build-libgit2.lisp` against the root `libgit2.pin` (version, sha256, url, and the candidate source set's count and digest), with a C compiler alone. The three headers libgit2's cmake would generate are written by the script, per platform. zlib, pcre2 and llhttp come from libgit2's own `deps/` and are compiled into the one library, which exports only libgit2's API; its HTTPS uses the platform's library (SecureTransport on macOS, WinHTTP on Windows, OpenSSL loaded at run time on Linux), so it depends on nothing a clean machine lacks. **GPL version 2 with the libgit2 linking exception**: linking from an app under any licence is allowed, and a bundle that carries the library carries `COPYING` (written beside the library) and the source tarball the pin names. Approved by the maintainer on #429. Two upstream advisories about HTTPS remotes, both fixed in libgit2 v1.9.5 (the pin is 1.9.7), are recorded in the pin. `aion/libgit` still refuses an offsite redirect by default, because libgit2's own default follows one on the first request. |
 | `libsqlite3` | SQLite engine | mnemosyne, via `cl-sqlite` | The system's copy, whatever it is. **Unpinned, and not carried by default** — the same exposure ADR-0011 found with libev. Vendoring it would make it carried automatically, since the bundler carries what this tree builds (ADR-0013). Until then, an app that ships its own pinned copy passes it to `scripts/build-desktop-app.lisp --carry` (ADR-0013's 2026-09-28 amendment, #78). Which copy was loaded is now reported: `mnemosyne/sqlite-library:loaded-library` gives the file and `sqlite3_libversion()`, and the gate prints them under mnemosyne's result on every leg (#129). |
@@ -121,6 +121,28 @@ cannot bundle; (2) one version everywhere, instead of Ubuntu's 1.51.0 and whatev
 and MSYS2 carry; (3) it is the same artifact CI publishes and installers will ship (#78).
 The build needs only a C compiler — no cmake, no make — so the "no external build tools"
 rule survives intact.
+
+### Supplied by the operating system, deliberately (#736)
+
+Three native libraries in the table above have no pinned version on Linux and macOS. That is a
+decision, recorded on #736, not something nobody has looked at:
+
+| Library | Who supplies it | Why it is not pinned |
+|---|---|---|
+| OpenSSL 3 | the distribution, or Homebrew's `openssl@3` on macOS; not loaded on Windows | Its security releases are the reason to take it from the operating system: a pinned copy would be one that this repository has to notice and replace, and the system's is replaced by the system's own updates. cl+ssl needs OpenSSL 3 or later, and `aion/src/http-client/openssl.lisp` patches it for OpenSSL 4 (#706). |
+| libsqlite3 | the distribution on Linux; macOS ships it | Windows is pinned (`SQLITE_VERSION` in `scripts/versions.env`), because Windows has no system copy. The copy that loaded is reported on every gate run (#129). |
+| libev | the distribution, or Homebrew | Only an app that declares `clack-handler-woo` loads it, and that app owns bundling it (row above). |
+
+They have **no entry in [`upstream.sexp`](../upstream.sexp)**, because there is no pinned version
+to compare with a release. This section is where they are accounted for.
+
+**The WebView2 Evergreen bootstrapper** is the other unversioned download.
+`scripts/build-installer.ps1` embeds it in the Windows installer, fetched from Microsoft's
+fwlink, which has no version, so it cannot be pinned by checksum. Instead
+`scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature from
+`O=Microsoft Corporation` on every build, cached copy or fresh download, and prints the file's
+version and sha256. `desktop-release.yml` passes `-RequireWebView2`, so a release stops rather
+than ship an installer without it (#736).
 
 ### Database server extensions
 
@@ -154,7 +176,7 @@ symbol it lacks is a READ error rather than a run-time one.
 | **elenchon** | coalton, alexandria | 2 |
 | **praxeon** | coalton, alexandria, dexador, com.inuoe.jzon, ironclad, bordeaux-threads (+ `aion/log` → log4cl, `aion/interceptor` → none, `cons` → none; spinneret, sb-concurrency, woo\|hunchentoot in `praxeon/web`; `aion/boundary`, `aion/log` for the log line when a corpus changes strategy, and `coalton` for its fusion module, in `praxeon/retrieval`, #316 -- **no new external dep**; `com.inuoe.jzon`, `ironclad` for the archive's SHA-256 names, `aion/dynamic` for the provider call's thread, `aion/log` (turned off at hook start) and `sb-posix` (Unix only) in `praxeon/claude-code`, and `fiveam`, `aion/fs` and `sb-posix` (Unix only) in its tests, #452 -- **no new external dep**; `aion/random` in core praxeon for a held turn's id, and `aion/test-threads` in its tests, #531 -- **no new external dep**, `aion/random` is ironclad, which praxeon already loads; `aion/http-client`, `aion/log`, `aion/oauth`, `com.inuoe.jzon` and `cl-base64` in `praxeon/mcp`, the MCP client, and `aion/test-http`, `aion/test-threads`, `aion/dynamic`, `aion/http-client`, `aion/oauth`, `aion/oauth/tests`, `aion/secret`, `aion/log` and `log4cl` (which `aion/log` already loads) in its tests, #527 -- **no new external dep**: `cl-base64` is already hermes' and `hyperion/update`'s, and encodes header values the MCP specification requires in base64; local MCP servers over stdio are started with `sb-ext:run-program`, and its tests run a server script with `sbcl --script`, #527 part 5 -- **no new dep**; `aion/windows` in `praxeon/mcp` on Windows only, `(:feature :win32 "aion/windows")`, for the job object each local MCP server runs in, and since #700 to start the server suspended inside that job with `aion/windows:spawn-in-job`, and in its tests, which signal `aion/windows:win32-error`, #599 -- **no new external dep**: `aion/windows` is this tree's and needs only `cffi`; `aion/http-client` in `praxeon/tests`, whose #719 tests signal `aion/http-client:http-error` to stand for a connection that was refused, #719 -- **no new external dep**: core praxeon already declares it for its provider calls) | ~6 core |
 | **hyperion** | coalton, alexandria, bordeaux-threads, clack, spinneret, parenscript, quri, com.inuoe.jzon, 3bmd, 3bmd-ext-code-blocks, woo\|hunchentoot (+ `aion/random` → **ironclad** for session ids (pre-publication issue 95); `aion/log` → log4cl; plump in `/import`, clingon in `/cli`; `aion/dynamic` in core so the request context and request id cross into a thread the request spawns (#158 -- **no new external dep**); `aion/oauth` in the opt-in `/oauth`, the routes an app mounts for its users' OAuth sign-ins (#527 -- **no new external dep**); `aion/tz` in the opt-in `/calendar`, for today's date in a zone (#489 -- **no new external dep**); `mnemosyne` + `aion/log` in the aux `/db-connection`, a middleware that lends each request a connection from a mnemosyne pool (#325 -- **no new external dep**; mnemosyne's pool uses `sb-thread` and the `cffi` it already declares); `aion/log` in the aux `/session-db` too, to log a session store operation retried after Postgres ended its connection (#636 -- **no new external dep**; it already arrived through `mnemosyne`); `aion/random` declared by the aux `/auth-db` for its email and password-reset tokens (#690 -- **no new external dep**; hyperion core already loads it for session ids); `aion/platform` in `/desktop` for the one resolver that answers where the running executable lives (pre-publication issue 335 -- **no new external dep**, and it REPLACES a second copy of that walk rather than adding one); `aion/signature` + `aion/platform` + `aion/http-client` + `cl-base64` in the opt-in `hyperion/update` (pre-publication issue 76; dexador was dropped from that line in pre-publication issue 332 once pre-publication issue 223 moved the binary-body contract into `aion/http-client` — it arrives through the shared client now, declared where it is used) -- **no new external dep**, every one already in the tree; `cl-base64` because a detached `.sig` is base64 TEXT, which is the same reason `aion/signature` carries it; `hyperion/sidecar` for dev sidecars, which core `hyperion` and `hyperion/desktop` now depend on, with `aion/log`, `aion/secret` and, on Windows only, `aion/windows` for the job object each sidecar runs in, and `hyperion/test-ports`, `log4cl` and `clack-handler-hunchentoot` in its tests, #700 -- **no new external dep**: `aion/windows` needs only `cffi`) | ~11 (+ `sb-bsd-sockets`, an SBCL **contrib**, for the pre-publication issue 238 port preflight — previously reaching core only transitively via clack/usocket and now declared) |
-| **hermes** (satellite) | dexador, com.inuoe.jzon, cl-base64, ironclad (+ `aion/log` → log4cl **and coalton**; `hermes/payments` adds coalton for the event vocabulary, plus `aion/secret/types` for opaque credentials (pre-publication issue 209) — NO new external dep either way) | 4 |
+| **hermes** (satellite) | dexador, com.inuoe.jzon, cl-base64, ironclad (+ `aion/log` → log4cl **and coalton**; `hermes/payments` adds coalton for the event vocabulary, plus `aion/secret/types` for opaque credentials (pre-publication issue 209); `hermes/payments/tests` names `aion/log`, which core `hermes/payments` already loads, because the #734 test captures a warning — NO new external dep either way) | 4 |
 | **hades** (satellite) | none external. `hades/credentials` (#357) uses `aion/secret`, `aion/windows` and `cffi` on Windows for Credential Manager, and `aion/darwin` and `cffi` on macOS for the Keychain. `hades/single-instance` (#305) uses `aion/windows` and `cffi` on Windows, for CreateFileW, and `sb-posix`, an SBCL contrib, on Unix, for fcntl; all were already in the tree | 0 |
 
 The web framework and the data layer carry the surface; everything else is lean by construction.
@@ -277,11 +299,17 @@ only — and it made the Coalton REPL *desktop app*, which we ship as an install
 nothing without internet. The bytes now live in `hyperion/assets/vendor/` and are compiled
 **into the image** by the opt-in `hyperion/assets` system.
 
-| Asset | Version | Size | Licence |
-|---|---|---|---|
-| htmx | 1.9.12 | 48K | Zero-Clause BSD |
-| Alpine.js | 3.14.1 | 44K | MIT |
-| Bulma | 1.0.4 | 678K | MIT |
+| Asset | Version | Size | Licence | sha256 | From |
+|---|---|---|---|---|---|
+| htmx | 2.0.11 | 51K | Zero-Clause BSD | `d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717` | `dist/htmx.min.js` of npm `htmx.org@2.0.11` |
+| Alpine.js | 3.17.4 | 55K | MIT | `232519394c6c8fdba6f362b1d9da16106db513cdbf899011f00daab4051df31c` | `dist/cdn.min.js` of npm `alpinejs@3.17.4` |
+| Bulma | 1.0.4 | 678K | MIT | `67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee` | the jsdelivr URL in `ASSETS.pin` (not re-checked in #717) |
+
+htmx and Alpine.js moved from 1.9.12 and 3.14.1 on 2026-10-16 (#717), on the maintainer's
+decision to keep both current. Each file was taken from its npm package tarball after the
+tarball matched the sha512 `integrity` value the npm registry publishes for that version, and
+is byte-identical to the unpkg URL recorded in `ASSETS.pin`. What htmx 2 changes for an app is
+in the `CHANGELOG.md` entry for #717.
 
 - **Pinned by version + sha256** in [`hyperion/assets/vendor/ASSETS.pin`](../hyperion/assets/vendor/ASSETS.pin),
   same doctrine as `libuv.pin`. `scripts/check-assets.lisp` proves the files on disk still

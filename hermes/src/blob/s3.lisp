@@ -340,11 +340,20 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
           (format nil "~A~A~A" base sep (%uri-encode key :encode-slash nil))))
       (%presigned-url s bucket key "GET" expires-in)))
 
+(defconstant +max-single-put-bytes+ (* 5 1024 1024 1024)
+  "5 GiB, the largest object S3 accepts in a single PUT. Larger files need a multipart upload.")
+
 (defmethod upload-url ((s s3-store) bucket key &key expires-in content-type content-length max-bytes)
   ;; A presigned PUT. Content-Type and Content-Length are SIGNED when given, so S3 refuses a
   ;; request whose values differ: the type cannot be swapped, and with the length signed the
   ;; size cap checked in the :BEFORE method holds for the bytes that arrive (#770).
-  (let* ((headers (append (when content-type (list (cons "content-type" content-type)))
+  (when (and content-length (> content-length +max-single-put-bytes+))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :too-large-for-single-put
+                                :size content-length :limit +max-single-put-bytes+))
+  ;; Trimmed here, once, so the value returned in the target's headers is the value signed:
+  ;; %PRESIGN trims spaces when it builds the canonical request.
+  (let* ((content-type (and content-type (string-trim " " content-type)))
+         (headers (append (when content-type (list (cons "content-type" content-type)))
                           (when content-length (list (cons "content-length" (princ-to-string content-length))))))
          (url (%presigned-url s bucket key "PUT" expires-in :headers headers)))
     ;; The URL is a credential: never logged. The key is the server's own (the docs require

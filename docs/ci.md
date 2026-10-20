@@ -147,7 +147,7 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 - **macOS** — **Homebrew, not the pin.** Upstream publishes no macOS SBCL binaries, so
   there is nothing to pin to and the machine gets whatever brew carries.
   `setup.sh --check` passes on the mismatch deliberately: it checks *presence*, not
-  equality. `macos-14` is arm64, which is precisely why the Linux leg matters.
+  equality. `macos-26` is arm64, which is precisely why the Linux leg matters.
 - **Windows** — the official MSI at the pinned version.
 
 ## The two caches, and why one has no fallback

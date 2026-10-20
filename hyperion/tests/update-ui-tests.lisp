@@ -357,10 +357,10 @@ update source and APP-NAME as its *APP-NAME*."
 
 ;;; --- the poll interval is one htmx reads as meant (#422) --------------------------
 ;;;
-;;; The default was "6h". htmx 1.9.12 knows ms, s and m, and reads anything else with
-;;; parseFloat, so "6h" was 6 ms: every page with the banner asked for its status many times a
-;;; second, and it helped make the maintainer's machine unresponsive. The route test above
-;;; guarded the trigger against `load'; nothing guarded its interval.
+;;; The default was "6h". htmx 1.9.12 knows ms, s and m, as does 2.0.11 (#717), and reads
+;;; anything else with parseFloat, so "6h" was 6 ms: every page with the banner asked for its
+;;; status many times a second, and it helped make the maintainer's machine unresponsive. The
+;;; route test above guarded the trigger against `load'; nothing guarded its interval.
 
 (defun %htmx-source ()
   (uiop:read-file-string
@@ -370,7 +370,7 @@ update source and APP-NAME as its *APP-NAME*."
   "The check below is written against this parser. If htmx is upgraded and learns another unit,
 this fails, and the check should be revisited rather than trusted."
   (let ((src (%htmx-source)))
-    (is (search "version:\"1.9.12\"" src) "the vendored htmx is 1.9.12")
+    (is (search "version:\"2.0.11\"" src) "the vendored htmx is 2.0.11")
     (is (search "if(e.slice(-2)==\"ms\"){t=parseFloat(e.slice(0,-2))}else if(e.slice(-1)==\"s\"){t=parseFloat(e.slice(0,-1))*1e3}else if(e.slice(-1)==\"m\"){t=parseFloat(e.slice(0,-1))*1e3*60}else{t=parseFloat(e)}"
                 src)
         "the interval parser still reads ms, s and m, and parseFloat for anything else")))
