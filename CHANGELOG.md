@@ -14,6 +14,92 @@ its tag.
 
 ### An app may have to act
 
+- **Native: the pinned libuv is 1.53.0** (#739), released 2026-09-24, in place of 1.52.1.
+  `libuv.pin` names it with its sha256, and `scripts/build-libuv.lisp` builds it. A tree whose
+  `vendor/libuv/` was built from 1.52.1 keeps loading that copy until it is rebuilt: delete
+  `vendor/libuv/` and run `sbcl --script scripts/build-libuv.lisp`. A desktop bundle that carries
+  `libuv.dll`, `libuv.so.1` or `libuv.1.dylib` carries the rebuilt copy only once it is rebuilt.
+  `aion/uv:version` returns the version that loaded. On Windows the build now also links
+  `synchronization`, because 1.53.0's `src/win/pipe.c` calls `WaitOnAddress`. The public
+  struct layouts `aion/uv` writes by hand (`uv_buf_t`, `uv_stat_t`, `uv_dirent_t`,
+  `uv_timespec_t`, `uv_stdio_container_t`, `uv_process_options_t`) did not change, and request
+  structs keep their size: `UV_REQ_FIELDS` gives up one reserved pointer to a union of the same
+  size in the private fields.
+
+- **The Stripe backend sends `Stripe-Version: 2026-09-30.endive` on every request** (#734),
+  where it sent no `Stripe-Version` before and Stripe answered in the version the account was
+  created with. `hermes/payments:+stripe-api-version+` names the version. A webhook payload
+  comes in the version of the webhook endpoint instead, so when an event's `api_version`
+  differs, `verify-webhook` logs the warning "stripe webhook api_version differs from the pinned
+  version", with `event-api-version` and `pinned-api-version` fields, and still parses the
+  event. Stripe cannot change an existing endpoint's API version, so to stop the warning the
+  app creates a new webhook endpoint at `2026-09-30.endive` and then disables the old one;
+  Stripe's guide "Handle webhook versioning" gives the steps. Create it through the API with
+  `api_version=2026-09-30.endive`: the Dashboard creates an endpoint only at the latest
+  version, and a later version also differs from the pin and gets the warning. Both readers take the newer shape and fall back to the older one: the period
+  end from `items.data[].current_period_end`, else the subscription's `current_period_end`, and
+  an invoice's subscription from `parent.subscription_details.subscription`, else its top-level
+  `subscription`.
+- **A Stripe subscription's `subscription-current-period-end` is the earliest period end among
+  its items** (#734), when its items carry one, which they do from `2025-03-31.basil`. Before,
+  it was read only from the subscription's own `current_period_end`. An account or webhook
+  endpoint on `2025-03-31.basil` or later does not send that field, so the period end read as 0
+  and `subscription-grants-access-p` granted access on the status alone. A
+  subscription whose items renew on different dates now stops granting access when the first
+  item's period ends, unless a newer event or `subscription-state` brings a later one.
+
+- **Toolchain: the pinned Coalton is `024d0a17`** (#697), upstream `main` of 2026-10-12, in
+  place of `7915fad0`. `coalton.pin` names it, and `scripts/setup.sh` and `scripts/setup.ps1`
+  fetch it and check an existing checkout out at it. Re-run the setup script, or run
+  `git fetch origin && git checkout 024d0a17` in the Coalton checkout, then clear
+  `~/.cache/common-lisp` and rebuild `bin/cons`; `scripts/check-coalton.lisp` says which
+  Coalton loads. The framework needed no change. An app's own Coalton code may:
+  - A discarded `Result` is now a full warning, which fails an ASDF build: a non-final form
+    of a body, or the last form of a `when` or `unless` body or of `protect`'s cleanup, whose
+    value is a `Result`. Handle it, or bind it with `(let _ = …)`.
+    `docs/coalton-patterns.md` §8a shows the message.
+  - A toplevel list left open at the end of a file is an error, where before it silently
+    swallowed every form after it.
+  - `error` takes only a `String`. `Signalable` and `result:ok-or-error` are removed, as are
+    the identity `Into`/`Iso` instances, the `Cell` to `String` conversion and the tuple-swap
+    conversions.
+  - `unwrap`, `expect` and `error` signal a `Panic` condition that prints the message as
+    written; it is no longer used as a `format` control string.
+  - `coalton` now exports `need`, `protect` and `handle`, which can collide with an app's
+    own definitions of those names in a package that uses `coalton`.
+
+  An app that pins Coalton in its own build moves that pin to `024d0a17`.
+
+- **praxeon/mcp on Windows: a local server's command must name an `.exe` or `.com` program;
+  a `.bat` or `.cmd` file is refused** (#700). Local MCP servers are now started by
+  `aion/windows:spawn-in-job`, which starts the server suspended inside its kill-on-close job
+  object and with no console window, then lets it run, so every process the server starts is
+  in the job too. Before, `sb-ext:run-program` started it and it was put in the job afterwards,
+  so a process it started in that moment could outlive it. `spawn-in-job` refuses batch files
+  with `aion/windows:process-not-started`, because `cmd.exe` would read the arguments by rules
+  the quoting does not follow; the client logs the failure and the request fails as not run. A
+  bare name was never found as a batch file (`run-program`'s `:search` does not look for one
+  either), so only an app that gave the full path of a `.bat` or `.cmd`, for example
+  `C:\...\npx.cmd`, is affected. Name the program the batch file runs instead, for example
+  `node` with the script's path as its first argument.
+
+- **hyperion/http: an app that looked up a form or query field by its percent-encoded name
+  must use the decoded name** (#715). `form-param`, `form-params`, `query-param`,
+  `query-params` and `form-alist` now decode names, so `(form-param body "en%3Awho")` no
+  longer finds a field a browser posted as `en%3Awho`; `(form-param body "en:who")` does. The
+  fix itself is under Fixed.
+
+- **praxeon: a failed model, embedding or rerank request signals
+  `praxeon/conditions:provider-request-failed`, and the response body is on the condition,
+  not in its report or the log** (#719). The new condition is a subclass of
+  `deliberation-failure`, so a handler for that still receives it. Its readers are
+  `provider-request-failed-status`, `-error-type`, `-error-code` (read from the service's
+  error JSON when the body parses as one, otherwise NIL) and `-body`. The report and
+  `deliberation-failure-detail` now give the status, the type and code, and the body's length
+  instead of the body, and the `llm request failed` warn line logs `status`, `error-type`,
+  `error-code` and `body-length` fields. An app that read the service's explanation from the
+  report, the detail or the log line reads it from `provider-request-failed-body`.
+
 - **hyperion/assets: the vendored htmx is 2.0.11 and Alpine.js is 3.17.4** (#717), up from
   htmx 1.9.12 and Alpine.js 3.14.1. `(hyperion/assets:url :htmx)` now serves
   `htmx-d6fdc75f.min.js` and `(hyperion/assets:url :alpine)` serves `alpine-23251939.min.js`.
@@ -61,6 +147,28 @@ its tag.
   `htmx:timeout`, `htmx:configRequest` and `htmx:afterSwap`, and the `hx-request` attribute,
   are unchanged.
 
+- **praxeon: an unrecognised tool-choice value signals `praxeon/conditions:unknown-tool-choice`,
+  and the value is on the condition, not in its report or the log** (#727). Before, the
+  message was `unknown tool-choice` followed by the value, and the `llm request failed` warn
+  line logged it; a forced tool's name can come from a prompt. The new condition is a subclass
+  of `deliberation-failure`, so a handler for that still receives it. Its reader is
+  `unknown-tool-choice-value`. The report and `deliberation-failure-detail` now say what kind of
+  value it was and its length, for example `unknown tool-choice: a list of 2 elements`. An app
+  that read the value from the report, the detail or the log line reads it from
+  `unknown-tool-choice-value`.
+
+- **praxeon: the report of `praxeon/conditions:tool-choice-unsupported` no longer prints the
+  tool choice** (#727). `complete` signals it inside the handler that writes the `llm request
+  failed` warn line, so with the meta impl a forced `(:tool "name")` reached the log. The report
+  now says what kind of value it was and its length, for example `a list of 2 elements`. The
+  value is still in `tool-choice-unsupported-requested`; an app that read it from the report
+  reads it there.
+
+- **praxeon: `provider-request-failed-error-type` and `-error-code` are NIL unless the value is
+  1 to 64 letters, digits, underscores, dots or hyphens** (#727). Both are logged, and a proxy
+  between praxeon and the service can answer with its own error JSON, so a value with other
+  characters could be text of its own. The value is still in `provider-request-failed-body`.
+
 - **Toolchain: the pinned SBCL is 2.6.9** (#696). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.9` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
@@ -74,6 +182,43 @@ its tag.
   Then clear `~/.cache/common-lisp` and rebuild `bin/cons`, which refuses to run under an SBCL
   other than the one that built it. An app that pins SBCL in its own CI or Dockerfile moves
   that pin to 2.6.9 to build against the same compiler the framework is tested on.
+
+- **praxeon/memory-db: make the store over a mnemosyne pool when the app also uses the
+  database** (#653). `make-db-memory-store` now takes a pool as well as a connection. Over a
+  pool each store operation borrows a connection, and reads take no lock. A write on Postgres
+  takes the store's lock after the connection. A write on SQLite runs in a transaction that
+  begins IMMEDIATE, or a savepoint inside one already open, and holds the database's write lock
+  in place of the store's lock, so an observer that waits for an app's transaction to commit
+  holds nothing the app's next store write needs. Inside an app's `conn:with-transaction` that
+  has not written yet, that transaction began deferred, so the store's write takes the write
+  lock only at its first write, and if the observer commits in between, the write can fail
+  with `SQLITE_BUSY` instead of waiting. `praxeon/observe` writes on a thread of its own, so it
+  gets a connection of its own. Over one connection shared with the app, an app that held a
+  transaction open while the observer wrote had that transaction committed by the observer's
+  COMMIT on Postgres, so its rollback undid nothing, and the observer's writes were refused on
+  SQLite (#651). A store call the app makes on its own thread inside its
+  `conn:with-connection` on the same pool uses that connection and is part of its transaction.
+  A store over one connection keeps working when nothing else uses that connection. On SQLite
+  the store's own transactions (a window's, `supersede`'s and `forget-subject`'s) begin
+  IMMEDIATE, so behind an app's write transaction they wait for the write lock, within
+  mnemosyne's busy timeout (5000 ms by default), instead of failing with SQLITE_BUSY at once.
+  `forget` clears the predecessor's link and deletes the observation in one transaction, so a
+  pooled reader never sees both as current. An embedding a transaction computed before taking
+  the lock is used only by the store whose embedder computed it, and `supersede` inside the
+  transaction uses it instead of embedding the text again.
+
+- **hyperion/auth-db: `make-db-auth` refuses to start unless the users table has the column
+  `email_confirmed_at` and the tables `hyperion_email_tokens` and `hyperion_email_events`
+  exist** (#690). Without them it signals `missing-email-tables`, whose report names the
+  migrations to add: `users-email-confirmed-ddl` (an `ALTER TABLE … ADD COLUMN`),
+  `email-tokens-ddl`, `email-tokens-hash-index-ddl`, `email-tokens-user-index-ddl`,
+  `email-events-ddl` and `email-events-index-ddl`, in that order. `docs/migrations.md` section 5
+  lists them as `make-migration` steps. The column is not in `users-ddl`, so a new timeline adds
+  it with the same `ALTER` step as an existing one. Existing accounts start unconfirmed; to mark
+  them confirmed, add `UPDATE hyperion_users SET email_confirmed_at = created_at WHERE
+  email_confirmed_at IS NULL` after the `ALTER`. An app that uses none of the new functions
+  below can pass `:require-email-tables nil` instead. `:ensure t` and `ensure-schema` create
+  all of it. A store with its own table names passes `:tokens-table` and `:email-events-table`.
 
 - **hyperion/static: `file-response`'s body is an open file stream, not a pathname** (#314).
   `file-response` now opens the file, reads back the path the open handle refers to
@@ -286,8 +431,183 @@ its tag.
   or progress display branches on `:tool-result` outcomes meets `:started` from MCP tools on a
   connection made with `:tasks t`, and records the call's result from `:task-finished`, joined
   by `:id`. Nothing produces `:started` unless a means returns `started-result`.
+- **Desktop: a macOS app from `scripts/build-dmg.sh` says it needs macOS 15.0, and
+  `desktop-release.yml` builds it on `macos-15`** (#763). `LSMinimumSystemVersion` in the app's
+  `Info.plist` was 11.0, which was never true: the bundle carries Homebrew's `sbcl` and
+  `libzstd`, which need at least the macOS they were built on, so an app built on `macos-14`
+  needed macOS 14. `scripts/verify-bundle-macos.sh` now fails a `.app` that has a binary needing
+  a later macOS than its `LSMinimumSystemVersion` (check 0), and prints the OpenSSL the app
+  loaded. An app that builds its own `.app` with `build-dmg.sh` on a newer macOS than 15 will
+  fail that check until it builds on `macos-15` or older.
+
+- **praxeon: the default Anthropic model is `claude-sonnet-5-5`** (#764), in place of
+  `claude-sonnet-5`, which Anthropic now lists as a legacy model. `praxeon/llm:*default-model*`
+  holds it. An app that sets neither `PRAXEON_ANTHROPIC_MODEL` nor `PRAXEON_LLM_MODEL` and makes
+  an `anthropic` provider without `:model` now sends `claude-sonnet-5-5`, so its answers, token
+  counts and price per token can change. To keep the old model, set
+  `PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5` or pass `:model "claude-sonnet-5"`.
+  `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
+  unchanged. The documentation's examples now name
+  `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
+  `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
+  `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
+  `:hide`, `:photo` a URL or file_id), is sent by `hermes:send` or by `deliver` to a
+  `hermes:telegram` provider (`make-telegram`). The bot token is `TELEGRAM_BOT_TOKEN` or
+  `:token`, held as an `aion/secret` secret, and replaced by `<redacted>` in the text of every
+  failure the backend signals. `HERMES_TELEGRAM_IMPL` picks the backend, default `telegram`;
+  `HERMES_TRANSPORT=dev` renders Telegram messages, and `dev-last-telegram` reads the last one.
+  New with it:
+  - `escape-markdown-v2` and `escape-telegram-html`, for text in those parse modes;
+  - `edit-sent-message` (`:part :text` or `:caption`) and `delete-sent-message`, which take a
+    `delivery-result`; the email and SMS backends signal `unsupported-message` for them;
+  - `telegram-can-post`, which answers `:yes`, `:not-member` or `:not-permitted`;
+  - the conditions `telegram-chat-unreachable`, `telegram-not-permitted` and
+    `telegram-chat-migrated`, subtypes of `delivery-failure`. `telegram-chat-migrated` is a
+    group that became a supergroup; `telegram-chat-migrated-migrate-to-chat-id` is the new
+    chat id to send to;
+  - `delivery-rate-limited`, a `delivery-failure` subtype for a provider's rate limit (HTTP
+    429), whose `delivery-rate-limited-retry-after` is the number of seconds asked for, or
+    NIL. hermes does not wait or retry; the hermes README shows a retry stored with
+    `aion/schedule:schedule-once`. Only the Telegram backend signals it so far; SendGrid and
+    Twilio still signal a plain `delivery-failure` for a 429;
+  - `delivery-result-destination`, a new slot of `delivery-result`, NIL by default. Only the
+    Telegram backend fills it, with the chat id.
+
+  The log lines `hermes:send` writes are unchanged except that `hermes: sent` now carries
+  `:channel` like `hermes: sending`; neither carries a message's text or recipient. Core
+  `hermes` now loads `aion/secret`. upstream.sexp records Bot API 10.3.
+
+- **hermes/blob: multipart uploads for files over 5 GB and for resuming a dropped upload** (#770).
+  `start-multipart-upload` returns an upload id, `multipart-part-url` returns an `upload-target`
+  for one part (part number and upload id signed, the size signed when given),
+  `complete-multipart-upload` joins the parts from a list of `(part-number . etag)`,
+  `abort-multipart-upload` frees them, and `list-multipart-parts` lists what has arrived, for
+  resuming. A complete that S3 answers with an `<Error>` in a 200 signals `blob-backend-error`.
+  `blob-upload-refused` gains the reasons `:bad-part-number`, `:bad-upload-id` and `:bad-parts`.
+  The filesystem store signals `blob-unsupported`. `put-bucket-cors` takes `:expose-headers`;
+  a browser completing a multipart upload needs `'("ETag")` there to read each part's ETag.
+- **hermes/blob: `put-bucket-cors` sets the CORS rule a browser upload needs, and
+  `check-bucket-cors` says why one would be blocked** (#770).
+  `(put-bucket-cors store bucket :origins '("https://app.example.com"))` allows `PUT` with
+  `Content-Type` from those origins (`:methods`, `:allowed-headers`, `:max-age-seconds` to
+  change them). It replaces the bucket's whole CORS configuration, as the S3 API does.
+  `(check-bucket-cors store bucket origin)` returns `:allowed`, `:no-cors-configuration`,
+  `:origin-not-allowed`, `:method-not-allowed` or `:header-not-allowed`, for an upload that
+  reached the app only as a network error. The filesystem store signals `blob-unsupported`.
+- **hermes/blob: `upload-url` gives a client a presigned PUT for uploading straight to S3 or
+  Spaces, and `read-blob-range` reads a blob's first bytes to check what arrived** (#770).
+  `(upload-url store bucket key :expires-in :content-type :content-length :max-bytes)` returns
+  an `upload-target` (`upload-target-url`, `-method`, `-headers`, `-expires-in`,
+  `-content-length`). Content-Type and Content-Length are signed, so the store refuses another
+  type or size. `:max-bytes` refuses to sign a declared size over it, or no declared size at all,
+  with the new condition `blob-upload-refused` (`blob-upload-refused-reason`: `:too-large`,
+  `:content-length-required`, `:bad-content-length`, `:bad-max-bytes`, `:bad-content-type`,
+  `:bad-expiry`). A content type containing a control character, CR and LF included, is
+  refused, and `upload-target-headers` returns the trimmed value that was signed. On S3 a
+  declared size over 5 GiB, the single-PUT limit, is refused with `:too-large-for-single-put`.
+  The app must still check the declared content type against its own allow-list: signing
+  only binds the type the app passes in. The filesystem store, and any store class that does
+  not implement `upload-url`, signals `blob-unsupported`, so a development app proxies through
+  `put-blob`; a store class that does not implement `read-blob-range` reads the range through
+  `get-blob`. `blob-meta-etag` carries S3's ETag from `blob-metadata`. The URL is never
+  logged, and an `upload-target` prints without it. Usage, checking an upload and the
+  security notes are in `hermes/docs/blob-direct-uploads.md`.
+- **`scripts/build-installer.ps1` checks the WebView2 bootstrapper's signature, and takes
+  `-RequireWebView2`** (#736). Before it embeds `MicrosoftEdgeWebview2Setup.exe`, the new
+  `scripts/check-webview2-bootstrapper.ps1` requires a Valid Authenticode signature whose
+  signer has the relative distinguished name `O=Microsoft Corporation`, compared exactly, on a
+  cached copy as well as a fresh download, and prints the file's version and sha256. A copy that fails is deleted from `scripts/installers/.cache`. Without
+  `-RequireWebView2` a failed download or check still builds the installer without the
+  bootstrapper, with a warning, as before; with it, the build stops. An app that builds its own
+  release installer should pass `-RequireWebView2`, as `desktop-release.yml` now does, so that
+  a release never ships without a way to install the WebView2 runtime.
+
+- **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
+  image protocol, with OpenAI's Image API as its first provider** (#758). Load
+  `praxeon/image` and call `praxeon/image:register-openai-image` with `:on-image`, a function that
+  receives each `image-result` (`image-result-octets`, `image-result-media-type`,
+  `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
+  `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
+  nothing when there is no key; the key is `:api-key` when given, otherwise
+  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
+  `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
+  and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
+  `:read-timeout` (default 120 seconds, `praxeon/image:*openai-images-read-timeout*`) signals
+  `praxeon/image:image-request-failed` (`image-request-failed-kind` is `:rate-limited`,
+  `:server-error` or `:no-answer`; `image-request-failed-retry-after` is the Retry-After seconds),
+  a `provider-request-failed`; inside a turn the model is told to try again later and the turn
+  goes on, with no automatic retry. A reply is read up to 24 MB per image
+  (`praxeon/image:*max-bytes-per-image*`), and `:count` is 1 to 10. The default model is
+  `gpt-image-2.5-flare` (`praxeon/image:*openai-image-model*`, or `PRAXEON_IMAGE_MODEL`). The bytes
+  reach the app as the provider sent them, and the model never sees them. A content-policy
+  refusal signals `praxeon/image:image-refused`, a `tool-error-result` with
+  `image-refused-code`, `image-refused-stage` and `image-refused-categories`, so the agent is told
+  and the turn goes on. **New event kind `:image-usage`**, one for each request that succeeds,
+  with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
+  `:size` and `:quality`, and `:input-tokens`, `:output-tokens` and `:cost` only when the
+  provider reports them (`:cost` is absent, never 0, when not reported). A refused or failed
+  request emits no `:image-usage`. `generate-image` calls a provider outside a turn. `praxeon/llm` now exports
+  `request-failure`, the #719 mapping of a failed HTTP request to `provider-request-failed`.
+  Generating from a reference image is not supported yet.
+
+- **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
+  that start and stop with the dev server** (#700). Declare one with
+  `hyperion/sidecar:define-sidecar` (`:command`, `:environment`, `:directory`, `:ready`,
+  `:ready-timeout`, `:secret`, `:required`, `:restart`) and name it in the new `:sidecars`
+  argument of `hyperion/dev:serve`, `hyperion/dev:watch` or `hyperion/desktop:run-app`. The
+  sidecars start once the server has bound its port, with that port in place of `{port}` in the
+  command, and stop when the dev session ends; a dev reload leaves them running.
+  `hyperion/sidecar:token-after` makes a `:ready` function that captures a value from the
+  sidecar's output, and `hyperion/sidecar:sidecar-value` returns it, as an `aion/secret` when
+  the sidecar is declared `:secret t`. A program missing from PATH is logged as a warning, or
+  signals `sidecar-not-started` when the sidecar is `:required t`; a sidecar that does not
+  become ready signals `sidecar-not-ready`. A sidecar does not outlive an image that is killed:
+  on Windows it runs in a kill-on-close job object, and one that cannot be put in a job is not
+  started (`sidecar-not-started`, reason `:no-job`); on Linux it is started through
+  `setpriv --pdeathsig KILL` when `setpriv` is installed, and on macOS, or Linux without
+  `setpriv`, the next `start-sidecars` ends a sidecar left by an image that has exited, using
+  state files under `~/.cache/hyperion-sidecars/`. `hyperion/server:serve-forever` takes no
+  sidecars, and a shipped desktop image ignores them. `:environment` takes only string names and
+  values; any other value, such as NIL from an unset variable, is an error at declaration. At
+  debug level a sidecar's output lines are logged by length and stream, never by text. Core
+  `hyperion` now depends on `hyperion/sidecar`, and through it on `aion/secret` and, on
+  Windows, `aion/windows` and `cffi`. See `hyperion/docs/sidecars.md`.
+
+- **hyperion/server: `handler-port` returns the port a running server listens on** (#700). On
+  the native `:uv` server it is the port that was bound, which is the one the operating system
+  chose when `start` was given port 0; on a Clack backend it is the port `start` was given.
+
+- **aion/windows: `spawn-in-job` starts a process suspended inside a kill-on-close job
+  object, with no console window, then lets it run** (#700). Every process the new process
+  starts is in the job too, which `sb-ext:run-program` followed by `assign-process-to-job`
+  could not ensure. Its standard input, output and error can each be a stream or the NUL
+  device, and standard error can be appended to a file. It returns a `job-process`, read with
+  `job-process-pid`, `job-process-input`, `job-process-output`, `job-process-error`,
+  `job-process-alive-p`, `job-process-exit-code`, `job-process-status` and `job-process-wait`,
+  and ended with `job-process-terminate` and `job-process-close`. `find-executable` finds an
+  `.exe` or `.com` program on PATH, and `quote-windows-argument` and `windows-command-line`
+  build a command line that the Microsoft C runtime splits back into the same arguments. A
+  missing program or a batch file signals `process-not-started`.
+
+- **praxeon: the tool-results benchmark reports the token counts the provider reported, and has
+  two more configurations and a second task** (#319). `praxeon/bench/tool-results.lisp`'s
+  `run-benchmark` now sums `:input`, `:output`, `:cache-read` and `:cache-write` from each
+  step's `:usage` event and prints them beside its estimates; a count no step reported is NIL
+  and printed as `-`. With a real provider, the estimated input is the sum of the
+  `:estimated-input` of those events. Each figure taken from those events comes with the
+  number of requests that reported it (`:reported-input-requests`, `:input-requests`, and so
+  on), and the report marks a figure with `*` when fewer requests reported it than were made.
+  Each row also gives the number of turns that signalled
+  an error (the error text is not printed), the requests, and the clearing batches. New
+  configurations `:clear-wide` (`:clear-budget 6000 :keep-recent 2`) and `:offload-and-clear`
+  (`:threshold 500 :clear-budget 1200 :keep-recent 1`), and `:task :mixed`, where the
+  even-numbered pages are under the offload threshold. `*scripted-usage*` makes the scripted
+  model report usage, for tests. Offloading stays opt-in.
 
 - **aion/schedule: a job scheduler, with `mnemosyne/jobs` to keep its jobs in Postgres or
   SQLite** (#689). An app registers a job function with `define-job`, with a schedule of
@@ -295,25 +615,41 @@ its tag.
   `(:weekly (:mon :fri) (hour minute) :zone ...)` or `(:once universal-time)`; a daily or
   weekly slot that falls in a daylight-saving gap runs at the first instant after it, and one
   that falls in an overlap runs once, at the earlier instant. `schedule-once` stores a one-off
-  run with arguments. Each instance of the app runs a `scheduler` over the same store, and a
+  run with arguments; given a `:key` a stored job already has, it signals `job-exists` unless
+  passed `:replace t`. Each instance of the app runs a `scheduler` over the same store, and a
   lease in the store means each slot runs once across all of them; a slot missed while no
   instance was running runs once when one starts (trigger `:catch-up`). Jobs run on an
   `aion/pool` pool the scheduler makes for itself, of two workers by default. Every run is
   recorded with its trigger, outcome (`:completed`, `:completed-with-errors`, `:failed`,
   `:skipped`, `:abandoned`), the counts plist the job returned, and an error text; a job calls
   `note-item-error` for an item that failed without failing the run. `run-now` and `run-job`
-  run a job off its schedule. `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the
-  run log. Drive the scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv
-  timer), and end it with `stop`. **A job must tolerate running twice**: when an instance dies
+  run a job off its schedule, and start nothing while this instance is still running the job;
+  when a run of the job is still starting here, `run-now` waits for it and returns its id. Each
+  run gets its own copy of the job's arguments.
+  `store-prune-runs` and `make-scheduler`'s `:keep-runs` limit the run log. Drive the
+  scheduler with `start` (a thread) or `aion/schedule/uv:start` (a libuv timer), and end it
+  with `stop`, which returns `:timed-out` while a lease renewal an earlier `stop` started is
+  still using the store. **A job must tolerate running twice**: when an instance dies
   during a run, the run is marked `:abandoned` once its lease expires and another instance runs
   the job again (trigger `:retry`), once per slot: a retry that is abandoned too is not retried.
   A stored job that cannot be read back is returned with `stored-job-unreadable` set, logged
-  once and left alone, and `run-now` on it signals `unreadable-job`. Lease times come from each instance's own clock, which may
-  differ from another's by up to about a third of `:lease-seconds` (100 seconds at the default
-  of 300), so keep the instances' clocks synchronised. `mnemosyne/jobs:make-db-job-store` keeps
+  once and left alone, and `run-now` on it signals `unreadable-job`; `define-job` or
+  `schedule-once :replace t` rewrites it. A driver other than the two here calls
+  `reserve-driver` before its first tick, so that a `stop` during that tick waits for it. A
+  store's `store-finish` takes the stored job the run started from as `:remove-job`, and
+  removes the job only when its definition is unchanged. Lease times come from each
+  instance's own clock, which may differ from another's by up to about a third of
+  `:lease-seconds` (100 seconds at the default of 300), so keep the instances' clocks
+  synchronised. `mnemosyne/jobs:make-db-job-store` keeps
   jobs in the tables `aion_jobs` and `aion_job_runs`; it refuses to start with
   `missing-job-tables` until they exist, so add the statements from `jobs-ddl` to the app's
   migrations, or pass `:ensure t`. See `docs/scheduling.md`.
+
+- **mnemosyne/conn: `with-transaction` takes `:immediate`** (#653). On SQLite an outermost
+  transaction then begins with BEGIN IMMEDIATE and waits, within `*sqlite-busy-timeout-ms*`, for
+  the database's write lock before it reads. A deferred transaction that reads first and then
+  writes behind another connection's write transaction fails with SQLITE_BUSY at once, without
+  the busy timeout. On Postgres, and for an inner transaction, it changes nothing.
 
 - **praxeon/memory: `store-transactions-p`, `call-with-store-transaction` and
   `with-store-transaction`, for writes that take effect together or not at all** (#529). Both
@@ -323,6 +659,22 @@ its tag.
   thread's progress to put back on a non-local exit; `praxeon/memory-db` uses
   `conn:with-transaction` under its recursive lock, a savepoint inside an app's own
   transaction.
+
+- **hyperion/auth-db: email confirmation, change of address and password reset** (#690).
+  `issue-confirmation` and `confirm-email` confirm an account's address, and `email-confirmed-p`
+  and `user-email-confirmed-at` report it. `request-email-change` (which requires the current
+  password unless `:password :skip`), `confirm-email-change` and `revert-email-change` move an
+  account to a new address, with a revert link to the old one that ends every session of the
+  account. `set-email` is the operator path and requires `:actor`. `issue-password-reset` and
+  `reset-password` reset a password. A change of address cancels the account's unused
+  confirmation, change and reset tokens. Tokens are stored as SHA-256 hashes, and a failed one
+  signals `invalid-token` with a reason. A user is sent at most 5 tokens of one purpose an hour
+  (`too-many-tokens`); the limit and the lifetimes (24 hours, 1 hour for a reset, 7 days for a
+  revert) are `make-db-auth` keys. `email-history` reads the log of confirmations and changes,
+  and `prune-email-tokens` deletes expired tokens. The functions return the tokens and the app
+  sends the mail.
+- **hyperion/session: `end-sessions`** ends every session that holds a given value under a
+  key, such as one user's sessions under `:user-id`, except the one named by `:except` (#690).
 
 - **praxeon/llm: a `meta` impl for Meta's Model API (Muse Wonder)** (#678). Select it with
   `PRAXEON_LLM_IMPL=meta` or, for one role, `PRAXEON_<ROLE>_IMPL=meta`. It is an
@@ -966,6 +1318,66 @@ its tag.
 
 ### Fixed
 
+- **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
+  value by its kind and length ("a string of 12 characters") without printing it, as the
+  `unknown-tool-choice` detail does; it was the internal `%value-shape`.
+
+- **hyperion/http: `form-param`, `form-params`, `query-param`, `query-params` and `form-alist`
+  decode field names as well as values, with `+` as a space** (#715). A browser
+  percent-encodes a field name when it submits a form, so a field named `en:who` arrives as
+  `en%3Awho`, `items[0]` as `items%5B0%5D` and `a b` as `a+b`. Before this, those names were
+  not decoded, so `(form-param body "en:who")` returned NIL and a handler read the field as
+  not sent, with no error. An app that renamed its fields to avoid these characters can keep
+  or undo that workaround. A name or value that does not decode, such as the truncated escape
+  in `x%4=1`, is kept as it arrived instead of signalling `quri:url-decoding-error`, which a
+  value already did before this change: a client could post such a body to make the CSRF
+  check signal instead of answering 403. New `hyperion/http:form-urlencode` builds a
+  urlencoded body from `(name . value)` pairs the way a browser does, for tests.
+
+- **aion/schedule: `run-now` and `run-job` no longer start a second run when the run they
+  waited for finished before they woke** (#723). A call that found a run of the same job still
+  starting on this instance waited for it, as documented. If that run then started and
+  finished before the waiting call took the scheduler's lock again, the call found the job
+  free and started a second run. Now `run-now` returns `(values run-id :already-running)` with
+  the id of the run it waited for, which may already have finished, and `run-job` returns
+  NIL, as it does whenever another run holds the job. Either one tries to start a run itself
+  only when the run it waited for did not start.
+
+- **aion, elenchon, hyperion and mnemosyne: `scripts/setup.sh` and `scripts/setup.ps1` check
+  that Coalton is at the commit `coalton.pin` names, and no longer clone it** (#751). Like
+  praxeon's before #733, they ran `git clone --depth 1` on Coalton's latest commit when
+  `~/common-lisp/coalton` was missing, and accepted any commit when it was present. All five
+  frameworks' setup scripts now run the new `scripts/coalton-pin.sh` or
+  `scripts/coalton-pin.ps1` at the monorepo root. It exits 0 when the checkout at `COALTON_DIR`
+  (default `~/common-lisp/coalton`) is at the pinned commit, and otherwise names the checkout's
+  commit (or "no commit") and the pinned one, says to run the root `scripts/setup.sh` or
+  `scripts/setup.ps1`, and exits 1. It warns when the checkout's `origin` differs from the pin's
+  `repo` line, as the root scripts do. The root setup scripts are now the only ones that clone
+  Coalton.
+
+- **praxeon: `praxeon/scripts/setup.sh` and `setup.ps1` check that Coalton is at the commit
+  `coalton.pin` names, and no longer clone it** (#733). They ran `git clone --depth 1` on
+  Coalton's latest commit when `~/common-lisp/coalton` was missing, and accepted any commit
+  when it was present, so a machine set up through them could build against a Coalton the tree
+  is not tested with. They now stop with an error naming the checkout's commit and the pinned
+  one, and say to run the monorepo's `scripts/setup.sh` or `scripts/setup.ps1`, which clones
+  Coalton and checks out the pinned commit. Both honour `COALTON_DIR`, as the root scripts do.
+
+- **hyperion/dev: `watch` refuses to watch more files than `*watch-file-limit*` allows,
+  100000 by default, and names the root that passed it** (#730). The watcher snapshots every
+  file under its roots on every poll, and nothing limited that snapshot, so a root that was a
+  very large tree, such as a home or temporary directory, filled the heap and ended in heap
+  exhaustion with a backtrace that did not mention the watched path. `watch` now takes
+  `:file-limit` (default `hyperion/dev:*watch-file-limit*`, `nil` for no limit), and past it
+  signals `hyperion/dev:watch-too-large` (readers `watch-too-large-root`,
+  `watch-too-large-count`, `watch-too-large-limit`) before the builder runs, so nothing is
+  started, and a dev server that `watch` started earlier keeps running. It refuses rather than watching part of the tree, because a partial watch leaves some
+  edits without a reload and gives no sign of which. If the roots grow past the limit while
+  watching, the previous snapshot is kept and the condition is shown as the reload error, in the
+  browser overlay, until they are back within it; an error it replaced, such as a Lisp file that
+  still fails to compile, is shown again then. `hyperion/dev:serve` callers set the limit by
+  binding `*watch-file-limit*`.
+
 - **hyperion/session-db: `ensure-schema` and `make-db-store … :ensure t` create the table the
   store's `:table` names** (#638). They created `hyperion_sessions` whatever `:table` said, so a
   store made with another table name and `:ensure t` failed its first operation on a table that
@@ -973,6 +1385,12 @@ its tag.
   `hyperion/auth-db` does since #378, and refuses a name that is not letters, digits and
   underscores. An app that made `hyperion_sessions` by hand because of this, while its store
   named another table, can drop it.
+
+- **aion/schedule: `stop` starts no lease renewal when less than 50 ms of its timeout is left**
+  (#728). A timed wait can return a little before its timeout, by a spurious wakeup or a coarse
+  timer such as Windows' default one. `stop` then started a renewal with a few milliseconds left,
+  which it could not wait for. That renewal kept using the store after `stop` returned, and the
+  next `stop` had to wait for it.
 
 - **praxeon/observe: on a store with transactions, a window's observations, its promotions and
   its progress are written in one transaction** (#529). When the progress write failed after
@@ -989,6 +1407,47 @@ its tag.
     back too, and the attempt is retried. Before, they stayed written and the next attempt only
     finished the promotion. A promotion callback that keeps signalling therefore leaves the
     window skipped with nothing in the thread, where before its thread observations were kept.
+
+- **`aion/platform:shipped-image-p` is false inside `bin/cons`** (#703). `bin/cons` is one dumped
+  file, so its runtime and core are the same file, and an app run under it (`cons test-app`, for
+  example) read it as a shipped Linux build on every OS: `shipped-image-p` returned true and
+  `shipped-image-directory` (and `hyperion/desktop:install-directory`) returned the tree's `bin/`.
+  `bootstrap.lisp` now dumps `bin/cons` with `:development-runner t`, which puts
+  `:ouranos-development-runner` on `*features*`, and `shipped-image-p` returns false while that
+  feature is present. The new `aion/platform:development-runner-p` reports it, and
+  `shipped-image-p` takes `:development-runner` to override it. `scripts/dump-image.lisp`'s
+  `dump-executable` and `dump-core` take `:development-runner` and remove the feature for every
+  other dump, so an app dumped from inside `bin/cons` still reads as shipped. Rebuild `bin/cons`
+  (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`) to get the mark. An app that looks
+  for its assets only in the source tree, because `shipped-image-p` was wrong under `cons`, can
+  use `shipped-image-p` again.
+
+- **`aion/http-client`: verified https requests work when the default libssl is OpenSSL 4**
+  (#706). cl+ssl reads a certificate's names with `ASN1_STRING_data`, which OpenSSL 4 removed,
+  so on a host whose default libcrypto is OpenSSL 4 every https request that verifies the
+  server's host name failed: dexador's own requests, which call cl+ssl with `:verify` and
+  `:hostname`, and those made with `:connect-address`. `aion/http-client` now points
+  `cl+ssl::asn1-string-data` at `ASN1_STRING_get0_data`, which OpenSSL 1.1, 3 and 4 all have,
+  in `aion/src/http-client/openssl.lisp`. The fix applies only in an image that loads
+  `aion/http-client`; an image that uses dexador or cl+ssl without it is still affected. The
+  patch is removed once the pinned cl+ssl contains cl-plus-ssl pull request 202, and this file
+  will say so then.
+
+- **hyperion/csrf: a protected form no longer shows a stray "T" after its hidden `_csrf`
+  field** (#663). `token-field` returned `T`, and the `:form` deftag calls it inside the
+  form's Spinneret body, which prints a body form's value, so every `post`, `put`, `patch`,
+  `delete` or `hx-post` form rendered with a token read `<input type=hidden name=_csrf …>T`,
+  visible on the page and read aloud by screen readers. `token-field` now returns no values.
+  An app that calls `token-field` itself and read its return value, `T` when a field was
+  written, now gets no value.
+
+- **scripts/setup.ps1: moving to a new Coalton pin fetches it, instead of stopping** (#697).
+  When the Coalton checkout did not contain the pinned commit yet, which is the usual state
+  after `coalton.pin` changes, `git rev-parse` reported an unknown revision and Windows
+  PowerShell treated that message as a terminating error, so `setup.ps1` exited 1 before it
+  fetched. `setup.ps1 -Check` stopped the same way instead of reporting the pin as missing.
+  Both now resolve the commit through `Resolve-GitCommit`, which returns nothing for a
+  revision git cannot resolve. `scripts/setup.sh` was not affected.
 
 - **praxeon/event: the list of events at the top of `praxeon/src/event.lisp` names every event
   praxeon emits** (#339). It left out eleven: `:usage`, `:tool-held`, `:tool-decided`,

@@ -236,6 +236,18 @@
   :serial t
   :components ((:file "src/web-search")))
 
+;;; An image-generation Means behind a neutral protocol, with OpenAI's Image API as its first
+;;; provider (#758). Opt-in: an app registers it with REGISTER-OPENAI-IMAGE, which registers
+;;; nothing when there is no key.
+(defsystem "praxeon/image"
+  :description "A generate-image Means for Praxeon agents, behind a neutral image protocol."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon"
+               "cl-base64")           ; the provider sends each image as base64
+  :serial t
+  :components ((:file "src/image")))
+
 ;;; A general one-shot translation capability (any agent): translate text between
 ;;; languages via a possibly-different, translation-tuned model. Elise uses it to
 ;;; converse in the user's locale; provider-neutral, so it's just praxeon + llm.
@@ -287,6 +299,8 @@
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
+               "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
+               "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
@@ -295,7 +309,10 @@
   :serial t
   :components ((:module "tests"
                 :serial t
-                :components ((:file "praxeon-tests"))))
+                :components ((:file "praxeon-tests")
+                             ;; #758: in the PRAXEON suite, after praxeon-tests, whose
+                             ;; %SERVE-REPLIES and scripted provider it uses
+                             (:file "image-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

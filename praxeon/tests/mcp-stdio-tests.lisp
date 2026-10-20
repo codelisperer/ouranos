@@ -297,7 +297,7 @@ the handshake fails rather than left running until CLOSE-CLIENT."
   (with-stdio-client (client record "legacy-no-init" :timeout 2 :restart nil)
     (is-true (%failure-of (lambda () (mcp:list-tools client))))
     (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
-      (is-false (sb-ext:process-alive-p process)))
+      (is-false (praxeon/mcp::%process-alive-p process)))
     (is (= 1 (%recorded-count record "eof")))
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
@@ -517,7 +517,7 @@ of passing without having ended it."
     (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
            (echo (%tool-named client "echo"))
            (old (praxeon/mcp::client-child client))
-           (in (sb-ext:process-input (praxeon/mcp::child-process old)))
+           (in (praxeon/mcp::%process-input (praxeon/mcp::child-process old)))
            ;; Before the exit call is made, so the time measured below is not less than the
            ;; time the shell has been sleeping, however this thread is scheduled (#628).
            (started (get-internal-real-time))
@@ -587,7 +587,7 @@ the test has waited 15 seconds for it, and the last two checks fail."
       (is-true (aion/test-threads:join exiting))
       ;; Its output does not end while the holder has it, so wait for the process instead.
       (is-true (%wait-for (lambda ()
-                            (not (sb-ext:process-alive-p (praxeon/mcp::child-process old))))))
+                            (not (praxeon/mcp::%process-alive-p (praxeon/mcp::child-process old))))))
       ;; Finishes the old server, which ends the blocked writer, and starts the next one.
       (is (equal "after" (mcp:call-tool client echo (%text "after"))))
       (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
@@ -624,8 +624,8 @@ as not run."
     (mcp:list-tools client)
     (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
       (mcp:close-client client)
-      (is-false (sb-ext:process-alive-p process))
-      (is (eql 0 (sb-ext:process-exit-code process))))
+      (is-false (praxeon/mcp::%process-alive-p process))
+      (is (eql 0 (praxeon/mcp::%process-exit-code process))))
     (is (= 1 (%recorded-count record "eof")))
     (is (= 0 (%recorded-count record "SIGTERM")))
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
@@ -649,11 +649,11 @@ terminated, which ends it (#599)."
     (with-stdio-client (client record "ignore-eof")
       (mcp:list-tools client)
       (let* ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client)))
-             (pid (sb-ext:process-pid process)))
+             (pid (praxeon/mcp::%process-pid process)))
         #-win32 (is (eql pid (praxeon/mcp::%getpgid pid))
                     "the server does not lead its own process group")
         (mcp:close-client client)
-        (is-false (sb-ext:process-alive-p process))
+        (is-false (praxeon/mcp::%process-alive-p process))
         (is (= 1 (%recorded-count record "eof")))
         #-win32 (is (= 1 (%recorded-count record "SIGTERM")))))))
 
@@ -666,10 +666,10 @@ group, which the client checks it leads first."
     (with-stdio-client (client record "ignore-term")
       (mcp:list-tools client)
       (let* ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client)))
-             (pid (sb-ext:process-pid process)))
+             (pid (praxeon/mcp::%process-pid process)))
         (is (eql pid (praxeon/mcp::%getpgid pid)) "the server does not lead its own process group")
         (mcp:close-client client)
-        (is-false (sb-ext:process-alive-p process))
+        (is-false (praxeon/mcp::%process-alive-p process))
         (is (= 1 (%recorded-count record "SIGTERM")))
         (is (eq :signaled (sb-ext:process-status process)))
         (is (eql 9 (sb-ext:process-exit-code process)))))))
@@ -733,7 +733,7 @@ it started as well."
            (setf pid (%start-grandchild client))
            (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
              (mcp:close-client client)
-             (is-false (sb-ext:process-alive-p process))
+             (is-false (praxeon/mcp::%process-alive-p process))
              (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid)))
       (%end-ping pid))))
 
@@ -772,7 +772,7 @@ by its closed stdin, by TerminateProcess or by itself, and the process it starte
                  (with-stdio-client (client record mode :call-timeout 3)
                    (setf pid (%start-grandchild client))
                    (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
-                     (setf server-pid (sb-ext:process-pid process))
+                     (setf server-pid (praxeon/mcp::%process-pid process))
                      (is (null (praxeon/mcp::child-job (praxeon/mcp::client-child client))))
                      (ecase how
                        (:close (mcp:close-client client))
@@ -780,7 +780,7 @@ by its closed stdin, by TerminateProcess or by itself, and the process it starte
                                              (mcp:call-tool client (%tool-named client "exit") nil)))
                         ;; As long as the job watcher would take to close a job.
                         (sleep 1)))
-                     (is-false (sb-ext:process-alive-p process))
+                     (is-false (praxeon/mcp::%process-alive-p process))
                      (is-true (%ping-running-p pid) "in ~A ~A, the ping ~D ended without a job to end it"
                               mode how pid))))
                (let ((logged (get-output-stream-string log)))

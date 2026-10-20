@@ -38,6 +38,36 @@ not one a message can carry (#366), before anything is sent."))
 is the HTTP status when there was a response; DETAIL is the provider's response body (where it
 explains the failure) or a transport error."))
 
+(define-condition delivery-rate-limited (delivery-failure)
+  ((retry-after :initarg :retry-after :initform nil :reader delivery-rate-limited-retry-after))
+  (:report (lambda (c stream)
+             (format stream "Delivery via ~A was refused by the provider's rate limit~@[; retry after ~D seconds~]."
+                     (delivery-failure-provider c)
+                     (delivery-rate-limited-retry-after c))))
+  (:documentation "The provider refused the message because too many were sent (HTTP 429).
+RETRY-AFTER is the number of seconds the provider asked the caller to wait, or NIL when it gave
+none. hermes neither waits nor retries: a caller that wants a retry schedules one, for example
+with AION/SCHEDULE:SCHEDULE-ONCE (#778). The Telegram backend signals it; the other backends
+still signal a plain DELIVERY-FAILURE for a 429."))
+
+(define-condition telegram-chat-unreachable (delivery-failure)
+  ()
+  (:documentation "Telegram refused the message because the bot cannot reach the chat: the
+chat does not exist, the bot was never added to it, or the bot was removed or blocked (#778)."))
+
+(define-condition telegram-not-permitted (delivery-failure)
+  ()
+  (:documentation "Telegram refused the message because the bot is in the chat but may not post
+there, for example a channel where the bot is not an administrator with the right to post
+(#778)."))
+
+(define-condition telegram-chat-migrated (delivery-failure)
+  ((migrate-to-chat-id :initarg :migrate-to-chat-id :initform nil
+                       :reader telegram-chat-migrated-migrate-to-chat-id))
+  (:documentation "Telegram refused the message because the group became a supergroup, which has
+a new chat id. MIGRATE-TO-CHAT-ID is that id; send to it instead, and store it in place of the
+old one (#778)."))
+
 (define-condition unsupported-message (hermes-error)
   ((provider :initarg :provider :reader unsupported-message-provider)
    (message :initarg :message :reader unsupported-message-message))

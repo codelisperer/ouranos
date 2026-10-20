@@ -114,9 +114,55 @@ that the log can be read, and signals `missing-role-log`, naming the migration a
 cannot, so a missing migration shows at boot rather than the first time an operator changes a
 role. An app that never changes roles can pass `:require-role-log nil` instead.
 
+**The email tables (#690).** Email confirmation, change of address and password reset add a
+column and two tables, each with its own steps:
+
+```lisp
+(be:make-migration "20261015_001_hyperion_users_email_confirmed" "email confirmed at"
+                   (auth:users-email-confirmed-ddl :dialect :sqlite)
+                   "ALTER TABLE hyperion_users DROP COLUMN email_confirmed_at") ; SQLite 3.35 or later
+(be:make-migration "20261015_002_hyperion_email_tokens" "email tokens"
+                   (auth:email-tokens-ddl :dialect :sqlite)
+                   "DROP TABLE hyperion_email_tokens")
+(be:make-migration "20261015_003_hyperion_email_tokens_hash" "email token lookup"
+                   (auth:email-tokens-hash-index-ddl)
+                   "DROP INDEX idx_hyperion_email_tokens_hash")
+(be:make-migration "20261015_004_hyperion_email_tokens_user" "email tokens per user"
+                   (auth:email-tokens-user-index-ddl)
+                   "DROP INDEX idx_hyperion_email_tokens_user")
+(be:make-migration "20261015_005_hyperion_email_events" "email change log"
+                   (auth:email-events-ddl :dialect :sqlite)
+                   "DROP TABLE hyperion_email_events")
+(be:make-migration "20261015_006_hyperion_email_events_index" "email change log index"
+                   (auth:email-events-index-ddl)
+                   "DROP INDEX idx_hyperion_email_events_user_at")
+```
+
+- `email_confirmed_at` on the users table is NULL until the address is confirmed. **It is not in
+  `users-ddl`**, so a new timeline adds it with the same `ALTER` step as an old one. If
+  `users-ddl` included it, a fresh database replaying an existing timeline would create the
+  column in the first step and then fail on the `ALTER` (section 8).
+- `hyperion_email_tokens` holds the SHA-256 of each confirmation, change, revert and reset
+  token, never the token itself.
+- `hyperion_email_events` is the append-only log of confirmations and changes of address, read
+  by `email-history`.
+
+`make-db-auth` checks the column and both tables at construction and signals
+`missing-email-tables` naming these steps. An app that uses none of the confirmation,
+change-of-address or reset functions can pass `:require-email-tables nil` instead. **Existing
+accounts start unconfirmed.** To mark them confirmed, add one more step after the `ALTER`:
+
+```sql
+UPDATE hyperion_users SET email_confirmed_at = created_at WHERE email_confirmed_at IS NULL
+```
+
+A store with other table names passes `:tokens-table` and `:email-events-table` to
+`make-db-auth`, and the same names as `:table` to the DDL functions.
+
 A store made with other table names (`make-db-auth … :table "members" :events-table
 "member_roles"`) needs its migrations to create those names: pass the same `:table` to
-`users-ddl`, `users-email-index-ddl`, `role-events-ddl` and `role-events-index-ddl` (#378).
+`users-ddl`, `users-email-index-ddl`, `role-events-ddl` and `role-events-index-ddl` (#378),
+and to the email DDL functions above.
 `:ensure t` uses the store's names itself.
 
 `mnemosyne/jobs` (#689) owns two tables, `aion_jobs` and `aion_job_runs`. `jobs-ddl` returns the

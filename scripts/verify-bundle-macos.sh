@@ -121,6 +121,44 @@ for name in $REQUIRED; do
   fi
 done
 
+# --- check 0: no binary needs a later macOS than the app says it runs on ---------------
+# A .app states the oldest macOS it runs on as LSMinimumSystemVersion. Each Mach-O in it
+# records the oldest macOS it was built for (minos). One whose minos is later than the stated
+# minimum makes the statement false, and the app fails to start on the Macs in between. This
+# happened when the build image moved to macos-26 (#763).
+# ver_gt A B: true when version A is later than B, comparing each dotted part as a number, so
+# 15 and 15.0 are equal.
+ver_gt() {
+  awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, ".")
+    for (i = 1; i <= (n > m ? n : m); i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
+    exit 1 }'
+}
+case "$TARGET" in
+  *.app)
+    echo "--- check 0: no binary needs a later macOS than LSMinimumSystemVersion ---"
+    MIN=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$TARGET/Contents/Info.plist" 2>/dev/null || true)
+    if [ -z "$MIN" ]; then
+      echo "  FAIL -- Info.plist has no LSMinimumSystemVersion"
+      FAILED=1
+    else
+      echo "  LSMinimumSystemVersion = $MIN"
+      for f in "$DIR"/*; do
+        [ -f "$f" ] && file -b "$f" | grep -q Mach-O || continue
+        MINOS=$(vtool -show-build "$f" 2>/dev/null | awk '$1 == "minos" {print $2; exit}')
+        if [ -z "$MINOS" ]; then
+          echo "  FAIL -- $(basename "$f"): vtool reported no minos"
+          FAILED=1
+        elif ver_gt "$MINOS" "$MIN"; then
+          echo "  FAIL -- $(basename "$f") needs macOS $MINOS, later than $MIN"
+          FAILED=1
+        else
+          echo "  ok -- $(basename "$f") needs macOS $MINOS"
+        fi
+      done
+    fi
+    echo ;;
+esac
+
 # --- check 1: no build-machine paths survive in the load commands ----------------------
 # The bug ADR-0014 exists for. A path under /opt/homebrew, /usr/local or the source tree is
 # a machine-specific dependency that will not exist on a user's Mac.
@@ -220,6 +258,16 @@ for lib in $CARRIED; do
     fi
   fi
 done
+
+# Which OpenSSL the app loaded, for the record. It comes from Homebrew, not the bundle (#191),
+# and its major version can change with the build image (#763). Not a pass or fail.
+SSL=$(grep -E 'libssl\.|libcrypto\.' "$LOG" | grep dyld | sed 's/^.*dyld[^/]*//' | grep -v '^ *$' | sort -u || true)
+if [ -n "$SSL" ]; then
+  echo "  info -- OpenSSL loaded from:"
+  echo "$SSL" | sed 's/^/         /'
+else
+  echo "  info -- no libssl or libcrypto was loaded on this run"
+fi
 
 # --- check 3: the control, for linked libraries only -----------------------------------
 # Decisive on any machine: @executable_path has no fallback. Skipped for dlopen'd libraries,

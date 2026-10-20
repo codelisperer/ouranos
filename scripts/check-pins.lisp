@@ -31,7 +31,7 @@
                       (uiop:pathname-directory-pathname *load-truename*)))
 
 (defparameter *identity-fields* '("version" "sha")
-  "A pin must name WHAT we build in one of these. libuv.pin says `version 1.52.1';
+  "A pin must name WHAT we build in one of these. libuv.pin says `version 1.53.0';
 coalton.pin says `sha 7915fad0'. Requiring one specific spelling would fail a pin that
 already identifies itself perfectly well in the other.")
 

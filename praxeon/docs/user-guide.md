@@ -28,8 +28,10 @@ provider key (§1) and jump to [Talk to Elise](#4-talk-to-elise). The sections b
 explain each piece for when you want to set things up by hand or need to troubleshoot.
 
 (The framework-local `scripts/setup.sh` still works as an **interim** convenience —
-it clones Coalton, seeds `.env`, and with `--test` compiles + runs the suite — but
-discovery now comes from the bootstrap drop-in, not a `local-projects` symlink.)
+it checks that Coalton is at the commit in the monorepo's `coalton.pin`, seeds `.env`,
+and with `--test` compiles + runs the suite — but discovery now comes from the bootstrap
+drop-in, not a `local-projects` symlink. It does not install Coalton: the monorepo's
+`scripts/setup.sh` or `scripts/setup.ps1` checks out the pinned commit.)
 
 ## Prerequisites
 
@@ -63,7 +65,7 @@ Minimum to talk to Elise via **Anthropic**:
 
 ```sh
 PRAXEON_LLM_IMPL=anthropic
-PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5        # or claude-opus-4-8
+PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5-5      # or claude-opus-5-5
 PRAXEON_ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -378,8 +380,8 @@ signals `praxeon/conditions:missing-provider-key`, which names both variables.
 So one process runs several agents, each on its own model/vendor:
 
 ```sh
-PRAXEON_LLM_MODEL=claude-sonnet-5                  # shared default (any role)
-PRAXEON_ELISE_MODEL=claude-opus-4-8                # Elise deliberates (therapist)
+PRAXEON_LLM_MODEL=claude-sonnet-5-5                # shared default (any role)
+PRAXEON_ELISE_MODEL=claude-opus-5-5                # Elise deliberates (therapist)
 PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 # PRAXEON_SCRIBE_MODEL=...                          # a future agent: just add a var
 ```
@@ -1047,7 +1049,100 @@ finds it. The clearing row shows a setting to avoid: when each result is about h
 a batch runs after almost every result, and each batch changes the start of the prompt, so the
 cached share falls.
 
-## 14. Run the tests
+## 14. Let an agent create images (`praxeon/image`, #758)
+
+`praxeon/image` gives an agent the means `generate-image`. The model calls it with a prompt and,
+optionally, a shape (`square`, `portrait`, `landscape`) and a quality (`low`, `medium`,
+`high`). The image goes to your app, never to the model: a means returns a string to the model,
+and the bytes are yours to store and serve. Praxeon keeps nothing.
+
+```lisp
+(ql:quickload :praxeon/image)
+
+(praxeon/image:register-openai-image
+ agent
+ :api-key (user-openai-key user)          ; the user's key first; omit to read the environment
+ :on-image (lambda (image)
+             ;; IMAGE is an IMAGE-RESULT: its octets, media type, revised prompt, size, quality.
+             (let ((id (store-image! (praxeon/image:image-result-octets image)
+                                     (praxeon/image:image-result-media-type image))))
+               ;; What you return is shown to the model as the image's reference, or NIL.
+               id)))
+```
+
+`register-openai-image` returns the means' name, or NIL when there is no key, in which case it
+registers nothing. Use it rather than `register`, so an agent never has a means that can only
+fail. With no `:api-key` it reads `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an
+`:api-key` you pass is used even when it is NIL. An `:api-key` of `""` is no key either: nothing
+is registered, and a warning is logged, because it usually means the app's key setting is blank.
+`PRAXEON_IMAGE_MODEL` and `PRAXEON_IMAGE_BASE_URL` override the model (default
+`gpt-image-2.5-flare`) and the endpoint.
+
+**Bounding what an image costs.** Pass `:qualities` to choose which qualities the model may ask
+for, and `:default-quality` and `:default-size` for a call that names none:
+
+```lisp
+(praxeon/image:register-openai-image
+ agent :on-image #'store-image!
+ :qualities '(:low :medium) :default-quality :low :default-size :square)
+```
+
+The tool schema then offers only `low` and `medium`, and a call that asks for `high` is refused
+with an error result naming the allowed values, before any request is sent. Without
+`:qualities` the model may ask for `low`, `medium`, `high` or `auto`. Each request makes one
+image.
+
+**Another model.** Pass any OpenAI image model id as `:model`, or set `PRAXEON_IMAGE_MODEL`. For
+example, `gpt-image-1-mini` costs about a quarter as much per token as the default. OpenAI shuts
+it down on 2026-12-01, along with `gpt-image-1.5` and `chatgpt-image-latest`; `gpt-image-1`
+shuts down on 2026-10-23. OpenAI names `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` as
+their replacements: Sunburst is the variant for work where editing precision matters most. The
+quality the model is asked for is a parameter too, so an app can trade cost for detail on each
+call.
+
+The model is told the image's media type, its size in bytes, your reference and the prompt the
+provider says it used. The bytes are passed to `:on-image` as the provider sent them and are
+never re-encoded, so provenance metadata embedded in the file, such as C2PA, is kept.
+
+**A refusal is a result, not a crash.** When the provider refuses a prompt under its content
+policy, the means signals `praxeon/image:image-refused`, a `tool-error-result`. The model is
+told the request was refused, with the provider's code, stage and categories, and the turn goes
+on, so the agent can explain it.
+
+**A busy or silent service is a result too.** When the service answers 429 or 5xx, or does not
+answer within the read timeout (120 seconds by default; pass `:read-timeout` to change it), the
+request signals `praxeon/image:image-request-failed`, whose `image-request-failed-kind` is
+`:rate-limited`, `:server-error` or `:no-answer`. Inside a turn the model is told the service is
+busy or unavailable and to try again later, with the wait the service's `Retry-After` header
+asked for when it sent one, and the turn goes on. Praxeon does not retry. The `:tool-result`
+outcome is `:not-run` for a 429 and `:unknown` otherwise, since the request may have been
+processed. Any other failed request, such as a 400, is `provider-request-failed`, as for the
+chat providers, and ends the turn.
+
+**Usage.** Each request that succeeds emits one `:image-usage` event through `praxeon/event`,
+with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
+`:size` and `:quality`, plus `:input-tokens`, `:output-tokens` and `:cost` when the provider
+reports them. OpenAI reports token counts and no cost, so `:cost` is absent rather than 0. A
+refused or failed request emits no `:image-usage` event, because the provider reports no usage
+with an error. Whether a provider charges for a refused request is its own policy, which praxeon
+cannot see. The model's call and its result arrive as the usual `:tool-call` and `:tool-result`
+events, so a status line can say an image is being made.
+
+**Logging** records the provider, model, count, size, quality, byte count, status and duration,
+never the prompt, the revised prompt or the image.
+
+To call the provider outside a turn, use `generate-image`:
+
+```lisp
+(praxeon/image:generate-image (praxeon/image:make-openai-images :api-key key)
+                              "a red fox at dusk" :size :landscape :quality :high)
+;; => a list of IMAGE-RESULTs
+```
+
+Generating from a reference image (an edit or a variation) is not supported yet; it is the
+follow-up to #758.
+
+## 15. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

@@ -102,7 +102,7 @@
     stays with the caller, and STOP takes whichever handler START returned.")
   (:export #:default-server #:available-servers #:no-server-backend
            #:native-backend-p
-           #:*default-port* #:start #:stop
+           #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
            #:loopback-host-p
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
@@ -130,6 +130,8 @@
     query param, read a request header or cookie, negotiate JSON, and
     encode/decode JSON. Domain-neutral -- the caller supplies its own keys.")
   (:export #:body-string #:form-alist #:form-param #:form-params
+           ;; a body encoded as a browser encodes a form, for tests (#715)
+           #:form-urlencode
            ;; a body is a stream and is read once; a middleware that must look
            ;; inside it caches the result here rather than spending it (pre-publication issue 280)
            #:+body-string-key+ #:cache-body-string
@@ -222,7 +224,9 @@
            #:session-cookie-not-attachable #:session-cookie-not-attachable-response
            ;; dev/REPL session management
            #:sessions #:session-summary #:describe-sessions
-           #:kill-session #:kill-sessions))
+           #:kill-session #:kill-sessions
+           ;; #690: end every session of one user, after a change of address or a revert.
+           #:end-sessions))
 
 (cl:defpackage #:hyperion/csrf
   (:use #:cl)
@@ -531,6 +535,7 @@
 (cl:defpackage #:hyperion/dev
   (:use #:cl)
   (:local-nicknames (#:srv  #:hyperion/server)
+                    (#:sidecar #:hyperion/sidecar)
                     (#:hjs  #:hyperion/js)
                     (#:hlog #:hyperion/logging))
   (:documentation
@@ -543,6 +548,9 @@
   (:export #:*reload-epoch* #:mark-reloaded
            ;; what the watcher watches (pre-publication issue 134): a denylist, pruning directories
            #:*watch-excluded-directories* #:*watch-excluded-types*
+           ;; #730: the most files watched, and what is signalled past it
+           #:*watch-file-limit* #:watch-too-large #:watch-too-large-root
+           #:watch-too-large-count #:watch-too-large-limit
            #:watch #:unwatch #:reload! #:dev-error
            #:serve #:wrap-dev
            ;; pre-publication issue 235: the guard is only useful if a caller can name what it signals.

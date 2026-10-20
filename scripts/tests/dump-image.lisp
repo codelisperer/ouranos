@@ -136,6 +136,75 @@ may call save-lisp-and-die itself, so the two tests above describe what they pro
       (is (search "ouranos-dump:dump-executable" text) "~A must dump through ouranos-dump:dump-executable" file)
       (is (not (search "(sb-ext:save-lisp-and-die" text)) "~A calls save-lisp-and-die itself, so its image skips UIOP's hooks" file))))
 
+;;; --- bin/cons is a development runner, and a shipped image is not (#703) --------------------
+;;;
+;;; Each image below loads aion/platform, by path, as an app run by bin/cons would, and prints
+;;; what SHIPPED-IMAGE-P and DEVELOPMENT-RUNNER-P answer in it. Every one is a single dumped
+;;; file, so its runtime and core are the same file. The first is dumped the way bootstrap.lisp
+;;; dumps bin/cons. The second is the control, a shipped image, which must still read as one.
+;;; The third is a shipped image dumped from a process that carries the mark, as an app dumped
+;;; from inside bin/cons would be.
+
+(defun %platform-probe-answer (&key development-runner marked-before-dump)
+  "Dump an image through DUMP-EXECUTABLE with DEVELOPMENT-RUNNER, from a process that carries the
+development-runner mark when MARKED-BEFORE-DUMP, run it, and return its output and exit code."
+  (let* ((tree (%fresh-tree))
+         (probe (merge-pathnames "platform-probe.lisp" tree))
+         (image (merge-pathnames (if (uiop:os-windows-p) "platform-probe.exe" "platform-probe") tree))
+         (dump-out (make-string-output-stream))
+         (run-out (make-string-output-stream)))
+    (%write probe (%lines "(defpackage #:platform-probe (:use #:cl))"
+                          "(in-package #:platform-probe)"
+                          "(defun main ()"
+                          "  (format t \"~&SHIPPED ~A RUNNER ~A~%\" (aion/platform:shipped-image-p) (aion/platform:development-runner-p))"
+                          "  (finish-output)"
+                          "  (uiop:quit 0))"))
+    (uiop:run-program
+     (append
+      (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+            "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+            "--eval" "(require :asdf)")
+      (loop for file in '("aion/src/platform/packages.lisp" "aion/src/platform/platform.lisp")
+            append (list "--eval" (format nil "(load ~S)" (uiop:native-namestring
+                                                          (merge-pathnames file td-root)))))
+      (list "--eval" (format nil "(load ~S)" (uiop:native-namestring probe)))
+      (and marked-before-dump (list "--eval" "(push :ouranos-development-runner *features*)"))
+      (list "--eval" (format nil "(load ~S)" (uiop:native-namestring (merge-pathnames "dump-image.lisp" *scripts*)))
+            "--eval" (format nil "(ouranos-dump:dump-executable ~S 'platform-probe::main :development-runner ~:[nil~;t~])"
+                             (uiop:native-namestring image) development-runner)))
+     :output dump-out :error-output dump-out :ignore-error-status t)
+    (let ((run-code (and (probe-file image)
+                         (nth-value 2 (uiop:run-program (list (uiop:native-namestring image))
+                                                        :output run-out :error-output run-out
+                                                        :ignore-error-status t)))))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore)
+      (values (format nil "~A~@[~%dump output:~%~A~]" (get-output-stream-string run-out)
+                      (and (null run-code) (get-output-stream-string dump-out)))
+              run-code))))
+
+(test an-image-dumped-as-bin-cons-is-not-a-shipped-build
+  (multiple-value-bind (out code) (%platform-probe-answer :development-runner t)
+    (is (eql 0 code) "the image did not run cleanly:~%~A" out)
+    (is (search "SHIPPED NIL RUNNER T" out) "dumped as bin/cons is, it must not read as shipped:~%~A" out)))
+
+(test a-shipped-image-is-still-a-shipped-build
+  "The control for the test above: the same dump without :DEVELOPMENT-RUNNER."
+  (multiple-value-bind (out code) (%platform-probe-answer)
+    (is (eql 0 code) "the image did not run cleanly:~%~A" out)
+    (is (search "SHIPPED T RUNNER NIL" out) "a shipped image must read as shipped:~%~A" out)))
+
+(test an-image-dumped-from-inside-bin-cons-is-not-marked
+  (multiple-value-bind (out code) (%platform-probe-answer :marked-before-dump t)
+    (is (eql 0 code) "the image did not run cleanly:~%~A" out)
+    (is (search "SHIPPED T RUNNER NIL" out)
+        "a shipped image dumped from a process carrying the mark must not carry it:~%~A" out)))
+
+(test bootstrap-dumps-bin-cons-as-a-development-runner
+  "The dump above is the one bootstrap.lisp makes only if bootstrap.lisp passes the flag."
+  (let ((text (uiop:read-file-string (merge-pathnames "bootstrap.lisp" td-root))))
+    (is (search "(fdefinition (read-from-string \"cons/cli:main\")) :development-runner t)" text)
+        "bootstrap.lisp must dump bin/cons with :development-runner t")))
+
 (defun %tree-lisp-files ()
   "Every .lisp file in the tree outside a tests/, vendor/ or dist/ directory and outside .git.
 Test fixtures dump bare on purpose (the #107 fixture above is one), and vendor/ and dist/

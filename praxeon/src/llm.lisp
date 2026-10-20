@@ -13,9 +13,10 @@
 
 (cl:in-package #:praxeon/llm)
 
-(defparameter *default-model* "claude-sonnet-5"
-  "Default model id. Confirmed a valid Claude API model string; for heavy
-agentic tool-use loops prefer a more capable model such as \"claude-opus-4-8\".")
+(defparameter *default-model* "claude-sonnet-5-5"
+  "Default model id: Claude Sonnet 5.5, the current Sonnet model on Anthropic's models page
+(read 2026-10-17, #764). For heavy agentic tool-use loops prefer a more capable model such as
+\"claude-opus-5-5\".")
 
 (defparameter *default-max-tokens* 8192
   "The output-token limit for a completion when the caller passes no :max-tokens. An agent turn
@@ -31,7 +32,7 @@ written through a tool is output), and, on a model that thinks before answering,
 The default model decides for itself whether to think when a request carries no thinking
 setting, and this client sends none. A consuming app raised the limit to 8,192 after its tool
 calls were cut off at 1,024. The models praxeon names as defaults accept 8,192:
-claude-sonnet-5 (*DEFAULT-MODEL*) and claude-opus-4-8 allow up to 128,000 output tokens, and
+claude-sonnet-5-5 (*DEFAULT-MODEL*) and claude-opus-5-5 allow up to 128,000 output tokens, and
 the model card of qwen2.5 (the default model of OPENAI-COMPATIBLE) gives its generation length
 as 8,192 tokens. For a model whose maximum is lower, pass :max-tokens or bind this lower.
 
@@ -228,7 +229,9 @@ No tools are offered. The text is returned as the provider sent it: checking it 
 schema is the caller's job, as GENERATE-STRUCTURED does (#680).
 
 Only a provider whose SUPPORTS-RESPONSE-FORMAT-P is true implements this. The default method
-signals DELIBERATION-FAILURE before anything is sent.")
+signals DELIBERATION-FAILURE before anything is sent. Its detail names SPEC, so a developer can
+tell which call reached a provider without response_format; the name is the app's own
+identifier, not a value from a provider or a user.")
   (:method ((p provider) messages spec &key system max-tokens temperature)
     (declare (ignore messages system max-tokens temperature))
     (error 'praxeon/conditions:deliberation-failure
@@ -278,9 +281,20 @@ signals DELIBERATION-FAILURE before anything is sent.")
                      ;; :warn, not :error -- a provider failure is often retried or falls
                      ;; back to another provider, so it is not by itself an app error. The
                      ;; caller decides; we just make sure it is never silent.
-                     (log:warn "llm request failed" :provider (string (type-of p))
-                                                    :model model :error (princ-to-string c)
-                                                    :ms (%ms-since start)))))
+                     ;;
+                     ;; The report of a PROVIDER-REQUEST-FAILED leaves the response body out,
+                     ;; and its parts are logged as fields: never the body itself (#719).
+                     (if (typep c 'praxeon/conditions:provider-request-failed)
+                         (log:warn "llm request failed" :provider (string (type-of p))
+                                                        :model model :error (princ-to-string c)
+                                                        :status (praxeon/conditions:provider-request-failed-status c)
+                                                        :error-type (praxeon/conditions:provider-request-failed-error-type c)
+                                                        :error-code (praxeon/conditions:provider-request-failed-error-code c)
+                                                        :body-length (length (or (praxeon/conditions:provider-request-failed-body c) ""))
+                                                        :ms (%ms-since start))
+                         (log:warn "llm request failed" :provider (string (type-of p))
+                                                        :model model :error (princ-to-string c)
+                                                        :ms (%ms-since start))))))
       (let ((completion (call-next-method)))
         (log:debug "llm response" :model model
                                   :stop-reason (completion-stop-reason completion)
@@ -301,21 +315,66 @@ signals DELIBERATION-FAILURE before anything is sent.")
   "Milliseconds since START (an internal-real-time reading), rounded."
   (round (* 1000 (- (get-internal-real-time) start)) internal-time-units-per-second))
 
-(defun %http-error-detail (label e)
-  "A detail string for a failed HTTP request E. Includes the status and response body when
-there is one -- the body is where a provider explains a 400, so surfacing it turns an opaque
-failure into an actionable one.
+(defun %identifier-char-p (ch)
+  (or (char<= #\a ch #\z) (char<= #\A ch #\Z) (char<= #\0 ch #\9) (find ch "_.-")))
 
-Reads AION/HTTP-CLIENT:HTTP-ERROR rather than decoding dexador conditions directly (pre-publication issue 202).
-praxeon used to hand-roll that decoding in this function precisely because the shared client
-was not reachable; now the client carries status and body and this only has to phrase them."
-  (typecase e
-    (http:http-error
-     (if (http:http-error-status e)
-         (format nil "~A: HTTP ~A -- ~A" label (http:http-error-status e)
-                 (or (http:http-error-body e) ""))
-         (format nil "~A: ~A" label (or (http:http-error-detail e) e))))
-    (t (format nil "~A: ~A" label e))))
+(defun %short-string (x)
+  "X as a string when it is a string or an integer of at most 64 characters, each a letter, a
+digit or one of _ . -, otherwise NIL. An error type or code is a short identifier, and both are
+logged; anything else is not one, and could be text from the body or from a proxy between
+praxeon and the service (#727)."
+  (let ((s (typecase x
+             (string x)
+             (integer (princ-to-string x)))))
+    (and s (<= 1 (length s) 64) (every #'%identifier-char-p s) s)))
+
+(defun %unknown-tool-choice (value)
+  "The UNKNOWN-TOOL-CHOICE for VALUE (#727). Its detail, which the report prints and the warn
+line logs, gives VALUE's kind and length; a forced tool's name can come from a prompt."
+  (make-condition 'praxeon/conditions:unknown-tool-choice
+                  :value value
+                  :detail (format nil "unknown tool-choice: ~A"
+                                  (praxeon/conditions:value-shape value))))
+
+(defun %provider-error-fields (body)
+  "The error type and code in BODY, a service's error JSON, as two values, each NIL when absent.
+Anthropic sends {\"type\":\"error\",\"error\":{\"type\":..,\"message\":..}}, with no code;
+OpenAI-compatible servers send {\"error\":{\"type\":..,\"code\":..,\"message\":..}}. A body
+that is not JSON, or not of either shape, gives NIL and NIL."
+  (let* ((parsed (and (stringp body)
+                      (handler-case (jzon:parse body) (error () nil))))
+         (err (and (hash-table-p parsed) (gethash "error" parsed))))
+    (if (hash-table-p err)
+        (values (%short-string (gethash "type" err)) (%short-string (gethash "code" err)))
+        (values nil nil))))
+
+(defun %request-failure (label e)
+  "A PROVIDER-REQUEST-FAILED for the failed HTTP request E, whose report starts with LABEL (#719).
+
+Reads AION/HTTP-CLIENT:HTTP-ERROR rather than decoding dexador conditions directly (pre-publication
+issue 202). The response body goes on the condition, where an app reads the service's
+explanation of a 400. The detail, which the report prints and praxeon/llm logs, has the status,
+the error type and code, and the body's length, never the body (#719): docs/logging.md keeps
+payloads out of log lines, and a response body can repeat the request."
+  (if (and (typep e 'http:http-error) (http:http-error-status e))
+      (let ((status (http:http-error-status e))
+            (body (http:http-error-body e)))
+        (multiple-value-bind (type code) (%provider-error-fields body)
+          (make-condition 'praxeon/conditions:provider-request-failed
+                          :status status :error-type type :error-code code :body body
+                          :detail (format nil "~A: HTTP ~A~@[, ~A~]~@[, code ~A~], a response body of ~D characters"
+                                          label status type code (length (or body ""))))))
+      (make-condition 'praxeon/conditions:provider-request-failed
+                      :detail (format nil "~A: ~A" label
+                                      (if (typep e 'http:http-error)
+                                          (or (http:http-error-detail e) "no response")
+                                          e)))))
+
+(defun request-failure (label e)
+  "The PROVIDER-REQUEST-FAILED for the failed HTTP request E, as %REQUEST-FAILURE builds it, for a
+praxeon module that calls a service itself rather than through COMPLETE (#758). Its report starts
+with LABEL and carries the status, error type and code and the body's length, never the body."
+  (%request-failure label e))
 
 (defun %post-json (url headers payload)
   "One JSON POST through the shared interceptor client, returning the response body.
@@ -372,8 +431,7 @@ property that makes every existing agent provably unaffected."
        (setf (gethash "type" ht) "tool"
              (gethash "name" ht) (second tool-choice))
        ht))
-    (t (error 'praxeon/conditions:deliberation-failure
-              :detail (format nil "unknown tool-choice ~S" tool-choice)))))
+    (t (error (%unknown-tool-choice tool-choice)))))
 
 (defun anthropic-request-body (p messages &key system tools
                                             (max-tokens *default-max-tokens*)
@@ -422,8 +480,7 @@ translation happened."
              (handler-case
                  (%post-json (anthropic-endpoint p) (%auth-headers p) payload)
                (error (e)
-                 (error 'praxeon/conditions:deliberation-failure
-                        :detail (%http-error-detail "Anthropic request failed" e))))))
+                 (error (%request-failure "Anthropic request failed" e))))))
       (%parse-completion (jzon:parse response)))))
 
 ;;; --- request translation: neutral -> Anthropic JSON ---------------------
@@ -639,8 +696,7 @@ object in every case. That difference is exactly what the neutral value exists t
              (gethash "type" ht) "function"
              (gethash "function" ht) fn)
        ht))
-    (t (error 'praxeon/conditions:deliberation-failure
-              :detail (format nil "unknown tool-choice ~S" tool-choice)))))
+    (t (error (%unknown-tool-choice tool-choice)))))
 
 (defvar *oai-response-format* nil
   "The TOOL-SPEC whose schema the next OPENAI-COMPATIBLE request asks for as response_format, or
@@ -726,10 +782,8 @@ through response_format (#680)."
              (handler-case
                  (%post-json url headers payload)
                (error (e)
-                 (error 'praxeon/conditions:deliberation-failure
-                        :detail (%http-error-detail
-                                 (format nil "OpenAI-compatible request to ~A failed" url)
-                                 e))))))
+                 (error (%request-failure
+                         (format nil "OpenAI-compatible request to ~A failed" url) e))))))
       (%parse-openai (jzon:parse response)))))
 
 ;;; --- request translation: neutral -> OpenAI JSON ------------------------

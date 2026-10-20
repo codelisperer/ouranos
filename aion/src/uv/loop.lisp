@@ -147,7 +147,7 @@ rather than at LOAD with a broken system."
   t)
 
 (defun version ()
-  "The version string of the libuv actually loaded, e.g. \"1.52.1\"."
+  "The version string of the libuv actually loaded, e.g. \"1.53.0\"."
   (ensure-available)
   (ffi:uv-version-string))
 

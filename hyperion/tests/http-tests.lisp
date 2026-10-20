@@ -18,6 +18,55 @@
     (loop for (k v) on headers by #'cddr do (setf (gethash (string-downcase k) h) v))
     (list :query-string query :headers h :raw-body body)))
 
+;;; --- names a browser encodes (#715) ---------------------------------------
+;;;
+;;; A browser percent-encodes a field NAME the way it encodes a value. Before #715 the parser
+;;; decoded only values, so these fields were read as not sent. The bodies below come from
+;;; FORM-URLENCODE, which encodes as a browser does, and each test also checks the encoded
+;;; spelling is really in the body, so a helper that stopped encoding could not make them pass.
+
+(defparameter *browser-names* '("en:who" "items[0]" "a b")
+  "The three shapes of name in #715: a reserved character, brackets, and a space.")
+
+(test form-urlencode-encodes-a-form-as-a-browser-does
+  (is (string= "en%3Awho=a+b&items%5B0%5D=x%2Fy&%C3%A9t%C3%A9=1&ok=*-._"
+               (http:form-urlencode '(("en:who" . "a b") ("items[0]" . "x/y") ("été" . "1")
+                                      ("ok" . "*-._"))))))
+
+(test a-browser-encoded-field-name-is-read-by-its-decoded-name
+  (dolist (name *browser-names*)
+    (let ((body (http:form-urlencode (list (cons "other" "z") (cons name "saved")))))
+      (is (null (search name body)) "the body carries ~S encoded, as a browser sends it: ~A" name body)
+      (is (equal "saved" (http:form-param body name)) "form-param finds ~S in ~A" name body)
+      (is (equal '("saved") (http:form-params body name))))))
+
+(test the-encoded-names-from-the-issue-are-decoded
+  "The bodies as #715 reports them, written out rather than built by the helper."
+  (is (equal "x" (http:form-param "en%3Awho=x" "en:who")))
+  (is (equal "x" (http:form-param "items%5B0%5D=x" "items[0]")))
+  (is (equal "x" (http:form-param "a+b=x" "a b")))
+  (is (equal '(("en:who" . "x") ("a b" . "y")) (http:form-alist "en%3Awho=x&a+b=y")))
+  (is (equal "x" (http:form-param "plain=x" "plain")) "control: a name with nothing to decode"))
+
+(test a-browser-encoded-query-key-is-read-by-its-decoded-name
+  (dolist (name *browser-names*)
+    (let ((env (%http-env :query (http:form-urlencode (list (cons name "v1") (cons name "v2"))))))
+      (is (equal "v1" (http:query-param env name)) "query-param finds ~S" name)
+      (is (equal '("v1" "v2") (http:query-params env name))))))
+
+(test a-part-that-does-not-decode-is-kept-as-it-arrived
+  "quri signals on a truncated escape even with :LENIENT. The body is client-supplied, so the
+parser keeps that part's raw text instead of signalling."
+  (is (equal '(("x%4" . "1")) (http:form-alist "x%4=1")))
+  (is (equal '(("a" . "%4")) (http:form-alist "a=%4")))
+  (is (equal "1" (http:form-param "x%4=1&ok=1" "ok")) "the pairs after it are still read")
+  (is (equal "1" (http:form-param "%=1" "")) "a lone % decodes to nothing, as quri reads it")
+  (is (equal "x y" (http:form-param "a=x+y" "a")) "control: a part that decodes is decoded"))
+
+(test form-urlencode-round-trips-through-form-alist
+  (let ((pairs '(("en:who" . "Zoë & co") ("items[0]" . "a=b") ("a b" . "") ("+" . "%"))))
+    (is (equal pairs (http:form-alist (http:form-urlencode pairs))))))
+
 ;;; --- the repeated field, which is the whole issue --------------------------
 
 (test form-params-returns-every-value-of-a-repeated-field

@@ -482,6 +482,60 @@ Opt-in, so existing code is unaffected. Checked on `create-user`, `grant-role` *
 `revoke-role` — a typo on the way out is the worse direction, since you believe you removed
 a role and did not.
 
+### Confirming an address, changing it, and resetting a password (#690)
+
+The store owns the tokens, the checks and the writes. It sends no mail, because hyperion cannot
+depend on `hermes`: every function that creates a token returns it with the address it is for,
+and the app mails a link carrying it. The app also renders every page. The store needs the
+column and tables in `docs/migrations.md` section 5, or `:ensure t`.
+
+```lisp
+;; Sign-up, or "resend the confirmation":
+(multiple-value-bind (token email) (auth:issue-confirmation *auth* user-id)
+  (mail email (link "/confirm" token)))
+(auth:confirm-email *auth* token)                   ; => USER, now (auth:email-confirmed-p user)
+
+;; Change of address, from a form that asks for the current password:
+(multiple-value-bind (token new old) (auth:request-email-change *auth* user-id new-email
+                                                                :password current-password)
+  (mail new (link "/confirm-change" token))
+  (mail old "A change of address was requested for your account."))
+(multiple-value-bind (user old revert) (auth:confirm-email-change *auth* token)
+  (mail old (link "/revert-change" revert))         ; "your address was changed; undo it here"
+  (session:end-sessions sessions :user-id (auth:user-id user) :except current-session)
+  (session:rotate-session sessions current-session))
+(auth:revert-email-change *auth* revert sessions)   ; restores the old address, ends every session
+
+;; Password reset. Show the same page whether or not ISSUE-PASSWORD-RESET found an account.
+(multiple-value-bind (token user) (auth:issue-password-reset *auth* email)
+  (when token (mail (auth:user-email user) (link "/reset" token))))
+(auth:reset-password *auth* token new-password)
+```
+
+- **Unconfirmed is a state, not a refusal.** `email-confirmed-p` reports it, and the app decides
+  what an unconfirmed account may do.
+- **A token works once, for one purpose, and for the address it was sent to.** Everything else
+  signals `invalid-token`. Its reason (`:unknown`, `:used`, `:expired`, `:superseded`) is for
+  the log; show the visitor the same page for all four. Lifetimes are 24 hours for a
+  confirmation or a change, 1 hour for a reset and 7 days for a revert, set with
+  `:confirm-token-seconds`, `:reset-token-seconds` and `:revert-token-seconds`.
+- **A user is sent at most 5 tokens of one purpose an hour** (`:token-limit`, `:token-window`);
+  the sixth signals `too-many-tokens` with the seconds to wait. This limits mail to one
+  account. Limit the routes by address as well, as in `docs/rate-limit.md`: a change request
+  refused with `duplicate-email` tells the signed-in user that the address has an account.
+- **A change of address cancels the user's unused confirmation, change and reset tokens**, so a
+  link mailed to the old address stops working. It does not cancel the revert link. Whoever
+  changed the address could otherwise change it again to cancel the link the owner was sent.
+  A revert cancels the revert link it uses and every revert link sent after it, and keeps the
+  older ones, so a hijacker who uses their own revert link cannot cancel the owner's.
+- **`request-email-change` requires the current password**, so a session someone else has taken
+  over cannot start a change. Pass `:password :skip` for an account that signs in without one.
+- **`set-email` is the operator path.** It changes the address at once, requires `:actor`,
+  and leaves the address unconfirmed unless `:confirmed t`; call `issue-confirmation`
+  afterwards to have the new address prove itself.
+- `email-history` returns the recorded confirmations and changes, with the actor, oldest first.
+  `prune-email-tokens` deletes expired tokens; run it from a scheduled job.
+
 ## Request logging (`hyperion/logging`)
 
 `server:start` wraps your app in request logging by default (`:log nil` opts out). Each

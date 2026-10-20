@@ -5,7 +5,8 @@
 #
 # scripts/setup.ps1 -- one-time Windows provisioning so a fresh clone of Hyperion loads.
 # Idempotent. Does NOT install SBCL/Quicklisp -- checks and tells you how.
-#   1. Clone Coalton (local checkout; not pulled by Quicklisp).
+#   1. Check that Coalton is at the commit coalton.pin names (scripts\coalton-pin.ps1).
+#      The monorepo's scripts\setup.ps1 is what clones it.
 # Discovery of the frameworks is NOT this script's job -- run
 # `sbcl --script bootstrap.lisp` at the repo root once (writes the ASDF drop-in).
 # NB: on Windows the web backend is Hunchentoot (Woo/libev are Unix-only), so
@@ -23,10 +24,10 @@ $QlSetup = Join-Path $QlHome 'setup.lisp'
 if (-not (Test-Path $QlSetup)) { Die "Quicklisp not found at $QlSetup (https://www.quicklisp.org/beta/)." }
 Info "SBCL present  |  Quicklisp at $QlHome"
 
-$CoaltonDir = Join-Path $HOME 'common-lisp\coalton'
-if (Test-Path (Join-Path $CoaltonDir '.git')) { Info "Coalton present at $CoaltonDir." }
-else { Info "Cloning Coalton into $CoaltonDir ..."; New-Item -ItemType Directory -Force -Path (Split-Path $CoaltonDir) | Out-Null
-       git clone --depth 1 https://github.com/coalton-lang/coalton $CoaltonDir }
+# Coalton: checked here, never cloned. scripts\coalton-pin.ps1 at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+& (Join-Path $PSScriptRoot '..\..\scripts\coalton-pin.ps1')
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
 # Discovery: framework discovery is via bootstrap.lisp's ASDF source-registry drop-in
 # -- run `sbcl --script bootstrap.lisp` at the repo root once. No local-projects junction.

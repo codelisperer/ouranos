@@ -311,11 +311,14 @@ idiom the one shape the injector missed."
   "Write the hidden token field for a form with METHOD, if one is warranted and available.
 
 Exported so a form built by a path the deftag cannot reach -- DYNAMIC-TAG,
-INTERPRET-HTML-TREE, hole 2 above -- can still be protected by asking for it."
+INTERPRET-HTML-TREE, hole 2 above -- can still be protected by asking for it.
+
+Returns no values. It is called inside a Spinneret body, the :FORM deftag's included, and
+Spinneret prints a body form's value, so a returned T showed as text after the field (#663)."
   (let ((tok (current-token)))
     (when (and tok (%form-changes-state-p method hx))
-      (spin:with-html (:input :type "hidden" :name *field-name* :value tok))
-      t)))
+      (spin:with-html (:input :type "hidden" :name *field-name* :value tok))))
+  (values))
 
 (defun token-headers ()
   "An hx-headers value carrying this request\'s token as *HEADER-NAME*, or NIL when no token is

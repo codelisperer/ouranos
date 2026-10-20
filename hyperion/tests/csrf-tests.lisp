@@ -130,6 +130,21 @@ production and would bury the suite here."
      (is (= 200 (first (funcall wrapped (%csrf-env :method :get :session s)))))
      (is (= 403 (first (funcall wrapped (%csrf-env :method :post :session s))))))))
 
+(test a-body-with-an-escape-that-does-not-decode-is-refused-with-403
+  "#720's review. Before FORM-ALIST kept a part that does not decode, a POST with `x%4=1' made
+the token lookup signal QURI:URL-DECODING-ERROR, so any client could turn the check into an
+unhandled condition instead of a refusal."
+  (%quietly
+   (let* ((s (%csrf-session "TOK"))
+          (app (lambda (env) (declare (ignore env)) (list 200 nil (list "ok"))))
+          (wrapped (csrf:wrap-csrf app)))
+     (dolist (body '("x%4=1" "a=%4" "%=1" "_csrf=TO%4"))
+       (is (eql 403 (handler-case (first (funcall wrapped (%csrf-env :session s :body body)))
+                      (error (e) (type-of e))))
+           "~S is refused, not an error" body))
+     (is (= 200 (first (funcall wrapped (%csrf-env :session s :body "x%4=1&_csrf=TOK"))))
+         "control: the same body with the right token is accepted"))))
+
 (test every-method-not-named-safe-is-checked
   ;; Exempt-by-omission is the failure mode: a method nobody listed must be CHECKED.
   (%quietly
@@ -447,6 +462,35 @@ with itself by construction."
   (let ((html (%rendering ((%csrf-session)) (:form :method "post" (:input :name "q")))))
     (is (stringp (%token-in html)) "a POST form must carry a token: ~S" html)
     (is (search "<input name=q>" html) "and the author's own children survive")))
+
+(defun %text-after-token-field (html)
+  "The characters between the end of the hidden _csrf input in HTML and the next tag, with
+surrounding whitespace removed, or NIL when HTML has no such input."
+  (let ((at (search "name=_csrf" html)))
+    (when at
+      (let* ((end (position #\> html :start at))
+             (next (or (position #\< html :start end) (length html))))
+        (string-trim '(#\Space #\Tab #\Newline #\Return) (subseq html (1+ end) next))))))
+
+(test nothing-is-rendered-between-the-token-field-and-the-forms-body
+  "The hidden _csrf input is followed directly by the form's own body, or by the end of the
+form when it has none. TOKEN-FIELD used to return T, which the :FORM deftag's expansion
+printed after the input, so every protected form showed a stray T (#663)."
+  (dolist (html (list (%rendering ((%csrf-session)) (:form :method "post" (:input :name "q")))
+                      (%rendering ((%csrf-session)) (:form :hx-post "/x" (:button "go")))
+                      (%rendering ((%csrf-session)) (:form :method "post"))))
+    (is (stringp (%token-in html)) "precondition: the form carries a token: ~S" html)
+    (is (equal "" (%text-after-token-field html))
+        "text between the token field and the next tag: ~S in ~S"
+        (%text-after-token-field html) html)))
+
+(test token-field-returns-no-values
+  "TOKEN-FIELD is called for its output only. A value it returned would be printed by any
+Spinneret body that calls it, as the :FORM deftag does (#663)."
+  (let ((csrf:*token-thunk* (lambda () (csrf:ensure-token (%csrf-session)))))
+    (let ((returned :unset))
+      (spin:with-html-string (setf returned (multiple-value-list (csrf:token-field "post"))))
+      (is (null returned) "TOKEN-FIELD returned ~S" returned))))
 
 (test the-injector-leaves-a-GET-form-alone
   ;; ADR-0019 hole 3, closed rather than documented: a token on a GET form lands in the
