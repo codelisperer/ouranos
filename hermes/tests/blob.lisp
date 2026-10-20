@@ -1910,8 +1910,10 @@ GET-BLOB and PUT-BLOB, and a move deletes nothing."
       (signals b:blob-unsupported (b:move-blob store "media" "a.txt" "media" "b.txt"))
       (is (b:blob-exists-p inner "media" "a.txt") "the move deleted nothing"))))
 
+;;; === 17. XML numeric character references ======================================
+
 (test s3-xml-decode-reads-numeric-references-in-one-pass
-  "MinIO writes an ETag's quotes as &#34; (measured on #804). Read without decoding it, a part's
+  "MinIO writes an ETag's quotes as &#34; (measured on MinIO 2025-04-22). Read without decoding it, a part's
 ETag is not the ETag, and completing the upload fails with 400."
   (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
   (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#X22;")))

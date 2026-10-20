@@ -472,7 +472,7 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
 in one pass, so `&amp;lt;' becomes `&lt;' and not `<'. Keys we write cannot contain them (the
 key alphabet excludes `&' and `<'), but a bucket may hold objects written by something else,
 and the sweep must not mistake a mis-decoded key for an orphan. MinIO writes the quotes around
-an ETag as `&#34;' (measured on #804), so a part's ETag read without this is not the ETag."
+an ETag as `&#34;' (measured on MinIO 2025-04-22), so an ETag read without this is not the ETag."
   (with-output-to-string (out)
     (loop with i = 0
           while (< i (length string))
