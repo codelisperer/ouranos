@@ -836,7 +836,7 @@ another size. The canonical request carries them, lower-cased and sorted with ho
                               :content-length 1234 :max-bytes 400000000)))
     (is (typep target 'b:upload-target))
     (is (string= "PUT" (b:upload-target-method target)))
-    (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))
+    (is (equal '(("Content-Type" . "video/mp4") ("x-amz-acl" . "private")) (b:upload-target-headers target)))
     (is (= 900 (b:upload-target-expires-in target)))
     (is (= 1234 (b:upload-target-content-length target)))
     (is (eql 0 (search "https://media.s3.amazonaws.com/uploads/a.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&"
@@ -999,7 +999,7 @@ NO-APPLICABLE-METHOD, on a store class that implements neither."
 to send is the trimmed value, so the client sends exactly what was signed."
   (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
                               :expires-in 900 :content-type "  video/mp4 ")))
-    (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))))
+    (is (equal '(("Content-Type" . "video/mp4") ("x-amz-acl" . "private")) (b:upload-target-headers target)))))
 
 ;;; === 11. bucket CORS for browser uploads (#770) ===============================
 
@@ -1048,8 +1048,9 @@ rule exposes it (#770)."
       (is (null (getf call :key)) "a bucket-level request")
       (is (string= "cors=" (getf call :query)))
       (is (string= "application/xml" (getf call :content-type)))
-      (is (string= (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type") 3000)
-                   (sb-ext:octets-to-string body :external-format :utf-8)))
+      (is (string= (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type" "x-amz-acl") 3000)
+                   (sb-ext:octets-to-string body :external-format :utf-8))
+          "the default allows the headers UPLOAD-URL's target carries")
       (is (string= (b::%base64 (ironclad:digest-sequence :md5 body))
                    (cdr (assoc "content-md5" (getf call :extra-headers) :test #'string=)))
           "Content-MD5 is the body's, which PutBucketCors requires"))))
@@ -1210,3 +1211,54 @@ recording each call. Returns (values result calls)."
     (signals b:blob-unsupported (b:complete-multipart-upload store "media" "a" "u" '((1 . "e"))))
     (signals b:blob-unsupported (b:abort-multipart-upload store "media" "a" "u"))
     (signals b:blob-unsupported (b:list-multipart-parts store "media" "a" "u"))))
+
+;;; === 13. the upload's ACL is signed (#796) ====================================
+;;;
+;;; Measured on MinIO in #796: an unsigned x-amz-acl: public-read added by the client is accepted,
+;;; and with x-amz-acl: private signed, public-read is refused (403) and so is leaving it out (400).
+;;; Spaces implements object ACLs, so the header is signed by default.
+
+(defun signed-headers-of (url)
+  "The X-Amz-SignedHeaders value of a presigned URL, still percent-encoded."
+  (let* ((start (+ (search "X-Amz-SignedHeaders=" url) 20))
+         (end (or (position #\& url :start start) (length url))))
+    (subseq url start end)))
+
+(test s3-upload-url-signs-a-private-acl-by-default
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4" :content-length 1234)))
+    (is (string= "content-length%3Bcontent-type%3Bhost%3Bx-amz-acl"
+                 (signed-headers-of (b:upload-target-url target))))
+    (is (equal "private" (cdr (assoc "x-amz-acl" (b:upload-target-headers target) :test #'string=)))
+        "the client is told to send the header that was signed"))
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.bin" :expires-in 900)))
+    (is (string= "host%3Bx-amz-acl" (signed-headers-of (b:upload-target-url target))))
+    (is (equal '(("x-amz-acl" . "private")) (b:upload-target-headers target))
+        "signed with no content type or size given as well")))
+
+(test s3-upload-url-acl-none-signs-no-acl
+  "For a provider that rejects x-amz-acl, :ACL :NONE leaves it out of the signature and the headers."
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4" :content-length 1234
+                              :acl :none)))
+    (is (string= "content-length%3Bcontent-type%3Bhost" (signed-headers-of (b:upload-target-url target))))
+    (is (equal '(("Content-Type" . "video/mp4")) (b:upload-target-headers target)))))
+
+(test upload-url-refuses-an-acl-other-than-private-or-none
+  (is (eq :bad-acl (upload-refusal :expires-in 900 :acl :public-read)))
+  (is (eq :bad-acl (upload-refusal :expires-in 900 :acl "private")))
+  (is (eq :bad-acl (upload-refusal :expires-in 900 :acl nil)))
+  (is (null (upload-refusal :expires-in 900 :acl :private)))
+  (is (null (upload-refusal :expires-in 900 :acl :none))))
+
+(test s3-check-bucket-cors-by-default-asks-for-the-acl-header-too
+  "A rule set before the ACL was signed allows only Content-Type. The browser's upload now sends
+x-amz-acl as well, so the default check reports that rule as blocking it."
+  (let ((old-rule "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>Content-Type</AllowedHeader></CORSRule></CORSConfiguration>")
+        (new-rule "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>Content-Type</AllowedHeader><AllowedHeader>x-amz-acl</AllowedHeader></CORSRule></CORSConfiguration>"))
+    (is (eq :header-not-allowed
+            (call-with-recorded-s3 (octets old-rule)
+                                   (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://app.example.com")))))
+    (is (eq :allowed
+            (call-with-recorded-s3 (octets new-rule)
+                                   (lambda () (b:check-bucket-cors (test-s3-store) "media" "https://app.example.com")))))))

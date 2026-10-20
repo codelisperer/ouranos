@@ -104,7 +104,7 @@ When NIL the store must be configured public, and the URL is permanent and unaut
 -- so NIL is a decision about the blob, not a convenience default, and a store with no
 public base URL signals BLOB-UNSUPPORTED rather than inventing one."))
 
-(defgeneric upload-url (store bucket key &key expires-in content-type content-length max-bytes)
+(defgeneric upload-url (store bucket key &key expires-in content-type content-length max-bytes acl)
   (:documentation
    "An UPLOAD-TARGET a client can use to upload the blob at BUCKET/KEY straight to the store,
 without the bytes passing through this process (#770).
@@ -116,6 +116,10 @@ the size the client declares for its file before uploading.
 MAX-BYTES is the largest upload this URL may carry. It needs CONTENT-LENGTH, because a single
 presigned PUT can be held to an exact size but not to a range; a CONTENT-LENGTH over it, or a
 MAX-BYTES with no CONTENT-LENGTH, signals BLOB-UPLOAD-REFUSED rather than signing.
+ACL is :PRIVATE (the default) or :NONE. With :PRIVATE the URL signs `x-amz-acl: private', and
+the header is in the target's HEADERS, so a client that adds `x-amz-acl: public-read' to make
+the upload public, or leaves the header out, is refused by a provider that checks it (#796).
+:NONE signs no ACL header, for a provider that rejects it.
 
 KEY should be chosen by the server, never taken from the client, and one URL should serve one
 upload. Check the result with BLOB-METADATA and READ-BLOB-RANGE before trusting it.
@@ -133,7 +137,8 @@ For checking what a client uploaded by its first bytes, without fetching the who
    "Set BUCKET's CORS rule so a browser on one of ORIGINS can upload to it directly (#770).
 
 ORIGINS is a list of origins such as (\"https://app.example.com\"); each may hold one `*'.
-METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\"), MAX-AGE-SECONDS to 3000.
+METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\" \"x-amz-acl\"), the headers
+UPLOAD-URL's target tells the client to send, and MAX-AGE-SECONDS to 3000.
 EXPOSE-HEADERS lists response headers a browser script may read; a multipart upload from a
 browser needs (\"ETag\"), because the client completes the upload with each part's ETag.
 This REPLACES the bucket's whole CORS configuration, as the S3 API does; a bucket that needs
@@ -142,7 +147,7 @@ other rules too should have them set by whoever owns it. Returns T."))
 (defgeneric check-bucket-cors (store bucket origin &key method headers)
   (:documentation
    "Whether BUCKET's CORS rules let a browser on ORIGIN send METHOD (default \"PUT\") with HEADERS
-(default (\"Content-Type\")) (#770). A browser upload that fails for this reason reaches the app
+(default (\"Content-Type\" \"x-amz-acl\"), the headers UPLOAD-URL's target carries) (#770). A browser upload that fails for this reason reaches the app
 only as a network error, so this is the diagnostic: call it when an upload never arrives.
 
 Returns one of :ALLOWED, :NO-CORS-CONFIGURATION, :ORIGIN-NOT-ALLOWED, :METHOD-NOT-ALLOWED or
@@ -233,8 +238,11 @@ passes through."
   (let ((code (char-code char)))
     (or (< code 32) (= code 127))))
 
-(defmethod upload-url :before ((s store) bucket key &key expires-in content-type content-length max-bytes)
+(defmethod upload-url :before ((s store) bucket key &key expires-in content-type content-length max-bytes
+                                                         (acl :private))
   (%check-key bucket key)
+  (unless (member acl '(:private :none))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-acl))
   (unless (and (integerp expires-in) (<= 1 expires-in +max-presign-seconds+))
     (error 'blob-upload-refused :bucket bucket :key key :reason :bad-expiry))
   ;; A CR or LF in a header value would let the value start a second header, and the client
@@ -355,8 +363,8 @@ bug at the call site. Prefer this."
 ;;; An app can define its own STORE subclass. Without these, calling UPLOAD-URL or
 ;;; READ-BLOB-RANGE on one signals NO-APPLICABLE-METHOD instead of what the docstrings promise.
 
-(defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes)
-  (declare (ignore expires-in content-type content-length max-bytes))
+(defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes acl)
+  (declare (ignore expires-in content-type content-length max-bytes acl))
   (error 'blob-unsupported :bucket bucket :key key
                            :operation "presigned uploads (proxy the upload through put-blob)"))
 

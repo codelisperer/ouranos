@@ -170,8 +170,8 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
     (let ((sep (if (eql #\/ (char base (1- (length base)))) "" "/")))
       (format nil "~A~A~A/~A" base sep bucket key))))
 
-(defmethod upload-url ((s filesystem-store) bucket key &key expires-in content-type content-length max-bytes)
-  (declare (ignore expires-in content-type content-length max-bytes))
+(defmethod upload-url ((s filesystem-store) bucket key &key expires-in content-type content-length max-bytes acl)
+  (declare (ignore expires-in content-type content-length max-bytes acl))
   ;; Nothing serves this directory that could check a signature, the same reason BLOB-URL
   ;; refuses to sign. A typed refusal lets a development app fall back to proxying the upload
   ;; through PUT-BLOB, which is the shape the issue asked for (#770).
