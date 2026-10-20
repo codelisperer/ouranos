@@ -243,9 +243,14 @@ knows it for free."
                             :content-type content-type
                             :payload-hash checksum
                             :extra-headers
-                            (loop for (mk . mv) in metadata
-                                  collect (cons (format nil "x-amz-meta-~A" (string-downcase mk))
-                                                mv)))
+                            ;; The checksum is stored with the object, so BLOB-METADATA can report
+                            ;; it later. Before #810 it was only sent as the payload hash, and
+                            ;; BLOB-METADATA returned NIL for every blob. "sha256" is reserved, so
+                            ;; the app's METADATA cannot send a second one.
+                            (cons (cons "x-amz-meta-sha256" checksum)
+                                  (loop for (mk . mv) in metadata
+                                        collect (cons (format nil "x-amz-meta-~A" (string-downcase mk))
+                                                      mv))))
                (log:debug "blob put" :backend "s3" :bucket bucket :bytes size)
                (make-blob-meta key size content-type checksum (get-universal-time)))
           (uiop:delete-file-if-exists tmp))))))
@@ -277,7 +282,8 @@ knows it for free."
                       (hdr "content-type")
                       ;; The ETag is the MD5 for a single-part upload and something else
                       ;; entirely for a multipart one, so it is NOT our SHA-256 checksum.
-                      ;; Report the checksum we recorded at PUT time, or nothing.
+                      ;; Report the checksum PUT-BLOB recorded, or nothing: an object stored
+                      ;; before #810, or uploaded directly by a client, has none.
                       (hdr "x-amz-meta-sha256")
                       nil
                       (let ((etag (hdr "etag"))) (and etag (string-trim "\"" etag)))))))

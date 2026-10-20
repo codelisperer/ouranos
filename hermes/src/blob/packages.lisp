@@ -51,6 +51,7 @@
    ;; conditions -- the failure protocol
    #:blob-error #:blob-error-bucket #:blob-error-key
    #:blob-not-found #:blob-invalid-key #:blob-invalid-key-fault
+   #:blob-invalid-metadata #:blob-invalid-metadata-name #:blob-invalid-metadata-fault
    #:blob-backend-error #:blob-backend-error-status #:blob-backend-error-detail
    #:blob-configuration-error #:blob-configuration-error-missing
    #:blob-unsupported #:blob-unsupported-operation

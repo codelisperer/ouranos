@@ -1210,3 +1210,61 @@ recording each call. Returns (values result calls)."
     (signals b:blob-unsupported (b:complete-multipart-upload store "media" "a" "u" '((1 . "e"))))
     (signals b:blob-unsupported (b:abort-multipart-upload store "media" "a" "u"))
     (signals b:blob-unsupported (b:list-multipart-parts store "media" "a" "u"))))
+
+;;; === 13. the S3 store keeps its checksum (#810) ===============================
+
+(test s3-put-blob-stores-its-checksum-as-object-metadata
+  "PUT-BLOB sends the SHA-256 it computed as x-amz-meta-sha256, which is where BLOB-METADATA reads
+it. Before #810 it was sent only as the payload hash, and BLOB-METADATA returned NIL on S3."
+  (with-temp-store (fs)
+    (declare (ignore fs))
+    (multiple-value-bind (meta calls)
+        (call-with-recorded-s3 "" (lambda () (put-string (test-s3-store) "media" "a.txt" "hello"
+                                                         :metadata '(("Owner" . "42")))))
+      (let ((headers (getf (first calls) :extra-headers))
+            (sum "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"))
+        (is (string= sum (b:blob-meta-checksum meta)) "the SHA-256 of \"hello\"")
+        (is (equal sum (cdr (assoc "x-amz-meta-sha256" headers :test #'string=))) "~S" headers)
+        (is (equal sum (getf (first calls) :payload-hash)) "still the payload hash as well")
+        (is (equal "42" (cdr (assoc "x-amz-meta-owner" headers :test #'string=)))
+            "the app's own metadata is still sent")
+        (is (= 1 (count "x-amz-meta-sha256" headers :key #'car :test #'string-equal)))))))
+
+(test s3-blob-metadata-reports-the-stored-checksum
+  (let ((headers (make-hash-table :test #'equal)))
+    (setf (gethash "content-length" headers) "5"
+          (gethash "x-amz-meta-sha256" headers) "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    (let ((original (fdefinition 'b::%s3-request)))
+      (unwind-protect
+           (progn (setf (fdefinition 'b::%s3-request)
+                        (lambda (&rest args) (declare (ignore args)) (values "" 200 headers)))
+                  (is (string= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                               (b:blob-meta-checksum (b:blob-metadata (test-s3-store) "media" "a.txt")))))
+        (setf (fdefinition 'b::%s3-request) original)))))
+
+(defun metadata-refusal (store metadata)
+  "The NAME of the BLOB-INVALID-METADATA that PUT-BLOB signals for METADATA, :NO-NAME when it
+names none, or NIL when PUT-BLOB accepts it."
+  (handler-case (progn (put-string store "media" "m.txt" "x" :metadata metadata) nil)
+    (b:blob-invalid-metadata (c) (or (b:blob-invalid-metadata-name c) :no-name))))
+
+(test put-blob-refuses-reserved-or-malformed-metadata-on-every-store
+  "\"sha256\" is reserved for the checksum in any case, and names and values go into request headers
+on S3. The refusal is in PUT-BLOB's :BEFORE method, so the filesystem store refuses the same input
+(#810)."
+  (with-temp-store (fs)
+    (dolist (store (list fs (test-s3-store)))
+      (call-with-recorded-s3
+       ""
+       (lambda ()
+         (is (equal "sha256" (metadata-refusal store '(("sha256" . "abc")))) "~A" (b:store-name store))
+         (is (equal "SHA256" (metadata-refusal store '(("SHA256" . "abc")))))
+         (is (equal "Sha256" (metadata-refusal store '(("owner" . "1") ("Sha256" . "abc")))))
+         (is (equal "" (metadata-refusal store '(("" . "x")))))
+         (is (equal "a:b" (metadata-refusal store '(("a:b" . "x")))))
+         (is (equal (format nil "a~Cb" #\Linefeed) (metadata-refusal store (list (cons (format nil "a~Cb" #\Linefeed) "x")))))
+         (is (equal "owner" (metadata-refusal store (list (cons "owner" (format nil "1~C~CX-Evil: 2" #\Return #\Linefeed))))))
+         (is (eq :no-name (metadata-refusal store '(("owner" . 42)))))
+         (is (eq :no-name (metadata-refusal store '("owner"))))
+         (is (null (metadata-refusal store '(("owner" . "42") ("sha256-of-thumbnail" . "x"))))
+             "the control: ordinary names, and one that only starts with sha256, are accepted"))))))
