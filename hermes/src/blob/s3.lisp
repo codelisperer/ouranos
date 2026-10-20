@@ -386,9 +386,29 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
 
 ;;; --- listing ---------------------------------------------------------------
 
+(defconstant +max-entity-name-length+ 12
+  "The longest text between `&' and `;' that %XML-DECODE reads as an entity. The longest name it
+decodes is `#x10FFFF' plus a few leading zeros; a `;' further away cannot close an entity, and
+not looking further keeps decoding linear in a string with many `&' and no `;'.")
+
+(defun %numeric-reference (name)
+  "The character the numeric reference NAME stands for (NAME is the text between `&' and `;',
+starting with `#'), or NIL. Only `#' and decimal digits, or `#x' and hex digits, with no sign
+and no space, and only a code point XML allows: not 0, not a surrogate (D800-DFFF), which has no
+UTF-8 encoding, and not beyond the last code point (#813)."
+  (let* ((hex (and (>= (length name) 2) (char-equal #\x (char name 1))))
+         (radix (if hex 16 10))
+         (digits (subseq name (if hex 2 1))))
+    (when (and (plusp (length digits))
+               (every (lambda (c) (digit-char-p c radix)) digits))
+      (let ((code (parse-integer digits :radix radix)))
+        (when (and (< 0 code char-code-limit) (not (<= #xD800 code #xDFFF)))
+          (code-char code))))))
+
 (defun %xml-decode (string)
   "Decode the five XML predefined entities and numeric character references (&#34; and &#x22;),
-in one pass, so `&amp;lt;' becomes `&lt;' and not `<'. Keys we write cannot contain them (the
+in one pass, so an escaped reference such as `&amp;#34;' is decoded once, to `&#34;'. Anything
+that is not exactly one of those is kept as written. Keys we write cannot contain them (the
 key alphabet excludes `&' and `<'), but a bucket may hold objects written by something else,
 and the sweep must not mistake a mis-decoded key for an orphan. MinIO writes the quotes around
 an ETag as `&#34;' (measured on MinIO 2025-04-22), so an ETag read without this is not the ETag."
@@ -396,7 +416,8 @@ an ETag as `&#34;' (measured on MinIO 2025-04-22), so an ETag read without this 
     (loop with i = 0
           while (< i (length string))
           do (let* ((amp (position #\& string :start i))
-                    (semi (and amp (position #\; string :start amp))))
+                    (window (and amp (min (length string) (+ amp 2 +max-entity-name-length+))))
+                    (semi (and amp (position #\; string :start amp :end window))))
                (write-string string out :start i :end (or amp (length string)))
                (unless amp (return))
                (let* ((name (and semi (subseq string (1+ amp) semi)))
@@ -404,15 +425,11 @@ an ETag as `&#34;' (measured on MinIO 2025-04-22), so an ETag read without this 
                                   ((string= name "lt") #\<) ((string= name "gt") #\>)
                                   ((string= name "quot") #\") ((string= name "apos") #\')
                                   ((string= name "amp") #\&)
-                                  ((and (> (length name) 2) (char-equal #\x (char name 1)) (char= #\# (char name 0)))
-                                   (let ((code (parse-integer name :start 2 :radix 16 :junk-allowed t)))
-                                     (and code (< code char-code-limit) (code-char code))))
-                                  ((and (> (length name) 1) (char= #\# (char name 0)))
-                                   (let ((code (parse-integer name :start 1 :junk-allowed t)))
-                                     (and code (< code char-code-limit) (code-char code)))))))
+                                  ((and (plusp (length name)) (char= #\# (char name 0)))
+                                   (%numeric-reference name)))))
                  (if char
                      (progn (write-char char out) (setf i (1+ semi)))
-                     ;; Not an entity we know: keep the `&' as it is and go on after it.
+                     ;; Not an entity we decode: keep the `&' as it is and go on after it.
                      (progn (write-char #\& out) (setf i (1+ amp)))))))))
 
 (defun %replace-all (string part replacement)
