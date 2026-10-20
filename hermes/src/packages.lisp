@@ -1,8 +1,8 @@
 ;;;; packages.lisp --- hermes package definitions.
 ;;;;
 ;;;; Package-per-module; :local-nicknames over long prefixes. Two modules:
-;;;;   hermes          -- DELIVERY (send): neutral EMAIL/SMS, the DELIVER protocol, the
-;;;;                      SendGrid/Twilio/dev backends, env selection, conditions. The
+;;;;   hermes          -- DELIVERY (send): neutral EMAIL/SMS/TELEGRAM-MESSAGE, the DELIVER
+;;;;                      protocol, the SendGrid/Twilio/Telegram/dev backends, env selection, conditions. The
 ;;;;                      interceptor-shaped HTTP client is INTERNAL to this package.
 ;;;;   hermes/inbound  -- RECEIVE: a neutral inbound-message event apps subscribe to, and a
 ;;;;                      signature-verified Twilio webhook that emits it.
@@ -11,7 +11,8 @@
   (:use #:cl)
   (:local-nicknames (#:jzon #:com.inuoe.jzon)
                     (#:b64  #:cl-base64)
-                    (#:log  #:aion/log))
+                    (#:log  #:aion/log)
+                    (#:secret #:aion/secret))
     (:import-from #:aion/http-client
                 ;; The HTTP client moved to aion (pre-publication issue 202). Imported rather than nicknamed so
                 ;; the backends' call sites are unchanged by the move -- the point of the
@@ -35,21 +36,30 @@
    #:attachment-content #:attachment-disposition #:attachment-content-id #:attachment-octets
    #:dev-last-email
    #:sms #:make-sms #:sms-to #:sms-from #:sms-text
+   #:telegram-message #:make-telegram-message #:telegram-message-p #:telegram-message-chat
+   #:telegram-message-text #:telegram-message-parse-mode #:telegram-message-link-preview
+   #:telegram-message-photo #:escape-markdown-v2 #:escape-telegram-html #:dev-last-telegram
    ;; delivery result
    #:delivery-result #:make-delivery-result #:delivery-result-provider #:delivery-result-id
-   #:delivery-result-status #:delivery-result-raw
+   #:delivery-result-status #:delivery-result-raw #:delivery-result-destination
    ;; the protocol
-   #:provider #:email-provider #:sms-provider #:deliver
+   #:provider #:email-provider #:sms-provider #:telegram-provider #:deliver
+   #:edit-sent-message #:delete-sent-message #:telegram-can-post
    ;; backends + constructors
-   #:sendgrid #:make-sendgrid #:twilio #:make-twilio #:dev-transport #:make-dev-transport
+   #:sendgrid #:make-sendgrid #:twilio #:make-twilio #:telegram #:make-telegram
+   #:telegram-api-base #:dev-transport #:make-dev-transport
    ;; provider selection from the environment
-   #:register-impl #:email-provider-from-env #:sms-provider-from-env #:send
+   #:register-impl #:email-provider-from-env #:sms-provider-from-env
+   #:telegram-provider-from-env #:send
    ;; conditions
    #:hermes-error #:configuration-error #:configuration-error-missing
    #:invalid-message #:invalid-message-problem
    #:as-delivery
    #:delivery-failure #:delivery-failure-provider #:delivery-failure-status
    #:delivery-failure-detail #:unsupported-message
+   #:delivery-rate-limited #:delivery-rate-limited-retry-after
+   #:telegram-chat-unreachable #:telegram-not-permitted
+   #:telegram-chat-migrated #:telegram-chat-migrated-migrate-to-chat-id
    #:version))
 
 (cl:defpackage #:hermes/inbound
