@@ -118,7 +118,10 @@
     (is (search (format nil "time.~%Fees") text) "a <br> starts a new line")
     (dolist (absent '("not-page-text" "color: red" "Home | About" "Site header" "Copyright"
                       "a comment"))
-      (is-false (search absent text) "~S is in the text" absent))))
+      (is-false (search absent text) "~S is in the text" absent)))
+  (let ((text (wp:html-text "<html><body><nav>Menu</nav><p>Body text</p></body></html>")))
+    (is (search "Body text" text))
+    (is-false (search "Menu" text) "navigation inside the body is dropped when there is no <main>")))
 
 ;;; --- PUBLIC-FETCH -----------------------------------------------------------------------------
 
