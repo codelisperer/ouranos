@@ -14,21 +14,6 @@ its tag.
 
 ### An app may have to act
 
-- **hermes/blob: `upload-url` signs `x-amz-acl: private` by default, so the browser must now
-  send that header** (#796). `upload-target-headers` now holds `("x-amz-acl" . "private")` as
-  well as `Content-Type`, and a client that sends the headers exactly as given needs no change.
-  A client that builds its own headers, for example only `Content-Type`, is now refused (400 on
-  MinIO): send every header in `upload-target-headers`. A client that adds
-  `x-amz-acl: public-read` is refused too (403 on MinIO), which is the point: on a provider with
-  object ACLs, such as DigitalOcean Spaces, that header would otherwise make the quarantined
-  upload public. The bucket's CORS rule must allow the new header, or the browser blocks the
-  upload: `put-bucket-cors` now allows `("Content-Type" "x-amz-acl")` by default, so call it
-  again for a bucket whose rule was set before this change, and `check-bucket-cors` checks both
-  headers by default, so it reports `:header-not-allowed` for such a bucket. For a provider that
-  rejects the header, pass `:acl :none`; the bucket must then block public ACLs itself. Any
-  other `:acl` value signals `blob-upload-refused` with reason `:bad-acl`. See
-  `hermes/docs/blob-direct-uploads.md`.
-
 - **Native: the pinned libuv is 1.53.0** (#739), released 2026-09-24, in place of 1.52.1.
   `libuv.pin` names it with its sha256, and `scripts/build-libuv.lisp` builds it. A tree whose
   `vendor/libuv/` was built from 1.52.1 keeps loading that copy until it is rebuilt: delete
@@ -466,6 +451,21 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **hermes/blob: an S3 store can sign `x-amz-acl: private` into upload URLs, for a bucket that
+  honours ACLs** (#796). `make-s3-store` takes `:upload-acl`, `:none` (the default) or `:private`,
+  or reads `MNEMOSYNE_S3_UPLOAD_ACL` (`private` or `none`); any other value signals
+  `blob-configuration-error` when the store is made. With `:private`, `upload-url` signs
+  `x-amz-acl: private` and returns it in `upload-target-headers`, so a client that adds
+  `x-amz-acl: public-read` or leaves the header out is refused (403 and 400 on MinIO). Set it for
+  DigitalOcean Spaces and for AWS buckets with ACLs enabled. Leave it `:none` for an AWS bucket
+  with ACLs disabled, the default for a new AWS bucket, which refuses an upload naming `private`
+  with 400 `AccessControlListNotSupported`, and for Cloudflare R2, which does not implement the
+  header. With the default nothing changes for an existing app. `put-bucket-cors` now allows
+  `("Content-Type" "x-amz-acl")` by default, and `check-bucket-cors` by default checks the headers
+  `upload-url` sends on that store. A bucket whose CORS rule allows only `Content-Type` needs
+  `put-bucket-cors` again before switching its store to `:private`, or the browser blocks the
+  upload. See `hermes/docs/blob-direct-uploads.md`.
 
 - **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
   `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
