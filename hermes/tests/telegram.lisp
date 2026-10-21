@@ -507,6 +507,26 @@ CL:ERROR), and return the log text."
       (is (equal '(nil 101 102) offsets)
           "a full page, the next page from one past it, then the call that only confirms"))))
 
+(test confirming-stops-at-a-full-page-that-does-not-move-the-offset
+  "A full page whose newest update_id is behind the offset already sent cannot move the offset,
+so the read stops after it instead of asking for the same offset again (#805)."
+  (let ((calls 0))
+    (with-bot (s p (lambda (method request stream)
+                     (declare (ignore method request))
+                     (incf calls)
+                     ;; Every call before the fifth returns updates 1 to 100, the first time
+                     ;; correctly and then as a stale page; the fifth is empty, so a loop that
+                     ;; does not stop still ends.
+                     (%bot-reply stream 200
+                                 (if (> calls 4)
+                                     (%updates-json)
+                                     (apply #'%updates-json
+                                            (loop for id from 1 to 100 collect (%plain-update id)))))))
+      (h:telegram-added-chats p :confirm t)
+      (is (equal '(nil 101)
+                 (mapcar (lambda (r) (gethash "offset" (%request-json r))) (%requests s)))
+          "the first page, then one call from past it, and no repeat of that call"))))
+
 (test confirming-stops-at-a-full-page-whose-updates-have-no-id
   (let ((calls 0))
     (with-bot (s p (lambda (method request stream)

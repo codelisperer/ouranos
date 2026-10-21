@@ -457,8 +457,9 @@ its tag.
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
   `-date`) from the bot's `my_chat_member` updates. By default it leaves the updates pending;
   `:confirm t` confirms them. A bot with a webhook gets the new condition
-  `telegram-webhook-active`. The dev transport returns no chats. With `:confirm t`, a full page
-  of updates that carries no `update_id` ends the read instead of being asked for again (#805).
+  `telegram-webhook-active`. The dev transport returns no chats. With `:confirm t`, a page of
+  updates that carries no `update_id`, or none newer than those already confirmed, ends the read
+  instead of being asked for again, and the updates on that page stay pending (#805).
   The README says what happens when the app's own `getUpdates` poll runs at the same time, and
   when the bot's stored `allowed_updates` leaves out `my_chat_member`.
 
