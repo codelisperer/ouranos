@@ -898,21 +898,46 @@ that were there before."
     (is (not (search signature text)) "never the signature: ~A" text)
     (is (not (search "X-Amz-" text)) "and no part of the query string: ~A" text)))
 
+(defclass counting-octet-stream (sb-gray:fundamental-binary-input-stream)
+  ((data :initarg :data :reader counting-data)
+   (position :initform 0 :accessor counting-position))
+  (:documentation "An octet input stream over a vector that records how many bytes were read,
+standing in for a response body: a test can see that a reader stopped early."))
+
+(defmethod stream-element-type ((s counting-octet-stream)) '(unsigned-byte 8))
+
+(defmethod sb-gray:stream-read-byte ((s counting-octet-stream))
+  (if (< (counting-position s) (length (counting-data s)))
+      (prog1 (aref (counting-data s) (counting-position s)) (incf (counting-position s)))
+      :eof))
+
+(defmethod sb-gray:stream-read-sequence ((s counting-octet-stream) seq &optional (start 0) end)
+  (let* ((end (or end (length seq)))
+         (n (min (- end start) (- (length (counting-data s)) (counting-position s)))))
+    (replace seq (counting-data s) :start1 start :end1 (+ start n) :start2 (counting-position s))
+    (incf (counting-position s) n)
+    (+ start n)))
+
 (defun call-with-ranged-s3 (answer fn)
-  "Call FN with %S3-REQUEST answering ANSWER, a list (body status) or a status to signal.
-Returns (values result range-header) so a test sees the Range that was signed."
+  "Call FN with %S3-REQUEST answering ANSWER: a list (body status), where BODY is served as a
+COUNTING-OCTET-STREAM; a status to signal as BLOB-BACKEND-ERROR; or :NOT-FOUND.
+Returns (values result range-header body-stream methods) so a test sees the Range that was
+signed, how much of the body was read, and which requests were made."
   (let ((original (fdefinition 'b::%s3-request))
-        (range nil))
+        (range nil) (stream nil) (methods '()))
     (unwind-protect
          (progn
            (setf (fdefinition 'b::%s3-request)
                  (lambda (store bucket key method &key extra-headers &allow-other-keys)
-                   (declare (ignore store method))
+                   (declare (ignore store))
+                   (push method methods)
                    (setf range (cdr (assoc "range" extra-headers :test #'string-equal)))
-                   (if (integerp answer)
-                       (error 'b:blob-backend-error :bucket bucket :key key :status answer)
-                       (values (first answer) (second answer) (make-hash-table :test #'equal)))))
-           (values (funcall fn) range))
+                   (cond ((eq answer :not-found) (error 'b:blob-not-found :bucket bucket :key key))
+                         ((integerp answer)
+                          (error 'b:blob-backend-error :bucket bucket :key key :status answer))
+                         (t (setf stream (make-instance 'counting-octet-stream :data (first answer)))
+                            (values stream (second answer) (make-hash-table :test #'equal))))))
+           (values (funcall fn) range stream (reverse methods)))
       (setf (fdefinition 'b::%s3-request) original))))
 
 (test s3-read-blob-range-asks-for-the-range-and-handles-the-edges
@@ -927,9 +952,39 @@ Returns (values result range-header) so a test sees the Range that was signed."
       "a store that ignores Range and answers 200 is cut down to the range")
   (is (equalp #() (call-with-ranged-s3 416 (lambda () (b:read-blob-range (test-s3-store) "media" "a" :start 99))))
       "416, a start past the end, is no bytes")
-  (is (equalp #() (b:read-blob-range (test-s3-store) "media" "a" :length 0)) "length 0 asks for nothing")
   (signals b:blob-backend-error
     (call-with-ranged-s3 500 (lambda () (b:read-blob-range (test-s3-store) "media" "a")))))
+
+(test s3-read-blob-range-reads-only-the-range-when-the-store-ignores-range
+  "A store or proxy that ignores Range answers 200 with the whole object. Only START + LENGTH
+bytes of it are read, and the body is closed, so a large object is never held in memory (#796)."
+  (let ((object (make-array 1000000 :element-type '(unsigned-byte 8) :initial-element 7)))
+    (setf (aref object 10) 1 (aref object 11) 2)
+    (multiple-value-bind (bytes range body)
+        (call-with-ranged-s3 (list object 200)
+                             (lambda () (b:read-blob-range (test-s3-store) "media" "big" :start 10 :length 2)))
+      (is (equalp #(1 2) bytes))
+      (is (string= "bytes=10-11" range))
+      (is (= 12 (counting-position body)) "read ~D bytes of a 1000000-byte body" (counting-position body))
+      (is (not (open-stream-p body)) "the body is closed")))
+  (multiple-value-bind (bytes range body)
+      (call-with-ranged-s3 (list (octets "abcdef") 206)
+                           (lambda () (b:read-blob-range (test-s3-store) "media" "a" :start 2 :length 2)))
+    (declare (ignore range))
+    (is (equalp (octets "ab") bytes) "a 206 body is the range itself, read from its first byte")
+    (is (not (open-stream-p body)))))
+
+(test s3-zero-length-read-blob-range-still-reports-a-missing-blob
+  "No Range header can ask for zero bytes, so a zero-length read asks whether the blob exists,
+and a missing one signals BLOB-NOT-FOUND as it does on the filesystem store (#796)."
+  (multiple-value-bind (bytes range body methods)
+      (call-with-ranged-s3 (list (octets "") 200)
+                           (lambda () (b:read-blob-range (test-s3-store) "media" "a" :length 0)))
+    (declare (ignore range body))
+    (is (equalp #() bytes))
+    (is (equal '(:head) methods) "one HEAD request, no GET"))
+  (signals b:blob-not-found
+    (call-with-ranged-s3 :not-found (lambda () (b:read-blob-range (test-s3-store) "media" "missing" :length 0)))))
 
 (test filesystem-upload-url-is-unsupported-so-the-app-proxies
   (with-temp-store (store)
@@ -1287,3 +1342,132 @@ upload on a store that signs one, because the browser then sends x-amz-acl as we
       (is (eq :allowed (verdict old-rule (test-s3-store))))
       (is (eq :header-not-allowed (verdict old-rule (test-s3-store :upload-acl :private))))
       (is (eq :allowed (verdict new-rule (test-s3-store :upload-acl :private)))))))
+
+;;; === 14. follow-ups from the #772 review (#796) ===============================
+
+(test start-multipart-upload-refuses-a-bad-content-type-before-any-request
+  "The content type goes into the CreateMultipartUpload request's headers, so it gets the same
+check as UPLOAD-URL's: no request is made for one that is empty or holds a control character."
+  (dolist (bad (list (format nil "video/mp4~C~CX-Evil: 1" #\Return #\Linefeed)
+                     (format nil "video/mp4~C" #\Tab) "" "  " :video))
+    (multiple-value-bind (reason calls)
+        (call-with-recorded-s3 ""
+                               (lambda ()
+                                 (handler-case
+                                     (progn (b:start-multipart-upload (test-s3-store) "media" "big.mp4"
+                                                                      :content-type bad)
+                                            nil)
+                                   (b:blob-upload-refused (c) (b:blob-upload-refused-reason c)))))
+      (is (eq :bad-content-type reason) "~S" bad)
+      (is (null calls) "no request was made for ~S" bad))))
+
+;;; Presigned PUT vectors from botocore 1.35.99, AWS's own Python signer, with its clock pinned to
+;;; 2013-05-24T00:00:00Z and AWS's documentation credentials. Generated in a python:3.12-slim
+;;; container by patching botocore.auth.datetime.datetime.utcnow and calling
+;;; S3SigV4QueryAuth(credentials, "s3", "us-east-1", expires=900).add_auth on an AWSRequest
+;;; for PUT with Content-Type video/mp4, Content-Length 1234 and x-amz-acl private: the headers
+;;; UPLOAD-URL's default signs. AWS publishes no PUT vector; these pin the PUT, path-style and
+;;; session-token paths to an independent implementation (#796).
+
+(defparameter +botocore-put-signatures+
+  '((:virtual-host "458e4480ce3a901ad28655b98ef309a86746c9c1068b319187a6ea36ea88676a")
+    (:path-style "53bdb0e487678243d2e84ab2a006748c3363a13e3a7fd37f45e2acaecb21e471")
+    (:session-token "0c4143cef561c5460d2550ff74d9acaaa1c0e27cadcd117b1c5b43c19d40de8b"))
+  "X-Amz-Signature for each botocore vector.")
+
+(defun botocore-vector-url (&rest store-args)
+  (b::%presigned-url (apply #'aws-example-store store-args) "examplebucket" "uploads/a.mp4" "PUT" 900
+                     :headers '(("content-type" . "video/mp4") ("content-length" . "1234")
+                                ("x-amz-acl" . "private"))
+                     :universal-time +aws-example-time+))
+
+(defun url-signature (url) (subseq url (+ (search "X-Amz-Signature=" url) 16)))
+
+(test s3-presigned-put-matches-botocore
+  (let ((url (botocore-vector-url)))
+    (is (string= (second (assoc :virtual-host +botocore-put-signatures+)) (url-signature url)) "~A" url)
+    (is (eql 0 (search "https://examplebucket.s3.amazonaws.com/uploads/a.mp4?" url)))
+    (is (string= "content-length%3Bcontent-type%3Bhost%3Bx-amz-acl" (signed-headers-of url)))))
+
+(test s3-presigned-put-path-style-matches-botocore
+  (let ((url (botocore-vector-url :path-style t)))
+    (is (string= (second (assoc :path-style +botocore-put-signatures+)) (url-signature url)) "~A" url)
+    (is (eql 0 (search "https://s3.amazonaws.com/examplebucket/uploads/a.mp4?" url))
+        "the bucket is in the path, not the host")))
+
+(test s3-presigned-put-with-a-session-token-matches-botocore
+  "The token is in the query and inside the signature. Its `/', `+' and `=' are percent-encoded
+the way botocore encodes them, or the signatures would differ."
+  (let ((url (botocore-vector-url :session-token "IQoJb3JpZ2luX2VjEXAMPLETOKEN/with+slash==")))
+    (is (string= (second (assoc :session-token +botocore-put-signatures+)) (url-signature url)) "~A" url)
+    (is (search "X-Amz-Security-Token=IQoJb3JpZ2luX2VjEXAMPLETOKEN%2Fwith%2Bslash%3D%3D&" url) "~A" url)))
+
+(defun url-signature-from-auth (auth) (subseq auth (+ (search "Signature=" auth :from-end t) 10)))
+
+(defun count-occurrences (needle haystack)
+  (loop with start = 0 for pos = (search needle haystack :start2 start)
+        while pos count t do (setf start (1+ pos))))
+
+(test s3-range-header-is-signed
+  "READ-BLOB-RANGE sends its Range as an extra header. %SIGNED-HEADERS signs every extra header, so
+a proxy that rewrote the range would break the signature."
+  (let* ((headers (b::%signed-headers (test-s3-store) "media" "a.flac" "GET"
+                                      :extra-headers '(("range" . "bytes=0-3"))))
+         (auth (cdr (assoc "Authorization" headers :test #'string=))))
+    (is (search "SignedHeaders=host;range;x-amz-content-sha256;x-amz-date," auth) "~A" auth)
+    (is (string/= (url-signature-from-auth auth)
+                  (url-signature-from-auth
+                   (cdr (assoc "Authorization"
+                               (b::%signed-headers (test-s3-store) "media" "a.flac" "GET"
+                                                   :extra-headers '(("range" . "bytes=0-4")))
+                               :test #'string=))))
+        "another range is another signature")))
+
+(test s3-upload-url-log-line-holds-no-url-or-credential-material
+  "The issue line is logged once, with the key, expiry, size and ACL setting, and nothing from the
+URL: no query parameter, no credential scope, no access key id and no signature."
+  (let* ((log (make-string-output-stream))
+         (target (with-captured-log (log)
+                   (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                                 :expires-in 900 :content-type "video/mp4" :content-length 1234)))
+         (text (get-output-stream-string log))
+         (url (b:upload-target-url target))
+         (query (subseq url (1+ (position #\? url)))))
+    (is (= 1 (count-occurrences "blob upload URL issued" text)) "~A" text)
+    (is (search "upload-acl" text :test #'char-equal) "the store's ACL setting is logged: ~A" text)
+    (is (not (search query text)))
+    (is (not (search "?" (subseq text (search "blob upload URL issued" text)))) "no query string at all: ~A" text)
+    (is (not (search (b::s3-access-key (test-s3-store)) text)) "no access key id: ~A" text)
+    (is (not (search "aws4_request" text)) "no credential scope: ~A" text)
+    (is (not (search (url-signature url) text)))
+    (is (not (search "X-Amz-" text)))))
+
+(test s3-error-body-is-read-bounded-and-closed
+  "An error response's body is kept as DETAIL. A streamed one is read up to 64 KiB and closed, so
+it does not hold the connection; anything else passes through (#796)."
+  (is (equalp (octets "<Error/>") (b::%error-body (octets "<Error/>"))))
+  (is (null (b::%error-body nil)))
+  (let ((small (make-instance 'counting-octet-stream :data (octets "<Error><Code>InvalidRange</Code></Error>"))))
+    (is (equalp (octets "<Error><Code>InvalidRange</Code></Error>") (b::%error-body small)))
+    (is (not (open-stream-p small))))
+  (let ((large (make-instance 'counting-octet-stream
+                              :data (make-array 200000 :element-type '(unsigned-byte 8) :initial-element 32))))
+    (is (= 65536 (length (b::%error-body large))))
+    (is (= 65536 (counting-position large)) "read no further than the bound")
+    (is (not (open-stream-p large)))))
+
+(test s3-ranged-read-past-the-end-closes-the-error-stream
+  "A ranged read past the end answers 416. With the body streamed, the error carries an open
+stream; %S3-REQUEST closes it, and READ-BLOB-RANGE returns no bytes."
+  (let ((original (fdefinition 'dex:request))
+        (body (make-instance 'counting-octet-stream :data (octets "<Error><Code>InvalidRange</Code></Error>"))))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (declare (ignore args))
+                   (error 'dex:http-request-failed :body body :status 416 :headers (make-hash-table)
+                                                   :uri url :method :get)))
+           (is (equalp #() (b:read-blob-range (test-s3-store) "media" "a" :start 99 :length 4))))
+      (setf (fdefinition 'dex:request) original))
+    (is (not (open-stream-p body)) "the 416 body is closed")))

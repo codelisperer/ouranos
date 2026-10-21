@@ -1389,6 +1389,20 @@ its tag.
   - The dev transport edits and deletes a result from the real Telegram backend instead of
     refusing it with `unsupported-message`.
 
+- **hermes/blob: on the S3 store, `read-blob-range` with `:length 0` signals `blob-not-found`
+  for a missing key** (#796), as the filesystem store does and as the docstring says. It returned
+  an empty vector without asking the store; it now makes one HEAD request.
+
+- **hermes/blob: on the S3 store, `read-blob-range` reads only the range when the store ignores
+  `Range`** (#796). A store, or a proxy in front of it, that answers 200 with the whole object
+  had its whole body read into memory and then cut down. The body is now read as a stream: the
+  method skips to `:start`, reads `:length` bytes and closes the connection.
+
+- **hermes/blob: `start-multipart-upload` refuses a content type that is empty or contains a
+  control character** (#796), with `blob-upload-refused` reason `:bad-content-type`, before
+  sending anything. This is the same check `upload-url` makes; a CR or LF in it would end up in a
+  request header.
+
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the
   `unknown-tool-choice` detail does; it was the internal `%value-shape`.

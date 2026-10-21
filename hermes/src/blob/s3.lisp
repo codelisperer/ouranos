@@ -213,6 +213,21 @@ knows it for free."
                           (format nil "AWS4-HMAC-SHA256 Credential=~A/~A, SignedHeaders=~A, Signature=~A"
                                   (s3-access-key store) scope signed-list signature)))))))
 
+(defconstant +max-error-body-bytes+ 65536
+  "The most of an error response's body kept as a condition's DETAIL. An S3 error document is a
+few hundred bytes; this bounds what a misbehaving store or proxy can make the image hold.")
+
+(defun %error-body (body)
+  "BODY as an error response's DETAIL. A stream is read up to +MAX-ERROR-BODY-BYTES+ and closed;
+anything else is returned as it is."
+  (if (streamp body)
+      (unwind-protect
+           (let* ((buffer (make-array +max-error-body-bytes+ :element-type '(unsigned-byte 8)))
+                  (n (read-sequence buffer body)))
+             (subseq buffer 0 n))
+        (close body))
+      body))
+
 (defun %s3-request (store bucket key method &key content content-type query
                                                  payload-hash extra-headers want-stream)
   "Perform a signed S3 request, translating transport failure into the blob protocol."
@@ -230,7 +245,11 @@ knows it for free."
                              :want-stream want-stream :force-binary t
                              :keep-alive nil)
           (dex:http-request-failed (e)
-            (let ((status (dex:response-status e)))
+            (let ((status (dex:response-status e))
+                  ;; With WANT-STREAM the error's body is an open stream on the connection.
+                  ;; Read what is needed of it and close it here, or a ranged read past the end
+                  ;; (416) holds its socket until the stream is garbage-collected (#796).
+                  (detail (%error-body (dex:response-body e))))
               (if (member status '(403 404))
                   ;; 403 is folded into NOT-FOUND deliberately: a bucket configured to
                   ;; deny listing answers a missing key with 403, and a caller asking
@@ -238,7 +257,7 @@ knows it for free."
                   ;; happens to run to read the answer.
                   (error 'blob-not-found :bucket bucket :key key)
                   (error 'blob-backend-error :bucket bucket :key key :status status
-                                             :detail (dex:response-body e)))))
+                                             :detail detail))))
           (error (e)
             (error 'blob-backend-error :bucket bucket :key key
                                        :detail (princ-to-string e))))
@@ -404,17 +423,20 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
 
 (defmethod read-blob-range ((s s3-store) bucket key &key (start 0) (length 512))
   (if (zerop length)
-      (make-array 0 :element-type '(unsigned-byte 8))
+      ;; No range asks for zero bytes, so ask whether the blob exists instead: a missing key
+      ;; signals BLOB-NOT-FOUND here as it does on every other store (#796).
+      (if (blob-exists-p s bucket key)
+          (make-array 0 :element-type '(unsigned-byte 8))
+          (error 'blob-not-found :bucket bucket :key key))
       (handler-case
           (multiple-value-bind (body status)
-              (%s3-request s bucket key :get
+              (%s3-request s bucket key :get :want-stream t
                            :extra-headers (list (cons "range" (format nil "bytes=~D-~D" start (+ start length -1)))))
-            ;; 206 is the range; 200 means the store ignored Range and sent the whole object,
-            ;; so cut it down here rather than hand back more than was asked for.
-            (let ((octets (coerce body '(simple-array (unsigned-byte 8) (*)))))
-              (if (= status 206)
-                  octets
-                  (subseq octets (min start (length octets)) (min (+ start length) (length octets))))))
+            ;; 206 is the range. 200 means the store, or a proxy in front of it, ignored Range
+            ;; and is sending the whole object, so skip to START and read only LENGTH bytes;
+            ;; closing the stream then drops the rest unread (#796).
+            (unwind-protect (%read-range body (if (= status 206) 0 start) length)
+              (close body)))
         (blob-backend-error (e)
           ;; 416: START is at or past the end, including any START on an empty object.
           (if (eql 416 (blob-backend-error-status e))
