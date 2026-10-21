@@ -550,7 +550,10 @@ one that binds, so defaults have to come last for a caller's override to take ef
                  (list :endpoint "s3.amazonaws.com"
                        :region "us-east-1"
                        :access-key "AKIAIOSFODNN7EXAMPLE"
-                       :secret-key "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"))))
+                       :secret-key "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+                       ;; Explicit, so MNEMOSYNE_S3_UPLOAD_ACL in a developer's environment
+                       ;; cannot change what these tests see.
+                       :upload-acl :none))))
 
 (defun configuration-error-missing (thunk)
   "The MISSING slot of the BLOB-CONFIGURATION-ERROR that THUNK signals, or NIL if it does
@@ -1048,8 +1051,9 @@ rule exposes it (#770)."
       (is (null (getf call :key)) "a bucket-level request")
       (is (string= "cors=" (getf call :query)))
       (is (string= "application/xml" (getf call :content-type)))
-      (is (string= (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type") 3000)
-                   (sb-ext:octets-to-string body :external-format :utf-8)))
+      (is (string= (b::%cors-xml '("https://app.example.com") '("PUT") '("Content-Type" "x-amz-acl") 3000)
+                   (sb-ext:octets-to-string body :external-format :utf-8))
+          "the default allows the headers UPLOAD-URL's target carries")
       (is (string= (b::%base64 (ironclad:digest-sequence :md5 body))
                    (cdr (assoc "content-md5" (getf call :extra-headers) :test #'string=)))
           "Content-MD5 is the body's, which PutBucketCors requires"))))
@@ -1210,3 +1214,76 @@ recording each call. Returns (values result calls)."
     (signals b:blob-unsupported (b:complete-multipart-upload store "media" "a" "u" '((1 . "e"))))
     (signals b:blob-unsupported (b:abort-multipart-upload store "media" "a" "u"))
     (signals b:blob-unsupported (b:list-multipart-parts store "media" "a" "u"))))
+
+;;; === 13. the upload's ACL, a setting on the S3 store (#796) =====================
+;;;
+;;; Measured on MinIO in #796: an unsigned x-amz-acl: public-read added by the client is accepted,
+;;; and with x-amz-acl: private signed, public-read is refused (403) and so is leaving it out (400).
+;;; The maintainer ruled that signing it is a store setting, off by default, because an AWS bucket
+;;; with ACLs disabled (the AWS default) refuses an upload naming `private'.
+
+(defun signed-headers-of (url)
+  "The X-Amz-SignedHeaders value of a presigned URL, still percent-encoded."
+  (let* ((start (+ (search "X-Amz-SignedHeaders=" url) 20))
+         (end (or (position #\& url :start start) (length url))))
+    (subseq url start end)))
+
+(test s3-upload-url-signs-no-acl-by-default
+  "The control for the test below: a store made without :UPLOAD-ACL signs no ACL and tells the
+client to send no ACL header."
+  (let ((target (b:upload-url (test-s3-store) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4" :content-length 1234)))
+    (is (eq :none (b::s3-upload-acl (test-s3-store))))
+    (is (string= "content-length%3Bcontent-type%3Bhost" (signed-headers-of (b:upload-target-url target))))
+    (is (null (assoc "x-amz-acl" (b:upload-target-headers target) :test #'string-equal)))))
+
+(test s3-upload-url-signs-a-private-acl-when-the-store-is-set-to
+  (let ((target (b:upload-url (test-s3-store :upload-acl :private) "media" "uploads/a.mp4"
+                              :expires-in 900 :content-type "video/mp4" :content-length 1234)))
+    (is (string= "content-length%3Bcontent-type%3Bhost%3Bx-amz-acl"
+                 (signed-headers-of (b:upload-target-url target))))
+    (is (equal '(("Content-Type" . "video/mp4") ("x-amz-acl" . "private")) (b:upload-target-headers target))
+        "the client is told to send the header that was signed"))
+  (let ((target (b:upload-url (test-s3-store :upload-acl :private) "media" "uploads/a.bin" :expires-in 900)))
+    (is (string= "host%3Bx-amz-acl" (signed-headers-of (b:upload-target-url target))))
+    (is (equal '(("x-amz-acl" . "private")) (b:upload-target-headers target))
+        "signed with no content type or size given as well")))
+
+(defmacro with-environment-variable ((name value) &body body)
+  "Run BODY with the environment variable NAME set to VALUE, then restore it. NIL sets it to the
+empty string, which MAKE-S3-STORE reads as unset, so no unsetenv (and no sb-posix) is needed."
+  (let ((old (gensym "OLD")))
+    `(let ((,old (uiop:getenv ,name)))
+       (unwind-protect
+            (progn (setf (uiop:getenv ,name) (or ,value ""))
+                   ,@body)
+         (setf (uiop:getenv ,name) (or ,old ""))))))
+
+(test s3-upload-acl-setting-comes-from-the-argument-or-the-environment
+  (flet ((store-acl (&rest args)
+           (b::s3-upload-acl (apply #'b:make-s3-store :endpoint "s3.amazonaws.com"
+                                    :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args))))
+    (with-environment-variable ("MNEMOSYNE_S3_UPLOAD_ACL" nil)
+      (is (eq :none (store-acl)) "unset is no ACL")
+      (is (eq :private (store-acl :upload-acl :private))))
+    (with-environment-variable ("MNEMOSYNE_S3_UPLOAD_ACL" "private")
+      (is (eq :private (store-acl)))
+      (is (eq :none (store-acl :upload-acl :none)) "the argument wins over the environment"))
+    (with-environment-variable ("MNEMOSYNE_S3_UPLOAD_ACL" "None")
+      (is (eq :none (store-acl)) "case does not matter"))
+    (with-environment-variable ("MNEMOSYNE_S3_UPLOAD_ACL" "public-read")
+      (signals b:blob-configuration-error (store-acl)))
+    (signals b:blob-configuration-error (store-acl :upload-acl :public-read))
+    (signals b:blob-configuration-error (store-acl :upload-acl "private"))))
+
+(test s3-check-bucket-cors-by-default-checks-the-headers-this-store-sends
+  "A rule that allows only Content-Type is enough for a store that signs no ACL, and blocks the
+upload on a store that signs one, because the browser then sends x-amz-acl as well."
+  (let ((old-rule "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>Content-Type</AllowedHeader></CORSRule></CORSConfiguration>")
+        (new-rule "<CORSConfiguration><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedHeader>Content-Type</AllowedHeader><AllowedHeader>x-amz-acl</AllowedHeader></CORSRule></CORSConfiguration>"))
+    (flet ((verdict (rule store)
+             (call-with-recorded-s3 (octets rule)
+                                    (lambda () (b:check-bucket-cors store "media" "https://app.example.com")))))
+      (is (eq :allowed (verdict old-rule (test-s3-store))))
+      (is (eq :header-not-allowed (verdict old-rule (test-s3-store :upload-acl :private))))
+      (is (eq :allowed (verdict new-rule (test-s3-store :upload-acl :private)))))))
