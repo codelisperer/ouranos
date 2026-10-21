@@ -22,13 +22,13 @@
 ;;;; tool schema offers only those. A request for any other quality is refused before it is sent.
 ;;;;
 ;;;; USAGE. Each request that succeeds emits one :IMAGE-USAGE event through praxeon/event, with
-;;;; the provider, the model, the number of images, the size and quality the provider reports, the
-;;;; token counts it reports, :COST only when the provider reports a cost, and the call's :ID,
-;;;; :PRINCIPAL and :AGENT as on :TOOL-RESULT. OpenAI reports no cost, so for a model in
-;;;; *OPENAI-IMAGE-PRICES* praxeon computes one from the token counts and OpenAI's published
-;;;; per-token prices, and the event says so with :ESTIMATED T. For a model not in the table :COST
-;;;; is absent rather than 0. A refused or failed request emits no :IMAGE-USAGE event, because
-;;;; the provider reports no usage with an error; whether a provider charges for a refused request is its own policy,
+;;;; the provider, the model, the number of images, the size and quality the provider reports,
+;;;; the token counts it reports, :COST when it is known, and the call's :ID, :PRINCIPAL and
+;;;; :AGENT as on :TOOL-RESULT. OpenAI reports no cost, so for a model in *OPENAI-IMAGE-PRICES*
+;;;; praxeon computes one from the token counts and OpenAI's published per-token prices, and the
+;;;; event says so with :ESTIMATED T. For a model not in the table :COST is absent rather than 0.
+;;;; A refused or failed request emits no :IMAGE-USAGE event, because the provider reports no
+;;;; usage with an error; whether a provider charges for a refused request is its own policy,
 ;;;; which praxeon cannot see.
 ;;;;
 ;;;; LOGGING follows docs/logging.md: kinds, counts, lengths, status and durations. The prompt,
@@ -427,8 +427,11 @@ base64."
 (defparameter *openai-image-prices*
   ;; US dollars per million tokens, from https://developers.openai.com/api/docs/pricing, table
   ;; "Image generation models", Standard. upstream.sexp pins each row with the date it was read.
-  ;; A price the page does not list is left out of its row, never guessed.
-  '(("gpt-image-2.5-flare" :text-input 5 :image-input 8 :image-output 30)
+  ;; A price the page does not list is left out of its row, never guessed. A model's shutdown
+  ;; date is its upstream.sexp entry's :retires; the row stays, so a request made before that
+  ;; date can still be priced.
+  '(("gpt-image-2" :text-input 5 :image-input 8 :image-output 30)
+    ("gpt-image-2.5-flare" :text-input 5 :image-input 8 :image-output 30)
     ("gpt-image-2.5-sunburst" :text-input 5 :image-input 8 :image-output 30)
     ("gpt-image-1.5" :text-input 5 :image-input 8 :text-output 10 :image-output 32)
     ("gpt-image-1-mini" :text-input 2 :image-input 5/2 :image-output 8)

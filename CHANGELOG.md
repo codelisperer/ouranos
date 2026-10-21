@@ -575,11 +575,14 @@ its tag.
   tokens and OpenAI's published per-million-token prices, in US dollars as an exact rational,
   with `:estimated t`. `image-result-cost` is each image's share and
   `image-result-cost-estimated-p` is true. `praxeon/image:openai-image-cost` computes the same
-  figure. The table covers `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1.5`,
-  `gpt-image-1-mini`, `gpt-image-1` and `chatgpt-image-latest`, and `upstream.sexp` records the
-  date each row was read from OpenAI's pricing page ("OpenAI image prices: MODEL"). Where praxeon
-  approximates (cached input, a token count the reply does not split), it uses the higher rate.
-  For a model not in the table `:cost` is still absent.
+  figure. The table covers `gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`,
+  `gpt-image-1.5`, `gpt-image-1-mini`, `gpt-image-1` and `chatgpt-image-latest`, and
+  `upstream.sexp` records the date each row was read from OpenAI's pricing page ("OpenAI image
+  prices: MODEL"). Where praxeon approximates (cached input, a token count the reply does not
+  split), it uses the higher rate. For a model not in the table `:cost` is still absent. A
+  model OpenAI has scheduled for shutdown keeps its row after the date, so a request made before
+  it can still be priced; its entry's new `:retires` key holds the date, and
+  `scripts/check-upstream.lisp --online` lists it under "Past its shutdown date" from that day.
   An app that kept its own per-image price list can compare it with this one.
 
 - **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
