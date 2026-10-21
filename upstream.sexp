@@ -144,6 +144,40 @@
  :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
  :reviewed "2026-10-18")
 
+;;; Each row of praxeon/image's *OPENAI-IMAGE-PRICES*, in US dollars per million tokens, as the
+;;; pricing page's "Image generation models" table (Standard) lists them. The value is the row's
+;;; prices, so a change to any of them shows here. #758.
+
+(:name "OpenAI image prices: gpt-image-2.5-flare" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-2.5-flare\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-2.5-sunburst" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-2.5-sunburst\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-1.5" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-1.5\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-1-mini" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-1-mini\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-1" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-1\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: chatgpt-image-latest" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"chatgpt-image-latest\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")
