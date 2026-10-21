@@ -452,6 +452,13 @@ its tag.
 
 ### Added
 
+- **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
+  (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
+  invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
+  `-date`) from the bot's `my_chat_member` updates. By default it leaves the updates pending;
+  `:confirm t` confirms them. A bot with a webhook gets the new condition
+  `telegram-webhook-active`. The dev transport returns no chats.
+
 - **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
   `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
   `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
@@ -1333,6 +1340,21 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
+  - A refusal whose `description` is not a string is reported with its class and the response
+    body as detail. Before, it signalled a `type-error`.
+  - `make-telegram-message` refuses an `@username` that ends with an underscore, as Telegram
+    does.
+  - `telegram-can-post` signals `telegram-chat-migrated` for a group that became a supergroup,
+    as before; that is now documented and tested.
+  - An error raised during the request whose report cannot be printed still arrives as a
+    `delivery-failure`, whose detail names the error's type.
+  - A serious condition that is not an error, such as a timeout, is signalled again unchanged
+    after the request is unwound. Before, it propagated with the request, and so the token in
+    its URL, in live frames, which hyperion's dev server prints for any serious condition.
+  - The dev transport edits and deletes a result from the real Telegram backend instead of
+    refusing it with `unsupported-message`.
 
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the
