@@ -273,7 +273,8 @@ Host header is the URL's too."
                            (resolve #'resolve-host)
                            (address-policy #'address-category)
                            (perform #'%http))
-  "Fetch URL, which a user supplied, and return the RESPONSE of the last hop. Any status is
+  "Fetch URL, which a user supplied, and return the RESPONSE of the last hop, and as a second
+value the URL of that hop, which differs from URL after a redirect (#757). Any status is
 returned as a response; apply ENSURE-2XX or similar to it as usual.
 
 Before each connection, including each redirect, the host is resolved (RESOLVE), and if any of
@@ -304,7 +305,7 @@ PINNED-CONNECT-UNSUPPORTED. RESOLVE, ADDRESS-POLICY and PERFORM are parameters f
              (status (response-status response))
              (location (and (member status '(301 302 303 307 308))
                             (header-value (response-headers response) "location"))))
-        (unless location (return response))
+        (unless location (return (values response url)))
         (when (>= hops max-redirects)
           (error 'too-many-redirects :url url :limit max-redirects))
         (let ((next (quri:merge-uris (quri:uri location) uri)))
