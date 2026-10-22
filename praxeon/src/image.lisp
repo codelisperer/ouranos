@@ -60,6 +60,7 @@
    #:image-request-mask
    #:reference-image #:make-reference-image #:reference-image-octets
    #:reference-image-media-type #:reference-image-name #:*max-reference-bytes*
+   #:*max-reference-total-bytes*
    #:*max-references* #:image-input-invalid
    #:image-result #:image-result-octets #:image-result-media-type
    #:image-result-revised-prompt #:image-result-provider #:image-result-model
@@ -137,6 +138,11 @@ for each image and mask sent to /images/edits.")
   "The most reference images one request may send. OpenAI's Image API reference allows up to 16
 for its GPT Image models.")
 
+(defparameter *max-reference-total-bytes* (* 64 1024 1024)
+  "The most bytes of reference images and mask together in one request. Sixteen files of 50 MB
+would be 800 MB, held in memory twice while the request is built, so this bounds what one call
+can make the image hold. An app that edits larger images can raise it.")
+
 (defun %octets-start-with-p (octets prefix &optional (start 0))
   (and (<= (+ start (length prefix)) (length octets))
        (every #'= prefix (subseq octets start (+ start (length prefix))))))
@@ -151,16 +157,16 @@ for its GPT Image models.")
 
 (defstruct (reference-image (:constructor %make-reference-image (octets media-type name)))
   "An image sent with a request, as a reference to edit or to make a variation of, or as a mask.
-OCTETS are the file's bytes, MEDIA-TYPE is read from those bytes, and NAME is the file name the
-provider is given. Make one with MAKE-REFERENCE-IMAGE."
+OCTETS are the file's bytes and MEDIA-TYPE is read from those bytes. NAME labels the image in the
+reasons IMAGE-INPUT-INVALID gives and is never sent: the provider is given a file name praxeon
+makes, such as image-1.png. Make one with MAKE-REFERENCE-IMAGE."
   octets media-type name)
 
 (defun make-reference-image (octets &key (name "image"))
   "A REFERENCE-IMAGE of OCTETS, a vector of (unsigned-byte 8). Its media type is read from the
 file's own first bytes, not taken from the caller, because a provider refuses a file whose
 declared type is wrong. Signals IMAGE-INPUT-INVALID unless OCTETS are a PNG, JPEG or WebP file
-of at most *MAX-REFERENCE-BYTES*. NAME is the file name the provider is given; only its
-extension matters to OpenAI, so the extension of the type found is added to it."
+of at most *MAX-REFERENCE-BYTES*. NAME labels the image in those reasons; it is not sent."
   (unless (and (typep octets '(vector (unsigned-byte 8))) (plusp (length octets)))
     (%invalid "The image ~S is empty or is not a file's bytes, so it was not sent." name))
   (when (> (length octets) *max-reference-bytes*)
@@ -169,8 +175,10 @@ extension matters to OpenAI, so the extension of the type found is added to it."
   (let ((type (%sniff-media-type octets)))
     (unless type
       (%invalid "The image ~S is not a PNG, JPEG or WebP file, so it was not sent." name))
-    (%make-reference-image octets type
-                           (format nil "~A.~A" name (subseq type (length "image/"))))))
+    (%make-reference-image octets type name)))
+
+(defun %extension (image)
+  (subseq (reference-image-media-type image) (length "image/")))
 
 (defun %u32 (octets start)
   (logior (ash (aref octets start) 24) (ash (aref octets (+ start 1)) 16)
@@ -206,6 +214,11 @@ IDAT chunk. Each chunk is a 4-byte length, a 4-byte name, the data and a 4-byte 
   (when (> (length references) *max-references*)
     (%invalid "~D reference images were given and at most ~D can be sent, so none were sent."
               (length references) *max-references*))
+  (let ((total (reduce #'+ (if mask (cons mask references) references)
+                       :key (lambda (r) (length (reference-image-octets r))))))
+    (when (> total *max-reference-total-bytes*)
+      (%invalid "The reference images and mask come to ~D bytes, over the limit of ~D for one request, so none were sent."
+                total *max-reference-total-bytes*)))
   (when mask
     (unless (reference-image-p mask)
       (error "MASK must be a REFERENCE-IMAGE made with MAKE-REFERENCE-IMAGE: ~S" mask))
@@ -339,6 +352,8 @@ failure."
                :provider name :model model :count (length results)
                (append (list :size (or (getf reported :size) (%size-name size))
                              :quality (or (getf reported :quality) (%size-name quality)))
+                       ;; Present only for an edit, so a ledger can tell edits from generations.
+                       (and references (list :references (length references)))
                        (loop for key in '(:input-tokens :output-tokens :cost :estimated)
                              for value = (getf reported key)
                              when value append (list key value))))
@@ -471,36 +486,61 @@ as the mask part. Separate from the POST so a test can read the body that is bui
              (and (image-request-mask request) (list (cons "mask" (image-request-mask request)))))
      (image-request-count request))))
 
-(defun %boundary (files)
-  "A multipart boundary that occurs in none of FILES' bytes. 32 random hex digits make a clash
-unlikely; the check makes it impossible."
-  (loop for boundary = (format nil "praxeon-~32,'0X" (random (expt 16 32)))
-        for marker = (sb-ext:string-to-octets boundary :external-format :ascii)
-        unless (some (lambda (f) (search marker (reference-image-octets (cdr f)))) files)
+(defun %utf-8 (string)
+  (sb-ext:string-to-octets string :external-format :utf-8))
+
+(defun %boundary (contents)
+  "A multipart boundary that occurs in none of CONTENTS, the octets of every field value and file
+the body will carry. The prompt is among them, so a prompt cannot end a part early and add a
+field of its own. 128 bits from the OS generator make a clash unlikely; the check makes it
+impossible."
+  (loop for boundary = (format nil "praxeon-~A" (aion/random:random-hex 128))
+        for marker = (%utf-8 boundary)
+        unless (some (lambda (c) (search marker c)) contents)
           return boundary))
+
+(defun %file-name (name index image)
+  "The file name the provider is given for IMAGE: image-1.png for the first image[] part, and so
+on, or mask.png. Only the extension matters to OpenAI, and a name praxeon makes cannot carry a
+quote or a line break from the app or the model into the part's header."
+  (if (equal name "mask")
+      (format nil "mask.~A" (%extension image))
+      (format nil "image-~D.~A" index (%extension image))))
 
 (defun %multipart (body)
   "BODY, an EDIT-BODY, encoded as multipart/form-data. Returns the octets and the content-type
-header that names their boundary, as two values."
-  (let* ((boundary (%boundary (edit-body-files body)))
-         (out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-    (flet ((text (control &rest args)
-             (loop for b across (sb-ext:string-to-octets (apply #'format nil control args)
-                                                         :external-format :utf-8)
-                   do (vector-push-extend b out))))
-      (loop for (name . value) in (edit-body-fields body)
-            do (text "--~A~C~CContent-Disposition: form-data; name=\"~A\"~C~C~C~C~A~C~C"
-                     boundary #\Return #\Newline name #\Return #\Newline #\Return #\Newline
-                     value #\Return #\Newline))
-      (loop for (name . image) in (edit-body-files body)
-            do (text "--~A~C~CContent-Disposition: form-data; name=\"~A\"; filename=\"~A\"~C~CContent-Type: ~A~C~C~C~C"
-                     boundary #\Return #\Newline name (reference-image-name image) #\Return #\Newline
-                     (reference-image-media-type image) #\Return #\Newline #\Return #\Newline)
-               (loop for b across (reference-image-octets image) do (vector-push-extend b out))
-               (text "~C~C" #\Return #\Newline))
-      (text "--~A--~C~C" boundary #\Return #\Newline))
-    (values (coerce out '(simple-array (unsigned-byte 8) (*)))
-            (format nil "multipart/form-data; boundary=~A" boundary))))
+header that names their boundary, as two values. The parts are encoded once, their total size
+is added up, and they are copied into one array of that size, so a large image is copied once."
+  (let* ((fields (mapcar (lambda (f) (cons (car f) (%utf-8 (cdr f)))) (edit-body-fields body)))
+         (files (edit-body-files body))
+         (boundary (%boundary (append (mapcar #'cdr fields)
+                                      (mapcar (lambda (f) (reference-image-octets (cdr f))) files))))
+         (crlf (%utf-8 (format nil "~C~C" #\Return #\Newline)))
+         (chunks '()))
+    (flet ((add (octets) (push octets chunks))
+           (header (control &rest args)
+             (%utf-8 (apply #'format nil control args))))
+      (loop for (name . value) in fields
+            do (add (header "--~A~C~CContent-Disposition: form-data; name=\"~A\"~C~C~C~C"
+                            boundary #\Return #\Newline name #\Return #\Newline #\Return #\Newline))
+               (add value)
+               (add crlf))
+      (loop for (name . image) in files
+            for index from 1
+            do (add (header "--~A~C~CContent-Disposition: form-data; name=\"~A\"; filename=\"~A\"~C~CContent-Type: ~A~C~C~C~C"
+                            boundary #\Return #\Newline name (%file-name name index image)
+                            #\Return #\Newline (reference-image-media-type image)
+                            #\Return #\Newline #\Return #\Newline))
+               (add (reference-image-octets image))
+               (add crlf))
+      (add (header "--~A--~C~C" boundary #\Return #\Newline)))
+    (let* ((chunks (nreverse chunks))
+           (out (make-array (reduce #'+ chunks :key #'length) :element-type '(unsigned-byte 8)))
+           (at 0))
+      (dolist (c chunks)
+        (replace out c :start1 at)
+        (incf at (length c)))
+      (values out (format nil "multipart/form-data; boundary=~A" boundary)))))
 
 (defgeneric image-post (provider body)
   (:documentation "Send BODY to PROVIDER and return the parsed JSON reply. The transport, as a
@@ -832,25 +872,30 @@ prompt, so it needs only enough to see what changed; the whole of it is in the I
             cut *revised-prompt-chars* (and revised (length revised)))))
 
 (defun %resolve-references (args resolve max)
-  "The REFERENCE-IMAGEs the tool ARGS name in reference_images, through RESOLVE. Refuses the call
-before any request, as a :NOT-RUN error result, when the list is not a list of strings, is longer
-than MAX, or names a reference RESOLVE does not know."
+  "The REFERENCE-IMAGEs the tool ARGS name in reference_images, through RESOLVE, each reference
+once however often it is named, so a repeated reference is neither resolved nor sent twice.
+Refuses the call before any request, as a :NOT-RUN error result, when the list is not a list of
+strings, names more than MAX different references, names one RESOLVE does not know, or RESOLVE
+returns something other than a REFERENCE-IMAGE for it."
   (let ((given (gethash "reference_images" args)))
-    (cond ((null given) '())
-          ((not (%reference-list-p given max))
-           (error 'cnd:tool-error-result
-                  :outcome :not-run
-                  :text (format nil "generate-image: reference_images must be a list of at most ~D references. No image was made." max)))
-          (t (map 'list
-                  (lambda (ref)
-                    (or (funcall resolve ref)
-                        (error 'cnd:tool-error-result
-                               :outcome :not-run
-                               :text (format nil "generate-image: ~S is not an image reference you were given. Use a reference exactly as you were told it. No image was made." ref))))
-                  given)))))
-
-(defun %reference-list-p (given max)
-  (and (vectorp given) (not (stringp given)) (<= (length given) max) (every #'stringp given)))
+    (flet ((refuse (control &rest args)
+             (error 'cnd:tool-error-result
+                    :outcome :not-run
+                    :text (format nil "generate-image: ~? No image was made." control args))))
+      (cond ((null given) '())
+            ((not (and (vectorp given) (not (stringp given)) (every #'stringp given)))
+             (refuse "reference_images must be a list of references."))
+            (t
+             (let ((refs (remove-duplicates (coerce given 'list) :test #'string= :from-end t)))
+               (when (> (length refs) max)
+                 (refuse "reference_images must name at most ~D references." max))
+               (mapcar (lambda (ref)
+                         (let ((image (funcall resolve ref)))
+                           (cond ((reference-image-p image) image)
+                                 ((null image)
+                                  (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." ref))
+                                 (t (refuse "the image ~S could not be read." ref)))))
+                       refs)))))))
 
 (defun register (agent provider &key on-image (name "generate-image") capability source
                                      (qualities *qualities*) default-quality (default-size :auto)

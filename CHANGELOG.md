@@ -626,10 +626,15 @@ its tag.
   because `/images/variations` served only DALL-E. In a turn, `register` and
   `register-openai-image` take `:resolve-reference`, a function from a reference string the
   model gives to a `reference-image` or NIL, and `:max-references` (default 4); only then does
-  the schema offer `reference_images`. An unknown reference, too many, or a file that is not an
-  image is a `:not-run` error result. New exports: `image-request-references`,
-  `image-request-mask`, `reference-image-octets`, `reference-image-media-type`,
-  `reference-image-name`, `openai-image-edit-body`, `edit-body-fields`, `edit-body-files`.
+  the schema offer `reference_images`. A reference named twice is resolved and sent once. An
+  unknown reference, too many, a resolver result that is not a `reference-image`, or a file that
+  is not an image is a `:not-run` error result. One request's reference images and mask may come
+  to at most 64 MB (`*max-reference-total-bytes*`). The provider is sent file names praxeon
+  makes (`image-1.png`, `mask.png`); `reference-image-name` only labels refusals.
+  `:image-usage` carries `:references`, the number of reference images, for an edit. New
+  exports: `image-request-references`, `image-request-mask`, `reference-image-octets`,
+  `reference-image-media-type`, `reference-image-name`, `*max-reference-total-bytes*`,
+  `openai-image-edit-body`, `edit-body-fields`, `edit-body-files`.
 
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with

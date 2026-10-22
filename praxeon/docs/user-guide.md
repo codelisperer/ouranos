@@ -1168,7 +1168,10 @@ the new image is made from them and the prompt. Each is a `reference-image`, mad
 bytes with `make-reference-image`, which reads the media type from the bytes themselves and
 refuses anything that is not a PNG, JPEG or WebP file, or is over 50 MB, with
 `praxeon/image:image-input-invalid`. Up to 16 references can go in one request
-(`*max-references*`).
+(`*max-references*`), and together with the mask they may come to at most 64 MB
+(`*max-reference-total-bytes*`; raise it for larger images). The name you give
+`make-reference-image` only labels the image in refusals: the provider is sent `image-1.png`,
+`image-2.jpeg` and so on, so a name from a user or the model never reaches a request header.
 
 ```lisp
 (praxeon/image:generate-image

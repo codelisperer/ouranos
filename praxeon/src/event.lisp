@@ -54,10 +54,11 @@
 ;;;;                           provider reported no counts at all
 ;;;;   (:type :image-usage  :id .. :principal .. :agent .. :provider .. :model .. :count ..
 ;;;;                        :size .. :quality .. [:input-tokens ..] [:output-tokens ..] [:cost ..]
-;;;;                        [:estimated t])
+;;;;                        [:estimated t] [:references ..])
 ;;;;                        -- an image request succeeded (praxeon/image, #758). ID is the tool
 ;;;;                           call's, the same as on its :TOOL-RESULT, and PRINCIPAL and AGENT
-;;;;                           are as there; each is NIL outside a turn. PROVIDER and
+;;;;                           are as there; each is NIL outside a turn. REFERENCES, present only
+;;;;                           for an edit, is the number of reference images sent. PROVIDER and
 ;;;;                           MODEL are strings, COUNT the number of images returned, SIZE and
 ;;;;                           QUALITY as the provider reported them, or as requested when it
 ;;;;                           did not. The token counts are present only when the provider

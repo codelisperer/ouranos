@@ -759,8 +759,8 @@ checksums are zeros: the code reads the header, it does not decode the image."
   (is (equal "image/png" (praxeon/image:reference-image-media-type (%ref (%png 4 4)))))
   (is (equal "image/jpeg" (praxeon/image:reference-image-media-type (%ref +jpeg-octets+))))
   (is (equal "image/webp" (praxeon/image:reference-image-media-type (%ref +webp-octets+))))
-  (is (equal "photo.jpeg" (praxeon/image:reference-image-name (%ref +jpeg-octets+ "photo")))
-      "the file name the provider sees carries the extension of the type found"))
+  (is (equal "photo" (praxeon/image:reference-image-name (%ref +jpeg-octets+ "photo")))
+      "the name is kept as given, as a label for refusals; it is never sent"))
 
 (test a-reference-image-that-cannot-be-sent-is-refused-with-the-reason
   (flet ((refusal (fn)
@@ -803,7 +803,8 @@ rate: (20 x 5 + 500 x 8 + 1056 x 30) / 10^6 = 35780 / 10^6 dollars for gpt-image
           (is (= 2 (length images)) "~S" (mapcar #'car parts))
           (is (equalp png (cdr (first images))) "the PNG arrives byte for byte, in order")
           (is (equalp +jpeg-octets+ (cdr (second images))))
-          (is (search "filename=\"fox.png\"" (car (first images))) "~A" (car (first images)))
+          (is (search "filename=\"image-1.png\"" (car (first images))) "~A" (car (first images)))
+          (is (search "filename=\"image-2.jpeg\"" (car (second images))) "~A" (car (second images)))
           (is (search "Content-Type: image/png" (car (first images))))
           (is (search "Content-Type: image/jpeg" (car (second images)))))
         (is (null (%part-named parts "mask")) "no mask part when none is given")))))
@@ -916,7 +917,83 @@ exactly those bytes, and the app receives the new image."
           (is (search "/v1/images/edits" request-line))
           (is (equalp png (cdr (first (%part-named parts "image[]"))))))
         (let ((result (find :tool-result events :key #'evt:event-type)))
-          (is (and result (not (getf result :is-error))) "~S" result))))))
+          (is (and result (not (getf result :is-error))) "~S" result))
+        (is (eql 1 (getf (find :image-usage events :key #'evt:event-type) :references))
+            "the usage event of an edit counts its references")))))
+
+(test in-a-turn-a-reference-named-twice-is-resolved-and-sent-once
+  (let ((asked '()))
+    (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+      (let ((requests nil))
+        (unwind-protect
+             (let ((ag (%references-agent
+                        (list "prompt" "x" "reference_images" (vector "img-1" "img-1"))
+                        (lambda (ref) (push ref asked) (%ref (%png 2 2) ref))
+                        :max-references 1
+                        :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+               (%collecting-events (lambda () (actor:run-turn ag "x"))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (is (equal '("img-1") asked) "resolved once, and within a limit of 1: ~S" asked)
+        (multiple-value-bind (request-line type parts) (%edit-request requests)
+          (declare (ignore request-line type))
+          (is (= 1 (length (%part-named parts "image[]")))))))))
+
+(test in-a-turn-a-resolver-that-returns-something-else-is-refused-as-a-result
+  "A resolver that returns a pathname, say, instead of a REFERENCE-IMAGE is the app's mistake,
+but it must not end the turn with an untyped error."
+  (let* ((ag (%references-agent (list "prompt" "x" "reference_images" (vector "img-1"))
+                                (constantly #p"/tmp/img-1.png")))
+         (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+    (let ((result (find :tool-result events :key #'evt:event-type)))
+      (is (and result (eq :not-run (getf result :outcome))) "~S" result)
+      (is (search "could not be read" (getf result :content)) "~A" (getf result :content)))))
+
+(test the-file-name-sent-is-praxeons-not-the-callers
+  "A name with a quote and a line break, as an app or a model might supply, never reaches the
+part's header; the provider is given image-1.png."
+  (multiple-value-bind (results requests)
+      (%with-image-server (list (%image-reply))
+                          (lambda (p)
+                            (praxeon/image:generate-image
+                             p "x" :references (list (%ref (%png 2 2)
+                                                           (format nil "a\"b~%Content-Type: text/html"))))))
+    (declare (ignore results))
+    (multiple-value-bind (request-line type parts) (%edit-request requests)
+      (declare (ignore request-line type))
+      (let ((header (car (first (%part-named parts "image[]")))))
+        (is (search "filename=\"image-1.png\"" header) "~A" header)
+        (is-false (search "text/html" header) "~A" header)))))
+
+(test a-prompt-cannot-add-a-field-of-its-own
+  "The prompt carries what would end its part and start a quality part, if the boundary matched.
+The boundary is chosen to occur in no field or file, so the body still has one quality field,
+the one praxeon set, and the prompt arrives whole."
+  (let ((prompt (format nil "a fox~C~C--praxeon-0~C~CContent-Disposition: form-data; name=\"quality\"~C~C~C~Chigh"
+                        #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline)))
+    (multiple-value-bind (results requests)
+        (%with-image-server (list (%image-reply))
+                            (lambda (p)
+                              (praxeon/image:generate-image p prompt :quality :low
+                                                            :references (list (%ref (%png 2 2))))))
+      (declare (ignore results))
+      (multiple-value-bind (request-line type parts) (%edit-request requests)
+        (declare (ignore request-line))
+        (is-false (search (subseq type (+ (search "boundary=" type) 9)) prompt))
+        (let ((quality (%part-named parts "quality")))
+          (is (= 1 (length quality)) "~D quality parts" (length quality))
+          (is (equal "low" (sb-ext:octets-to-string (cdr (first quality)) :external-format :utf-8))))
+        (is (equal prompt (sb-ext:octets-to-string (cdr (first (%part-named parts "prompt")))
+                                                   :external-format :utf-8)))))))
+
+(test the-reference-images-of-one-request-are-capped-in-total
+  (let ((praxeon/image:*max-reference-total-bytes* 100)
+        (p (praxeon/image:make-openai-images :api-key "k" :base-url "http://127.0.0.1:9/v1")))
+    (let ((text (handler-case (progn (praxeon/image:generate-image
+                                      p "x" :references (list (%ref (%png 2 2)) (%ref (%png 2 2))
+                                                              (%ref (%png 2 2))))
+                                     "no refusal")
+                  (praxeon/image:image-input-invalid (c) (cnd:tool-error-result-text c)))))
+      (is (search "over the limit of 100 for one request" text) "~A" text))))
 
 (test in-a-turn-a-reference-the-app-does-not-know-is-refused-before-any-request
   (let* ((ag (%references-agent (list "prompt" "edit it" "reference_images" (vector "img-404"))
