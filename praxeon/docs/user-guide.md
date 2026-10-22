@@ -1152,7 +1152,8 @@ day, so the row is removed deliberately. The dates on 2026-10-20 were `gpt-image
 2026-10-23, and `gpt-image-1-mini`, `gpt-image-1.5` and `chatgpt-image-latest` on 2026-12-01.
 
 **Logging** records the provider, model, count, size, quality, byte count, status and duration,
-never the prompt, the revised prompt or the image.
+and for an edit the number of reference images, their total size and whether there was a mask,
+never the prompt, the revised prompt or any image.
 
 To call the provider outside a turn, use `generate-image`:
 
@@ -1162,8 +1163,48 @@ To call the provider outside a turn, use `generate-image`:
 ;; => a list of IMAGE-RESULTs
 ```
 
-Generating from a reference image (an edit or a variation) is not supported yet; it is the
-follow-up to #758.
+**Editing an image, or making a variation of it.** Pass reference images to `generate-image`:
+the new image is made from them and the prompt. Each is a `reference-image`, made from the file's
+bytes with `make-reference-image`, which reads the media type from the bytes themselves and
+refuses anything that is not a PNG, JPEG or WebP file, or is over 50 MB, with
+`praxeon/image:image-input-invalid`. Up to 16 references can go in one request
+(`*max-references*`).
+
+```lisp
+(praxeon/image:generate-image
+ provider "the same fox, in winter"
+ :references (list (praxeon/image:make-reference-image fox-octets :name "fox")))
+```
+
+A variation is the same call with a prompt that asks for one: OpenAI's `/images/variations`
+served only DALL-E, which OpenAI shut down on 2026-05-12. To change only part of an image, pass
+a `:mask` as well: a PNG with an alpha channel, the same size as the first reference, which must
+also be a PNG. Its transparent pixels mark what to replace. A mask that does not meet these is
+refused before any request, with the reason. With references, the OpenAI provider sends the
+request to `/images/edits` as `multipart/form-data`; without them, to `/images/generations` as
+before. The reply reports image input tokens separately, so the cost prices them at the image
+input rate.
+
+**Letting the model edit images.** Give `register` (or `register-openai-image`) a
+`:resolve-reference` function. The tool schema then offers `reference_images`, a list of at most
+`:max-references` (default 4) strings, and the model fills it with references it was given: the
+strings your `:on-image` returned for images made earlier, or ids you gave it for images the user
+uploaded. Your function turns each string into a `reference-image`, or returns NIL for one this
+model may not use, so the model reaches only the images you allow:
+
+```lisp
+(praxeon/image:register-openai-image
+ agent :on-image #'store-image!
+ :resolve-reference (lambda (ref)
+                      (let ((stored (find-image-for-user ref user)))
+                        (and stored
+                             (praxeon/image:make-reference-image (stored-octets stored)
+                                                                 :name ref)))))
+```
+
+A reference your function does not know, more references than allowed, or a file that is not an
+image is refused as a `:not-run` error result that tells the model why, and the turn goes on.
+Without `:resolve-reference` the model can only create images from a prompt, as before.
 
 ## 15. Run the tests
 

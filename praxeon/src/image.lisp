@@ -34,8 +34,13 @@
 ;;;; LOGGING follows docs/logging.md: kinds, counts, lengths, status and durations. The prompt,
 ;;;; the revised prompt and the image bytes are never logged.
 ;;;;
-;;;; This first version generates from a prompt. An edit or variation from a reference image
-;;;; (OpenAI's /images/edits, a multipart request) is the follow-up to #758.
+;;;; REFERENCE IMAGES. A request can carry reference images, to edit an image or to make a
+;;;; variation of it or a new image in its style, and a mask marking the part of the first one
+;;;; to replace. OpenAI takes these at /images/edits as multipart/form-data. Its /images/variations
+;;;; served only DALL-E, which OpenAI shut down on 2026-05-12, so a variation is an edit whose
+;;;; prompt asks for one. Inside a turn the model names reference images by the references the app
+;;;; gave it, and the app's RESOLVE-REFERENCE turns each into bytes, so the model reaches only the
+;;;; images the app lets it. A Google provider is the remaining part of #758.
 
 (cl:defpackage #:praxeon/image
   (:use #:cl)
@@ -51,7 +56,11 @@
    ;; the protocol
    #:image-provider #:image-provider-name #:image-model-of #:generate-images
    #:image-request #:make-image-request #:image-request-prompt #:image-request-size
-   #:image-request-quality #:image-request-count
+   #:image-request-quality #:image-request-count #:image-request-references
+   #:image-request-mask
+   #:reference-image #:make-reference-image #:reference-image-octets
+   #:reference-image-media-type #:reference-image-name #:*max-reference-bytes*
+   #:*max-references* #:image-input-invalid
    #:image-result #:image-result-octets #:image-result-media-type
    #:image-result-revised-prompt #:image-result-provider #:image-result-model
    #:image-result-size #:image-result-quality #:image-result-cost
@@ -64,7 +73,8 @@
    #:image-request-failed #:image-request-failed-kind #:image-request-failed-retry-after
    ;; OpenAI
    #:openai-images #:make-openai-images #:openai-images-from-env #:image-post
-   #:openai-image-request-body #:*openai-image-model* #:*openai-images-base-url*
+   #:openai-image-request-body #:openai-image-edit-body #:edit-body-fields #:edit-body-files
+   #:*openai-image-model* #:*openai-images-base-url*
    #:*openai-images-read-timeout* #:*max-bytes-per-image*
    #:*openai-image-prices* #:openai-image-cost
    ;; the means
@@ -95,11 +105,125 @@ Signals IMAGE-REFUSED for a content-policy refusal and PROVIDER-REQUEST-FAILED f
 failed request. Call GENERATE-IMAGE rather than this: it emits the usage event and logs."))
 
 (defstruct (image-request (:constructor make-image-request
-                              (&key prompt (size :auto) (quality :auto) (count 1))))
+                              (&key prompt (size :auto) (quality :auto) (count 1)
+                                    references mask)))
   "What to generate. PROMPT is a string. SIZE is :SQUARE, :PORTRAIT, :LANDSCAPE, :AUTO or a
 \"WIDTHxHEIGHT\" string the provider accepts. QUALITY is :LOW, :MEDIUM, :HIGH or :AUTO, or a
-string the provider accepts. COUNT is the number of images."
-  prompt size quality count)
+string the provider accepts. COUNT is the number of images. REFERENCES is a list of
+REFERENCE-IMAGEs the new images are made from, such as an image to edit, or NIL to generate
+from the prompt alone. MASK is a REFERENCE-IMAGE whose transparent pixels mark the part of the
+first reference to replace, or NIL."
+  prompt size quality count references mask)
+
+;;; --- reference images ---------------------------------------------------------------------
+
+(define-condition image-input-invalid (cnd:tool-error-result) ()
+  (:documentation "A reference image or a mask cannot be sent, so no request was made (#758).
+TEXT says why, without the image's contents.
+
+It is a TOOL-ERROR-RESULT with outcome :NOT-RUN, so inside a turn the model is told why the
+image could not be used and the turn goes on. A caller of GENERATE-IMAGE outside a turn handles
+it as any condition."))
+
+(defun %invalid (control &rest args)
+  (error 'image-input-invalid :outcome :not-run
+                              :text (apply #'format nil control args)))
+
+(defparameter *max-reference-bytes* (* 50 1024 1024)
+  "The largest reference image or mask, in bytes. OpenAI's Image API reference gives under 50 MB
+for each image and mask sent to /images/edits.")
+
+(defparameter *max-references* 16
+  "The most reference images one request may send. OpenAI's Image API reference allows up to 16
+for its GPT Image models.")
+
+(defun %octets-start-with-p (octets prefix &optional (start 0))
+  (and (<= (+ start (length prefix)) (length octets))
+       (every #'= prefix (subseq octets start (+ start (length prefix))))))
+
+(defun %sniff-media-type (octets)
+  "The media type the first bytes of OCTETS show: image/png, image/jpeg or image/webp, or NIL."
+  (cond ((%octets-start-with-p octets #(137 80 78 71 13 10 26 10)) "image/png")
+        ((%octets-start-with-p octets #(255 216 255)) "image/jpeg")
+        ((and (%octets-start-with-p octets #(82 73 70 70))            ; RIFF
+              (%octets-start-with-p octets #(87 69 66 80) 8))         ; WEBP
+         "image/webp")))
+
+(defstruct (reference-image (:constructor %make-reference-image (octets media-type name)))
+  "An image sent with a request, as a reference to edit or to make a variation of, or as a mask.
+OCTETS are the file's bytes, MEDIA-TYPE is read from those bytes, and NAME is the file name the
+provider is given. Make one with MAKE-REFERENCE-IMAGE."
+  octets media-type name)
+
+(defun make-reference-image (octets &key (name "image"))
+  "A REFERENCE-IMAGE of OCTETS, a vector of (unsigned-byte 8). Its media type is read from the
+file's own first bytes, not taken from the caller, because a provider refuses a file whose
+declared type is wrong. Signals IMAGE-INPUT-INVALID unless OCTETS are a PNG, JPEG or WebP file
+of at most *MAX-REFERENCE-BYTES*. NAME is the file name the provider is given; only its
+extension matters to OpenAI, so the extension of the type found is added to it."
+  (unless (and (typep octets '(vector (unsigned-byte 8))) (plusp (length octets)))
+    (%invalid "The image ~S is empty or is not a file's bytes, so it was not sent." name))
+  (when (> (length octets) *max-reference-bytes*)
+    (%invalid "The image ~S is ~D bytes, over the limit of ~D, so it was not sent."
+              name (length octets) *max-reference-bytes*))
+  (let ((type (%sniff-media-type octets)))
+    (unless type
+      (%invalid "The image ~S is not a PNG, JPEG or WebP file, so it was not sent." name))
+    (%make-reference-image octets type
+                           (format nil "~A.~A" name (subseq type (length "image/"))))))
+
+(defun %u32 (octets start)
+  (logior (ash (aref octets start) 24) (ash (aref octets (+ start 1)) 16)
+          (ash (aref octets (+ start 2)) 8) (aref octets (+ start 3))))
+
+(defun %png-info (octets)
+  "The width, height and whether it has an alpha channel, of the PNG file OCTETS, as three values,
+read from its IHDR chunk and, for transparency given separately, a tRNS chunk before the image
+data. NIL when the header cannot be read."
+  (when (and (>= (length octets) 33)
+             (%octets-start-with-p octets (map 'vector #'char-code "IHDR") 12))
+    (let ((width (%u32 octets 16))
+          (height (%u32 octets 20))
+          (color-type (aref octets 25)))
+      (values width height
+              (and (or (member color-type '(4 6))     ; grey with alpha, colour with alpha
+                       (%png-has-chunk-before-data-p octets "tRNS"))
+                   t)))))
+
+(defun %png-has-chunk-before-data-p (octets name)
+  "True when the PNG file OCTETS has a chunk called NAME after its header and before its first
+IDAT chunk. Each chunk is a 4-byte length, a 4-byte name, the data and a 4-byte checksum."
+  (do ((at 33)) ((> (+ at 8) (length octets)) nil)
+    (let ((kind (map 'string #'code-char (subseq octets (+ at 4) (+ at 8)))))
+      (cond ((equal kind name) (return t))
+            ((equal kind "IDAT") (return nil))
+            (t (incf at (+ 12 (%u32 octets at))))))))
+
+(defun %check-inputs (references mask)
+  "Signal IMAGE-INPUT-INVALID unless REFERENCES and MASK can be sent together."
+  (unless (every #'reference-image-p references)
+    (error "REFERENCES must be REFERENCE-IMAGEs made with MAKE-REFERENCE-IMAGE: ~S" references))
+  (when (> (length references) *max-references*)
+    (%invalid "~D reference images were given and at most ~D can be sent, so none were sent."
+              (length references) *max-references*))
+  (when mask
+    (unless (reference-image-p mask)
+      (error "MASK must be a REFERENCE-IMAGE made with MAKE-REFERENCE-IMAGE: ~S" mask))
+    (unless references
+      (%invalid "A mask marks part of a reference image to replace, and no reference image was given."))
+    (let ((first (first references)))
+      (unless (and (equal "image/png" (reference-image-media-type mask))
+                   (equal "image/png" (reference-image-media-type first)))
+        (%invalid "A mask and the image it applies to, the first reference, must both be PNG files."))
+      (multiple-value-bind (mw mh alpha) (%png-info (reference-image-octets mask))
+        (multiple-value-bind (iw ih) (%png-info (reference-image-octets first))
+          (unless (and mw iw)
+            (%invalid "The mask or the first reference image is not a readable PNG file."))
+          (unless (and (= mw iw) (= mh ih))
+            (%invalid "The mask is ~Dx~D and the first reference image is ~Dx~D; they must be the same size."
+                      mw mh iw ih))
+          (unless alpha
+            (%invalid "The mask has no alpha channel, so it cannot mark which part to replace.")))))))
 
 (defstruct (image-result (:constructor %make-image-result))
   "One generated image. OCTETS are the file's bytes as the provider sent them, and MEDIA-TYPE
@@ -152,12 +276,22 @@ again and the turn goes on. Praxeon does not retry the request."))
   (if (keywordp size) (string-downcase (symbol-name size)) size))
 
 (defun generate-image (provider prompt &key (size :auto) (quality :auto) (count 1)
+                                            references mask
                                             (id actor:*tool-call-id*)
                                             (principal actor:*principal*) agent)
   "Generate COUNT images from PROMPT with PROVIDER. Returns a list of IMAGE-RESULTs.
 
 SIZE is :SQUARE, :PORTRAIT, :LANDSCAPE, :AUTO or a \"WIDTHxHEIGHT\" string; QUALITY is :LOW,
-:MEDIUM, :HIGH or :AUTO, or a string the provider accepts. COUNT is from 1 to 10, the range OpenAI's Image API accepts.
+:MEDIUM, :HIGH or :AUTO, or a string the provider accepts. COUNT is from 1 to 10, the range
+OpenAI's Image API accepts.
+
+REFERENCES is a list of up to *MAX-REFERENCES* REFERENCE-IMAGEs to make the new images from: an
+image to edit, or images whose subjects or style the prompt refers to. A variation of an image is
+a request with that image as the reference and a prompt asking for a variation. MASK is a PNG
+REFERENCE-IMAGE with an alpha channel, the size of the first reference, whose transparent pixels
+mark the part of that image to replace. Signals IMAGE-INPUT-INVALID, before any request, when
+they cannot be sent together.
+
 Emits one :IMAGE-USAGE event for a request that succeeded, carrying ID, PRINCIPAL and AGENT
 (the agent's name) as a :TOOL-RESULT event does; ID and PRINCIPAL default to the running tool
 call's. Signals IMAGE-REFUSED for a content-policy refusal, IMAGE-REQUEST-FAILED when the
@@ -165,7 +299,9 @@ service is busy, fails on its side or does not answer, and PROVIDER-REQUEST-FAIL
 failure."
   (check-type prompt string)
   (check-type count (integer 1 10))
-  (let ((request (make-image-request :prompt prompt :size size :quality quality :count count))
+  (%check-inputs references mask)
+  (let ((request (make-image-request :prompt prompt :size size :quality quality :count count
+                                     :references references :mask mask))
         (name (image-provider-name provider))
         (model (image-model-of provider))
         (start (get-internal-real-time)))
@@ -173,7 +309,11 @@ failure."
                          internal-time-units-per-second)))
       (log:debug "image request" :provider name :model model :count count
                                  :size (%size-name size) :quality (%size-name quality)
-                                 :prompt-length (length prompt))
+                                 :prompt-length (length prompt)
+                                 :references (length references)
+                                 :reference-bytes (reduce #'+ references
+                                                          :key (lambda (r) (length (reference-image-octets r))))
+                                 :mask (and mask t))
       (multiple-value-bind (results reported)
           (handler-bind
               ((image-refused
@@ -313,6 +453,55 @@ can read the body that is built."
                                        (string-downcase (symbol-name quality))))
     body))
 
+(defstruct (edit-body (:constructor %make-edit-body (fields files count)))
+  "The body of a request to OpenAI's /images/edits, before it is encoded as multipart/form-data.
+FIELDS is an alist of (NAME . STRING), FILES an alist of (NAME . REFERENCE-IMAGE) in the order
+they are sent, and COUNT the number of images asked for."
+  fields files count)
+
+(defun openai-image-edit-body (provider request)
+  "The EDIT-BODY of the request for REQUEST, which has reference images: the same fields as
+OPENAI-IMAGE-REQUEST-BODY's, each reference as an image[] part in order, then the mask, if any,
+as the mask part. Separate from the POST so a test can read the body that is built."
+  (let ((json (openai-image-request-body provider request)))
+    (%make-edit-body
+     (loop for name in '("model" "prompt" "n" "size" "quality")
+           collect (cons name (princ-to-string (gethash name json))))
+     (append (mapcar (lambda (r) (cons "image[]" r)) (image-request-references request))
+             (and (image-request-mask request) (list (cons "mask" (image-request-mask request)))))
+     (image-request-count request))))
+
+(defun %boundary (files)
+  "A multipart boundary that occurs in none of FILES' bytes. 32 random hex digits make a clash
+unlikely; the check makes it impossible."
+  (loop for boundary = (format nil "praxeon-~32,'0X" (random (expt 16 32)))
+        for marker = (sb-ext:string-to-octets boundary :external-format :ascii)
+        unless (some (lambda (f) (search marker (reference-image-octets (cdr f)))) files)
+          return boundary))
+
+(defun %multipart (body)
+  "BODY, an EDIT-BODY, encoded as multipart/form-data. Returns the octets and the content-type
+header that names their boundary, as two values."
+  (let* ((boundary (%boundary (edit-body-files body)))
+         (out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (flet ((text (control &rest args)
+             (loop for b across (sb-ext:string-to-octets (apply #'format nil control args)
+                                                         :external-format :utf-8)
+                   do (vector-push-extend b out))))
+      (loop for (name . value) in (edit-body-fields body)
+            do (text "--~A~C~CContent-Disposition: form-data; name=\"~A\"~C~C~C~C~A~C~C"
+                     boundary #\Return #\Newline name #\Return #\Newline #\Return #\Newline
+                     value #\Return #\Newline))
+      (loop for (name . image) in (edit-body-files body)
+            do (text "--~A~C~CContent-Disposition: form-data; name=\"~A\"; filename=\"~A\"~C~CContent-Type: ~A~C~C~C~C"
+                     boundary #\Return #\Newline name (reference-image-name image) #\Return #\Newline
+                     (reference-image-media-type image) #\Return #\Newline #\Return #\Newline)
+               (loop for b across (reference-image-octets image) do (vector-push-extend b out))
+               (text "~C~C" #\Return #\Newline))
+      (text "--~A--~C~C" boundary #\Return #\Newline))
+    (values (coerce out '(simple-array (unsigned-byte 8) (*)))
+            (format nil "multipart/form-data; boundary=~A" boundary))))
+
 (defgeneric image-post (provider body)
   (:documentation "Send BODY to PROVIDER and return the parsed JSON reply. The transport, as a
 generic function so that a test can answer in its place."))
@@ -374,21 +563,31 @@ IMAGE-REQUEST-FAILED when trying again later may help, otherwise PROVIDER-REQUES
         failure)))
 
 (defmethod image-post ((p openai-images) body)
-  (let ((url (concatenate 'string (openai-images-base-url p) "/images/generations"))
-        (retry-after nil))
+  "BODY is a hash table, sent as JSON to /images/generations, or an EDIT-BODY, sent as
+multipart/form-data to /images/edits."
+  (multiple-value-bind (content content-type path count)
+      (if (edit-body-p body)
+          (multiple-value-bind (octets type) (%multipart body)
+            (values octets type "/images/edits" (edit-body-count body)))
+          (values (jzon:stringify body) "application/json" "/images/generations"
+                  (gethash "n" body)))
+    (%image-post p (concatenate 'string (openai-images-base-url p) path)
+                 content content-type count)))
+
+(defun %image-post (p url content content-type count)
+  (let ((retry-after nil))
     (handler-case
         (%parse-reply
          (http:response-body
           (http:send-request
            (http:make-request :method :post :url url
-                              :headers (list '("content-type" . "application/json")
+                              :headers (list (cons "content-type" content-type)
                                              (cons "authorization"
                                                    (format nil "Bearer ~A" (openai-images-api-key p))))
-                              :content (jzon:stringify body)
+                              :content content
                               :read-timeout (openai-images-read-timeout p)
                               :connect-timeout (openai-images-connect-timeout p)
-                              :max-body-bytes (* *max-bytes-per-image*
-                                                 (max 1 (or (gethash "n" body) 1))))
+                              :max-body-bytes (* *max-bytes-per-image* (max 1 (or count 1))))
            ;; Leave stages run last to first, so the header is read before ENSURE-2XX signals.
            (list (http:ensure-2xx "openai images")
                  (http:make-interceptor
@@ -493,7 +692,9 @@ left out."
               (count-of out :output-image-tokens "image_tokens")))))
 
 (defmethod generate-images ((p openai-images) request)
-  (let* ((parsed (image-post p (openai-image-request-body p request)))
+  (let* ((parsed (image-post p (if (image-request-references request)
+                                   (openai-image-edit-body p request)
+                                   (openai-image-request-body p request))))
          (parsed (if (hash-table-p parsed)
                      parsed
                      (error (%unexpected-reply "is not a JSON object"))))
@@ -535,6 +736,11 @@ style, composition, colours and any text it must contain. The image is delivered
 you are told only that it was made. Optionally choose a shape and a quality from the values the
 input schema lists.")
 
+(defparameter *reference-description*
+  " To edit an image, or to make a variation of it or a new image in its style, give its
+reference in reference_images, exactly as you were told it, and say in the prompt what to
+change or keep.")
+
 (defparameter *sizes* '(:square :portrait :landscape :auto)
   "The shapes the means can offer the model.")
 
@@ -551,9 +757,22 @@ input schema lists.")
           (gethash "description" h) description)
     h))
 
-(defun %schema (qualities default-size default-quality)
+(defun %references-property (max-references)
+  (let ((items (make-hash-table :test 'equal))
+        (h (make-hash-table :test 'equal)))
+    (setf (gethash "type" items) "string")
+    (setf (gethash "type" h) "array"
+          (gethash "items" h) items
+          (gethash "maxItems" h) max-references
+          (gethash "description" h)
+          (format nil "Up to ~D images to make the new image from, each given by the reference you were told for it: an image created earlier or one the user provided. Leave out to create an image from the prompt alone."
+                  max-references))
+    h))
+
+(defun %schema (qualities default-size default-quality &optional max-references)
   "The JSON input schema: a required PROMPT, an optional SIZE, and an optional QUALITY offering
-only QUALITIES. Each description names the value used when the model gives none."
+only QUALITIES. Each description names the value used when the model gives none. With
+MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings."
   (let ((prompt (make-hash-table :test 'equal))
         (props (make-hash-table :test 'equal))
         (schema (make-hash-table :test 'equal)))
@@ -568,6 +787,8 @@ only QUALITIES. Each description names the value used when the model gives none.
           (%enum (%names qualities)
                  (format nil "Higher quality takes longer and costs more. Default: ~(~A~)."
                          default-quality)))
+    (when max-references
+      (setf (gethash "reference_images" props) (%references-property max-references)))
     (setf (gethash "type" schema) "object"
           (gethash "properties" schema) props
           (gethash "required" schema) (vector "prompt"))
@@ -610,8 +831,30 @@ prompt, so it needs only enough to see what changed; the whole of it is in the I
             (if cut (subseq revised 0 *revised-prompt-chars*) revised)
             cut *revised-prompt-chars* (and revised (length revised)))))
 
+(defun %resolve-references (args resolve max)
+  "The REFERENCE-IMAGEs the tool ARGS name in reference_images, through RESOLVE. Refuses the call
+before any request, as a :NOT-RUN error result, when the list is not a list of strings, is longer
+than MAX, or names a reference RESOLVE does not know."
+  (let ((given (gethash "reference_images" args)))
+    (cond ((null given) '())
+          ((not (%reference-list-p given max))
+           (error 'cnd:tool-error-result
+                  :outcome :not-run
+                  :text (format nil "generate-image: reference_images must be a list of at most ~D references. No image was made." max)))
+          (t (map 'list
+                  (lambda (ref)
+                    (or (funcall resolve ref)
+                        (error 'cnd:tool-error-result
+                               :outcome :not-run
+                               :text (format nil "generate-image: ~S is not an image reference you were given. Use a reference exactly as you were told it. No image was made." ref))))
+                  given)))))
+
+(defun %reference-list-p (given max)
+  (and (vectorp given) (not (stringp given)) (<= (length given) max) (every #'stringp given)))
+
 (defun register (agent provider &key on-image (name "generate-image") capability source
-                                     (qualities *qualities*) default-quality (default-size :auto))
+                                     (qualities *qualities*) default-quality (default-size :auto)
+                                     resolve-reference (max-references 4))
   "Register the generate-image means on AGENT, generating with PROVIDER, an IMAGE-PROVIDER.
 Returns NAME.
 
@@ -630,8 +873,21 @@ DEFAULT-QUALITY is used when the model names none; it must be in QUALITIES, and 
 When the service is busy, fails on its side or does not answer (IMAGE-REQUEST-FAILED), the
 model is told so in an error result and the turn goes on; the request is not retried.
 
+RESOLVE-REFERENCE lets the model edit an image or make a variation of it. It is a function of one
+string, a reference the model gives in reference_images, that returns a REFERENCE-IMAGE (see
+MAKE-REFERENCE-IMAGE) or NIL when the reference is not one this model may use. The references
+are the app's: the strings ON-IMAGE returned for images made earlier, or ids the app gave the
+model for images the user provided, and the app decides which ones a model may reach. Only with
+RESOLVE-REFERENCE does the schema offer reference_images, of at most MAX-REFERENCES, from 1 to
+*MAX-REFERENCES*. A reference RESOLVE-REFERENCE does not know, or more than MAX-REFERENCES, is
+refused before any request, as is an image that is not a PNG, JPEG or WebP file.
+
 An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there is no key."
   (check-type provider image-provider)
+  (unless (or (null resolve-reference) (functionp resolve-reference))
+    (error "REGISTER's :RESOLVE-REFERENCE must be a function, not ~S." resolve-reference))
+  (unless (typep max-references `(integer 1 ,*max-references*))
+    (error "REGISTER's :MAX-REFERENCES must be from 1 to ~D, not ~S." *max-references* max-references))
   (unless (functionp on-image)
     (error "REGISTER needs :ON-IMAGE, a function that receives each generated image; without one the image would be made, paid for and lost."))
   (unless (and qualities (listp qualities) (subsetp qualities *qualities*))
@@ -643,12 +899,15 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
     (unless (member default-size *sizes*)
       (error "REGISTER's :DEFAULT-SIZE must be one of ~{~S~^, ~}, not ~S." *sizes* default-size))
     (%register agent provider on-image name capability source
-               qualities default-quality default-size)))
+               qualities default-quality default-size
+               resolve-reference (and resolve-reference max-references))))
 
 (defun %register (agent provider on-image name capability source
-                  qualities default-quality default-size)
+                  qualities default-quality default-size resolve-reference max-references)
   (actor:register-means
-   agent name *description*
+   agent name (if resolve-reference
+                  (concatenate 'string *description* *reference-description*)
+                  *description*)
    (lambda (args)
      (let ((prompt (gethash "prompt" args)))
        ;; Refused before any request, as an error result the model can correct: an empty
@@ -660,6 +919,8 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                        :text "generate-image needs a prompt describing the image."))
      (let* ((size (%choice args "size" *sizes* default-size))
             (quality (%choice args "quality" qualities default-quality))
+            (references (and resolve-reference
+                             (%resolve-references args resolve-reference max-references)))
             (results
               (handler-bind
                   ((image-request-failed
@@ -672,16 +933,18 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                            :unknown)
                               :text (%retry-text c)))))
                 (generate-image provider prompt :size size :quality quality
+                                                :references references
                                                 :agent (actor:agent-name agent)))))
        (format nil "~{~A~^~%~}"
                (mapcar (lambda (r) (%summary r (funcall on-image r))) results)))))
-   :schema (%schema qualities default-size default-quality)
+   :schema (%schema qualities default-size default-quality max-references)
    :capability capability :source source))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
                                          read-timeout (name "generate-image") capability source
                                          (qualities *qualities*) default-quality
-                                         (default-size :auto))
+                                         (default-size :auto) resolve-reference
+                                         (max-references 4))
   "Register the generate-image means on AGENT with OpenAI's Image API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
@@ -689,8 +952,8 @@ to register it: a means without a key could only fail.
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_IMAGE_API_KEY, then
 PRAXEON_OPENAI_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
-ON-IMAGE, QUALITIES, DEFAULT-QUALITY and DEFAULT-SIZE are as for REGISTER. MODEL, BASE-URL and
-READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."
+ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE and MAX-REFERENCES are as
+for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
               :name name))
@@ -703,4 +966,6 @@ READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."
          (register agent provider :on-image on-image :name name
                                   :capability capability :source source
                                   :qualities qualities :default-quality default-quality
-                                  :default-size default-size))))
+                                  :default-size default-size
+                                  :resolve-reference resolve-reference
+                                  :max-references max-references))))

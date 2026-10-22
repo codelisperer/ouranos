@@ -122,7 +122,8 @@ the revised prompt and the size and quality the provider reported."
       ;; each count is priced at the higher of its rates: (50 x 8 + 1056 x 30) / 10^6 dollars.
       (is (eql 401/12500 (praxeon/image:image-result-cost r)) "~S" (praxeon/image:image-result-cost r))
       (is-true (praxeon/image:image-result-cost-estimated-p r)))
-    (destructuring-bind (request-line headers body) (first requests)
+    (destructuring-bind (request-line headers body &optional octets) (first requests)
+      (declare (ignore octets))
       (is (search "POST /v1/images/generations" request-line) "~A" request-line)
       (is (equal "Bearer sk-test-758" (cdr (assoc "authorization" headers :test #'string=))))
       (is (equal "a red fox" (gethash "prompt" (jzon:parse body)))))))
@@ -693,3 +694,255 @@ does not stop a model being priced. gpt-image-1's entry says it shuts down on 20
     (is (equal "2026-10-23" (getf entry :retires)) "~S" entry))
   (is (eql 41/1000 (praxeon/image:openai-image-cost "gpt-image-1"
                                                     '(:input-tokens 100 :output-tokens 1000)))))
+
+;;; --- reference images: edits and variations (part three of #758) ---------------------------
+;;;
+;;; The edit request is the multipart/form-data OpenAI documents for POST /v1/images/edits: the
+;;; fields model, prompt, n, size and quality, one image[] part per reference image, and a mask
+;;; part. The test server keeps the body's octets, so each file part is compared byte for byte.
+
+(defun %octets (&rest parts)
+  "One octet vector of PARTS, each a vector of bytes or a string encoded as ASCII."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (dolist (p parts (coerce out '(simple-array (unsigned-byte 8) (*))))
+      (loop for b across (if (stringp p) (sb-ext:string-to-octets p :external-format :ascii) p)
+            do (vector-push-extend b out)))))
+
+(defun %be32 (n)
+  (vector (ldb (byte 8 24) n) (ldb (byte 8 16) n) (ldb (byte 8 8) n) (ldb (byte 8 0) n)))
+
+(defun %png (width height &key (color-type 6) trns)
+  "The start of a PNG file: its signature, an IHDR chunk for WIDTH x HEIGHT with COLOR-TYPE (6 is
+colour with alpha, 2 colour without), a tRNS chunk when TRNS, then an empty IDAT and an IEND. The
+checksums are zeros: the code reads the header, it does not decode the image."
+  (%octets #(137 80 78 71 13 10 26 10)
+           (%be32 13) "IHDR" (%be32 width) (%be32 height) (vector 8 color-type 0 0 0) (%be32 0)
+           (if trns (%octets (%be32 2) "tRNS" #(0 0) (%be32 0)) #())
+           (%be32 0) "IDAT" (%be32 0)
+           (%be32 0) "IEND" (%be32 0)))
+
+(defparameter +jpeg-octets+ (%octets #(255 216 255 224) "JFIF-marker-758" #(255 217)))
+(defparameter +webp-octets+ (%octets "RIFF" #(20 0 0 0) "WEBPVP8 " "marker-758"))
+
+(defun %ref (octets &optional (name "image"))
+  (praxeon/image:make-reference-image octets :name name))
+
+(defun %multipart-parts (octets boundary)
+  "The parts of the multipart/form-data body OCTETS, split at BOUNDARY, as a list of
+(HEADERS-TEXT . CONTENT-OCTETS)."
+  (let ((marker (sb-ext:string-to-octets (format nil "--~A" boundary) :external-format :ascii))
+        (crlf2 (%octets (string #\Return) (string #\Newline) (string #\Return) (string #\Newline)))
+        (parts '()))
+    (loop for start = (search marker octets) then next
+          for next = (and start (search marker octets :start2 (+ start (length marker))))
+          while next
+          do (let* ((part (subseq octets (+ start (length marker) 2) (- next 2)))
+                    (split (search crlf2 part)))
+               (push (cons (sb-ext:octets-to-string (subseq part 0 split) :external-format :latin-1)
+                           (subseq part (+ split 4)))
+                     parts)))
+    (nreverse parts)))
+
+(defun %part-named (parts name)
+  "The parts whose Content-Disposition names NAME."
+  (remove-if-not (lambda (p) (search (format nil "name=\"~A\"" name) (car p))) parts))
+
+(defun %edit-request (requests)
+  "The request line, the boundary and the parts of the one request REQUESTS holds."
+  (destructuring-bind (request-line headers body octets) (first requests)
+    (declare (ignore body))
+    (let* ((type (cdr (assoc "content-type" headers :test #'string=)))
+           (boundary (subseq type (+ (search "boundary=" type) (length "boundary=")))))
+      (values request-line type (%multipart-parts octets boundary)))))
+
+(test a-reference-image-takes-its-media-type-from-its-own-bytes
+  (is (equal "image/png" (praxeon/image:reference-image-media-type (%ref (%png 4 4)))))
+  (is (equal "image/jpeg" (praxeon/image:reference-image-media-type (%ref +jpeg-octets+))))
+  (is (equal "image/webp" (praxeon/image:reference-image-media-type (%ref +webp-octets+))))
+  (is (equal "photo.jpeg" (praxeon/image:reference-image-name (%ref +jpeg-octets+ "photo")))
+      "the file name the provider sees carries the extension of the type found"))
+
+(test a-reference-image-that-cannot-be-sent-is-refused-with-the-reason
+  (flet ((refusal (fn)
+           (handler-case (progn (funcall fn) nil)
+             (praxeon/image:image-input-invalid (c) c))))
+    (let ((gif (refusal (lambda () (%ref (%octets "GIF89a" #(1 0 1 0)) "anim")))))
+      (is (typep gif 'cnd:tool-error-result))
+      (is (eq :not-run (and gif (cnd:tool-error-result-outcome gif))))
+      (is (search "not a PNG, JPEG or WebP" (and gif (cnd:tool-error-result-text gif)))))
+    (is-true (refusal (lambda () (%ref (make-array 0 :element-type '(unsigned-byte 8))))) "empty")
+    (let ((praxeon/image:*max-reference-bytes* 16))
+      (let ((big (refusal (lambda () (%ref (%png 4 4))))))
+        (is (search "over the limit of 16" (and big (cnd:tool-error-result-text big))))))))
+
+(test reference-images-go-to-the-edits-endpoint-as-multipart-byte-for-byte
+  "Two reference images, a PNG and a JPEG, sent with the generation fields. The reply reports its
+input tokens split, 20 text and 500 image, so the image tokens are priced at the image input
+rate: (20 x 5 + 500 x 8 + 1056 x 30) / 10^6 = 35780 / 10^6 dollars for gpt-image-2.5-flare."
+  (let ((png (%png 8 6)))
+    (multiple-value-bind (results requests)
+        (%with-image-server (list (%image-reply :input-details '(20 500)))
+                            (lambda (p)
+                              (praxeon/image:generate-image
+                               p "make the fox blue" :size :landscape :quality :low
+                               :references (list (%ref png "fox") (%ref +jpeg-octets+ "style")))))
+      (is (= 1 (length results)))
+      (is (eql 1789/50000 (praxeon/image:image-result-cost (first results)))
+          "~S" (praxeon/image:image-result-cost (first results)))
+      (multiple-value-bind (request-line type parts) (%edit-request requests)
+        (is (search "POST /v1/images/edits" request-line) "~A" request-line)
+        (is (eql 0 (search "multipart/form-data; boundary=" type)) "~A" type)
+        (flet ((field (name) (sb-ext:octets-to-string (cdr (first (%part-named parts name)))
+                                                      :external-format :utf-8)))
+          (is (equal praxeon/image:*openai-image-model* (field "model")))
+          (is (equal "make the fox blue" (field "prompt")))
+          (is (equal "1" (field "n")))
+          (is (equal "1536x1024" (field "size")))
+          (is (equal "low" (field "quality"))))
+        (let ((images (%part-named parts "image[]")))
+          (is (= 2 (length images)) "~S" (mapcar #'car parts))
+          (is (equalp png (cdr (first images))) "the PNG arrives byte for byte, in order")
+          (is (equalp +jpeg-octets+ (cdr (second images))))
+          (is (search "filename=\"fox.png\"" (car (first images))) "~A" (car (first images)))
+          (is (search "Content-Type: image/png" (car (first images))))
+          (is (search "Content-Type: image/jpeg" (car (second images)))))
+        (is (null (%part-named parts "mask")) "no mask part when none is given")))))
+
+(test without-references-the-request-is-json-to-generations-as-before
+  (multiple-value-bind (results requests)
+      (%with-image-server (list (%image-reply)) (lambda (p) (praxeon/image:generate-image p "x")))
+    (declare (ignore results))
+    (destructuring-bind (request-line headers &rest rest) (first requests)
+      (declare (ignore rest))
+      (is (search "POST /v1/images/generations" request-line))
+      (is (equal "application/json" (cdr (assoc "content-type" headers :test #'string=)))))))
+
+(test a-mask-is-sent-after-the-references
+  (let ((image (%png 8 6 :color-type 2))
+        (mask (%png 8 6)))
+    (multiple-value-bind (results requests)
+        (%with-image-server (list (%image-reply))
+                            (lambda (p)
+                              (praxeon/image:generate-image p "replace the sky"
+                                                            :references (list (%ref image))
+                                                            :mask (%ref mask "mask"))))
+      (declare (ignore results))
+      (multiple-value-bind (request-line type parts) (%edit-request requests)
+        (declare (ignore request-line type))
+        (is (equalp mask (cdr (first (%part-named parts "mask")))))
+        (is (eq (first (%part-named parts "mask")) (car (last parts))) "the mask is the last part")))))
+
+(test a-mask-that-cannot-apply-is-refused-before-any-request
+  "Each of these signals IMAGE-INPUT-INVALID from GENERATE-IMAGE before any request: the provider
+points at a closed port, so a request would fail to connect instead."
+  (let ((p (praxeon/image:make-openai-images :api-key "k" :base-url "http://127.0.0.1:9/v1")))
+    (flet ((reason (&rest args)
+             (handler-case (progn (apply #'praxeon/image:generate-image p "x" args) "no refusal")
+               (praxeon/image:image-input-invalid (c) (cnd:tool-error-result-text c)))))
+      (is (search "no reference image" (reason :mask (%ref (%png 8 6)))))
+      (is (search "must both be PNG" (reason :references (list (%ref +jpeg-octets+))
+                                             :mask (%ref (%png 8 6)))))
+      (is (search "must be the same size" (reason :references (list (%ref (%png 8 6)))
+                                                  :mask (%ref (%png 8 5)))))
+      (is (search "no alpha channel" (reason :references (list (%ref (%png 8 6)))
+                                             :mask (%ref (%png 8 6 :color-type 2)))))
+      (let ((praxeon/image:*max-references* 2))
+        (is (search "at most 2" (reason :references (list (%ref (%png 1 1)) (%ref (%png 1 1))
+                                                          (%ref (%png 1 1))))))))))
+
+(test a-mask-whose-transparency-is-a-trns-chunk-has-an-alpha-channel
+  "A palette or colour PNG can carry its transparency in a tRNS chunk rather than in its colour
+type. That counts as an alpha channel, so this mask passes the checks."
+  (is (null (praxeon/image::%check-inputs (list (%ref (%png 8 6 :color-type 2)))
+                                          (%ref (%png 8 6 :color-type 2 :trns t)))))
+  (is (eq t (nth-value 2 (praxeon/image::%png-info (%png 8 6 :color-type 2 :trns t)))))
+  (is (null (nth-value 2 (praxeon/image::%png-info (%png 8 6 :color-type 2))))))
+
+(defun %references-agent (call-args resolve &key (max-references 4) (base-url nil))
+  "An agent whose model calls generate-image once with CALL-ARGS and then answers, registered
+with RESOLVE as :RESOLVE-REFERENCE, against BASE-URL, or a closed port when none is given so that
+any request fails to connect. Returns the agent."
+  (let ((ag (actor:make-agent
+             :name "designer"
+             :provider (make-instance 'scripted
+                                      :script (list (%call-completion "generate-image"
+                                                                      (apply #'%args call-args))
+                                                    (llm:make-completion :text "Done."
+                                                                         :stop-reason :end))))))
+    (praxeon/image:register ag (praxeon/image:make-openai-images
+                                :api-key "k" :base-url (or base-url "http://127.0.0.1:9/v1"))
+                            :on-image (constantly "img-2") :resolve-reference resolve
+                            :max-references max-references)
+    ag))
+
+(test the-schema-offers-reference-images-only-with-a-resolver
+  (let ((with (actor:make-agent :name "a" :provider (make-instance 'scripted :script '())))
+        (without (actor:make-agent :name "b" :provider (make-instance 'scripted :script '()))))
+    (praxeon/image:register with (praxeon/image:make-openai-images :api-key "k")
+                            :on-image #'identity :resolve-reference (constantly nil)
+                            :max-references 3)
+    (praxeon/image:register without (praxeon/image:make-openai-images :api-key "k")
+                            :on-image #'identity)
+    (flet ((property (agent)
+             (gethash "reference_images"
+                      (gethash "properties"
+                               (actor::means-entry-schema
+                                (gethash "generate-image" (actor:agent-means agent)))))))
+      (is (eql 3 (gethash "maxItems" (property with))))
+      (is (null (property without)) "no resolver, no reference_images"))
+    (signals error (praxeon/image:register with (praxeon/image:make-openai-images :api-key "k")
+                                           :on-image #'identity :max-references 17))))
+
+(test in-a-turn-the-model-edits-an-image-it-names-by-its-reference
+  "The model names img-1, which the app resolves to a PNG; the request to /images/edits carries
+exactly those bytes, and the app receives the new image."
+  (let ((png (%png 8 6))
+        (asked '()))
+    (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+      (let ((requests nil) (text nil) (events nil))
+        (unwind-protect
+             (let ((ag (%references-agent
+                        (list "prompt" "make it blue" "reference_images" (vector "img-1"))
+                        (lambda (ref) (push ref asked)
+                          (and (equal ref "img-1") (%ref png "img-1")))
+                        :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+               (multiple-value-setq (text events)
+                 (%collecting-events (lambda () (actor:run-turn ag "make my fox blue")))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (is (equal "Done." text))
+        (is (equal '("img-1") asked))
+        (multiple-value-bind (request-line type parts) (%edit-request requests)
+          (declare (ignore type))
+          (is (search "/v1/images/edits" request-line))
+          (is (equalp png (cdr (first (%part-named parts "image[]"))))))
+        (let ((result (find :tool-result events :key #'evt:event-type)))
+          (is (and result (not (getf result :is-error))) "~S" result))))))
+
+(test in-a-turn-a-reference-the-app-does-not-know-is-refused-before-any-request
+  (let* ((ag (%references-agent (list "prompt" "edit it" "reference_images" (vector "img-404"))
+                                (constantly nil)))
+         (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "edit"))))))
+    (let ((result (find :tool-result events :key #'evt:event-type)))
+      (is (and result (getf result :is-error)))
+      (is (and result (eq :not-run (getf result :outcome))))
+      (is (search "\"img-404\" is not an image reference" (getf result :content))
+          "~A" (getf result :content)))
+    (is-false (find :image-usage events :key #'evt:event-type))))
+
+(test in-a-turn-more-references-than-the-app-allows-are-refused
+  (let* ((ag (%references-agent (list "prompt" "x" "reference_images" (vector "a" "b" "c"))
+                                (lambda (ref) (%ref (%png 1 1) ref))
+                                :max-references 2))
+         (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+    (let ((result (find :tool-result events :key #'evt:event-type)))
+      (is (and result (eq :not-run (getf result :outcome))))
+      (is (search "at most 2" (getf result :content)) "~A" (getf result :content)))))
+
+(test in-a-turn-a-resolved-file-that-is-not-an-image-is-refused-with-the-reason
+  "The app's resolver returns a GIF, which MAKE-REFERENCE-IMAGE refuses; the model is told why."
+  (let* ((ag (%references-agent (list "prompt" "x" "reference_images" (vector "anim"))
+                                (lambda (ref) (%ref (%octets "GIF89a" #(1 0)) ref))))
+         (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+    (let ((result (find :tool-result events :key #'evt:event-type)))
+      (is (and result (eq :not-run (getf result :outcome))))
+      (is (search "not a PNG, JPEG or WebP" (getf result :content)) "~A" (getf result :content)))))
