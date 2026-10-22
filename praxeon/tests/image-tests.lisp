@@ -25,13 +25,23 @@ marker standing for embedded provenance metadata.")
 
 (defparameter +image-prompt-marker+ "MARKER-758-the-users-image-prompt")
 
-(defun %image-reply (&key (octets +image-octets+) (count 1) (format "png") revised-prompt)
-  "The JSON text OpenAI's Image API sends for COUNT images of OCTETS."
+(defun %image-reply (&key (octets +image-octets+) (count 1) (format "png") revised-prompt
+                          input-details output-details)
+  "The JSON text OpenAI's Image API sends for COUNT images of OCTETS. INPUT-DETAILS and
+OUTPUT-DETAILS, when given, are (TEXT-TOKENS IMAGE-TOKENS) for usage.input_tokens_details and
+usage.output_tokens_details."
   (let ((reply (make-hash-table :test #'equal))
         (usage (make-hash-table :test #'equal)))
     (setf (gethash "input_tokens" usage) 50
           (gethash "output_tokens" usage) 1056
           (gethash "total_tokens" usage) 1106)
+    (loop for (name details) in (list (list "input_tokens_details" input-details)
+                                      (list "output_tokens_details" output-details))
+          when details
+            do (let ((h (make-hash-table :test #'equal)))
+                 (setf (gethash "text_tokens" h) (first details)
+                       (gethash "image_tokens" h) (second details)
+                       (gethash name usage) h)))
     (setf (gethash "created" reply) 1760000000
           (gethash "data" reply)
           (coerce (loop repeat count
@@ -108,7 +118,10 @@ the revised prompt and the size and quality the provider reported."
       (is (equal "a red fox at dusk" (praxeon/image:image-result-revised-prompt r)))
       (is (equal "1536x1024" (praxeon/image:image-result-size r)))
       (is (equal "high" (praxeon/image:image-result-quality r)))
-      (is (null (praxeon/image:image-result-cost r)) "OpenAI reports no cost"))
+      ;; OpenAI reports no cost; the reply's 50 input and 1056 output tokens are not split, so
+      ;; each count is priced at the higher of its rates: (50 x 8 + 1056 x 30) / 10^6 dollars.
+      (is (eql 401/12500 (praxeon/image:image-result-cost r)) "~S" (praxeon/image:image-result-cost r))
+      (is-true (praxeon/image:image-result-cost-estimated-p r)))
     (destructuring-bind (request-line headers body) (first requests)
       (is (search "POST /v1/images/generations" request-line) "~A" request-line)
       (is (equal "Bearer sk-test-758" (cdr (assoc "authorization" headers :test #'string=))))
@@ -155,7 +168,10 @@ message, which can carry the prompt."
 
 ;;; --- usage --------------------------------------------------------------------------------
 
-(test a-request-emits-one-image-usage-event-and-no-cost-it-was-not-given
+(test a-request-emits-one-image-usage-event-with-a-cost-marked-estimated
+  "OpenAI reports no cost. For the default model, which is in the price table, the event carries
+the cost computed from the reported tokens and :ESTIMATED T, so a ledger can tell it from a cost
+the provider reported."
   (let ((events (nth-value 1 (%collecting-events
                               (lambda ()
                                 (%with-image-server (list (%image-reply))
@@ -171,7 +187,28 @@ message, which can carry the prompt."
         (is (equal "high" (getf e :quality)))
         (is (eql 50 (getf e :input-tokens)))
         (is (eql 1056 (getf e :output-tokens)))
-        (is-false (member :cost e) "a cost that was not reported is absent, not 0: ~S" e)))))
+        (is (eql 401/12500 (getf e :cost)) "~S" e)
+        (is (eq t (getf e :estimated)) "~S" e)))))
+
+(test a-model-with-no-price-row-has-no-cost-rather-than-0
+  (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+    (let ((events '()) (results nil))
+      (unwind-protect
+           (setf events (nth-value 1 (%collecting-events
+                                      (lambda ()
+                                        (setf results
+                                              (praxeon/image:generate-image
+                                               (praxeon/image:make-openai-images
+                                                :api-key "k" :model "an-unpriced-model"
+                                                :base-url (format nil "http://127.0.0.1:~D/v1" port))
+                                               "x"))))))
+        (aion/test-threads:join server :timeout 10))
+      (let ((e (find :image-usage events :key #'evt:event-type)))
+        (is-true e)
+        (is-false (member :cost e) "a cost nobody can know is absent, not 0: ~S" e)
+        (is-false (member :estimated e) "~S" e))
+      (is (null (praxeon/image:image-result-cost (first results))))
+      (is-false (praxeon/image:image-result-cost-estimated-p (first results))))))
 
 (test a-refused-request-emits-no-image-usage-event
   (let ((events (nth-value 1 (%collecting-events
@@ -578,3 +615,81 @@ well before the server lets go after 9, so the elapsed time shows the timeout wa
       (is (null (praxeon/image:register-openai-image ag :api-key "" :on-image #'identity)))
       (is (zerop (hash-table-count (actor:agent-means ag)))
           "an empty key does not fall back to the environment's"))))
+
+;;; --- the price table (part two of #758) ---------------------------------------------------
+
+(test the-cost-prices-each-reported-part-at-its-own-rate
+  "Dollars per million tokens from *OPENAI-IMAGE-PRICES*. Each expected value is worked out by
+hand in its comment, so a wrong rate or a wrong formula disagrees with it."
+  ;; gpt-image-2.5-flare, split: 50 text x 5 + 0 image x 8 in; 0 text + 1056 image x 30 out.
+  ;; (250 + 31680) / 10^6 = 31930 / 10^6.
+  (is (eql 3193/100000
+           (praxeon/image:openai-image-cost
+            "gpt-image-2.5-flare" '(:input-tokens 50 :output-tokens 1056
+                                    :input-text-tokens 50 :input-image-tokens 0
+                                    :output-text-tokens 0 :output-image-tokens 1056))))
+  ;; Not split: 50 in at the higher input rate, 8; 1056 out at the higher output rate, 30.
+  ;; (400 + 31680) / 10^6 = 32080 / 10^6.
+  (is (eql 401/12500
+           (praxeon/image:openai-image-cost "gpt-image-2.5-flare"
+                                            '(:input-tokens 50 :output-tokens 1056))))
+  ;; gpt-image-1.5 lists a text output price: 20 text x 5 in; 10 text x 10 + 1000 image x 32 out.
+  ;; (100 + 100 + 32000) / 10^6 = 32200 / 10^6.
+  (is (eql 161/5000
+           (praxeon/image:openai-image-cost
+            "gpt-image-1.5" '(:input-tokens 20 :output-tokens 1010
+                              :input-text-tokens 20 :input-image-tokens 0
+                              :output-text-tokens 10 :output-image-tokens 1000))))
+  ;; gpt-image-1-mini's image input is $2.50, an exact 5/2: 100 image x 5/2 + 0 text; 0 out.
+  (is (eql 1/4000
+           (praxeon/image:openai-image-cost
+            "gpt-image-1-mini" '(:input-tokens 100 :output-tokens 0
+                                 :input-text-tokens 0 :input-image-tokens 100)))))
+
+(test there-is-no-cost-without-a-price-or-without-counts
+  (is (null (praxeon/image:openai-image-cost "an-unpriced-model"
+                                             '(:input-tokens 50 :output-tokens 1056))))
+  (is (null (praxeon/image:openai-image-cost "gpt-image-2.5-flare" '(:input-tokens 50)))
+      "no output count")
+  (is (null (praxeon/image:openai-image-cost "gpt-image-2.5-flare" '()))))
+
+(test a-reply-that-splits-its-tokens-is-priced-by-part-and-shared-among-its-images
+  (multiple-value-bind (results)
+      (%with-image-server (list (%image-reply :count 2 :input-details '(50 0)
+                                              :output-details '(0 1056)))
+                          (lambda (p) (praxeon/image:generate-image p "x" :count 2)))
+    (is (= 2 (length results)))
+    (is (every (lambda (r) (eql 3193/200000 (praxeon/image:image-result-cost r))) results)
+        "each of 2 images carries half of 3193/100000: ~S"
+        (mapcar #'praxeon/image:image-result-cost results))))
+
+(defun %upstream-entries ()
+  "The entries of the tree's upstream.sexp, read with *READ-EVAL* off, as the checker reads it."
+  (with-open-file (in (asdf:system-relative-pathname :praxeon "../upstream.sexp"))
+    (let ((*read-eval* nil))
+      (loop for form = (read in nil in) until (eq form in) collect form))))
+
+(test every-price-row-has-an-upstream-entry-with-a-review-date
+  "A row added to *OPENAI-IMAGE-PRICES* without an upstream.sexp entry would be a price nobody
+recorded reading. Each row needs \"OpenAI image prices: MODEL\" with a :reviewed date, and every
+rate a row lists must be a positive rational."
+  (let ((entries (%upstream-entries)))
+    (is (plusp (length praxeon/image:*openai-image-prices*)))
+    (dolist (row praxeon/image:*openai-image-prices*)
+      (let* ((name (format nil "OpenAI image prices: ~A" (car row)))
+             (entry (find name entries :key (lambda (e) (getf e :name)) :test #'equal)))
+        (is-true entry "no upstream.sexp entry named ~S" name)
+        (is (stringp (getf entry :reviewed)) "~S has no :reviewed date" name)
+        (dolist (key '(:text-input :image-input :image-output))
+          (is (typep (getf (cdr row) key) '(rational (0))) "~A ~S" (car row) key))))))
+
+(test a-model-past-its-shutdown-date-is-still-priced
+  "A cost is worked out for a request that already happened, so a shutdown date in upstream.sexp
+does not stop a model being priced. gpt-image-1's entry says it shuts down on 2026-10-23.
+100 input tokens unsplit at the higher input rate, 10, and 1000 output at 40:
+(1000 + 40000) / 10^6 = 41/1000 dollars."
+  (let ((entry (find "OpenAI image prices: gpt-image-1" (%upstream-entries)
+                     :key (lambda (e) (getf e :name)) :test #'equal)))
+    (is (equal "2026-10-23" (getf entry :retires)) "~S" entry))
+  (is (eql 41/1000 (praxeon/image:openai-image-cost "gpt-image-1"
+                                                    '(:input-tokens 100 :output-tokens 1000)))))

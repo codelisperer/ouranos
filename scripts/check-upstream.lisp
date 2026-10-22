@@ -181,6 +181,9 @@ says why the place could not be read at all."
     (let ((held (getf entry :held)))
       (when (and held (not (and (stringp (getf held :reason)) (integerp (getf held :issue)))))
         (problem "~A: :held needs a :reason string and an :issue number: ~S" name held)))
+    (let ((retires (getf entry :retires :absent)))
+      (unless (or (eq retires :absent) (date-p retires))
+        (problem "~A: :retires needs a date YYYY-MM-DD, not ~S" name retires)))
     (let ((where (getf entry :where))
           (seen '()))
       (when (null where)
@@ -309,6 +312,20 @@ v7.0.1, and behind once v8 exists."
 (defun base (variable default)
   (let ((v (uiop:getenv variable))) (if (and v (plusp (length v))) v default)))
 
+(defun today ()
+  "Today's date in UTC as YYYY-MM-DD, or CHECK_UPSTREAM_TODAY when it is set, which is how a test
+fixes the day."
+  (base "CHECK_UPSTREAM_TODAY"
+        (multiple-value-bind (s m h day month year) (decode-universal-time (get-universal-time) 0)
+          (declare (ignore s m h))
+          (format nil "~4,'0D-~2,'0D-~2,'0D" year month day))))
+
+(defun retired-p (entry today)
+  "True when ENTRY has a :retires date on or before TODAY. Both are YYYY-MM-DD, so comparing them
+as strings compares them as dates."
+  (let ((retires (getf entry :retires)))
+    (and (stringp retires) (string<= retires today) t)))
+
 (defun github-api () (base "CHECK_UPSTREAM_GITHUB_API" "https://api.github.com"))
 (defun npm-registry () (base "CHECK_UPSTREAM_NPM_REGISTRY" "https://registry.npmjs.org"))
 (defun nuget-api () (base "CHECK_UPSTREAM_NUGET_API" "https://api.nuget.org"))
@@ -422,6 +439,12 @@ bootstrap.lisp's drop-in registers it, so the client is this tree's own."
         (setf detail (format nil "check ~A by hand; ~A~@[; held: ~A~]" (second (getf entry :upstream))
                              (if (eq r :never) "never reviewed" (format nil "reviewed ~A" r))
                              (and held (format nil "~A (#~D)" (getf held :reason) (getf held :issue)))))))
+    ;; Checked last, so it overrides every other status: an entry whose upstream has stopped
+    ;; serving it needs removing whether or not it is current.
+    (when (retired-p entry (today))
+      (setf status :retired
+            detail (format nil "shut down on ~A: remove this entry and what it pins~@[; ~A~]"
+                           (getf entry :retires) detail)))
     (list (getf entry :name) (getf entry :category) value latest status detail)))
 
 (defun cell (x)
@@ -436,7 +459,8 @@ early (the hub's review of #738), so it is escaped, and a line break becomes a s
 
 (defun write-markdown (rows stream)
   (format stream "Written by `scripts/check-upstream.lisp --online` (#716). Each row is an entry in `upstream.sexp`.~%~%")
-  (dolist (group '((:behind "Behind the latest release")
+  (dolist (group '((:retired "Past its shutdown date")
+                   (:behind "Behind the latest release")
                    (:unknown "Could not be checked")
                    (:held "Behind on purpose")
                    (:manual "Checked by hand")
@@ -466,7 +490,14 @@ early (the hub's review of #738), so it is escaped, and a line break becomes a s
                  (string= "2.0.11" (newest '("2.0.9" "2.0.11" "1.9.12"))) (not (stable-p "4.0.0-beta.1")))
       (incf failed)
       (format t "  FAIL version-shape, newest or stable-p~%"))
-    (format t "check-upstream --self-test: ~D case~:P, ~D failed~%" (1+ (length cases)) failed)
+    ;; The shutdown day itself counts as past, the day before does not, and no date never does.
+    (unless (and (retired-p '(:retires "2026-10-23") "2026-10-23")
+                 (retired-p '(:retires "2026-10-23") "2027-01-01")
+                 (not (retired-p '(:retires "2026-10-23") "2026-10-22"))
+                 (not (retired-p '(:name "x") "2099-12-31")))
+      (incf failed)
+      (format t "  FAIL retired-p~%"))
+    (format t "check-upstream --self-test: ~D case~:P, ~D failed~%" (+ 2 (length cases)) failed)
     (uiop:quit (if (zerop failed) 0 1))))
 
 ;;; --- main ----------------------------------------------------------------------------------
@@ -520,7 +551,7 @@ build."
     (dolist (r rows)
       (format t "~42A ~10A ~22A ~22A ~@[~A~]~%" (first r) (string-downcase (fifth r)) (third r) (or (fourth r) "") (sixth r)))
     (format t "~%check-upstream --online: ~{~A~^, ~}~%"
-            (loop for s in '(:behind :unknown :held :manual :current)
+            (loop for s in '(:retired :behind :unknown :held :manual :current)
                   for n = (count s rows :key #'fifth)
                   when (plusp n) collect (format nil "~D ~A" n (string-downcase s))))
     (when markdown
