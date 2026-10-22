@@ -1207,7 +1207,11 @@ model may not use, so the model reaches only the images you allow:
 
 A reference your function does not know, more references than allowed, or a file that is not an
 image is refused as a `:not-run` error result that tells the model why, and the turn goes on.
-Without `:resolve-reference` the model can only create images from a prompt, as before.
+Two references to the same stored image send it once. The images are added up as your function
+returns them, and the call is refused as soon as they pass `*max-reference-total-bytes*`, so
+praxeon stops asking for more. Your function still reads each image it returns, so look up the
+stored size first and return NIL for an image over 50 MB rather than reading it. Without
+`:resolve-reference` the model can only create images from a prompt, as before.
 
 ## 15. Run the tests
 

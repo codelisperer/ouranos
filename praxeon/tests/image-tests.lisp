@@ -189,7 +189,8 @@ the provider reported."
         (is (eql 50 (getf e :input-tokens)))
         (is (eql 1056 (getf e :output-tokens)))
         (is (eql 401/12500 (getf e :cost)) "~S" e)
-        (is (eq t (getf e :estimated)) "~S" e)))))
+        (is (eq t (getf e :estimated)) "~S" e)
+        (is-false (member :references e) "a generation is not marked as an edit: ~S" e)))))
 
 (test a-model-with-no-price-row-has-no-cost-rather-than-0
   (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
@@ -1006,6 +1007,85 @@ own part and start another."
                   (cdr (first (%part-named (%multipart-parts octets "praxeon-clean-3") "prompt")))
                   :external-format :utf-8))
           "the prompt arrives whole in its own part"))))
+
+(defun %crlf () (format nil "~C~C" #\Return #\Newline))
+
+(test an-edit-body-is-framed-byte-for-byte
+  "A small edit body with the boundary fixed, compared with the bytes RFC 7578 framing gives: a
+delimiter line before each part, CRLF after each part's content, and the closing delimiter with
+its two trailing hyphens. The parser the other tests use skips the CRLF after each delimiter
+without checking it; this does not."
+  (let* ((png (%png 1 1))
+         (body (praxeon/image:openai-image-edit-body
+                (praxeon/image:make-openai-images :api-key "k" :model "m")
+                (praxeon/image:make-image-request :prompt "p" :size :square :quality :low
+                                                  :references (list (%ref png)))))
+         (n (%crlf))
+         (expected (%octets
+                    "--BND-758" n "Content-Disposition: form-data; name=\"model\"" n n "m" n
+                    "--BND-758" n "Content-Disposition: form-data; name=\"prompt\"" n n "p" n
+                    "--BND-758" n "Content-Disposition: form-data; name=\"n\"" n n "1" n
+                    "--BND-758" n "Content-Disposition: form-data; name=\"size\"" n n "1024x1024" n
+                    "--BND-758" n "Content-Disposition: form-data; name=\"quality\"" n n "low" n
+                    "--BND-758" n "Content-Disposition: form-data; name=\"image[]\"; filename=\"image-1.png\""
+                    n "Content-Type: image/png" n n png n
+                    "--BND-758--" n)))
+    (multiple-value-bind (octets type)
+        (praxeon/image::%multipart body (constantly "BND-758"))
+      (is (equal "multipart/form-data; boundary=BND-758" type))
+      (is (equalp expected octets) "~D bytes, expected ~D" (length octets) (length expected)))))
+
+(test a-mask-that-is-not-a-reference-image-is-a-short-error
+  "Raw octets passed as :mask are a programming error. The error names the type it got and does
+not print the object, which would put a whole image into a log line."
+  (let ((c (handler-case (progn (praxeon/image::%check-inputs
+                                 (list (%ref (%png 2 2)))
+                                 (make-array 100000 :element-type '(unsigned-byte 8)))
+                                nil)
+             (error (c) c))))
+    (is-true c "no error was signalled")
+    (is (< (length (princ-to-string c)) 300) "~D characters" (length (princ-to-string c)))
+    (is (search "MASK must be a REFERENCE-IMAGE" (princ-to-string c)) "~A" c)))
+
+(test the-total-cap-counts-the-mask
+  "Each of the reference and the mask is under the cap; together they are over it."
+  (let ((praxeon/image:*max-reference-total-bytes* (+ (length (%png 8 6)) 10))
+        (p (praxeon/image:make-openai-images :api-key "k" :base-url "http://127.0.0.1:9/v1")))
+    (let ((text (handler-case (progn (praxeon/image:generate-image
+                                      p "x" :references (list (%ref (%png 8 6 :color-type 2)))
+                                            :mask (%ref (%png 8 6)))
+                                     "no refusal")
+                  (praxeon/image:image-input-invalid (c) (cnd:tool-error-result-text c)))))
+      (is (search "reference images and mask come to" text) "~A" text))))
+
+(test in-a-turn-the-total-cap-stops-resolving-once-it-is-passed
+  "Three references of 57 bytes each against a cap of 100: the second takes the total past the
+cap, so the resolver is not asked for the third and no request is made."
+  (let ((asked '()))
+    (let* ((praxeon/image:*max-reference-total-bytes* 100)
+           (ag (%references-agent (list "prompt" "x" "reference_images" (vector "a" "b" "c"))
+                                  (lambda (ref) (push ref asked) (%ref (%png 2 2) ref))))
+           (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+      (is (= 57 (length (%png 2 2))) "the fixture's size the arithmetic assumes")
+      (is (equal '("b" "a") asked) "resolved a and b, not c: ~S" asked)
+      (let ((result (find :tool-result events :key #'evt:event-type)))
+        (is (and result (eq :not-run (getf result :outcome))) "~S" result)
+        (is (search "more than 100 bytes" (getf result :content)) "~A" (getf result :content))))))
+
+(test in-a-turn-two-references-to-one-image-send-it-once
+  (let ((image (%ref (%png 2 2))))
+    (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+      (let ((requests nil))
+        (unwind-protect
+             (let ((ag (%references-agent
+                        (list "prompt" "x" "reference_images" (vector "a" "b"))
+                        (constantly image)
+                        :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+               (%collecting-events (lambda () (actor:run-turn ag "x"))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (multiple-value-bind (request-line type parts) (%edit-request requests)
+          (declare (ignore request-line type))
+          (is (= 1 (length (%part-named parts "image[]")))))))))
 
 (test the-reference-images-of-one-request-are-capped-in-total
   (let ((praxeon/image:*max-reference-total-bytes* 100)

@@ -207,10 +207,24 @@ IDAT chunk. Each chunk is a 4-byte length, a 4-byte name, the data and a 4-byte 
             ((equal kind "IDAT") (return nil))
             (t (incf at (+ 12 (%u32 octets at))))))))
 
+(defun %type-name (x)
+  "The type of X on one line, for an error message that must not print X itself."
+  (let ((*print-pretty* nil))
+    (princ-to-string (type-of x))))
+
 (defun %check-inputs (references mask)
-  "Signal IMAGE-INPUT-INVALID unless REFERENCES and MASK can be sent together."
-  (unless (every #'reference-image-p references)
-    (error "REFERENCES must be REFERENCE-IMAGEs made with MAKE-REFERENCE-IMAGE: ~S" references))
+  "Signal IMAGE-INPUT-INVALID unless REFERENCES and MASK can be sent together. A REFERENCES or
+MASK of the wrong type is a programming error, signalled as an ERROR that names the type it got
+and never prints the object, which can be a 50 MB vector."
+  (unless (listp references)
+    (error "REFERENCES must be a list of REFERENCE-IMAGEs, not a ~A." (%type-name references)))
+  (let ((bad (position-if-not #'reference-image-p references)))
+    (when bad
+      (error "REFERENCES must be REFERENCE-IMAGEs made with MAKE-REFERENCE-IMAGE; element ~D of ~D is a ~A."
+             bad (length references) (%type-name (nth bad references)))))
+  (when (and mask (not (reference-image-p mask)))
+    (error "MASK must be a REFERENCE-IMAGE made with MAKE-REFERENCE-IMAGE, not a ~A."
+           (%type-name mask)))
   (when (> (length references) *max-references*)
     (%invalid "~D reference images were given and at most ~D can be sent, so none were sent."
               (length references) *max-references*))
@@ -220,8 +234,6 @@ IDAT chunk. Each chunk is a 4-byte length, a 4-byte name, the data and a 4-byte 
       (%invalid "The reference images and mask come to ~D bytes, over the limit of ~D for one request, so none were sent."
                 total *max-reference-total-bytes*)))
   (when mask
-    (unless (reference-image-p mask)
-      (error "MASK must be a REFERENCE-IMAGE made with MAKE-REFERENCE-IMAGE: ~S" mask))
     (unless references
       (%invalid "A mask marks part of a reference image to replace, and no reference image was given."))
     (let ((first (first references)))
@@ -879,10 +891,16 @@ prompt, so it needs only enough to see what changed; the whole of it is in the I
 
 (defun %resolve-references (args resolve max)
   "The REFERENCE-IMAGEs the tool ARGS name in reference_images, through RESOLVE, each reference
-once however often it is named, so a repeated reference is neither resolved nor sent twice.
-Refuses the call before any request, as a :NOT-RUN error result, when the list is not a list of
-strings, names more than MAX different references, names one RESOLVE does not know, or RESOLVE
-returns something other than a REFERENCE-IMAGE for it."
+once however often it is named, so a repeated reference is neither resolved nor sent twice, and
+each image once even when two references resolve to it. Refuses the call before any request, as
+a :NOT-RUN error result, when the list is not a list of strings, names more than MAX different
+references, names one RESOLVE does not know, or RESOLVE returns something other than a
+REFERENCE-IMAGE for it.
+
+The images resolved so far are added up as each one arrives, and the call is refused as soon as
+the total would pass *MAX-REFERENCE-TOTAL-BYTES*, so the means stops resolving instead of reading
+every image first. RESOLVE still reads each image it returns, so a resolver should check an
+image's stored size before reading it."
   (let ((given (gethash "reference_images" args)))
     (flet ((refuse (control &rest args)
              (error 'cnd:tool-error-result
@@ -895,13 +913,21 @@ returns something other than a REFERENCE-IMAGE for it."
              (let ((refs (remove-duplicates (coerce given 'list) :test #'string= :from-end t)))
                (when (> (length refs) max)
                  (refuse "reference_images must name at most ~D references." max))
-               (mapcar (lambda (ref)
-                         (let ((image (funcall resolve ref)))
-                           (cond ((reference-image-p image) image)
-                                 ((null image)
-                                  (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." ref))
-                                 (t (refuse "the image ~S could not be read." ref)))))
-                       refs)))))))
+               (let ((images '()) (total 0))
+                 (dolist (ref refs (nreverse images))
+                   (let ((image (funcall resolve ref)))
+                     (cond ((null image)
+                            (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." ref))
+                           ((not (reference-image-p image))
+                            (refuse "the image ~S could not be read." ref)))
+                     ;; Two references to one stored image send it once.
+                     (unless (find (reference-image-octets image) images
+                                   :key #'reference-image-octets :test #'eq)
+                       (incf total (length (reference-image-octets image)))
+                       (when (> total *max-reference-total-bytes*)
+                         (refuse "the reference images come to more than ~D bytes, the limit for one request."
+                                 *max-reference-total-bytes*))
+                       (push image images)))))))))))
 
 (defun register (agent provider &key on-image (name "generate-image") capability source
                                      (qualities *qualities*) default-quality (default-size :auto)
@@ -931,7 +957,11 @@ are the app's: the strings ON-IMAGE returned for images made earlier, or ids the
 model for images the user provided, and the app decides which ones a model may reach. Only with
 RESOLVE-REFERENCE does the schema offer reference_images, of at most MAX-REFERENCES, from 1 to
 *MAX-REFERENCES*. A reference RESOLVE-REFERENCE does not know, or more than MAX-REFERENCES, is
-refused before any request, as is an image that is not a PNG, JPEG or WebP file.
+refused before any request, as is an image that is not a PNG, JPEG or WebP file. The resolved
+images are added up as they arrive and the call is refused once they pass
+*MAX-REFERENCE-TOTAL-BYTES*, but RESOLVE-REFERENCE reads each image it returns, so it should
+check an image's stored size, and return NIL for one over *MAX-REFERENCE-BYTES*, before reading
+its bytes.
 
 An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there is no key."
   (check-type provider image-provider)
