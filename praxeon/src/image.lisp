@@ -489,12 +489,16 @@ as the mask part. Separate from the POST so a test can read the body that is bui
 (defun %utf-8 (string)
   (sb-ext:string-to-octets string :external-format :utf-8))
 
-(defun %boundary (contents)
+(defun %random-boundary ()
+  (format nil "praxeon-~A" (aion/random:random-hex 128)))
+
+(defun %boundary (contents &optional (candidate #'%random-boundary))
   "A multipart boundary that occurs in none of CONTENTS, the octets of every field value and file
 the body will carry. The prompt is among them, so a prompt cannot end a part early and add a
 field of its own. 128 bits from the OS generator make a clash unlikely; the check makes it
-impossible."
-  (loop for boundary = (format nil "praxeon-~A" (aion/random:random-hex 128))
+impossible. CANDIDATE, a function of no arguments, proposes each boundary to try; a test passes
+one that proposes a clash first."
+  (loop for boundary = (funcall candidate)
         for marker = (%utf-8 boundary)
         unless (some (lambda (c) (search marker c)) contents)
           return boundary))
@@ -507,14 +511,16 @@ quote or a line break from the app or the model into the part's header."
       (format nil "mask.~A" (%extension image))
       (format nil "image-~D.~A" index (%extension image))))
 
-(defun %multipart (body)
+(defun %multipart (body &optional (candidate #'%random-boundary))
   "BODY, an EDIT-BODY, encoded as multipart/form-data. Returns the octets and the content-type
 header that names their boundary, as two values. The parts are encoded once, their total size
-is added up, and they are copied into one array of that size, so a large image is copied once."
+is added up, and they are copied into one array of that size, so a large image is copied once.
+CANDIDATE is as for %BOUNDARY."
   (let* ((fields (mapcar (lambda (f) (cons (car f) (%utf-8 (cdr f)))) (edit-body-fields body)))
          (files (edit-body-files body))
          (boundary (%boundary (append (mapcar #'cdr fields)
-                                      (mapcar (lambda (f) (reference-image-octets (cdr f))) files))))
+                                      (mapcar (lambda (f) (reference-image-octets (cdr f))) files))
+                              candidate))
          (crlf (%utf-8 (format nil "~C~C" #\Return #\Newline)))
          (chunks '()))
     (flet ((add (octets) (push octets chunks))

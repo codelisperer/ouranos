@@ -985,6 +985,28 @@ the one praxeon set, and the prompt arrives whole."
         (is (equal prompt (sb-ext:octets-to-string (cdr (first (%part-named parts "prompt")))
                                                    :external-format :utf-8)))))))
 
+(test a-boundary-that-occurs-in-the-prompt-or-a-file-is-not-used
+  "An edit body whose prompt contains praxeon-clash-1 and whose image contains praxeon-clash-2 is
+encoded with boundaries proposed in that order and then praxeon-clean-3. The body must use the
+third. Without the check on field values it would use the first, and the prompt could end its
+own part and start another."
+  (let* ((image (%ref (%octets (%png 2 2) "praxeon-clash-2")))
+         (body (praxeon/image:openai-image-edit-body
+                (praxeon/image:make-openai-images :api-key "k")
+                (praxeon/image:make-image-request :prompt "draw --praxeon-clash-1 please"
+                                                  :references (list image))))
+         (proposals (list "praxeon-clash-1" "praxeon-clash-2" "praxeon-clean-3"))
+         (asked 0))
+    (multiple-value-bind (octets type)
+        (praxeon/image::%multipart body (lambda () (incf asked) (pop proposals)))
+      (is (equal "multipart/form-data; boundary=praxeon-clean-3" type) "~A" type)
+      (is (= 3 asked) "each clashing proposal was refused in turn")
+      (is (equal "draw --praxeon-clash-1 please"
+                 (sb-ext:octets-to-string
+                  (cdr (first (%part-named (%multipart-parts octets "praxeon-clean-3") "prompt")))
+                  :external-format :utf-8))
+          "the prompt arrives whole in its own part"))))
+
 (test the-reference-images-of-one-request-are-capped-in-total
   (let ((praxeon/image:*max-reference-total-bytes* 100)
         (p (praxeon/image:make-openai-images :api-key "k" :base-url "http://127.0.0.1:9/v1")))
