@@ -459,6 +459,42 @@ its tag.
   `:confirm t` confirms them. A bot with a webhook gets the new condition
   `telegram-webhook-active`. The dev transport returns no chats.
 
+- **praxeon: an agent can read a web page the user gives it, through the new
+  `read-web-page` means** (#757). It is in the opt-in system `praxeon/web-page`, registered
+  with `register-read-web-page`.
+  - It returns the page's main text, trimmed to `*budget*` characters, with its title and the
+    URL it was read from after redirects.
+  - The backend is Tavily's `/extract` when `TAVILY_API_KEY` is set. Otherwise the page is
+    fetched with `aion/http-client:fetch-public` and its text extracted with plump. On Windows
+    without a Tavily key nothing is registered, and the reason is logged.
+  - A URL whose host is a private, loopback, link-local or other internal address is refused
+    before any request.
+  - A failure is the condition `web-page-unreadable`, a `tool-error-result`, so the turn goes
+    on.
+  - `status-line` turns the means' `:tool-call` event into "Reading example.com…".
+- **praxeon: `praxeon/source:quote-source`** wraps outside text, such as a fetched page or a
+  retrieved document, between markers carrying a random nonce, after a sentence saying it is
+  quoted material and not instructions (#757). `read-web-page` uses it, and
+  `praxeon/retrieval` can.
+- **aion/http-client: `fetch-public` returns the URL of the last hop as a second value**
+  (#757). After a redirect this differs from the URL it was given. A caller that uses only
+  the first value is unaffected.
+
+- **hermes/blob: an S3 store can sign `x-amz-acl: private` into upload URLs, for a bucket that
+  honours ACLs** (#796). `make-s3-store` takes `:upload-acl`, `:none` (the default) or `:private`,
+  or reads `MNEMOSYNE_S3_UPLOAD_ACL` (`private` or `none`); any other value signals
+  `blob-configuration-error` when the store is made. With `:private`, `upload-url` signs
+  `x-amz-acl: private` and returns it in `upload-target-headers`, so a client that adds
+  `x-amz-acl: public-read` or leaves the header out is refused (403 and 400 on MinIO). Set it for
+  DigitalOcean Spaces and for AWS buckets with ACLs enabled. Leave it `:none` for an AWS bucket
+  with ACLs disabled, the default for a new AWS bucket, which refuses an upload naming `private`
+  with 400 `AccessControlListNotSupported`, and for Cloudflare R2, which does not implement the
+  header. With the default nothing changes for an existing app. `put-bucket-cors` now allows
+  `("Content-Type" "x-amz-acl")` by default, and `check-bucket-cors` by default checks the headers
+  `upload-url` sends on that store. A bucket whose CORS rule allows only `Content-Type` needs
+  `put-bucket-cors` again before switching its store to `:private`, or the browser blocks the
+  upload. See `hermes/docs/blob-direct-uploads.md`.
+
 - **hermes: Telegram groups and channels, through the Telegram Bot API** (#778). A
   `hermes:telegram-message`, built with `make-telegram-message` (`:chat` an integer chat id or
   `"@username"`, `:text`, `:parse-mode` `:html` or `:markdown-v2`, `:link-preview` `:show` or
@@ -539,11 +575,14 @@ its tag.
   tokens and OpenAI's published per-million-token prices, in US dollars as an exact rational,
   with `:estimated t`. `image-result-cost` is each image's share and
   `image-result-cost-estimated-p` is true. `praxeon/image:openai-image-cost` computes the same
-  figure. The table covers `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1.5`,
-  `gpt-image-1-mini`, `gpt-image-1` and `chatgpt-image-latest`, and `upstream.sexp` records the
-  date each row was read from OpenAI's pricing page ("OpenAI image prices: MODEL"). Where praxeon
-  approximates (cached input, a token count the reply does not split), it uses the higher rate.
-  For a model not in the table `:cost` is still absent.
+  figure. The table covers `gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`,
+  `gpt-image-1.5`, `gpt-image-1-mini`, `gpt-image-1` and `chatgpt-image-latest`, and
+  `upstream.sexp` records the date each row was read from OpenAI's pricing page ("OpenAI image
+  prices: MODEL"). Where praxeon approximates (cached input, a token count the reply does not
+  split), it uses the higher rate. For a model not in the table `:cost` is still absent. A
+  model OpenAI has scheduled for shutdown keeps its row after the date, so a request made before
+  it can still be priced; its entry's new `:retires` key holds the date, and
+  `scripts/check-upstream.lisp --online` lists it under "Past its shutdown date" from that day.
   An app that kept its own per-image price list can compare it with this one.
 
 - **praxeon/image: a `generate-image` means that creates images from a prompt, behind a neutral
@@ -1352,6 +1391,20 @@ its tag.
     its URL, in live frames, which hyperion's dev server prints for any serious condition.
   - The dev transport edits and deletes a result from the real Telegram backend instead of
     refusing it with `unsupported-message`.
+
+- **hermes/blob: on the S3 store, `read-blob-range` with `:length 0` signals `blob-not-found`
+  for a missing key** (#796), as the filesystem store does and as the docstring says. It returned
+  an empty vector without asking the store; it now makes one HEAD request.
+
+- **hermes/blob: on the S3 store, `read-blob-range` reads only the range when the store ignores
+  `Range`** (#796). A store, or a proxy in front of it, that answers 200 with the whole object
+  had its whole body read into memory and then cut down. The body is now read as a stream: the
+  method skips to `:start`, reads `:length` bytes and closes the connection.
+
+- **hermes/blob: `start-multipart-upload` refuses a content type that is empty or contains a
+  control character** (#796), with `blob-upload-refused` reason `:bad-content-type`, before
+  sending anything. This is the same check `upload-url` makes; a CR or LF in it would end up in a
+  request header.
 
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the

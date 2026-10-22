@@ -28,7 +28,11 @@
                "Address the bucket as a PATH (endpoint/bucket/key) rather than as a
 subdomain (bucket.endpoint/key). MinIO and most local test doubles need this; AWS prefers
 virtual-host style.")
-   (public-base-url :initarg :public-base-url :initform nil :reader s3-public-base-url))
+   (public-base-url :initarg :public-base-url :initform nil :reader s3-public-base-url)
+   (upload-acl :initarg :upload-acl :initform :none :reader s3-upload-acl
+               :documentation
+               ":NONE or :PRIVATE: whether UPLOAD-URL signs `x-amz-acl: private' (#796). See
+MAKE-S3-STORE."))
   (:documentation "A blob store on any S3-compatible object store."))
 
 (defun %require-setting (value name)
@@ -37,7 +41,7 @@ virtual-host style.")
       (error 'blob-configuration-error :missing name)))
 
 (defun make-s3-store (&key endpoint region access-key secret-key session-token
-                           (secure t) path-style public-base-url)
+                           (secure t) path-style public-base-url upload-acl)
   "An S3-STORE, defaulting every setting from the environment.
 
 Credentials are checked HERE rather than at first use, so a deploy missing a secret dies
@@ -57,7 +61,29 @@ at boot with the variable's name instead of on the first upload a member attempt
                                    (let ((v (uiop:getenv "MNEMOSYNE_S3_PATH_STYLE")))
                                      (and v (string-equal v "true"))))
                    :public-base-url (or public-base-url
-                                        (uiop:getenv "MNEMOSYNE_S3_PUBLIC_BASE_URL")))))
+                                        (uiop:getenv "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
+                   :upload-acl (%upload-acl-setting upload-acl))))
+
+(defun %upload-acl-setting (value)
+  "The store's UPLOAD-ACL: VALUE when given, else MNEMOSYNE_S3_UPLOAD_ACL, else :NONE.
+
+:PRIVATE makes UPLOAD-URL sign `x-amz-acl: private', so a client cannot ask for a public
+object. Set it for a bucket that honours ACLs, such as DigitalOcean Spaces or an AWS bucket
+with ACLs enabled. Leave it :NONE for an AWS bucket with ACLs disabled, the default for a new
+AWS bucket, which refuses an upload naming `private' with 400 AccessControlListNotSupported,
+and for Cloudflare R2, which does not implement the header (the maintainer's ruling on #796)."
+  (let ((value (or value
+                   (let ((v (uiop:getenv "MNEMOSYNE_S3_UPLOAD_ACL")))
+                     (and v (plusp (length v))
+                          (cond ((string-equal v "private") :private)
+                                ((string-equal v "none") :none)
+                                (t v))))
+                   :none)))
+    (unless (member value '(:none :private))
+      (error 'blob-configuration-error
+             :missing (format nil "MNEMOSYNE_S3_UPLOAD_ACL or :upload-acl must be private or none, not ~S"
+                              value)))
+    value))
 
 (register-store "s3" #'make-s3-store)
 
@@ -187,6 +213,21 @@ knows it for free."
                           (format nil "AWS4-HMAC-SHA256 Credential=~A/~A, SignedHeaders=~A, Signature=~A"
                                   (s3-access-key store) scope signed-list signature)))))))
 
+(defconstant +max-error-body-bytes+ 65536
+  "The most of an error response's body kept as a condition's DETAIL. An S3 error document is a
+few hundred bytes; this bounds what a misbehaving store or proxy can make the image hold.")
+
+(defun %error-body (body)
+  "BODY as an error response's DETAIL. A stream is read up to +MAX-ERROR-BODY-BYTES+ and closed;
+anything else is returned as it is."
+  (if (streamp body)
+      (unwind-protect
+           (let* ((buffer (make-array +max-error-body-bytes+ :element-type '(unsigned-byte 8)))
+                  (n (read-sequence buffer body)))
+             (subseq buffer 0 n))
+        (close body))
+      body))
+
 (defun %s3-request (store bucket key method &key content content-type query
                                                  payload-hash extra-headers want-stream)
   "Perform a signed S3 request, translating transport failure into the blob protocol."
@@ -204,7 +245,11 @@ knows it for free."
                              :want-stream want-stream :force-binary t
                              :keep-alive nil)
           (dex:http-request-failed (e)
-            (let ((status (dex:response-status e)))
+            (let ((status (dex:response-status e))
+                  ;; With WANT-STREAM the error's body is an open stream on the connection.
+                  ;; Read what is needed of it and close it here, or a ranged read past the end
+                  ;; (416) holds its socket until the stream is garbage-collected (#796).
+                  (detail (%error-body (dex:response-body e))))
               (if (member status '(403 404))
                   ;; 403 is folded into NOT-FOUND deliberately: a bucket configured to
                   ;; deny listing answers a missing key with 403, and a caller asking
@@ -212,7 +257,7 @@ knows it for free."
                   ;; happens to run to read the answer.
                   (error 'blob-not-found :bucket bucket :key key)
                   (error 'blob-backend-error :bucket bucket :key key :status status
-                                             :detail (dex:response-body e)))))
+                                             :detail detail))))
           (error (e)
             (error 'blob-backend-error :bucket bucket :key key
                                        :detail (princ-to-string e))))
@@ -343,6 +388,11 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
 (defconstant +max-single-put-bytes+ (* 5 1024 1024 1024)
   "5 GiB, the largest object S3 accepts in a single PUT. Larger files need a multipart upload.")
 
+(defun %upload-acl-headers (store)
+  "The x-amz-acl header UPLOAD-URL signs on STORE, as an alist: one entry or none."
+  (when (eq (s3-upload-acl store) :private)
+    (list (cons "x-amz-acl" "private"))))
+
 (defmethod upload-url ((s s3-store) bucket key &key expires-in content-type content-length max-bytes)
   ;; A presigned PUT. Content-Type and Content-Length are SIGNED when given, so S3 refuses a
   ;; request whose values differ: the type cannot be swapped, and with the length signed the
@@ -352,32 +402,41 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
                                 :size content-length :limit +max-single-put-bytes+))
   ;; Trimmed here, once, so the value returned in the target's headers is the value signed:
   ;; %PRESIGN trims spaces when it builds the canonical request.
+  ;; On a store made with :UPLOAD-ACL :PRIVATE, x-amz-acl: private is signed too, so a client
+  ;; cannot add x-amz-acl: public-read to a bucket that honours ACLs. Measured on MinIO (#796):
+  ;; with the header signed, public-read is refused with 403 and a missing header with 400.
   (let* ((content-type (and content-type (string-trim " " content-type)))
+         (acl-header (%upload-acl-headers s))
          (headers (append (when content-type (list (cons "content-type" content-type)))
-                          (when content-length (list (cons "content-length" (princ-to-string content-length))))))
+                          (when content-length (list (cons "content-length" (princ-to-string content-length))))
+                          acl-header))
          (url (%presigned-url s bucket key "PUT" expires-in :headers headers)))
     ;; The URL is a credential: never logged. The key is the server's own (the docs require
     ;; it), so it is logged with the expiry and the cap.
     (log:info "blob upload URL issued" :backend "s3" :bucket bucket :key key
                                        :expires-in expires-in :content-length content-length
-                                       :max-bytes max-bytes)
+                                       :max-bytes max-bytes :upload-acl (s3-upload-acl s))
     (make-upload-target url "PUT"
-                        (when content-type (list (cons "Content-Type" content-type)))
+                        (append (when content-type (list (cons "Content-Type" content-type)))
+                                acl-header)
                         expires-in content-length)))
 
 (defmethod read-blob-range ((s s3-store) bucket key &key (start 0) (length 512))
   (if (zerop length)
-      (make-array 0 :element-type '(unsigned-byte 8))
+      ;; No range asks for zero bytes, so ask whether the blob exists instead: a missing key
+      ;; signals BLOB-NOT-FOUND here as it does on every other store (#796).
+      (if (blob-exists-p s bucket key)
+          (make-array 0 :element-type '(unsigned-byte 8))
+          (error 'blob-not-found :bucket bucket :key key))
       (handler-case
           (multiple-value-bind (body status)
-              (%s3-request s bucket key :get
+              (%s3-request s bucket key :get :want-stream t
                            :extra-headers (list (cons "range" (format nil "bytes=~D-~D" start (+ start length -1)))))
-            ;; 206 is the range; 200 means the store ignored Range and sent the whole object,
-            ;; so cut it down here rather than hand back more than was asked for.
-            (let ((octets (coerce body '(simple-array (unsigned-byte 8) (*)))))
-              (if (= status 206)
-                  octets
-                  (subseq octets (min start (length octets)) (min (+ start length) (length octets))))))
+            ;; 206 is the range. 200 means the store, or a proxy in front of it, ignored Range
+            ;; and is sending the whole object, so skip to START and read only LENGTH bytes;
+            ;; closing the stream then drops the rest unread (#796).
+            (unwind-protect (%read-range body (if (= status 206) 0 start) length)
+              (close body)))
         (blob-backend-error (e)
           ;; 416: START is at or past the end, including any START on an empty object.
           (if (eql 416 (blob-backend-error-status e))
@@ -491,7 +550,7 @@ this module declares no base64 dependency for one call."
     (format out "<MaxAgeSeconds>~D</MaxAgeSeconds></CORSRule></CORSConfiguration>" max-age-seconds)))
 
 (defmethod put-bucket-cors ((s s3-store) bucket &key origins (methods '("PUT"))
-                                                      (allowed-headers '("Content-Type"))
+                                                      (allowed-headers '("Content-Type" "x-amz-acl"))
                                                       (max-age-seconds 3000) expose-headers)
   (let* ((body (%octets (%cors-xml origins methods allowed-headers max-age-seconds expose-headers)))
          (md5 (%base64 (ironclad:digest-sequence :md5 body))))
@@ -535,7 +594,10 @@ as S3 allows in AllowedOrigin and AllowedHeader?"
           ((notany (lambda (r) (and (origin-ok r) (method-ok r))) rules) :method-not-allowed)
           (t :header-not-allowed))))
 
-(defmethod check-bucket-cors ((s s3-store) bucket origin &key (method "PUT") (headers '("Content-Type")))
+(defmethod check-bucket-cors ((s s3-store) bucket origin
+                              &key (method "PUT")
+                                   ;; The headers UPLOAD-URL's target carries on this store.
+                                   (headers (cons "Content-Type" (mapcar #'car (%upload-acl-headers s)))))
   (let ((xml (handler-case
                  (let ((body (%s3-request s bucket nil :get :query "cors=")))
                    (if (stringp body) body (sb-ext:octets-to-string body :external-format :utf-8)))
