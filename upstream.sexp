@@ -30,6 +30,10 @@
 ;;;;   :reviewed  for :manual entries only: the date (YYYY-MM-DD) somebody last read the URL,
 ;;;;              or :never
 ;;;;   :held      optional: (:reason "why this pin is not on the latest release" :issue N)
+;;;;   :retires   optional: the date (YYYY-MM-DD) the upstream says it stops serving what this
+;;;;              entry pins, such as a model's shutdown date. The offline check only checks the
+;;;;              date's form. From that day on, --online lists the entry under "Past its
+;;;;              shutdown date", so someone removes it on purpose; nothing removes it by itself.
 
 ;;; --- toolchain ---------------------------------------------------------------------------
 
@@ -143,6 +147,51 @@
  :where ((:text "praxeon/src/image.lisp" "(defparameter *openai-images-base-url* \"https://api.openai.com/" "\""))
  :upstream (:manual "https://developers.openai.com/api/docs/guides/image-generation")
  :reviewed "2026-10-18")
+
+;;; Each row of praxeon/image's *OPENAI-IMAGE-PRICES*, in US dollars per million tokens, as the
+;;; pricing page's "Image generation models" table (Standard) lists them. The value is the row's
+;;; prices, so a change to any of them shows here. #758. A :retires date is the model's shutdown
+;;; date from https://developers.openai.com/api/docs/deprecations, read on 2026-10-20; the row
+;;; keeps pricing requests made before it, and --online reports it once the date has passed.
+
+(:name "OpenAI image prices: gpt-image-2" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-2\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-2.5-flare" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-2.5-flare\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-2.5-sunburst" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-2.5-sunburst\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20")
+
+(:name "OpenAI image prices: gpt-image-1.5" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-1.5\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20"
+ :retires "2026-12-01")
+
+(:name "OpenAI image prices: gpt-image-1-mini" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-1-mini\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20"
+ :retires "2026-12-01")
+
+(:name "OpenAI image prices: gpt-image-1" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"gpt-image-1\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20"
+ :retires "2026-10-23")
+
+(:name "OpenAI image prices: chatgpt-image-latest" :category :api
+ :where ((:text "praxeon/src/image.lisp" "(\"chatgpt-image-latest\" " ")"))
+ :upstream (:manual "https://developers.openai.com/api/docs/pricing")
+ :reviewed "2026-10-20"
+ :retires "2026-12-01")
 
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))

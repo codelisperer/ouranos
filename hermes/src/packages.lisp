@@ -44,7 +44,10 @@
    #:delivery-result-status #:delivery-result-raw #:delivery-result-destination
    ;; the protocol
    #:provider #:email-provider #:sms-provider #:telegram-provider #:deliver
-   #:edit-sent-message #:delete-sent-message #:telegram-can-post
+   #:edit-sent-message #:delete-sent-message #:telegram-can-post #:telegram-added-chats
+   #:telegram-added-chat #:telegram-added-chat-p #:telegram-added-chat-id
+   #:telegram-added-chat-type #:telegram-added-chat-title #:telegram-added-chat-status
+   #:telegram-added-chat-date
    ;; backends + constructors
    #:sendgrid #:make-sendgrid #:twilio #:make-twilio #:telegram #:make-telegram
    #:telegram-api-base #:dev-transport #:make-dev-transport
@@ -60,6 +63,7 @@
    #:delivery-rate-limited #:delivery-rate-limited-retry-after
    #:telegram-chat-unreachable #:telegram-not-permitted
    #:telegram-chat-migrated #:telegram-chat-migrated-migrate-to-chat-id
+   #:telegram-webhook-active
    #:version))
 
 (cl:defpackage #:hermes/inbound

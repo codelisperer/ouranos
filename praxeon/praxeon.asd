@@ -59,6 +59,7 @@
                              (:file "event")        ; client<->framework progress contract
                              (:file "praxeology")   ; Coalton-typed core ontology
                              (:file "conditions")   ; recoverable-failure protocol
+                             (:file "source")       ; outside text as quoted source (#757)
                              (:file "context")      ; budgeted context (Kairos seed)
                              (:file "results")      ; tool results outside the prompt (#319)
                              (:file "memory")       ; observational memory (pre-publication issue 60)
@@ -236,6 +237,17 @@
   :serial t
   :components ((:file "src/web-search")))
 
+;;; A read-web-page Means (#757): open a URL the user gives and read its text, through Tavily's
+;;; /extract when there is a key and otherwise through aion/http-client's FETCH-PUBLIC.
+(defsystem "praxeon/web-page"
+  :description "A read-web-page Means for Praxeon agents, with address checks and quoted output."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon" "quri"
+               "plump")              ; the page's readable text, as hyperion/import parses HTML
+  :serial t
+  :components ((:file "src/web-page")))
+
 ;;; An image-generation Means behind a neutral protocol, with OpenAI's Image API as its first
 ;;; provider (#758). Opt-in: an app registers it with REGISTER-OPENAI-IMAGE, which registers
 ;;; nothing when there is no key.
@@ -300,6 +312,7 @@
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
                "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
+               "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
@@ -312,7 +325,8 @@
                 :components ((:file "praxeon-tests")
                              ;; #758: in the PRAXEON suite, after praxeon-tests, whose
                              ;; %SERVE-REPLIES and scripted provider it uses
-                             (:file "image-tests"))))
+                             (:file "image-tests")
+                             (:file "web-page-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 
