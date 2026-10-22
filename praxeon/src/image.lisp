@@ -22,11 +22,13 @@
 ;;;; tool schema offers only those. A request for any other quality is refused before it is sent.
 ;;;;
 ;;;; USAGE. Each request that succeeds emits one :IMAGE-USAGE event through praxeon/event, with
-;;;; the provider, the model, the number of images, the size and quality the provider reports, the
-;;;; token counts it reports, :COST only when the provider reports a cost, and the call's :ID,
-;;;; :PRINCIPAL and :AGENT as on :TOOL-RESULT. OpenAI reports no cost, so :COST is absent rather
-;;;; than 0. A refused or failed request emits no :IMAGE-USAGE event, because the provider reports
-;;;; no usage with an error; whether a provider charges for a refused request is its own policy,
+;;;; the provider, the model, the number of images, the size and quality the provider reports,
+;;;; the token counts it reports, :COST when it is known, and the call's :ID, :PRINCIPAL and
+;;;; :AGENT as on :TOOL-RESULT. OpenAI reports no cost, so for a model in *OPENAI-IMAGE-PRICES*
+;;;; praxeon computes one from the token counts and OpenAI's published per-token prices, and the
+;;;; event says so with :ESTIMATED T. For a model not in the table :COST is absent rather than 0.
+;;;; A refused or failed request emits no :IMAGE-USAGE event, because the provider reports no
+;;;; usage with an error; whether a provider charges for a refused request is its own policy,
 ;;;; which praxeon cannot see.
 ;;;;
 ;;;; LOGGING follows docs/logging.md: kinds, counts, lengths, status and durations. The prompt,
@@ -53,6 +55,7 @@
    #:image-result #:image-result-octets #:image-result-media-type
    #:image-result-revised-prompt #:image-result-provider #:image-result-model
    #:image-result-size #:image-result-quality #:image-result-cost
+   #:image-result-cost-estimated-p
    #:generate-image
    ;; a refusal
    #:image-refused #:image-refused-provider #:image-refused-code #:image-refused-stage
@@ -63,6 +66,7 @@
    #:openai-images #:make-openai-images #:openai-images-from-env #:image-post
    #:openai-image-request-body #:*openai-image-model* #:*openai-images-base-url*
    #:*openai-images-read-timeout* #:*max-bytes-per-image*
+   #:*openai-image-prices* #:openai-image-cost
    ;; the means
    #:register #:register-openai-image #:*description*))
 
@@ -84,7 +88,9 @@ logs."))
 (defgeneric generate-images (provider request)
   (:documentation "Ask PROVIDER for the images REQUEST describes. Returns two values: a list of
 IMAGE-RESULTs, and a plist of what the provider reported about the request, with the keys
-:SIZE, :QUALITY, :INPUT-TOKENS, :OUTPUT-TOKENS and :COST, each present only when reported.
+:SIZE, :QUALITY, :INPUT-TOKENS, :OUTPUT-TOKENS and :COST, each present only when known, and
+:ESTIMATED T when the backend computed :COST from a price table rather than the provider
+reporting it. :COST is in US dollars.
 Signals IMAGE-REFUSED for a content-policy refusal and PROVIDER-REQUEST-FAILED for any other
 failed request. Call GENERATE-IMAGE rather than this: it emits the usage event and logs."))
 
@@ -98,9 +104,11 @@ string the provider accepts. COUNT is the number of images."
 (defstruct (image-result (:constructor %make-image-result))
   "One generated image. OCTETS are the file's bytes as the provider sent them, and MEDIA-TYPE
 their type, such as \"image/png\". REVISED-PROMPT is the prompt the provider says it used, or
-NIL. SIZE and QUALITY are as the provider reported them, or NIL. COST is the cost the provider
-reported, or NIL when it reported none."
-  octets media-type revised-prompt provider model size quality cost)
+NIL. SIZE and QUALITY are as the provider reported them, or NIL. COST is this image's share of
+the request's cost in US dollars, as a rational: the request's cost divided evenly among its
+images. It is NIL when the cost is not known. COST-ESTIMATED-P is true when praxeon computed COST
+from a price table rather than the provider reporting it."
+  octets media-type revised-prompt provider model size quality cost cost-estimated-p)
 
 (define-condition image-refused (cnd:tool-error-result)
   ((provider :initarg :provider :initform nil :reader image-refused-provider)
@@ -191,7 +199,7 @@ failure."
                :provider name :model model :count (length results)
                (append (list :size (or (getf reported :size) (%size-name size))
                              :quality (or (getf reported :quality) (%size-name quality)))
-                       (loop for key in '(:input-tokens :output-tokens :cost)
+                       (loop for key in '(:input-tokens :output-tokens :cost :estimated)
                              for value = (getf reported key)
                              when value append (list key value))))
         results))))
@@ -416,13 +424,82 @@ base64."
   (handler-case (b64:base64-string-to-usb8-array encoded)
     (error () (error (%unexpected-reply "has an image that is not valid base64")))))
 
+(defparameter *openai-image-prices*
+  ;; US dollars per million tokens, from https://developers.openai.com/api/docs/pricing, table
+  ;; "Image generation models", Standard. upstream.sexp pins each row with the date it was read.
+  ;; A price the page does not list is left out of its row, never guessed. A model's shutdown
+  ;; date is its upstream.sexp entry's :retires; the row stays, so a request made before that
+  ;; date can still be priced.
+  '(("gpt-image-2" :text-input 5 :image-input 8 :image-output 30)
+    ("gpt-image-2.5-flare" :text-input 5 :image-input 8 :image-output 30)
+    ("gpt-image-2.5-sunburst" :text-input 5 :image-input 8 :image-output 30)
+    ("gpt-image-1.5" :text-input 5 :image-input 8 :text-output 10 :image-output 32)
+    ("gpt-image-1-mini" :text-input 2 :image-input 5/2 :image-output 8)
+    ("gpt-image-1" :text-input 5 :image-input 10 :image-output 40)
+    ("chatgpt-image-latest" :text-input 5 :image-input 8 :text-output 10 :image-output 32))
+  "OpenAI's image model prices, as (MODEL . PRICES). PRICES is a plist of US dollars per million
+tokens: :TEXT-INPUT, :IMAGE-INPUT, :IMAGE-OUTPUT and, when OpenAI lists it, :TEXT-OUTPUT. The
+prices are exact rationals, so 5/2 is $2.50.
+
+OpenAI publishes these per token, not per image: what an image costs depends on the tokens it
+used, which the reply reports. OPENAI-IMAGE-COST turns those counts into a cost. An app that
+bills from it should treat the result as an estimate (:ESTIMATED T on :IMAGE-USAGE). Each
+approximation it makes raises the estimate rather than lowering it: cached input is priced at the
+full input rate, and a count the reply does not split is priced at the higher of its two rates.
+It is only as accurate as the token counts the reply reports.")
+
+(defun %price-for (model)
+  (cdr (assoc model *openai-image-prices* :test #'equal)))
+
+(defun openai-image-cost (model reported)
+  "The cost in US dollars, as a rational, of a request to MODEL whose usage was REPORTED, a plist
+with :INPUT-TOKENS and :OUTPUT-TOKENS and, when the reply split them, :INPUT-TEXT-TOKENS,
+:INPUT-IMAGE-TOKENS, :OUTPUT-TEXT-TOKENS and :OUTPUT-IMAGE-TOKENS. NIL when MODEL is not in
+*OPENAI-IMAGE-PRICES* or the reply gave no token counts.
+
+When the reply splits a count into text and image tokens, each part is priced at its own rate.
+When it does not, the whole count is priced at the higher of the two rates. Output text tokens
+are priced at :TEXT-OUTPUT, or at :IMAGE-OUTPUT when OpenAI lists no text output price."
+  (let ((prices (%price-for model)))
+    (flet ((n (key) (getf reported key))
+           (rate (key) (getf prices key)))
+      (let ((input (n :input-tokens))
+            (output (n :output-tokens))
+            (text-output (or (rate :text-output) (rate :image-output))))
+        (when (and prices (integerp input) (integerp output))
+          (/ (+ (if (and (n :input-text-tokens) (n :input-image-tokens))
+                    (+ (* (n :input-text-tokens) (rate :text-input))
+                       (* (n :input-image-tokens) (rate :image-input)))
+                    (* input (max (rate :text-input) (rate :image-input))))
+                (if (and (n :output-text-tokens) (n :output-image-tokens))
+                    (+ (* (n :output-text-tokens) text-output)
+                       (* (n :output-image-tokens) (rate :image-output)))
+                    (* output (max text-output (rate :image-output)))))
+             1000000))))))
+
+(defun %usage-counts (usage)
+  "The token counts in the reply's USAGE object, as a plist. A count that is not an integer is
+left out."
+  (flet ((count-of (table key name)
+           (let ((v (and (hash-table-p table) (gethash name table))))
+             (and (integerp v) (list key v)))))
+    (let ((in (and (hash-table-p usage) (gethash "input_tokens_details" usage)))
+          (out (and (hash-table-p usage) (gethash "output_tokens_details" usage))))
+      (append (count-of usage :input-tokens "input_tokens")
+              (count-of usage :output-tokens "output_tokens")
+              (count-of in :input-text-tokens "text_tokens")
+              (count-of in :input-image-tokens "image_tokens")
+              (count-of out :output-text-tokens "text_tokens")
+              (count-of out :output-image-tokens "image_tokens")))))
+
 (defmethod generate-images ((p openai-images) request)
   (let* ((parsed (image-post p (openai-image-request-body p request)))
          (parsed (if (hash-table-p parsed)
                      parsed
                      (error (%unexpected-reply "is not a JSON object"))))
          (data (gethash "data" parsed))
-         (usage (gethash "usage" parsed))
+         (counts (%usage-counts (gethash "usage" parsed)))
+         (cost (openai-image-cost (image-model-of p) counts))
          (media-type (%media-type (%reported parsed "output_format")))
          (size (%reported parsed "size"))
          (quality (%reported parsed "quality")))
@@ -440,15 +517,15 @@ base64."
                :revised-prompt (let ((r (gethash "revised_prompt" item)))
                                  (and (stringp r) (plusp (length r)) r))
                :provider "openai" :model (image-model-of p)
-               :size size :quality quality :cost nil)))
+               :size size :quality quality
+               :cost (and cost (/ cost (length data))) :cost-estimated-p (and cost t))))
           data)
      (append (and size (list :size size))
              (and quality (list :quality quality))
-             (and (hash-table-p usage)
-                  (append (let ((v (gethash "input_tokens" usage)))
-                            (and (integerp v) (list :input-tokens v)))
-                          (let ((v (gethash "output_tokens" usage)))
-                            (and (integerp v) (list :output-tokens v)))))))))
+             (loop for (key value) on counts by #'cddr
+                   when (member key '(:input-tokens :output-tokens))
+                     append (list key value))
+             (and cost (list :cost cost :estimated t))))))
 
 ;;; --- the means ----------------------------------------------------------------------------
 

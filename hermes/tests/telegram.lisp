@@ -103,6 +103,7 @@ pointed at it."
                      (list :chat "@has space" :text "x")
                      (list :chat "@1abcde" :text "x")          ; must start with a letter
                      (list :chat "@_abcde" :text "x")
+                     (list :chat "@abcde_" :text "x")          ; cannot end with an underscore
                      (list :chat 1.5 :text "x")
                      (list :chat "@news_channel" :text "")     ; empty, and no photo
                      (list :chat "@news_channel" :text "x" :parse-mode :markdown)
@@ -145,6 +146,17 @@ pointed at it."
              (is (eq :telegram (h:delivery-failure-provider c)))
              (is (eql status (h:delivery-failure-status c)))
              (is (equal description (h:delivery-failure-detail c))))))
+
+(test a-description-that-is-not-a-string-is-treated-as-absent
+  ;; A string-downcase of a number signalled a TYPE-ERROR in place of the refusal (#788).
+  (dolist (description '("5" "[\"chat not found\"]" "{\"text\":\"x\"}"))
+    (let ((c (%refusal 400 (format nil "{\"ok\":false,\"error_code\":400,\"description\":~A}"
+                                   description))))
+      (is (eq 'h:delivery-failure (type-of c)) "description ~A gave ~S" description (type-of c))
+      (is (stringp (h:delivery-failure-detail c)))))
+  (is (eq 'h:telegram-chat-unreachable
+          (type-of (%refusal 403 "{\"ok\":false,\"error_code\":403,\"description\":403}")))
+      "the status still decides the class"))
 
 (test a-flood-limit-arrives-with-retry-after-in-seconds
   (let ((c (%refusal 429 (%bot-error 429 "Too Many Requests: retry after 35" "{\"retry_after\":35}"))))
@@ -229,15 +241,17 @@ pointed at it."
 ;;; token or a request carrying the URL.
 
 (defun %logged-exception (thunk)
-  "Call THUNK inside a HANDLER-BIND that logs any error with AION/LOG:EXCEPTION, the way a
-request middleware does, and return the log text."
+  "Call THUNK inside a HANDLER-BIND that logs any serious condition with AION/LOG:EXCEPTION, the
+way a request middleware does (hyperion's dev server binds SERIOUS-CONDITION, its request log
+CL:ERROR), and return the log text."
   (let ((out (make-string-output-stream)))
     (unwind-protect
          (progn (aion/log:setup :env :dev :level :error :stream out)
                 (handler-case
-                    (handler-bind ((cl:error (lambda (c) (aion/log:exception c "request failed"))))
+                    (handler-bind ((serious-condition
+                                     (lambda (c) (aion/log:exception c "request failed"))))
                       (funcall thunk))
-                  (cl:error () nil)))
+                  (serious-condition () nil)))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))
     (get-output-stream-string out)))
 
@@ -259,6 +273,38 @@ request middleware does, and return the log text."
                (lambda () (h:deliver p (h:make-telegram-message :chat -1 :text "x"))))))
     (is (search "DELIVERY-FAILURE" log) "it arrives as a DELIVERY-FAILURE")
     (is (search "unexpected" log) "with the original report as its detail")
+    (is (%no-token-p log))))
+
+(define-condition %unprintable-error (cl:error) ()
+  (:report (lambda (c stream)
+             (declare (ignore c stream))
+             (cl:error "the report itself failed"))))
+
+(test an-error-whose-report-cannot-be-printed-still-arrives-as-a-delivery-failure
+  (let* ((hermes::*telegram-perform*
+           (lambda (req) (declare (ignore req)) (cl:error '%unprintable-error)))
+         (p (h:make-telegram :token +bot-token+))
+         (c (handler-case (progn (h:deliver p (h:make-telegram-message :chat -1 :text "x")) nil)
+              (cl:error (c) c))))
+    (is (eq 'h:delivery-failure (type-of c)) "arrived as ~S" (type-of c))
+    (is (search "%UNPRINTABLE-ERROR" (h:delivery-failure-detail c))
+        "the detail names the type it could not print")))
+
+(define-condition %test-timeout (serious-condition) ()
+  (:report "the test's deadline passed"))
+
+(test a-serious-condition-inside-the-request-is-signalled-again-without-the-token
+  ;; Not an error, so not a delivery failure; but a handler that prints a backtrace for any
+  ;; serious condition must not see the request's frames.
+  (let* ((hermes::*telegram-perform* (lambda (req) (declare (ignore req)) (cl:error '%test-timeout)))
+         (p (h:make-telegram :token +bot-token+))
+         (arrived nil)
+         (log (%logged-exception
+               (lambda ()
+                 (handler-bind ((serious-condition (lambda (c) (setf arrived c))))
+                   (h:deliver p (h:make-telegram-message :chat -1 :text "x")))))))
+    (is (typep arrived '%test-timeout) "the same condition arrives, not a delivery failure")
+    (is (search "DELIVER" log) "the backtrace reached the frames inside hermes")
     (is (%no-token-p log))))
 
 ;;; --- edit, delete, can-post -----------------------------------------------
@@ -328,6 +374,16 @@ request middleware does, and return the log text."
     (let ((edited (h:edit-sent-message dev sent "edited")))
       (is (eq t (h:delete-sent-message dev edited)) "an edited result can be deleted"))))
 
+(test the-dev-transport-edits-and-deletes-a-result-from-the-real-backend
+  (let ((real (with-bot (s p (%always 200 (%bot-ok +sent-message+)))
+                (declare (ignorable s))
+                (h:deliver p (h:make-telegram-message :chat "@news_channel" :text "hi"))))
+        (dev (h:make-dev-transport :stream (make-broadcast-stream))))
+    (let ((edited (h:edit-sent-message dev real "edited")))
+      (is (eq :edited (h:delivery-result-status edited)))
+      (is (eql -1001234567890 (h:delivery-result-destination edited))))
+    (is (eq t (h:delete-sent-message dev real)))))
+
 (defun %member (&rest kvs) (apply #'hermes::%obj kvs))
 
 (test whether-the-bot-can-post-follows-the-chat-type-and-its-member-record
@@ -364,6 +420,79 @@ request middleware does, and return the log text."
   (with-bot (s p (%always 400 (%bot-error 400 "Bad Request: chat not found")))
     (declare (ignorable s))
     (is (eq :not-member (h:telegram-can-post p "@news_channel")))))
+
+(test the-can-post-check-signals-a-migrated-group-with-its-new-chat-id
+  ;; Not one of the three answers: the app needs the new id to replace the one it stored.
+  (with-bot (s p (%always 400 (%bot-error 400 "Bad Request: group chat was upgraded to a supergroup chat"
+                                          "{\"migrate_to_chat_id\":-1009876543210}")))
+    (declare (ignorable s))
+    (let ((c (handler-case (progn (h:telegram-can-post p -123) nil)
+               (h:telegram-chat-migrated (c) c))))
+      (is (typep c 'h:telegram-chat-migrated))
+      (is (eql -1009876543210 (and c (h:telegram-chat-migrated-migrate-to-chat-id c)))))))
+
+;;; --- the chats the bot was added to (#794) --------------------------------
+
+(defun %member-update (update-id chat-id type title status date)
+  "A getUpdates entry for a my_chat_member update, the way Telegram sends one."
+  (format nil "{\"update_id\":~D,\"my_chat_member\":{\"chat\":{\"id\":~D,\"type\":~S,\"title\":~S},\"from\":{\"id\":1,\"is_bot\":false,\"first_name\":\"Op\"},\"date\":~D,\"old_chat_member\":{\"user\":{\"id\":777,\"is_bot\":true,\"first_name\":\"Bot\"},\"status\":\"left\"},\"new_chat_member\":{\"user\":{\"id\":777,\"is_bot\":true,\"first_name\":\"Bot\"},\"status\":~S}}}"
+          update-id chat-id type title date status))
+
+(defun %updates-json (&rest entries)
+  (%bot-ok (format nil "[~{~A~^,~}]" entries)))
+
+(test the-chats-the-bot-was-added-to-are-read-from-its-updates-without-confirming-them
+  (with-bot (s p (%always 200
+                          (%updates-json
+                           (%member-update 10 -1001 "supergroup" "Ops room" "member" 1760000000)
+                           "{\"update_id\":11,\"message\":{\"message_id\":5,\"date\":1760000001,\"chat\":{\"id\":-1001,\"type\":\"supergroup\"},\"text\":\"hello\"}}"
+                           (%member-update 12 -1002 "channel" "Announcements" "administrator" 1760000002)
+                           (%member-update 13 -1001 "supergroup" "Ops room" "administrator" 1760000003))))
+    (let ((chats (h:telegram-added-chats p))
+          (requests (%requests s)))
+      (is (equal '(-1002 -1001) (mapcar #'h:telegram-added-chat-id chats))
+          "one entry per chat, ordered by its latest change; the message update is ignored")
+      (is (equal '(:channel :supergroup) (mapcar #'h:telegram-added-chat-type chats)))
+      (is (equal '("Announcements" "Ops room") (mapcar #'h:telegram-added-chat-title chats)))
+      (is (equal '(:administrator :administrator) (mapcar #'h:telegram-added-chat-status chats))
+          "the group's entry is from its later update")
+      (is (equal '(1760000002 1760000003) (mapcar #'h:telegram-added-chat-date chats)))
+      (is (= 1 (length requests)))
+      (is (search "/getUpdates" (aion/test-http:request-path (first requests))))
+      (let ((json (%request-json (first requests))))
+        (is (null (nth-value 1 (gethash "offset" json))) "no offset, so nothing is confirmed")
+        (is (null (nth-value 1 (gethash "allowed_updates" json)))
+            "no allowed_updates, which Telegram would store for the bot")))))
+
+(test confirming-reads-every-page-and-then-confirms-the-last-update
+  (with-bot (s p (lambda (method request stream)
+                   (declare (ignore method))
+                   (let ((offset (gethash "offset" (%request-json request))))
+                     (%bot-reply stream 200
+                                 (if offset
+                                     (%updates-json)
+                                     (%updates-json
+                                      (%member-update 20 -1003 "group" "Night shift" "member" 1760000010)
+                                      (%member-update 21 -1004 "group" "Day shift" "kicked" 1760000011)))))))
+    (let ((chats (h:telegram-added-chats p :confirm t))
+          (requests (%requests s)))
+      (is (equal '(-1003 -1004) (mapcar #'h:telegram-added-chat-id chats)))
+      (is (equal '(:member :kicked) (mapcar #'h:telegram-added-chat-status chats)))
+      (is (= 2 (length requests)) "one page, then one call that only confirms")
+      (is (eql 22 (gethash "offset" (%request-json (second requests))))
+          "the offset is one past the last update read"))))
+
+(test a-bot-with-a-webhook-cannot-list-its-chats-and-its-webhook-is-left-alone
+  (with-bot (s p (%always 409 (%bot-error 409 "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first")))
+    (let ((c (handler-case (progn (h:telegram-added-chats p) nil)
+               (h:delivery-failure (c) c))))
+      (is (eq 'h:telegram-webhook-active (type-of c)))
+      (is (%no-token-p c))
+      (is (every (lambda (r) (search "/getUpdates" (aion/test-http:request-path r))) (%requests s))
+          "no deleteWebhook, or any other method"))))
+
+(test the-dev-transport-was-added-to-no-chats
+  (is (null (h:telegram-added-chats (h:make-dev-transport :stream (make-broadcast-stream))))))
 
 ;;; --- escaping -------------------------------------------------------------
 

@@ -53,15 +53,19 @@
 ;;;;                           history budget was enforced against. Not emitted when the
 ;;;;                           provider reported no counts at all
 ;;;;   (:type :image-usage  :id .. :principal .. :agent .. :provider .. :model .. :count ..
-;;;;                        :size .. :quality .. [:input-tokens ..] [:output-tokens ..] [:cost ..])
+;;;;                        :size .. :quality .. [:input-tokens ..] [:output-tokens ..] [:cost ..]
+;;;;                        [:estimated t])
 ;;;;                        -- an image request succeeded (praxeon/image, #758). ID is the tool
 ;;;;                           call's, the same as on its :TOOL-RESULT, and PRINCIPAL and AGENT
 ;;;;                           are as there; each is NIL outside a turn. PROVIDER and
 ;;;;                           MODEL are strings, COUNT the number of images returned, SIZE and
 ;;;;                           QUALITY as the provider reported them, or as requested when it
-;;;;                           did not. The token counts and COST are present only when the
-;;;;                           provider reported them: a COST that is absent was not reported,
-;;;;                           and is never sent as 0. A refused or failed request emits none,
+;;;;                           did not. The token counts are present only when the provider
+;;;;                           reported them. COST is in US dollars, as a rational, and is
+;;;;                           present when the provider reported it or praxeon computed it from
+;;;;                           a price table, in which case :ESTIMATED is T (praxeon/image's
+;;;;                           *OPENAI-IMAGE-PRICES*). A COST that is absent is not known, and is
+;;;;                           never sent as 0. A refused or failed request emits none,
 ;;;;                           because the provider reports no usage with an error. Named apart
 ;;;;                           from :USAGE, which carries a model step's token counts, until #493
 ;;;;                           settles one usage interface

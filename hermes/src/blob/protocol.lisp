@@ -118,6 +118,8 @@ the size the client declares for its file before uploading.
 MAX-BYTES is the largest upload this URL may carry. It needs CONTENT-LENGTH, because a single
 presigned PUT can be held to an exact size but not to a range; a CONTENT-LENGTH over it, or a
 MAX-BYTES with no CONTENT-LENGTH, signals BLOB-UPLOAD-REFUSED rather than signing.
+An S3 store made with :UPLOAD-ACL :PRIVATE also signs `x-amz-acl: private' and puts it in the
+target's HEADERS, for a bucket that honours ACLs (#796); see MAKE-S3-STORE.
 
 KEY should be chosen by the server, never taken from the client, and one URL should serve one
 upload. Check the result with BLOB-METADATA and READ-BLOB-RANGE before trusting it.
@@ -135,7 +137,8 @@ For checking what a client uploaded by its first bytes, without fetching the who
    "Set BUCKET's CORS rule so a browser on one of ORIGINS can upload to it directly (#770).
 
 ORIGINS is a list of origins such as (\"https://app.example.com\"); each may hold one `*'.
-METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\"), MAX-AGE-SECONDS to 3000.
+METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\" \"x-amz-acl\"), every header
+UPLOAD-URL's target can tell the client to send, and MAX-AGE-SECONDS to 3000.
 EXPOSE-HEADERS lists response headers a browser script may read; a multipart upload from a
 browser needs (\"ETag\"), because the client completes the upload with each part's ETag.
 This REPLACES the bucket's whole CORS configuration, as the S3 API does; a bucket that needs
@@ -144,8 +147,10 @@ other rules too should have them set by whoever owns it. Returns T."))
 (defgeneric check-bucket-cors (store bucket origin &key method headers)
   (:documentation
    "Whether BUCKET's CORS rules let a browser on ORIGIN send METHOD (default \"PUT\") with HEADERS
-(default (\"Content-Type\")) (#770). A browser upload that fails for this reason reaches the app
-only as a network error, so this is the diagnostic: call it when an upload never arrives.
+(default: the headers UPLOAD-URL's target carries on this store, \"Content-Type\" and, on an S3
+store made with :UPLOAD-ACL :PRIVATE, \"x-amz-acl\") (#770). A browser upload that fails for
+this reason reaches the app only as a network error, so this is the diagnostic: call it when
+an upload never arrives.
 
 Returns one of :ALLOWED, :NO-CORS-CONFIGURATION, :ORIGIN-NOT-ALLOWED, :METHOD-NOT-ALLOWED or
 :HEADER-NOT-ALLOWED, the last three naming the first test that no rule passes."))
@@ -315,8 +320,13 @@ the same header, and \"sha256\" is reserved for the checksum the store records."
     (error 'blob-upload-refused :bucket bucket :key key :reason :bad-upload-id)))
 
 (defmethod start-multipart-upload :before ((s store) bucket key &key content-type)
-  (declare (ignore content-type))
-  (%check-key bucket key))
+  (%check-key bucket key)
+  ;; The same check as UPLOAD-URL's: the content type goes into a request header (#796).
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-type)))
 
 (defmethod multipart-part-url :before ((s store) bucket key upload-id part-number &key expires-in content-length)
   (%check-key bucket key)
@@ -396,18 +406,23 @@ bug at the call site. Prefer this."
   (error 'blob-unsupported :bucket bucket :key key
                            :operation "presigned uploads (proxy the upload through put-blob)"))
 
+(defun %read-range (in start length)
+  "At most LENGTH octets of the octet input stream IN, from byte START. Skips START bytes in
+bounded chunks and then reads only LENGTH, so a long stream is never held in memory."
+  (let ((skip (make-array (min start +copy-buffer-size+) :element-type '(unsigned-byte 8)))
+        (remaining start))
+    (loop while (plusp remaining)
+          do (let ((n (read-sequence skip in :end (min remaining (length skip)))))
+               (when (zerop n) (return))
+               (decf remaining n)))
+    (let ((buffer (make-array length :element-type '(unsigned-byte 8))))
+      ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
+      (subseq buffer 0 (read-sequence buffer in)))))
+
 (defmethod read-blob-range ((s store) bucket key &key (start 0) (length 512))
-  ;; Reads through GET-BLOB: skips START bytes in bounded chunks, then reads at most LENGTH.
+  ;; Reads through GET-BLOB.
   (with-blob-stream (in s bucket key)
-    (let ((skip (make-array (min start +copy-buffer-size+) :element-type '(unsigned-byte 8)))
-          (remaining start))
-      (loop while (plusp remaining)
-            do (let ((n (read-sequence skip in :end (min remaining (length skip)))))
-                 (when (zerop n) (return))
-                 (decf remaining n)))
-      (let ((buffer (make-array length :element-type '(unsigned-byte 8))))
-        ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
-        (subseq buffer 0 (read-sequence buffer in))))))
+    (%read-range in start length)))
 
 ;;; --- the registry + environment selection ----------------------------------
 ;;;

@@ -1121,12 +1121,35 @@ chat providers, and ends the turn.
 
 **Usage.** Each request that succeeds emits one `:image-usage` event through `praxeon/event`,
 with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
-`:size` and `:quality`, plus `:input-tokens`, `:output-tokens` and `:cost` when the provider
-reports them. OpenAI reports token counts and no cost, so `:cost` is absent rather than 0. A
-refused or failed request emits no `:image-usage` event, because the provider reports no usage
-with an error. Whether a provider charges for a refused request is its own policy, which praxeon
-cannot see. The model's call and its result arrive as the usual `:tool-call` and `:tool-result`
-events, so a status line can say an image is being made.
+`:size` and `:quality`, plus `:input-tokens` and `:output-tokens` when the provider reports
+them, and `:cost` when it is known. A refused or failed request emits no `:image-usage` event,
+because the provider reports no usage with an error. Whether a provider charges for a refused
+request is its own policy, which praxeon cannot see. The model's call and its result arrive as
+the usual `:tool-call` and `:tool-result` events, so a status line can say an image is being
+made.
+
+**Cost.** OpenAI's reply reports token counts and no cost, and OpenAI publishes its image prices
+per token, not per image. For a model in `praxeon/image:*openai-image-prices*`, praxeon computes
+the cost from the reported counts and those prices, and the event carries it as `:cost`, in US
+dollars as an exact rational, with `:estimated t`. Each `image-result` carries its share in
+`image-result-cost`, with `image-result-cost-estimated-p` true. For a model not in the table,
+`:cost` is absent, never 0, and an app that bills must decide what to do with an unpriced model.
+
+The table holds the prices from OpenAI's pricing page
+(<https://developers.openai.com/api/docs/pricing>, "Image generation models", Standard), and
+`upstream.sexp` records the date each row was read. Each approximation praxeon makes raises the
+estimate rather than lowering it: cached input is priced at the full input rate, and a count the
+reply does not split into text and image tokens is priced at the higher of its two rates. The
+estimate is only as accurate as the token counts the reply reports, so reconcile it with
+OpenAI's invoice before relying on it for billing. `openai-image-cost` gives the same figure for
+a model and a plist of counts, and an app with a negotiated rate can bind `*openai-image-prices*`
+around its calls.
+
+A model OpenAI has scheduled for shutdown keeps its row after the date, so a request made before
+the shutdown can still be priced. Its `upstream.sexp` entry carries the date as `:retires`, and
+`scripts/check-upstream.lisp --online` lists the entry under "Past its shutdown date" from that
+day, so the row is removed deliberately. The dates on 2026-10-20 were `gpt-image-1` on
+2026-10-23, and `gpt-image-1-mini`, `gpt-image-1.5` and `chatgpt-image-latest` on 2026-12-01.
 
 **Logging** records the provider, model, count, size, quality, byte count, status and duration,
 never the prompt, the revised prompt or the image.

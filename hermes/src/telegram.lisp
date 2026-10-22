@@ -97,12 +97,13 @@ few kilobytes; a longer body signals RESPONSE-TOO-LARGE, which arrives as DELIVE
   "The condition class for a refused Telegram call with HTTP STATUS and Telegram's DESCRIPTION.
 Telegram answers 400 for an unknown chat, for missing rights, and for a malformed request
 alike, so those are told apart by the description's text; a 400 not recognised here stays a
-plain DELIVERY-FAILURE."
-  (let ((d (string-downcase (or description ""))))
+plain DELIVERY-FAILURE. A DESCRIPTION that is not a string is treated as absent."
+  (let ((d (string-downcase (if (stringp description) description ""))))
     (flet ((has (s) (search s d)))
       (cond ((eql status 429) 'delivery-rate-limited)
             ((eql status 403) 'telegram-chat-unreachable)
             ((and (eql status 400) (has "chat not found")) 'telegram-chat-unreachable)
+            ((and (eql status 409) (has "webhook")) 'telegram-webhook-active)
             ((and (eql status 400)
                   (or (has "not enough rights") (has "need administrator rights")
                       (has "have no rights") (has "chat_write_forbidden")
@@ -121,9 +122,11 @@ plain DELIVERY-FAILURE."
   "The condition, not yet signalled, for a Telegram call refused with HTTP STATUS and response
 BODY. REDACT is a function that removes the token from a string; it is a closure rather than the
 token so that no frame printed in a backtrace shows the token. Telegram's description is the
-detail; a group that became a supergroup gives TELEGRAM-CHAT-MIGRATED with the new chat id."
+detail, and the body when Telegram sent no description as a string; a group that became a
+supergroup gives TELEGRAM-CHAT-MIGRATED with the new chat id."
   (let* ((json (%parse-object body))
-         (description (and json (gethash "description" json)))
+         (description (let ((d (and json (gethash "description" json))))
+                        (and (stringp d) d)))
          (parameters (and json (gethash "parameters" json)))
          (retry-after (and (hash-table-p parameters) (gethash "retry_after" parameters)))
          (migrate-to (and (hash-table-p parameters) (gethash "migrate_to_chat_id" parameters)))
@@ -165,11 +168,23 @@ anything is signalled (see this file's header)."
                                                                (or (http-error-detail c)
                                                                    (http-error-body c)))))))
                  ;; Anything else -- a defect in a stage, a network library's own condition --
-                 ;; would otherwise reach an outer handler with the request's frames live.
+                 ;; would otherwise reach an outer handler with the request's frames live. The
+                 ;; report is printed under IGNORE-ERRORS: a report that fails to print would
+                 ;; otherwise signal from here, unredacted, instead of the DELIVERY-FAILURE.
                  (cl:error (c)
                    (error 'delivery-failure
                           :provider :telegram
-                          :detail (funcall redact (format nil "~A: ~A" (type-of c) c))))))
+                          :detail (or (ignore-errors
+                                       (funcall redact (format nil "~A: ~A" (type-of c) c)))
+                                      (format nil "~A, whose report could not be printed"
+                                              (type-of c)))))
+                 ;; A serious condition that is not an error -- a timeout, a heap or stack
+                 ;; exhaustion, an interrupt -- is not a delivery failure, so it is signalled
+                 ;; again unchanged, but only after this HANDLER-CASE has unwound the request's
+                 ;; frames: hyperion's dev server prints a backtrace for any SERIOUS-CONDITION.
+                 ;; Signalled again with ERROR, an interrupt loses its CONTINUE restart.
+                 (serious-condition (c)
+                   (error c))))
          (json (%parse-object (response-body resp))))
     (unless (and json (eq t (gethash "ok" json)))
       (error 'delivery-failure :provider :telegram :status (response-status resp)
@@ -266,6 +281,8 @@ permissions or the bot's own restriction take can_send_messages away."
             (t :not-permitted)))))
 
 (defmethod telegram-can-post ((p telegram) chat)
+  "Signals TELEGRAM-CHAT-MIGRATED for a group that became a supergroup, rather than answering:
+the condition carries the new chat id, which the app needs to store in place of CHAT."
   (unless (%telegram-chat-p chat)
     (error 'invalid-message :problem "it needs a Telegram chat (an integer chat id or \"@username\")"))
   (handler-case
@@ -278,5 +295,66 @@ permissions or the bot's own restriction take can_send_messages away."
                         (or (gethash "permissions" info) (%obj "can_send_messages" t))
                         member))
     (telegram-chat-unreachable () :not-member)))
+
+(defstruct (telegram-added-chat (:constructor %make-telegram-added-chat
+                                    (id type title status date)))
+  "A chat the bot was added to or removed from, from a my_chat_member update (#794). ID is the
+numeric chat id to send to. TYPE is :GROUP, :SUPERGROUP, :CHANNEL or :PRIVATE. TITLE is the
+group's or channel's title, or NIL. STATUS is the bot's membership after the change: :CREATOR,
+:ADMINISTRATOR, :MEMBER, :RESTRICTED, :LEFT or :KICKED. DATE is when it changed, in Unix seconds."
+  id type title status date)
+
+(defun %telegram-keyword (text choices)
+  "The keyword in CHOICES whose lowercase name is TEXT, or NIL."
+  (find-if (lambda (k) (equal text (string-downcase (symbol-name k)))) choices))
+
+(defun %telegram-updates (result)
+  "The Update objects in getUpdates' RESULT, a JSON array, as a list."
+  (and (vectorp result) (not (stringp result))
+       (remove-if-not #'hash-table-p (coerce result 'list))))
+
+(defun %added-chats (updates)
+  "One TELEGRAM-ADDED-CHAT for each chat in the my_chat_member UPDATES, from its latest update,
+oldest first. Other kinds of update are ignored."
+  (let ((latest (make-hash-table)) (order '()))
+    (dolist (u updates)
+      (let* ((m (gethash "my_chat_member" u))
+             (chat (and (hash-table-p m) (gethash "chat" m)))
+             (id (and (hash-table-p chat) (gethash "id" chat)))
+             (member (and (hash-table-p m) (gethash "new_chat_member" m))))
+        (when (integerp id)
+          (setf order (cons id (remove id order))
+                (gethash id latest)
+                (%make-telegram-added-chat
+                 id
+                 (%telegram-keyword (gethash "type" chat) '(:group :supergroup :channel :private))
+                 (let ((title (gethash "title" chat))) (and (stringp title) title))
+                 (%telegram-keyword (and (hash-table-p member) (gethash "status" member))
+                                    '(:creator :administrator :member :restricted :left :kicked))
+                 (let ((date (gethash "date" m))) (and (integerp date) date)))))))
+    (mapcar (lambda (id) (gethash id latest)) (reverse order))))
+
+(defparameter +telegram-updates-page+ 100
+  "The most updates getUpdates returns in one call, Telegram's default and maximum limit.")
+
+(defmethod telegram-added-chats ((p telegram) &key confirm)
+  ;; No allowed_updates is sent: Telegram stores it for the bot and applies it to every later
+  ;; getUpdates and webhook delivery, so passing it here would change what other readers get.
+  (if (not confirm)
+      (%added-chats (%telegram-updates (%telegram-call p "getUpdates" (%obj))))
+      ;; An offset confirms every update below it. Read a page, move the offset past it, and
+      ;; stop after a short page with one more call that only confirms; the update that call
+      ;; may return is left pending.
+      (let ((all '()) (offset nil))
+        (loop
+          (let* ((page (%telegram-updates
+                        (%telegram-call p "getUpdates" (if offset (%obj "offset" offset) (%obj)))))
+                 (ids (remove-if-not #'integerp
+                                     (mapcar (lambda (u) (gethash "update_id" u)) page))))
+            (setf all (append all page))
+            (when ids (setf offset (1+ (reduce #'max ids))))
+            (when (< (length page) +telegram-updates-page+)
+              (when ids (%telegram-call p "getUpdates" (%obj "offset" offset "limit" 1)))
+              (return (%added-chats all))))))))
 
 (register-impl :telegram "telegram" (lambda () (make-telegram)))
