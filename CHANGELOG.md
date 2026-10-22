@@ -475,7 +475,9 @@ its tag.
   - When fetched, a page is decoded in the charset its `Content-Type` names, or, for HTML, the
     charset a `<meta>` in its first 1024 bytes names, else UTF-8. A response with no
     `Content-Type` is read when it is text. The whole read has a 30-second deadline
-    (`make-public-fetch`'s `:deadline`), reported as the reason `:timeout`. A redirect to a
+    (`make-public-fetch`'s `:deadline`), reported as the reason `:timeout`. Resolving the host
+    and opening the connection are not interrupted, only checked when they return, so a read
+    can end up to the resolver's timeout plus the 10-second connect timeout past it. A redirect to a
     URL that is not http or https is reported as `:invalid-url` (#807).
   - `make-public-fetch` and `make-tavily-extract` no longer take `:address-policy`; passing it
     is an error. The check that a page's host is a public address cannot be changed by an app
@@ -493,8 +495,10 @@ its tag.
   `fetch-deadline-exceeded-url` and `-deadline`), so a server that sends a byte now and then
   can no longer hold the caller for as long as it likes. It covers the TLS handshake, the
   request, the headers and the body, but not resolving the host name or opening the TCP
-  connection, which are checked when they return. The default, `nil`, sets no deadline, so
-  existing callers are unchanged.
+  connection, which are checked when they return, so a fetch can end up to the resolver's own
+  timeout plus `:connect-timeout` past the deadline; with `:connect-timeout nil` the operating
+  system's connect limit applies, about 127 seconds on Linux. The default, `nil`, sets no
+  deadline, so existing callers are unchanged.
 
 - **hermes/blob: an S3 store can sign `x-amz-acl: private` into upload URLs, for a bucket that
   honours ACLs** (#796). `make-s3-store` takes `:upload-acl`, `:none` (the default) or `:private`,

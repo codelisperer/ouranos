@@ -208,7 +208,9 @@ can turn off the check that a page's host is a public address (#807).")
    (address-policy :initform *%address-policy* :reader %address-policy))
   (:documentation "Reads a page from this machine with aion/http-client's FETCH-PUBLIC and
 extracts its text here. CONNECT-TIMEOUT and READ-TIMEOUT are seconds, for each hop. DEADLINE is
-seconds for the whole read, redirects included (#807). RESOLVE is FETCH-PUBLIC's, for tests. The
+seconds for the whole read, redirects included (#807); resolving the host and opening the
+connection are not interrupted, only checked when they return, so a read can end up to the
+resolver's timeout plus CONNECT-TIMEOUT past it. RESOLVE is FETCH-PUBLIC's, for tests. The
 address policy is always ADDRESS-CATEGORY outside this system's tests (*%ADDRESS-POLICY*)."))
 
 (defun make-public-fetch (&rest initargs)

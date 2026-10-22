@@ -550,6 +550,22 @@ to fire later and no thread is started for it (#807)."
       (is (null (%deadline-timers)) "none after a fetch that signalled")
       (is (null (%deadline-threads)) "no thread was started"))))
 
+(test a-deadline-works-on-every-platform-and-leaves-no-timer
+  "With a stub effect, a fetch with a deadline returns, or signals the effect's own failure, and
+leaves no timer scheduled. This runs on Windows too, where a form the reader dropped once left
+the deadline number where the watch belonged (#807)."
+  (let ((resolve (%resolver '(("public.test" "93.184.216.34")))))
+    (is (= 200 (http:response-status
+                (http:fetch-public "http://public.test/" :deadline 30 :resolve resolve
+                                                         :perform (%ok :body "x")))))
+    (is (null (%deadline-timers)) "none after a fetch that returned")
+    (signals http:http-error
+      (http:fetch-public "http://public.test/" :deadline 30 :resolve resolve
+                                               :perform (lambda (req)
+                                                          (declare (ignore req))
+                                                          (error 'http:http-error :detail "stub"))))
+    (is (null (%deadline-timers)) "none after a fetch whose effect signalled")))
+
 (test fetch-public-returns-an-empty-response
   "A 404 with an empty body is an ordinary response: status 404, no bytes. It used to fail with
 CLOSED-STREAM-ERROR, because the connection was closed before the body was read (#527)."

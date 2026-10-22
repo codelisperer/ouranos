@@ -306,7 +306,8 @@ shut down and the fetch signals FETCH-DEADLINE-EXCEEDED, so a server that sends 
 then cannot hold the caller past it. It covers the TLS handshake, the request, the headers and
 the body. It does not interrupt resolving a host name (RESOLVE) or opening the TCP connection:
 those are checked against the deadline when they return, so they can overrun it by up to the
-resolver's own time and CONNECT-TIMEOUT. NIL, the default, sets no deadline.
+resolver's own time and CONNECT-TIMEOUT. With CONNECT-TIMEOUT NIL the operating system's own
+connect limit applies, about 127 seconds on Linux. NIL, the default, sets no deadline.
 
 On Windows the pinned connection is not available and this signals
 PINNED-CONNECT-UNSUPPORTED.
@@ -315,7 +316,7 @@ RESOLVE, ADDRESS-POLICY and PERFORM are for tests. ADDRESS-POLICY decides which 
 as public, so a policy other than the default turns off the check that keeps this from reaching
 internal addresses. Never pass one derived from a setting or from user input."
   (let* ((current url)
-         (watch (and deadline #-os-windows (%make-watch)))
+         (watch (and deadline (%make-watch)))
          ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
          ;; That thread runs %FIRE once, a socket shutdown under the watch's lock, and ends. A
          ;; fetch that finishes first unschedules the timer below, and then no thread is made.

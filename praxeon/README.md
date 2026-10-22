@@ -168,8 +168,10 @@ gets back the page's main text, its title and the URL it was read from after red
   again. For Tavily the check runs here too, so an internal URL is never sent to Tavily.
 - **Limits.** `fetch-public` reads at most 2 MiB (`*max-page-bytes*`) and follows at most 5
   redirects, with a 10-second connect timeout and a 15-second read timeout on each hop, and a
-  30-second deadline for the whole read (`make-public-fetch`'s `:deadline`). Only HTML, XHTML
-  and plain text are read; a response with no `Content-Type` is read when it is text. A page is
+  30-second deadline for the whole read (`make-public-fetch`'s `:deadline`). Resolving the host
+  and opening the connection are not interrupted by the deadline, only checked when they
+  return, so a read can end up to the resolver's timeout plus the connect timeout past it. Only
+  HTML, XHTML and plain text are read; a response with no `Content-Type` is read when it is text. A page is
   decoded in the charset its `Content-Type` names, or, for HTML, the charset a `<meta>` in its
   first 1024 bytes names, else UTF-8. The model is given at most 12000 characters
   (`*budget*`, or `register`'s `:budget`), followed by a line saying how many were left out.
