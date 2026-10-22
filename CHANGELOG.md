@@ -1425,6 +1425,17 @@ its tag.
   through `upload-url` or through a multipart upload started with `start-multipart-upload`, still
   report NIL, because their bytes never pass through hermes.
 
+- **hermes/blob: on the S3 store, `list-multipart-parts` returns usable ETags from MinIO**. MinIO
+  writes the quotes around an ETag in its XML as the numeric reference `&#34;`, and the S3
+  store's XML reader decoded only the five named entities, so each ETag came back as
+  `&#34;...&#34;`. Completing an upload with those ETags fails with 400, so resuming a multipart
+  upload on MinIO did not work (#813). The reader now decodes numeric references (`&#34;`,
+  `&#x22;`) in one pass, so an escaped reference such as `&amp;#34;` is decoded once, to
+  `&#34;`. Only exact references are decoded: ASCII digits only, a lowercase `x` for hex, no
+  sign, space or trailing characters, and not 0 or a surrogate code point, which XML does not
+  allow. Anything else is kept as written, so a
+  key that holds such text is listed as it is.
+
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the
   `unknown-tool-choice` detail does; it was the internal `%value-shape`.
