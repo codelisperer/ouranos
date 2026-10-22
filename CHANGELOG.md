@@ -14,6 +14,17 @@ its tag.
 
 ### An app may have to act
 
+- **hermes/blob: `put-blob` refuses metadata named `sha256`, and malformed metadata, with the new
+  condition `blob-invalid-metadata`** (#810). `sha256`, in any case, is reserved for the checksum
+  the S3 store now records. Names and values become request headers on S3, so a name must be a
+  non-empty HTTP header token (ASCII letters, digits and ``!#$%&'*+-.^_`|~``), a value must be
+  printable ASCII, and two names that differ only in case are refused, because they would be
+  the same header. S3 expects a non-ASCII value RFC 2047-encoded; hermes does not encode, so
+  encode one yourself or keep it in your own row. `blob-invalid-metadata-name` names the
+  offending entry. The check runs on every store,
+  so an app that passed `("sha256" . ...)` in `:metadata` to keep its own checksum must rename
+  that entry; the store's own checksum is in `blob-meta-checksum`.
+
 - **Native: the pinned libuv is 1.53.0** (#739), released 2026-09-24, in place of 1.52.1.
   `libuv.pin` names it with its sha256, and `scripts/build-libuv.lisp` builds it. A tree whose
   `vendor/libuv/` was built from 1.52.1 keeps loading that copy until it is rebuilt: delete
@@ -1405,6 +1416,14 @@ its tag.
   control character** (#796), with `blob-upload-refused` reason `:bad-content-type`, before
   sending anything. This is the same check `upload-url` makes; a CR or LF in it would end up in a
   request header.
+
+- **hermes/blob: on the S3 store, `blob-metadata` returns the checksum `put-blob` computed**
+  (#810). `put-blob` now stores the SHA-256 as the object's `x-amz-meta-sha256`, which is where
+  `blob-meta-checksum` is read from. Before, it was sent only as the payload hash, so
+  `blob-metadata` returned NIL for the checksum of every blob on S3; `put-blob`'s own return value
+  was always right. Objects stored before this change, and objects a client uploaded directly
+  through `upload-url` or through a multipart upload started with `start-multipart-upload`, still
+  report NIL, because their bytes never pass through hermes.
 
 - **praxeon: `praxeon/conditions:value-shape` is exported** (follow-up to #760). It describes a
   value by its kind and length ("a string of 12 characters") without printing it, as the

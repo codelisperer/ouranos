@@ -74,7 +74,9 @@ A presigned URL is a credential. Do not log it or store it."
    "Stream the bytes of STREAM (an octet input stream) into STORE at BUCKET/KEY.
 
 Returns a BLOB-META describing what was written. Overwrites an existing blob. METADATA is
-an alist of string->string carried alongside the object where the backend supports it.
+an alist of string->string carried alongside the object where the backend supports it. The
+name \"sha256\", in any case, is reserved for the checksum the store records, and a malformed
+entry signals BLOB-INVALID-METADATA (#810).
 
 The stream is consumed but NOT closed -- the caller opened it and owns it."))
 
@@ -217,9 +219,43 @@ passes through."
                       (k:blob-key-fault-message key)
                       "a blob key must be a string"))))
 
+(defun %token-char-p (char)
+  "True for a character allowed in an HTTP header name: RFC 7230's tchar, ASCII letters, digits
+and !#$%&'*+-.^_`|~."
+  (or (char<= #\a char #\z) (char<= #\A char #\Z) (char<= #\0 char #\9)
+      (find char "!#$%&'*+-.^_`|~")))
+
+(defun %check-metadata (bucket key metadata)
+  "Signal BLOB-INVALID-METADATA unless METADATA is an alist of usable string names to string
+values (#810). Names and values become x-amz-meta-* headers on S3, so a name must be an HTTP
+header token and a value printable ASCII: S3 expects anything else RFC 2047-encoded, and a raw
+non-ASCII value can break the request's signature. Two names that differ only in case would be
+the same header, and \"sha256\" is reserved for the checksum the store records."
+  (unless (listp metadata)
+    (error 'blob-invalid-metadata :bucket bucket :key key :fault "metadata must be an alist"))
+  (let ((seen '()))
+    (dolist (entry metadata)
+      (unless (and (consp entry) (stringp (car entry)) (stringp (cdr entry)))
+        (error 'blob-invalid-metadata :bucket bucket :key key
+                                      :fault "each entry must be a (name . value) pair of strings"))
+      (destructuring-bind (name . value) entry
+        (flet ((refuse (fault)
+                 (error 'blob-invalid-metadata :bucket bucket :key key :name name :fault fault)))
+          (cond ((zerop (length name)) (refuse "a name may not be empty"))
+                ((notevery #'%token-char-p name)
+                 (refuse "a name must be an HTTP token: ASCII letters, digits, !#$%&'*+-.^_`|~"))
+                ((string-equal name "sha256")
+                 (refuse "the name sha256 is reserved for the checksum the store records"))
+                ((member name seen :test #'string-equal)
+                 (refuse "two names differ only in case, and would be the same header"))
+                ((notevery (lambda (c) (<= 32 (char-code c) 126)) value)
+                 (refuse "a value must be printable ASCII")))
+          (push name seen))))))
+
 (defmethod put-blob :before ((s store) bucket key stream &key content-type metadata)
-  (declare (ignore stream content-type metadata))
-  (%check-key bucket key))
+  (declare (ignore stream content-type))
+  (%check-key bucket key)
+  (%check-metadata bucket key metadata))
 
 (defmethod get-blob :before ((s store) bucket key) (%check-key bucket key))
 (defmethod delete-blob :before ((s store) bucket key) (%check-key bucket key))
