@@ -47,7 +47,23 @@ missing, and DELIVERY-FAILURE when the provider refuses (#778)."))
 (defgeneric telegram-can-post (provider chat)
   (:documentation "Whether the bot behind PROVIDER can post to CHAT (an integer chat id or an
 \"@username\"), for an admin screen: :YES, :NOT-MEMBER (the bot is not in the chat, or cannot
-see it), or :NOT-PERMITTED (it is in the chat but may not post there) (#778)."))
+see it), or :NOT-PERMITTED (it is in the chat but may not post there) (#778). A group that became
+a supergroup is not answered: the Telegram backend signals TELEGRAM-CHAT-MIGRATED, whose
+TELEGRAM-CHAT-MIGRATED-MIGRATE-TO-CHAT-ID is the chat id to store instead (#788)."))
+
+(defgeneric telegram-added-chats (provider &key confirm)
+  (:documentation "The chats the bot behind PROVIDER was added to or removed from recently, as a
+list of TELEGRAM-ADDED-CHAT, one per chat with its latest change, oldest first (#794). This is how
+an app finds the numeric id of a private group or channel that operators share as a t.me/+
+invite link, which no Bot API method resolves: an operator adds the bot, then the app lists these
+and the operator picks the chat by its title.
+
+The Telegram backend reads the bot's pending updates with getUpdates. Telegram keeps an update for
+24 hours, so a bot added longer ago than that is not listed. Without CONFIRM, the updates are read
+and left pending, so another reader of the same bot still receives them; only the first 100
+pending updates are read. With CONFIRM true, every pending update is read and confirmed, and
+Telegram then drops them, for every reader of the bot. Signals TELEGRAM-WEBHOOK-ACTIVE when the
+bot has a webhook set."))
 
 (defmethod edit-sent-message ((p provider) result text &key parse-mode link-preview part)
   "Default: the provider cannot edit a sent message."

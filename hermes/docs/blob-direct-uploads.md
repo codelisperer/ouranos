@@ -22,7 +22,8 @@ for it. Smaller files can still go through `put-blob`.
    ```
 
    It returns an `upload-target`: `upload-target-url`, `upload-target-method` (`"PUT"`),
-   `upload-target-headers` (the headers the client must send exactly, here `Content-Type`),
+   `upload-target-headers` (the headers the client must send exactly: here `Content-Type`, and
+   `x-amz-acl: private` as well on a store made with `:upload-acl :private`),
    `upload-target-expires-in` and `upload-target-content-length`.
 3. **The client PUTs the file** to the URL with those headers. The browser sets
    `Content-Length` itself from the body.
@@ -55,6 +56,24 @@ for it. Smaller files can still go through `put-blob`.
   `:content-length` that is not a non-negative integer is refused (reasons `:bad-max-bytes` and
   `:bad-content-length`). On S3 a declared size over 5 GiB, the largest single PUT S3 accepts, is
   refused with reason `:too-large-for-single-put`; such a file needs a multipart upload.
+- **On a bucket that honours ACLs, set `:upload-acl :private`.** An unsigned header is not
+  covered by the signature, so a client can add `x-amz-acl: public-read` to its PUT. On a bucket
+  that honours ACLs, that header could make the quarantined upload readable by anyone. Whether
+  DigitalOcean Spaces applies such an unsigned header has not been measured yet (#796). An S3
+  store made with `:upload-acl :private`, or with `MNEMOSYNE_S3_UPLOAD_ACL=private`, signs
+  `x-amz-acl: private` and puts it in `upload-target-headers`, so the browser must send exactly
+  that. Measured on MinIO (#796): with the header signed, a PUT that sends `public-read` is refused
+  with 403, and a PUT that leaves the header out is refused with 400.
+
+  Which buckets should set it:
+  - **`:private`:** buckets that honour ACLs, such as DigitalOcean Spaces and AWS buckets with ACLs
+    enabled.
+  - **`:none`, the default:** AWS buckets with ACLs disabled, which is the default for a new AWS
+    bucket. AWS documents that such a bucket refuses an upload naming any ACL other than
+    `bucket-owner-full-control` with 400 `AccessControlListNotSupported`, so signing `private` there
+    would refuse every upload. Also Cloudflare R2, which lists `x-amz-acl` as not implemented.
+
+  Any other value for the setting fails when the store is made, with `blob-configuration-error`.
 - **The expiry must be from 1 second to 7 days,** SigV4's limit; anything else is
   `blob-upload-refused` with reason `:bad-expiry`.
 - **The key is validated** like every other blob operation, so `..` and the other faults in
@@ -116,18 +135,22 @@ not implement `read-blob-range` gets a default that reads the range through `get
 ## CORS
 
 A browser upload to a bucket needs a CORS rule on the bucket allowing `PUT` from the app's origin,
-with the `Content-Type` header. Without one, the browser blocks the request before it reaches the
-store, and the app sees only a network error.
+with the headers in `upload-target-headers`: `Content-Type`, and `x-amz-acl` on a store made with
+`:upload-acl :private`. Without one, the browser blocks the request before it reaches the store,
+and the app sees only a network error.
 
 - **To set the rule:** `(hermes/blob:put-bucket-cors store "media" :origins '("https://app.example.com"))`.
-  `:methods` defaults to `("PUT")`, `:allowed-headers` to `("Content-Type")` and `:max-age-seconds`
-  to 3000. It **replaces** the bucket's whole CORS configuration, as the S3 API does, so a bucket that
+  `:methods` defaults to `("PUT")`, `:allowed-headers` to `("Content-Type" "x-amz-acl")`, which covers
+  both settings, and `:max-age-seconds` to 3000. It **replaces** the bucket's whole CORS configuration, as the S3 API does, so a bucket that
   needs other rules as well should have them all set together, by whoever owns the bucket.
 - **To find out why an upload never arrived:**
   `(hermes/blob:check-bucket-cors store "media" "https://app.example.com")` reads the bucket's rules and
   returns `:allowed`, `:no-cors-configuration`, `:origin-not-allowed`, `:method-not-allowed` or
-  `:header-not-allowed`. Pass `:method` and `:headers` when the upload sends something other than a
-  `PUT` with `Content-Type`. `:no-cors-configuration` is also what a missing bucket reads as.
+  `:header-not-allowed`. By default it checks a `PUT` with the headers `upload-url` sends on this
+  store: `Content-Type`, plus `x-amz-acl` on a store made with `:upload-acl :private`. A rule that
+  allows only `Content-Type` reads as `:header-not-allowed` on such a store. Pass `:method` and
+  `:headers` to check something else. `:no-cors-configuration` is also what a missing bucket reads
+  as.
 
 Both use S3's PutBucketCors and GetBucketCors calls, which DigitalOcean Spaces documents as supported.
 Neither has been run against a live store yet; the tests check the request each one sends and the

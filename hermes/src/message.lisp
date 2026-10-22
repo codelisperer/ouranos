@@ -71,13 +71,14 @@ default); TEXT is the message body."
 
 (defun %telegram-chat-p (chat)
   "True for a Telegram chat: an integer chat id, or a public username written \"@name\" with 5 to
-32 letters, digits and underscores, starting with a letter."
+32 letters, digits and underscores, starting with a letter and not ending with an underscore."
   (flet ((ascii-letter-p (ch) (and (char< ch (code-char 128)) (alpha-char-p ch))))
     (or (integerp chat)
         (and (stringp chat)
              (<= 6 (length chat) 33)
              (char= (char chat 0) #\@)
              (ascii-letter-p (char chat 1))
+             (char/= (char chat (1- (length chat))) #\_)
              (every (lambda (ch) (or (char= ch #\_) (ascii-letter-p ch) (digit-char-p ch)))
                     (subseq chat 1))))))
 

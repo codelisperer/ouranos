@@ -572,6 +572,25 @@ POST is followed with a GET and no body. Control: a 307 on the same origin keeps
         (is (equal "x=1" (http:request-content second)))
         (is (assoc "Authorization" (http:request-headers second) :test #'string-equal))))))
 
+(test fetch-public-returns-the-url-of-the-last-hop
+  "The second value is the URL the response came from: the redirect's target, resolved against
+the URL that redirected, and the URL itself when nothing redirected (#757)."
+  (let ((resolve (%resolver '(("a.test" "93.184.216.34") ("b.test" "93.184.216.35")))))
+    (flet ((perform (req)
+             (let ((path (quri:uri-path (quri:uri (http:request-url req)))))
+               (cond ((string= "/start" path)
+                      (http:make-response :status 301 :headers (%headers "location" "http://b.test/moved")))
+                     ((string= "/moved" path)
+                      (http:make-response :status 302 :headers (%headers "location" "final?x=1")))
+                     (t (http:make-response :status 200))))))
+      (multiple-value-bind (r url) (http:fetch-public "http://a.test/start" :resolve resolve
+                                                                            :perform #'perform)
+        (is (= 200 (http:response-status r)))
+        (is (string= "http://b.test/final?x=1" url)))
+      (is (string= "http://a.test/plain"
+                   (nth-value 1 (http:fetch-public "http://a.test/plain" :resolve resolve
+                                                                         :perform #'perform)))))))
+
 (test a-url-without-a-port-connects-to-its-scheme-default
   "Review of #312: QURI-PORT is NIL when the URL gives no port, and the pinned connection must
 then use 80 for http and 443 for https, not NIL. Checked on the function that chooses the port,
