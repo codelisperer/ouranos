@@ -632,7 +632,9 @@ multipart/form-data to /images/edits."
             ;; own, and fails on these octets with a TYPE-ERROR (#817's first CI run). WinHTTP
             ;; on Windows passes the octets through, so the test suite passed there. HTTP treats
             ;; whitespace before a field value as not part of it (RFC 9110, section 5.5), so the
-            ;; server reads exactly TYPE, while dexador's prefix check no longer matches.
+            ;; server reads exactly TYPE, while dexador's prefix check no longer matches. #828
+            ;; asks aion/http-client to send octets with their Content-Type as given on every
+            ;; backend; this space goes when it does.
             (values octets (concatenate 'string " " type) "/images/edits"
                     (edit-body-count body)))
           (values (jzon:stringify body) "application/json" "/images/generations"
