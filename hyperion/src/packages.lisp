@@ -488,6 +488,31 @@
    ;; component
    #:consent-banner))
 
+;;; --- Link-preview tags: Open Graph, Twitter cards, canonical (#821) ------
+(cl:defpackage #:hyperion/page-meta
+  (:use #:cl)
+  (:local-nicknames (#:log  #:aion/log)
+                    (#:spin #:spinneret)
+                    (#:i18n #:hyperion/i18n))
+  (:documentation
+   "The <head> tags that make a shared link show a preview card: Open Graph (og:*),
+    Twitter cards (twitter:*), <meta name=description> and <link rel=canonical>. A
+    handler or layout declares the page's title, description, image, canonical URL,
+    type and locale; PAGE-META turns that into a list of tags, and META-TAGS writes
+    them into the page with Spinneret. Every URL is made absolute from the SITE's
+    configured public origin, never from the request's Host header. A page that needs
+    sign-in or is marked noindex gets the site's name and fallback image only.")
+  (:export
+   ;; the site
+   #:site #:site-p #:make-site #:*site*
+   #:site-name #:site-origin #:site-image #:site-image-width #:site-image-height
+   #:site-image-alt #:site-twitter
+   ;; the page
+   #:page-meta #:meta-tags #:meta-tags-string
+   ;; pieces, exported for apps that build their own tags
+   #:absolute-url #:trim-description #:og-locale #:expiring-url-p
+   #:page-meta-error))
+
 ;;; --- Static asset serving -----------------------------------------------
 (cl:defpackage #:hyperion/static
   (:use #:cl)

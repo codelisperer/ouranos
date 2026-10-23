@@ -109,6 +109,19 @@ constructed, not at first use, so a misconfigured deploy fails at boot."))
 :BAD-CONTENT-TYPE, :BAD-EXPIRY, :BAD-PART-NUMBER, :BAD-UPLOAD-ID or :BAD-PARTS, so a caller
 branches on the reason and not on the message."))
 
+(define-condition blob-source-changed (blob-backend-error)
+  ()
+  (:default-initargs :status 412)
+  (:report (lambda (c s)
+             (format s "the source blob ~A/~A changed after it was read, so it was not copied"
+                     (or (blob-error-bucket c) "?") (or (blob-error-key c) "?"))))
+  (:documentation
+   "COPY-BLOB or MOVE-BLOB found that the source is no longer the object it read at the start
+(#804): the provider refused the copy with 412 because the source's ETag changed. BUCKET and KEY
+name the SOURCE. Nothing was copied, and a move deleted nothing. For a quarantine flow this
+means \"verify the object again\", which a transient BLOB-BACKEND-ERROR does not; it is a
+BLOB-BACKEND-ERROR subclass, so a handler for that still catches it."))
+
 (define-condition blob-unsupported (blob-error)
   ((operation :initarg :operation :initform nil :reader blob-unsupported-operation))
   (:report (lambda (c s)

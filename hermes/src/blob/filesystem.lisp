@@ -99,7 +99,10 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
                           (or (ignore-errors (parse-integer (or (field "size") "0"))) 0)
                           (if (and ct (plusp (length ct))) ct nil)
                           (if (and sum (plusp (length sum))) sum nil)
-                          (ignore-errors (parse-integer (or (field "last-modified") "0")))))))))
+                          (ignore-errors (parse-integer (or (field "last-modified") "0")))
+                          ;; The ETag is the content's SHA-256, standing in for S3's (#826): it
+                          ;; changes when the bytes change, which is what IF-MATCH relies on.
+                          (if (and sum (plusp (length sum))) sum nil)))))))
 
 ;;; --- operations ------------------------------------------------------------
 
@@ -122,7 +125,7 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
            (uiop:rename-file-overwriting-target tmp final)
            (setf committed t))
       (unless committed (uiop:delete-file-if-exists tmp)))
-    (let ((meta (make-blob-meta key size content-type checksum (get-universal-time))))
+    (let ((meta (make-blob-meta key size content-type checksum (get-universal-time) checksum)))
       (%write-meta meta-path meta metadata)
       (log:debug "blob put" :backend "filesystem" :bucket bucket :bytes size)
       meta)))
@@ -217,6 +220,83 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
 (defmethod list-multipart-parts ((s filesystem-store) bucket key upload-id)
   (declare (ignore upload-id))
   (error 'blob-unsupported :bucket bucket :key key :operation "multipart uploads (proxy the upload through put-blob)"))
+
+(defun %read-user-metadata (path)
+  "The app's metadata recorded in the sidecar at PATH, as an alist, in the order written; NIL if
+there is no sidecar. These are the `x-NAME: value' lines %WRITE-META writes."
+  (when (probe-file path)
+    (with-open-file (in path :external-format :utf-8)
+      (loop for line = (read-line in nil nil)
+            while line
+            for colon = (position #\: line)
+            when (and colon (> (length line) 2) (string= "x-" line :end2 2))
+              collect (cons (subseq line 2 colon)
+                            (string-left-trim " " (subseq line (1+ colon))))))))
+
+(defmethod copy-blob ((s filesystem-store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  (let ((src (%blob-path s src-bucket src-key "objects"))
+        (src-meta (%blob-path s src-bucket src-key "meta")))
+    (unless (probe-file src)
+      (error 'blob-not-found :bucket src-bucket :key src-key))
+    (let* ((old (blob-metadata s src-bucket src-key))
+           (new-type (or content-type (blob-meta-content-type old)))
+           (new-metadata (or metadata (%read-user-metadata src-meta))))
+      (%check-if-match src-bucket src-key if-match (blob-meta-etag old))
+      (if (%same-location-p src-bucket src-key dst-bucket dst-key)
+          ;; In place: the bytes stay, and only a change rewrites the sidecar.
+          (if (or content-type metadata)
+              (let ((meta (make-blob-meta dst-key (blob-meta-size old) new-type
+                                          (blob-meta-checksum old) (get-universal-time)
+                                          (blob-meta-etag old))))
+                (%write-meta src-meta meta new-metadata)
+                meta)
+              old)
+          ;; Through PUT-BLOB's own temp-file-and-rename path, so a crash leaves nothing
+          ;; half-written under the destination key, and the checksum is computed again from the
+          ;; bytes copied.
+          (with-open-file (in src :element-type '(unsigned-byte 8))
+            (let ((meta (put-blob s dst-bucket dst-key in
+                                  :content-type new-type :metadata new-metadata)))
+              (log:info "blob copied" :backend "filesystem"
+                                      :src-bucket src-bucket :dst-bucket dst-bucket
+                                      :bytes (blob-meta-size meta))
+              meta))))))
+
+(defmethod move-blob ((s filesystem-store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  (let ((src (%blob-path s src-bucket src-key "objects"))
+        (src-meta (%blob-path s src-bucket src-key "meta"))
+        (dst (%blob-path s dst-bucket dst-key "objects"))
+        (dst-meta (%blob-path s dst-bucket dst-key "meta")))
+    (unless (probe-file src)
+      (error 'blob-not-found :bucket src-bucket :key src-key))
+    ;; Checked before anything moves: a mismatch renames and deletes nothing.
+    (%check-if-match src-bucket src-key if-match
+                     (blob-meta-etag (blob-metadata s src-bucket src-key)))
+    (cond ((%same-location-p src-bucket src-key dst-bucket dst-key)
+           ;; Deletes nothing: the source IS the destination.
+           (if (or content-type metadata)
+               (copy-blob s src-bucket src-key dst-bucket dst-key
+                          :content-type content-type :metadata metadata)
+               (blob-metadata s src-bucket src-key)))
+          (t
+           (let* ((old (blob-metadata s src-bucket src-key))
+                  (user (or metadata (%read-user-metadata src-meta))))
+             (uiop:ensure-all-directories-exist (list dst dst-meta))
+             ;; A rename within one root: the object appears under the new key whole, or not at all.
+             (uiop:rename-file-overwriting-target src dst)
+             (%write-meta dst-meta
+                          (make-blob-meta dst-key (blob-meta-size old)
+                                          (or content-type (blob-meta-content-type old))
+                                          (blob-meta-checksum old) (get-universal-time)
+                                          (blob-meta-etag old))
+                          user)
+             (uiop:delete-file-if-exists src-meta)
+             (log:info "blob moved" :backend "filesystem"
+                                    :src-bucket src-bucket :dst-bucket dst-bucket
+                                    :bytes (blob-meta-size old))
+             (blob-metadata s dst-bucket dst-key))))))
 
 (defmethod list-blobs ((s filesystem-store) bucket &key prefix)
   ;; A KEY IS PROTOCOL, not an implementation detail. S3 keys are `/'-separated by
