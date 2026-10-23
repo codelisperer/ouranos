@@ -206,6 +206,82 @@ account is neither returned nor deleted."
           (other (lambda (schema attributes err)
                    (ffi:secret-password-clearv-sync schema attributes (cffi:null-pointer) err)))))))
 
+  #+linux
+  (test a-stored-value-that-is-not-utf-8-is-refused-without-its-bytes
+    "Another program can store any bytes under this schema. Fetching bytes that are not UTF-8
+signals CREDENTIAL-ERROR, whose report and slots hold none of them; SBCL's own decoding error
+would have carried them."
+    (let ((service (%item (%service) "user"))
+          (octets (coerce #(115 107 255 254 45 120 121 122) '(vector (unsigned-byte 8)))))
+      (unwind-protect
+           (progn
+             (libsecret:with-libsecret-lock ()
+               (libsecret:with-schema (schema hades/credentials::*schema-name*
+                                              '("service" "account"))
+                 (libsecret:with-attributes (attributes (list (cons "service" service)
+                                                              (cons "account" "user")))
+                   (let ((v (libsecret:make-secret-value octets)))
+                     (unwind-protect
+                          (libsecret:with-gerror (err "storing bytes that are not UTF-8")
+                            (ffi:secret-password-storev-binary-sync
+                             schema attributes "default" "hades test: bytes that are not UTF-8"
+                             v (cffi:null-pointer) err))
+                       (ffi:secret-value-unref v))))))
+             (let ((condition (handler-case (progn (cred:fetch-credential service "user") nil)
+                                (error (e) e))))
+               (is (typep condition 'cred:credential-error) "got ~S" condition)
+               (is (not (typep condition 'cred:credential-not-found)))
+               (when condition
+                 (let ((report (princ-to-string condition)))
+                   (is (search "not UTF-8" report) "~A" report)
+                   (is (not (search "xyz" report)) "the bytes appeared in the report: ~A"
+                       report)))))
+        (%cleanup service "user"))))
+
+  #+linux
+  (test a-locked-keyring-is-reported-as-locked-by-every-operation
+    "In a new keyring that holds the item, with the default collection then locked, store, fetch
+and delete each signal CREDENTIAL-STORE-UNAVAILABLE. Without a display the request to unlock is
+never made. With a display on which no prompt can be shown, libsecret asks, gets no answer, and
+returns nothing without an error, and that must not read as an absent item. Each case runs in a
+child under its own scripts/with-secret-service.sh, so this machine's keyring is never locked."
+    (let ((daemon (ignore-errors (uiop:run-program '("sh" "-c" "command -v gnome-keyring-daemon")
+                                                   :output '(:string :stripped t)))))
+      (if (or (null daemon) (string= "" daemon))
+          (skip "gnome-keyring-daemon is not installed, so a keyring cannot be locked here")
+          (dolist (case '((("DISPLAY=" "WAYLAND_DISPLAY=") "there is no display")
+                          (("DISPLAY=:99" "WAYLAND_DISPLAY=") "the keyring is locked")))
+            (destructuring-bind (environment expected) case
+              (let ((value (%marker)))
+                (multiple-value-bind (text lines)
+                    (%child-results
+                     environment
+                     '(progn
+                       (cred:store-credential "ouranos-test-hades-credentials/child" "user"
+                                              (sec:make-secret "stored before the lock"))
+                       (let ((cl-user::service
+                               (libsecret:with-gerror (cl-user::err "reaching the service")
+                                 (ffi:secret-service-get-sync ffi:+secret-service-none+
+                                                              (cffi:null-pointer) cl-user::err))))
+                         (cffi:with-foreign-object (cl-user::paths :pointer 2)
+                           (setf (cffi:mem-aref cl-user::paths :pointer 0)
+                                 (cffi:foreign-string-alloc
+                                  "/org/freedesktop/secrets/aliases/default")
+                                 (cffi:mem-aref cl-user::paths :pointer 1) (cffi:null-pointer))
+                           (libsecret:with-gerror (cl-user::err "locking the default collection")
+                             (ffi:secret-service-lock-dbus-paths-sync
+                              cl-user::service cl-user::paths (cffi:null-pointer)
+                              (cffi:null-pointer) cl-user::err))))
+                       (format t "~&LOCKED ~A~%" (libsecret:default-collection-locked-p)))
+                     value :wrapper (%with-secret-service-script))
+                  (is (search "LOCKED T" text) "the collection must be locked first:~%~A" text)
+                  (is (= 3 (length lines)) "the child must report three operations:~%~A" text)
+                  (dolist (line lines)
+                    (is (search "UNAVAILABLE" line) "~A: expected UNAVAILABLE: ~A" environment line)
+                    (is (search expected line) "~A: the reason must say ~S: ~A"
+                        environment expected line))
+                  (is (not (search value text)) "the value appeared in the child's output"))))))))
+
   (in-suite leftovers)
 
   (test every-item-the-live-tests-created-is-gone
@@ -246,10 +322,16 @@ fetches by name only the items this run created."
     (ensure-directories-exist
      (merge-pathnames (format nil "hades-cred-~A/" (%token)) (uiop:temporary-directory))))
 
-  (defun %child-results (environment prelude value)
+  (defparameter *child-deadline* 180
+    "Seconds a child SBCL may run before it is killed and the test fails.")
+
+  (defun %child-results (environment prelude value &key wrapper)
     "Run a child SBCL with ENVIRONMENT, a list of \"NAME=VALUE\" strings replacing those
 variables, evaluate the form PRELUDE, then store VALUE and fetch and delete it. Returns the
-child's whole output as a string, and the lines of the form OPERATION OUTCOME REASON."
+child's whole output as a string, and the lines of the form OPERATION OUTCOME REASON. WRAPPER,
+when given, is a program the child is run through, such as scripts/with-secret-service.sh. A
+child still running after *CHILD-DEADLINE* seconds is killed, and its output then ends with a
+line saying so."
     (let* ((names (mapcar (lambda (e) (subseq e 0 (1+ (position #\= e)))) environment))
            (env (append environment
                         (remove-if (lambda (e) (some (lambda (n) (uiop:string-prefix-p n e)) names))
@@ -281,19 +363,39 @@ child's whole output as a string, and the lines of the form OPERATION OUTCOME RE
                                  (format nil "UNAVAILABLE ~A"
                                          (cred:credential-store-unavailable-reason cl-user::e)))
                                (error (cl-user::e) (format nil "OTHER ~A" cl-user::e)))))))))
-           (process (sb-ext:run-program
-                     sb-ext:*runtime-pathname*
-                     (list "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
-                           "--eval" "(require :asdf)"
-                           "--eval" (format nil "(load ~S)" (uiop:native-namestring setup))
-                           "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry (:tree ~S) :inherit-configuration))" (%tree))
-                           "--eval" "(let ((*standard-output* (make-broadcast-stream)) (*error-output* (make-broadcast-stream))) (asdf:load-system \"hades/credentials\"))"
-                           "--eval" form)
-                     :environment env :output :stream :error :output :wait nil))
+           (sbcl-arguments
+             (list "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                   "--eval" "(require :asdf)"
+                   "--eval" (format nil "(load ~S)" (uiop:native-namestring setup))
+                   "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry (:tree ~S) :inherit-configuration))" (%tree))
+                   "--eval" "(let ((*standard-output* (make-broadcast-stream)) (*error-output* (make-broadcast-stream))) (asdf:load-system \"hades/credentials\"))"
+                   "--eval" form))
+           (process (if wrapper
+                        (sb-ext:run-program wrapper
+                                            (cons (uiop:native-namestring sb-ext:*runtime-pathname*)
+                                                  sbcl-arguments)
+                                            :environment env :output :stream :error :output
+                                            :wait nil)
+                        (sb-ext:run-program sb-ext:*runtime-pathname* sbcl-arguments
+                                            :environment env :output :stream :error :output
+                                            :wait nil)))
+           (killed nil)
+           (watchdog (sb-thread:make-thread
+                      (lambda ()
+                        (loop repeat (* 10 *child-deadline*)
+                              while (sb-ext:process-alive-p process)
+                              do (sleep 1/10))
+                        (when (sb-ext:process-alive-p process)
+                          (setf killed t)
+                          (sb-ext:process-kill process 9)))
+                      :name "hades/credentials/tests child deadline"))
            (text (with-output-to-string (out)
                    (loop for line = (read-line (sb-ext:process-output process) nil)
-                         while line do (write-line line out)))))
-      (sb-ext:process-wait process)
+                         while line do (write-line line out))
+                   (sb-ext:process-wait process)
+                   (sb-thread:join-thread watchdog)
+                   (when killed
+                     (format out "KILLED after ~D seconds~%" *child-deadline*)))))
       (sb-ext:process-close process)
       (values text
               (remove-if-not (lambda (line)
@@ -325,6 +427,10 @@ contains EXPECTED, and the value never appears in the child's output."
      (list (format nil "DBUS_SESSION_BUS_ADDRESS=unix:path=~Ahades-cred-~A/no-bus-here"
                    (uiop:native-namestring (uiop:temporary-directory)) (%token)))
      nil "there is no D-Bus session bus"))
+
+  (defun %with-secret-service-script ()
+    (uiop:native-namestring
+     (merge-pathnames "scripts/with-secret-service.sh" (uiop:ensure-directory-pathname (%tree)))))
 
   (test on-a-bus-with-no-secret-service-every-call-says-so
     "A private session bus whose configuration names no service directories, so nothing can be

@@ -20,9 +20,14 @@ its tag.
   D-Bus session bus (GNOME Keyring, KeePassXC), under the libsecret schema
   `org.codelisperer.hades.Credential` with the attributes `service` and `account`, labelled
   "SERVICE (ACCOUNT)". It needs `libsecret-1.so.0` at run time (`libsecret-1-0` on Debian and
-  Ubuntu); where that is missing, where there is no session bus, where nothing provides the
-  Secret Service, or where the keyring is locked, every call still signals
-  `credential-store-unavailable`, and `credential-store-unavailable-reason` says which. An app
+  Ubuntu); where that is missing, where there is no session bus, or where nothing provides the
+  Secret Service, every call still signals `credential-store-unavailable`, and
+  `credential-store-unavailable-reason` says which. When the keyring is locked, an operation on a
+  desktop may ask the user to unlock it, as on macOS, and waits for the answer. Without a display
+  (neither `DISPLAY` nor `WAYLAND_DISPLAY` set) it asks nothing and signals
+  `credential-store-unavailable`. When the request is dismissed it also signals that, never
+  `credential-not-found`. A stored value that is not UTF-8 text, which only another program can
+  write, signals `credential-error` without its bytes. An app
   that treated Linux as having no store, for example by catching that condition to hide a
   setting, will now store the secret on a Linux desktop. An app shipped as an AppImage or other
   bundle should not bundle libsecret: the one the desktop installs is the one that talks to its
@@ -537,8 +542,9 @@ its tag.
 - **aion/libsecret: a Linux-only binding of libsecret for the Secret Service** (#357). The raw
   calls are in `aion/libsecret/ffi`; `aion/libsecret` has `load-libsecret` (T, or NIL and the
   reason), `with-libsecret-lock`, `with-schema`, `with-attributes`, `make-secret-value`,
-  `secret-value-octets`, `check-session-bus`, `check-secret-service`, and the condition
-  `libsecret-error` (domain, code, message) with `with-gerror` and `locked-error-p`. It depends
+  `secret-value-octets`, `check-session-bus`, `check-secret-service`,
+  `default-collection-locked-p`, and the condition `libsecret-error` (domain, code, message) with
+  `with-gerror`, `locked-error-p` and `service-missing-error-p`. It depends
   only on `cffi` and loads `libsecret-1.so.0` on first use, so it loads on a system without
   libsecret. hades/credentials uses it; an app normally does not.
 

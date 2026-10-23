@@ -51,11 +51,17 @@ Each of ARGUMENTS is (NAME CFFI-TYPE)."
 (defconstant +secret-schema-max-attributes+ 32
   "The length of SecretSchema's attributes array. The list ends at the first entry whose name is
 NULL, so a schema has at most 31 attributes.")
+(defconstant +secret-service-none+ 0 "SECRET_SERVICE_NONE.")
 (defconstant +secret-service-open-session+ 2 "SECRET_SERVICE_OPEN_SESSION (1 << 1).")
+(defconstant +secret-collection-none+ 0 "SECRET_COLLECTION_NONE.")
 (defconstant +g-bus-type-session+ 2 "G_BUS_TYPE_SESSION.")
 (defconstant +secret-error-is-locked+ 2
   "SECRET_ERROR_IS_LOCKED, in the domain \"secret-error\": the item or collection is locked.")
 (defconstant +secret-error-no-such-object+ 3 "SECRET_ERROR_NO_SUCH_OBJECT.")
+(defconstant +g-dbus-error-service-unknown+ 2
+  "G_DBUS_ERROR_SERVICE_UNKNOWN, in the domain \"g-dbus-error-quark\": nothing owns the name and
+no service file can start one.")
+(defconstant +g-dbus-error-name-has-no-owner+ 3 "G_DBUS_ERROR_NAME_HAS_NO_OWNER.")
 
 ;;; --- SecretSchema --------------------------------------------------------------------------
 ;;;
@@ -105,6 +111,15 @@ NULL, so a schema has at most 31 attributes.")
 
 (define-call secret-service-get-sync "secret_service_get_sync" :pointer
   (flags :int) (cancellable :pointer) (error :pointer))
+;;; A SecretCollection made by secret_collection_for_alias_sync on a service that has not loaded
+;;; its collections is a new D-Bus proxy, which reads the collection's properties when it is
+;;; made. Its Locked property is therefore current at that moment, not a cached value.
+(define-call secret-collection-for-alias-sync "secret_collection_for_alias_sync" :pointer
+  (service :pointer) (alias :string) (flags :int) (cancellable :pointer) (error :pointer))
+(define-call secret-collection-get-locked "secret_collection_get_locked" :int (collection :pointer))
+(define-call secret-service-lock-dbus-paths-sync "secret_service_lock_dbus_paths_sync" :int
+  (service :pointer) (paths :pointer) (cancellable :pointer) (locked :pointer) (error :pointer))
+
 (define-call g-bus-get-sync "g_bus_get_sync" :pointer
   (bus-type :int) (cancellable :pointer) (error :pointer))
 (define-call g-object-unref "g_object_unref" :void (object :pointer))

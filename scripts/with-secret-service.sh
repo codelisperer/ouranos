@@ -27,7 +27,11 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-if [ -z "${OURANOS_SECRET_SERVICE_DIR:-}" ]; then
+# The script runs twice: once as called, and once inside the private bus, recognised by the
+# first argument below. An environment variable would not do, because one a developer exported
+# would make the first run skip dbus-run-session and start the daemon on their own bus.
+inside=--inside-private-bus-started-by-with-secret-service
+if [ "${1:-}" != "$inside" ]; then
   for program in dbus-run-session gnome-keyring-daemon; do
     if ! command -v "$program" >/dev/null; then
       echo "$0: $program is not installed; it comes with the package named in this script's header" >&2
@@ -38,14 +42,16 @@ if [ -z "${OURANOS_SECRET_SERVICE_DIR:-}" ]; then
   trap 'rm -rf "$dir"' EXIT
   mkdir -m 700 "$dir/runtime" "$dir/data" "$dir/config"
   status=0
-  OURANOS_SECRET_SERVICE_DIR="$dir" \
+  env -u GNOME_KEYRING_CONTROL \
     XDG_RUNTIME_DIR="$dir/runtime" XDG_DATA_HOME="$dir/data" XDG_CONFIG_HOME="$dir/config" \
-    dbus-run-session -- "$0" "$@" || status=$?
+    dbus-run-session -- "$0" "$inside" "$@" || status=$?
   exit "$status"
 fi
+shift
 
 # Inside the private session. --unlock reads the password from standard input until it ends, and
 # with no login keyring yet it creates one with that password and makes it the default.
+unset GNOME_KEYRING_CONTROL
 head -c 32 /dev/urandom | base64 | tr -d '\n' \
   | gnome-keyring-daemon --unlock --components=secrets >/dev/null
 exec "$@"

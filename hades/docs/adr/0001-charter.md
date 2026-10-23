@@ -204,7 +204,10 @@ is the client library GNOME and KDE applications already use for this; speaking 
 Service's D-Bus protocol directly would mean writing a D-Bus client and its session encryption in
 Lisp, which is more code to get wrong than the binding it replaces. The value goes through the
 `_binary_` calls, which take a length, so a value containing a NUL byte is stored whole, as it is
-on Windows and macOS.
+on Windows and macOS. A locked keyring is handled as on macOS: on a desktop an operation may ask
+the user to unlock it. Without a display nothing is asked and the store is reported unavailable,
+and a request the user dismissed is reported the same way, never as an item that does not
+exist.
 
 ## Addendum, 2026-10-23: a modal notice before a window exists (#819)
 

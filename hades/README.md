@@ -85,8 +85,10 @@ Windows the store is Credential Manager, per user and encrypted by DPAPI; on mac
 Keychain; on Linux, the Secret Service that GNOME Keyring or KeePassXC provides over D-Bus,
 reached through libsecret, which must be installed (`libsecret-1-0` on Debian and Ubuntu). Where
 no store can be used (libsecret missing, no D-Bus session bus, nothing providing the Secret
-Service, or a locked keyring) every call signals `credential-store-unavailable` with the reason,
-rather than storing anywhere else (#357).
+Service) every call signals `credential-store-unavailable` with the reason, rather than storing
+anywhere else (#357). A locked keyring may be unlocked by asking the user on a desktop; without a
+display, or when the user dismisses the request, the call signals `credential-store-unavailable`
+too.
 
 ## A notice before the app has a window
 

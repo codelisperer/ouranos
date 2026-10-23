@@ -26,7 +26,13 @@
 ;;;; passes through a foreign buffer as UTF-8 bytes, and that buffer is zeroed before it is freed.
 ;;;; On macOS it passes through the same kind of buffer into a CFData; the buffer is zeroed, and
 ;;;; the CFData's own copy is not (aion ADR-0004). On Linux it passes through the same kind of
-;;;; buffer into a SecretValue, which libsecret clears when it is released. The Lisp string REVEAL returns cannot be
+;;;; buffer into a SecretValue, which libsecret clears when it is released.
+;;;;
+;;;; A LOCKED KEYRING on Linux: on a desktop an operation may ask the user to unlock it, as macOS
+;;;; does. Without a display (no DISPLAY or WAYLAND_DISPLAY) a locked default collection is
+;;;; refused before anything is asked. A lookup or delete that comes back empty while the
+;;;; collection is still locked was refused or dismissed, and is reported as
+;;;; CREDENTIAL-STORE-UNAVAILABLE, never as an absent item. The Lisp string REVEAL returns cannot be
 ;;;; zeroed; that is aion/secret's limit, not this file's.
 
 (in-package #:hades/credentials)
@@ -243,23 +249,47 @@ schema, so it never returns an item another program stored with the same attribu
 Credential Manager's limit, so a value an app can store on one system it can store on the
 others.")
 
+  (defparameter *locked-headless-reason*
+    "the keyring is locked, and there is no display to ask for it to be unlocked on (neither DISPLAY nor WAYLAND_DISPLAY is set); unlock it, for example by logging in to the desktop, and try again")
+
+  (defparameter *locked-declined-reason*
+    "the keyring is locked and was not unlocked: the request to unlock it was dismissed or could not be shown")
+
   (defun %unavailable-reason ()
-    "NIL when the Secret Service can be used, or a sentence saying why it cannot, checking in
+    "NIL when the Secret Service can be reached, or a sentence saying why it cannot, checking in
 the order a user would fix them: libsecret installed, a D-Bus session bus, a program providing
-the Secret Service on it. Nothing here unlocks a keyring, so it never prompts. The caller holds
+the Secret Service on it. These checks unlock nothing, so this does not prompt. The caller holds
 the libsecret lock."
     (multiple-value-bind (loaded why) (libsecret:load-libsecret)
       (flet ((fails (check what)
                (handler-case (progn (funcall check) nil)
                  (libsecret:libsecret-error (e)
-                   (format nil "~A (~A)" what (libsecret:libsecret-error-message e))))))
+                   (format nil "~A (~A)" (funcall what e) (libsecret:libsecret-error-message e))))))
         (if (not loaded)
             (format nil "libsecret is not installed, so the Secret Service cannot be reached (~A)"
                     why)
             (or (fails #'libsecret:check-session-bus
-                       "there is no D-Bus session bus to reach the Secret Service on")
+                       (constantly "there is no D-Bus session bus to reach the Secret Service on"))
                 (fails #'libsecret:check-secret-service
-                       "no program provides the Secret Service on the D-Bus session bus; GNOME Keyring and KeePassXC are two that do"))))))
+                       (lambda (e)
+                         (if (libsecret:service-missing-error-p e)
+                             "no program provides the Secret Service on the D-Bus session bus; GNOME Keyring and KeePassXC are two that do"
+                             "the Secret Service on the D-Bus session bus could not be reached"))))))))
+
+  (defun %headless-p ()
+    "True when there is no display an unlock prompt could be shown on."
+    (flet ((unset (name) (let ((v (uiop:getenv name))) (or (null v) (string= v "")))))
+      (and (unset "DISPLAY") (unset "WAYLAND_DISPLAY"))))
+
+  (defun %fail-if-still-locked (service account operation)
+    "Called when an operation found or changed nothing. When the default collection is locked,
+that result means the item could not be reached, not that it is absent, so signal
+CREDENTIAL-STORE-UNAVAILABLE. libsecret's lookup and clear ask to unlock a locked item, and when
+the request is dismissed they return nothing and no error."
+    (when (libsecret:default-collection-locked-p)
+      (error 'credential-store-unavailable
+             :service service :account account :operation operation
+             :reason *locked-declined-reason*)))
 
   (defun %secret-service-fail (condition service account operation)
     "Signal the hades condition for the libsecret CONDITION: a locked keyring is a store that
@@ -276,18 +306,28 @@ cannot be used now; anything else is a failed operation, with GLib's message as 
 
   (defun %call-with-item (service account operation fn)
     "Call FN with the schema and the attribute table naming the item SERVICE / ACCOUNT, under the
-libsecret lock, after checking that the Secret Service can be reached. Returns what FN returns."
+libsecret lock, after checking that the Secret Service can be reached. Returns what FN returns.
+
+On a desktop, FN's call may show the user a request to unlock the keyring, as the Keychain does
+on macOS, and waits for the answer holding the lock. Without a display there is nobody to ask,
+so a locked keyring is refused here instead of starting a request that could wait indefinitely."
     (libsecret:with-libsecret-lock ()
       (let ((reason (%unavailable-reason)))
         (when reason
           (error 'credential-store-unavailable
                  :service service :account account :operation operation :reason reason)))
-      (libsecret:with-schema (schema *schema-name* '("service" "account"))
-        (libsecret:with-attributes (attributes (list (cons "service" service)
-                                                     (cons "account" account)))
-          (handler-case (funcall fn schema attributes)
-            (libsecret:libsecret-error (e)
-              (%secret-service-fail e service account operation)))))))
+      (handler-case
+          (progn
+            (when (and (%headless-p) (libsecret:default-collection-locked-p))
+              (error 'credential-store-unavailable
+                     :service service :account account :operation operation
+                     :reason *locked-headless-reason*))
+            (libsecret:with-schema (schema *schema-name* '("service" "account"))
+              (libsecret:with-attributes (attributes (list (cons "service" service)
+                                                           (cons "account" account)))
+                (funcall fn schema attributes))))
+        (libsecret:libsecret-error (e)
+          (%secret-service-fail e service account operation)))))
 
   (defun %store (service account secret)
     (let ((octets (sb-ext:string-to-octets (aion/secret:reveal secret) :external-format :utf-8)))
@@ -309,6 +349,7 @@ libsecret lock, after checking that the Secret Service can be reached. Returns w
                                        schema attributes "default"
                                        (format nil "~A (~A)" service account)
                                        value (cffi:null-pointer) err)))
+                         (%fail-if-still-locked service account :store)
                          (error 'credential-error :service service :account account
                                                   :operation :store))
                     (ffi:secret-value-unref value))))))
@@ -323,21 +364,31 @@ libsecret lock, after checking that the Secret Service can be reached. Returns w
                       (ffi:secret-password-lookupv-binary-sync schema attributes
                                                                (cffi:null-pointer) err))))
          (when (cffi:null-pointer-p value)
+           (%fail-if-still-locked service account :fetch)
            (error 'credential-not-found :service service :account account :operation :fetch))
          (unwind-protect
               (let ((octets (libsecret:secret-value-octets value)))
                 (unwind-protect
-                     (aion/secret:make-secret
-                      (sb-ext:octets-to-string octets :external-format :utf-8))
+                     (aion/secret:make-secret (%decode-value octets service account))
                   (fill octets 0)))
            (ffi:secret-value-unref value))))))
+
+  (defun %decode-value (octets service account)
+    "OCTETS as a UTF-8 string. Another program can store bytes that are not UTF-8 under this
+schema; SBCL's decoding error would carry them into a report or a backtrace, so it is replaced
+by a CREDENTIAL-ERROR that names the item and not its bytes."
+    (or (handler-case (sb-ext:octets-to-string octets :external-format :utf-8)
+          (sb-int:character-decoding-error () nil))
+        (error 'credential-error :service service :account account :operation :fetch
+                                 :code "the stored value is not UTF-8 text")))
 
   (defun %delete (service account)
     (%call-with-item
      service account :delete
      (lambda (schema attributes)
-       (/= 0 (libsecret:with-gerror (err "deleting the credential")
-               (ffi:secret-password-clearv-sync schema attributes (cffi:null-pointer) err)))))))
+       (or (/= 0 (libsecret:with-gerror (err "deleting the credential")
+                   (ffi:secret-password-clearv-sync schema attributes (cffi:null-pointer) err)))
+           (progn (%fail-if-still-locked service account :delete) nil))))))
 
 ;;; --- elsewhere: no store ----------------------------------------------------------------
 

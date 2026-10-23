@@ -41,13 +41,36 @@ text, which describes the failure and never carries a stored value."))
   (and (equal "secret-error" (libsecret-error-domain condition))
        (= ffi:+secret-error-is-locked+ (libsecret-error-code condition))))
 
+(defun service-missing-error-p (condition)
+  "True when CONDITION says nothing on the bus provides the name asked for: D-Bus's
+ServiceUnknown or NameHasNoOwner."
+  (and (equal "g-dbus-error-quark" (libsecret-error-domain condition))
+       (member (libsecret-error-code condition)
+               (list ffi:+g-dbus-error-service-unknown+ ffi:+g-dbus-error-name-has-no-owner+))
+       t))
+
+(defun %c-string-lossy (pointer)
+  "The NUL-terminated C string at POINTER as a Lisp string, with each byte sequence that is not
+UTF-8 replaced by U+FFFD rather than signalled."
+  (if (cffi:null-pointer-p pointer)
+      ""
+      (let* ((n (loop for i from 0
+                      until (zerop (cffi:mem-aref pointer :uint8 i))
+                      finally (return i)))
+             (octets (make-array n :element-type '(unsigned-byte 8))))
+        (dotimes (i n) (setf (aref octets i) (cffi:mem-aref pointer :uint8 i)))
+        (sb-ext:octets-to-string octets
+                                 :external-format '(:utf-8 :replacement #\Replacement_Character)))))
+
 (defun %signal-gerror (gerror operation)
-  "Read the GError at GERROR, free it, and signal LIBSECRET-ERROR."
-  (let ((domain (ffi:g-quark-to-string (cffi:mem-ref gerror :uint32 0)))
-        (code (cffi:mem-ref gerror :int 4))
-        (message (cffi:foreign-string-to-lisp (cffi:mem-ref gerror :pointer 8)
-                                              :encoding :utf-8)))
-    (ffi:g-error-free gerror)
+  "Read the GError at GERROR, free it, and signal LIBSECRET-ERROR. The GError is freed even when
+reading it fails."
+  (let (domain code message)
+    (unwind-protect
+         (setf domain (ffi:g-quark-to-string (cffi:mem-ref gerror :uint32 0))
+               code (cffi:mem-ref gerror :int 4)
+               message (%c-string-lossy (cffi:mem-ref gerror :pointer 8)))
+      (ffi:g-error-free gerror))
     (error 'libsecret-error :domain domain :code code :message message :operation operation)))
 
 (defmacro with-gerror ((var operation) &body body)
@@ -78,12 +101,30 @@ when DBUS_SESSION_BUS_ADDRESS names nothing or is unset outside a desktop sessio
 (defun check-secret-service ()
   "Reach the Secret Service and open a session with it. Returns T, or signals LIBSECRET-ERROR
 when no program on the session bus provides org.freedesktop.secrets and none can be started.
-It never unlocks anything, so it never prompts."
+This call unlocks nothing, so it does not prompt."
   (let ((service (with-gerror (err "opening a session with the Secret Service")
                    (ffi:secret-service-get-sync ffi:+secret-service-open-session+
                                                 (cffi:null-pointer) err))))
     (unless (cffi:null-pointer-p service) (ffi:g-object-unref service))
     t))
+
+(defun default-collection-locked-p ()
+  "T when the Secret Service's default collection exists and is locked, NIL when it is unlocked
+or there is none. Reads the collection's Locked property from a new proxy, so the answer is
+current; it unlocks nothing, so it does not prompt. Signals LIBSECRET-ERROR when the service
+cannot be reached."
+  (let ((service (with-gerror (err "reaching the Secret Service")
+                   (ffi:secret-service-get-sync ffi:+secret-service-none+
+                                                (cffi:null-pointer) err))))
+    (unwind-protect
+         (let ((collection (with-gerror (err "finding the default collection")
+                             (ffi:secret-collection-for-alias-sync
+                              service "default" ffi:+secret-collection-none+
+                              (cffi:null-pointer) err))))
+           (unless (cffi:null-pointer-p collection)
+             (unwind-protect (/= 0 (ffi:secret-collection-get-locked collection))
+               (ffi:g-object-unref collection))))
+      (unless (cffi:null-pointer-p service) (ffi:g-object-unref service)))))
 
 ;;; --- schemas and attribute tables ----------------------------------------------------------
 

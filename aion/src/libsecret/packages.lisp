@@ -26,12 +26,15 @@
    #:libsecret #:load-libsecret
    #:secret-schema #:secret-schema-attribute
    #:+secret-schema-none+ #:+secret-schema-attribute-string+ #:+secret-schema-max-attributes+
-   #:+secret-service-open-session+ #:+g-bus-type-session+
+   #:+secret-service-none+ #:+secret-service-open-session+ #:+secret-collection-none+
+   #:+g-bus-type-session+
    #:+secret-error-is-locked+ #:+secret-error-no-such-object+
+   #:+g-dbus-error-service-unknown+ #:+g-dbus-error-name-has-no-owner+
    #:secret-password-storev-binary-sync #:secret-password-lookupv-binary-sync
    #:secret-password-clearv-sync
    #:secret-value-new #:secret-value-get #:secret-value-unref
-   #:secret-service-get-sync
+   #:secret-service-get-sync #:secret-collection-for-alias-sync #:secret-collection-get-locked
+   #:secret-service-lock-dbus-paths-sync
    #:g-bus-get-sync #:g-object-unref
    #:g-hash-table-new #:g-hash-table-insert #:g-hash-table-unref
    #:g-error-free #:g-quark-to-string
@@ -47,8 +50,8 @@
    ;; conditions
    #:libsecret-error #:libsecret-error-domain #:libsecret-error-code
    #:libsecret-error-message #:libsecret-error-operation #:with-gerror
-   #:locked-error-p
+   #:locked-error-p #:service-missing-error-p
    ;; the session bus and the service
-   #:check-session-bus #:check-secret-service
+   #:check-session-bus #:check-secret-service #:default-collection-locked-p
    ;; schemas, attributes and values
    #:with-schema #:with-attributes #:make-secret-value #:secret-value-octets))

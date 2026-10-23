@@ -93,6 +93,27 @@ wrong size reads past the end of what was allocated."
       (is (search "locked collection" (princ-to-string condition)))
       (is (ls:locked-error-p condition)))))
 
+(test a-gerror-message-that-is-not-utf-8-is-read-with-replacement-characters
+  "GLib's messages can quote names from the bus. One that is not UTF-8 must not stop the
+condition from being made, and the GError must still be freed."
+  (ls:load-libsecret)
+  (let ((condition
+          (handler-case
+              (ls:with-gerror (err "reading")
+                (cffi:with-foreign-object (bytes :uint8 6)
+                  (loop for b in '(98 97 100 255 33 0) for i from 0
+                        do (setf (cffi:mem-aref bytes :uint8 i) b))
+                  (setf (cffi:mem-ref err :pointer)
+                        (%call "g_error_new_literal" :pointer
+                               :uint32 (%call "g_quark_from_string" :uint32 :string "secret-error")
+                               :int 1 :pointer bytes)))
+                :returned)
+            (ls:libsecret-error (e) e))))
+    (is (typep condition 'ls:libsecret-error) "got ~S" condition)
+    (when (typep condition 'ls:libsecret-error)
+      (is (string= (format nil "bad~C!" (code-char #xFFFD))
+                   (ls:libsecret-error-message condition))))))
+
 (test an-unset-gerror-returns-the-body-s-value
   (is (eq :returned (ls:with-gerror (err "nothing") :returned))))
 
