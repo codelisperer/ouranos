@@ -6,11 +6,12 @@ Lisp, and porting between platforms a non-event — over the raw bindings aion p
 *Hades, who rules a realm nobody visits willingly and everybody eventually needs.* Windows is
 first, being furthest from POSIX; macOS and Linux are peers, not afterthoughts.
 
-> **Status: three facades.** The charter is [ADR-0001](docs/adr/0001-charter.md).
+> **Status: four facades.** The charter is [ADR-0001](docs/adr/0001-charter.md).
 > `hades/single-instance` (#305) is a per-user, per-directory lock that the operating system
 > holds and releases when the process ends; `hades/credentials` (#357) keeps secrets in the
 > operating system's store; `hades/notify` (#819) shows a modal notice before an app has a
-> window. The service lifecycle facade is still blocked on `aion/windows/service`, which does
+> window; `hades/open` (#820) shows a path in the file manager and opens a URL in the browser.
+> The service lifecycle facade is still blocked on `aion/windows/service`, which does
 > not exist yet.
 
 ## The two contracts, kept distinct
@@ -117,3 +118,30 @@ second value (`:requested`, `:ci`, `:ssh`, `:session-0`, `:no-display`, `:no-pro
 The tests check each platform's decision on every platform without showing a window.
 `(hades/notify/tests:run-native-tests)` shows one real notice per level, by hand at a screen
 (#819).
+
+## Show a path in the file manager, open a URL in the browser
+
+`hades/open:reveal-path` is the "Show in folder" and "Open data directory" action, and
+`hades/open:open-url` opens a web page in the default browser:
+
+```lisp
+(hades/open:reveal-path #p"/Users/me/Documents/report.pdf" :select t) ; the folder, with the file selected
+(hades/open:reveal-path (uiop:xdg-data-home "wordcrafter/"))          ; the folder itself
+(hades/open:open-url "https://codelisperer.com/")
+```
+
+| | `reveal-path` | `reveal-path :select t` | `open-url` |
+|---|---|---|---|
+| Windows | `explorer.exe <directory>` | `explorer.exe /select,<path>` | `rundll32.exe url.dll,FileProtocolHandler <url>` |
+| macOS | `open <directory>` | `open -R <path>` | `open <url>` |
+| Linux | `xdg-open <directory>` | `ShowItems` over D-Bus with `dbus-send`, else `xdg-open <directory>` | `xdg-open <url>` |
+
+Each program gets the path or URL as one argument, with no shell, and `explorer.exe` and
+`rundll32.exe` are run from the Windows directory, not from `PATH`. The path is made absolute
+first. Neither function waits for the file manager or the browser. Both return `:opened`, or
+`:not-available` with the reason as a second value: `:no-display` (Linux with neither `DISPLAY`
+nor `WAYLAND_DISPLAY`), `:no-program` (Linux without `xdg-open`) or `:failed` (the program did
+not start). `reveal-path` signals `path-not-found` when nothing exists at the path. `open-url`
+signals `unsupported-url` for anything but an http or https URL, because the same programs open
+`file:` URLs and custom schemes, which start other programs; the condition's report does not
+print the URL, which can carry a token (#820).
