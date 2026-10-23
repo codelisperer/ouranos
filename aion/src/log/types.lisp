@@ -29,6 +29,54 @@
 ;;;; of this file, which take and return promised types only.
 
 (cl:in-package #:aion/log/types)
+
+;;; One log entry is one physical line (#762). A field value can hold text from outside the
+;;; process -- a provider's error message, a header, a path -- and a line break in it would
+;;; start a second line that reads like a separate entry. These two helpers do the character
+;;; work for ESCAPE-LINE-TEXT and JSON-STRING below; they are pure String -> String functions,
+;;; written in CL because a loop over characters is plain CL and awkward in Coalton.
+
+(cl:defun %line-break-or-control-p (code)
+  "True for the characters that can end a line or disturb a terminal: C0 controls, DEL, C1
+controls (which include U+0085, NEXT LINE), and U+2028 and U+2029, the Unicode line and
+paragraph separators."
+  (cl:or (cl:< code 32) (cl:<= 127 code 159) (cl:= code #x2028) (cl:= code #x2029)))
+
+(cl:defun %escape-line-text (s)
+  "S with backslash written as two backslashes, LF, CR and tab as backslash-n, -r and -t, and
+every other character %LINE-BREAK-OR-CONTROL-P accepts as backslash-u and four hex digits.
+Every other character is unchanged, so the original text can be read back exactly. Returns S
+itself when nothing needs escaping."
+  (cl:if (cl:notany (cl:lambda (c) (cl:or (cl:char= c #\\)
+                                         (%line-break-or-control-p (cl:char-code c))))
+                    s)
+         s
+         (cl:with-output-to-string (out)
+           (cl:loop for c across s
+                    for code = (cl:char-code c)
+                    do (cl:case c
+                         (#\\ (cl:write-string "\\\\" out))
+                         (#\Newline (cl:write-string "\\n" out))
+                         (#\Return (cl:write-string "\\r" out))
+                         (#\Tab (cl:write-string "\\t" out))
+                         (cl:otherwise
+                          (cl:if (%line-break-or-control-p code)
+                                 (cl:format out "\\u~4,'0X" code)
+                                 (cl:write-char c out))))))))
+
+(cl:defun %escape-json-line-breaks (json)
+  "JSON, a serialised JSON value, with U+0085, U+2028 and U+2029 written as \\u escapes.
+JSON allows them raw inside a string, and jzon leaves them raw, but some readers split lines
+on them. Outside a string they cannot occur in a serialised value, so replacing them anywhere
+is safe."
+  (cl:if (cl:notany (cl:lambda (c) (cl:member (cl:char-code c) '(#x85 #x2028 #x2029))) json)
+         json
+         (cl:with-output-to-string (out)
+           (cl:loop for c across json
+                    for code = (cl:char-code c)
+                    do (cl:if (cl:member code '(#x85 #x2028 #x2029))
+                              (cl:format out "\\u~4,'0X" code)
+                              (cl:write-char c out))))))
 (named-readtables:in-readtable coalton:coalton)
 
 (coalton-toplevel
@@ -213,7 +261,15 @@ that silently breaks a downstream parser. This is a String -> String function of
 promised representation (coalton-patterns.md §7), and jzon:stringify allocates a string --
 it performs no IO, so the no-IO-in-Coalton rule holds."
     (lisp (-> String) (s)
-      (com.inuoe.jzon:stringify s)))
+      (%escape-json-line-breaks (com.inuoe.jzon:stringify s))))
+
+  (declare escape-line-text (String -> String))
+  (define (escape-line-text s)
+    "S as it is written in a pretty log line: backslash doubled, line breaks and other control
+characters as backslash escapes (see %ESCAPE-LINE-TEXT), so the entry stays on one physical
+line and the text can be read back (#762)."
+    (lisp (-> String) (s)
+      (%escape-line-text s)))
 
   (declare render-field-json (Field -> String))
   (define (render-field-json f)
@@ -225,18 +281,20 @@ it performs no IO, so the no-IO-in-Coalton rule holds."
 
   (declare render-field-pretty (Field -> String))
   (define (render-field-pretty f)
-    (<> " " (<> (field-key f) (<> "=" (field-value->string (field-value f))))))
+    (<> " " (<> (escape-line-text (field-key f))
+                (<> "=" (escape-line-text (field-value->string (field-value f)))))))
 
   (declare render-pretty (Event -> String))
   (define (render-pretty e)
-    "TS LEVEL [CAT] MESSAGE k=v k=v ..."
+    "TS LEVEL [CAT] MESSAGE k=v k=v ..., on one physical line. The category, the message and
+every key and value are escaped by ESCAPE-LINE-TEXT, because all of them share the line."
     (fold (fn (acc f) (<> acc (render-field-pretty f)))
           (<> (event-timestamp e)
               (<> " "
                   (<> (level->padded (event-level e))
                       (<> " ["
-                          (<> (event-category e)
-                              (<> "] " (event-message e)))))))
+                          (<> (escape-line-text (event-category e))
+                              (<> "] " (escape-line-text (event-message e))))))))
           (visible-fields Nil (event-fields e))))
 
   (declare render-json (Event -> String))
