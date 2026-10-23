@@ -941,7 +941,8 @@ image's stored size before reading it."
 
 (defun register (agent provider &key on-image (name "generate-image") capability source
                                      (qualities *qualities*) default-quality (default-size :auto)
-                                     resolve-reference (max-references 4))
+                                     resolve-reference (max-references 4)
+                                     (requires-user-intent t))
   "Register the generate-image means on AGENT, generating with PROVIDER, an IMAGE-PROVIDER.
 Returns NAME.
 
@@ -973,6 +974,11 @@ images are added up as they arrive and the call is refused once they pass
 check an image's stored size, and return NIL for one over *MAX-REFERENCE-BYTES*, before reading
 its bytes.
 
+An image spends the user's allowance, so by default the means is registered with
+:REQUIRES-USER-INTENT (#827): a call the model makes after a web page or search result was read
+in the turn is refused as not run, because that content may have asked for it. Pass
+:REQUIRES-USER-INTENT NIL to allow such calls.
+
 An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there is no key."
   (check-type provider image-provider)
   (unless (or (null resolve-reference) (functionp resolve-reference))
@@ -991,10 +997,11 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
       (error "REGISTER's :DEFAULT-SIZE must be one of ~{~S~^, ~}, not ~S." *sizes* default-size))
     (%register agent provider on-image name capability source
                qualities default-quality default-size
-               resolve-reference (and resolve-reference max-references))))
+               resolve-reference (and resolve-reference max-references) requires-user-intent)))
 
 (defun %register (agent provider on-image name capability source
-                  qualities default-quality default-size resolve-reference max-references)
+                  qualities default-quality default-size resolve-reference max-references
+                  requires-user-intent)
   (actor:register-means
    agent name (if resolve-reference
                   (concatenate 'string *description* *reference-description*)
@@ -1029,13 +1036,13 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
        (format nil "~{~A~^~%~}"
                (mapcar (lambda (r) (%summary r (funcall on-image r))) results)))))
    :schema (%schema qualities default-size default-quality max-references)
-   :capability capability :source source))
+   :capability capability :source source :requires-user-intent requires-user-intent))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
                                          read-timeout (name "generate-image") capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
-                                         (max-references 4))
+                                         (max-references 4) (requires-user-intent t))
   "Register the generate-image means on AGENT with OpenAI's Image API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
@@ -1043,8 +1050,9 @@ to register it: a means without a key could only fail.
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_IMAGE_API_KEY, then
 PRAXEON_OPENAI_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
-ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE and MAX-REFERENCES are as
-for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."
+ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and
+REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for
+MAKE-OPENAI-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
               :name name))
@@ -1059,4 +1067,5 @@ for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."
                                   :qualities qualities :default-quality default-quality
                                   :default-size default-size
                                   :resolve-reference resolve-reference
-                                  :max-references max-references))))
+                                  :max-references max-references
+                                  :requires-user-intent requires-user-intent))))

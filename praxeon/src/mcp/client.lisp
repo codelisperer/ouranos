@@ -1048,7 +1048,8 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
 (defun %clip (string limit)
   (if (> (length string) limit) (subseq string 0 limit) string))
 
-(defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability confirm)
+(defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability confirm
+                                        (untrusted t))
   "Register the tools of CLIENT's server that the app chooses as means of AGENT, and return the
 means names.
 
@@ -1062,6 +1063,11 @@ is not among the granted tools, signals an error and registers nothing. Each too
 T, so a turn decides it through its ON-HOLD policy, and after a refused token it is not sent
 again. A tool's readOnlyHint or destructiveHint annotation is untrusted and never decides this;
 the app does.
+
+UNTRUSTED, true by default, registers each tool with ACTOR:REGISTER-MEANS's :UNTRUSTED (#827): a
+server's result is content from outside the conversation, which may relay web pages, email or
+documents, so once a granted tool has run in a turn, a means that spends or writes for the user
+is refused for the rest of that turn. Pass NIL only for a server the app fully controls.
 
 Each means calls its tool for the principal of the turn it runs in, ACTOR:*PRINCIPAL*. A name
 that clashes with a means AGENT already has, or with another tool in the grant, signals
@@ -1109,6 +1115,7 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                 :schema (tool-input-schema tool)
                 :capability capability
                 :confirm (and held t)
+                :untrusted untrusted
                 :source (%means-source-plist connection tool))
                ;; Remember the entry itself, so REVOKE-TOOLS removes this registration and
                ;; nothing the app registered under a name or a :SOURCE that looks the same.
