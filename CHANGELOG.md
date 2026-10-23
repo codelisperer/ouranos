@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
+  part four). Its name does not say which vendor the key is for, and with a second image
+  provider a Google key put there would be sent to OpenAI. The OpenAI image provider
+  (`make-openai-images`, `openai-images-from-env`, `register-openai-image`) now reads
+  `:api-key`, then `PRAXEON_OPENAI_API_KEY`, then `PRAXEON_IMAGE_API_KEY`. That last one still
+  works and logs one warning naming `PRAXEON_OPENAI_API_KEY`. It will be removed in a later
+  release. The order changed: before, `PRAXEON_IMAGE_API_KEY` was read first, so an app that
+  sets both to different keys now uses the one in `PRAXEON_OPENAI_API_KEY`. The Google provider
+  reads neither.
+
 - **praxeon: `generate-image` is refused once a turn has read a web page or search results**
   (#827). `praxeon/image:register` and `register-openai-image` now pass
   `:requires-user-intent t` to `register-means`, because each image costs money. When the model
@@ -763,7 +773,8 @@ its tag.
   `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
   `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
   nothing when there is no key; the key is `:api-key` when given, otherwise
-  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  `PRAXEON_OPENAI_API_KEY`, then the deprecated `PRAXEON_IMAGE_API_KEY` (see "An app may have to
+  act"); an `:api-key` of `""` is no key and is
   logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
   `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
   and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
@@ -784,6 +795,26 @@ its tag.
   request emits no `:image-usage`. `generate-image` calls a provider outside a turn.
   `praxeon/llm` now exports `request-failure`, the #719 mapping of a failed HTTP request to
   `provider-request-failed`.
+
+- **praxeon/image: Google's Gemini API as a second image provider** (#758, part four).
+  `praxeon/image:register-google-image` takes the same arguments as `register-openai-image`;
+  `make-google-images` and `google-images-from-env` build the provider. The key is `:api-key`,
+  else `PRAXEON_GOOGLE_API_KEY`, then `GEMINI_API_KEY`; it never reads `PRAXEON_IMAGE_API_KEY`
+  or `PRAXEON_OPENAI_API_KEY`, so a key set up for OpenAI is not sent to Google. The default
+  model is `gemini-nano-banana-2.1` (`*google-image-model*`, or `PRAXEON_GOOGLE_IMAGE_MODEL`);
+  `gemini-3.1-flash-lite-image` is the low-cost model, 1K images only. Requests go to
+  `generateContent` at v1. A shape is sent as an aspect ratio and a quality as a resolution
+  (low 1K, medium 2K, high 4K), so `:qualities` also bounds resolution. Reference images are
+  sent inline, up to 14; Google takes no mask and makes one image per request, and a request
+  with a mask or `:count` above 1 is refused with `image-input-invalid`. A blocked prompt or an
+  image stopped for safety is `image-refused`; a reply with no image for another reason is the
+  new `praxeon/image:image-not-made` (`image-not-made-reason`), a `tool-error-result`.
+  `:image-usage` carries an estimated `:cost` from `*google-image-prices*` (four models, dated in
+  `upstream.sexp` as "Google image prices: MODEL") and the reply's token counts. New generic
+  functions `image-provider-max-references` and `image-provider-accepts-mask-p` say what a
+  provider takes. Like `register-openai-image`, `register-google-image` takes
+  `:requires-user-intent`, which defaults to true (#827); pass NIL to allow an image after a
+  web page or search result was read in the turn.
 
 - **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
   three). `praxeon/image:generate-image` takes `:references`, a list of up to 16

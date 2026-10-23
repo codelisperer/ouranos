@@ -40,7 +40,10 @@
 ;;;; served only DALL-E, which OpenAI shut down on 2026-05-12, so a variation is an edit whose
 ;;;; prompt asks for one. Inside a turn the model names reference images by the references the app
 ;;;; gave it, and the app's RESOLVE-REFERENCE turns each into bytes, so the model reaches only the
-;;;; images the app lets it. A Google provider is the remaining part of #758.
+;;;; images the app lets it.
+;;;;
+;;;; PROVIDERS. OpenAI's Image API is here; Google's Gemini API is in image-google.lisp. Each
+;;;; reads only its own key variables, so a key set up for one vendor is never sent to another.
 
 (cl:defpackage #:praxeon/image
   (:use #:cl)
@@ -66,10 +69,11 @@
    #:image-result-revised-prompt #:image-result-provider #:image-result-model
    #:image-result-size #:image-result-quality #:image-result-cost
    #:image-result-cost-estimated-p
-   #:generate-image
-   ;; a refusal
+   #:generate-image #:image-provider-max-references #:image-provider-accepts-mask-p
+   ;; a refusal, and a reply with no image for another reason
    #:image-refused #:image-refused-provider #:image-refused-code #:image-refused-stage
    #:image-refused-categories
+   #:image-not-made #:image-not-made-provider #:image-not-made-reason
    ;; the service busy, failing or not answering
    #:image-request-failed #:image-request-failed-kind #:image-request-failed-retry-after
    ;; OpenAI
@@ -78,8 +82,12 @@
    #:*openai-image-model* #:*openai-images-base-url*
    #:*openai-images-read-timeout* #:*max-bytes-per-image*
    #:*openai-image-prices* #:openai-image-cost
+   ;; Google (image-google.lisp)
+   #:google-images #:make-google-images #:google-images-from-env #:google-image-request-body
+   #:*google-image-model* #:*google-images-base-url* #:*google-max-references*
+   #:*google-image-prices* #:google-image-cost
    ;; the means
-   #:register #:register-openai-image #:*description*))
+   #:register #:register-openai-image #:register-google-image #:*description*))
 
 (cl:in-package #:praxeon/image)
 
@@ -136,7 +144,17 @@ for each image and mask sent to /images/edits.")
 
 (defparameter *max-references* 16
   "The most reference images one request may send. OpenAI's Image API reference allows up to 16
-for its GPT Image models.")
+for its GPT Image models. A provider that takes fewer says so with
+IMAGE-PROVIDER-MAX-REFERENCES.")
+
+(defgeneric image-provider-max-references (provider)
+  (:documentation "The most reference images PROVIDER takes in one request.")
+  (:method ((provider t)) *max-references*))
+
+(defgeneric image-provider-accepts-mask-p (provider)
+  (:documentation "True when PROVIDER takes a mask with its reference images. A provider that
+does not refuses a request with one, as IMAGE-INPUT-INVALID, before anything is sent.")
+  (:method ((provider t)) t))
 
 (defparameter *max-reference-total-bytes* (* 64 1024 1024)
   "The most bytes of reference images and mask together in one request. Sixteen files of 50 MB
@@ -212,8 +230,9 @@ IDAT chunk. Each chunk is a 4-byte length, a 4-byte name, the data and a 4-byte 
   (let ((*print-pretty* nil))
     (princ-to-string (type-of x))))
 
-(defun %check-inputs (references mask)
-  "Signal IMAGE-INPUT-INVALID unless REFERENCES and MASK can be sent together. A REFERENCES or
+(defun %check-inputs (references mask &optional provider)
+  "Signal IMAGE-INPUT-INVALID unless REFERENCES and MASK can be sent together, to PROVIDER when it
+is given: no more references than it takes, and a mask only when it takes one. A REFERENCES or
 MASK of the wrong type is a programming error, signalled as an ERROR that names the type it got
 and never prints the object, which can be a 50 MB vector."
   (unless (listp references)
@@ -225,9 +244,13 @@ and never prints the object, which can be a 50 MB vector."
   (when (and mask (not (reference-image-p mask)))
     (error "MASK must be a REFERENCE-IMAGE made with MAKE-REFERENCE-IMAGE, not a ~A."
            (%type-name mask)))
-  (when (> (length references) *max-references*)
-    (%invalid "~D reference images were given and at most ~D can be sent, so none were sent."
-              (length references) *max-references*))
+  (let ((max (if provider (image-provider-max-references provider) *max-references*)))
+    (when (> (length references) max)
+      (%invalid "~D reference images were given and at most ~D can be sent, so none were sent."
+                (length references) max)))
+  (when (and mask provider (not (image-provider-accepts-mask-p provider)))
+    (%invalid "The ~A image provider takes no mask. Describe in the prompt which part to change, and leave the mask out."
+              (image-provider-name provider)))
   (let ((total (reduce #'+ (if mask (cons mask references) references)
                        :key (lambda (r) (length (reference-image-octets r))))))
     (when (> total *max-reference-total-bytes*)
@@ -278,6 +301,25 @@ It is a TOOL-ERROR-RESULT, so when the generate-image means signals it inside a 
 is told, in TEXT, that the request was refused and why, and the turn goes on. A caller of
 GENERATE-IMAGE outside a turn handles it as any condition."))
 
+(define-condition image-not-made (cnd:tool-error-result)
+  ((provider :initarg :provider :initform nil :reader image-not-made-provider)
+   (reason :initarg :reason :initform nil :reader image-not-made-reason))
+  (:report (lambda (c stream)
+             (format stream "The ~A image provider finished without an image~@[ (~A)~]."
+                     (image-not-made-provider c) (image-not-made-reason c))))
+  (:documentation "The provider answered without an image, for a reason that is not a refusal
+under its content policy, such as Google's NO_IMAGE or IMAGE_OTHER finish reason (#758). REASON is
+the provider's own short identifier, or NIL.
+
+It is a TOOL-ERROR-RESULT with outcome :ERROR, because the request ran and may have been charged,
+so inside a turn the model is told no image was made and the turn goes on."))
+
+(defun %not-made (provider reason)
+  (error 'image-not-made
+         :provider provider :reason reason :outcome :error
+         :text (format nil "The ~A image provider finished without making an image~@[ (reason ~A)~]. No image was made. Rephrase the request or try again, and tell the user if it keeps happening."
+                       provider reason)))
+
 (define-condition image-request-failed (cnd:provider-request-failed)
   ((kind :initarg :kind :initform nil :reader image-request-failed-kind)
    (retry-after :initarg :retry-after :initform nil :reader image-request-failed-retry-after))
@@ -324,7 +366,7 @@ service is busy, fails on its side or does not answer, and PROVIDER-REQUEST-FAIL
 failure."
   (check-type prompt string)
   (check-type count (integer 1 10))
-  (%check-inputs references mask)
+  (%check-inputs references mask provider)
   (let ((request (make-image-request :prompt prompt :size size :quality quality :count count
                                      :references references :mask mask))
         (name (image-provider-name provider))
@@ -422,21 +464,38 @@ filling the heap.")
   (let ((v (uiop:getenv name)))
     (and v (plusp (length v)) v)))
 
-(defun %env-key ()
-  "The OpenAI image key from the environment: PRAXEON_IMAGE_API_KEY, then PRAXEON_OPENAI_API_KEY.
-NIL when neither is set."
-  (or (%getenv "PRAXEON_IMAGE_API_KEY") (%getenv "PRAXEON_OPENAI_API_KEY")))
+(defvar *warned-of-image-api-key* nil
+  "True once the deprecated PRAXEON_IMAGE_API_KEY has been read and warned of, so the warning is
+logged once per image, not on every request.")
 
-(defun %key (api-key api-key-p)
-  "The key to use: API-KEY when given, otherwise the environment's. A given key that is NIL or
-the empty string is no key; it never falls back to the environment, because the app chose it."
-  (let ((key (if api-key-p api-key (%env-key))))
+(defun %env-key ()
+  "The OpenAI image key from the environment: PRAXEON_OPENAI_API_KEY, then the deprecated
+PRAXEON_IMAGE_API_KEY. NIL when neither is set.
+
+PRAXEON_IMAGE_API_KEY does not say which vendor it is for, so a key meant for another provider
+could be put there and sent to OpenAI. It is still read, after PRAXEON_OPENAI_API_KEY, and the
+first time it supplies the key a warning names PRAXEON_OPENAI_API_KEY as its replacement. It
+goes away in a later release."
+  (or (%getenv "PRAXEON_OPENAI_API_KEY")
+      (let ((key (%getenv "PRAXEON_IMAGE_API_KEY")))
+        (when (and key (not *warned-of-image-api-key*))
+          (setf *warned-of-image-api-key* t)
+          (log:warn "PRAXEON_IMAGE_API_KEY is deprecated and will be removed; set PRAXEON_OPENAI_API_KEY instead"
+                    :provider "openai"))
+        key)))
+
+(defun %key (api-key api-key-p &optional (env-key #'%env-key))
+  "The key to use: API-KEY when given, otherwise what ENV-KEY, a function of no arguments, finds
+in the environment. Each provider passes a function that reads only its own variables, so one
+vendor's key is never sent to another. A given key that is NIL or the empty string is no key; it
+never falls back to the environment, because the app chose it."
+  (let ((key (if api-key-p api-key (funcall env-key))))
     (and (stringp key) (plusp (length key)) key)))
 
 (defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout)
   "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
-is read only when none is given (PRAXEON_IMAGE_API_KEY, then PRAXEON_OPENAI_API_KEY). A given
-key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
+is read only when none is given (PRAXEON_OPENAI_API_KEY, then the deprecated
+PRAXEON_IMAGE_API_KEY, which logs a warning once). A given key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
 BASE-URL to PRAXEON_IMAGE_BASE_URL, then *OPENAI-IMAGES-BASE-URL*; READ-TIMEOUT, in seconds, to
 *OPENAI-IMAGES-READ-TIMEOUT*. Signals MISSING-PROVIDER-KEY when there is no key, because every
 request would fail."
@@ -446,7 +505,7 @@ request would fail."
              :impl "openai images"
              :variables (if api-key-p
                             '(":API-KEY")
-                            '("PRAXEON_IMAGE_API_KEY" "PRAXEON_OPENAI_API_KEY"))))
+                            '("PRAXEON_OPENAI_API_KEY" "PRAXEON_IMAGE_API_KEY"))))
     (make-instance 'openai-images
                    :api-key key
                    :model (or model (%getenv "PRAXEON_IMAGE_MODEL") *openai-image-model*)
@@ -579,16 +638,17 @@ identifiers are kept, because anything longer could carry the request."
                     (and (vectorp cats) (remove nil (map 'list #'short cats)))))
           (values nil '())))))
 
-(defun %unexpected-reply (what)
+(defun %unexpected-reply (what &optional (label "openai images"))
   "A PROVIDER-REQUEST-FAILED for a 2xx reply that is not the documented shape. WHAT says how; it
-never quotes the reply, which can repeat the request."
+never quotes the reply, which can repeat the request. LABEL names the provider in the report."
   (make-condition 'cnd:provider-request-failed
-                  :detail (format nil "openai images: the reply ~A" what)))
+                  :detail (format nil "~A: the reply ~A" label what)))
 
-(defun %parse-reply (text)
+(defun %parse-reply (text &optional (label "openai images"))
   "TEXT, a reply body, parsed as JSON, or PROVIDER-REQUEST-FAILED when it is not JSON."
   (handler-case (jzon:parse text)
-    (error () (error (%unexpected-reply (format nil "is not JSON (~D characters)" (length text)))))))
+    (error () (error (%unexpected-reply (format nil "is not JSON (~D characters)" (length text))
+                                        label)))))
 
 (defun %retry-after-seconds (value)
   "The Retry-After header VALUE as a whole number of seconds, or NIL when it is absent or is an
@@ -604,10 +664,11 @@ later would not help, such as for a 400 or a reply over the size limit."
         ((and status (<= 500 status 599)) :server-error)
         ((and (null status) (not (typep e 'http:response-too-large))) :no-answer)))
 
-(defun %request-failed (e retry-after)
+(defun %request-failed (e retry-after &optional (label "openai images"))
   "The condition to signal for the failed HTTP request E that is not a refusal: an
-IMAGE-REQUEST-FAILED when trying again later may help, otherwise PROVIDER-REQUEST-FAILED."
-  (let* ((failure (llm:request-failure "openai images" e))
+IMAGE-REQUEST-FAILED when trying again later may help, otherwise PROVIDER-REQUEST-FAILED.
+LABEL names the provider in the report."
+  (let* ((failure (llm:request-failure label e))
          (status (cnd:provider-request-failed-status failure))
          (kind (%failure-kind e status)))
     (if kind
@@ -642,39 +703,53 @@ multipart/form-data to /images/edits."
     (%image-post p (concatenate 'string (openai-images-base-url p) path)
                  content content-type count)))
 
-(defun %image-post (p url content content-type count)
+(defun %send (label url headers content &key read-timeout connect-timeout max-body-bytes
+                                              refusal)
+  "POST CONTENT to URL with HEADERS and return the reply parsed as JSON. LABEL names the provider
+in reports. A failed request signals IMAGE-REQUEST-FAILED when trying again later may help and
+PROVIDER-REQUEST-FAILED otherwise, unless REFUSAL, a function of that PROVIDER-REQUEST-FAILED,
+returns a condition to signal in its place, such as an IMAGE-REFUSED."
   (let ((retry-after nil))
     (handler-case
         (%parse-reply
          (http:response-body
           (http:send-request
-           (http:make-request :method :post :url url
-                              :headers (list (cons "content-type" content-type)
-                                             (cons "authorization"
-                                                   (format nil "Bearer ~A" (openai-images-api-key p))))
-                              :content content
-                              :read-timeout (openai-images-read-timeout p)
-                              :connect-timeout (openai-images-connect-timeout p)
-                              :max-body-bytes (* *max-bytes-per-image* (max 1 (or count 1))))
+           (http:make-request :method :post :url url :headers headers :content content
+                              :read-timeout read-timeout :connect-timeout connect-timeout
+                              :max-body-bytes max-body-bytes)
            ;; Leave stages run last to first, so the header is read before ENSURE-2XX signals.
-           (list (http:ensure-2xx "openai images")
+           (list (http:ensure-2xx label)
                  (http:make-interceptor
                   "retry-after"
                   :leave (lambda (resp)
                            (setf retry-after (http:header-value (http:response-headers resp)
                                                                 "retry-after"))
-                           resp))))))
+                           resp)))))
+         label)
       (http:http-error (e)
-        (let ((failure (llm:request-failure "openai images" e)))
-          (if (member (cnd:provider-request-failed-error-code failure) *refusal-codes*
-                      :test #'equal)
-              (multiple-value-bind (stage categories)
-                  (%refusal-details (cnd:provider-request-failed-body failure))
-                (let ((code (cnd:provider-request-failed-error-code failure)))
-                  (error 'image-refused :provider "openai" :code code :stage stage
-                                        :categories categories :outcome :error
-                                        :text (%refusal-text "openai" code stage categories))))
-              (error (%request-failed e retry-after))))))))
+        (error (or (and refusal (funcall refusal (llm:request-failure label e)))
+                   (%request-failed e retry-after label)))))))
+
+(defun %openai-refusal (failure)
+  "An IMAGE-REFUSED for the failed OpenAI request FAILURE when its error code is a content-policy
+refusal, otherwise NIL."
+  (when (member (cnd:provider-request-failed-error-code failure) *refusal-codes* :test #'equal)
+    (multiple-value-bind (stage categories)
+        (%refusal-details (cnd:provider-request-failed-body failure))
+      (let ((code (cnd:provider-request-failed-error-code failure)))
+        (make-condition 'image-refused :provider "openai" :code code :stage stage
+                                       :categories categories :outcome :error
+                                       :text (%refusal-text "openai" code stage categories))))))
+
+(defun %image-post (p url content content-type count)
+  (%send "openai images" url
+         (list (cons "content-type" content-type)
+               (cons "authorization" (format nil "Bearer ~A" (openai-images-api-key p))))
+         content
+         :read-timeout (openai-images-read-timeout p)
+         :connect-timeout (openai-images-connect-timeout p)
+         :max-body-bytes (* *max-bytes-per-image* (max 1 (or count 1)))
+         :refusal #'%openai-refusal))
 
 (defun %media-type (format)
   (cond ((equal format "jpeg") "image/jpeg")
@@ -685,11 +760,11 @@ multipart/form-data to /images/edits."
   (let ((v (gethash key parsed)))
     (and (stringp v) v)))
 
-(defun %decode-image (encoded)
+(defun %decode-image (encoded &optional (label "openai images"))
   "The octets ENCODED, a base64 string, stands for, or PROVIDER-REQUEST-FAILED when it is not
-base64."
+base64. LABEL names the provider in the report."
   (handler-case (b64:base64-string-to-usb8-array encoded)
-    (error () (error (%unexpected-reply "has an image that is not valid base64")))))
+    (error () (error (%unexpected-reply "has an image that is not valid base64" label)))))
 
 (defparameter *openai-image-prices*
   ;; US dollars per million tokens, from https://developers.openai.com/api/docs/pricing, table
@@ -983,8 +1058,9 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
   (check-type provider image-provider)
   (unless (or (null resolve-reference) (functionp resolve-reference))
     (error "REGISTER's :RESOLVE-REFERENCE must be a function, not ~S." resolve-reference))
-  (unless (typep max-references `(integer 1 ,*max-references*))
-    (error "REGISTER's :MAX-REFERENCES must be from 1 to ~D, not ~S." *max-references* max-references))
+  (unless (typep max-references `(integer 1 ,(image-provider-max-references provider)))
+    (error "REGISTER's :MAX-REFERENCES must be from 1 to ~D, not ~S."
+           (image-provider-max-references provider) max-references))
   (unless (functionp on-image)
     (error "REGISTER needs :ON-IMAGE, a function that receives each generated image; without one the image would be made, paid for and lost."))
   (unless (and qualities (listp qualities) (subsetp qualities *qualities*))
@@ -1047,8 +1123,8 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
 
-The key is API-KEY when given, NIL included, and otherwise PRAXEON_IMAGE_API_KEY, then
-PRAXEON_OPENAI_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
+The key is API-KEY when given, NIL included, and otherwise PRAXEON_OPENAI_API_KEY, then the
+deprecated PRAXEON_IMAGE_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
 ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and
 REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for
