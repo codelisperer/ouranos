@@ -1446,6 +1446,7 @@ URL: no query parameter, no credential scope, no access key id and no signature.
   "An error response's body is kept as DETAIL. A streamed one is read up to 64 KiB and closed, so
 it does not hold the connection; anything else passes through (#796)."
   (is (equalp (octets "<Error/>") (b::%error-body (octets "<Error/>"))))
+  (is (string= "<Error/>" (b::%error-body "<Error/>")) "a string body passes through as it is")
   (is (null (b::%error-body nil)))
   (let ((small (make-instance 'counting-octet-stream :data (octets "<Error><Code>InvalidRange</Code></Error>"))))
     (is (equalp (octets "<Error><Code>InvalidRange</Code></Error>") (b::%error-body small)))
@@ -1461,6 +1462,7 @@ it does not hold the connection; anything else passes through (#796)."
 stream; %S3-REQUEST closes it, and READ-BLOB-RANGE returns no bytes."
   (let ((original (fdefinition 'dex:request))
         (body (make-instance 'counting-octet-stream :data (octets "<Error><Code>InvalidRange</Code></Error>"))))
+    (is (open-stream-p body) "precondition: the stub's body starts open")
     (unwind-protect
          (progn
            (setf (fdefinition 'dex:request)
@@ -1471,3 +1473,179 @@ stream; %S3-REQUEST closes it, and READ-BLOB-RANGE returns no bytes."
            (is (equalp #() (b:read-blob-range (test-s3-store) "media" "a" :start 99 :length 4))))
       (setf (fdefinition 'dex:request) original))
     (is (not (open-stream-p body)) "the 416 body is closed")))
+
+(defclass failing-octet-stream (sb-gray:fundamental-binary-input-stream) ()
+  (:documentation "An octet input stream whose every read signals, standing in for a connection
+that drops while an error response's body is being read."))
+
+(defmethod stream-element-type ((s failing-octet-stream)) '(unsigned-byte 8))
+(defmethod sb-gray:stream-read-sequence ((s failing-octet-stream) seq &optional start end)
+  (declare (ignore seq start end))
+  (error "connection reset"))
+
+(test s3-unreadable-error-body-is-still-a-backend-error
+  "%ERROR-BODY runs inside %S3-REQUEST's handler clause, which the sibling ERROR clause does not
+cover. A body that fails to read must still surface as BLOB-BACKEND-ERROR with its status, not as
+the stream's own error (#796)."
+  (let ((body (make-instance 'failing-octet-stream)))
+    (let ((detail (b::%error-body body)))
+      (is (stringp detail))
+      (is (search "could not be read" detail) "~A" detail))
+    (is (not (open-stream-p body)) "and the stream is closed"))
+  (let ((original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (declare (ignore args))
+                   (error 'dex:http-request-failed :body (make-instance 'failing-octet-stream) :status 500
+                                                   :headers (make-hash-table) :uri url :method :get)))
+           (let ((c (handler-case (progn (b:read-blob-range (test-s3-store) "media" "a") nil)
+                      (b:blob-backend-error (c) c)
+                      (error (e) e))))
+             (is (typep c 'b:blob-backend-error) "got ~S" (and c (type-of c)))
+             (is (eql 500 (and (typep c 'b:blob-backend-error) (b:blob-backend-error-status c))))))
+      (setf (fdefinition 'dex:request) original))))
+
+;;; === 15. the S3 store keeps its checksum (#810) ===============================
+
+(test s3-put-blob-stores-its-checksum-as-object-metadata
+  "PUT-BLOB sends the SHA-256 it computed as x-amz-meta-sha256, which is where BLOB-METADATA reads
+it. Before #810 it was sent only as the payload hash, and BLOB-METADATA returned NIL on S3."
+  (with-temp-store (fs)
+    (declare (ignore fs))
+    (multiple-value-bind (meta calls)
+        (call-with-recorded-s3 "" (lambda () (put-string (test-s3-store) "media" "a.txt" "hello"
+                                                         :metadata '(("Owner" . "42")))))
+      (let ((headers (getf (first calls) :extra-headers))
+            (sum "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"))
+        (is (string= sum (b:blob-meta-checksum meta)) "the SHA-256 of \"hello\"")
+        (is (equal sum (cdr (assoc "x-amz-meta-sha256" headers :test #'string=))) "~S" headers)
+        (is (equal sum (getf (first calls) :payload-hash)) "still the payload hash as well")
+        (is (equal "42" (cdr (assoc "x-amz-meta-owner" headers :test #'string=)))
+            "the app's own metadata is still sent")
+        (is (= 1 (count "x-amz-meta-sha256" headers :key #'car :test #'string-equal)))))))
+
+(test s3-blob-metadata-reports-the-stored-checksum
+  (let ((headers (make-hash-table :test #'equal)))
+    (setf (gethash "content-length" headers) "5"
+          (gethash "x-amz-meta-sha256" headers) "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    (let ((original (fdefinition 'b::%s3-request)))
+      (unwind-protect
+           (progn (setf (fdefinition 'b::%s3-request)
+                        (lambda (&rest args) (declare (ignore args)) (values "" 200 headers)))
+                  (is (string= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                               (b:blob-meta-checksum (b:blob-metadata (test-s3-store) "media" "a.txt")))))
+        (setf (fdefinition 'b::%s3-request) original)))))
+
+(defun metadata-refusal (store metadata)
+  "The NAME of the BLOB-INVALID-METADATA that PUT-BLOB signals for METADATA, :NO-NAME when it
+names none, or NIL when PUT-BLOB accepts it."
+  (handler-case (progn (put-string store "media" "m.txt" "x" :metadata metadata) nil)
+    (b:blob-invalid-metadata (c) (or (b:blob-invalid-metadata-name c) :no-name))))
+
+(test put-blob-refuses-reserved-or-malformed-metadata-on-every-store
+  "\"sha256\" is reserved for the checksum in any case, and names and values go into request headers
+on S3. The refusal is in PUT-BLOB's :BEFORE method, so the filesystem store refuses the same input
+(#810)."
+  (with-temp-store (fs)
+    (dolist (store (list fs (test-s3-store)))
+      (call-with-recorded-s3
+       ""
+       (lambda ()
+         (is (equal "sha256" (metadata-refusal store '(("sha256" . "abc")))) "~A" (b:store-name store))
+         (is (equal "SHA256" (metadata-refusal store '(("SHA256" . "abc")))))
+         (is (equal "Sha256" (metadata-refusal store '(("owner" . "1") ("Sha256" . "abc")))))
+         (is (equal "" (metadata-refusal store '(("" . "x")))))
+         (is (equal "a:b" (metadata-refusal store '(("a:b" . "x")))))
+         (is (equal (format nil "a~Cb" #\Linefeed) (metadata-refusal store (list (cons (format nil "a~Cb" #\Linefeed) "x")))))
+         (is (equal "owner" (metadata-refusal store (list (cons "owner" (format nil "1~C~CX-Evil: 2" #\Return #\Linefeed))))))
+         (is (eq :no-name (metadata-refusal store '(("owner" . 42)))))
+         (is (eq :no-name (metadata-refusal store '("owner"))))
+         (is (equal "my owner" (metadata-refusal store '(("my owner" . "x")))) "a space is not a header token")
+         (is (equal (format nil "propri~Ctaire" (code-char 233))
+                    (metadata-refusal store (list (cons (format nil "propri~Ctaire" (code-char 233)) "x")))))
+         (is (equal "owner" (metadata-refusal store (list (cons "owner" (format nil "Ren~C" (code-char 233))))))
+             "a non-ASCII value")
+         (is (equal "owner" (metadata-refusal store '(("Owner" . "1") ("owner" . "2"))))
+             "two names that differ only in case are one header")
+         (is (null (metadata-refusal store '(("owner" . "42") ("sha256-of-thumbnail" . "x"))))
+             "the control: ordinary names, and one that only starts with sha256, are accepted")
+         (is (null (metadata-refusal store '(("x-thumb.v2_a~b" . "A value, with spaces & symbols!"))))
+             "every token character in a name, and any printable ASCII in a value"))))))
+
+(test s3-blob-metadata-without-a-stored-checksum-reports-nil
+  "An object stored before #810, or uploaded directly by a client, has no x-amz-meta-sha256.
+BLOB-METADATA reports NIL for its checksum rather than signalling."
+  (let ((headers (make-hash-table :test #'equal)))
+    (setf (gethash "content-length" headers) "5" (gethash "content-type" headers) "text/plain")
+    (let ((original (fdefinition 'b::%s3-request)))
+      (unwind-protect
+           (progn (setf (fdefinition 'b::%s3-request)
+                        (lambda (&rest args) (declare (ignore args)) (values "" 200 headers)))
+                  (let ((meta (b:blob-metadata (test-s3-store) "media" "old.txt")))
+                    (is (null (b:blob-meta-checksum meta)))
+                    (is (= 5 (b:blob-meta-size meta)) "the rest of the metadata is still read")))
+        (setf (fdefinition 'b::%s3-request) original)))))
+
+;;; === 16. XML numeric character references ======================================
+
+(test s3-xml-decode-reads-numeric-references-in-one-pass
+  "MinIO writes an ETag's quotes as &#34; (measured on MinIO 2025-04-22). Read without decoding
+it, a part's ETag is not the ETag, and completing the upload fails with 400."
+  (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
+  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#x22;")))
+  (is (string= "<>\"'&" (b::%xml-decode "&lt;&gt;&quot;&apos;&amp;")))
+  (is (string= "&#34;" (b::%xml-decode "&amp;#34;"))
+      "one pass: an escaped reference is decoded once")
+  (is (string= "a & b &unknown; &#zz;" (b::%xml-decode "a & b &unknown; &#zz;"))
+      "anything else is kept")
+  (is (string= "plain" (b::%xml-decode "plain"))))
+
+(test s3-xml-decode-keeps-anything-that-is-not-exactly-a-reference
+  "Only `#' and decimal digits, or `#x' and hex digits, between `&' and `;'. A sign, a space,
+trailing junk, or no `;' near enough keeps the text as written, so a key that holds such text is
+listed as it is (#813). Each case sits beside the control it differs from."
+  (dolist (pair `(("&#34;" . "\"")
+                  ("&#-1;" . "&#-1;") ("&#x-1;" . "&#x-1;") ("&#+34;" . "&#+34;")
+                  ("&# 34;" . "&# 34;")
+                  ("&#34abc;" . "&#34abc;") ("&#x22zz;" . "&#x22zz;")
+                  ("&#34 abc; tail" . "&#34 abc; tail")
+                  ("&#;" . "&#;") ("&#x;" . "&#x;")
+                  ("&#x22;" . "\"") ("&#X22;" . "&#X22;") ("&#xAB;" . ,(string (code-char #xAB)))))
+    (is (string= (cdr pair) (b::%xml-decode (car pair))) "~S" (car pair))))
+
+(test s3-xml-decode-reads-only-ascii-digits
+  "On SBCL DIGIT-CHAR-P and PARSE-INTEGER accept any Unicode decimal digit, so Arabic-Indic or
+fullwidth digits for 3 and 4 would read as 34, a quote (#813). XML allows only ASCII digits, so
+such text is kept as written. The ASCII form beside it is the control."
+  (let ((arabic (format nil "&#~C~C;" (code-char #x0663) (code-char #x0664)))
+        (fullwidth (format nil "&#~C~C;" (code-char #xFF13) (code-char #xFF14))))
+    (is (string= arabic (b::%xml-decode arabic)))
+    (is (string= fullwidth (b::%xml-decode fullwidth)))
+    (is (string= "\"" (b::%xml-decode "&#34;")) "the control")))
+
+(test s3-xml-decode-keeps-code-points-xml-does-not-allow
+  "0 and the surrogates D800-DFFF are kept as written: XML allows neither, a surrogate has no
+UTF-8 encoding, and a NUL in a key would break the request that names it (#813). The code points
+on either side of the surrogate range are the controls."
+  (dolist (kept '("&#0;" "&#x0;" "&#xD800;" "&#xDFFF;" "&#55296;" "&#x110000;"))
+    (is (string= kept (b::%xml-decode kept)) "~S" kept))
+  (is (equal (string (code-char #xD7FF)) (b::%xml-decode "&#xD7FF;")))
+  (is (equal (string (code-char #xE000)) (b::%xml-decode "&#xE000;")))
+  (is (equal (string (code-char 1)) (b::%xml-decode "&#1;"))))
+
+(test s3-xml-decode-is-linear-in-ampersands-without-semicolons
+  "The `;' is looked for only a few characters after each `&', so a long string of `&' with a `;'
+at the very end decodes as written, without scanning to the end once per `&'."
+  (let ((input (concatenate 'string (make-string 200000 :initial-element #\&) ";")))
+    (is (string= input (b::%xml-decode input)))))
+
+(test s3-list-multipart-parts-reads-minio-etags
+  (is (equal '((1 "\"e1\"" 5242880))
+             (call-with-recorded-s3
+              (octets (concatenate 'string
+                                   "<ListPartsResult><Part><PartNumber>1</PartNumber>"
+                                   "<ETag>&#34;e1&#34;</ETag><Size>5242880</Size></Part>"
+                                   "<IsTruncated>false</IsTruncated></ListPartsResult>"))
+              (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.bin" "u-1"))))))

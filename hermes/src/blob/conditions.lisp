@@ -40,6 +40,21 @@ photo whose row still points at it is this, not a bug."))
    "The key is not well-formed -- see MNEMOSYNE/BLOB-KEY:KEY-FAULT for the vocabulary.
 Signalled at the protocol seam, before any backend sees it."))
 
+(define-condition blob-invalid-metadata (blob-error)
+  ((name :initarg :name :initform nil :reader blob-invalid-metadata-name)
+   (fault :initarg :fault :initform "" :reader blob-invalid-metadata-fault))
+  (:report (lambda (c s)
+             ;; NAME is the app's own metadata key, so it is reported; the value never is, for the
+             ;; same reason the key is kept out of BLOB-INVALID-KEY's report.
+             (format s "invalid blob metadata for bucket ~A~@[, name ~S~]: ~A"
+                     (or (blob-error-bucket c) "?") (blob-invalid-metadata-name c)
+                     (blob-invalid-metadata-fault c))))
+  (:documentation
+   "The METADATA passed to PUT-BLOB is not an alist of string names to string values, a name is
+empty or not an HTTP header token, a value is not printable ASCII, two names differ only in
+case, or a name is reserved. \"sha256\", in any case, is reserved: the S3 store keeps the blob's
+checksum under it (#810). Signalled at the protocol seam, before any backend sees it."))
+
 (define-condition blob-backend-error (blob-error)
   ((status :initarg :status :initform nil :reader blob-backend-error-status)
    (detail :initarg :detail :initform nil :reader blob-backend-error-detail))
