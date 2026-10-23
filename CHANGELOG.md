@@ -593,6 +593,27 @@ its tag.
 
 ### Added
 
+- **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
+  opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
+  :select t)` selects the item in its folder: `explorer.exe /select,"<path>"` on Windows,
+  `open -R` on macOS, and on Linux the `org.freedesktop.FileManager1` `ShowItems` call through
+  `dbus-send`, falling back to `xdg-open` on the folder. Without `:select` it opens the
+  directory, or the directory holding a file, with `ShellExecuteW` on Windows and `xdg-open` on
+  Linux; on macOS it always uses `open -R`, because `open` on an app bundle launches it. A string
+  path is read as a native file name, so `[`, `*` and `?` are ordinary characters.
+  `(hades/open:open-url url)` takes http and https URLs made of the characters RFC 3986 allows,
+  opens them with `ShellExecuteW` on Windows, and signals `unsupported-url` for anything else.
+  Both return `:opened`, or `:not-available` with `:no-display`, `:no-program` or `:failed`, and
+  neither waits for the program. A missing path signals `path-not-found`. New systems
+  `hades/open` and `hades/program`; `hades` loads both. `hades/program:find-program` searches
+  only the absolute directories on `PATH`.
+- **aion/windows: `system-windows-directory` and `shell-open`** (#820).
+  `(aion/windows:system-windows-directory)` returns the Windows directory from
+  `GetSystemWindowsDirectoryW`, not from the `SystemRoot` environment variable.
+  `(aion/windows:shell-open target)` opens a URL or file with the program registered for it
+  through `ShellExecuteW` and the `open` verb, with no command line and no shell, and returns `t`
+  when it started. It does not check the target; `hades/open:open-url` does. `aion/windows` now
+  loads `shell32.dll`.
 - **aion/libsecret: a Linux-only binding of libsecret for the Secret Service** (#357). The raw
   calls are in `aion/libsecret/ffi`; `aion/libsecret` has `load-libsecret` (T, or NIL and the
   reason), `with-libsecret-lock`, `with-schema`, `with-attributes`, `make-secret-value`,

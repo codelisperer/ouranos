@@ -80,7 +80,11 @@
    ;; a message box before any window exists (#819)
    #:message-box-w #:get-current-process-id #:process-id-to-session-id
    #:+mb-ok+ #:+mb-iconerror+ #:+mb-iconwarning+ #:+mb-iconinformation+
-   #:+mb-setforeground+ #:+mb-topmost+))
+   #:+mb-setforeground+ #:+mb-topmost+
+   ;; the Windows directory, and opening a URL with its registered program (#820)
+   #:get-system-windows-directory-w #:shell-execute-w #:+sw-shownormal+
+   #:co-initialize-ex #:co-uninitialize
+   #:+coinit-apartmentthreaded+ #:+coinit-disable-ole1dde+))
 
 (cl:defpackage #:aion/windows
   (:use #:common-lisp)
@@ -108,6 +112,8 @@
    #:make-kill-on-close-job #:assign-process-to-job #:terminate-job
    ;; starting a process in a job, with no console window (#700)
    #:spawn-in-job #:default-job-function #:find-executable
+   ;; the Windows directory, and opening a URL with its registered program (#820)
+   #:system-windows-directory #:shell-open
    #:quote-windows-argument #:windows-command-line
    #:process-not-started #:process-not-started-program #:process-not-started-reason
    #:job-process #:job-process-p #:job-process-pid #:job-process-job
