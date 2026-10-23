@@ -463,6 +463,16 @@ its tag.
 
 ### Added
 
+- **hades: `notify-user` shows a modal notice with one OK button before an app has a window**
+  (#819), for example to say "already running" when `hades/single-instance` refuses a second
+  launch. `(hades/notify:notify-user title message :level :warning)` uses `MessageBoxW` on
+  Windows, `osascript`'s `display alert` on macOS (no permission prompt), and `zenity` or
+  `kdialog` on Linux. Where no notice can be shown, in CI, an SSH session, Windows session 0,
+  Linux with no display or neither program, or when the native notice fails, it writes
+  `title (level): message` to standard error and does not wait. It returns `:native` or
+  `:stderr`, with the reason for `:stderr` as a second value. Bind
+  `hades/notify:*notify-backend*` to `:stderr` under `--self-test`. A new system,
+  `hades/notify`, which `hades` now loads.
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
   page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
