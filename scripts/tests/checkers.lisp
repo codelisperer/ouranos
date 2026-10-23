@@ -149,7 +149,7 @@ per-checker list that would go stale."
          (target (merge-pathnames name scripts)))
     (ensure-directories-exist scripts)
     (uiop:copy-file (merge-pathnames name *scripts*) target)
-    (dolist (helper '("tree-root.lisp" "human-path.lisp"))
+    (dolist (helper '("tree-root.lisp" "human-path.lisp" "pin-files.lisp"))
       (uiop:copy-file (merge-pathnames helper *scripts*) (merge-pathnames helper scripts)))
     target))
 
@@ -404,6 +404,71 @@ fails even when its neighbour has the field (#735)."
       (is (= 0 code) "complete asset blocks must pass; exit was ~D~%~A" code output)
       (is (search "All 2 pins" output) "two assets are two pins: ~A" output))))
 
+(defun %replace-once (text old new)
+  "TEXT with the first OLD replaced by NEW. Signals if OLD is not there, so a fixture built from
+a constant that has since changed fails loudly rather than testing the unchanged constant."
+  (let ((at (search old text)))
+    (unless at (error "fixture: ~S not found" old))
+    (concatenate 'string (subseq text 0 at) new (subseq text (+ at (length old))))))
+
+(defun %run-pins-on-assets (assets-pin)
+  "Run check-pins on a fresh tree whose only pin is ASSETS-PIN. (values exit output)"
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) assets-pin)
+    (%run (%install-checker tree "check-pins.lisp"))))
+
+(test pins-fails-an-asset-whose-first-line-is-malformed
+  "An asset whose first line is not `NAME VERSION sha256 HASH' used to have its fields added to
+the asset above it, so it was never checked and the run passed (#808). It now fails, naming the
+line. PINS-PASSES-COMPLETE-ASSET-BLOCKS is the control: the same fixture with the line intact."
+  (multiple-value-bind (code output)
+      (%run-pins-on-assets
+       (%replace-once +good-assets-pin+
+                      "bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee"
+                      "bulma       1.0.4    sha256"))
+    (is (/= 0 code) "exit ~D~%~A" code output)
+    (is (search "ASSETS.pin line 10" output) "the failure names the line: ~A" output)
+    (is (search "not an asset's first line" output) "~A" output)
+    (is (search "ASSETS.pin htmx" output) "and the asset above is still checked on its own: ~A" output)))
+
+(test pins-fails-a-stray-line-in-an-asset-file
+  "A line in the first column that is not an asset's first line used to be skipped silently."
+  (multiple-value-bind (code output)
+      (%run-pins-on-assets (%replace-once +good-assets-pin+ (format nil "~%bulma") (format nil "~%stray note~%bulma")))
+    (is (/= 0 code) "exit ~D~%~A" code output)
+    (is (search "not an asset's first line" output) "~A" output)))
+
+(test pins-accepts-a-sha384-asset-line
+  "The control for the malformed-line tests from the other side: sha384 is an asset's first line."
+  (multiple-value-bind (code output)
+      (%run-pins-on-assets (%replace-once +good-assets-pin+ "1.0.4    sha256" "1.0.4    sha384"))
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "All 2 pins" output) "~A" output)))
+
+(defun %bad-pin () (%without-line +good-pin+ "advisories"))
+
+(test pins-leave-out-build-output-and-nested-checkouts
+  "Top-level vendor/, dist/ and dist-*/ (what .gitignore names) and a checkout nested in the tree
+are not read; a pin in them that would fail does not (#808). One good pin keeps the run non-empty."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "libuv.pin" tree) +good-pin+)
+    (dolist (place '("vendor/libuv/x.pin" "dist/x.pin" "dist-probe/x.pin" "nested/sub/x.pin"))
+      (%write (merge-pathnames place tree) (%bad-pin)))
+    (%write (merge-pathnames "nested/.git" tree) (format nil "gitdir: /elsewhere~%"))
+    (multiple-value-bind (code output) (%run (%install-checker tree "check-pins.lisp"))
+      (is (= 0 code) "exit ~D~%~A" code output)
+      (is (search "All 1 pin" output) "only the root pin is read: ~A" output))))
+
+(test pins-still-read-a-directory-called-vendor-below-the-top
+  "The control: hyperion/assets/vendor/ is where ASSETS.pin lives, so only the top-level vendor/ is
+left out, and a failing pin further down still fails."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "libuv.pin" tree) +good-pin+)
+    (%write (merge-pathnames "hyperion/vendor/x.pin" tree) (%bad-pin))
+    (multiple-value-bind (code output) (%run (%install-checker tree "check-pins.lisp"))
+      (is (/= 0 code) "exit ~D~%~A" code output)
+      (is (search "hyperion/vendor/x.pin" output) "~A" output))))
+
 ;;; --- check-upstream (#716) -----------------------------------------------------
 ;;;
 ;;; What it exists to detect: a pin in the tree with no entry in upstream.sexp, and an entry
@@ -470,6 +535,19 @@ SBCL_SHA256_X86_64_LINUX=39fac28407405841003e4c2abfbe0d96abd93b7701e8b61cdd35e71
     (multiple-value-bind (code output) (%run-upstream tree)
       (is (= 1 code) "exit ~D~%~A" code output)
       (is (search "mbedtls.pin version has no entry" output) "~A" output))))
+
+(test upstream-leaves-out-the-same-directories-as-check-pins
+  "A pin with no entry fails (the test above), but not under the top-level vendor/ or in a nested
+checkout: check-upstream walks the tree with check-pins' own PIN-FILES (#808)."
+  (let ((tree (%upstream-tree)))
+    (%write (merge-pathnames "vendor/libuv/mbedtls.pin" tree)
+            (format nil "version 4.1.1~%advisories x~%reviewed 2026-09-15~%"))
+    (%write (merge-pathnames "nested/mbedtls.pin" tree)
+            (format nil "version 4.1.1~%advisories x~%reviewed 2026-09-15~%"))
+    (%write (merge-pathnames "nested/.git" tree) (format nil "gitdir: /elsewhere~%"))
+    (multiple-value-bind (code output) (%run-upstream tree)
+      (is (= 0 code) "exit ~D~%~A" code output)
+      (is (not (search "mbedtls.pin" output)) "~A" output))))
 
 (test upstream-fails-on-a-versions-env-key-with-no-entry
   (multiple-value-bind (code output)
