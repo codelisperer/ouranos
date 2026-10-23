@@ -1680,6 +1680,20 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
+  given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
+  native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
+  takes any Content-Type starting with `multipart/` as its own job, builds the body itself from an
+  alist with a boundary of its own, and failed on octets the caller had encoded with a TYPE-ERROR,
+  reported as an `http-error`. For such a request the client now gives dexador the Content-Type
+  with one leading space, which dexador's check does not match. HTTP does not count that space as
+  part of the value (RFC 9110, section 5.5), so the server reads the type and boundary exactly;
+  only the whitespace on the wire differs. On Windows, where dexador uses WinHTTP and already sent
+  the octets as given, nothing changes. A string or alist body is left to dexador as before.
+  `praxeon/image` drops the leading space it added itself for OpenAI's `/images/edits`; an app
+  that added one for the same reason can drop it. A test sends such a body to a local server and
+  compares what arrives, so a dexador update that checks the prefix another way fails it.
+
 - **praxeon/web-page: a byte order mark decides a page's charset, and a `<meta>` naming UTF-16
   or UTF-32 means UTF-8** (#823), as browsers decide. A page that starts with the UTF-8 mark
   (EF BB BF) is read as UTF-8 even when its `Content-Type` names Latin-1, and FE FF or FF FE

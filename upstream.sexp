@@ -54,6 +54,11 @@
  :upstream (:nuget "Microsoft.Web.WebView2"))
 
 ;;; --- Quicklisp ---------------------------------------------------------------------------
+;;;
+;;; A dist move also moves dexador. aion/http-client's %DEX-HEADERS works around dexador's
+;;; multipart handling on Linux and macOS (#828), and depends on how dexador-20260101's usocket
+;;; backend checks a Content-Type for "multipart/"; the test MULTIPART-OCTETS-ARRIVE-AS-SENT in
+;;; aion/tests/http-client.lisp fails if a new dexador checks it another way.
 
 (:name "Quicklisp dist" :category :quicklisp
  :where ((:env "scripts/versions.env" "QUICKLISP_DIST"))

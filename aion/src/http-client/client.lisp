@@ -335,10 +335,48 @@ Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
           (when (> (length octets) limit) (too-large))
           octets))))
 
+(defun %multipart-octets-header-p (header)
+  "Is HEADER, a (name . value) pair, a Content-Type whose value begins with \"multipart/\"?"
+  (and (consp header)
+       (string-equal (string (car header)) "content-type")
+       (stringp (cdr header))
+       (>= (length (cdr header)) 10)
+       (string-equal "multipart/" (cdr header) :end2 10)))
+
+(defun %dex-headers (req)
+  "REQ's headers as dexador is given them.
+
+A CENTRALIZED WORKAROUND, NOT A NATIVE SEND (#828). Dexador's usocket backend, which serves
+Linux and macOS, sets MULTIPART-P when the Content-Type value's first ten characters are
+string= \"multipart/\". It then writes its own Content-Type with a boundary of its own, and
+builds the body from an alist of fields, failing with a TYPE-ERROR on a body of octets the caller
+encoded itself (dexador-20260101, src/backend/usocket.lisp, lines 494-506 and 569-575). Its
+loop over the caller's other headers skips content-type (lines 610-615), so there is no other
+way to send the header. For a body of octets with a multipart/ type, the value is given here
+with one leading space: dexador's check no longer matches, and it writes the header and the
+octets as given. HTTP does not count whitespace before a field value as part of the value
+(RFC 9110, section 5.5), so a server reads the type, boundary included, byte for byte. Nothing
+is lost: dexador's multipart branch needs an alist, so it could never send these octets.
+
+WinHTTP, dexador's Windows backend, sends the octets and the header as given, so this applies
+only off Windows. The test MULTIPART-OCTETS-ARRIVE-AS-SENT sends such a body through the real
+client to a local server and compares what arrives, so a dexador that checks the prefix another
+way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here too."
+  (let ((headers (request-headers req)))
+    #+os-windows headers
+    #-os-windows
+    (if (typep (request-content req) '(array (unsigned-byte 8) (*)))
+        (mapcar (lambda (h)
+                  (if (%multipart-octets-header-p h)
+                      (cons (car h) (concatenate 'string " " (cdr h)))
+                      h))
+                headers)
+        headers)))
+
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
   (append (list :method (request-method req)
-                :headers (request-headers req)
+                :headers (%dex-headers req)
                 :content (request-content req)
                 ;; ALWAYS binary (pre-publication issue 223). Left to itself dexador decides by
                 ;; content-type and hands back a string for anything it considers text -- at
