@@ -400,4 +400,4 @@ from a backend, not from a connection."
   "IS* counts each check under *CURRENT-BACKEND*. With none bound, the check would be counted
 under NIL, which is evidence for no backend, so IS* signals instead."
   (let ((*current-backend* nil))
-    (signals error (is* t))))
+    (signals error (is* (eq t t)))))
