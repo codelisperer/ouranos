@@ -2941,8 +2941,10 @@ including the two optional breakdowns.")
   "Accept one connection on LISTENER within 10 seconds, read its request, and answer with REPLY
 as JSON, with status 200; or, when REPLY is a cons (STATUS-LINE . TEXT), answer TEXT with that
 status, such as \"400 Bad Request\" (#719); or, when REPLY is a list (STATUS-LINE TEXT HEADERS),
-also send HEADERS, an alist of names and values (#758). Returns the request line, the headers as an alist
-with lowercased names, and the body."
+also send HEADERS, an alist of names and values (#758). Returns the request line, the headers as
+an alist with lowercased names, the body decoded as UTF-8, and the body's octets, which is the
+only exact copy of a binary body such as a multipart upload (#758). The stream is bivalent so the
+headers are read as text and the body as octets."
   (let* ((socket (loop with deadline = (+ (get-universal-time) 10)
                        for s = (sb-bsd-sockets:socket-accept listener)
                        when s return (progn (setf (sb-bsd-sockets:non-blocking-mode s) nil) s)
@@ -2950,7 +2952,7 @@ with lowercased names, and the body."
                          do (error "no request reached the test server in 10 seconds")
                        do (sleep 0.02)))
          (stream (sb-bsd-sockets:socket-make-stream
-                  socket :input t :output t :element-type 'character
+                  socket :input t :output t :element-type :default
                          :external-format '(:utf-8 :replacement #\?) :buffering :full)))
     (unwind-protect
          (flet ((line () (string-right-trim '(#\Return) (read-line stream))))
@@ -2962,8 +2964,10 @@ with lowercased names, and the body."
                   (length (parse-integer (or (cdr (assoc "content-length" headers
                                                           :test #'string=))
                                              "0")))
-                  (body (make-string length)))
-             (read-sequence body stream)
+                  (octets (make-array length :element-type '(unsigned-byte 8)))
+                  (body (progn (read-sequence octets stream)
+                               (sb-ext:octets-to-string octets :external-format
+                                                        '(:utf-8 :replacement #\?)))))
              ;; A REPLY of (STATUS-LINE TEXT HEADERS) also sends HEADERS, an alist (#758).
              (let* ((extra (and (consp reply) (consp (cdr reply)) (third reply)))
                     (status (if (consp reply) (car reply) "200 OK"))
@@ -2978,7 +2982,7 @@ with lowercased names, and the body."
                        (length (sb-ext:string-to-octets text :external-format :utf-8))
                        #\Return #\Newline #\Return #\Newline #\Return #\Newline text))
              (finish-output stream)
-             (list request-line headers body)))
+             (list request-line headers body octets)))
       (close stream))))
 
 (defun %serve-replies (replies)

@@ -468,7 +468,11 @@ its tag.
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
   `-date`) from the bot's `my_chat_member` updates. By default it leaves the updates pending;
   `:confirm t` confirms them. A bot with a webhook gets the new condition
-  `telegram-webhook-active`. The dev transport returns no chats.
+  `telegram-webhook-active`. The dev transport returns no chats. With `:confirm t`, a page of
+  updates that carries no `update_id`, or none newer than those already confirmed, ends the read
+  instead of being asked for again, and the updates on that page stay pending (#805).
+  The README says what happens when the app's own `getUpdates` poll runs at the same time, and
+  when the bot's stored `allowed_updates` leaves out `my_chat_member`.
 
 - **praxeon: an agent can read a web page the user gives it, through the new
   `read-web-page` means** (#757). It is in the opt-in system `praxeon/web-page`, registered
@@ -483,6 +487,16 @@ its tag.
   - A failure is the condition `web-page-unreadable`, a `tool-error-result`, so the turn goes
     on.
   - `status-line` turns the means' `:tool-call` event into "Reading example.com…".
+  - When fetched, a page is decoded in the charset its `Content-Type` names, or, for HTML, the
+    charset a `<meta>` in its first 1024 bytes names, else UTF-8. A response with no
+    `Content-Type` is read when it is text. The whole read has a 30-second deadline
+    (`make-public-fetch`'s `:deadline`), reported as the reason `:timeout`. Resolving the host
+    and opening the connection are not interrupted, only checked when they return, so a read
+    can end up to the resolver's timeout plus the 10-second connect timeout past it. A redirect to a
+    URL that is not http or https is reported as `:invalid-url` (#807).
+  - `make-public-fetch` and `make-tavily-extract` no longer take `:address-policy`; passing it
+    is an error. The check that a page's host is a public address cannot be changed by an app
+    (#807).
 - **praxeon: `praxeon/source:quote-source`** wraps outside text, such as a fetched page or a
   retrieved document, between markers carrying a random nonce, after a sentence saying it is
   quoted material and not instructions (#757). `read-web-page` uses it, and
@@ -490,6 +504,16 @@ its tag.
 - **aion/http-client: `fetch-public` returns the URL of the last hop as a second value**
   (#757). After a redirect this differs from the URL it was given. A caller that uses only
   the first value is unaffected.
+- **aion/http-client: `fetch-public` takes `:deadline`, seconds for the whole fetch over every
+  hop** (#807). When it passes, the socket in use is shut down and `fetch-public` signals the
+  new condition `fetch-deadline-exceeded` (a subtype of `http-error`; readers
+  `fetch-deadline-exceeded-url` and `-deadline`), so a server that sends a byte now and then
+  can no longer hold the caller for as long as it likes. It covers the TLS handshake, the
+  request, the headers and the body, but not resolving the host name or opening the TCP
+  connection, which are checked when they return, so a fetch can end up to the resolver's own
+  timeout plus `:connect-timeout` past the deadline; with `:connect-timeout nil` the operating
+  system's connect limit applies, about 127 seconds on Linux. The default, `nil`, sets no
+  deadline, so existing callers are unchanged.
 
 - **hermes/blob: an S3 store can sign `x-amz-acl: private` into upload URLs, for a bucket that
   honours ACLs** (#796). `make-s3-store` takes `:upload-acl`, `:none` (the default) or `:private`,
@@ -621,9 +645,31 @@ its tag.
   with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
   `:size` and `:quality`, and `:input-tokens`, `:output-tokens` and `:cost` only when the
   provider reports them (`:cost` is absent, never 0, when not reported). A refused or failed
-  request emits no `:image-usage`. `generate-image` calls a provider outside a turn. `praxeon/llm` now exports
-  `request-failure`, the #719 mapping of a failed HTTP request to `provider-request-failed`.
-  Generating from a reference image is not supported yet.
+  request emits no `:image-usage`. `generate-image` calls a provider outside a turn.
+  `praxeon/llm` now exports `request-failure`, the #719 mapping of a failed HTTP request to
+  `provider-request-failed`.
+
+- **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
+  three). `praxeon/image:generate-image` takes `:references`, a list of up to 16
+  `reference-image`s (`*max-references*`), and `:mask`. Make each with
+  `praxeon/image:make-reference-image`, which reads the media type from the file's bytes and
+  signals `praxeon/image:image-input-invalid` (a `tool-error-result`, outcome `:not-run`) for a
+  file that is not PNG, JPEG or WebP, is empty, or is over 50 MB (`*max-reference-bytes*`). A
+  mask must be a PNG with an alpha channel, the size of the first reference, which must be a PNG
+  too; one that is not is refused before any request. With references the OpenAI provider posts
+  `multipart/form-data` to `/images/edits`. A variation is an edit whose prompt asks for one,
+  because `/images/variations` served only DALL-E. In a turn, `register` and
+  `register-openai-image` take `:resolve-reference`, a function from a reference string the
+  model gives to a `reference-image` or NIL, and `:max-references` (default 4); only then does
+  the schema offer `reference_images`. A reference named twice is resolved and sent once. An
+  unknown reference, too many, a resolver result that is not a `reference-image`, or a file that
+  is not an image is a `:not-run` error result. One request's reference images and mask may come
+  to at most 64 MB (`*max-reference-total-bytes*`). The provider is sent file names praxeon
+  makes (`image-1.png`, `mask.png`); `reference-image-name` only labels refusals.
+  `:image-usage` carries `:references`, the number of reference images, for an edit. New
+  exports: `image-request-references`, `image-request-mask`, `reference-image-octets`,
+  `reference-image-media-type`, `reference-image-name`, `*max-reference-total-bytes*`,
+  `openai-image-edit-body`, `edit-body-fields`, `edit-body-files`.
 
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with

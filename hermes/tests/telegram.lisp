@@ -482,6 +482,67 @@ CL:ERROR), and return the log text."
       (is (eql 22 (gethash "offset" (%request-json (second requests))))
           "the offset is one past the last update read"))))
 
+(defun %plain-update (update-id)
+  "A getUpdates entry that is not a my_chat_member update."
+  (format nil "{\"update_id\":~D,\"message\":{\"message_id\":~D,\"date\":1760000000,\"chat\":{\"id\":5,\"type\":\"private\"},\"text\":\"hi\"}}"
+          update-id update-id))
+
+(test confirming-reads-a-full-page-and-then-the-next
+  (with-bot (s p (lambda (method request stream)
+                   (declare (ignore method))
+                   (let ((offset (gethash "offset" (%request-json request))))
+                     (%bot-reply stream 200
+                                 (cond ((null offset)
+                                        (apply #'%updates-json
+                                               (%member-update 1 -1005 "group" "Early" "member" 1760000020)
+                                               (loop for id from 2 to 100 collect (%plain-update id))))
+                                       ((= offset 101)
+                                        (%updates-json
+                                         (%member-update 101 -1006 "channel" "Late" "administrator" 1760000030)))
+                                       (t (%updates-json)))))))
+    (let ((chats (h:telegram-added-chats p :confirm t))
+          (offsets (mapcar (lambda (r) (gethash "offset" (%request-json r))) (%requests s))))
+      (is (equal '(-1005 -1006) (mapcar #'h:telegram-added-chat-id chats))
+          "the chats from both pages")
+      (is (equal '(nil 101 102) offsets)
+          "a full page, the next page from one past it, then the call that only confirms"))))
+
+(test confirming-stops-at-a-full-page-that-does-not-move-the-offset
+  "A full page whose newest update_id is behind the offset already sent cannot move the offset,
+so the read stops after it instead of asking for the same offset again (#805)."
+  (let ((calls 0))
+    (with-bot (s p (lambda (method request stream)
+                     (declare (ignore method request))
+                     (incf calls)
+                     ;; Every call before the fifth returns updates 1 to 100, the first time
+                     ;; correctly and then as a stale page; the fifth is empty, so a loop that
+                     ;; does not stop still ends.
+                     (%bot-reply stream 200
+                                 (if (> calls 4)
+                                     (%updates-json)
+                                     (apply #'%updates-json
+                                            (loop for id from 1 to 100 collect (%plain-update id)))))))
+      (h:telegram-added-chats p :confirm t)
+      (is (equal '(nil 101)
+                 (mapcar (lambda (r) (gethash "offset" (%request-json r))) (%requests s)))
+          "the first page, then one call from past it, and no repeat of that call"))))
+
+(test confirming-stops-at-a-full-page-whose-updates-have-no-id
+  (let ((calls 0))
+    (with-bot (s p (lambda (method request stream)
+                     (declare (ignore method request))
+                     (incf calls)
+                     ;; After three calls the page is empty, so a loop that does not stop
+                     ;; still ends and the test reports how many calls it made.
+                     (%bot-reply stream 200
+                                 (if (> calls 3)
+                                     (%updates-json)
+                                     (apply #'%updates-json
+                                            (loop repeat 100
+                                                  collect "{\"message\":{\"message_id\":1,\"date\":1760000000,\"chat\":{\"id\":5,\"type\":\"private\"},\"text\":\"hi\"}}"))))))
+      (is (null (h:telegram-added-chats p :confirm t)))
+      (is (= 1 (length (%requests s))) "one call, and no second one with the same offset"))))
+
 (test a-bot-with-a-webhook-cannot-list-its-chats-and-its-webhook-is-left-alone
   (with-bot (s p (%always 409 (%bot-error 409 "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first")))
     (let ((c (handler-case (progn (h:telegram-added-chats p) nil)
