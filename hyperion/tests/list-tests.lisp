@@ -107,6 +107,30 @@ tries.")
     (%state (concatenate 'string "sort=" (string-downcase name)))
     (is (null (find-symbol name :keyword)))))
 
+(test page-numbers-at-the-edges
+  (is (= 1 (list:list-state-page (%state "page=%D9%A3"))) "an Arabic-Indic digit is not a digit here")
+  (is (= 1 (list:list-state-page (%state "page=+1"))) "+1 decodes to \" 1\", which is not digits")
+  (is (= 1 (list:list-state-page (%state "page=%2B1"))) "a literal plus sign")
+  (is (= 999999999 (list:list-state-page (%state "page=999999999"))) "9 digits")
+  (is (= 1 (list:list-state-page (%state "page=1000000000"))) "10 digits")
+  (is (equal '("page") (list:list-state-adjusted (%state "page=1000000000")))))
+
+(test control-characters-are-removed-from-a-text-filter
+  "Postgres refuses a NUL in a text value with an error; no control character belongs in a
+search term."
+  (let ((s (%state "q=a%00b%0Ac")))
+    (is (equal "abc" (list:filter-value s :q)))
+    (is (equal '("q") (list:list-state-adjusted s))))
+  (is (null (list:filter-value (%state "q=%00%01") :q)) "nothing left means no filter"))
+
+(test markup-in-a-filter-is-encoded-in-links-and-escaped-in-html
+  (let* ((s (%state "q=%3Cs%3E%22"))
+         (html (%html (lambda () (list:pager s 60 :hx-target "#c")))))
+    (is (equal "<s>\"" (list:filter-value s :q)))
+    (is (search "q=%3Cs%3E%22" (list:list-href s :page 2)))
+    (is (not (search "<s>" html)) "~A" html)
+    (is (search "hx-get=\"?page=2&amp;q=%3Cs%3E%22\"" html) "~A" html)))
+
 (test unknown-parameters-are-ignored-and-a-text-filter-is-cut
   (let ((s (%state "role=admin&q=abcdefgh")))
     (is (equal "abcde" (list:filter-value s :q)))
@@ -130,7 +154,9 @@ tries.")
   (signals error (list:make-list-spec :id "x" :page-size 30 :page-sizes '(25 50)))
   (signals error (list:make-list-spec :id "x" :sorts '((:a :column :a)) :default-sort :b))
   (signals error (list:make-list-spec :id "x" :filters '((:page :values ("1")))))
-  (signals error (list:make-list-spec :id "x" :filters '((:q :text t :column :q)))))
+  (signals error (list:make-list-spec :id "x" :filters '((:q :text t :column :q))))
+  (signals error (list:make-list-spec :id "x" :sorts '((:name :column :name)))
+    "a list with sort keys needs a tiebreak"))
 
 ;;; --- pages ---------------------------------------------------------------------------
 
@@ -145,25 +171,56 @@ tries.")
 
 ;;; --- links ---------------------------------------------------------------------------
 
-(test the-default-view-links-to-the-bare-path
-  (is (string= "/contacts" (list:list-href (%state "page=2") :page 1))))
+(test the-default-view-links-to-an-empty-query
+  (is (string= "?" (list:list-href (%state "page=2") :page 1))))
+
+(test links-carry-no-path
+  "A relative link is right under any mount, and nothing from the request's path reaches it:
+a mounted router's sub-path, a decoded %3F, or a leading // that would name another host."
+  (dolist (path '("/contacts" "/a?b" "//evil.com" "/"))
+    (let ((s (list:read-list-state *spec* (%env "page=2" path))))
+      (is (string= "?page=3" (list:list-href s :page 3)) "path ~S: ~A" path
+          (list:list-href s :page 3))))
+  (let ((html (%html (lambda ()
+                       (list:pager (list:read-list-state *spec* (%env "page=2" "//evil.com"))
+                                   60 :hx-target "#c")))))
+    (is (not (search "evil" html)) "~A" html)))
+
+(test a-mounted-router-gives-links-for-the-mounted-page
+  "Under (mount \"/admin\" ...), the router rewrites :path-info to the sub-path. The link is
+relative, so the browser keeps /admin."
+  (let* ((seen nil)
+         (app (hyperion/router:router
+               (hyperion/router:mount
+                "/admin"
+                (hyperion/router:router
+                 (hyperion/router:route
+                  :get "/contacts"
+                  (lambda (env)
+                    (setf seen (list (getf env :path-info)
+                                     (list:list-href (list:read-list-state *spec* env) :page 2)))
+                    '(200 () ("ok")))))))))
+    (hyperion/router:dispatch app (list :request-method :get :path-info "/admin/contacts"
+                                        :query-string "tab=x"))
+    (is (equal "/contacts" (first seen)) "the router rewrote :path-info: ~S" seen)
+    (is (string= "?tab=x&page=2" (second seen)) "~S" seen)))
 
 (test links-keep-parameters-the-list-does-not-own
   (let ((s (%state "tab=archived&page=2&sort=name")))
-    (is (string= "/contacts?tab=archived&page=3&sort=name" (list:list-href s :page 3))
+    (is (string= "?tab=archived&page=3&sort=name" (list:list-href s :page 3))
         "~A" (list:list-href s :page 3))))
 
 (test the-same-sort-key-reverses-and-a-new-one-takes-its-default
   (let ((s (%state "sort=name&page=3")))
-    (is (string= "/contacts?sort=name&dir=desc" (list:list-href s :sort :name)))
-    (is (string= "/contacts" (list:list-href s :sort :added)) "the default sort, newest first")
-    (is (string= "/contacts?dir=asc" (list:list-href s :sort :added :dir :asc)))))
+    (is (string= "?sort=name&dir=desc" (list:list-href s :sort :name)))
+    (is (string= "?" (list:list-href s :sort :added)) "the default sort, newest first")
+    (is (string= "?dir=asc" (list:list-href s :sort :added :dir :asc)))))
 
 (test a-size-or-filter-change-goes-back-to-page-one
   (let ((s (%state "page=3&status=open")))
-    (is (string= "/contacts?size=50&status=open" (list:list-href s :size 50)))
-    (is (string= "/contacts?status=closed" (list:list-href s :filters '(:status "closed"))))
-    (is (string= "/contacts" (list:list-href s :filters '(:status nil))))))
+    (is (string= "?size=50&status=open" (list:list-href s :size 50)))
+    (is (string= "?status=closed" (list:list-href s :filters '(:status "closed"))))
+    (is (string= "?" (list:list-href s :filters '(:status nil))))))
 
 (test a-link-reads-back-as-the-state-it-describes
   (let* ((s (%state "sort=name&size=50&status=closed&q=ab"))
@@ -181,18 +238,21 @@ tries.")
     (signals error (list:list-href s :size 30))
     (signals error (list:list-href s :dir :sideways))
     (signals error (list:list-href s :filters '(:role "admin")))
+    (signals error (list:list-href s :filters '(:status "pending")) "outside the closed set")
+    (signals error (list:list-href s :filters '(:q "abcdefgh")) "longer than :max-length")
+    (signals error (list:list-href s :filters (list :q (format nil "a~Cb" (code-char 0)))))
     (signals error (list:list-href s :page 0))))
 
 (test a-prefix-keeps-two-lists-apart
   (let* ((tasks (list:make-list-spec :id "tasks" :prefix "tasks."
-                                     :sorts '((:due :column :due)) :page-sizes '(10)
-                                     :page-size 10))
+                                     :sorts '((:due :column :due)) :tiebreak :id
+                                     :page-sizes '(10) :page-size 10))
          (env (%env "page=2&tasks.page=5"))
          (contacts-state (list:read-list-state *spec* env))
          (tasks-state (list:read-list-state tasks env)))
     (is (= 2 (list:list-state-page contacts-state)))
     (is (= 5 (list:list-state-page tasks-state)))
-    (is (string= "/contacts?page=2&tasks.page=6" (list:list-href tasks-state :page 6)))))
+    (is (string= "?page=2&tasks.page=6" (list:list-href tasks-state :page 6)))))
 
 (test query-string-with-replaces-and-removes
   (is (string= "a=1&c=3&b=9" (http:query-string-with "a=1&b=2&c=3&b=4" '(("b" . "9")))))
@@ -231,7 +291,7 @@ tries.")
   "Otherwise the link to the first page of the default view would have no list parameters,
 and following it would restore the stored state instead."
   (let ((store (make-instance 'memory-store)))
-    (is (string= "/contacts?page=1" (list:list-href (%state "page=2" :store store) :page 1)))))
+    (is (string= "?page=1" (list:list-href (%state "page=2" :store store) :page 1)))))
 
 (test a-tampered-stored-value-is-checked-like-a-request
   (let ((store (make-instance 'memory-store)))
@@ -293,13 +353,13 @@ a tag's angle brackets removed."
   (let ((html (%html (lambda () (list:pager (%state "page=5") 312)))))
     (is (search ">Showing 101–125 of 312<" html) "~A" html)
     (is (search "<span aria-current=page>5</span>" html) "~A" html)
-    (is (search "href=\"/contacts?page=4\"" html) "previous: ~A" html)
+    (is (search "href=\"?page=4\"" html) "previous: ~A" html)
     (is (search "rel=prev" html))
-    (is (search "href=\"/contacts?page=6\"" html) "next")
+    (is (search "href=\"?page=6\"" html) "next")
     (is (search "rel=next" html))
-    (is (search "<a href=\"/contacts\" aria-label=\"Page 1\">1</a>" html)
-        "page 1 links to the bare path: ~A" html)
-    (is (search "href=\"/contacts?page=13\"" html) "the last page is linked")
+    (is (search "<a href=? aria-label=\"Page 1\">1</a>" html)
+        "page 1 links to the empty query: ~A" html)
+    (is (search "href=\"?page=13\"" html) "the last page is linked")
     (is (= 2 (count-matches "hyperion-pager-gap" html)) "a gap on each side")
     (is (not (search "hx-get" html)) "no htmx attributes without a target")))
 
@@ -320,7 +380,7 @@ a tag's angle brackets removed."
 
 (test with-a-target-links-carry-the-htmx-attributes
   (let ((html (%html (lambda () (list:pager (%state "page=2") 60 :hx-target "#contacts")))))
-    (is (search "hx-get=\"/contacts?page=3\"" html) "~A" html)
+    (is (search "hx-get=\"?page=3\"" html) "~A" html)
     (is (search "hx-target=#contacts" html) "~A" html)
     (is (search "hx-swap=outerHTML" html))
     (is (search "hx-push-url=true" html))))
@@ -330,16 +390,16 @@ a tag's angle brackets removed."
          (active (%html (lambda () (list:sort-heading s :name "Name"))))
          (other (%html (lambda () (list:sort-heading s :added "Added")))))
     (is (search "aria-sort=ascending" active) "~A" active)
-    (is (search "href=\"/contacts?sort=name&amp;dir=desc\"" active) "~A" active)
+    (is (search "href=\"?sort=name&amp;dir=desc\"" active) "~A" active)
     (is (search "aria-hidden=true>▲</span>" active) "~A" active)
     (is (not (search "aria-sort" other)) "~A" other)
-    (is (search "<a href=\"/contacts\">Added</a>" other) "~A" other)))
+    (is (search "<a href=?>Added</a>" other) "~A" other)))
 
 (test the-page-size-choice-marks-the-current-size
   (let ((html (%html (lambda () (list:page-size-choice (%state "page=3&size=50"))))))
     (is (search "<span aria-current=true>50</span>" html) "~A" html)
-    (is (search "<a href=\"/contacts\">25</a>" html) "back to page 1 at the default size: ~A" html)
-    (is (search "<a href=\"/contacts?size=100\">100</a>" html) "~A" html)))
+    (is (search "<a href=?>25</a>" html) "back to page 1 at the default size: ~A" html)
+    (is (search "<a href=\"?size=100\">100</a>" html) "~A" html)))
 
 (test the-text-comes-from-the-translation-source
   (let ((source (i18n:make-dictionary

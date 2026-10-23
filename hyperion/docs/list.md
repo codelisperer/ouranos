@@ -69,20 +69,57 @@ The query parameters are `page`, `size`, `sort`, `dir` and each filter's name, f
 ```
 
 `fetch-page` counts first and brings the page within the pages that exist, so a page past the
-end shows the last page. A filter becomes SQL in the app's `:where`:
+end shows the last page. Links are relative (`?page=2`), so they stay right under a mounted
+router, and nothing from the request's path is written into them. A filter becomes SQL in the app's `:where`:
 - `filter-where` gives `(:= column value)` for the `:values` filters that declare a `:column`;
 - for anything else, `filter-value` gives the checked value, which the app passes as a value
   and never as an identifier.
 
+A `:text` filter has its control characters removed (Postgres refuses a NUL in a text value)
+and is cut to `:max-length`.
+
+### Searching with LIKE
+
+A text filter used in `LIKE` needs its own `%`, `_` and `\` escaped. Otherwise a user's `%`
+or `_` is a wildcard: `q=%_%_%_` matches every row, and a pattern full of wildcards makes the
+scan slower. mnemosyne's `:like` has no `ESCAPE` clause yet (#862), which makes the two
+databases differ:
+
+- **Postgres:** LIKE's default escape character is the backslash, so escaping with a backslash
+  works today.
+
+  ```lisp
+  (defun like-contains (text)
+    "TEXT as a LIKE pattern that matches it anywhere, with \\, % and _ taken literally."
+    (with-output-to-string (out)
+      (write-char #\% out)
+      (loop for c across text
+            do (when (find c "\\%_") (write-char #\\ out))
+               (write-char c out))
+      (write-char #\% out)))
+
+  (hyperion/list-db:fetch-page *db* state :select '(:id :name) :from '(:contacts)
+    :where (let ((q (hyperion/list:filter-value state :q)))
+             (and q (list :ilike :name (like-contains q)))))
+  ```
+
+- **SQLite:** LIKE has no default escape character, so the escapes above are matched as
+  literal backslashes. Until mnemosyne can write `ESCAPE` (#862), a SQLite search treats
+  `%` and `_` in the term as wildcards. Keep `:max-length` short for a text filter used this
+  way.
+
 ## Links
 
 `(list-href state :page 3)`, `(list-href state :sort :name)`, `(list-href state :size 50)` and
-`(list-href state :filters '(:status "closed"))` link to the current path with that change.
+`(list-href state :filters '(:status "closed"))` give a relative link, `?` and a query string,
+to the current page with that change.
 - Every parameter the list does not own is kept, such as a tab the app keeps in the query.
 - Choosing the current sort key again reverses the direction.
 - Changing the sort, the size or a filter goes back to page 1.
-- Values equal to their defaults are left out, so the first page of the default view is the
-  bare path.
+- Values equal to their defaults are left out, so the first page of the default view is `?`.
+- A value from code that is not one of the spec's choices signals an error: an unknown sort
+  key or size, a filter value outside its set, or a text value too long or with control
+  characters.
 
 ## The components
 
@@ -127,6 +164,10 @@ generics over its own table.
 - Keyset ("seek") paging: `OFFSET` gets slower on deep pages.
 - The cost of `COUNT(*)` on very large tables.
 - User-chosen sorts on several columns, and saved views.
+
+`:tiebreak` is required whenever a list has sort keys. Without a unique column at the end of
+`ORDER BY`, rows with equal sort values can come back in a different order on each query, so a
+row can appear on two pages or on none.
 
 An app with these needs can still use `read-list-state` and `list-href`, and count some other
 way.

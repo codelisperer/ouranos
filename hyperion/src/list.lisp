@@ -103,9 +103,9 @@ lists on one page can use \"contacts.\" and \"tasks.\" and not share their page.
 SORTS is a list of (KEY :column COLUMN [:direction :asc|:desc]). KEY is the keyword the
 request names, by its lowercase name (?sort=name for :name). COLUMN is the keyword mnemosyne
 writes into ORDER BY. DIRECTION is the key's default. DEFAULT-SORT is the key used when the
-request names none; it defaults to the first. TIEBREAK, a column keyword such as :id, is
-added to every ORDER BY after the chosen column, so rows with equal sort values keep one
-order from page to page.
+request names none; it defaults to the first. TIEBREAK, a unique column such as :id, is
+required when there are sort keys. It is added to every ORDER BY after the chosen column, so
+rows with equal sort values keep one order and no row repeats or is skipped between pages.
 
 FILTERS is a list of (NAME :values (STRING ...) [:column COLUMN]), a closed set, or (NAME :text
 t [:max-length N]), free text cut to N characters (100 by default). The request names a filter
@@ -129,6 +129,8 @@ Signals an error for a malformed spec, because a spec is code."
       (%spec-error ":page-size ~S is not one of :page-sizes ~S" page-size page-sizes))
     (when (and default-sort (not (assoc default-sort sorts)))
       (%spec-error ":default-sort ~S is not one of the sort keys" default-sort))
+    (when (and sorts (not tiebreak))
+      (%spec-error ":tiebreak is required when the list has sort keys: name a unique column, such as the primary key, so rows with equal sort values keep one order and none repeats or is skipped between pages"))
     (when (and tiebreak (not (keywordp tiebreak)))
       (%spec-error ":tiebreak must be a keyword naming a column, got ~S" tiebreak))
     (dolist (f filters)
@@ -164,7 +166,6 @@ Signals an error for a malformed spec, because a spec is code."
   (direction :asc :type (member :asc :desc))
   (filters '() :type list)      ; ((name . validated-string) ...)
   (adjusted '() :type list)     ; parameter names whose value was replaced by a default
-  (path "/" :type string)
   (query-string nil :type (or null string))
   (remembering nil :type boolean))  ; read with a store: links always name the page
 
@@ -179,6 +180,11 @@ becoming an offset no database should be asked for.")
        (every (lambda (c) (char<= #\0 c #\9)) text)
        (let ((n (parse-integer text)))
          (and (plusp n) n))))
+
+(defun %control-char-p (c)
+  "True for a C0 control character or DEL. A text filter drops them: Postgres refuses a NUL in
+a text value with an error, and none of them belongs in a search term."
+  (let ((code (char-code c))) (or (< code 32) (= code 127))))
 
 (defun %parse-params (spec lookup)
   "The validated state for SPEC from LOOKUP, a function from a parameter name to its first
@@ -212,8 +218,9 @@ parameters that were present and replaced."
                                        ((getf options :values)
                                         (or (find text (getf options :values) :test #'string=)
                                             (progn (adjust (%lower name)) nil)))
-                                       (t (let ((cut (subseq text 0 (min (length text)
-                                                                        (getf options :max-length)))))
+                                       (t (let* ((clean (remove-if #'%control-char-p text))
+                                                 (cut (subseq clean 0 (min (length clean)
+                                                                           (getf options :max-length)))))
                                             (when (< (length cut) (length text))
                                               (adjust (%lower name)))
                                             (and (plusp (length cut)) cut))))
@@ -229,8 +236,9 @@ parameters that were present and replaced."
 
 Every value is checked against the spec, and one that does not fit is replaced by the
 default: an unknown sort key, a direction other than asc or desc, a page that is not 1 to 9
-digits, a page size not in :page-sizes, a filter value outside its set. A text filter is cut
-to its :max-length. LIST-STATE-ADJUSTED lists the parameters that were replaced or cut.
+digits, a page size not in :page-sizes, a filter value outside its set. A text filter loses
+its control characters and is cut to its :max-length. LIST-STATE-ADJUSTED lists the parameters
+that were replaced, cleaned or cut.
 
 STORE, when given, is a remembered-state store (LOAD-LIST-STATE, SAVE-LIST-STATE). When the
 request carries none of the list's parameters, the stored ones are read instead, checked
@@ -248,7 +256,6 @@ always shows what it says."
         (%parse-params spec (%first-value-function source))
       (let ((state (%make-list-state :spec spec :page page :page-size size :sort sort
                                      :direction direction :filters filters :adjusted adjusted
-                                     :path (or (getf env :path-info) "/")
                                      :query-string query-string
                                      :remembering (and store t))))
         (when (and store request-has-own)
@@ -330,13 +337,20 @@ of the list's parameters restores the stored ones, and the default view must sta
 
 (defun list-href (state &rest changes &key (page nil page-p) (size nil size-p)
                                            (sort nil sort-p) (dir nil dir-p) filters)
-  "The link to the current path with STATE changed by CHANGES, keeping every query parameter
-the list does not own.
+  "A relative link, \"?\" and the query string, to the current page with STATE changed by
+CHANGES, keeping every query parameter the list does not own.
+
+THE LINK CARRIES NO PATH. The browser resolves it against the page the user is on, so it is
+right under any mount and needs no path from the request. The env's :PATH-INFO is not usable
+here: a mounted router rewrites it to the sub-path, and it is already decoded, so a request
+for /a%3Fb or //evil.com would be echoed back as a different link or one to another site.
 
   (list-href state :page 3)                  page 3, everything else as it is
   (list-href state :sort :name)              sort by :name; the same key again reverses it
   (list-href state :size 50)
   (list-href state :filters '(:status \"open\"))   set a filter; NIL as the value removes it
+
+The result is \"?\" alone for the first page of the default view with no other parameters.
 
 Changing the sort, the size or a filter goes back to page 1 unless :PAGE is also given.
 Choosing a different sort key uses that key's default direction unless :DIR is given. A
@@ -365,6 +379,13 @@ app's code, not from the request."
       (loop for (name value) on filters by #'cddr
             for options = (rest (assoc name (list-spec-filters spec)))
             do (unless options (%spec-error "~S is not a filter of list ~S" name (list-spec-id spec)))
+               (when value
+                 (unless (and (stringp value)
+                              (if (getf options :values)
+                                  (member value (getf options :values) :test #'string=)
+                                  (and (<= (length value) (getf options :max-length))
+                                       (not (find-if #'%control-char-p value)))))
+                   (%spec-error "~S is not a value filter ~S accepts" value name)))
                (setf (list-state-filters new)
                      (append (remove name (list-state-filters new) :key #'car)
                              (when value (list (cons name value)))))))
@@ -373,14 +394,12 @@ app's code, not from the request."
                             (%spec-error "~S is not a page number" page)))
                 ((or sort-p size-p dir-p filters) 1)
                 (t (list-state-page state))))
-    (let* ((own (%own-param-names spec))
-           (query (http:query-string-with
-                   (list-state-query-string state)
-                   (append (mapcar (lambda (n) (cons n nil)) own)
-                           (list-params new)))))
-      (if (string= query "")
-          (list-state-path state)
-          (concatenate 'string (list-state-path state) "?" query)))))
+    (let ((own (%own-param-names spec)))
+      (concatenate 'string "?"
+                   (http:query-string-with
+                    (list-state-query-string state)
+                    (append (mapcar (lambda (n) (cons n nil)) own)
+                            (list-params new)))))))
 
 ;;; --- remembered state ----------------------------------------------------------------
 
