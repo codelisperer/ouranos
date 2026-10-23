@@ -650,6 +650,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "delete-tree")
+                             (:file "links")      ; make-directory-link, make-file-link (#825); after delete-tree, whose %KIND it uses
                              (:file "attributes")
                              (:file "temporary"))))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
@@ -662,7 +663,8 @@
                 :serial t
                 :components ((:file "delete-tree-tests")
                              (:file "attributes-tests")
-                             (:file "temporary-tests"))))
+                             (:file "temporary-tests")
+                             (:file "links-tests"))))   ; #825; uses delete-tree-tests' %FRESH and %WRITE
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"
