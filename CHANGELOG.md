@@ -571,6 +571,31 @@ its tag.
   tests have a store; a developer can run them the same way without their own keyring being
   touched.
 
+- **hyperion/list: page, sort and filter a list from the query string** (#488). The app
+  declares a list once with `hyperion/list:make-list-spec`:
+  - sort keys mapped to columns, a default sort, and a `:tiebreak` column, which is required
+    when there are sort keys;
+  - filters, either a closed set of `:values` or `:text` with a `:max-length`;
+  - `:page-size` and the allowed `:page-sizes`.
+
+  The functions:
+  - `read-list-state` reads `page`, `size`, `sort`, `dir` and the filters from the request.
+    The request can only choose among the declared values: an unknown sort key, a direction
+    other than asc or desc, a page that is not 1 to 9 digits, or a size not allowed falls
+    back to the default, and `list-state-adjusted` says which. A text filter loses its control
+    characters and is cut to its `:max-length`.
+  - `list-clauses` gives `:order-by`, `:limit` and `:offset`, with every column taken from
+    the spec.
+  - `list-href` builds relative links (`?page=2`) that keep the other query parameters, so
+    they work under a mounted router and repeat nothing from the request's path.
+  - `pager`, `sort-heading` and `page-size-choice` render real links, with `hx-get`,
+    `hx-target`, `hx-swap` and `hx-push-url` when a target is given.
+  - `:store` with `make-session-list-store` remembers a list's state in the session.
+
+  The new `hyperion/list-db` system adds `fetch-page`, which returns the rows of one page,
+  the total, and the state with its page clamped. `hyperion/http` gains `query-string-with`
+  and `htmx-request-p`. See `hyperion/docs/list.md`.
+
 - **hades/credentials: ask whether a credential store is available, and its name, without
   trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
   service`) is true when this system has a usable store and NIL otherwise, with a reason as a

@@ -308,6 +308,42 @@
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
+(defsystem "hyperion/list"
+  :description "Paging, sorting and filtering a list from the query string, against a spec the app declares: the state, the mnemosyne clauses, links, and the pager and sort-heading components (#488)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/http, hyperion/i18n and hyperion/session. No database: the
+  ;; clauses are plain data, and hyperion/list-db runs them.
+  :depends-on ("hyperion" "spinneret")
+  :components ((:file "src/list"))
+  :in-order-to ((test-op (test-op "hyperion/list/tests"))))
+
+(defsystem "hyperion/list/tests"
+  :description "Tests for hyperion/list: the request can only choose among declared values, links keep other parameters, and the components' markup."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/list" "hyperion" "mnemosyne" "spinneret" "fiveam")
+  :components ((:file "tests/list-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/list/tests :run-tests)))
+
+(defsystem "hyperion/list-db"
+  :description "FETCH-PAGE for hyperion/list: one page of rows and the total, through mnemosyne (#488)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("hyperion/list" "mnemosyne")
+  :components ((:file "src/list-db"))
+  :in-order-to ((test-op (test-op "hyperion/list-db/tests"))))
+
+(defsystem "hyperion/list-db/tests"
+  :description "Tests for hyperion/list-db against SQLite in memory, and Postgres when MNEMOSYNE_TEST_PG_URL is set."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/list-db" "hyperion/list" "mnemosyne" "fiveam")
+  :components ((:file "tests/list-db-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/list-db/tests :run-tests)))
+
 (defsystem "hyperion/sidecar"
   :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
   :author "Bob <eternal.recursion@proton.me>"
