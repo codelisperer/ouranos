@@ -112,6 +112,23 @@ the CL code that calls it decides what to record. No `aion/log` call belongs ins
 ```
 
 `:prod`/`:staging` select **one-line JSON on stdout**; anything else is the pretty layout.
+
+**Every entry is one physical line, in both layouts** (#762). A field value can hold text
+from outside the process, such as a provider's error message, a header or a path. Unescaped,
+a line break in it would start a second line that reads like a separate entry, and a test
+that checks "the log line" would only see the first part.
+- **JSON:** the line is a JSON object, so quotes, backslashes and control characters are
+  escaped as JSON requires. U+0085, U+2028 and U+2029, which JSON allows raw and some
+  readers split lines on, are written as `\u0085`, `\u2028` and `\u2029`.
+- **Pretty:** the message, the category and every key and value share the line, so all of
+  them are escaped:
+  - a backslash becomes `\\`;
+  - line feed, carriage return and tab become `\n`, `\r` and `\t`;
+  - every other control character (U+0000 to U+001F, U+007F to U+009F) and U+2028 and
+    U+2029 become `\u` followed by four hex digits.
+  The original text can be read back exactly by undoing those escapes. The pretty layout
+  does not quote values, so a value containing a space and `k=v` text still reads like an
+  extra field on the same line. Use the JSON layout when entries are parsed by a program.
 Frameworks never call `setup` — a library that configures logging on load steals a decision
 that belongs to the application.
 

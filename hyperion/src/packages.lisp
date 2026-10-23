@@ -138,6 +138,9 @@
            ;; and the same one level up, for a multipart body (pre-publication issue 280)
            #:+multipart-parts-key+ #:cache-multipart-parts
            #:query-param #:query-params #:request-header #:cookie
+           ;; a link to the current query with some parameters changed, and the htmx
+           ;; request test (#488)
+           #:query-string-with #:htmx-request-p
            ;; multipart/form-data (pre-publication issue 143): ceilings on by default, content streamed
            #:multipart-p #:parse-multipart #:delete-parts #:sanitize-filename
            #:part #:part-p #:part-name #:part-filename #:part-safe-filename

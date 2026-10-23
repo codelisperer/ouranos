@@ -35,6 +35,21 @@ its tag.
   bundle should not bundle libsecret: the one the desktop installs is the one that talks to its
   keyring. A value is limited to 2560 UTF-8 bytes, as on Windows and macOS.
 
+- **aion/log: every log entry is one physical line; the pretty layout escapes line breaks,
+  control characters and backslashes** (#762). Before, a field value or message containing a
+  line break continued the entry onto a new line, and text from outside the process could
+  write a line that looked like a separate entry. In the pretty layout (`log:setup` with any
+  `:env` other than `:prod` or `:staging`):
+  - the message, the category and every field key and value are escaped;
+  - a backslash is written as `\\`, so a Windows path such as `C:\new` now appears as
+    `C:\\new`;
+  - line feed, carriage return and tab are written as `\n`, `\r` and `\t`;
+  - other control characters and U+2028 and U+2029 are written as `\u` and four hex digits.
+  The JSON layout already escaped control characters, and now also writes U+0085, U+2028 and
+  U+2029 as `\u` escapes. A script or test that reads pretty log text and expects raw line
+  breaks, tabs or single backslashes there needs to undo the escapes. The rules are in
+  `docs/logging.md`.
+
 - **hades/credentials: the live tests use the real credential store only when
   `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows, macOS
   and Linux fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
@@ -555,6 +570,31 @@ its tag.
   keyring afterwards (#357). CI runs the Linux gate through it so the `hades/credentials` live
   tests have a store; a developer can run them the same way without their own keyring being
   touched.
+
+- **hyperion/list: page, sort and filter a list from the query string** (#488). The app
+  declares a list once with `hyperion/list:make-list-spec`:
+  - sort keys mapped to columns, a default sort, and a `:tiebreak` column, which is required
+    when there are sort keys;
+  - filters, either a closed set of `:values` or `:text` with a `:max-length`;
+  - `:page-size` and the allowed `:page-sizes`.
+
+  The functions:
+  - `read-list-state` reads `page`, `size`, `sort`, `dir` and the filters from the request.
+    The request can only choose among the declared values: an unknown sort key, a direction
+    other than asc or desc, a page that is not 1 to 9 digits, or a size not allowed falls
+    back to the default, and `list-state-adjusted` says which. A text filter loses its control
+    characters and is cut to its `:max-length`.
+  - `list-clauses` gives `:order-by`, `:limit` and `:offset`, with every column taken from
+    the spec.
+  - `list-href` builds relative links (`?page=2`) that keep the other query parameters, so
+    they work under a mounted router and repeat nothing from the request's path.
+  - `pager`, `sort-heading` and `page-size-choice` render real links, with `hx-get`,
+    `hx-target`, `hx-swap` and `hx-push-url` when a target is given.
+  - `:store` with `make-session-list-store` remembers a list's state in the session.
+
+  The new `hyperion/list-db` system adds `fetch-page`, which returns the rows of one page,
+  the total, and the state with its page clamped. `hyperion/http` gains `query-string-with`
+  and `htmx-request-p`. See `hyperion/docs/list.md`.
 
 - **hades/credentials: ask whether a credential store is available, and its name, without
   trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key

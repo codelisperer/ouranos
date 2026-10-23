@@ -243,6 +243,27 @@ this is first-wins rather than an error."
   (let ((h (getf env :headers)))
     (and h (gethash (string-downcase name) h))))
 
+(defun query-string-with (query-string changes)
+  "QUERY-STRING with the parameters named in CHANGES replaced, for building a link that keeps
+the rest of the current query (#488). CHANGES is a list of (name . value): every existing
+pair with that name is removed, and the pair is appended when VALUE is a string. A value of
+NIL only removes. Other pairs keep their order. The result is encoded as FORM-URLENCODE
+encodes, and is the empty string when no pair is left.
+
+QUERY-STRING is what the Clack env holds under :QUERY-STRING, or NIL."
+  (let ((names (mapcar #'car changes)))
+    (form-urlencode
+     (append (remove-if (lambda (pair) (member (car pair) names :test #'string=))
+                        (form-alist query-string))
+             (loop for (name . value) in changes
+                   when value collect (cons name value))))))
+
+(defun htmx-request-p (env)
+  "True when the request was made by htmx: it carries the header HX-Request: true. A handler
+uses this to return only the fragment htmx swaps in, and the whole page otherwise. Such a
+response should carry Vary: HX-Request, so a cache does not serve one as the other."
+  (equal (request-header env "hx-request") "true"))
+
 (defun cookie (env name)
   "The value of cookie NAME from the request's Cookie header, or NIL."
   (let ((raw (request-header env "cookie")))
