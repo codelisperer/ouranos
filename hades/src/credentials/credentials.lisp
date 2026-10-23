@@ -8,7 +8,10 @@
 ;;;;   - macOS: the login Keychain, a generic-password item per credential, with the item's
 ;;;;     service and account set to SERVICE and ACCOUNT. Not the data-protection keychain,
 ;;;;     which needs a keychain-access-groups entitlement that an app signed ad hoc lacks.
-;;;;   - Linux: the Secret Service API over D-Bus. Not written yet (#357).
+;;;;   - Linux: the Secret Service, the freedesktop.org API that GNOME Keyring and KeePassXC
+;;;;     provide over D-Bus, through libsecret. An item per credential in the default
+;;;;     collection (the user's login keyring), with the attributes service and account under
+;;;;     the schema org.codelisperer.hades.Credential, labelled "SERVICE (ACCOUNT)".
 ;;;;
 ;;;; Where no backend exists, every call signals CREDENTIAL-STORE-UNAVAILABLE. Nothing is ever
 ;;;; written to a file instead: a store that quietly saved the key somewhere weaker would be the
@@ -22,7 +25,14 @@
 ;;;; prints as #<SECRET REDACTED>. No condition carries it, and no report names it. On Windows it
 ;;;; passes through a foreign buffer as UTF-8 bytes, and that buffer is zeroed before it is freed.
 ;;;; On macOS it passes through the same kind of buffer into a CFData; the buffer is zeroed, and
-;;;; the CFData's own copy is not (aion ADR-0004). The Lisp string REVEAL returns cannot be
+;;;; the CFData's own copy is not (aion ADR-0004). On Linux it passes through the same kind of
+;;;; buffer into a SecretValue, which libsecret clears when it is released.
+;;;;
+;;;; A LOCKED KEYRING on Linux: on a desktop an operation may ask the user to unlock it, as macOS
+;;;; does. Without a display (no DISPLAY or WAYLAND_DISPLAY) a locked default collection is
+;;;; refused before anything is asked. A lookup or delete that comes back empty while the
+;;;; collection is still locked was refused or dismissed, and is reported as
+;;;; CREDENTIAL-STORE-UNAVAILABLE, never as an absent item. The Lisp string REVEAL returns cannot be
 ;;;; zeroed; that is aion/secret's limit, not this file's.
 
 (in-package #:hades/credentials)
@@ -226,14 +236,168 @@ FN returns."
             ((= status ffi:+err-sec-item-not-found+) nil)
             (t (%keychain-fail status service account :delete))))))
 
-;;; --- elsewhere: no store yet ------------------------------------------------------------
+;;; --- Linux: the Secret Service ----------------------------------------------------------
 
-#-(or win32 darwin)
+#+linux
+(progn
+  (defparameter *schema-name* "org.codelisperer.hades.Credential"
+    "The libsecret schema every item is stored under. A lookup matches only items with this
+schema, so it never returns an item another program stored with the same attributes.")
+
+  (defconstant +secret-service-max-bytes+ 2560
+    "The longest value stored, in UTF-8 bytes. The Secret Service itself takes more; this is
+Credential Manager's limit, so a value an app can store on one system it can store on the
+others.")
+
+  (defparameter *locked-headless-reason*
+    "the keyring is locked, and there is no display to ask for it to be unlocked on (neither DISPLAY nor WAYLAND_DISPLAY is set); unlock it, for example by logging in to the desktop, and try again")
+
+  (defparameter *locked-declined-reason*
+    "the keyring is locked and was not unlocked: the request to unlock it was dismissed or could not be shown")
+
+  (defun %unavailable-reason ()
+    "NIL when the Secret Service can be reached, or a sentence saying why it cannot, checking in
+the order a user would fix them: libsecret installed, a D-Bus session bus, a program providing
+the Secret Service on it. These checks unlock nothing, so this does not prompt. The caller holds
+the libsecret lock."
+    (multiple-value-bind (loaded why) (libsecret:load-libsecret)
+      (flet ((fails (check what)
+               (handler-case (progn (funcall check) nil)
+                 (libsecret:libsecret-error (e)
+                   (format nil "~A (~A)" (funcall what e) (libsecret:libsecret-error-message e))))))
+        (if (not loaded)
+            (format nil "libsecret is not installed, so the Secret Service cannot be reached (~A)"
+                    why)
+            (or (fails #'libsecret:check-session-bus
+                       (constantly "there is no D-Bus session bus to reach the Secret Service on"))
+                (fails #'libsecret:check-secret-service
+                       (lambda (e)
+                         (if (libsecret:service-missing-error-p e)
+                             "no program provides the Secret Service on the D-Bus session bus; GNOME Keyring and KeePassXC are two that do"
+                             "the Secret Service on the D-Bus session bus could not be reached"))))))))
+
+  (defun %headless-p ()
+    "True when there is no display an unlock prompt could be shown on."
+    (flet ((unset (name) (let ((v (uiop:getenv name))) (or (null v) (string= v "")))))
+      (and (unset "DISPLAY") (unset "WAYLAND_DISPLAY"))))
+
+  (defun %fail-if-still-locked (service account operation)
+    "Called when an operation found or changed nothing. When the default collection is locked,
+that result means the item could not be reached, not that it is absent, so signal
+CREDENTIAL-STORE-UNAVAILABLE. libsecret's lookup and clear ask to unlock a locked item, and when
+the request is dismissed they return nothing and no error."
+    (when (libsecret:default-collection-locked-p)
+      (error 'credential-store-unavailable
+             :service service :account account :operation operation
+             :reason *locked-declined-reason*)))
+
+  (defun %secret-service-fail (condition service account operation)
+    "Signal the hades condition for the libsecret CONDITION: a locked keyring is a store that
+cannot be used now; anything else is a failed operation, with GLib's message as its code."
+    (if (libsecret:locked-error-p condition)
+        (error 'credential-store-unavailable
+               :service service :account account :operation operation
+               :reason "the keyring is locked; unlock it, for example by logging in to the desktop, and try again")
+        (error 'credential-error
+               :service service :account account :operation operation
+               :code (format nil "~A ~D: ~A" (libsecret:libsecret-error-domain condition)
+                             (libsecret:libsecret-error-code condition)
+                             (libsecret:libsecret-error-message condition)))))
+
+  (defun %call-with-item (service account operation fn)
+    "Call FN with the schema and the attribute table naming the item SERVICE / ACCOUNT, under the
+libsecret lock, after checking that the Secret Service can be reached. Returns what FN returns.
+
+On a desktop, FN's call may show the user a request to unlock the keyring, as the Keychain does
+on macOS, and waits for the answer holding the lock. Without a display there is nobody to ask,
+so a locked keyring is refused here instead of starting a request that could wait indefinitely."
+    (libsecret:with-libsecret-lock ()
+      (let ((reason (%unavailable-reason)))
+        (when reason
+          (error 'credential-store-unavailable
+                 :service service :account account :operation operation :reason reason)))
+      (handler-case
+          (progn
+            (when (and (%headless-p) (libsecret:default-collection-locked-p))
+              (error 'credential-store-unavailable
+                     :service service :account account :operation operation
+                     :reason *locked-headless-reason*))
+            (libsecret:with-schema (schema *schema-name* '("service" "account"))
+              (libsecret:with-attributes (attributes (list (cons "service" service)
+                                                           (cons "account" account)))
+                (funcall fn schema attributes))))
+        (libsecret:libsecret-error (e)
+          (%secret-service-fail e service account operation)))))
+
+  (defun %store (service account secret)
+    (let ((octets (sb-ext:string-to-octets (aion/secret:reveal secret) :external-format :utf-8)))
+      (unwind-protect
+           (progn
+             (when (> (length octets) +secret-service-max-bytes+)
+               (error 'credential-too-large :service service :account account :operation :store
+                                            :size (length octets)
+                                            :limit +secret-service-max-bytes+))
+             (%call-with-item
+              service account :store
+              (lambda (schema attributes)
+                (let ((value (libsecret:make-secret-value octets)))
+                  (unwind-protect
+                       ;; Stores a new item, or replaces the value of the one already stored with
+                       ;; the same schema and attributes in the collection.
+                       (when (zerop (libsecret:with-gerror (err "storing the credential")
+                                      (ffi:secret-password-storev-binary-sync
+                                       schema attributes "default"
+                                       (format nil "~A (~A)" service account)
+                                       value (cffi:null-pointer) err)))
+                         (%fail-if-still-locked service account :store)
+                         (error 'credential-error :service service :account account
+                                                  :operation :store))
+                    (ffi:secret-value-unref value))))))
+        (fill octets 0)))
+    t)
+
+  (defun %fetch (service account)
+    (%call-with-item
+     service account :fetch
+     (lambda (schema attributes)
+       (let ((value (libsecret:with-gerror (err "looking up the credential")
+                      (ffi:secret-password-lookupv-binary-sync schema attributes
+                                                               (cffi:null-pointer) err))))
+         (when (cffi:null-pointer-p value)
+           (%fail-if-still-locked service account :fetch)
+           (error 'credential-not-found :service service :account account :operation :fetch))
+         (unwind-protect
+              (let ((octets (libsecret:secret-value-octets value)))
+                (unwind-protect
+                     (aion/secret:make-secret (%decode-value octets service account))
+                  (fill octets 0)))
+           (ffi:secret-value-unref value))))))
+
+  (defun %decode-value (octets service account)
+    "OCTETS as a UTF-8 string. Another program can store bytes that are not UTF-8 under this
+schema; SBCL's decoding error would carry them into a report or a backtrace, so it is replaced
+by a CREDENTIAL-ERROR that names the item and not its bytes."
+    (or (handler-case (sb-ext:octets-to-string octets :external-format :utf-8)
+          (sb-int:character-decoding-error () nil))
+        (error 'credential-error :service service :account account :operation :fetch
+                                 :code "the stored value is not UTF-8 text")))
+
+  (defun %delete (service account)
+    (%call-with-item
+     service account :delete
+     (lambda (schema attributes)
+       (or (/= 0 (libsecret:with-gerror (err "deleting the credential")
+                   (ffi:secret-password-clearv-sync schema attributes (cffi:null-pointer) err)))
+           (progn (%fail-if-still-locked service account :delete) nil))))))
+
+;;; --- elsewhere: no store ----------------------------------------------------------------
+
+#-(or win32 darwin linux)
 (progn
   (defun %unavailable (service account operation)
     (error 'credential-store-unavailable
            :service service :account account :operation operation
-           :reason "the Secret Service backend is not written yet (#357)"))
+           :reason "hades/credentials has no backend for this operating system; it has one for Windows, macOS and Linux"))
   (defun %store (service account secret)
     (declare (ignore secret))
     (%unavailable service account :store))
@@ -279,10 +443,20 @@ a missing logon session means it cannot be used. Nothing is written and nothing 
     (values t nil))
   (defun %store-name () "macOS Keychain"))
 
-#-(or win32 darwin)
+#+linux
 (progn
   (defun %available ()
-    (values nil "no credential store backend exists on this system yet; the Secret Service one is #357"))
+    ;; The same checks every operation makes first: libsecret, the session bus, and a program
+    ;; providing the Secret Service. None of them unlocks a keyring, so this never prompts; a
+    ;; locked keyring is reported when an operation is tried, as on macOS.
+    (let ((reason (libsecret:with-libsecret-lock () (%unavailable-reason))))
+      (if reason (values nil reason) (values t nil))))
+  (defun %store-name () "Secret Service"))
+
+#-(or win32 darwin linux)
+(progn
+  (defun %available ()
+    (values nil "hades/credentials has no backend for this operating system; it has one for Windows, macOS and Linux"))
   (defun %store-name () nil))
 
 (defun credential-store-available-p (&key service)
@@ -293,15 +467,19 @@ NIL, says why.
 It never prompts, never writes, and never creates an item. On Windows it asks Credential Manager
 for an item that does not exist, and is false when the logon session has no credential store; on
 macOS it is true wherever the Keychain backend is built, without asking the Keychain, because a
-query can prompt when the keychain is locked; elsewhere it is false until #357 adds the Secret
-Service backend, and is true from then on without a change here. SERVICE is accepted for a
-backend that answers per service and is not used yet."
+query can prompt when the keychain is locked; on Linux it is true when libsecret is installed,
+there is a D-Bus session bus, and a program provides the Secret Service on it, checked without
+unlocking anything, and false with the first of those that is missing as the reason. A locked
+keyring is reported when an operation is tried. SERVICE is accepted for a backend that answers
+per service and is not used yet."
   (declare (ignore service))
   (%available))
 
 (defun credential-store-name ()
-  "The name to show a user for this system's credential store: \"Windows Credential Manager\" or
-\"macOS Keychain\", or NIL where there is none yet (Linux, until #357)."
+  "The name to show a user for this system's credential store: \"Windows Credential Manager\",
+\"macOS Keychain\" or \"Secret Service\", or NIL on a system hades/credentials has no backend
+for. On Linux the name is given even when the Secret Service cannot be reached;
+CREDENTIAL-STORE-AVAILABLE-P says whether it can."
   (%store-name))
 
 ;;; --- the facade ------------------------------------------------------------------------

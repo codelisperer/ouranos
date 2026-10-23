@@ -113,8 +113,8 @@ backend, the credential store (#357), which is listed by its own name."
            suite host coverage +required-reports+))
 
 (test a-required-backend-line-that-is-missing-is-a-problem
-  "hades/credentials/tests must report the credential store on Windows and macOS. With no line
-for it, as when the reader guard around the live suite or the system's test-op changes, there is
+  "In the fixture table, hades/credentials/tests must report the credential store on Windows and
+macOS. With no line for it, as when the reader guard around the live suite or the system's test-op changes, there is
 one problem naming the backend and the host; the gate prints it as a COVER failure."
   (%load-not-covered)
   (dolist (host '(:windows :darwin))
@@ -124,8 +124,9 @@ one problem naming the backend and the host; the gate prints it as a COVER failu
       (is (search (string-downcase (symbol-name host)) (first problems)) "~S" problems))))
 
 (test a-required-backend-line-is-not-required-on-other-hosts
-  "Linux has no credential-store backend until #357, so the suite prints no line there and that
-is not a problem."
+  "A row with :HOSTS does not apply on a host it does not name. The fixture names Windows and
+macOS, so a missing line on Linux is not a problem here; verify-tree.lisp's own table names
+Linux too since #357's Secret Service backend."
   (%load-not-covered)
   (is (null (%missing :hades/credentials/tests :linux '()))))
 

@@ -63,8 +63,8 @@
 ;;;;
 ;;;; The same rule covers the operating system's credential store (#357), which
 ;;;; hades/credentials/tests reports as `BACKEND-CHECKS credential-store ...'. Its live tests
-;;;; store, read and delete items in the real Credential Manager or Keychain of whoever runs
-;;;; them, so they run only when OURANOS_TEST_REAL_CREDENTIAL_STORE=1 is set. CI sets it, because
+;;;; store, read and delete items in the real Credential Manager, Keychain or Secret Service
+;;;; keyring of whoever runs them, so they run only when OURANOS_TEST_REAL_CREDENTIAL_STORE=1 is set. CI sets it, because
 ;;;; a runner's store is thrown away with the runner. On a developer's machine the skip fails
 ;;;; this gate unless OURANOS_ALLOW_NO_CREDENTIAL_STORE=1 excuses it, and NOT COVERED names it
 ;;;; either way. +BACKEND-RULES+ holds both rules.
@@ -809,10 +809,10 @@ demanding it would only produce a rule that never fires. Postgres is the one tha
 does not run, which is the whole reason this exists; it is required of every suite that
 reports a database backend. The credential store is the operating system's own, and its
 tests are opt-in on a developer's machine (#357); it is required of the suite that reports
-it, hades/credentials/tests on Windows and macOS.")
+it, hades/credentials/tests on Windows, macOS and Linux.")
 
 (defparameter +required-backend-reports+
-  '((:hades/credentials/tests "credential-store" :hosts (:windows :darwin))
+  '((:hades/credentials/tests "credential-store" :hosts (:windows :darwin :linux))
     (:mnemosyne/tests "postgres")
     (:mnemosyne/jobs/tests "postgres")
     (:praxeon/memory-db/tests "postgres")
@@ -823,7 +823,7 @@ on every host or only on HOSTS (values of OURANOS-PLATFORM:HOST-OS). +BACKEND-RU
 line that is there; a missing line passed silently, so a suite that stopped printing it, because
 a reader guard or its test-op changed, went green with none of that backend's checks run (the
 hub's review of #603). Checked by OURANOS-NOT-COVERED:MISSING-BACKEND-REPORTS. hades/credentials
-reports the credential store only where there is a backend, Windows and macOS, until #357.")
+reports the credential store where it has a backend: Windows, macOS and Linux (#357).")
 
 (defun %env-true-p (name)
   (let ((v (uiop:getenv name)))
