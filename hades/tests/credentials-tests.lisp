@@ -26,7 +26,7 @@
 
 (in-package #:hades/credentials/tests)
 
-(def-suite all :description "hades/credentials: the tests that do not touch a credential store.")
+(def-suite all :description "hades/credentials: the tests that store, change and delete nothing.")
 (def-suite live :description "hades/credentials: the tests that use this machine's real store.")
 (def-suite leftovers :description "hades/credentials: nothing the live tests created remains.")
 
@@ -292,7 +292,12 @@ fetches by name only the items this run created."
     (dolist (item *created*)
       (signals cred:credential-not-found (cred:fetch-credential (car item) (cdr item))))))
 
-;;; --- every platform: nothing here touches a store ------------------------------------------
+;;; --- every platform: nothing here stores, changes or deletes an item ------------------------
+;;;
+;;; On Windows and macOS the two availability tests (#824) read the store, but only the
+;;; probe's own item, which never exists (HADES/CREDENTIALS::*PROBE-SERVICE* and
+;;; *PROBE-ACCOUNT*). That is the read an app makes when it asks whether there is a store, so
+;;; they run without OURANOS_TEST_REAL_CREDENTIAL_STORE.
 
 (in-suite all)
 
@@ -466,3 +471,31 @@ started on it to provide org.freedesktop.secrets."
   ;; Refused before any store is reached, so this runs without the live variable.
   (signals error (cred:fetch-credential "" "user"))
   (signals error (cred:fetch-credential "service" "")))
+
+;;; --- is there a store? (#824) ----------------------------------------------------------
+
+(test the-store-is-named-and-its-availability-agrees-with-the-operations
+  "Where there is a backend the store is available and named; where there is none it is not,
+with a reason, and an operation signals CREDENTIAL-STORE-UNAVAILABLE, so the two never disagree."
+  (multiple-value-bind (available reason) (cred:credential-store-available-p)
+    #+win32 (progn (is (eq t available) "Credential Manager answers on this machine: ~A" reason)
+                   (is (equal "Windows Credential Manager" (cred:credential-store-name))))
+    #+darwin (progn (is (eq t available))
+                    (is (equal "macOS Keychain" (cred:credential-store-name))))
+    #-(or win32 darwin)
+    (progn (is (null available))
+           (is (search "#357" reason) "the reason names what is missing: ~A" reason)
+           (is (null (cred:credential-store-name)))
+           (signals cred:credential-store-unavailable
+             (cred:fetch-credential (%service) "user")))))
+
+(test asking-whether-the-store-is-available-creates-nothing
+  "The probe only reads. Asked twice, the item it reads still does not exist afterwards; where
+there is no backend, the fetch says the store is unavailable instead."
+  (cred:credential-store-available-p)
+  (cred:credential-store-available-p :service "ouranos-test-hades-credentials/probe")
+  (let ((service hades/credentials::*probe-service*)
+        (account hades/credentials::*probe-account*))
+    #+(or win32 darwin) (signals cred:credential-not-found (cred:fetch-credential service account))
+    #-(or win32 darwin) (signals cred:credential-store-unavailable
+                          (cred:fetch-credential service account))))

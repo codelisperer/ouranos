@@ -764,3 +764,78 @@ print with its headers."
         "precondition: the request is printed in it, so the next check is not vacuous: ~A"
         (subseq trace 0 (min 600 (length trace))))
     (is (null (%leaked trace)) "~S in the backtrace" (%leaked trace))))
+
+;;; --- a body of octets with a multipart type arrives as sent (#828) ---------------------
+
+(defun %multipart-octets (boundary)
+  "A multipart/form-data body with a text field and a binary file part, encoded by hand."
+  (flet ((text (control &rest args)
+           (sb-ext:string-to-octets (apply #'format nil control args) :external-format :utf-8)))
+    (let ((crlf (format nil "~C~C" #\Return #\Linefeed)))
+      (concatenate '(vector (unsigned-byte 8))
+                   (text "--~A~A" boundary crlf)
+                   (text "Content-Disposition: form-data; name=\"prompt\"~A~A" crlf crlf)
+                   (text "a red kite~A--~A~A" crlf boundary crlf)
+                   (text "Content-Disposition: form-data; name=\"image\"; filename=\"kite.png\"~A"
+                         crlf)
+                   (text "Content-Type: image/png~A~A" crlf crlf)
+                   (coerce '(137 80 78 71 13 10 26 10 0 255 254 1) '(vector (unsigned-byte 8)))
+                   (text "~A--~A--~A" crlf boundary crlf)))))
+
+(defun %send-and-capture (content content-type)
+  "Send CONTENT with CONTENT-TYPE through the real client to a local server; return the
+request the server read."
+  (aion/test-http:with-server
+      (server (lambda (request stream) (declare (ignore request))
+                (aion/test-http:write-response stream 200 '() "ok")))
+    (http:send-request (http:make-request :method :post
+                                          :url (aion/test-http:server-url server "/edits")
+                                          :headers (list (cons "Content-Type" content-type))
+                                          :content content :read-timeout 10)
+                       (list (http:ensure-2xx)))
+    (first (aion/test-http:server-requests server))))
+
+(test multipart-octets-arrive-as-sent
+  "A body the caller encoded as multipart/form-data reaches the server byte for byte, and its
+Content-Type value is the one given (#828). Dexador's usocket backend would otherwise rebuild the
+body from an alist and fail on these octets; this test is what notices if a dexador update
+changes that check. The control sends octets of another type, whose header is untouched."
+  (let* ((boundary "hermes-Kq7xV2-boundary")
+         (body (%multipart-octets boundary))
+         (type (format nil "multipart/form-data; boundary=~A" boundary))
+         (got (%send-and-capture body type))
+         (header (aion/test-http:request-header got "Content-Type")))
+    (is (equalp body (aion/test-http:request-body got)) "the body arrives byte for byte")
+    (is (string= type (string-trim " " header))
+        "the Content-Type value is the one given: ~S" header)
+    (is (search (format nil "boundary=~A" boundary) (aion/test-http:request-head got))
+        "with the caller's boundary, not one of dexador's"))
+  (let* ((body (coerce '(1 2 3 4) '(vector (unsigned-byte 8))))
+         (got (%send-and-capture body "application/octet-stream")))
+    (is (equalp body (aion/test-http:request-body got)))
+    (is (search (format nil "Content-Type: application/octet-stream~C" #\Return)
+                (aion/test-http:request-head got))
+        "the control: another type is sent exactly, with no added space")))
+
+(test the-multipart-workaround-applies-only-where-dexador-needs-it
+  (flet ((sent-type (content type)
+           (let ((req (http:make-request :url "https://x.example" :content content
+                                         :headers (list (cons "Content-Type" type)))))
+             (cdr (assoc "Content-Type" (http::%dex-headers req) :test #'string-equal)))))
+    (let ((octets (coerce '(1 2) '(vector (unsigned-byte 8))))
+          (form "multipart/form-data; boundary=x"))
+      #-os-windows
+      (progn
+        (is (string= (concatenate 'string " " form) (sent-type octets form)))
+        (is (string= " Multipart/Mixed; boundary=x"
+                     (sent-type octets "Multipart/Mixed; boundary=x"))
+            "in any case"))
+      #+os-windows
+      (is (string= form (sent-type octets form))
+          "WinHTTP sends octets as given, so Windows' header is unchanged")
+      (is (string= "application/json" (sent-type octets "application/json"))
+          "only a multipart type")
+      (is (string= "multipart/form-data" (sent-type "a string body" "multipart/form-data"))
+          "only a body of octets: dexador's own multipart handling of other bodies is left alone")
+      (is (string= "multipart/form-data"
+                   (sent-type '(("field" . "value")) "multipart/form-data"))))))

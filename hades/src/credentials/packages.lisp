@@ -8,6 +8,7 @@
   (:documentation "A credential store over the operating system's own: store, fetch and delete a
 secret by service and account. Fetch returns an AION/SECRET (hades ADR-0001, #357).")
   (:export #:store-credential #:fetch-credential #:delete-credential
+           #:credential-store-available-p #:credential-store-name
            #:credential-error #:credential-error-service #:credential-error-account
            #:credential-error-operation #:credential-error-code
            #:credential-not-found #:credential-store-unavailable
