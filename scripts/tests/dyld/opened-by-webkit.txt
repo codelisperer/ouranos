@@ -1,0 +1,15 @@
+dyld[27818]: <5B6CC3DD-1BCB-3D34-9ABE-5F523CAB261A> /Applications/Example App.app/Contents/MacOS/hyperion-view
+dyld[27818]: <4FED5EE2-5D3E-35B1-A170-9859C4B683BB> /usr/lib/libSystem.B.dylib
+dyld[27818]: <9B672762-7B1F-30BC-96DE-F176B372D66D> /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+dyld[27818]: <2E99AD96-DC1C-3643-9988-273AB6844EFC> /usr/lib/libcurl.4.dylib
+dyld[27818]: <46D13DA8-E7BD-37DC-91DD-D5E6CE00C2B8> /usr/lib/libcrypto.46.dylib
+dyld[27818]: <07D5F4C6-1A13-344C-882B-0B0A08048DE5> /usr/lib/libssl.48.dylib
+dyld[27818]: move loaded to delayed: CoreFoundation
+dyld[27818]: move loaded to delayed: libcurl.4.dylib
+dyld[27818]: move loaded to delayed: libcrypto.46.dylib
+dyld[27818]: move loaded to delayed: libssl.48.dylib
+dyld[27818]: move delayed to loaded: CoreFoundation
+dyld[27818]: move delayed to loaded: libcurl.4.dylib
+dyld[27818]: move delayed to loaded: libcrypto.46.dylib
+dyld[27818]: move delayed to loaded: libssl.48.dylib
+MARK /System/Library/Frameworks/WebKit.framework/WebKit opened

@@ -237,7 +237,9 @@ onto another port is fragility bought for nothing.
   machine with nothing installed (`scripts/verify-bundle.sh`, in `desktop-release.yml`).
   macOS and Windows have scripts that check which file the loader actually opened, which
   is weaker: `scripts/verify-bundle-macos.sh`, run in `desktop-release.yml` as a blocking step
-  on the signed `.app` with `--require-carried libuv` (#472), and
+  on the signed `.app` with `--require-carried libuv` (#472), which also fails when a process
+  the bundle starts has a libssl or libcrypto loaded that the bundle does not carry, except
+  Apple's copy that WebKit loads in `hyperion-view` (#783), and
   `scripts/verify-bundle-windows.ps1`, run in `desktop-release.yml` as a blocking step. The
   Windows script also traces `hyperion-view.exe` and the WebView2 runtime's processes, judges
   only the processes whose program is in the bundle, and reports whether the window opened
