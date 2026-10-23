@@ -8187,11 +8187,23 @@ and #\\\" do not start a comment or a string."
             do (setf code (concatenate 'string (subseq code 0 (1+ p)) (subseq code (+ p 2)))))
       code)))
 
+(defun %first-parameter (code defun-at)
+  "The first parameter of the DEFUN that starts at DEFUN-AT in CODE (from %CODE-TEXT), or NIL
+when its name is not followed by a lambda list."
+  (let* ((name-at (+ defun-at (length "(defun ")))
+         (after-name (+ name-at (length (%token-after code name-at)) 1)))
+    (and (< after-name (length code))
+         (char= (char code after-name) #\()
+         (let ((parameter (%token-after code (1+ after-name))))
+           (and (plusp (length parameter)) parameter)))))
+
 (defun %emitted-event-types (texts)
   "The event types emitted in TEXTS (source files as strings, read through %CODE-TEXT), as
 keywords; the calls whose type cannot be read from the source; and the functions that pass
-their own argument to EVT:EMIT as the type. A call whose type is not a keyword -- to EVT:EMIT
-or to one of those functions -- is one whose type cannot be read."
+their own first argument to EVT:EMIT as the type. A call whose type is not a keyword -- to
+EVT:EMIT or to one of those functions -- is one whose type cannot be read. A function counts as
+passing its type on only when the type it gives #'EVT:EMIT is its first parameter, because its
+callers are read at their first argument (#693); any other expression there is unreadable."
   (let ((codes (mapcar #'%code-text texts))
         (types '()) (unreadable '()) (wrappers '()))
     (flet ((take (code p)
@@ -8205,7 +8217,8 @@ or to one of those functions -- is one whose type cannot be read."
           (if (char= (char code p) #\:)
               (take code p)
               (let ((defun-at (search "(defun " code :from-end t :end2 p)))
-                (if defun-at
+                (if (and defun-at
+                         (equal (%first-parameter code defun-at) (%token-after code p)))
                     (push (%token-after code (+ defun-at 7)) wrappers)
                     (push (%source-at code p) unreadable))))))
       (setf wrappers (remove-duplicates wrappers :test #'string=))
@@ -8235,6 +8248,49 @@ or to a function that passes its type on."
       (is (equal '(:named) types) "types found: ~S" types)
       (is (= 2 (length unreadable)) "unreadable: ~S" unreadable)
       (is (equal '("w") wrappers)))))
+
+(test a-function-passes-its-type-on-only-when-it-is-its-first-parameter
+  "#693, from Copilot's review of #691. A function whose call to #'EVT:EMIT gives anything other
+than its own first parameter as the type is not a function that passes its type on: that call
+is reported as unreadable, and the function's callers are not read as emitting their argument."
+  (flet ((scan (&rest texts) (multiple-value-list (%emitted-event-types texts))))
+    (destructuring-bind (types unreadable wrappers)
+        (scan "(defun w (type more) (apply #'evt:emit (if more :undocumented type) more))"
+              "(w :named nil)")
+      (is (null types) "types found: ~S" types)
+      (is (= 1 (length unreadable)) "unreadable: ~S" unreadable)
+      (is (null wrappers) "an expression in place of the type: ~S" wrappers))
+    (destructuring-bind (types unreadable wrappers)
+        (scan "(defun w (held type) (apply #'evt:emit type held))" "(w :held-id :named)")
+      (is (null types) "types found: ~S" types)
+      (is (= 1 (length unreadable)) "unreadable: ~S" unreadable)
+      (is (null wrappers) "the second parameter in place of the type: ~S" wrappers))
+    (destructuring-bind (types unreadable wrappers)
+        (scan "(defun w (type) (apply #'evt:emit other type))" "(w :named)")
+      (is (null types) "types found: ~S" types)
+      (is (= 1 (length unreadable)) "unreadable: ~S" unreadable)
+      (is (null wrappers) "a variable that is not a parameter: ~S" wrappers)))
+  ;; The case in #693, on praxeon's own source: %HELD-EVENT changed to pass
+  ;; (if held-id :undocumented type). Before the fix the scan still followed %HELD-EVENT, read a
+  ;; keyword at each call site, reported nothing, and the completeness test passed.
+  (let* ((src (asdf:system-relative-pathname :praxeon "src/"))
+         (texts (mapcar #'uiop:read-file-string (directory (merge-pathnames "**/*.lisp" src))))
+         (from "(apply #'evt:emit type :id (getf call :id)")
+         (to "(apply #'evt:emit (if held-id :undocumented type) :id (getf call :id)")
+         (changed (mapcar (lambda (text)
+                            (let ((p (search from text)))
+                              (if p
+                                  (concatenate 'string (subseq text 0 p) to
+                                               (subseq text (+ p (length from))))
+                                  text)))
+                          texts)))
+    (is (= 1 (count-if (lambda (text) (search to text)) changed))
+        "the change was made in exactly one file")
+    (multiple-value-bind (types unreadable wrappers) (%emitted-event-types changed)
+      (declare (ignore types))
+      (is (equal '("%task-event") wrappers) "%HELD-EVENT is no longer followed: ~S" wrappers)
+      (is (find-if (lambda (u) (search "(if held-id :undocumented" u)) unreadable)
+          "and its call is reported: ~S" unreadable))))
 
 (test the-event-list-names-every-event-praxeon-emits
   "#339. Every event type a praxeon source file emits is in the list at the top of event.lisp,
