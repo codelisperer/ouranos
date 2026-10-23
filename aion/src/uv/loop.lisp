@@ -295,9 +295,15 @@ waits for it again (#694). It used to forget the thread and return as if it had 
 CLOSE-LOOP then freed the loop under the running callback."
   (let ((thread (loop-thread loop)))
     (when thread
-      (setf (loop-stop-requested-p loop) t)
-      ;; Wake the blocked uv_run so it re-tests the flag and returns.
-      (ignore-errors (ffi:uv-async-send (loop-async loop)))
+      ;; The wakeup, and below the clear and the unref, touch LOOP-ASYNC, which a concurrent
+      ;; CLOSE-LOOP may be about to free. Each is done under LOOP-LOCK and only while the loop
+      ;; is not being freed and THREAD is still the one recorded; CLOSE-LOOP claims the freeing
+      ;; under the same lock (#876's review). The join stays outside it.
+      (sb-thread:with-mutex ((loop-lock loop))
+        (when (and (null (loop-freed-p loop)) (eq (loop-thread loop) thread))
+          (setf (loop-stop-requested-p loop) t)
+          ;; Wake the blocked uv_run so it re-tests the flag and returns.
+          (ignore-errors (ffi:uv-async-send (loop-async loop)))))
       (unless wait (return-from stop-loop-thread nil))
       ;; From a callback on the loop thread itself there is nothing to wait for: the thread
       ;; cannot exit while this runs on it, so it is still running by definition.
@@ -307,9 +313,11 @@ CLOSE-LOOP then freed the loop under the running callback."
             (sb-thread:join-thread thread :default nil)))
       (when (sb-thread:thread-alive-p thread)
         (error 'loop-thread-still-running :loop loop :thread thread :timeout timeout))
-      (setf (loop-thread loop) nil)
-      ;; Drop the reference again so a subsequent plain RUN can still terminate.
-      (ignore-errors (ffi:uv-unref (loop-async loop)))))
+      (sb-thread:with-mutex ((loop-lock loop))
+        (when (and (null (loop-freed-p loop)) (eq (loop-thread loop) thread))
+          (setf (loop-thread loop) nil)
+          ;; Drop the reference again so a subsequent plain RUN can still terminate.
+          (ignore-errors (ffi:uv-unref (loop-async loop)))))))
   t)
 
 (cffi:defcallback %close-callback :void ((handle :pointer))
@@ -364,6 +372,8 @@ valid, and every later one is refused."
       (stop-loop-thread loop :timeout timeout)
     (wait-for-loop-thread ()
       :report "Wait for the loop thread to exit without a limit, then free the loop."
+      ;; Not on the loop's own thread, which cannot exit while it waits for itself.
+      :test (lambda (c) (declare (ignore c)) (not (loop-thread-p loop)))
       (stop-loop-thread loop :timeout nil))
     (leave-loop-unfreed ()
       :report "Leave the loop unfreed (a deliberate leak); a later CLOSE-LOOP can still free it."

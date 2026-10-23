@@ -34,8 +34,17 @@ its tag.
   - `close-loop` called from a callback on the loop's own thread signals instead of freeing
     the loop it is running on.
 
-  An app that wraps `close-loop` in `ignore-errors` now leaks a loop whose callback is still
-  running, instead of corrupting memory.
+  `close-loop` and `stop-loop-thread` therefore signal where they used to return. An app that
+  wraps `close-loop` in `ignore-errors` now leaks a loop whose callback is still running,
+  instead of corrupting memory.
+
+  `hyperion/server-uv:stop` (and `hyperion/server:stop` on `:uv`) does not signal. When a loop
+  thread is still in a handler after `*stop-wait-seconds*`, it:
+  - logs a warning naming the shard and the thread;
+  - leaves that loop closed but unfreed, and keeps it on the server;
+  - still closes the other loops and stops the workers.
+  A later `stop`, once the handler has returned, frees the kept loop. A `start` that fails
+  partway logs a loop it cannot close, where it used to ignore the failure.
 
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
