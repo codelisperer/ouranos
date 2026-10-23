@@ -70,7 +70,7 @@ A presigned URL is a credential. Do not log it or store it."
 (defgeneric store-name (store)
   (:documentation "A short backend name, for logs and errors."))
 
-(defgeneric put-blob (store bucket key stream &key content-type metadata cache-control)
+(defgeneric put-blob (store bucket key stream &key content-type metadata &allow-other-keys)
   (:documentation
    "Stream the bytes of STREAM (an octet input stream) into STORE at BUCKET/KEY.
 
@@ -81,8 +81,13 @@ entry signals BLOB-INVALID-METADATA (#810).
 
 CACHE-CONTROL, a string such as \"public, max-age=86400\", is the Cache-Control header the
 object is served with (#830). The S3 store stores it with the object. The filesystem store
-ignores it, because whatever serves its directory sets its own headers. A value with a control
-character signals BLOB-INVALID-METADATA.
+accepts it and does nothing with it, because whatever serves its directory sets its own
+headers. A value with a control character signals BLOB-INVALID-METADATA.
+
+The generic takes &ALLOW-OTHER-KEYS so that a store class an app wrote against v0.1.7, whose
+method accepts only CONTENT-TYPE and METADATA, still loads (CLHS 7.6.4) and can be called with
+:CACHE-CONTROL. Such a method receives the argument and drops it; the object is stored without a
+Cache-Control header until the method names CACHE-CONTROL and passes it on.
 
 The stream is consumed but NOT closed -- the caller opened it and owns it."))
 

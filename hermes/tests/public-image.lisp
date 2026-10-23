@@ -325,3 +325,149 @@ GPS block, then the GPS block's text."
       (b:put-blob store "media" "a.jpg" (make-instance 'b::%octet-source :octets (bytes "x"))
                   :cache-control ""))
     (is-false (b:blob-exists-p store "media" "a.jpg"))))
+
+;;; --- unusual and hostile inputs (#847's review) ----------------------------------
+
+(test a-second-image-after-eoi-and-its-mpf-index-are-dropped
+  ;; A phone's multi-picture JPEG: an APP2 MPF index, then a second complete JPEG with its own
+  ;; EXIF after the first image's EOI.
+  (let* ((jpeg (bytes #xFF #xD8
+                      (jpeg-segment #xE2 "MPF" 0 "MM" 0 42 "MPFSECRET")
+                      (jpeg-segment #xE2 "ICC_PROFILE" 0 1 1 "ICCDATA")
+                      +jpeg-image-part+
+                      (jpeg-fixture)))
+         (out (b:strip-image-metadata jpeg)))
+    (is-true (no-secret-p out))
+    (is-true (ends-with-p out +jpeg-image-part+) "Nothing after the first image's EOI.")
+    (is (null (search (bytes #xFF #xD8) out :start2 2)) "No second start of image.")
+    (is (equal '(#xE2 #xDB #xC0 #xC4 #xDA) (jpeg-markers out)))))
+
+(test extended-xmp-across-several-app1-segments-is-dropped
+  (let* ((extension (bytes "http://ns.adobe.com/xmp/extension/" 0
+                           "0123456789ABCDEF0123456789ABCDEF" (be 40 4)))
+         (jpeg (bytes #xFF #xD8
+                      (jpeg-segment #xE1 "http://ns.adobe.com/xap/1.0/" 0
+                                    "<x:xmpmeta xmpNote:HasExtendedXMP=\"0123\"/>")
+                      (jpeg-segment #xE1 extension (be 0 4) "EXTSECRET-ONE")
+                      (jpeg-segment #xE1 extension (be 20 4) "EXTSECRET-TWO")
+                      +jpeg-image-part+))
+         (out (b:strip-image-metadata jpeg)))
+    (is-true (no-secret-p out))
+    (is-false (contains-p out "xmp"))
+    (is (equal '(#xDB #xC0 #xC4 #xDA) (jpeg-markers out)))))
+
+(test a-progressive-jpeg-loses-metadata-between-its-scans
+  (let* ((scan-1 (bytes (jpeg-segment #xDA 1 1 0 0 0 #x10) #x11 #x22 #xFF #x00 #x33))
+         (scan-2 (bytes (jpeg-segment #xC4 #x10 (make-list 16 :initial-element 0))
+                        (jpeg-segment #xDA 1 1 0 1 63 #x01) #x44 #x55))
+         (jpeg (bytes #xFF #xD8
+                      (jpeg-segment #xDB 0 (make-list 64 :initial-element 1))
+                      (jpeg-segment #xC2 8 (be 20 2) (be 30 2) 1 1 #x11 0) ; SOF2, 30x20
+                      (jpeg-segment #xC4 0 (make-list 16 :initial-element 0))
+                      scan-1
+                      (jpeg-segment #xE1 "Exif" 0 0 (tiff-with-gps 1))
+                      (jpeg-segment #xFE "COMMENTSECRET")
+                      scan-2
+                      #xFF #xD9))
+         (out (b:strip-image-metadata jpeg)))
+    (is-true (no-secret-p out))
+    (is-false (contains-p out "Exif"))
+    (is-true (search scan-1 out) "The first scan, byte for byte.")
+    (is-true (ends-with-p out (bytes scan-2 #xFF #xD9)) "The second scan follows it directly.")
+    (is (= (+ (search scan-1 out) (length scan-1)) (search scan-2 out)))
+    (multiple-value-bind (o width height) (b:strip-image-metadata jpeg)
+      (declare (ignore o))
+      (is (equal '(30 20) (list width height)) "The size comes from SOF2."))))
+
+(test png-ztxt-and-itxt-chunks-are-dropped
+  (let* ((png (bytes #x89 "PNG" #x0D #x0A #x1A #x0A
+                     (png-chunk "IHDR" (be 30 4) (be 20 4) 8 2 0 0 0)
+                     (png-chunk "zTXt" "Comment" 0 0 "ZTXTSECRET")
+                     (png-chunk "iTXt" "Description" 0 0 0 "en" 0 0 "ITXTSECRET")
+                     +png-idat+
+                     (png-chunk "IEND")))
+         (out (b:strip-image-metadata png)))
+    (is-true (no-secret-p out))
+    (is (equal '("IHDR" "IDAT" "IEND") (png-chunk-types out)))))
+
+(test an-odd-length-webp-chunk-is-padded-and-the-next-one-still-read
+  (let* ((alph (riff-chunk "ALPH" "ABC"))
+         (body (bytes "WEBP"
+                      (riff-chunk "VP8X" #x14 0 0 0 (le 29 3) (le 19 3)) ; alpha, XMP
+                      (riff-chunk "XMP " "XMPSECRET")                   ; 9 bytes, padded
+                      alph
+                      +webp-vp8+))
+         (out (b:strip-image-metadata (bytes "RIFF" (le (length body) 4) body))))
+    (is-true (no-secret-p out))
+    (is (equal '("VP8X" "ALPH" "VP8 ") (riff-chunk-ids out)))
+    (is-true (search alph out) "ALPH with its pad byte, byte for byte.")
+    (is (= #x10 (aref out 20)) "VP8X keeps alpha and drops XMP.")
+    (is (= (- (length out) 8) (logior (aref out 4) (ash (aref out 5) 8))))))
+
+(test jpeg-segment-lengths-of-0-1-and-ffff
+  (is (eq :malformed (refusal (bytes #xFF #xD8 #xFF #xFE 0 0 +jpeg-image-part+))) "length 0")
+  (is (eq :malformed (refusal (bytes #xFF #xD8 #xFF #xFE 0 1 +jpeg-image-part+))) "length 1")
+  (is (eq :malformed (refusal (bytes #xFF #xD8 #xFF #xFE #xFF #xFF "short" +jpeg-image-part+)))
+      "length #xFFFF in a shorter file")
+  (let* ((jpeg (bytes #xFF #xD8 (jpeg-segment #xFE "COMMENTSECRET" (make-list 65520 :initial-element 0))
+                      +jpeg-image-part+))
+         (out (b:strip-image-metadata jpeg)))
+    (is (= #xFFFF (logior (ash (aref jpeg 4) 8) (aref jpeg 5))) "The fixture's COM is #xFFFF long.")
+    (is-true (no-secret-p out))
+    (is (equalp (bytes #xFF #xD8 +jpeg-image-part+) out))))
+
+(test a-vp8x-after-the-image-or-too-short-is-refused
+  (flet ((webp (&rest chunks)
+           (let ((body (apply #'bytes "WEBP" chunks)))
+             (bytes "RIFF" (le (length body) 4) body))))
+    (is (eq :malformed (refusal (webp +webp-vp8+ (riff-chunk "VP8X")))) "VP8 first, then an empty VP8X")
+    (is (eq :malformed (refusal (webp +webp-vp8+ (riff-chunk "VP8X" 0 0 0 0)))) "a 4-byte VP8X")
+    (is (eq :malformed (refusal (webp (riff-chunk "VP8X" 0 0 0 0) +webp-vp8+))) "a short VP8X first")))
+
+(test any-other-error-while-reading-is-refused-as-malformed
+  (sb-int:encapsulate 'b::%strip-png 'boom (lambda (f v) (declare (ignore f v)) (error "an error the format code did not foresee")))
+  (unwind-protect (is (eq :malformed (refusal (png-fixture))))
+    (sb-int:unencapsulate 'b::%strip-png 'boom)))
+
+(test an-adobe-segment-is-cut-to-its-12-standard-bytes
+  (let* ((adobe (bytes "Adobe" 0 100 0 0 0 0 1))
+         (out (b:strip-image-metadata
+               (bytes #xFF #xD8 (jpeg-segment #xEE adobe "ADOBESECRET") +jpeg-image-part+))))
+    (is-true (no-secret-p out))
+    (is-true (search (bytes #xFF #xEE 0 14 adobe) out))))
+
+(test a-large-webp-is-copied-without-a-list-per-byte
+  (let* ((data (make-array (* 1024 1024) :element-type '(unsigned-byte 8) :initial-element 7))
+         (vp8 (riff-chunk "VP8 " 0 0 0 #x9D #x01 #x2A (le 30 2) (le 20 2) data))
+         (body (bytes "WEBP" (riff-chunk "VP8X" 0 0 0 0 (le 29 3) (le 19 3)) vp8))
+         (webp (bytes "RIFF" (le (length body) 4) body))
+         (before (sb-ext:get-bytes-consed)))
+    (b:strip-image-metadata webp)
+    ;; A list per byte costs 16 bytes per byte on a 64-bit SBCL.
+    (is (< (- (sb-ext:get-bytes-consed) before) (* 6 (length webp))))))
+
+;;; --- a store class an app wrote against v0.1.7 ----------------------------------
+
+(defclass v017-store (b:store)
+  ((inner :initarg :inner :reader v017-inner))
+  (:documentation "A store an app might have written against v0.1.7, whose PUT-BLOB takes only
+CONTENT-TYPE and METADATA. Before put-blob's generic took &ALLOW-OTHER-KEYS, this file would not
+load."))
+
+(defmethod b:put-blob ((s v017-store) bucket key stream &key content-type metadata)
+  (b:put-blob (v017-inner s) bucket key stream :content-type content-type :metadata metadata))
+(defmethod b:get-blob ((s v017-store) bucket key) (b:get-blob (v017-inner s) bucket key))
+(defmethod b:blob-metadata ((s v017-store) bucket key) (b:blob-metadata (v017-inner s) bucket key))
+(defmethod b:delete-blob ((s v017-store) bucket key) (b:delete-blob (v017-inner s) bucket key))
+(defmethod b:list-blobs ((s v017-store) bucket &key prefix)
+  (b:list-blobs (v017-inner s) bucket :prefix prefix))
+(defmethod b:blob-url ((s v017-store) bucket key &key expires-in)
+  (b:blob-url (v017-inner s) bucket key :expires-in expires-in))
+
+(test a-store-written-against-v017-works-as-the-public-store
+  (with-two-stores (private inner)
+    (let ((public (make-instance 'v017-store :inner inner)))
+      (put-octets private "media" "a.png" (png-fixture))
+      (let ((url (b:public-image-url private "media" "a.png" public "cards")))
+        (is (eql 0 (search "https://img.example.com/cards/og/" url)) "~A" url)
+        (is (= 1 (length (b:list-blobs inner "cards" :prefix "og/"))))))))

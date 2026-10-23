@@ -190,8 +190,12 @@ a stuffed zero or a restart marker."
                         (when (%img-ascii-at-p v p (format nil "ICC_PROFILE~C" (code-char 0)))
                           (push (subseq v pos end) pieces)))
                        ((= m #xEE)
-                        (when (%img-ascii-at-p v p "Adobe")
-                          (push (subseq v pos end) pieces)))
+                        ;; Kept as its 12 standard bytes ("Adobe", version, two flag words and
+                        ;; the colour transform), which a decoder needs for CMYK and YCCK; a
+                        ;; writer can append anything after them.
+                        (when (and (>= len 14) (%img-ascii-at-p v p "Adobe"))
+                          (push (%img-concat (list '(#xFF #xEE 0 14) (subseq v p (+ p 12))))
+                                pieces)))
                        ((%jpeg-kept-marker-p m)
                         (when (and (%jpeg-sof-p m) (null width))
                           (unless (>= len 8) (%img-malformed))
@@ -266,9 +270,11 @@ a stuffed zero or a restart marker."
 (defparameter +webp-kept-chunks+ '("VP8X" "ICCP" "ANIM" "ANMF" "ALPH" "VP8 " "VP8L"))
 
 (defun %webp-chunk (fourcc data)
-  "A RIFF chunk of FOURCC holding DATA (an octet vector or list), padded to an even length."
-  (append (%img-ascii fourcc) (%img-le (length data) 4) (coerce data 'list)
-          (when (oddp (length data)) '(0))))
+  "A RIFF chunk of FOURCC holding DATA (an octet vector or list), padded to an even length, as a
+list of parts for %IMG-CONCAT. DATA is not copied, so a large chunk costs no conses."
+  (list* (append (%img-ascii fourcc) (%img-le (length data) 4))
+         data
+         (when (oddp (length data)) (list '(0)))))
 
 (defun %webp-size (fourcc v p len)
   "The width and height a VP8, VP8L or VP8X chunk's data at P (LEN bytes) declares."
@@ -297,6 +303,8 @@ a stuffed zero or a restart marker."
                     (p (+ pos 8))
                     (end (+ p len)))
                (unless (<= end riff-end) (%img-malformed))
+               ;; Wherever it appears: its flags byte is rewritten below.
+               (when (and (string= fourcc "VP8X") (< len 10)) (%img-malformed))
                (when (and (null width) (member fourcc '("VP8X" "VP8 " "VP8L") :test #'string=))
                  (multiple-value-setq (width height) (%webp-size fourcc v p len)))
                (when (member fourcc '("VP8 " "VP8L" "ANMF") :test #'string=) (setf image t))
@@ -316,10 +324,12 @@ a stuffed zero or a restart marker."
         (let ((data (copy-seq (cdr vp8x))))
           (setf (aref data 0) (logior (logand (aref data 0) (lognot #x0C)) (if exif #x08 0)))
           (setf (cdr vp8x) data)))
-      (let ((body (append (%img-ascii "WEBP")
+      (let ((body (append (list (%img-ascii "WEBP"))
                           (loop for (fourcc . data) in chunks append (%webp-chunk fourcc data))
                           (when exif (%webp-chunk "EXIF" (%orientation-tiff orientation))))))
-        (values (%img-concat (list (%img-ascii "RIFF") (%img-le (length body) 4) body))
+        (values (%img-concat (list* (%img-ascii "RIFF")
+                                    (%img-le (reduce #'+ body :key #'length) 4)
+                                    body))
                 width height orientation)))))
 
 ;;; --- the format, from the bytes ----------------------------------------------
@@ -336,7 +346,8 @@ holding that field and nothing else. WIDTH and HEIGHT are as the image is shown:
 Orientation turns it a quarter.
 
 Signals BLOB-IMAGE-REFUSED: :UNSUPPORTED-FORMAT for anything else (SVG, GIF and HEIC
-included), :MALFORMED for a file whose structure does not parse."
+included), :MALFORMED for a file whose structure does not parse, and for any other error
+while reading it."
   (let ((v (coerce octets '%image-octets)))
     (multiple-value-bind (strip content-type extension)
         (cond ((and (>= (length v) 3) (= (aref v 0) #xFF) (= (aref v 1) #xD8) (= (aref v 2) #xFF))
@@ -346,7 +357,13 @@ included), :MALFORMED for a file whose structure does not parse."
               ((and (>= (length v) 12) (%img-ascii-at-p v 0 "RIFF") (%img-ascii-at-p v 8 "WEBP"))
                (values #'%strip-webp "image/webp" "webp"))
               (t (error 'blob-image-refused :reason :unsupported-format)))
-      (multiple-value-bind (stripped width height orientation) (funcall strip v)
+      (multiple-value-bind (stripped width height orientation)
+          ;; A backstop: an input the checks above did not foresee, which would otherwise end
+          ;; in an index or type error the caller's fallback does not handle, is refused as
+          ;; malformed like the ones they did.
+          (handler-bind ((error (lambda (c)
+                                  (unless (typep c 'blob-image-refused) (%img-malformed)))))
+            (funcall strip v))
         (if (%turned-p orientation)
             (values stripped height width content-type extension)
             (values stripped width height content-type extension))))))

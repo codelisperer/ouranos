@@ -478,9 +478,12 @@ its tag.
   and ETag, so a second call writes nothing and a changed original gets a new copy, with the old
   ones deleted. `delete-public-images` removes an image's copies: call it when the image is
   deleted or its post stops being public. `put-blob` takes a new `:cache-control`, which the S3
-  store sends and the filesystem store ignores; a public copy is written with
-  `*public-image-cache-control*`, `public, max-age=86400`. A store class an app defines itself
-  ignores `:cache-control` until its `put-blob` method reads it. See "A public copy for a
+  store sends and the filesystem store accepts and does not use; a public copy is written with
+  `*public-image-cache-control*`, `public, max-age=86400`. The `put-blob` generic now ends in
+  `&allow-other-keys`, so a store class an app defined against v0.1.7, with a method taking only
+  `:content-type` and `:metadata`, still loads and works with `public-image-url`; such a store
+  drops `:cache-control`, and its objects have no Cache-Control header until its method passes
+  the argument on. See "A public copy for a
   link-preview card" in `hermes/docs/blob-direct-uploads.md`.
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the

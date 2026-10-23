@@ -200,7 +200,9 @@ expire, and `hyperion/page-meta` uses the site's fallback image instead of a pre
   store made with `:public-base-url`, or a filesystem store with `:base-url`. Give its bucket a
   policy that allows `s3:GetObject` and not `s3:ListBucket`, so the copies cannot be listed. Do
   not open a prefix of the private bucket instead: one mistake in that policy makes members'
-  private images public.
+  private images public. For a filesystem public store, the web server that serves its directory
+  must have directory listing turned off (`autoindex off` in nginx, `Options -Indexes` in Apache),
+  for the same reason.
 - **Only for public content.** The copy can be read by anyone who has its URL. Call
   `public-image-url` only for an image shown on a page whose `:visibility` is `:public`. Call
   `(hermes/blob:delete-public-images "media" final-key public-store "cards")` when the image is
@@ -227,11 +229,16 @@ expire, and `hyperion/page-meta` uses the site's fallback image instead of a pre
 - **Keys and versions.** A copy's key is `og/<SHA-256 of bucket/key>/<SHA-256 of the original's
   ETag>-<width>x<height>.<ext>`, so it does not show the private key. When the original changes,
   its ETag changes, the next call writes a new copy under a new key, and deletes the older copies
-  of that image.
+  of that image. The hash is not keyed with a secret, so anyone who can guess an original's bucket
+  and key can compute its directory and check whether a public copy exists. If the app's keys can
+  be guessed, for example `avatars/<member id>.jpg`, that tells an outsider which members have a
+  public image; give each original's key a random part, such as a UUID, to prevent it.
 - **Cache-Control.** The copy is written with `public, max-age=86400` (the variable
   `*public-image-cache-control*`, or the `:cache-control` argument). `put-blob` takes
-  `:cache-control` for any object: the S3 store sends it, and the filesystem store ignores it,
-  because whatever serves that directory sets its own headers.
+  `:cache-control` for any object: the S3 store sends it, and the filesystem store accepts it
+  and does nothing with it, because whatever serves that directory sets its own headers. A store
+  class the app wrote itself receives `:cache-control` and drops it unless its `put-blob` method
+  names the argument and passes it on.
 
 ## On the filesystem store
 
