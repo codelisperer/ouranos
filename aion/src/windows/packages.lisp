@@ -76,7 +76,11 @@
    #:+create-suspended+ #:+create-unicode-environment+ #:+extended-startupinfo-present+
    #:+create-no-window+ #:+startf-usestdhandles+ #:+handle-flag-inherit+
    #:+proc-thread-attribute-handle-list+ #:+file-append-data+ #:+file-share-read+
-   #:+file-share-write+ #:+wait-object-0+ #:+wait-timeout+ #:+infinite+ #:+still-active+))
+   #:+file-share-write+ #:+wait-object-0+ #:+wait-timeout+ #:+infinite+ #:+still-active+
+   ;; a message box before any window exists (#819)
+   #:message-box-w #:get-current-process-id #:process-id-to-session-id
+   #:+mb-ok+ #:+mb-iconerror+ #:+mb-iconwarning+ #:+mb-iconinformation+
+   #:+mb-setforeground+ #:+mb-topmost+))
 
 (cl:defpackage #:aion/windows
   (:use #:common-lisp)
