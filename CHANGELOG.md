@@ -506,13 +506,16 @@ its tag.
   administrator rights and no Developer Mode, and a symbolic link on macOS and Linux.
   `aion/fs:make-file-link` (`link target`) makes a symbolic link; on Windows that needs Developer
   Mode or the symbolic-link privilege, and without either it signals
-  `aion/fs:link-not-permitted`. Both return the link, which `link-p` sees and `delete-link`
-  removes without touching the target. A failure signals `aion/fs:link-error`
-  (`link-error-target`, `link-error-operation`, `link-error-code`) and leaves nothing at the
-  link's path: when the link already exists (`:exists`), when the target is missing
-  (`:target-missing`) or of the wrong kind (`:target-not-a-directory`, `:target-not-a-file`), or
-  when the operating system refuses (its own error code). An app's tests that made links with
-  `cmd /c mklink /J` or `ln -s` can call these instead.
+  `aion/fs:link-not-permitted`. Both return the link as an absolute pathname, which `link-p` sees
+  and `delete-link` removes without touching the target. A relative path is taken against the
+  current directory; on Windows `.` and `..` are resolved and a leading `\\?\` is taken off, and a
+  UNC target is refused (`:target-unc`). A target that is a link is followed to check what it
+  reaches. A failure signals `aion/fs:link-error` (`link-error-target`, `link-error-operation`,
+  `link-error-code`) and leaves nothing at the link's path: when the link already exists
+  (`:exists`), when the target is missing (`:target-missing`) or of the wrong kind
+  (`:target-not-a-directory`, `:target-not-a-file`), or when the operating system refuses (its own
+  error code). An app's tests that made links with `cmd /c mklink /J` or `ln -s` can call these
+  instead.
 
 - **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
   version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns

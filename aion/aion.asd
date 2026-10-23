@@ -637,7 +637,7 @@
   :perform (test-op (op c) (uiop:symbol-call :aion/signature/tests :run-tests)))
 
 (defsystem "aion/fs"
-  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347), and a temporary directory no other process can be given (#515)."
+  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347), a temporary directory no other process can be given (#515), and making a directory link (a junction on Windows) or a file link without a shell (#825)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"

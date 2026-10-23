@@ -14,6 +14,10 @@
 (defun %read (path)
   (with-open-file (s path) (read-line s nil "")))
 
+(defun %name (path)
+  "PATH's native namestring without a trailing separator, to compare two names for one path."
+  (string-right-trim "/\\" (uiop:native-namestring path)))
+
 (defun %refusal (fn)
   "Call FN and return the LINK-ERROR it signals, or NIL when it signals none."
   (handler-case (progn (funcall fn) nil)
@@ -26,7 +30,8 @@
     (unwind-protect
          (progn
            (%write (merge-pathnames "keep.txt" target) "keep")
-           (is (equal (fs:make-directory-link link target) link) "it returns the link")
+           (is (equal (%name (fs:make-directory-link link target)) (%name link))
+               "it returns the link")
            (is-true (fs:link-p link))
            (is (equal "keep" (%read (merge-pathnames "keep.txt" link))) "the target is reached through it")
            #+win32
@@ -60,9 +65,11 @@
          (progn
            (ensure-directories-exist target)
            (let* ((existing (ensure-directories-exist (merge-pathnames "existing/" base)))
+                  (inside (%write (merge-pathnames "inside.txt" existing) "was here"))
                   (c (%refusal (lambda () (fs:make-directory-link existing target)))))
              (is (eq :exists (and c (fs:link-error-code c))) "~S" c)
-             (is-false (fs:link-p existing) "the directory that was there is left as it was"))
+             (is-false (fs:link-p existing) "the directory that was there is left as it was")
+             (is (equal "was here" (%read inside)) "and what it held survives"))
            (let* ((link (merge-pathnames "to-nothing/" base))
                   (c (%refusal (lambda () (fs:make-directory-link link (merge-pathnames "absent/" base))))))
              (is (eq :target-missing (and c (fs:link-error-code c))) "~S" c)
@@ -96,4 +103,94 @@ there, but one of them must happen. Elsewhere the link must be made."
                   (is-false (probe-file link)))
                  (t (is-false (probe-file link) "nothing is left after a refusal")))
            (is (equal "keep" (%read target)) "the target is intact"))
+      (%cleanup base))))
+
+;;; --- the hub's review of #853 -------------------------------------------------------------
+
+(test a-relative-target-with-dot-dot-makes-a-link-that-reaches-it
+  "From inside base/here/, the target is ../target and the link is ../link, both relative. On
+Windows the junction's target must be a full path with .. resolved, or the junction points at
+nothing while LINK-P still says it is a link; reading a file through it is what tells them apart."
+  (let* ((base (%fresh))
+         (here (ensure-directories-exist (merge-pathnames "here/" base)))
+         (target (merge-pathnames "target/" base))
+         (link (merge-pathnames "link/" base)))
+    (unwind-protect
+         (progn
+           (%write (merge-pathnames "keep.txt" target) "keep")
+           (uiop:with-current-directory (here)
+             (fs:make-directory-link (format nil "..~Clink" (if (uiop:os-windows-p) #\\ #\/))
+                                     (format nil "..~Ctarget" (if (uiop:os-windows-p) #\\ #\/))))
+           (is-true (fs:link-p link))
+           (is (equal "keep" (%read (merge-pathnames "keep.txt" link))) "the file is read through it")
+           (is (eq t (fs:delete-link link)))
+           (is (equal "keep" (%read (merge-pathnames "keep.txt" target)))))
+      (%cleanup base))))
+
+(test make-file-link-refuses-and-leaves-nothing-behind
+  (let* ((base (%fresh))
+         (target (%write (merge-pathnames "target.txt" base) "keep"))
+         (taken (%write (merge-pathnames "taken.txt" base) "mine"))
+         (directory (ensure-directories-exist (merge-pathnames "a-directory/" base))))
+    (unwind-protect
+         (progn
+           (let ((c (%refusal (lambda () (fs:make-file-link taken target)))))
+             (is (eq :exists (and c (fs:link-error-code c))) "~S" c)
+             (is (equal "mine" (%read taken)) "the file that was there survives"))
+           (let* ((link (merge-pathnames "to-a-directory.txt" base))
+                  (c (%refusal (lambda () (fs:make-file-link link directory)))))
+             (is (eq :target-not-a-file (and c (fs:link-error-code c))) "~S" c)
+             (is-false (probe-file link))))
+      (%cleanup base))))
+
+(test a-failed-check-is-a-link-error-not-another-condition
+  "The link's parent is a file, so asking the operating system about the link's path fails with
+an error other than not-found (ENOTDIR on POSIX, ERROR_PATH_NOT_FOUND or ERROR_DIRECTORY on
+Windows). It must come back as LINK-ERROR."
+  (let* ((base (%fresh))
+         (target (ensure-directories-exist (merge-pathnames "target/" base)))
+         (file (%write (merge-pathnames "plain.txt" base) "x")))
+    (unwind-protect
+         (let ((c (handler-case (progn (fs:make-directory-link
+                                        (concatenate 'string (%name file)
+                                                     (if (uiop:os-windows-p) "\\l" "/l"))
+                                        target)
+                                       nil)
+                    (error (e) e))))
+           (is (typep c 'fs:link-error) "~S" c)
+           (is (equal "x" (%read file))))
+      (%cleanup base))))
+
+(test a-directory-link-to-a-link-that-reaches-a-file-is-refused
+  "A target that is a link is followed to see what it reaches. Where a file link cannot be made
+for want of the privilege, there is nothing to test, and the test says so by checking only that."
+  (let* ((base (%fresh))
+         (file (%write (merge-pathnames "plain.txt" base) "x"))
+         (file-link (merge-pathnames "file-link.txt" base)))
+    (unwind-protect
+         (let ((made (handler-case (fs:make-file-link file-link file)
+                       (fs:link-not-permitted () nil))))
+           (if made
+               (let* ((link (merge-pathnames "dir-link/" base))
+                      (c (%refusal (lambda () (fs:make-directory-link link file-link)))))
+                 (is (eq :target-not-a-directory (and c (fs:link-error-code c))) "~S" c)
+                 (is-false (probe-file link)))
+               (is-true #+win32 t #-win32 nil "a file link is refused only on Windows")))
+      (%cleanup base))))
+
+#+win32
+(test a-windows-target-in-long-form-works-and-a-unc-target-is-refused
+  (let* ((base (%fresh))
+         (target (merge-pathnames "target/" base))
+         (link (merge-pathnames "link/" base)))
+    (unwind-protect
+         (progn
+           (%write (merge-pathnames "keep.txt" target) "keep")
+           (fs:make-directory-link link (concatenate 'string "\\\\?\\" (%name target)))
+           (is (equal "keep" (%read (merge-pathnames "keep.txt" link)))
+               "a \\\\?\\ target loses the prefix and the junction reaches it")
+           (fs:delete-link link)
+           (let ((c (%refusal (lambda () (fs:make-directory-link link "\\\\server\\share\\dir")))))
+             (is (eq :target-unc (and c (fs:link-error-code c))) "~S" c)
+             (is-false (probe-file link))))
       (%cleanup base))))
