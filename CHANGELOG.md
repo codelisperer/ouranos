@@ -14,6 +14,21 @@ its tag.
 
 ### An app may have to act
 
+- **aion/log: every log entry is one physical line; the pretty layout escapes line breaks,
+  control characters and backslashes** (#762). Before, a field value or message containing a
+  line break continued the entry onto a new line, and text from outside the process could
+  write a line that looked like a separate entry. In the pretty layout (`log:setup` with any
+  `:env` other than `:prod` or `:staging`):
+  - the message, the category and every field key and value are escaped;
+  - a backslash is written as `\\`, so a Windows path such as `C:\new` now appears as
+    `C:\\new`;
+  - line feed, carriage return and tab are written as `\n`, `\r` and `\t`;
+  - other control characters and U+2028 and U+2029 are written as `\u` and four hex digits.
+  The JSON layout already escaped control characters, and now also writes U+0085, U+2028 and
+  U+2029 as `\u` escapes. A script or test that reads pretty log text and expects raw line
+  breaks, tabs or single backslashes there needs to undo the escapes. The rules are in
+  `docs/logging.md`.
+
 - **hades/credentials: the live tests use the real credential store only when
   `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows and
   macOS fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
