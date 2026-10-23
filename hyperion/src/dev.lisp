@@ -157,13 +157,36 @@ most files counted across all ROOTS before WATCH-TOO-LARGE is signalled."
 ;;;
 ;;; FILE-WRITE-DATE has a resolution of one second, so a file saved in the same second as the
 ;;; snapshot before it keeps its date, and a reloader that compares dates alone misses the save
-;;; until the file is saved again. Each file's state is therefore its date, its size, and, for a
-;;; file written in the last +RECENT-SECONDS+, a hash of its octets, as klio's watcher keeps a
-;;; hash of its content. An older file is not read: it cannot have been rewritten without its
-;;; date moving past the one recorded, so each poll reads only what was written recently.
+;;; until the file is saved again. Each file's state is therefore its date and, for a file
+;;; written in the last *RECENT-SECONDS*, its size and a hash of its octets, as klio's watcher
+;;; keeps a hash of its content.
+;;;
+;;; WHAT A POLL TOUCHES. An older file is only dated: it cannot have been rewritten without its
+;;; date moving past the one recorded, so it is never opened. A recent file is first stat'ed, for
+;;; its type and size, and read only when it is a regular file of at most +HASH-LIMIT+ octets.
+;;; Opening every file on every poll blocked forever on a FIFO under a watched root, with the
+;;; reloader's lock held, and on Windows made antivirus report editors' saves as "file in use"
+;;; (the hub's review of #659).
 
-(defparameter +recent-seconds+ 2
-  "A file whose write date is this many seconds old or less is hashed as well as dated.")
+(defvar *recent-seconds* 2
+  "A file whose write date is this many seconds old or less has its size and hash recorded as
+well as its date. Raise it when the watched files are on a network share whose clock runs ahead
+of this machine's, so that a file saved there still counts as recent here.")
+
+(defconstant +hash-limit+ (* 1024 1024)
+  "The largest file, in octets, whose content is hashed. A larger file that keeps its date and
+size counts as unchanged, so a big asset is not read on every poll while it is recent.")
+
+(defun %regular-size (path)
+  "PATH's size in octets when it is a regular file, :NOT-REGULAR when it is something else, such
+as a FIFO or a device, and NIL when it cannot be stat'ed. Reads the file's status, never the
+file, so a FIFO cannot block it. SB-UNIX:UNIX-STAT does this on Windows as well as on Unix."
+  (multiple-value-bind (ok dev ino mode nlink uid gid rdev size)
+      (sb-unix:unix-stat (sb-ext:native-namestring path))
+    (declare (ignore dev ino nlink uid gid rdev))
+    (cond ((not ok) nil)
+          ((= (logand mode #o170000) #o100000) size)
+          (t :not-regular))))
 
 (defun %octet-hash (path)
   "A 64-bit FNV-1a hash of PATH's octets, or NIL when it cannot be read."
@@ -179,28 +202,38 @@ most files counted across all ROOTS before WATCH-TOO-LARGE is signalled."
                                   (* (logxor hash (aref buffer i)) #x100000001b3)))))
        hash))))
 
+(defun %content (path)
+  "(SIZE HASH) for PATH, read now. SIZE is its size in octets, or :NOT-REGULAR, or NIL when it
+cannot be stat'ed. HASH is the FNV-1a hash of a regular file of at most +HASH-LIMIT+ octets,
+:LARGE for a larger one, :NOT-REGULAR for anything else, and :UNREADABLE when the file could not
+be stat'ed or read, for instance because an editor was replacing it."
+  (let ((size (%regular-size path)))
+    (list size
+          (cond ((null size) :unreadable)
+                ((eq size :not-regular) :not-regular)
+                ((> size +hash-limit+) :large)
+                (t (or (%octet-hash path) :unreadable))))))
+
 (defun %file-state (path now)
-  "PATH's (DATE SIZE HASH), or NIL when it has no write date. HASH is :OLD when the file was
-written more than +RECENT-SECONDS+ before NOW and so was not read, and :UNREADABLE when it was
-recent but could not be read, for instance because an editor was replacing it. The two are kept
-apart because only the first says the content is known not to have changed (Copilot's review of
-#659)."
+  "PATH's (DATE SIZE HASH), or NIL when it has no write date. A file written more than
+*RECENT-SECONDS* before NOW is only dated: SIZE is NIL and HASH is :OLD, and it is not opened. A
+recent one has SIZE and HASH from %CONTENT. :OLD and :UNREADABLE are kept apart because only the
+first says the content is known not to have changed (Copilot's review of #659)."
   (let ((date (ignore-errors (file-write-date path))))
     (when date
-      (list date
-            (ignore-errors (with-open-file (in path :element-type '(unsigned-byte 8))
-                             (file-length in)))
-            (if (<= (- now date) +recent-seconds+)
-                (or (%octet-hash path) :unreadable)
-                :old)))))
+      (if (<= (- now date) *recent-seconds*)
+          (cons date (%content path))
+          (list date nil :old)))))
 
 (defun %snapshot (roots &key (excluded-dirs *watch-excluded-directories*)
                              (excluded-types *watch-excluded-types*)
-                             (limit *watch-file-limit*))
-  "Each watched file under ROOTS, by namestring, with its state from %FILE-STATE. Signals
-WATCH-TOO-LARGE when the roots hold more than LIMIT files (#730)."
-  (let ((h (make-hash-table :test 'equal))
-        (now (get-universal-time)))
+                             (limit *watch-file-limit*)
+                             (now (get-universal-time)))
+  "Each watched file under ROOTS, by namestring, with its state from %FILE-STATE as of NOW, a
+universal time. Signals WATCH-TOO-LARGE when the roots hold more than LIMIT files (#730). NOW is
+for tests, which pass the time they wrote a file at so that a slow step cannot move the file out
+of the window."
+  (let ((h (make-hash-table :test 'equal)))
     (dolist (f (%watched-files roots :excluded-dirs excluded-dirs
                                      :excluded-types excluded-types
                                      :limit limit)
@@ -209,20 +242,27 @@ WATCH-TOO-LARGE when the roots hold more than LIMIT files (#730)."
         (when state (setf (gethash f h) state))))))
 
 (defun %same-file-p (path old new)
-  "Whether the states OLD and NEW of PATH describe the same content. Different dates or sizes
-are a change. With equal dates and sizes:
-- OLD's hash :OLD means the file was not rewritten after its date, so it is the same;
-- OLD's hash :UNREADABLE means its content was not known, so it counts as a change;
-- otherwise the hashes decide. NEW has no hash of its own when the poll came more than
-  +RECENT-SECONDS+ after the save, and it is computed now; one that cannot be read is a change."
+  "Whether the states OLD and NEW of PATH describe the same content. A different date is a
+change. With equal dates, by OLD's hash:
+- :OLD: the file was not rewritten after its date, so it is the same;
+- :UNREADABLE: its content was not known, so it counts as a change;
+- :NOT-REGULAR: it is the same while it is still not a regular file;
+- :LARGE: it is the same while its size is unchanged;
+- a hash: the same when the size and the hash still match.
+NEW has no size or hash of its own when the poll came more than *RECENT-SECONDS* after the save;
+they are read now, for this file only."
   (destructuring-bind (old-date old-size old-hash) old
     (destructuring-bind (date size hash) new
       (and (= date old-date)
-           (eql size old-size)
-           (case old-hash
-             (:old t)
-             (:unreadable nil)
-             (t (eql old-hash (if (integerp hash) hash (%octet-hash path)))))))))
+           (if (eq old-hash :old)
+               t
+               (destructuring-bind (size hash)
+                   (if (eq hash :old) (%content path) (list size hash))
+                 (case old-hash
+                   (:unreadable nil)
+                   (:not-regular (eq size :not-regular))
+                   (:large (eql size old-size))
+                   (t (and (eql size old-size) (eql hash old-hash))))))))))
 
 (defun %changed-files (old new)
   "Files in NEW that are not in OLD, or whose content may differ from what OLD recorded:

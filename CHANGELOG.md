@@ -1859,9 +1859,15 @@ its tag.
 
 - **hyperion/dev: a file saved in the same second as the reloader's last poll is reloaded** (#658).
   The reloader compared write dates only, and a write date has a resolution of one second, so
-  such a save kept its date and was not reloaded until the file was saved again. Each poll now
-  also compares the file's size, and, for a file written in the last two seconds
-  (`hyperion/dev::+recent-seconds+`), a hash of its contents. Older files are not read.
+  such a save kept its date and was not reloaded until the file was saved again. For a file
+  written in the last two seconds, each poll now also compares its size and a hash of its
+  contents. The window is `hyperion/dev:*recent-seconds*`; raise it for files on a network share
+  whose clock runs ahead of this machine's. A poll does not open other files:
+  - an older file is only dated;
+  - a recent file is stat'ed first, and only a regular file is read, so a FIFO under a watched
+    root cannot block the reloader;
+  - a regular file over 1 MiB is not hashed, and with the same date and size counts as
+    unchanged.
 
 - **hyperion/desktop: the `:browser` shell opens its URL with no shell on Windows, and opens
   only http and https URLs** (#851). `run-app` with `:shell :browser` ran `cmd /c start "" URL`
