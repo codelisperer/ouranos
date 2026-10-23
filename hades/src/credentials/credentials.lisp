@@ -443,10 +443,20 @@ a missing logon session means it cannot be used. Nothing is written and nothing 
     (values t nil))
   (defun %store-name () "macOS Keychain"))
 
-#-(or win32 darwin)
+#+linux
 (progn
   (defun %available ()
-    (values nil "no credential store backend exists on this system yet; the Secret Service one is #357"))
+    ;; The same checks every operation makes first: libsecret, the session bus, and a program
+    ;; providing the Secret Service. None of them unlocks a keyring, so this never prompts; a
+    ;; locked keyring is reported when an operation is tried, as on macOS.
+    (let ((reason (libsecret:with-libsecret-lock () (%unavailable-reason))))
+      (if reason (values nil reason) (values t nil))))
+  (defun %store-name () "Secret Service"))
+
+#-(or win32 darwin linux)
+(progn
+  (defun %available ()
+    (values nil "hades/credentials has no backend for this operating system; it has one for Windows, macOS and Linux"))
   (defun %store-name () nil))
 
 (defun credential-store-available-p (&key service)
@@ -457,15 +467,19 @@ NIL, says why.
 It never prompts, never writes, and never creates an item. On Windows it asks Credential Manager
 for an item that does not exist, and is false when the logon session has no credential store; on
 macOS it is true wherever the Keychain backend is built, without asking the Keychain, because a
-query can prompt when the keychain is locked; elsewhere it is false until #357 adds the Secret
-Service backend, and is true from then on without a change here. SERVICE is accepted for a
-backend that answers per service and is not used yet."
+query can prompt when the keychain is locked; on Linux it is true when libsecret is installed,
+there is a D-Bus session bus, and a program provides the Secret Service on it, checked without
+unlocking anything, and false with the first of those that is missing as the reason. A locked
+keyring is reported when an operation is tried. SERVICE is accepted for a backend that answers
+per service and is not used yet."
   (declare (ignore service))
   (%available))
 
 (defun credential-store-name ()
-  "The name to show a user for this system's credential store: \"Windows Credential Manager\" or
-\"macOS Keychain\", or NIL where there is none yet (Linux, until #357)."
+  "The name to show a user for this system's credential store: \"Windows Credential Manager\",
+\"macOS Keychain\" or \"Secret Service\", or NIL on a system hades/credentials has no backend
+for. On Linux the name is given even when the Secret Service cannot be reached;
+CREDENTIAL-STORE-AVAILABLE-P says whether it can."
   (%store-name))
 
 ;;; --- the facade ------------------------------------------------------------------------

@@ -27,7 +27,9 @@ its tag.
   (neither `DISPLAY` nor `WAYLAND_DISPLAY` set) it asks nothing and signals
   `credential-store-unavailable`. When the request is dismissed it also signals that, never
   `credential-not-found`. A stored value that is not UTF-8 text, which only another program can
-  write, signals `credential-error` without its bytes. An app
+  write, signals `credential-error` without its bytes. `credential-store-available-p` answers
+  the first three without trying an operation and without prompting, and `credential-store-name`
+  is "Secret Service". An app
   that treated Linux as having no store, for example by catching that condition to hide a
   setting, will now store the secret on a Linux desktop. An app shipped as an AppImage or other
   bundle should not bundle libsecret: the one the desktop installs is the one that talks to its
@@ -560,9 +562,10 @@ its tag.
   second value. It never prompts, never writes and never creates an item: on Windows it reads an
   item that does not exist and is false when the logon session has no credential store; on macOS
   it is true wherever the Keychain backend is built, without querying the Keychain, which can
-  prompt when locked; on Linux it is false until #357 adds the Secret Service backend.
+  prompt when locked; on Linux it checks that libsecret is installed, that there is a D-Bus
+  session bus and that a program provides the Secret Service, without unlocking anything (#357).
   `hades/credentials:credential-store-name` is "Windows Credential Manager", "macOS Keychain",
-  or NIL where there is no store. An app that probed with a `fetch-credential` of a dummy
+  "Secret Service", or NIL on a system with no backend. An app that probed with a `fetch-credential` of a dummy
   account and caught `credential-store-unavailable` can call these instead. `service` is
   accepted and not used yet.
 

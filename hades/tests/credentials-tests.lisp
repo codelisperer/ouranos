@@ -275,12 +275,24 @@ child under its own scripts/with-secret-service.sh, so this machine's keyring is
                        (format t "~&LOCKED ~A~%" (libsecret:default-collection-locked-p)))
                      value :wrapper (%with-secret-service-script))
                   (is (search "LOCKED T" text) "the collection must be locked first:~%~A" text)
-                  (is (= 3 (length lines)) "the child must report three operations:~%~A" text)
-                  (dolist (line lines)
+                  (is (= 4 (length lines))
+                      "the child must report availability and three operations:~%~A" text)
+                  ;; Availability does not look at the lock, so it is true here.
+                  (is (uiop:string-prefix-p "AVAILABLE T " (first lines)) "~A" (first lines))
+                  (dolist (line (rest lines))
                     (is (search "UNAVAILABLE" line) "~A: expected UNAVAILABLE: ~A" environment line)
                     (is (search expected line) "~A: the reason must say ~S: ~A"
                         environment expected line))
                   (is (not (search value text)) "the value appeared in the child's output"))))))))
+
+  #+linux
+  (test with-a-secret-service-the-store-is-available-and-asking-creates-nothing
+    (multiple-value-bind (available reason) (cred:credential-store-available-p)
+      (is (eq t available) "the live tests need a Secret Service: ~A" reason)
+      (is (null reason)))
+    (is (equal "Secret Service" (cred:credential-store-name)))
+    (signals cred:credential-not-found
+      (cred:fetch-credential hades/credentials::*probe-service* hades/credentials::*probe-account*)))
 
   (in-suite leftovers)
 
@@ -332,11 +344,11 @@ fetches by name only the items this run created."
 
   (defun %child-results (environment prelude value &key wrapper)
     "Run a child SBCL with ENVIRONMENT, a list of \"NAME=VALUE\" strings replacing those
-variables, evaluate the form PRELUDE, then store VALUE and fetch and delete it. Returns the
-child's whole output as a string, and the lines of the form OPERATION OUTCOME REASON. WRAPPER,
-when given, is a program the child is run through, such as scripts/with-secret-service.sh. A
-child still running after *CHILD-DEADLINE* seconds is killed, and its output then ends with a
-line saying so."
+variables, evaluate the form PRELUDE, print what CREDENTIAL-STORE-AVAILABLE-P answers, then
+store VALUE and fetch and delete it. Returns the child's whole output as a string, and its lines
+that start AVAILABLE, STORE, FETCH or DELETE, in that order. WRAPPER, when given, is a program
+the child is run through, such as scripts/with-secret-service.sh. A child still running after
+*CHILD-DEADLINE* seconds is killed, and its output then ends with a line saying so."
     (let* ((names (mapcar (lambda (e) (subseq e 0 (1+ (position #\= e)))) environment))
            (env (append environment
                         (remove-if (lambda (e) (some (lambda (n) (uiop:string-prefix-p n e)) names))
@@ -349,6 +361,9 @@ line saying so."
                (prin1-to-string
                 `(progn
                    ,prelude
+                   (multiple-value-bind (cl-user::available cl-user::why)
+                       (cred:credential-store-available-p)
+                     (format t "~&AVAILABLE ~A ~A~%" cl-user::available cl-user::why))
                    (dolist (cl-user::op (list (cons "STORE"
                                            (lambda ()
                                              (cred:store-credential
@@ -405,16 +420,21 @@ line saying so."
       (values text
               (remove-if-not (lambda (line)
                                (some (lambda (op) (uiop:string-prefix-p op line))
-                                     '("STORE " "FETCH " "DELETE ")))
+                                     '("AVAILABLE " "STORE " "FETCH " "DELETE ")))
                              (uiop:split-string text :separator '(#\Newline))))))
 
   (defun %check-unavailable (environment prelude expected)
-    "Every operation in the child signals CREDENTIAL-STORE-UNAVAILABLE with a reason that
-contains EXPECTED, and the value never appears in the child's output."
+    "CREDENTIAL-STORE-AVAILABLE-P in the child is false with a reason that contains EXPECTED, every
+operation signals CREDENTIAL-STORE-UNAVAILABLE with such a reason, and the value never appears in
+the child's output."
     (let ((value (%marker)))
       (multiple-value-bind (text lines) (%child-results environment prelude value)
-        (is (= 3 (length lines)) "the child must report three operations:~%~A" text)
-        (dolist (line lines)
+        (is (= 4 (length lines)) "the child must report availability and three operations:~%~A"
+            text)
+        (is (uiop:string-prefix-p "AVAILABLE NIL " (first lines))
+            "available-p must be false: ~A" (first lines))
+        (is (search expected (first lines)) "its reason must say ~S: ~A" expected (first lines))
+        (dolist (line (rest lines))
           (is (search "UNAVAILABLE" line) "expected UNAVAILABLE: ~A" line)
           (is (search expected line) "the reason must say ~S: ~A" expected line))
         (is (not (search value text)) "the value appeared in the child's output"))))
@@ -482,9 +502,22 @@ with a reason, and an operation signals CREDENTIAL-STORE-UNAVAILABLE, so the two
                    (is (equal "Windows Credential Manager" (cred:credential-store-name))))
     #+darwin (progn (is (eq t available))
                     (is (equal "macOS Keychain" (cred:credential-store-name))))
-    #-(or win32 darwin)
+    ;; Either answer is right on Linux, depending on whether a Secret Service is running. When
+    ;; it is, the store is not read here: that is the live suite's job, behind the opt-in.
+    #+linux
+    (progn (is (equal "Secret Service" (cred:credential-store-name)))
+           (if available
+               (is (null reason))
+               (let ((condition (handler-case (cred:fetch-credential (%service) "user")
+                                  (cred:credential-store-unavailable (e) e))))
+                 (is (stringp reason))
+                 (is (typep condition 'cred:credential-store-unavailable))
+                 (when (typep condition 'cred:credential-store-unavailable)
+                   (is (equal reason (cred:credential-store-unavailable-reason condition))
+                       "the operation must give the reason available-p gave")))))
+    #-(or win32 darwin linux)
     (progn (is (null available))
-           (is (search "#357" reason) "the reason names what is missing: ~A" reason)
+           (is (stringp reason))
            (is (null (cred:credential-store-name)))
            (signals cred:credential-store-unavailable
              (cred:fetch-credential (%service) "user")))))
@@ -497,5 +530,8 @@ there is no backend, the fetch says the store is unavailable instead."
   (let ((service hades/credentials::*probe-service*)
         (account hades/credentials::*probe-account*))
     #+(or win32 darwin) (signals cred:credential-not-found (cred:fetch-credential service account))
-    #-(or win32 darwin) (signals cred:credential-store-unavailable
-                          (cred:fetch-credential service account))))
+    ;; On Linux with a Secret Service running, the live suite checks the item is absent.
+    #+linux (unless (cred:credential-store-available-p)
+              (signals cred:credential-store-unavailable (cred:fetch-credential service account)))
+    #-(or win32 darwin linux) (signals cred:credential-store-unavailable
+                                (cred:fetch-credential service account))))
