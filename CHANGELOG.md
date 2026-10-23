@@ -518,6 +518,29 @@ its tag.
   content hash for a multipart or KMS-encrypted object: compare it, never recompute it. See
   "Reading the version you checked" in `hermes/docs/blob-direct-uploads.md`.
 
+- **hermes/blob: `public-image-url` gives an image in a private bucket a permanent public URL for
+  a link-preview card** (#830), with its metadata removed. `(public-image-url store bucket key
+  public-store public-bucket)` copies the image into a store the app configured as public
+  (`:public-base-url`, or `:base-url` on the filesystem store) and returns `(values url width
+  height content-type)`, for `hyperion/page-meta`'s `:image`, `:image-width` and
+  `:image-height`. The copy keeps the pixel data byte for byte, the colour profile, and the EXIF
+  Orientation field in a new EXIF block; EXIF (GPS, camera serial, thumbnail), XMP, IPTC,
+  comments, PNG text chunks and data after the image are removed, with no image library
+  (`strip-image-metadata` does this to an octet vector). Only JPEG, PNG and WebP up to 5 MiB
+  (`:max-bytes`) are accepted; SVG, GIF, HEIC and unparseable files signal the new
+  `blob-image-refused`, a `blob-unsupported` with `blob-image-refused-reason` `:unsupported-format`,
+  `:too-large` or `:malformed`. The copy's key is derived from hashes of the source's bucket, key
+  and ETag, so a second call writes nothing and a changed original gets a new copy, with the old
+  ones deleted. `delete-public-images` removes an image's copies: call it when the image is
+  deleted or its post stops being public. `put-blob` takes a new `:cache-control`, which the S3
+  store sends and the filesystem store accepts and does not use; a public copy is written with
+  `*public-image-cache-control*`, `public, max-age=86400`. The `put-blob` generic now ends in
+  `&allow-other-keys`, so a store class an app defined against v0.1.7, with a method taking only
+  `:content-type` and `:metadata`, still loads and works with `public-image-url`; such a store
+  drops `:cache-control`, and its objects have no Cache-Control header until its method passes
+  the argument on. See "A public copy for a
+  link-preview card" in `hermes/docs/blob-direct-uploads.md`.
+
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
   page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
