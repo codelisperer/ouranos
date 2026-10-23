@@ -102,7 +102,7 @@
     stays with the caller, and STOP takes whichever handler START returned.")
   (:export #:default-server #:available-servers #:no-server-backend
            #:native-backend-p
-           #:*default-port* #:start #:stop
+           #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
            #:loopback-host-p
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
@@ -130,12 +130,17 @@
     query param, read a request header or cookie, negotiate JSON, and
     encode/decode JSON. Domain-neutral -- the caller supplies its own keys.")
   (:export #:body-string #:form-alist #:form-param #:form-params
+           ;; a body encoded as a browser encodes a form, for tests (#715)
+           #:form-urlencode
            ;; a body is a stream and is read once; a middleware that must look
            ;; inside it caches the result here rather than spending it (pre-publication issue 280)
            #:+body-string-key+ #:cache-body-string
            ;; and the same one level up, for a multipart body (pre-publication issue 280)
            #:+multipart-parts-key+ #:cache-multipart-parts
            #:query-param #:query-params #:request-header #:cookie
+           ;; a link to the current query with some parameters changed, and the htmx
+           ;; request test (#488)
+           #:query-string-with #:htmx-request-p
            ;; multipart/form-data (pre-publication issue 143): ceilings on by default, content streamed
            #:multipart-p #:parse-multipart #:delete-parts #:sanitize-filename
            #:part #:part-p #:part-name #:part-filename #:part-safe-filename
@@ -222,7 +227,9 @@
            #:session-cookie-not-attachable #:session-cookie-not-attachable-response
            ;; dev/REPL session management
            #:sessions #:session-summary #:describe-sessions
-           #:kill-session #:kill-sessions))
+           #:kill-session #:kill-sessions
+           ;; #690: end every session of one user, after a change of address or a revert.
+           #:end-sessions))
 
 (cl:defpackage #:hyperion/csrf
   (:use #:cl)
@@ -265,7 +272,7 @@
    ;; the refusal for an app with no session (#293): Host, Sec-Fetch-Site, Origin
    #:check-host #:check-same-origin #:wrap-same-origin #:normalise-origin
    ;; the injector (ADR-0019): a deftag on :form, plus the seam it reads
-   #:*token-thunk* #:current-token #:token-field
+   #:*token-thunk* #:current-token #:token-field #:token-headers
    #:csrf-failure #:csrf-failure-reason #:csrf-failure-method #:csrf-failure-path))
 
 (cl:defpackage #:hyperion/ratelimit
@@ -484,6 +491,31 @@
    ;; component
    #:consent-banner))
 
+;;; --- Link-preview tags: Open Graph, Twitter cards, canonical (#821) ------
+(cl:defpackage #:hyperion/page-meta
+  (:use #:cl)
+  (:local-nicknames (#:log  #:aion/log)
+                    (#:spin #:spinneret)
+                    (#:i18n #:hyperion/i18n))
+  (:documentation
+   "The <head> tags that make a shared link show a preview card: Open Graph (og:*),
+    Twitter cards (twitter:*), <meta name=description> and <link rel=canonical>. A
+    handler or layout declares the page's title, description, image, canonical URL,
+    type and locale; PAGE-META turns that into a list of tags, and META-TAGS writes
+    them into the page with Spinneret. Every URL is made absolute from the SITE's
+    configured public origin, never from the request's Host header. A page that needs
+    sign-in or is marked noindex gets the site's name and fallback image only.")
+  (:export
+   ;; the site
+   #:site #:site-p #:make-site #:*site*
+   #:site-name #:site-origin #:site-image #:site-image-width #:site-image-height
+   #:site-image-alt #:site-twitter
+   ;; the page
+   #:page-meta #:meta-tags #:meta-tags-string
+   ;; pieces, exported for apps that build their own tags
+   #:absolute-url #:trim-description #:og-locale #:expiring-url-p
+   #:page-meta-error))
+
 ;;; --- Static asset serving -----------------------------------------------
 (cl:defpackage #:hyperion/static
   (:use #:cl)
@@ -531,6 +563,7 @@
 (cl:defpackage #:hyperion/dev
   (:use #:cl)
   (:local-nicknames (#:srv  #:hyperion/server)
+                    (#:sidecar #:hyperion/sidecar)
                     (#:hjs  #:hyperion/js)
                     (#:hlog #:hyperion/logging))
   (:documentation
@@ -543,6 +576,9 @@
   (:export #:*reload-epoch* #:mark-reloaded
            ;; what the watcher watches (pre-publication issue 134): a denylist, pruning directories
            #:*watch-excluded-directories* #:*watch-excluded-types*
+           ;; #730: the most files watched, and what is signalled past it
+           #:*watch-file-limit* #:watch-too-large #:watch-too-large-root
+           #:watch-too-large-count #:watch-too-large-limit
            #:watch #:unwatch #:reload! #:dev-error
            #:serve #:wrap-dev
            ;; pre-publication issue 235: the guard is only useful if a caller can name what it signals.

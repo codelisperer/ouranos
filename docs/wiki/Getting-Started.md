@@ -46,7 +46,7 @@ currently carries, regardless of what `SBCL_VERSION` says. The pin is honored on
 and Windows; on macOS it's documentation of intent. If two machines produce subtly different
 builds, this is the first place to look.
 
-**arm64 Linux has no upstream binary either** (none in 2.6.0 to 2.6.8; #9). There,
+**arm64 Linux has no upstream binary either** (none in 2.6.0 to 2.6.9; #9). There,
 `setup.sh` stops and asks you to install an SBCL yourself, from your distribution's package
 (`sudo apt install sbcl`) or built from source, and on the next run it uses that SBCL and
 warns that its version differs from the pin.

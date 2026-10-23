@@ -13,7 +13,7 @@
 
 ;;; --- tokenizer ------------------------------------------------------------
 (defparameter +sql-keywords+
-  '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "LIKE" "ILIKE" "IN" "BETWEEN" "IS" "NULL"
+  '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "LIKE" "ILIKE" "ESCAPE" "IN" "BETWEEN" "IS" "NULL"
     "ORDER" "GROUP" "BY" "HAVING" "LIMIT" "OFFSET" "INSERT" "INTO" "VALUES"
     "UPDATE" "SET" "DELETE" "ASC" "DESC"
     "JOIN" "INNER" "LEFT" "RIGHT" "FULL" "CROSS" "OUTER" "ON" "AS" "EXISTS"
@@ -138,6 +138,13 @@ position."
     ((eq (%peek-type) :num) (second (%advance)))
     (t (error "mnemosyne/query:parse: expected a column or value, got ~S" (%peek)))))
 
+(defun %p-like (op lhs)
+  "The rest of LHS LIKE pattern [ESCAPE 'c'], as (OP LHS PATTERN [:escape \"c\"]) (#862)."
+  (let ((pattern (%p-operand)))
+    (if (%kw-p "ESCAPE")
+        (progn (%advance) (list op lhs pattern :escape (%p-operand)))
+        (list op lhs pattern))))
+
 (defun %p-predicate ()
   (cond
     ((%kw-p "EXISTS") (%advance) (%eat :lp) (prog1 (list :exists (%p-select)) (%eat :rp)))
@@ -147,8 +154,8 @@ position."
      (let ((lhs (%p-operand)))       ; column | funcall | scalar subquery
        (cond
          ((eq (%peek-type) :op) (list (%op->kw (second (%advance))) lhs (%p-operand)))
-         ((%kw-p "LIKE") (%advance) (list :like lhs (%p-operand)))
-         ((%kw-p "ILIKE") (%advance) (list :ilike lhs (%p-operand)))
+         ((%kw-p "LIKE") (%advance) (%p-like :like lhs))
+         ((%kw-p "ILIKE") (%advance) (%p-like :ilike lhs))
          ((%kw-p "IN") (%advance) (%eat :lp)
           (if (%kw-p "SELECT")
               (prog1 (list :in lhs (%p-select)) (%eat :rp))          ; IN (SELECT ...)

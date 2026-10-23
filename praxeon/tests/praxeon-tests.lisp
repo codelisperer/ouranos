@@ -19,6 +19,8 @@
                     (#:wf #:praxeon/workflow)
                     (#:bt #:bordeaux-threads)   ; pre-publication issue 418: fan-out is really concurrent now
                     (#:web-search #:praxeon/web-search)
+                    (#:wp #:praxeon/web-page)          ; #757, web-page-tests.lisp
+                    (#:source #:praxeon/source)
                     (#:mem #:praxeon/memory)
                     (#:dst #:praxeon/distil)
                     (#:obs #:praxeon/observe))
@@ -2891,6 +2893,452 @@ is for openai, and PRAXEON_LLM_API_KEY, which belongs to anthropic, is not read.
       (is (string= "k" (llm::oai-api-key p)))
       (is (string= "https://openrouter.ai/api/v1" (llm::oai-base-url p))))))
 
+;;; --- Meta's Model API, the meta impl (#678) --------------------------------
+;;;
+;;; No test here calls Meta. The reply below is built from the response schema Meta documents
+;;; for Chat Completions (https://dev.meta.ai/docs/api-reference/chat-completions/schemas and
+;;; https://dev.meta.ai/docs/tool-calling, read 2026-10-14), not recorded from the live API,
+;;; and it is served from 127.0.0.1.
+
+(defparameter +meta-reply+
+  "{\"id\":\"chatcmpl-678\",\"object\":\"chat.completion\",\"created\":1792000000,
+    \"model\":\"muse-wonder-1.0\",
+    \"choices\":[{\"index\":0,
+                  \"message\":{\"role\":\"assistant\",\"content\":null,
+                               \"tool_calls\":[{\"id\":\"call_abc123\",\"type\":\"function\",
+                                                \"function\":{\"name\":\"draft_copy\",
+                                                  \"arguments\":\"{\\\"headline\\\":\\\"Spring\\\",\\\"characters\\\":6}\"}}]},
+                  \"finish_reason\":\"tool_calls\"}],
+    \"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":85,\"total_tokens\":1285,
+               \"prompt_tokens_details\":{\"cached_tokens\":1024},
+               \"completion_tokens_details\":{\"reasoning_tokens\":40}}}"
+  "A Chat Completions reply in the shape Meta documents, with a tool call and the usage figures,
+including the two optional breakdowns.")
+
+(defparameter +openai-reply+
+  "{\"choices\":[{\"message\":{\"content\":null,
+                  \"tool_calls\":[{\"id\":\"call_abc123\",\"type\":\"function\",
+                                   \"function\":{\"name\":\"draft_copy\",
+                                     \"arguments\":\"{\\\"headline\\\":\\\"Spring\\\",\\\"characters\\\":6}\"}}]},
+                  \"finish_reason\":\"tool_calls\"}],
+    \"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":85,
+               \"prompt_tokens_details\":{\"cached_tokens\":1024}}}"
+  "The same answer as +META-REPLY+ in the fields an OpenAI reply carries.")
+
+(defun %completion-fields (c)
+  "C's fields as a list that EQUAL can compare, with each call's arguments as an alist."
+  (list (llm:completion-text c) (llm:completion-stop-reason c)
+        (llm:completion-input-tokens c) (llm:completion-output-tokens c)
+        (llm:completion-cache-read-tokens c) (llm:completion-cache-write-tokens c)
+        (mapcar (lambda (call)
+                  (list (llm:tool-call-id call) (llm:tool-call-name call)
+                        (sort (loop for k being the hash-keys of (llm:tool-call-arguments call)
+                                      using (hash-value v) collect (cons k v))
+                              #'string< :key #'car)))
+                (llm:completion-tool-calls c))))
+
+(defun %answer-one-request (listener reply)
+  "Accept one connection on LISTENER within 10 seconds, read its request, and answer with REPLY
+as JSON, with status 200; or, when REPLY is a cons (STATUS-LINE . TEXT), answer TEXT with that
+status, such as \"400 Bad Request\" (#719); or, when REPLY is a list (STATUS-LINE TEXT HEADERS),
+also send HEADERS, an alist of names and values (#758). Returns the request line, the headers as
+an alist with lowercased names, the body decoded as UTF-8, and the body's octets, which is the
+only exact copy of a binary body such as a multipart upload (#758). The stream is bivalent so the
+headers are read as text and the body as octets."
+  (let* ((socket (loop with deadline = (+ (get-universal-time) 10)
+                       for s = (sb-bsd-sockets:socket-accept listener)
+                       when s return (progn (setf (sb-bsd-sockets:non-blocking-mode s) nil) s)
+                       when (> (get-universal-time) deadline)
+                         do (error "no request reached the test server in 10 seconds")
+                       do (sleep 0.02)))
+         (stream (sb-bsd-sockets:socket-make-stream
+                  socket :input t :output t :element-type :default
+                         :external-format '(:utf-8 :replacement #\?) :buffering :full)))
+    (unwind-protect
+         (flet ((line () (string-right-trim '(#\Return) (read-line stream))))
+           (let* ((request-line (line))
+                  (headers (loop for l = (line) until (zerop (length l))
+                                 collect (let ((colon (position #\: l)))
+                                           (cons (string-downcase (subseq l 0 colon))
+                                                 (string-trim " " (subseq l (1+ colon)))))))
+                  (length (parse-integer (or (cdr (assoc "content-length" headers
+                                                          :test #'string=))
+                                             "0")))
+                  (octets (make-array length :element-type '(unsigned-byte 8)))
+                  (body (progn (read-sequence octets stream)
+                               (sb-ext:octets-to-string octets :external-format
+                                                        '(:utf-8 :replacement #\?)))))
+             ;; A REPLY of (STATUS-LINE TEXT HEADERS) also sends HEADERS, an alist (#758).
+             (let* ((extra (and (consp reply) (consp (cdr reply)) (third reply)))
+                    (status (if (consp reply) (car reply) "200 OK"))
+                    (text (cond ((not (consp reply)) reply)
+                                ((consp (cdr reply)) (second reply))
+                                (t (cdr reply)))))
+               (format stream "HTTP/1.1 ~A~C~C" status #\Return #\Newline)
+               (loop for (name . value) in extra
+                     do (format stream "~A: ~A~C~C" name value #\Return #\Newline))
+               (format stream "Content-Type: application/json~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+                       #\Return #\Newline
+                       (length (sb-ext:string-to-octets text :external-format :utf-8))
+                       #\Return #\Newline #\Return #\Newline #\Return #\Newline text))
+             (finish-output stream)
+             (list request-line headers body octets)))
+      (close stream))))
+
+(defun %serve-replies (replies)
+  "Listen on 127.0.0.1 at a free port and answer one HTTP request per element of REPLIES, in
+order, with that element as JSON. Returns the port and the thread, which gives up after 10
+seconds without a request. The thread's value is a list with one element per request: the
+request line, the headers as an alist with lowercased names, and the request body."
+  (let ((listener (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address listener) t)
+    (sb-bsd-sockets:socket-bind listener #(127 0 0 1) 0)
+    (sb-bsd-sockets:socket-listen listener 1)
+    ;; Non-blocking, so a test that fails before sending ends this thread after 10 seconds
+    ;; rather than leaving it waiting in accept.
+    (setf (sb-bsd-sockets:non-blocking-mode listener) t)
+    (values
+     (nth-value 1 (sb-bsd-sockets:socket-name listener))
+     (sb-thread:make-thread
+      (lambda ()
+        (unwind-protect
+             (loop for reply in replies
+                   collect (%answer-one-request listener reply))
+          (sb-bsd-sockets:socket-close listener)))
+      :name "praxeon-tests meta replies"))))
+
+(test the-meta-impl-is-selected-with-its-url-model-and-key
+  "#678. PRAXEON_<ROLE>_IMPL=meta builds an OPENAI-COMPATIBLE for Meta's Model API: its
+documented base URL, muse-wonder-1.0 when no model is set, and PRAXEON_META_API_KEY. A model or
+base URL that is set still wins."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "anthropic")
+                 ("PRAXEON_CRITIC_IMPL" "meta")
+                 ("PRAXEON_CRITIC_API_KEY" nil) ("PRAXEON_CRITIC_MODEL" nil)
+                 ("PRAXEON_CRITIC_BASE_URL" nil)
+                 ("PRAXEON_META_API_KEY" "meta-key") ("PRAXEON_META_MODEL" nil)
+                 ("PRAXEON_META_BASE_URL" nil))
+    (let ((p (llm:make-provider-from-env :role :critic)))
+      (is (typep p 'llm:openai-compatible))
+      (is (string= "meta" (llm::oai-impl p)))
+      (is (string= "https://api.meta.ai/v1" (llm::oai-base-url p)))
+      (is (string= "muse-wonder-1.0" (llm:model-of p)) "Meta's model, not qwen2.5")
+      (is (string= "meta-key" (llm::oai-api-key p))))
+    (setf (uiop:getenv "PRAXEON_META_MODEL") "muse-spark-1.3"
+          (uiop:getenv "PRAXEON_META_BASE_URL") "https://gateway.example/v1")
+    (let ((p (llm:make-provider-from-env :role :critic)))
+      (is (string= "muse-spark-1.3" (llm:model-of p)))
+      (is (string= "https://gateway.example/v1" (llm::oai-base-url p))))
+    (let ((p (make-instance 'llm:openai-compatible :impl "meta" :api-key "k")))
+      (is (string= "muse-spark-1.3" (llm:model-of p))
+          "a directly made one reads the backend's model too"))))
+
+(test the-meta-impl-without-a-key-names-the-two-variables
+  "#678. Meta's API is hosted, so a role on meta with no key signals MISSING-PROVIDER-KEY at
+construction, naming the role's variable and PRAXEON_META_API_KEY, as openrouter does."
+  (with-emb-env (("PRAXEON_LLM_IMPL" "anthropic")
+                 ("PRAXEON_CRITIC_IMPL" "meta")
+                 ("PRAXEON_CRITIC_API_KEY" nil)
+                 ("PRAXEON_META_API_KEY" nil))
+    (handler-case (progn (llm:make-provider-from-env :role :critic)
+                         (fail "expected MISSING-PROVIDER-KEY"))
+      (cnd:missing-provider-key (c)
+        (is (string= "meta" (cnd:missing-provider-key-impl c)))
+        (is (equal '("PRAXEON_CRITIC_API_KEY" "PRAXEON_META_API_KEY")
+                   (cnd:missing-provider-key-variables c)))))))
+
+(test the-meta-impl-refuses-a-forced-tool-choice-before-sending
+  "#678. Meta's API accepts only tool_choice \"auto\" and returns HTTP 400 for anything else, so
+the meta impl reports that it cannot force a choice, and a forced choice signals
+TOOL-CHOICE-UNSUPPORTED before a request is made. The base URL is a closed port: had a request
+been made, the failure would be a DELIBERATION-FAILURE instead. Other OpenAI-compatible
+backends still force a choice."
+  (let ((p (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                 :base-url "http://127.0.0.1:1/v1")))
+    (is-false (llm:supports-tool-choice-p p))
+    (dolist (choice (list '(:tool "draft_copy") :none))
+      (is (typep (nth-value 1 (ignore-errors
+                               (llm:complete p '((:role :user :content "hi"))
+                                             :tools (list (%spec)) :tool-choice choice)))
+                 'cnd:tool-choice-unsupported)
+          "~S signals before sending" choice)))
+  (is-true (llm:supports-tool-choice-p
+            (make-instance 'llm:openai-compatible :impl "openrouter" :api-key "k" :model "m"))
+           "control: openrouter still forces a choice"))
+
+(test a-meta-reply-parses-to-the-completion-an-openai-reply-gives
+  "#678. The meta impl posts to <base>/chat/completions with the key as a Bearer token and no
+tool_choice, and a reply in Meta's documented shape, with a tool call and usage, parses to the
+same completion as the same answer in OpenAI's shape."
+  (multiple-value-bind (port server) (%serve-replies (list +meta-reply+))
+    (let* ((p (make-instance 'llm:openai-compatible
+                             :impl "meta" :api-key "meta-test-key" :model "muse-wonder-1.0"
+                             :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+           (c (llm:complete p '((:role :user :content "Write a headline."))
+                            :tools (list (%spec))))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request))))
+      (is (string= "POST /v1/chat/completions HTTP/1.1" (first request)))
+      (is (string= "Bearer meta-test-key"
+                   (cdr (assoc "authorization" (second request) :test #'string=))))
+      (is (string= "muse-wonder-1.0" (gethash "model" sent)))
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "no tool_choice is sent")
+      (is (= 1 (length (gethash "tools" sent))))
+      (is (eq :tool-use (llm:completion-stop-reason c)))
+      (is (equal '(1200 85 1024)
+                 (list (llm:completion-input-tokens c) (llm:completion-output-tokens c)
+                       (llm:completion-cache-read-tokens c))))
+      (is (equal (%completion-fields (praxeon/llm::%parse-openai (jzon:parse +openai-reply+)))
+                 (%completion-fields c))
+          "the same completion as the OpenAI-shaped reply"))))
+
+;;; --- generate-structured on meta, through response_format (#680) ----------
+
+(defun %meta-text-reply (content &key (finish-reason "stop"))
+  "A Chat Completions reply in the shape Meta documents, whose message content is CONTENT."
+  (let ((reply (make-hash-table :test #'equal))
+        (choice (make-hash-table :test #'equal))
+        (message (make-hash-table :test #'equal))
+        (usage (make-hash-table :test #'equal)))
+    (setf (gethash "role" message) "assistant"
+          (gethash "content" message) content
+          (gethash "index" choice) 0
+          (gethash "message" choice) message
+          (gethash "finish_reason" choice) finish-reason
+          (gethash "prompt_tokens" usage) 300
+          (gethash "completion_tokens" usage) 40
+          (gethash "total_tokens" usage) 340
+          (gethash "id" reply) "chatcmpl-680"
+          (gethash "object" reply) "chat.completion"
+          (gethash "created" reply) 1792000000
+          (gethash "model" reply) "muse-wonder-1.0"
+          (gethash "choices" reply) (vector choice)
+          (gethash "usage" reply) usage)
+    (jzon:stringify reply)))
+
+(defun %meta-provider (port)
+  (make-instance 'llm:openai-compatible :impl "meta" :api-key "meta-test-key"
+                                        :model "muse-wonder-1.0"
+                                        :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+
+(defun %sorted-fields (table)
+  (sort (loop for k being the hash-keys of table using (hash-value v) collect (cons k v))
+        #'string< :key #'car))
+
+(test generate-structured-on-meta-asks-through-response-format
+  "#680. On meta, which cannot force a tool call, GENERATE-STRUCTURED sends the spec's schema as
+response_format json_schema, offers no tools and no tool_choice, and returns the JSON object in
+the reply's text: the same record the tool-call path returns for the same answer."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spring\",\"characters\":6}")))
+    (let* ((p (%meta-provider port))
+           (result (llm:generate-structured p '((:role :user :content "Write a headline."))
+                                            (%spec)))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request)))
+           (format (gethash "response_format" sent)))
+      (is-true (llm:supports-response-format-p p))
+      (is (string= "json_schema" (gethash "type" format)))
+      (is (string= "draft_copy" (gethash "name" (gethash "json_schema" format))))
+      (is (equal (jzon:stringify (llm:tool-spec-schema (%spec)))
+                 (jzon:stringify (gethash "schema" (gethash "json_schema" format))))
+          "the spec's schema is sent as it is")
+      (is (null (nth-value 1 (gethash "tools" sent))) "no tools are offered")
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "and no tool_choice is sent")
+      (is (equal (%sorted-fields
+                  (llm:tool-call-arguments
+                   (first (llm:completion-tool-calls
+                           (praxeon/llm::%parse-openai (jzon:parse +openai-reply+))))))
+                 (%sorted-fields result))
+          "the record the tool-call path returns for the same answer"))))
+
+(test a-meta-reply-that-is-not-the-record-is-rejected-and-re-asked
+  "#680. Text that is not JSON, JSON that is not an object, and an object missing a required
+property are each a rejected attempt, signalled as STRUCTURED-RESULT-REJECTED with the RE-ASK
+restart, exactly as a bad tool argument is. Each re-ask carries the model's reply and the
+problems. When the attempts run out, STRUCTURED-RESULT-INVALID is signalled."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "Here is the copy you asked for.")
+                            (%meta-text-reply "[\"Spring\", 6]")
+                            (%meta-text-reply "{\"headline\":\"Spring\"}")))
+    (let ((rejections '())
+          (restarts 0)
+          (failure nil))
+      (handler-case
+          (handler-bind ((llm:structured-result-rejected
+                           (lambda (c)
+                             ;; Records each rejection and declines it, so the default repair
+                             ;; applies. Invoking RE-ASK would ask again past :ATTEMPTS.
+                             (push (llm:structured-result-rejected-problems c) rejections)
+                             (when (find-restart 'llm::re-ask c) (incf restarts)))))
+            (llm:generate-structured (%meta-provider port) '((:role :user :content "brief"))
+                                     (%spec) :attempts 3))
+        (llm:structured-result-invalid (c) (setf failure c)))
+      (let ((requests (aion/test-threads:join server :timeout 10)))
+        (is (equal '(("the reply was not valid JSON")
+                     ("the reply was JSON but not an object")
+                     ("required property \"characters\" is missing"))
+                   (reverse rejections)))
+        (is (= 3 restarts) "each rejection offered RE-ASK")
+        (is (typep failure 'llm:structured-result-invalid))
+        (is (= 3 (llm:structured-result-invalid-attempt failure)))
+        (is (= 3 (length requests)))
+        (let* ((messages (gethash "messages" (jzon:parse (third (second requests)))))
+               (last-two (subseq messages (- (length messages) 2))))
+          (is (string= "Here is the copy you asked for."
+                       (gethash "content" (elt last-two 0)))
+              "the re-ask shows the model its reply")
+          (is (search "the reply was not valid JSON" (gethash "content" (elt last-two 1))))
+          (is (search "Reply again with one corrected JSON object"
+                      (gethash "content" (elt last-two 1)))))))))
+
+(test a-meta-reply-repaired-on-the-second-attempt-is-returned
+  "#680. The default repair applies on meta too: a reply that is not JSON is re-asked without a
+handler, and a valid second reply is returned after two requests."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "not json")
+                            (%meta-text-reply "{\"headline\":\"Ship it\",\"characters\":7}")))
+    (let ((result (llm:generate-structured (%meta-provider port)
+                                           '((:role :user :content "brief")) (%spec)
+                                           :attempts 3)))
+      (is (equal '(("characters" . 7) ("headline" . "Ship it")) (%sorted-fields result)))
+      (is (= 2 (length (aion/test-threads:join server :timeout 10)))))))
+
+(test a-cut-off-meta-reply-is-structured-result-truncated
+  "#680. A reply stopped at the output limit signals STRUCTURED-RESULT-TRUNCATED, as on the
+tool-call path, and ACCEPT-TRUNCATED returns what could be parsed, here nothing."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spr" :finish-reason "length")))
+    (multiple-value-bind (arguments marker)
+        (handler-bind ((llm:structured-result-truncated
+                         (lambda (c) (invoke-restart (find-restart 'cnd:accept-truncated c)))))
+          (llm:generate-structured (%meta-provider port) '((:role :user :content "brief"))
+                                   (%spec)))
+      (is (null arguments))
+      (is (eq :truncated marker)))
+    (aion/test-threads:join server :timeout 10)))
+
+(defun %recursive-spec (&key (recursive t))
+  "A spec whose schema holds a node definition. With RECURSIVE, the node refers to itself."
+  (let ((schema (jzon:parse (format nil "{\"type\":\"object\",\"properties\":{\"root\":{\"$ref\":\"#/$defs/node\"}},\"required\":[\"root\"],\"$defs\":{\"node\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"}~:[~;,\"child\":{\"$ref\":\"#/$defs/node\"}~]}}}}"
+                                    recursive))))
+    ;; A validator, so the spec passes CHECK-SCHEMA-ENFORCEABLE and reaches the check under test.
+    (llm:make-tool-spec :name "tree" :description "A tree." :schema schema
+                        :validators (list (constantly nil)))))
+
+(test a-recursive-schema-is-refused-before-anything-is-sent-to-meta
+  "#680. Meta's API returns HTTP 400 for a recursive schema, so GENERATE-STRUCTURED refuses one
+with UNSENDABLE-SCHEMA before a request. The base URL is a closed port: a request that was made
+would fail as DELIBERATION-FAILURE instead, which is what the non-recursive control shows."
+  (let ((p (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                 :base-url "http://127.0.0.1:1/v1")))
+    (let ((c (nth-value 1 (ignore-errors
+                           (llm:generate-structured p '((:role :user :content "b"))
+                                                    (%recursive-spec))))))
+      (is (typep c 'llm:unsendable-schema))
+      (is (search "recursive" (llm:unsendable-schema-reason c)))
+      (is (search "#/$defs/node" (llm:unsendable-schema-reason c))))
+    (is (typep (nth-value 1 (ignore-errors
+                             (llm:generate-structured p '((:role :user :content "b"))
+                                                      (%recursive-spec :recursive nil))))
+               'cnd:deliberation-failure)
+        "control: the same schema without the self-reference is sent")))
+
+(test schema-recursion-follows-local-references
+  "#680. The recursion check, on its own: a reference to the root, a chain through two
+definitions, and a pointer with an escaped token are recursive; a definition used twice is not."
+  (flet ((recursion (json) (praxeon/llm::schema-recursion (jzon:parse json))))
+    (is-true (recursion "{\"type\":\"object\",\"properties\":{\"next\":{\"$ref\":\"#\"}}}"))
+    (is-true (recursion "{\"$defs\":{\"a\":{\"properties\":{\"b\":{\"$ref\":\"#/$defs/b\"}}},\"b\":{\"properties\":{\"a\":{\"$ref\":\"#/$defs/a\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"a/b\":{\"properties\":{\"x\":{\"$ref\":\"#/$defs/a~1b\"}}}}}"))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#/$defs/s\"},\"y\":{\"$ref\":\"#/$defs/s\"}},\"$defs\":{\"s\":{\"type\":\"string\"}}}"))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"https://example.com/s.json\"}}}"))
+    ;; Copilot's review of #681: "#name" names the schema whose $anchor is name, not the root.
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#leaf\"}},\"$defs\":{\"s\":{\"$anchor\":\"leaf\",\"type\":\"string\"}}}")
+              "a reference to an anchor on a leaf schema is not recursive")
+    (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"node\",\"properties\":{\"c\":{\"$ref\":\"#node\"}}}}}")
+             "a schema that refers to its own anchor is")))
+
+(test schema-recursion-leaves-literal-data-alone
+  "#686. A $ref or $anchor inside examples, default, const or enum is data, not a reference,
+so a schema that only shows one is not recursive. A property whose NAME is one of those
+keywords is still a schema. Control: the same $ref outside the data keyword is recursive."
+  (flet ((recursion (json) (praxeon/llm::schema-recursion (jzon:parse json))))
+    (is-false (recursion "{\"type\":\"object\",\"examples\":[{\"$ref\":\"#\"}]}"))
+    (is-false (recursion "{\"type\":\"object\",\"default\":{\"$ref\":\"#\"},\"const\":{\"$ref\":\"#\"},\"enum\":[{\"$ref\":\"#\"}]}"))
+    (is-false (recursion "{\"properties\":{\"x\":{\"$ref\":\"#leaf\"}},\"examples\":[{\"$anchor\":\"leaf\",\"properties\":{\"y\":{\"$ref\":\"#leaf\"}}}],\"$defs\":{\"s\":{\"$anchor\":\"leaf\",\"type\":\"string\"}}}")
+              "an $anchor inside an example is not the anchor a reference names")
+    (is-true (recursion "{\"type\":\"object\",\"properties\":{\"default\":{\"$ref\":\"#\"}}}")
+             "a property named default is a schema")
+    (is-true (recursion "{\"type\":\"object\",\"dependencies\":{\"default\":{\"$ref\":\"#\"}}}")
+             "a dependency named default is a schema (Copilot's review of #688)")
+    (is-true (recursion "{\"type\":\"object\",\"dependentSchemas\":{\"enum\":{\"$ref\":\"#\"}}}")
+             "a dependent schema named enum is a schema")
+    (is-true (recursion "{\"type\":\"object\",\"items\":{\"$ref\":\"#\"}}")
+             "control: the same $ref under a schema keyword is recursive")))
+
+(test schema-recursion-percent-decodes-a-fragment
+  "#686. A $ref is a URI, so its fragment is percent-decoded before it is read: #/$defs/%6Eode
+names the definition node, and %25 is a literal percent sign. Decoding comes before the JSON
+pointer escapes, so %7E1 is ~1, which is /. Control: the same schema with the definition
+under a name the reference does not decode to is not recursive."
+  (flet ((recursion (json) (praxeon/llm::schema-recursion (jzon:parse json))))
+    (is-true (recursion "{\"properties\":{\"n\":{\"$ref\":\"#/$defs/%6Eode\"}},\"$defs\":{\"node\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%6Eode\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"a%b\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/a%25b\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"a/b\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/a%7E1b\"}}}}}"))
+    (is-true (recursion "{\"$defs\":{\"n\":{\"$anchor\":\"n\\u00e9\",\"properties\":{\"c\":{\"$ref\":\"#n%C3%A9\"}}}}}")
+             "an anchor named with a UTF-8 escape")
+    (is-true (recursion "{\"$defs\":{\"\\u20ac\\u20ac\\u20acA\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/\\u20ac\\u20ac\\u20ac%41\"}}}}}")
+             "a fragment whose UTF-8 octets outnumber its characters (review of #688)")
+    (is-false (recursion "{\"properties\":{\"n\":{\"$ref\":\"#/$defs/%6Eode\"}},\"$defs\":{\"%6Eode\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%6Eode\"}}}}}")
+              "control: a definition named with the literal escape is not what the reference names")
+    (is-false (recursion "{\"$defs\":{\"n\":{\"properties\":{\"c\":{\"$ref\":\"#/$defs/%zz\"}}}}}")
+              "a malformed escape names nothing")))
+
+(defclass %schema-only-provider (recording) ()
+  (:documentation "A provider that cannot force a tool call, takes a response_format, and does not
+refuse a recursive schema. Its replies are the texts in its script."))
+
+(defmethod llm:supports-tool-choice-p ((p %schema-only-provider)) nil)
+(defmethod llm:supports-response-format-p ((p %schema-only-provider)) t)
+(defmethod llm:complete-with-schema ((p %schema-only-provider) messages spec &key system max-tokens temperature)
+  (declare (ignore spec system max-tokens temperature))
+  (push messages (recording-requests p))
+  (llm:make-completion :text (pop (recording-script p)) :stop-reason :end))
+
+(test only-a-provider-that-refuses-a-recursive-schema-has-it-refused
+  "Copilot's review of #681. Refusing a recursive schema is the provider's decision
+(RESPONSE-FORMAT-SCHEMA-PROBLEM), not GENERATE-STRUCTURED's: a provider that takes response_format
+and does not refuse one is sent it, while meta refuses it, naming its backend."
+  (let* ((p (make-instance '%schema-only-provider
+                           :script (list "{\"root\":{\"label\":\"a\"}}")))
+         (result (llm:generate-structured p '((:role :user :content "b")) (%recursive-spec))))
+    (is (string= "a" (gethash "label" (gethash "root" result))))
+    (is (= 1 (length (recording-requests p)))))
+  (let ((meta (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                    :base-url "http://127.0.0.1:1/v1")))
+    (is (search "the meta backend"
+                (llm:response-format-schema-problem meta (llm:tool-spec-schema (%recursive-spec)))))))
+
+(defclass %both-ways-provider (recording) ()
+  (:documentation "A provider that can force a tool call and also take a response_format."))
+
+(defmethod llm:supports-tool-choice-p ((p %both-ways-provider)) t)
+(defmethod llm:supports-response-format-p ((p %both-ways-provider)) t)
+(defmethod llm:complete-with-schema ((p %both-ways-provider) messages spec &key system max-tokens temperature)
+  (declare (ignore messages spec system max-tokens temperature))
+  (error "complete-with-schema was called"))
+
+(test a-provider-that-can-force-a-tool-call-keeps-the-tool-call
+  "#680. A forced tool call stays first: a provider that supports both ways is asked with the
+tool call, never through COMPLETE-WITH-SCHEMA."
+  (let* ((p (make-instance '%both-ways-provider
+                           :script (list (%call-completion "draft_copy"
+                                                           (%args "headline" "Ship it"
+                                                                  "characters" 7)))))
+         (result (llm:generate-structured p '((:role :user :content "brief")) (%spec))))
+    (is (string= "Ship it" (gethash "headline" result)))
+    (is (= 1 (length (recording-requests p))))))
+
 (test openrouter-embeddings-without-a-key-name-the-three-variables
   "Review follow-up on #291. OpenRouter is hosted, so building its embedding provider with no
 key signals MISSING-PROVIDER-KEY naming the role's, the process's and the backend's variable,
@@ -3541,6 +3989,195 @@ though it were the cost."
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
 
 ;;; --------------------------------------------------------------------------
+;;; #719: a failed provider request logs the status, the error type and code and the body's
+;;; length, and never the body. The body goes on the condition.
+;;;
+;;; Each reply below carries a marker string in the place a provider puts its explanation, which
+;;; is also where it can repeat the request. The marker must reach the condition's BODY and must
+;;; not reach the log line or the condition's report.
+;;; --------------------------------------------------------------------------
+
+(defparameter +719-marker+ "MARKER-719-the-users-prompt")
+
+(defun %failed-request-and-log (make-provider reply)
+  "Serve REPLY, a (STATUS-LINE . TEXT), to one request from the provider MAKE-PROVIDER builds
+from a port, with warn logging captured. Returns the condition signalled, the log lines that
+mention the failure, and everything logged. A field value can hold a newline, which the logger
+writes as it is, so a check for something that must not be logged searches everything logged,
+not only the line that names the failure."
+  (let ((out (make-string-output-stream))
+        (condition nil))
+    (multiple-value-bind (port server) (%serve-replies (list reply))
+      (unwind-protect
+           (progn
+             (aion/log:setup :env :dev :level :warn :stream out)
+             (handler-case (llm:complete (funcall make-provider port)
+                                         '((:role :user :content "Hello.")))
+               (cnd:provider-request-failed (c) (setf condition c)))
+             (aion/test-threads:join server :timeout 10))
+        (aion/log:setup :env :dev :level :warn :stream *standard-output*)))
+    (let ((logged (get-output-stream-string out)))
+      (values condition
+              (remove-if-not (lambda (line) (search "llm request failed" line))
+                             (uiop:split-string logged :separator '(#\Newline)))
+              logged))))
+
+(defun %anthropic-at (port)
+  (make-instance 'llm:anthropic :api-key "test-key" :model "m"
+                                :endpoint (format nil "http://127.0.0.1:~D/v1/messages" port)))
+
+(defun %openai-at (port)
+  (make-instance 'llm:openai-compatible :api-key "test-key" :model "m"
+                                        :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+
+(test an-anthropic-failure-logs-the-status-type-and-length-and-not-the-body
+  (let ((body (format nil "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"~A\"}}"
+                      +719-marker+)))
+    (multiple-value-bind (c lines logged) (%failed-request-and-log #'%anthropic-at (cons "400 Bad Request" body))
+      (is (typep c 'cnd:deliberation-failure) "an app's handler for a failed call still receives it")
+      (is (eql 400 (cnd:provider-request-failed-status c)))
+      (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
+      (is (null (cnd:provider-request-failed-error-code c)) "Anthropic sends no code")
+      (is (equal body (cnd:provider-request-failed-body c)) "the whole body is on the condition")
+      (is (null (search +719-marker+ (princ-to-string c))) "the report leaves the body out")
+      (is (= 1 (length lines)) "one warn line: ~S" lines)
+      (let ((line (first lines)))
+        (is (null (search +719-marker+ logged)) "nothing logged holds the body: ~A" logged)
+        (is (search "status=400" line) "~A" line)
+        (is (search "error-type=invalid_request_error" line) "~A" line)
+        (is (search (format nil "body-length=~D" (length body)) line) "~A" line)))))
+
+(test an-openai-compatible-failure-logs-the-type-and-code-and-not-the-body
+  (let ((body (format nil "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"~A\"}}"
+                      +719-marker+)))
+    (multiple-value-bind (c lines logged) (%failed-request-and-log #'%openai-at (cons "404 Not Found" body))
+      (is (eql 404 (cnd:provider-request-failed-status c)))
+      (is (equal "invalid_request_error" (cnd:provider-request-failed-error-type c)))
+      (is (equal "model_not_found" (cnd:provider-request-failed-error-code c)))
+      (is (equal body (cnd:provider-request-failed-body c)))
+      (is (= 1 (length lines)))
+      (is (null (search +719-marker+ logged)) "~A" logged)
+      (is (search "error-code=model_not_found" (first lines)) "~A" (first lines)))))
+
+(test a-failure-whose-body-is-not-json-logs-no-type-or-code-and-not-the-body
+  (let ((body (format nil "<html><body>~A</body></html>" +719-marker+)))
+    (multiple-value-bind (c lines logged) (%failed-request-and-log #'%anthropic-at (cons "502 Bad Gateway" body))
+      (is (eql 502 (cnd:provider-request-failed-status c)))
+      (is (null (cnd:provider-request-failed-error-type c)))
+      (is (null (cnd:provider-request-failed-error-code c)))
+      (is (equal body (cnd:provider-request-failed-body c)))
+      (is (= 1 (length lines)))
+      (is (null (search +719-marker+ logged)) "~A" logged)
+      (is (search (format nil "body-length=~D" (length body)) (first lines))))))
+
+(test a-long-error-type-is-not-taken-as-one
+  "The type and code are logged, so a value that is not a short identifier, which could be the
+body, is read as no type at all."
+  (let ((long (make-string 65 :initial-element #\x)))
+    (is (equal '(nil nil) (multiple-value-list
+                           (praxeon/llm::%provider-error-fields
+                            (format nil "{\"error\":{\"type\":\"~A\",\"code\":\"~A\"}}" long long)))))
+    (is (equal '("t" "42") (multiple-value-list
+                            (praxeon/llm::%provider-error-fields "{\"error\":{\"type\":\"t\",\"code\":42}}")))
+        "control: a short type, and a numeric code, are read")))
+
+;;; #727: a tool-choice value praxeon does not recognise is kept on the condition and left out
+;;; of the warn line. The request body is built before anything is sent, so these providers
+;;; point at a port nothing is serving and never connect.
+
+(defparameter +727-marker+ "summarise-the-patient-notes-727"
+  "A tool name a prompt might have put in a tool-choice value; it must not reach the log.")
+
+(defun %bad-tool-choice-and-log (make-provider tool-choice)
+  "Call the provider MAKE-PROVIDER builds with TOOL-CHOICE, with warn logging captured. Returns
+the condition signalled, the log lines that mention the failure, and everything logged, which is
+what a check for a leaked value searches (see %FAILED-REQUEST-AND-LOG)."
+  (let ((out (make-string-output-stream))
+        (condition nil))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :warn :stream out)
+           (handler-case (llm:complete (funcall make-provider 9)
+                                       '((:role :user :content "Hello."))
+                                       :tool-choice tool-choice)
+             (cnd:praxeon-error (c) (setf condition c))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (let ((logged (get-output-stream-string out)))
+      (values condition
+              (remove-if-not (lambda (line) (search "llm request failed" line))
+                             (uiop:split-string logged :separator '(#\Newline)))
+              logged))))
+
+(test an-unknown-tool-choice-is-on-the-condition-and-not-in-the-log
+  (dolist (make (list #'%anthropic-at #'%openai-at))
+    (let ((value (list :forced +727-marker+)))
+      (multiple-value-bind (c lines logged) (%bad-tool-choice-and-log make value)
+        (is (typep c 'cnd:unknown-tool-choice) "~S" c)
+        (is (eq value (and (typep c 'cnd:unknown-tool-choice) (cnd:unknown-tool-choice-value c)))
+            "the value itself is on the condition")
+        (is (search "a list of 2 elements" (princ-to-string c)) "~A" c)
+        (is (= 1 (length lines)) "one warn line: ~S" lines)
+        (is (null (search +727-marker+ (princ-to-string c))) "the report leaves the value out")
+        (is (null (search +727-marker+ logged)) "nothing logged holds it: ~A" logged)))))
+
+(test a-tool-choice-a-provider-cannot-honour-is-on-the-condition-and-not-in-the-log
+  "The meta impl cannot force a tool, so COMPLETE signals TOOL-CHOICE-UNSUPPORTED inside the
+handler that logs a failed request. The forced tool's name stays in the REQUESTED slot."
+  (let ((value (list :tool +727-marker+)))
+    (multiple-value-bind (c lines logged)
+        (%bad-tool-choice-and-log
+         (lambda (port)
+           (make-instance 'llm:openai-compatible :impl "meta" :api-key "k"
+                                                 :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+         value)
+      (is (typep c 'cnd:tool-choice-unsupported) "~S" c)
+      (is (eq value (and (typep c 'cnd:tool-choice-unsupported)
+                         (cnd:tool-choice-unsupported-requested c)))
+          "the value itself is on the condition")
+      (is (search "a list of 2 elements" (princ-to-string c)) "~A" c)
+      (is (= 1 (length lines)) "one warn line: ~S" lines)
+      (is (null (search +727-marker+ (princ-to-string c))) "the report leaves the value out")
+      (is (null (search +727-marker+ logged)) "nothing logged holds it: ~A" logged))))
+
+(test an-unknown-tool-choice-is-described-by-its-kind-and-length
+  (flet ((shape (v) (praxeon/conditions:value-shape v)))
+    (is (equal "a string of 5 characters" (shape "hello")))
+    (is (equal "a keyword of 8 characters" (shape :required)))
+    (is (equal "a symbol of 3 characters" (shape 'cl:car)))
+    (is (equal "a list that is not proper" (shape '(a . b))))
+    (is (equal "a value of class FIXNUM" (shape 3)))))
+
+(test a-provider-without-response-format-names-the-tool-spec-it-was-asked-for
+  "COMPLETE-WITH-SCHEMA's default refusal names the tool spec, which is the app developer's own
+identifier and the detail that says which call reached a provider without response_format."
+  (let* ((name "summarise-ticket")
+         (spec (llm:make-tool-spec :name name :description "d"))
+         (c (handler-case (progn (llm:complete-with-schema (make-instance 'llm:provider) '() spec) nil)
+              (cnd:deliberation-failure (c) c))))
+    (is (typep c 'cnd:deliberation-failure))
+    (is (search "\"summarise-ticket\"" (princ-to-string c)) "~A" c)))
+
+(test an-error-type-or-code-outside-the-identifier-characters-is-not-taken-as-one
+  "A proxy between praxeon and the service can answer with its own error JSON, so a type or
+code with a space or a quote in it could be a sentence of its text, and is read as none (#727)."
+  (is (equal '(nil nil) (multiple-value-list
+                         (praxeon/llm::%provider-error-fields
+                          "{\"error\":{\"type\":\"see the notes\",\"code\":\"a\\\"b\"}}"))))
+  (is (equal '("rate_limit.v2-x" "E42") (multiple-value-list
+                                         (praxeon/llm::%provider-error-fields
+                                          "{\"error\":{\"type\":\"rate_limit.v2-x\",\"code\":\"E42\"}}")))
+      "control: letters, digits, underscore, dot and hyphen are read"))
+
+(test a-request-that-fails-before-a-response-is-still-a-provider-request-failed
+  (let ((c (praxeon/llm::%request-failure "rerank request failed"
+                                          (make-condition 'aion/http-client:http-error
+                                                          :detail "connection refused"))))
+    (is (typep c 'cnd:provider-request-failed))
+    (is (null (cnd:provider-request-failed-status c)))
+    (is (null (cnd:provider-request-failed-body c)))
+    (is (search "connection refused" (princ-to-string c)))))
+
+;;; --------------------------------------------------------------------------
 ;;; #326: a step cut off by the output limit is not used.
 ;;;
 ;;; The scripted provider returns a completion whose stop reason is :max-tokens, which is what
@@ -4029,9 +4666,125 @@ model, which is what the file's commentary is for."
   (let* ((rows (funcall (find-symbol "RUN-BENCHMARK" "PRAXEON/BENCH/TOOL-RESULTS")
                         :tasks 2 :pages 4 :stream (make-broadcast-stream)))
          (by (lambda (name) (find name rows :key (lambda (r) (getf r :configuration))))))
-    (is (equal '(:full :offload :clear) (mapcar (lambda (r) (getf r :configuration)) rows)))
+    (is (equal '(:full :offload :clear :clear-wide :offload-and-clear)
+               (mapcar (lambda (r) (getf r :configuration)) rows)))
     (is (every (lambda (r) (= 2 (getf r :succeeded))) rows) "every task succeeded: ~S" rows)
     (is (< (getf (funcall by :offload) :input-tokens) (getf (funcall by :full) :input-tokens)))))
+
+;;; The benchmark's own reporting (#319): the provider's token counts, the mixed task, and a
+;;; turn that fails. Each test loads the file and calls it by name, as the one above does.
+
+(defun %bench (name &rest args)
+  (load (asdf:system-relative-pathname :praxeon "bench/tool-results.lisp"))
+  (apply (find-symbol name "PRAXEON/BENCH/TOOL-RESULTS") args))
+
+(defun %bench-row (rows name)
+  (find name rows :key (lambda (r) (getf r :configuration))))
+
+(test the-tool-results-benchmark-reports-the-providers-counts-and-they-meet-the-estimates
+  "With *SCRIPTED-USAGE*, the scripted model reports Anthropic-style counts: the request's
+estimated tokens less the simulated cached ones as input, and those cached ones as cache read.
+The two sums are collected different ways, from the :USAGE events and from the requests, so
+they have to meet."
+  (%bench "RUN-BENCHMARK" :tasks 1 :stream (make-broadcast-stream)) ; loads the file, so the variable exists
+  (let* ((usage (find-symbol "*SCRIPTED-USAGE*" "PRAXEON/BENCH/TOOL-RESULTS"))
+         (rows (progv (list usage) '(t)
+                 (%bench "RUN-BENCHMARK" :tasks 2 :pages 4 :stream (make-broadcast-stream)))))
+    (dolist (r rows)
+      (is (= (getf r :input-tokens) (+ (getf r :reported-input) (getf r :reported-cache-read)))
+          "~A: reported input plus cache read is the estimate: ~S" (getf r :configuration) r)
+      (is (= (getf r :cached-share)
+             (/ (getf r :reported-cache-read) (getf r :input-tokens)))
+          "~A: the cache read is the simulated cached share" (getf r :configuration))
+      (is (eql 0 (getf r :reported-cache-write)) "a reported 0 stays 0"))
+    (is (string= "full" (string-downcase (getf (first rows) :configuration)))))
+  (let ((rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 4 :stream (make-broadcast-stream))))
+    (is (every (lambda (r) (and (null (getf r :reported-input)) (null (getf r :reported-cache-read))
+                                (null (getf r :reported-cache-write)) (null (getf r :reported-output))))
+               rows)
+        "control: a model that reports nothing leaves every count NIL, not 0")))
+
+(test the-tool-results-benchmark-mixed-task-gives-offload-and-clear-something-to-clear
+  (let ((uniform (%bench "RUN-BENCHMARK" :tasks 2 :stream (make-broadcast-stream)))
+        (mixed (%bench "RUN-BENCHMARK" :tasks 2 :task :mixed :stream (make-broadcast-stream))))
+    (is (plusp (getf (%bench-row mixed :offload-and-clear) :clear-batches))
+        "on the mixed task, the small pages stay in the prompt and a batch of them is cleared")
+    (is (= 2 (getf (%bench-row mixed :offload-and-clear) :succeeded)))
+    (is (zerop (getf (%bench-row uniform :offload-and-clear) :clear-batches))
+        "control: on the uniform task every page is offloaded, so nothing is cleared")
+    (is (< (getf (%bench-row mixed :full) :input-tokens) (getf (%bench-row uniform :full) :input-tokens))
+        "the mixed task's small pages are smaller")
+    (is (= (getf (%bench-row uniform :offload) :input-tokens)
+           (getf (%bench-row uniform :offload-and-clear) :input-tokens)))))
+
+(defclass sometimes-counted (llm:provider)
+  ((calls :initform 0 :accessor counted-calls)
+   (every-other :initarg :every-other :reader counted-every-other))
+  (:documentation "A provider that answers at once. It reports usage on every other request
+when EVERY-OTHER is true, and never otherwise."))
+
+(defmethod llm:complete ((p sometimes-counted) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (let ((report (and (counted-every-other p) (oddp (incf (counted-calls p))))))
+    (llm:make-completion :text "I could not find it." :stop-reason :end
+                         :input-tokens (and report 10) :output-tokens (and report 5)
+                         :cache-read-tokens (and report 0) :cache-write-tokens nil)))
+
+(test the-tool-results-benchmark-marks-figures-that-not-every-request-reported
+  "The actor emits :USAGE only for a step whose provider reported a count, so a provider that
+reports on some requests gives a sum over those alone. The row carries how many requests
+reported each figure, and the report marks a partial sum with a star."
+  (let* ((out (make-string-output-stream))
+         (rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                       :provider (make-instance 'sometimes-counted :every-other t)))
+         (r (first rows))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (= 10 (getf r :reported-input)))
+    (is (= 1 (getf r :reported-input-requests)) "one of the two requests reported input")
+    (is (= 1 (getf r :input-requests)) "and so the estimate covers one request too")
+    (is (null (getf r :reported-cache-write)))
+    (is (= 0 (getf r :reported-cache-write-requests))
+        "a field the :USAGE event left out is not counted as reported")
+    (is (search "10*" text) "the partial input is marked: ~A" text)
+    (is (search "Fewer requests reported" text)))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out
+                                           :provider (make-instance 'sometimes-counted :every-other nil))))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf r :requests)))
+    (is (null (getf r :input-tokens)) "no request reported, so there is no estimate, not 0")
+    (is (null (getf r :reported-input)))
+    (is (null (search "Fewer requests reported" text)) "nothing partial, so no footnote"))
+  (let* ((out (make-string-output-stream))
+         (r (first (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= (getf r :requests) (getf r :input-requests))
+        "control: the scripted model's estimate covers every request")
+    (is (null (search "*" text)) "control: no figure is marked")))
+
+(defclass failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails, with a message that must not be printed."))
+
+(defmethod llm:complete ((p failing-provider) messages &key &allow-other-keys)
+  (declare (ignore messages))
+  (error "request refused for key sk-test-0000-not-printed"))
+
+(test the-tool-results-benchmark-counts-failed-turns-and-does-not-print-their-errors
+  (let* ((out (make-string-output-stream))
+         (events 0)
+         (rows (evt:with-observer ((lambda (e) (declare (ignore e)) (incf events)))
+                 (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :provider (make-instance 'failing-provider)
+                                         :configurations '((:full)) :stream out)))
+         (text (get-output-stream-string out)))
+    (is (= 2 (getf (first rows) :errors)))
+    (is (= 0 (getf (first rows) :succeeded)))
+    (is (null (search "sk-test" text)) "the error's text is not in the report: ~A" text)
+    (is (search "real provider" text))
+    (is (plusp events) "an observer bound around the benchmark still sees the turns' events"))
+  (let ((rows (%bench "RUN-BENCHMARK" :tasks 2 :pages 3 :configurations '((:full))
+                                      :stream (make-broadcast-stream))))
+    (is (= 0 (getf (first rows) :errors)) "control: the scripted model's turns do not fail")))
 
 ;;; --------------------------------------------------------------------------
 ;;; A translation or a structured result cut off at the output limit (#338)
@@ -7144,25 +7897,50 @@ With a failed closing save counted as a failed attempt, 7-12 and 13-18 were lost
     (obs:await-observer observer :timeout 10)
     (is (equal '("B." "C." "D." "E.") (%thread-contents store)))))
 
+(define-condition %step-deadline (error) ()
+  (:documentation "The deadline A-DEADLINE-DEFERRED-IN-THE-STEP-LEAVES-THE-WORKER-STOPPABLE sends
+into OBSERVE-TURN's step."))
+
 (test a-deadline-deferred-in-the-step-leaves-the-worker-stoppable
-  "%CLAIM is made to take 30 ms, so a 5 ms deadline around OBSERVE-TURN arrives inside the step
-and is deferred until it ends, while the worker is made. The model call blocks until the test
-releases it. STOP-OBSERVER with a timeout of 0.2 still ends the worker within a second, gives
-back the claim, and nothing is written after the call is released (the second review of #533).
-A worker made with the deferrable signals blocked could not be ended: the stop took 5.2 seconds,
-the worker lived on, and the window was written after the stop returned."
+  "A deadline arrives while OBSERVE-TURN's step runs with interrupts deferred, and is taken when
+the step ends, after the worker is made. The model call blocks until the test releases it.
+STOP-OBSERVER with a timeout of 0.2 still ends the worker within a second, gives back the claim,
+and nothing is written after the call is released (the second review of #533). A worker made with
+the deferrable signals blocked could not be ended: the stop took 5.2 seconds, the worker lived
+on, and the window was written after the stop returned.
+
+THE DEADLINE IS SENT FROM INSIDE THE STEP, not timed (#726). %CLAIM is made to say that the step
+has started and to wait until a helper thread has interrupted this one, which is how
+SB-EXT:WITH-TIMEOUT's timer delivers a deadline. A 5 ms WITH-TIMEOUT around a step slowed to
+30 ms had to wake inside those 30 ms; on Windows under load it did not in 11 of 200 trials, and
+OBSERVE-TURN returned first."
   (let* ((store (mem:make-in-memory-store))
          (provider (make-instance 'blocking-scripted :script (list (%call-with (%ob "Has a dog." "fact")))))
          (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0))
          (claim (fdefinition 'obs::%claim))
+         (target sb-thread:*current-thread*)
+         (in-step (sb-thread:make-semaphore :name "in-step"))
+         (sent (sb-thread:make-semaphore :name "deadline-sent"))
+         (sender (sb-thread:make-thread
+                  (lambda ()
+                    (when (sb-thread:wait-on-semaphore in-step :timeout 10)
+                      (sb-thread:interrupt-thread target (lambda () (error '%step-deadline)))
+                      (sb-thread:signal-semaphore sent)))
+                  :name "deadline-sender"))
          (how nil))
     (unwind-protect
          (progn
-           (setf (fdefinition 'obs::%claim) (lambda (o) (sleep 0.03) (funcall claim o)))
-           (setf how (handler-case (sb-ext:with-timeout 0.005 (obs:observe-turn observer (%history 6)) :returned)
-                       (sb-ext:timeout () :timeout))))
-      (setf (fdefinition 'obs::%claim) claim))
-    (is (eq :timeout how) "precondition: the deadline fired, after the step")
+           (setf (fdefinition 'obs::%claim)
+                 (lambda (o)
+                   (sb-thread:signal-semaphore in-step)
+                   (sb-thread:wait-on-semaphore sent :timeout 10)
+                   (funcall claim o)))
+           (setf how (handler-case (progn (obs:observe-turn observer (%history 6)) :returned)
+                       (%step-deadline () :deadline))))
+      (setf (fdefinition 'obs::%claim) claim)
+      (sb-thread:signal-semaphore in-step)
+      (sb-thread:join-thread sender :default nil :timeout 10))
+    (is (eq :deadline how) "precondition: the deadline fired, after the step")
     (loop repeat 1000 until (blocking-entered provider) do (sleep 0.005))
     (is-true (blocking-entered provider) "precondition: the worker is in the model call")
     (let* ((t0 (get-internal-real-time))
@@ -7288,10 +8066,14 @@ as an outage would; it uses up the first script entry."))
 
 (test the-pause-before-a-retry-is-not-measured-as-the-attempt
   "The first model call takes 150 seconds by the provider's clock, against a window timeout of
-100, and fails. During the 2-second pause before the retry the observer is waiting, not stuck,
-because no attempt is running. During the retry, 10 seconds long, it is not stuck either
-(Copilot's review of #634). Measured from the failed attempt's start, the pause read 150 seconds
-and was reported stuck."
+100, and fails. During the pause before the retry the observer is waiting, not stuck, because no
+attempt is running. During the retry, 10 seconds long, it is not stuck either (Copilot's review
+of #634). Measured from the failed attempt's start, the pause read 150 seconds and was reported
+stuck.
+
+THE PAUSE IS SIGNALLED, NOT INFERRED (#655). *PAUSE-HOOK* signals PAUSED as the pause begins and
+holds the observer's thread there until the test releases it, so the assertion runs inside the
+pause however the threads are scheduled."
   (let* ((store (mem:make-in-memory-store))
          (provider (make-instance 'clocked-failing-first
                                   :advances (list 150 10)
@@ -7299,16 +8081,364 @@ and was reported stuck."
          (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
                                                                        :retry-delay 2 :window-timeout 100)))
     (setf (obs::observer-clock observer) (lambda () (clocked-now provider)))
-    (is-true (obs:observe-turn observer (%history 6)))
-    (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: call 1 began")
-    (is-true (obs:observer-stuck-p observer) "precondition: call 1 is stuck while it runs")
-    (sb-thread:signal-semaphore (clocked-gate provider))
-    (loop repeat 200 until (= 1 (obs:observer-failures observer)) do (sleep 0.01))
-    (is (= 1 (obs:observer-failures observer)) "precondition: call 1 failed, and the retry pause began")
-    (sleep 0.2)
-    (is (null (obs:observer-stuck-p observer)) "not stuck during the pause before the retry")
-    (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: the retry began")
-    (is (null (obs:observer-stuck-p observer)) "not stuck during the retry")
-    (sb-thread:signal-semaphore (clocked-gate provider))
+    (let ((paused (sb-thread:make-semaphore :name "paused"))
+          (resume (sb-thread:make-semaphore :name "resume")))
+      (unwind-protect
+           (progn
+             (setf obs::*pause-hook* (lambda (o) (declare (ignore o))
+                                       (sb-thread:signal-semaphore paused)
+                                       ;; No timeout: the pause ends only when the test says so,
+                                       ;; and the cleanup below always does (Copilot's review of
+                                       ;; #656).
+                                       (sb-thread:wait-on-semaphore resume)))
+             (is-true (obs:observe-turn observer (%history 6)))
+             (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: call 1 began")
+             (is-true (obs:observer-stuck-p observer) "precondition: call 1 is stuck while it runs")
+             (sb-thread:signal-semaphore (clocked-gate provider))
+             (is-true (sb-thread:wait-on-semaphore paused :timeout 10) "precondition: the retry's pause began")
+             (is (null (obs:observer-stuck-p observer)) "not stuck during the pause before the retry")
+             (sb-thread:signal-semaphore resume)
+             (is-true (sb-thread:wait-on-semaphore (clocked-entered provider) :timeout 10) "precondition: the retry began")
+             (is (null (obs:observer-stuck-p observer)) "not stuck during the retry")
+             (sb-thread:signal-semaphore (clocked-gate provider))
+             (obs:await-observer observer :timeout 10)
+             (is (equal '("A.") (%thread-contents store))))
+        (setf obs::*pause-hook* nil)
+        (sb-thread:signal-semaphore resume)))))
+
+;;; --------------------------------------------------------------------------
+;;; #339: the list of events at the top of event.lisp names every event praxeon emits.
+;;;
+;;; The list is what a UI author reads to learn what to render, and eleven event types were
+;;; emitted for months without appearing in it. The test reads the source: each (evt:emit :X ..)
+;;; and (apply #'evt:emit :X ..), and, for a function that passes its own argument as the type
+;;; (apply #'evt:emit type ..), each call (that-function :X ..) anywhere under praxeon/src.
+;;; --------------------------------------------------------------------------
+
+(in-suite praxeon)
+
+(defun %token-after (text start)
+  "The symbol name in TEXT that begins at START, up to whitespace or a parenthesis."
+  (let ((end (or (position-if (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return #\( #\))))
+                              text :start start)
+                 (length text))))
+    (subseq text start end)))
+
+(defun %source-at (text start)
+  "Up to 40 characters of TEXT from START, to show where a call is."
+  (subseq text start (min (length text) (+ start 40))))
+
+(defun %positions-after (needle text)
+  "The position just after each occurrence of NEEDLE in TEXT."
+  (loop for p = (search needle text) then (search needle text :start2 (1+ p))
+        while p collect (+ p (length needle))))
+
+(defun %listed-event-types (event-file-text)
+  "The event types the comment at the top of event.lisp lists, as keywords."
+  (remove-duplicates
+   (loop for line in (uiop:split-string event-file-text :separator '(#\Newline))
+         for p = (search "(:type :" line)
+         when (and p (eql 0 (search ";;;;" line)))
+           collect (intern (string-upcase (%token-after line (+ p 8))) :keyword))))
+
+(defun %code-text (text)
+  "TEXT, a Lisp source file, as the scan reads it: comments (; to the end of the line, and
+#| |#, nested) and string literals removed, every run of whitespace one space, no space after
+an open parenthesis, and all of it in lower case. A character literal is kept whole, so #\\;
+and #\\\" do not start a comment or a string."
+  (let ((out (make-string-output-stream)) (i 0) (n (length text)) (space nil))
+    (flet ((emit (c)
+             (cond ((member c '(#\Space #\Tab #\Newline #\Return #\Page))
+                    (setf space t))
+                   (t (when space
+                        (write-char #\Space out)
+                        (setf space nil))
+                      (write-char (char-downcase c) out)))))
+      (loop while (< i n)
+            do (let ((c (char text i)))
+                 (cond
+                   ((char= c #\;)
+                    (setf i (or (position #\Newline text :start i) n)))
+                   ((and (char= c #\#) (< (1+ i) n) (char= (char text (1+ i)) #\|))
+                    (let ((depth 1))
+                      (incf i 2)
+                      (loop while (and (< i n) (plusp depth))
+                            do (cond ((and (< (1+ i) n) (char= (char text i) #\|)
+                                           (char= (char text (1+ i)) #\#))
+                                      (decf depth) (incf i 2))
+                                     ((and (< (1+ i) n) (char= (char text i) #\#)
+                                           (char= (char text (1+ i)) #\|))
+                                      (incf depth) (incf i 2))
+                                     (t (incf i))))
+                      (setf space t)))
+                   ((char= c #\")
+                    (incf i)
+                    (loop while (and (< i n) (char/= (char text i) #\"))
+                          do (incf i (if (char= (char text i) #\\) 2 1)))
+                    (incf i)
+                    (emit #\Space))
+                   ((and (char= c #\#) (< (+ i 2) n) (char= (char text (1+ i)) #\\))
+                    (emit #\#) (emit #\\) (emit (char text (+ i 2)))
+                    (incf i 3))
+                   (t (emit c) (incf i))))))
+    (let ((code (get-output-stream-string out)))
+      ;; "( evt:emit" is the same call as "(evt:emit".
+      (loop for p = (search "( " code) while p
+            do (setf code (concatenate 'string (subseq code 0 (1+ p)) (subseq code (+ p 2)))))
+      code)))
+
+(defun %emitted-event-types (texts)
+  "The event types emitted in TEXTS (source files as strings, read through %CODE-TEXT), as
+keywords; the calls whose type cannot be read from the source; and the functions that pass
+their own argument to EVT:EMIT as the type. A call whose type is not a keyword -- to EVT:EMIT
+or to one of those functions -- is one whose type cannot be read."
+  (let ((codes (mapcar #'%code-text texts))
+        (types '()) (unreadable '()) (wrappers '()))
+    (flet ((take (code p)
+             (if (char= (char code p) #\:)
+                 (push (intern (string-upcase (%token-after code (1+ p))) :keyword) types)
+                 (push (%source-at code p) unreadable))))
+      (dolist (code codes)
+        (dolist (p (%positions-after "(evt:emit " code))
+          (take code p))
+        (dolist (p (%positions-after "#'evt:emit " code))
+          (if (char= (char code p) #\:)
+              (take code p)
+              (let ((defun-at (search "(defun " code :from-end t :end2 p)))
+                (if defun-at
+                    (push (%token-after code (+ defun-at 7)) wrappers)
+                    (push (%source-at code p) unreadable))))))
+      (setf wrappers (remove-duplicates wrappers :test #'string=))
+      (dolist (wrapper wrappers)
+        (dolist (code codes)
+          (dolist (p (%positions-after (format nil "(~A " wrapper) code))
+            (take code p)))))
+    (values (remove-duplicates types) unreadable wrappers)))
+
+(test the-event-scan-reads-calls-the-way-lisp-does
+  "#339, from Copilot's review of #683. The scan behind the completeness test finds a call
+written across lines or in upper case, does not count one in a comment or a string, keeps a
+character literal from starting a comment, and reports a non-keyword type passed to EVT:EMIT
+or to a function that passes its type on."
+  (flet ((scan (&rest texts) (multiple-value-list (%emitted-event-types texts))))
+    (destructuring-bind (types unreadable wrappers)
+        (scan (format nil "(evt:emit~%    :split :x 1)~%(EVT:EMIT :upper)~%( evt:emit :spaced)")
+              (format nil "; (evt:emit :line-comment)~%#| (evt:emit :block #| nested |# ) |#~%(f \"(evt:emit :in-string)\")")
+              "(list #\\; (evt:emit :after-char-literal))")
+      (is (null (set-exclusive-or types '(:split :upper :spaced :after-char-literal)))
+          "types found: ~S" types)
+      (is (null unreadable))
+      (is (null wrappers)))
+    (destructuring-bind (types unreadable wrappers)
+        (scan "(defun w (type more) (apply #'evt:emit type more))"
+              (format nil "(w :named nil)~%(w (if x :handoff :named) nil)~%(evt:emit (if t :a :b))"))
+      (is (equal '(:named) types) "types found: ~S" types)
+      (is (= 2 (length unreadable)) "unreadable: ~S" unreadable)
+      (is (equal '("w") wrappers)))))
+
+(test the-event-list-names-every-event-praxeon-emits
+  "#339. Every event type a praxeon source file emits is in the list at the top of event.lisp,
+and every type in the list is emitted somewhere, so the list is complete and has no stale
+entries. The scan has to reach the MCP files in a subdirectory and the types passed through
+%HELD-EVENT and %TASK-EVENT, so the test checks that it found those first."
+  (let* ((src (asdf:system-relative-pathname :praxeon "src/"))
+         (files (directory (merge-pathnames "**/*.lisp" src)))
+         (listed (%listed-event-types (uiop:read-file-string (merge-pathnames "event.lisp" src)))))
+    (multiple-value-bind (emitted unreadable wrappers)
+        (%emitted-event-types (mapcar #'uiop:read-file-string files))
+      (is (member :task-started emitted) "the scan reached praxeon/src/mcp/ and %TASK-EVENT")
+      (is (member :tool-held emitted) "the scan followed %HELD-EVENT")
+      (is (equal '("%held-event" "%task-event") (sort (copy-list wrappers) #'string<))
+          "the functions that pass their own type to EVT:EMIT: ~S" wrappers)
+      (is (null unreadable) "calls whose event type cannot be read from the source: ~S" unreadable)
+      (is (null (set-difference emitted listed))
+          "emitted but not in the list at the top of event.lisp: ~S"
+          (set-difference emitted listed))
+      (is (null (set-difference listed emitted))
+          "in the list at the top of event.lisp but emitted nowhere: ~S"
+          (set-difference listed emitted)))))
+
+;;; --------------------------------------------------------------------------
+;;; #529: a window's writes and its progress in one transaction.
+;;; --------------------------------------------------------------------------
+
+;;; THE STORES WHOSE PROGRESS WRITES FAIL, IN THE TESTS ABOVE, HAVE NO TRANSACTIONS. Those tests
+;;; check what the observer does when a window's observations are stored and its progress is
+;;; not, which is the path every store without transactions takes, including an app's own. With
+;;; the in-memory store's transactions that state cannot arise, so the tests would not reach it.
+(defmethod mem:store-transactions-p ((store progress-fails-once-store)) nil)
+(defmethod mem:store-transactions-p ((store flaky-reads-store)) nil)
+(defmethod mem:store-transactions-p ((store selective-progress-store)) nil)
+(defmethod mem:store-transactions-p ((store always-failing-progress-store)) nil)
+
+(defclass progress-switch-store (mem:in-memory-store)
+  ((failing :initform nil :accessor progress-failing))
+  (:documentation "An in-memory store whose progress writes fail while PROGRESS-FAILING is true."))
+
+(defmethod mem:record-thread-progress :before ((store progress-switch-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (when (progress-failing store) (error "the progress write failed")))
+
+(defclass untransacted-switch-store (progress-switch-store) ()
+  (:documentation "The same store, saying it has no transactions: the observer's path for a store
+an app wrote without them."))
+
+(defmethod mem:store-transactions-p ((store untransacted-switch-store)) nil)
+
+(defun %two-observers-after-failed-progress (class first-script later-content)
+  "Observer A distils window 1-6 with FIRST-SCRIPT while every progress write of a store of CLASS
+fails. Then the writes work, and a new observer B distils the thread, its model wording the fact
+as LATER-CONTENT. Returns the thread's observations' contents and the stored progress."
+  (let ((store (make-instance class)))
+    (setf (progress-failing store) t)
+    (%turn (obs:make-observer (apply #'%provider-returning (mapcar (lambda (c) (%call-with (%ob c "fact"))) first-script))
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)
+           6)
+    (setf (progress-failing store) nil)
+    (%turn (obs:make-observer (%provider-returning (%call-with (%ob later-content "fact")))
+                              store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0 :max-attempts 2)
+           6)
+    (values (%thread-contents store)
+            (multiple-value-list (mem:thread-progress store "member-1" "conv-7")))))
+
+(test a-window-whose-progress-write-fails-leaves-nothing-so-a-new-observer-writes-one-copy
+  "Every progress write fails while observer A distils window 1-6. With the store's transactions
+the window's observations are rolled back with the failed progress write, so the store holds
+neither, and a new observer B, whose model words the fact differently, distils the window once:
+the thread holds one copy (#529). The control is the same store without transactions, today's
+path, where A's observation stays and B adds a reworded second copy."
+  (multiple-value-bind (contents progress)
+      (%two-observers-after-failed-progress 'progress-switch-store
+                                            '("Lives in Lisbon." "Lives in Lisbon.") "Resides in Lisbon.")
+    (is (equal '("Resides in Lisbon.") contents) "one copy: ~S" contents)
+    (is (equal '(6 nil) progress)))
+  (multiple-value-bind (contents progress)
+      (%two-observers-after-failed-progress 'untransacted-switch-store
+                                            '("Lives in Lisbon.") "Resides in Lisbon.")
+    (declare (ignore progress))
+    (is (equal '("Lives in Lisbon." "Resides in Lisbon.") contents)
+        "control, without transactions: two copies, ~S" contents)))
+
+(test the-in-memory-store-rolls-back-a-transaction-that-signals
+  "Inside a transaction that then signals, the store remembers an observation, supersedes another
+and records progress. Afterwards the store is as before: the new observations are gone, the
+superseded one is current again with its own fields as they were, and the progress is as it was
+(#529)."
+  (let* ((store (mem:make-in-memory-store))
+         (old (mem:remember store "member-1" "Lives in Porto." :thread "conv-7"
+                            :provenance (mem:make-provenance "conv-7" 1))))
+    (mem:record-thread-progress store "member-1" "conv-7" 6 '((1 6 1)))
+    (let ((copy (copy-structure old)))
+      (signals simple-error
+        (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+          (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                        :provenance (mem:make-provenance "conv-7" 7))
+          (mem:supersede store old "Lives in Lisbon." :provenance (mem:make-provenance "conv-7" 8))
+          (mem:record-thread-progress store "member-1" "conv-7" 12 nil)
+          (error "the transaction fails")))
+      (is (equal '("Lives in Porto.") (%thread-contents store)))
+      (is (null (mem:observation-superseded-by old)) "the superseded observation is current again")
+      (is (equalp copy old) "with every field as it was")
+      (is (= 1 (length (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t)))))
+    (is (equal '(6 ((1 6 1))) (multiple-value-list (mem:thread-progress store "member-1" "conv-7"))))))
+
+(test a-transaction-that-returns-keeps-its-writes
+  (let ((store (mem:make-in-memory-store)))
+    (is (eq :done (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                    (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                                  :provenance (mem:make-provenance "conv-7" 1))
+                    :done)))
+    (is (equal '("Has a dog.") (%thread-contents store)))))
+
+(test a-promote-function-that-reads-the-store-runs-inside-the-transaction
+  "The app's :PROMOTE function reads the thread's observations from the store while the window's
+transaction holds the store's lock. The store's lock is recursive, so the run finishes, the
+function sees the window's observation that the transaction has written and not yet committed,
+and the fact is promoted (the hub's review of #529's design; Copilot's review of #645: reading
+the subject's facts would read nothing either way)."
+  (let* ((store (mem:make-in-memory-store))
+         (seen nil)
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Has a dog." "fact")))
+                                      store "member-1" "conv-7" :step (%step-for 6) :retry-delay 0
+                                      :promote (lambda (o) (declare (ignore o))
+                                                 (setf seen (length (mem:observations-of store "member-1"
+                                                                                         :thread "conv-7")))
+                                                 t))))
+    (is (obs::observer-transactions observer) "precondition: the in-memory store has transactions")
+    (obs:observe-turn observer (%history 6))
+    (is-true (obs:await-observer observer :timeout 10) "the run finished")
+    (is (eql 1 seen) "the :promote function read the window's observation")
+    (is (equal '("Has a dog.") (%facts store)) "and the fact was promoted")))
+
+(test a-store-without-the-transaction-generics-keeps-todays-path
+  "A store written outside this tree, defining neither generic: STORE-TRANSACTIONS-P is NIL, and
+CALL-WITH-STORE-TRANSACTION calls its thunk and returns its values (#529)."
+  (let ((store (make-instance 'reader-only-store)))
+    (is (null (mem:store-transactions-p store)))
+    (is (equal '(1 2) (multiple-value-list (mem:with-store-transaction (store) (values 1 2)))))))
+
+;;; THE PROMOTION-FAILURE STORES ALSO HAVE NO TRANSACTIONS, so their tests above keep checking the
+;;; earlier path, where a thread observation stays written and the next attempt finishes its
+;;; promotion (the hub's review of #645). The versions below check the transaction path.
+(defmethod mem:store-transactions-p ((store promotion-fails-store)) nil)
+(defmethod mem:store-transactions-p ((store promotion-outage-store)) nil)
+
+(defclass transacted-promotion-fails-store (promotion-fails-store) ()
+  (:documentation "PROMOTION-FAILS-STORE with the in-memory store's transactions."))
+(defmethod mem:store-transactions-p ((store transacted-promotion-fails-store)) t)
+
+(defclass transacted-promotion-outage-store (promotion-outage-store) ()
+  (:documentation "PROMOTION-OUTAGE-STORE with the in-memory store's transactions."))
+(defmethod mem:store-transactions-p ((store transacted-promotion-outage-store)) t)
+
+(test with-transactions-a-promotion-that-fails-rolls-back-the-window-and-the-retry-writes-it
+  "The window's thread observation is written, then its promotion fails. With transactions the
+observation is rolled back with it, so the retry writes it again, once, and promotes it (#529;
+the hub's review of #645)."
+  (let* ((store (make-instance 'transacted-promotion-fails-store))
+         (reply (%call-with (%ob "Is vegetarian." "preference")))
+         (observer (obs:make-observer (%provider-returning reply reply) store "member-1" "conv-7"
+                                      :step (%step-for 6) :retry-delay 0 :promote (constantly t))))
+    (is (obs::observer-transactions observer) "precondition: the store has transactions")
+    (obs:observe-turn observer (%history 6))
     (obs:await-observer observer :timeout 10)
-    (is (equal '("A.") (%thread-contents store)))))
+    (is (= 1 (obs:observer-failures observer)))
+    (is (equal '("Is vegetarian.") (%thread-contents store)))
+    (is (= 1 (length (mem:observations-of store "member-1" :thread "conv-7" :include-superseded t)))
+        "one thread observation was ever kept")
+    (is (equal '("Is vegetarian.") (%facts store)))))
+
+(test with-transactions-a-promotion-that-keeps-failing-leaves-no-thread-observation
+  "Promotion fails on both attempts at the window. With transactions each attempt's thread
+observation is rolled back with it, so the window is skipped with nothing written to the thread,
+where without transactions the thread observation was kept (the behaviour change the CHANGELOG
+records). At the next turn, with the store back, the window is written once and promoted."
+  (let* ((store (make-instance 'transacted-promotion-outage-store :failures 2))
+         (reply (%call-with (%ob +allergy+ "fact")))
+         (observer (%allergy-observer store (%provider-returning reply reply reply))))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal '((1 6 1)) (obs:observer-skipped observer)))
+    (is (null (%thread-contents store)) "nothing in the thread")
+    (is (null (%facts store)))
+    (obs:observe-turn observer (%history 6))
+    (obs:await-observer observer :timeout 10)
+    (is (equal (list +allergy+) (%thread-contents store)))
+    (is (equal (list +allergy+) (%facts store)) "promoted once the store is back")))
+
+(test a-transaction-left-by-throw-or-return-from-is-rolled-back
+  "A transaction left by THROW, or by RETURN-FROM, is rolled back as one left by an error is
+(the hub's review of #645)."
+  (let ((store (mem:make-in-memory-store)))
+    (is (eq :thrown (catch 'out
+                      (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                        (mem:remember store "member-1" "Has a dog." :thread "conv-7"
+                                      :provenance (mem:make-provenance "conv-7" 1))
+                        (throw 'out :thrown)))))
+    (is (null (%thread-contents store)) "after THROW")
+    (is (eq :returned (block out
+                        (mem:with-store-transaction (store :subject "member-1" :thread "conv-7")
+                          (mem:remember store "member-1" "Has a cat." :thread "conv-7"
+                                        :provenance (mem:make-provenance "conv-7" 1))
+                          (return-from out :returned)))))
+    (is (null (%thread-contents store)) "after RETURN-FROM")))

@@ -74,6 +74,15 @@ jobs:
     # 35 to 40 minutes, and one was cancelled at the limit with every suite it had run passing.
     timeout-minutes: 60
 
+    # The credential-store tests (hades/credentials, #357) store, read and delete items in the
+    # real Credential Manager, Keychain or Secret Service keyring of whoever runs them, so they
+    # run only when this is set. A runner's store is thrown away with the runner, so every leg
+    # sets it. On Linux the store is a GNOME Keyring the gate step starts for itself (see
+    # "Secret Service (Linux)" below). A leg where they were skipped fails the gate
+    # (+BACKEND-RULES+ in scripts/verify-tree.lisp).
+    env:
+      OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is
       # knowing WHICH platform broke, and fail-fast throws that away.
@@ -87,15 +96,17 @@ jobs:
         #
         # The same triple desktop-release.yml builds, deliberately: two workflows
         # disagreeing about which platforms are supported is worse than either answer. The
-        # Linux floor is set by SBCL's own binary -- 2.6.8 needs GLIBC_2.38 and
-        # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-14+
-        # are arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
-        # matters.
+        # Linux floor is set by SBCL's own binary -- 2.6.9 needs GLIBC_2.38 and
+        # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-26
+        # is arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
+        # matters. The macOS image is the one place the two workflows differ: tests run on
+        # macos-26, while desktop-release.yml builds on an older image, because a build on
+        # macos-26 requires macOS 26 to run (#763).
         include:
           - os: ubuntu-24.04
             platform: linux-x86-64
             fasl: "~/.cache/common-lisp"
-          - os: macos-14
+          - os: macos-26
             platform: macos-arm64
             fasl: "~/.cache/common-lisp"
           - os: windows-2022
@@ -259,7 +270,8 @@ jobs:
       # and is kept because it is the reason this step exists at all.
       #
       # This step is NOT redundant now, for two reasons:
-      #   IT INSTALLS WHAT THE GATE CANNOT. The gate compiles; it does not apt-get. On a bare
+      #   IT NEEDS WHAT THE GATE CANNOT INSTALL. The gate compiles; it does not apt-get, and the
+      #   "Linux packages" step above does that now (#507). On a bare
       #   runner its `build.sh --check' fails without libwebkit2gtk-dev, and it would then
       #   DECLINE the view axis and still PASS -- disclosed, but ten checks lighter, which is
       #   exactly the state pre-publication issue 410 exists to end.
@@ -281,26 +293,43 @@ jobs:
       #
       # COST, with each number labelled. The compile is 1.90 s, measured. The apt install is
       # the real cost and was NOT measured when this landed -- estimated at about a minute,
-      # roughly $2.60/month at Linux rates over ~75 runs a week. The step TIMES ITSELF and
-      # prints both numbers as job notices so the estimate gets replaced by a measurement on
-      # the first run. An estimate repeated often enough becomes a fact nobody took, which
+      # roughly $2.60/month at Linux rates over ~75 runs a week. Both steps TIME THEMSELVES and
+      # print their numbers as job notices, so the estimate gets replaced by a measurement on
+      # every run. An estimate repeated often enough becomes a fact nobody took, which
       # is how docs/dependencies.md came to claim 25 systems against an actual 86 (#118).
       #
       # The 4.0 fallback matches desktop-release.yml: runner images have moved between
       # webkit2gtk 4.1 and 4.0, and build.sh probes for the same pair.
+      #
+      # THE APT INSTALLS ARE ONE STEP OF THEIR OWN, WITH A TIMEOUT (#507). apt-get stalled on the
+      # Ubuntu mirror three times in about 26 hours, each time until the job's limit cancelled
+      # it. scripts/ci-apt-install.sh gives every apt-get retries, connection timeouts and an
+      # outer timeout per attempt, and this step's timeout-minutes makes the worst case fail
+      # here, by name, long before the job's limit. It installs this step's packages and the
+      # keyring's below in one update.
+      - name: Linux packages -- launcher build tools and the keyring, with bounded waits
+        id: linux-packages
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        shell: bash
+        run: ./scripts/ci-apt-install.sh
+
       - name: Build the native webview launcher (Linux)
         id: build-the-native-webview-launcher-linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          start=$(date +%s)
-          sudo apt-get update
-          sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
-          echo "::notice::pre-publication issue 276 apt prerequisites: $(( $(date +%s) - start ))s"
           t0=$(date +%s)
           ./hyperion/hyperion-view/build.sh
           echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
+
+      # --- a Secret Service (Linux) -----------------------------------------------------
+      #
+      # hades/credentials stores secrets in the Secret Service on Linux, through libsecret
+      # (#357). A runner has neither a session bus nor a keyring, so the gate runs through
+      # scripts/with-secret-service.sh, which starts a private session bus and a new GNOME
+      # Keyring unlocked with a random password that is never printed. Its programs are installed
+      # by the "Linux packages" step above. Do not add `set -x` to the gate step.
 
       # --- a real Postgres ----------------------------------------------------------
       #
@@ -472,7 +501,10 @@ jobs:
           OURANOS_WITH_LIBGIT: "1"
         run: |
           set -o pipefail
-          sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
+          # On Linux the gate runs with a throwaway Secret Service (the step above).
+          wrap=()
+          if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
+          "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
       # --- the README's numbers, against the run that just happened -------------------
@@ -603,15 +635,18 @@ jobs:
       # apt prerequisites the gate cannot install and a LOUD failure if the compile breaks --
       # the gate's own build is deliberately best-effort. Same argument as the matrix leg's
       # copy of this step; see the long comment there.
+      # The apt packages for the launcher and for scripts/with-secret-service.sh, with bounded
+      # waits, as in the matrix leg's "Linux packages" step (#507).
+      - name: Linux packages -- launcher build tools and the keyring, with bounded waits
+        id: linux-packages
+        timeout-minutes: 15
+        shell: bash
+        run: ./scripts/ci-apt-install.sh
+
       - name: Build the native webview launcher
         id: build-the-native-webview-launcher
         shell: bash
         run: |
-          start=$(date +%s)
-          sudo apt-get update
-          sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y g++ pkg-config libwebkit2gtk-4.0-dev
-          echo "::notice::pre-publication issue 276 apt prerequisites: $(( $(date +%s) - start ))s"
           t0=$(date +%s)
           ./hyperion/hyperion-view/build.sh
           echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
@@ -636,9 +671,13 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          # The same credential-store tests as the matrix leg, against the same kind of
+          # throwaway keyring, so this gate is not a smaller tree than the one it is compared to.
+          OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
         run: |
           set -o pipefail
-          sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
+          scripts/with-secret-service.sh \
+            sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
       # Not a gate -- a record. The numbers land in the job log with their mode attached,

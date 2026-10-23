@@ -176,8 +176,10 @@
            #:exec #:query #:with-transaction
            #:db-error #:db-error-message #:db-error-cause
            ;; the connection pool (#325)
-           #:pool #:poolp #:make-pool #:close-pool #:pool-size
+           #:pool #:poolp #:make-pool #:close-pool #:pool-size #:pool-backend
            #:pool-open-count #:pool-idle-count
+           ;; telling a lost connection from a failed statement (#636)
+           #:connection-open-p
            #:*checkout-timeout-seconds* #:*idle-check-seconds*
            #:pool-exhausted #:pool-exhausted-pool #:pool-closed #:pool-closed-pool))
 
@@ -215,6 +217,11 @@
   ;; strings, and the two vocabularies could not disagree loudly -- only by one module
   ;; taking a branch meant for the other.
   (:export #:sql #:fetch #:run #:parse #:*dialect*
+           ;; identifiers and directions are checked before they are written into SQL (#860)
+           #:invalid-identifier #:invalid-identifier-text #:invalid-identifier-expected
+           #:invalid-identifier-clause
+           ;; LIKE patterns that match a user's %, _ and backslash literally (#862)
+           #:like-escape #:like-contains
            #:+vector-distance-ops+ #:vector-distance-opclass
            #:*warn-unindexed-vector-distance* #:unindexed-vector-distance
            #:unindexed-vector-distance-operator #:unindexed-vector-distance-opclass))

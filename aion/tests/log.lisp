@@ -200,3 +200,93 @@
   "Run the aion/log suite; return T on success (for `asdf:test-system`).
 Named RUN-TESTS, not RUN -- FiveAM already exports RUN."
   (run! 'aion-log))
+
+;;; --- one entry, one physical line (#762) -------------------------------------------------
+
+(defparameter *hostile-text*
+  (format nil "a~%2024-01-01T00:00:00Z INFO  [x] forged entry~Cr~Ct~Cb\\s~Cn~Cl~Cp~Cd"
+          #\Return #\Tab (code-char 8) (code-char #x85) (code-char #x2028) (code-char #x2029)
+          (code-char 127))
+  "A value with every kind of line break and control character, and a second line written to
+look like a separate log entry.")
+
+(defun %unescape-pretty (text)
+  "Undo the pretty layout's escaping: backslash-backslash, -n, -r, -t and -uXXXX."
+  (with-output-to-string (out)
+    (loop with i = 0
+          while (< i (length text))
+          do (let ((c (char text i)))
+               (if (char/= c #\\)
+                   (progn (write-char c out) (incf i))
+                   (let ((next (char text (1+ i))))
+                     (case next
+                       (#\\ (write-char #\\ out) (incf i 2))
+                       (#\n (write-char #\Newline out) (incf i 2))
+                       (#\r (write-char #\Return out) (incf i 2))
+                       (#\t (write-char #\Tab out) (incf i 2))
+                       (#\u (write-char (code-char (parse-integer text :start (+ i 2)
+                                                                       :end (+ i 6)
+                                                                       :radix 16))
+                                        out)
+                        (incf i 6))
+                       (t (error "unexpected escape ~S" next)))))))))
+
+(defun %breaks-or-controls (line)
+  "The characters in LINE that end a line or are control characters."
+  (remove-if-not (lambda (c) (let ((code (char-code c)))
+                               (or (< code 32) (<= 127 code 159) (= code #x2028)
+                                   (= code #x2029))))
+                 line))
+
+(test a-pretty-entry-with-line-breaks-in-it-is-one-physical-line
+  "Message, category, key and value each carry every kind of line break. The entry has none
+of them left, and each part reads back exactly."
+  (let ((line (types:render-event-line
+               "pretty" "info" (format nil "CAT~%x") *hostile-text* "2026-01-01T00:00:00Z"
+               (list (types:mk-field-string (format nil "k~%ey") *hostile-text*)))))
+    (is (string= "" (%breaks-or-controls line)) "left in the line: ~S"
+        (%breaks-or-controls line))
+    (is (search "a\\n2024-01-01T00:00:00Z INFO  [x] forged entry\\rr\\tt\\u0008b\\\\s" line)
+        "~A" line)
+    (is (search "[CAT\\nx]" line))
+    ;; The message sits between "] " and " k\ney=", and the value after that "=".
+    (let* ((message-start (+ 2 (search "] " line)))
+           (field-start (search " k\\ney=" line))
+           (value-start (+ field-start (length " k\\ney="))))
+      (is (string= *hostile-text* (%unescape-pretty (subseq line message-start field-start))))
+      (is (string= *hostile-text* (%unescape-pretty (subseq line value-start)))))))
+
+(test a-pretty-backslash-is-doubled-so-the-text-reads-back
+  (let ((line (types:render-event-line "pretty" "info" "C" "m" "2026-01-01T00:00:00Z"
+                                       (list (types:mk-field-string "path" "C:\\new\\x")))))
+    (is (search "path=C:\\\\new\\\\x" line) "~A" line)
+    (is (string= "C:\\new\\x" (%unescape-pretty (subseq line (+ 5 (search "path=" line))))))))
+
+(test a-json-entry-with-line-breaks-in-it-is-one-physical-line
+  "jzon escapes C0 controls; U+0085, U+2028 and U+2029, which JSON allows raw and some readers
+split lines on, are escaped as well. The values parse back unchanged."
+  (let* ((line (types:render-event-line
+                "json" "info" "C" *hostile-text* "2026-01-01T00:00:00Z"
+                (list (types:mk-field-string "v" *hostile-text*))))
+         (obj (jzon:parse line)))
+    (is (string= "" (remove (code-char 127) (%breaks-or-controls line)))
+        "left in the line: ~S" (%breaks-or-controls line))
+    (is (search "\\u2028" line))
+    (is (search "\\u0085" line))
+    (is (string= *hostile-text* (gethash "v" obj)))
+    (is (string= *hostile-text* (gethash "msg" obj)))))
+
+(test a-logged-value-with-a-newline-writes-one-line-to-the-stream
+  "Through the facade, as an app logs: each event ends in exactly one newline, its own."
+  (dolist (env '(:dev :prod))
+    (let ((out (make-string-output-stream)))
+      (unwind-protect
+           (progn
+             (log:setup :env env :level :info :stream out)
+             (log:info (format nil "first~%line") :error *hostile-text*)
+             (log:info "second")
+             (let ((text (get-output-stream-string out)))
+               (is (= 2 (count #\Newline text)) "~A: ~S" env text)
+               (is (search "second" (second (uiop:split-string text :separator '(#\Newline))))
+                   "~A: the second event must be on the second line: ~S" env text)))
+        (log:setup :env :dev :level :info)))))

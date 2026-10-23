@@ -114,12 +114,26 @@ knows only where it is. Requires BOTH trailing components -- a directory merely 
 (defun %namestring-or-nil (pathname)
   (and pathname (ignore-errors (namestring pathname))))
 
+(defun development-runner-p ()
+  "True in an image dumped as a development runner: bin/cons, which loads an app and runs it in
+its own process, as `cons test-app' does (#703). bin/cons is one dumped file, so its runtime and
+core are the same file, the shape of a shipped Linux build; this is how SHIPPED-IMAGE-P tells
+them apart.
+
+The mark is :OURANOS-DEVELOPMENT-RUNNER on *FEATURES*. scripts/dump-image.lisp puts it there
+when DUMP-EXECUTABLE or DUMP-CORE is given :DEVELOPMENT-RUNNER T, as bootstrap.lisp does for
+bin/cons, and takes it off for every other dump, so an app dumped from inside bin/cons is not
+marked."
+  (and (member :ouranos-development-runner *features*) t))
+
 (defun shipped-image-p (&key (runtime (%namestring-or-nil sb-ext:*runtime-pathname*))
                              (core (%namestring-or-nil sb-ext:*core-pathname*))
                              (macos (uiop:os-macosx-p))
-                             (windows (uiop:os-windows-p)))
+                             (windows (uiop:os-windows-p))
+                             (development-runner (development-runner-p)))
   "Whether RUNTIME and CORE, two namestrings (by default this image's), are those of a shipped
-build rather than of a developer's REPL.
+build rather than of a developer's REPL or of bin/cons. DEVELOPMENT-RUNNER true, by default when
+this image is bin/cons (see DEVELOPMENT-RUNNER-P), makes the answer false whatever the paths.
 
 A shipped build is one of three shapes:
   - one file, a dumped executable with its core inside, so RUNTIME and CORE are equal (Linux);
@@ -137,7 +151,8 @@ keeps them apart (libexec/bin/ and lib/sbcl/), so it matches no rule. The raw bu
 build-desktop-app.lisp writes on macOS is a build step, not something shipped, so it does not
 count either. MACOS and WINDOWS say which platform this is, so a test can ask about any
 platform."
-  (and runtime core
+  (and (not development-runner)
+       runtime core
        (or (equal runtime core)
            (and windows
                 (let ((r (pathname runtime))

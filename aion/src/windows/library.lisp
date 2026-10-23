@@ -6,11 +6,9 @@
 ;;;; question when a desktop app is packaged -- the DLLs are already on every machine the
 ;;;; app can run on.
 ;;;;
-;;;; THIS FILE LOADS FOUR: kernel32 (errors, handles), ole32 and oleaut32 (COM), and user32
-;;;; (the STA message pump). ADR-0003 s8 also names advapi32 and shell32 as OS DLLs with
-;;;; nothing to build -- they are NOT loaded here, and land with the subsystems that need
-;;;; them (`service' and `security' want advapi32, `shell' wants shell32). The list is kept
-;;;; to what is actually loaded because this file is the obvious place a reader looks to
+;;;; THIS FILE LOADS SIX: kernel32 (errors, handles), ole32 and oleaut32 (COM), user32 (the
+;;;; STA message pump), advapi32 (Credential Manager) and shell32 (ShellExecuteW). The list is
+;;;; kept to what is actually loaded because this file is the obvious place a reader looks to
 ;;;; find out what this image opened.
 ;;;;
 ;;;; That also means the search-order machinery aion/uv needs (an env override, beside the
@@ -30,17 +28,21 @@
 (cffi:define-foreign-library oleaut32 (:windows "oleaut32.dll"))
 ;; user32 is here for the STA MESSAGE PUMP, not for any UI: MsgWaitForMultipleObjects and
 ;; the PeekMessage/DispatchMessage trio live there, and an apartment that does not pump
-;; deadlocks the moment an out-of-process server calls back into it.
+;; deadlocks the moment an out-of-process server calls back into it. hades/notify also calls
+;; MessageBoxW from it, for a notice shown before an app has a window (#819).
 (cffi:define-foreign-library user32   (:windows "user32.dll"))
 ;; advapi32 for Credential Manager (CredWriteW, CredReadW, CredDeleteW, CredFree), which
 ;; hades/credentials is built on (#357).
 (cffi:define-foreign-library advapi32 (:windows "advapi32.dll"))
+;; shell32 for ShellExecuteW, which hades/open uses to open a URL in the default browser
+;; (#820).
+(cffi:define-foreign-library shell32  (:windows "shell32.dll"))
 
 (defvar *loaded* nil "Which of the OS libraries have been loaded into this image.")
 
 (defun load-windows-libraries ()
   "Load the OS DLLs this system binds. Idempotent; returns the list loaded."
-  (dolist (lib '(kernel32 ole32 oleaut32 user32 advapi32) *loaded*)
+  (dolist (lib '(kernel32 ole32 oleaut32 user32 advapi32 shell32) *loaded*)
     (unless (member lib *loaded*)
       (cffi:load-foreign-library lib)
       (push lib *loaded*))))
@@ -50,7 +52,7 @@
   (and (member lib *loaded*) t))
 
 ;;; Loaded eagerly HERE and not in platform.lisp, because by this point we know we are on
-;;; Windows: these three DLLs are part of the OS, so a failure to find them is not the
+;;; Windows: these DLLs are part of the OS, so a failure to find them is not the
 ;;; missing-optional-dependency case aion/uv defends against -- it is a broken installation,
 ;;; and reporting it at load is more useful than deferring it to a call site.
 (load-windows-libraries)

@@ -100,7 +100,7 @@
 ;;; ------------------------------------------------------- platform knowledge
 ;;;
 ;;; Transcribed from libuv's CMakeLists.txt. `uv_sources` is common to every platform;
-;;; the rest is selected by OS. Verified against 1.52.1.
+;;; the rest is selected by OS. Verified against 1.53.0.
 
 (defparameter *common-sources*
   '("src/fs-poll.c" "src/idna.c" "src/inet.c" "src/random.c" "src/strscpy.c"
@@ -160,7 +160,9 @@
      (values (append *common-sources* *windows-sources*)
              '("WIN32_LEAN_AND_MEAN" "_WIN32_WINNT=0x0A00" "_CRT_DECLARE_NONSTDC_NAMES=0")
              '("-lpsapi" "-luser32" "-ladvapi32" "-liphlpapi" "-luserenv" "-lws2_32"
-               "-ldbghelp" "-lole32" "-lshell32")
+               "-ldbghelp" "-lole32" "-lshell32"
+               ;; From 1.53.0: src/win/pipe.c calls WaitOnAddress and WakeByAddressSingle.
+               "-lsynchronization")
              "libuv.dll"))))
 
 (defun library-path ()

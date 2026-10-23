@@ -43,6 +43,8 @@
 (defparameter *out-file* (merge-pathnames "hyperion/src/vendor/cldr-plurals.lisp" *root*))
 
 (defparameter *cldr-version* "48.2.1")
+(defparameter *advisories* "https://github.com/unicode-org/cldr-json/security/advisories"
+  "Where CLDR publishes security advisories, written into PLURALS.pin (#735).")
 (defparameter *expected-sha256*
   "6c0a48e9bcfc25856f90202f703c2c7f89c105d6868f7712a943a6ed2dcbe8f4")
 (defparameter *url*
@@ -194,5 +196,13 @@ meaning `always` -- the evaluator treats a missing rule and a matching one ident
           (format s "sha256    ~A~%" actual)
           (format s "locales   ~D~%" (length table))
           (format s "generated hyperion/src/vendor/cldr-plurals.lisp~%")
-          (format s "licence   Unicode-3.0 (https://www.unicode.org/license.txt)~%"))
-        (format t "~&Wrote ~A (~D locales)~%and ~A~%" (human-path:human-path *out-file*) (length table) (human-path:human-path *pin-file*)))))
+          (format s "licence   Unicode-3.0 (https://www.unicode.org/license.txt)~%")
+          ;; check-pins.lisp requires both in every pin (#735). Writing the pin is adopting a
+          ;; release, and docs/versioning-and-pinning.md counts reading its notes in that commit
+          ;; as the review, so `reviewed' is today's date.
+          (format s "advisories ~A~%" *advisories*)
+          (multiple-value-bind (sec min hour day month year) (get-decoded-time)
+            (declare (ignore sec min hour))
+            (format s "reviewed   ~4,'0D-~2,'0D-~2,'0D~%" year month day)))
+        (format t "~&Wrote ~A (~D locales)~%and ~A~%" (human-path:human-path *out-file*) (length table) (human-path:human-path *pin-file*))
+        (format t "PLURALS.pin's `reviewed' is today: read ~A before committing.~%" *advisories*))))

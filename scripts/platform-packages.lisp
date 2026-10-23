@@ -30,7 +30,7 @@
   (:export #:host-os #:entries-for #:entries-here
            #:not-applicable-for #:not-applicable-here
            #:entry-system #:entry-status #:entry-issue #:entry-note
-           #:required-p #:planned-p #:*platform-packages*))
+           #:required-p #:planned-p #:system-owner #:*platform-packages*))
 
 (in-package #:ouranos-platform)
 
@@ -76,6 +76,11 @@
      (:system "hades/darwin"  :status :planned :issue "pre-publication issue 180"))
     (:linux
      (:system "hades/linux"   :status :planned :issue "pre-publication issue 180")
+     (:system "aion/libsecret" :status :required :issue "#357"
+      :note "the binding hades/credentials uses for the Secret Service: libsecret's schema,
+             attribute table, secret value and password calls, and GError as a condition. It
+             loads libsecret-1.so.0 on first use, so it loads where libsecret is missing; its
+             suite needs the library and never talks to D-Bus.")
      (:system "hyperion/woo"  :status :required :issue "#372"
       :note "hyperion served by Woo; its suite is the only one that runs a real Woo server.
              Woo binds libev at load and has no Windows build. It also runs on macOS, but a
@@ -138,3 +143,27 @@ checked on one third of the tree and asserted on the rest."
 (defun not-applicable-here ()
   "NOT-APPLICABLE-FOR this host."
   (not-applicable-for (host-os)))
+
+;;; --- one system's owner (#283) ----------------------------------------------
+
+(defun system-owner (name)
+  "(values OS ENTRY): the OS that owns the ASDF system NAME, and the registry entry that says
+so, or NIL when NAME belongs to no platform package and loads on every OS.
+
+NAME is owned by an entry when it is the entry's system or one of its subsystems, written with
+the entry's name and a slash first: aion/windows owns aion/windows/com/tests, and does not own
+aion/windowsx. The longest matching entry wins, so a subsystem registered on its own keeps its
+own owner. Case is ignored, as ASDF ignores it. scripts/check-compile.lisp uses this to skip a
+system that cannot load on this host, so the registry stays the one list of what loads where."
+  (let ((name (string-downcase (string name)))
+        (best-os nil) (best-entry nil) (best-length -1))
+    (dolist (bucket *platform-packages* (values best-os best-entry))
+      (dolist (entry (cdr bucket))
+        (let* ((system (string-downcase (entry-system entry)))
+               (n (length system)))
+          (when (and (> n best-length)
+                     (or (string= name system)
+                         (and (> (length name) n)
+                              (string= system name :end2 n)
+                              (char= #\/ (char name n)))))
+            (setf best-os (car bucket) best-entry entry best-length n)))))))
