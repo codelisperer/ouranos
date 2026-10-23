@@ -14,6 +14,33 @@ its tag.
 
 ### An app may have to act
 
+- **mnemosyne/query: a table, column, alias or function name and an ORDER BY direction are
+  checked before they are written into SQL** (#860). These are written into the SQL text, not
+  bound as parameters. Before, a string in such a position went in as it was, and the
+  direction was only upcased, so a caller that put request text there had SQL injection:
+  `:order-by (("name; DROP TABLE contacts; --" :asc))` rendered as
+  `ORDER BY name; DROP TABLE contacts; -- ASC`. Now:
+  - each dot-separated part of a name must be ASCII letters, digits and underscores, not
+    starting with a digit, and the last part may be `*`;
+  - a keyword such as `:created-at`, whose name has a hyphen, is refused as well;
+  - a direction must be `:asc` or `:desc` (or the string `asc` or `desc`, in any case);
+  - a non-negative integer is still accepted in ORDER BY as a column position;
+  - anything else signals the new `mnemosyne/query:invalid-identifier`
+    (`invalid-identifier-text`, `invalid-identifier-expected`) when the query is compiled,
+    before anything reaches the database.
+
+  An app that wrote SQL text through a string identifier rewrites it:
+  - a join in a FROM string, such as `:from ("a JOIN b ON …")`, becomes a `:join` clause;
+  - an expression in a select item, such as `:select ("count(*)")`, becomes
+    `(:raw "count(*)")` or `(:count :*)`;
+  - a direction with more in it, such as `"DESC NULLS LAST"`, becomes the expression form
+    `:order-by (((:raw "name DESC NULLS LAST")))`.
+
+  `(:raw "…")` is the one way to write SQL text, and it is visible at the call site. Every caller in this tree
+  already passes plain names: the suites of mnemosyne, mnemosyne/jobs, hyperion/session-db,
+  hyperion/auth-db, praxeon/memory-db, praxeon/results-db, praxeon/retrieval and cons pass
+  unchanged. mnemosyne/ddl's names are not affected.
+
 - **hades/credentials: the live tests use the real credential store only when
   `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows and
   macOS fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The

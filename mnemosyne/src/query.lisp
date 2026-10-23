@@ -14,6 +14,12 @@
 ;;;; anything else is a **value** (bound as a param). Pass a keyword-valued literal as a
 ;;;; string. `(:raw "sql")` is the escape hatch.
 ;;;;
+;;;; A string is also accepted as an identifier where only a name can stand: in FROM, a JOIN
+;;;; source, an alias, INSERT INTO, UPDATE, DELETE FROM, RETURNING, GROUP BY and ORDER BY.
+;;;; Identifiers are written into the SQL, not bound, so every one is checked (#860): letters,
+;;;; digits and underscores, dot-separated, with * as the last part. An ORDER BY direction
+;;;; must be :asc or :desc. Anything else signals INVALID-IDENTIFIER before any SQL exists.
+;;;;
 ;;;; Beyond the flat case the same data grows to cover the SQL a real app writes:
 ;;;;
 ;;;;   JOINs        :join ((:inner (:as :orders :o) (:= :u.id :o.user_id)) ...)  ; ordered,
@@ -78,13 +84,64 @@ inline (for round-trip / display; never execute inlined SQL with untrusted value
             (format nil "$~D" (ctx-n ctx))  ; provisional -- XTDB param handling is a seam
             "?"))))
 
+(define-condition invalid-identifier (error)
+  ((text :initarg :text :reader invalid-identifier-text)
+   (expected :initarg :expected :reader invalid-identifier-expected))
+  (:report (lambda (c s)
+             (format s "mnemosyne/query: ~S is not ~A. Identifiers are written into the SQL, not bound, so only safe names are accepted; write SQL text with (:raw \"...\") where it is meant."
+                     (invalid-identifier-text c) (invalid-identifier-expected c))))
+  (:documentation "A table, column, alias or function name, or an ORDER BY direction, that
+mnemosyne will not write into SQL (#860). Raised when the query is compiled, before any SQL
+reaches a connection."))
+
+(defun %identifier-part-p (part)
+  "True when PART is an ASCII letter or underscore followed by ASCII letters, digits and
+underscores."
+  (and (plusp (length part))
+       (let ((c (char part 0))) (or (char<= #\a (char-downcase c) #\z) (char= c #\_)))
+       (every (lambda (c) (or (char<= #\a (char-downcase c) #\z) (char<= #\0 c #\9) (char= c #\_)))
+              part)))
+
+(defun %safe-identifier-p (name)
+  "True when NAME is one or more identifier parts separated by dots (u.email, public.users),
+or ends in .* (u.*), or is * alone."
+  (let ((parts (loop with start = 0
+                     for dot = (position #\. name :start start)
+                     collect (subseq name start dot)
+                     while dot do (setf start (1+ dot)))))
+    (loop for (part . more) on parts
+          always (if more
+                     (%identifier-part-p part)
+                     (or (%identifier-part-p part) (string= part "*"))))))
+
 (defun %ident (x)
-  "Render X (keyword/symbol/string) as a SQL identifier. Dotted keywords pass through
-(e.g. :u.email -> \"u.email\"); \"*\" stays \"*\"."
-  (typecase x
-    (string x)
-    (symbol (string-downcase (symbol-name x)))
-    (t (princ-to-string x))))
+  "Render X as a SQL identifier: a keyword or symbol by its downcased name, a string as it is.
+Dotted names pass through (:u.email -> \"u.email\"), and \"*\" stays \"*\". A non-negative
+integer renders as itself, for a positional ORDER BY.
+
+THE NAME IS WRITTEN INTO THE SQL, NOT BOUND (#860), so it is checked: each dot-separated part
+must be an ASCII letter or underscore followed by letters, digits and underscores, and the last
+part may be *. Anything else signals INVALID-IDENTIFIER. Before #860 a string went into the SQL
+as it was, so a caller that put request text in an identifier position had SQL injection.
+(:raw \"...\") is the one way to write SQL text, and is visible at the call site."
+  (let ((name (typecase x
+                (string x)
+                (symbol (string-downcase (symbol-name x)))
+                ((integer 0) (return-from %ident (princ-to-string x)))
+                (t (princ-to-string x)))))
+    (unless (%safe-identifier-p name)
+      (error 'invalid-identifier :text name
+                                 :expected "a safe SQL identifier (letters, digits and underscores, dot-separated)"))
+    name))
+
+(defun %direction (x)
+  "ASC or DESC for X, which is :asc or :desc, or the string asc or desc in any case. Anything
+else signals INVALID-IDENTIFIER: the direction is written into the SQL, not bound (#860)."
+  (let ((name (and (or (stringp x) (symbolp x)) (string-downcase (string x)))))
+    (cond ((equal name "asc") "ASC")
+          ((equal name "desc") "DESC")
+          (t (error 'invalid-identifier :text (if (stringp x) x (princ-to-string x))
+                                        :expected "an ORDER BY direction (:asc or :desc)")))))
 
 (defun %subquery-p (e)
   "T if E is a nested query plist (a SELECT) usable as a subquery / derived table."
@@ -254,11 +311,9 @@ which was invisible while it only ever rendered identifiers."
                       ((and (consp spec) (consp (first spec)))
                        (format nil "~A~@[ ~A~]"
                                (%expr ctx (first spec))
-                               (and (second spec)
-                                    (string-upcase (%ident (second spec))))))
+                               (and (second spec) (%direction (second spec)))))
                       ((consp spec)
-                       (format nil "~A ~A" (%ident (first spec))
-                               (string-upcase (%ident (second spec)))))
+                       (format nil "~A ~A" (%ident (first spec)) (%direction (second spec))))
                       (t (%ident spec))))
                   specs)))
 

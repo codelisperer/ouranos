@@ -329,3 +329,84 @@ A guard that only one of the two spellings can reach is not a guard."
     (signals error
       (q:sql '(:insert-into :t :values ((:_id 1)) :returning (:_id)) :dialect d))
     (is (search "INSERT INTO" (q:sql '(:insert-into :t :values ((:_id 1))) :dialect d)))))
+
+;;; --- identifiers and directions are checked before they are written (#860) ----------
+;;;
+;;; An identifier or an ORDER BY direction is written into the SQL rather than bound, so
+;;; text from a request in either place used to be SQL injection. These are the three forms
+;;; measured on main 4336c6c, which rendered
+;;;   ... ORDER BY name; DROP TABLE contacts; -- ASC
+;;;   ... ORDER BY name ASC, (SELECT PASSWORD FROM USERS LIMIT 1)
+;;;   SELECT id, password FROM contacts c JOIN users u ON true
+
+(test the-measured-injections-are-refused
+  (signals q:invalid-identifier
+    (q:sql '(:select (:id) :from (:contacts) :order-by (("name; DROP TABLE contacts; --" :asc)))))
+  (signals q:invalid-identifier
+    (q:sql '(:select (:id) :from (:contacts)
+             :order-by ((:name "asc, (SELECT password FROM users LIMIT 1)")))))
+  (signals q:invalid-identifier
+    (q:sql '(:select ("id, password") :from ("contacts c JOIN users u ON true"))))
+  (signals q:invalid-identifier
+    (q:sql '(:select (:id) :from ("contacts c JOIN users u ON true")))))
+
+(test unsafe-names-are-refused-wherever-a-name-is-written
+  (dolist (q '((:select (:id) :from ("contacts; drop table x"))
+               (:select ((:as :id "x y")) :from (:t))
+               (:select (:id) :from ((:as :t "t; --")))
+               (:select (:id) :from (:t) :join ((:inner "u ON 1=1 --" (:= :t.id :u.id))))
+               (:select (:id) :from (:t) :group-by ("a, b"))
+               (:select (:id) :from (:t) :order-by ("1; drop"))
+               (:select ((:call "lower(x)--" :y)) :from (:t))
+               (:insert-into "t (a) VALUES (1); --" :values ((:a 1)))
+               (:insert-into :t :values (("a) VALUES (1); --" 1)))
+               (:update "t SET a = 1 --" :set (:a 2))
+               (:delete-from "t; --")
+               (:insert-into :t :values ((:a 1)) :returning ("a, (select 1)"))
+               (:select (:id) :from (:t) :order-by (""))
+               (:select (:id) :from (:t) :order-by ("1abc"))
+               (:select (:id) :from (:t) :order-by ("a..b"))
+               (:select (:id) :from (:t) :order-by ("caf\é"))))
+    (signals q:invalid-identifier (q:sql q) "~S" q)))
+
+(test a-direction-must-be-asc-or-desc
+  (dolist (dir '(:up "sideways" "desc; drop table t" "ASC NULLS LAST" 1))
+    (signals q:invalid-identifier (q:sql `(:select (:id) :from (:t) :order-by ((:id ,dir))))
+      "~S" dir)
+    (signals q:invalid-identifier
+      (q:sql `(:select (:id) :from (:t) :order-by (((:lower :name) ,dir))))
+      "expression form ~S" dir))
+  (dolist (dir '(:asc :desc "asc" "DESC" "Desc"))
+    (is (search (string-upcase (string dir))
+                (q:sql `(:select (:id) :from (:t) :order-by ((:id ,dir))))))))
+
+(test safe-names-still-render-as-before
+  "The control: every form the tree uses still renders, unchanged."
+  (is (string= "SELECT u.email, u.* FROM public.users AS u ORDER BY u.email DESC, 2 ASC, _id"
+               (q:sql '(:select (:u.email "u.*") :from ((:as "public.users" :u))
+                        :order-by ((:u.email :desc) (2 :asc) :_id)))))
+  (is (string= "SELECT * FROM contacts" (q:sql '(:select (:*) :from ("contacts")))))
+  (is (string= "SELECT LOWER(name) AS n FROM t GROUP BY Name_2"
+               (q:sql '(:select ((:as (:lower :name) :n)) :from (:t) :group-by ("Name_2")))))
+  (is (string= "SELECT count(*) AS n FROM t"
+               (q:sql '(:select ((:as (:raw "count(*)") :n)) :from (:t))))
+      "(:raw ...) is still the explicit way to write SQL text"))
+
+(test a-refused-query-never-reaches-the-connection
+  (let ((c (conn:connect (be:make-sqlite ":memory:"))))
+    (unwind-protect
+         (progn
+           (conn:exec c "CREATE TABLE contacts (id INTEGER, name TEXT)")
+           (signals q:invalid-identifier
+             (q:fetch c '(:select (:id) :from (:contacts)
+                          :order-by (("name; DROP TABLE contacts; --" :asc)))
+                      :dialect :sqlite))
+           (is (equal '(0) (mapcar #'second (conn:query c "SELECT count(*) FROM contacts")))
+               "the table is still there"))
+      (conn:disconnect c))))
+
+(test the-condition-names-the-text-and-what-was-expected
+  (let ((e (handler-case (q:sql '(:select (:id) :from ("a b"))) (q:invalid-identifier (e) e))))
+    (is (equal "a b" (q:invalid-identifier-text e)))
+    (is (search "identifier" (q:invalid-identifier-expected e)))
+    (is (search "(:raw" (princ-to-string e)))))
