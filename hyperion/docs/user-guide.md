@@ -635,7 +635,7 @@ startup, then call `meta-tags` in the layout's head:
            (:body (:raw body)))))
 
 (layout (list :title "Rates rise" :description "The bank raised its rate today."
-              :url "/news/rates" :type :article :image "/img/rates.jpg"
+              :url "/news/rates" :type :article :image "/img/rates.jpg" :visibility :public
               :locale locale :published-time (get-universal-time) :author "A. Writer")
         body)
 ```
@@ -643,14 +643,21 @@ startup, then call `meta-tags` in the layout's head:
 - Every URL is made absolute from the site's origin, never from the request's Host header,
   which the client chooses. A path starting with `/` is joined to the origin. An absolute URL
   must be https; anything else signals `page-meta-error`.
-- The description is cut to 200 characters on a word boundary. `:locale` takes what
+- The canonical `:url` must be on the site's own origin, and its query and fragment are
+  dropped, because a query often carries a token such as a reset link's. Pass
+  `:keep-query t` for a page whose query is part of its identity. An image may be on another
+  https host, such as a CDN.
+- The description is plain text: markup is not removed, so pass the page's summary as text,
+  not its HTML. It is cut to 200 characters on a word boundary. `:locale` takes what
   `i18n:resolve-locale` returns, and becomes `og:locale` (`:en-gb` is `en_GB`).
 - A page with no image uses the site's fallback image. An image URL presigned with an
   expiry is replaced by the fallback too, because a crawler keeps the card longer than the
   URL lasts; serve card images from a stable public URL.
-- A page that needs sign-in passes `:visibility :private`, and one kept out of search
+- `:visibility` is required, so a layout cannot forget to say that a page is private. A
+  public page passes `:visibility :public`. A page that needs sign-in passes
+  `:visibility :private`, and one kept out of search
   engines passes `:noindex`. Either gets `robots noindex` and the site's name and fallback
-  image, and nothing from its own title, description, URL or image.
+  image, and nothing from its own title, description, URL, image or `:site-name`.
 - `page-meta` returns the tags as a list of `(kind name value)` for a test or a layout that
   writes its own markup.
 

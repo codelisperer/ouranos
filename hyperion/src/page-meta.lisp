@@ -62,22 +62,50 @@ because a crawler cannot fetch it as the page meant."
              (%fail "A page-meta URL must be an https URL or a path starting with /; got ~S." url))
            url))))
 
+(defun %canonical-url (url origin keep-query)
+  "URL, a path or an https URL on ORIGIN, as the page's absolute canonical URL. The query
+and fragment are dropped unless KEEP-QUERY, in which case only the fragment is, because a
+query often carries a token (a reset link, a session) that must not be published to
+crawlers. A URL on any other origin, or with userinfo, signals PAGE-META-ERROR: the
+canonical URL says which page this is, and a page cannot claim to be another site's."
+  (let* ((absolute (absolute-url url origin))
+         (uri (quri:uri absolute))
+         (port (quri:uri-port uri))
+         (own (format nil "https://~A~@[:~D~]" (string-downcase (quri:uri-host uri))
+                      (and port (/= port 443) port))))
+    (unless (and (string= own origin) (null (quri:uri-userinfo uri)))
+      (%fail "A page's canonical URL must be on the site's own origin ~A; got ~S." origin url))
+    (format nil "~A~A~@[?~A~]" origin (or (quri:uri-path uri) "/")
+            (and keep-query (quri:uri-query uri)))))
+
 (defparameter +expiring-url-parameters+
-  '("x-amz-signature" "x-amz-expires" "x-goog-signature" "x-goog-expires" "expires")
-  "Query parameters that mark a URL as signed with an expiry: S3 and compatible stores,
-Google Cloud Storage, and CloudFront.")
+  '("x-amz-signature" "x-amz-expires" "x-amz-credential"
+    "x-goog-signature" "x-goog-expires" "x-goog-credential"
+    "expires" "signature" "policy" "key-pair-id"
+    "sig" "se")
+  "Query parameters, compared without case, that mark a URL as signed with an expiry: S3
+and compatible stores (X-Amz-*), Google Cloud Storage (X-Goog-*), CloudFront (Expires,
+Signature, Policy, Key-Pair-Id) and Azure shared access signatures (sig, se).")
+
+(defun %query-keys (query)
+  "The parameter names in QUERY, split by hand so that a malformed escape elsewhere in the
+query cannot hide them. A name that does not decode is kept as written."
+  (loop for pair in (uiop:split-string query :separator "&;")
+        for name = (subseq pair 0 (or (position #\= pair) (length pair)))
+        unless (string= name "")
+          collect (string-downcase (or (ignore-errors (quri:url-decode name)) name))))
 
 (defun expiring-url-p (url)
   "True when URL carries a query parameter that marks it as a presigned URL with an
-expiry. A crawler caches a card for days or weeks, so an image behind such a URL breaks
-once it expires; serve the image from a stable public URL instead."
+expiry, and also when URL cannot be parsed, so that a doubt counts as expiring. A crawler
+caches a card for days or weeks, so an image behind such a URL breaks once it expires;
+serve the image from a stable public URL instead."
   (let ((uri (ignore-errors (quri:uri url))))
-    (and uri (quri:uri-query uri)
-         (some (lambda (pair)
-                 (member (string-downcase (car pair)) +expiring-url-parameters+
-                         :test #'string=))
-               (ignore-errors (quri:url-decode-params (quri:uri-query uri))))
-         t)))
+    (cond ((null uri) t)
+          ((null (quri:uri-query uri)) nil)
+          (t (and (some (lambda (name) (member name +expiring-url-parameters+ :test #'string=))
+                        (%query-keys (quri:uri-query uri)))
+                  t)))))
 
 ;;; --- the site ----------------------------------------------------------------
 
@@ -124,20 +152,32 @@ fallback image cannot be made absolute."
 
 ;;; --- text --------------------------------------------------------------------
 
+(defun %space-p (c)
+  "True for ASCII and Unicode whitespace: no-break space, the U+2000 spaces, the line and
+paragraph separators, the ideographic space and the rest of Unicode's White_Space set."
+  (let ((code (char-code c)))
+    (or (<= 9 code 13) (= code 32) (= code #x85) (= code #xA0) (= code #x1680)
+        (<= #x2000 code #x200A) (= code #x2028) (= code #x2029) (= code #x202F)
+        (= code #x205F) (= code #x3000))))
+
 (defun %collapse-whitespace (text)
   (with-output-to-string (out)
     (let ((pending nil) (started nil))
       (loop for c across text
-            do (if (member c '(#\Space #\Tab #\Newline #\Return #\Page))
+            do (if (%space-p c)
                    (setf pending started)
                    (progn (when pending (write-char #\Space out))
                           (write-char c out)
                           (setf pending nil started t)))))))
 
 (defun trim-description (text &optional (limit 200))
-  "TEXT with runs of whitespace made single spaces, cut to at most LIMIT characters. A cut
-falls on a word boundary when there is one in the second half of the limit, and ends with
-an ellipsis (counted in LIMIT)."
+  "TEXT with runs of whitespace (Unicode's included) made single spaces, cut to at most
+LIMIT characters. A cut falls on a word boundary when there is one in the second half of
+the limit, and ends with an ellipsis (counted in LIMIT).
+
+TEXT is plain text. Markup is not removed: a tag or an entity is written into the
+attribute as characters (escaped) and counts toward LIMIT, so pass the page's summary as
+text, not its HTML."
   (let ((text (%collapse-whitespace text)))
     (if (<= (length text) limit)
         text
@@ -165,13 +205,43 @@ when LOCALE is not a language tag."
       (when (and language (<= 2 (length language) 3) (%alpha-p language))
         (format nil "~A~@[_~A~]" language (and region (string-upcase region)))))))
 
+(defun %iso-8601-p (s)
+  "True when S is an ISO 8601 date, or date and time with an optional fraction and an
+optional zone: 2026-01-02, 2026-01-02T03:04, 2026-01-02T03:04:05.123Z,
+2026-01-02T03:04:05+01:00."
+  (flet ((digits (start end)
+           (and (<= end (length s)) (every #'digit-char-p (subseq s start end))))
+         (at (i c) (and (< i (length s)) (char= c (char s i)))))
+    (and (digits 0 4) (at 4 #\-) (digits 5 7) (at 7 #\-) (digits 8 10)
+         (or (= (length s) 10)
+             (and (at 10 #\T) (digits 11 13) (at 13 #\:) (digits 14 16)
+                  (let ((i 16))
+                    (when (at i #\:)
+                      (unless (digits 17 19) (return-from %iso-8601-p nil))
+                      (setf i 19)
+                      (when (at i #\.)
+                        (let ((end (or (position-if-not #'digit-char-p s :start (1+ i))
+                                       (length s))))
+                          (when (= end (1+ i)) (return-from %iso-8601-p nil))
+                          (setf i end))))
+                    (or (= i (length s))
+                        (and (at i #\Z) (= (1+ i) (length s)))
+                        (and (or (at i #\+) (at i #\-)) (= (+ i 6) (length s))
+                             (digits (+ i 1) (+ i 3)) (at (+ i 3) #\:)
+                             (digits (+ i 4) (+ i 6)))))))
+         t)))
+
 (defun %iso-time (time)
-  "TIME, a universal time or an ISO 8601 string, as an ISO 8601 string in UTC."
-  (etypecase time
-    (string time)
+  "TIME, a universal time or an ISO 8601 string, as an ISO 8601 string. A universal time is
+written in UTC. Signals PAGE-META-ERROR for anything else."
+  (typecase time
+    (string (if (%iso-8601-p time)
+                time
+                (%fail "An article time must be a universal time or an ISO 8601 string; got ~S." time)))
     (integer
      (multiple-value-bind (s mi h d mo y) (decode-universal-time time 0)
-       (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ" y mo d h mi s)))))
+       (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ" y mo d h mi s)))
+    (t (%fail "An article time must be a universal time or an ISO 8601 string; got ~S." time))))
 
 ;;; --- the page ----------------------------------------------------------------
 
@@ -200,8 +270,8 @@ or it expires, else the site's fallback."
           (t (values nil nil nil nil)))))
 
 (defun page-meta (&key (site *site*) title description image image-alt image-width
-                    image-height url (type :website) site-name locale alternate-locales
-                    published-time modified-time author section (visibility :public))
+                    image-height url keep-query (type :website) site-name locale
+                    alternate-locales published-time modified-time author section visibility)
   "The link-preview tags for one page, as a list of (KIND NAME VALUE): KIND :PROPERTY is
 <meta property=NAME content=VALUE>, :NAME is <meta name=NAME content=VALUE>, and :LINK is
 <link rel=NAME href=VALUE>. Pass the result to META-TAGS, or call META-TAGS with the same
@@ -214,8 +284,10 @@ arguments.
                        Without one, or when it is a presigned URL that expires (see
                        EXPIRING-URL-P), the site's fallback image is used. With an image
                        the card is summary_large_image, else summary.
-  URL                  the canonical URL, a path or https URL: og:url and
-                       <link rel=canonical>. Omitted when NIL; it is never taken from the
+  URL                  the canonical URL: og:url and <link rel=canonical>. A path, or an
+                       https URL on the site's own origin. Its query and fragment are
+                       dropped, because a query often carries a token; KEEP-QUERY true
+                       keeps the query. Omitted when NIL; it is never taken from the
                        request.
   TYPE                 :WEBSITE or :ARTICLE.
   SITE-NAME            overrides the site's name.
@@ -225,10 +297,12 @@ arguments.
   PUBLISHED-TIME, MODIFIED-TIME, AUTHOR, SECTION
                        for an :ARTICLE only. A time is a universal time or an ISO 8601
                        string; AUTHOR is a string or a list of them.
-  VISIBILITY           :PUBLIC, :NOINDEX (public but kept out of search engines), or
-                       :PRIVATE (needs sign-in). Either of the last two emits robots
-                       noindex, the site's name as og:site_name and og:title, the
-                       fallback image, and nothing from the page's own declaration.
+  VISIBILITY           required: :PUBLIC, :NOINDEX (public but kept out of search
+                       engines), or :PRIVATE (needs sign-in). Either of the last two
+                       emits robots noindex, the SITE's name as og:site_name and
+                       og:title, the fallback image, and nothing from the page's own
+                       declaration, SITE-NAME included. There is no default, so a layout
+                       that forgets to say a page is private gets an error, not a card.
 
 URLs are made absolute from SITE's origin. Signals PAGE-META-ERROR when SITE is NIL or a
 value cannot produce a correct tag."
@@ -237,14 +311,14 @@ value cannot produce a correct tag."
   (unless (member type '(:website :article))
     (%fail "A page's type must be :WEBSITE or :ARTICLE; got ~S." type))
   (unless (member visibility '(:public :noindex :private))
-    (%fail "A page's visibility must be :PUBLIC, :NOINDEX or :PRIVATE; got ~S." visibility))
-  (let ((site-name (or site-name (site-name site)))
-        (twitter (site-twitter site)))
+    (%fail "A page's :VISIBILITY must be given, as :PUBLIC, :NOINDEX or :PRIVATE; got ~S." visibility))
+  (let ((twitter (site-twitter site)))
     (if (eq visibility :public)
         (multiple-value-bind (image-url width height alt)
             (%choose-image image image-width image-height image-alt site)
-          (let* ((description (and description (trim-description description)))
-                 (canonical (and url (absolute-url url (site-origin site))))
+          (let* ((site-name (or site-name (site-name site)))
+                 (description (and description (trim-description description)))
+                 (canonical (and url (%canonical-url url (site-origin site) keep-query)))
                  (og-locale (og-locale locale))
                  (entries
                    (append
@@ -278,18 +352,20 @@ value cannot produce a correct tag."
                     (when image-url (list (list :name "twitter:image" image-url)))
                     (when (and image-url alt) (list (list :name "twitter:image:alt" alt))))))
             entries))
-        ;; :NOINDEX or :PRIVATE: nothing from the page's own declaration.
+        ;; :NOINDEX or :PRIVATE: nothing from the page's own declaration, not even its
+        ;; SITE-NAME, which a page can set to something that names its content.
         (multiple-value-bind (image-url width height alt)
             (%choose-image nil nil nil nil site)
-          (append
-           (list (list :name "robots" "noindex"))
-           (when site-name
-             (list (list :property "og:site_name" site-name)
-                   (list :property "og:title" site-name)))
-           (when image-url (%image-entries image-url width height alt))
-           (list (list :name "twitter:card" (if image-url "summary_large_image" "summary")))
-           (when twitter (list (list :name "twitter:site" twitter)))
-           (when image-url (list (list :name "twitter:image" image-url))))))))
+          (let ((site-name (site-name site)))
+            (append
+             (list (list :name "robots" "noindex"))
+             (when site-name
+               (list (list :property "og:site_name" site-name)
+                     (list :property "og:title" site-name)))
+             (when image-url (%image-entries image-url width height alt))
+             (list (list :name "twitter:card" (if image-url "summary_large_image" "summary")))
+             (when twitter (list (list :name "twitter:site" twitter)))
+             (when image-url (list (list :name "twitter:image" image-url)))))))))
 
 (defun %write-tags (entries)
   (dolist (entry entries)
