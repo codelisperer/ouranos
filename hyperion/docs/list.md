@@ -80,33 +80,25 @@ and is cut to `:max-length`.
 
 ### Searching with LIKE
 
-A text filter used in `LIKE` needs its own `%`, `_` and `\` escaped. Otherwise a user's `%`
-or `_` is a wildcard: `q=%_%_%_` matches every row, and a pattern full of wildcards makes the
-scan slower. mnemosyne's `:like` has no `ESCAPE` clause yet (#862), which makes the two
-databases differ:
+A text filter used in `LIKE` needs its own `%`, `_` and escape character escaped. Otherwise a
+user's `%` or `_` is a wildcard: `q=%_%_%_` matches every row, and a pattern full of wildcards
+makes the scan slower. `mnemosyne/query:like-contains` builds the pattern, and `:escape` on
+`:like` or `:ilike` tells the database which character escapes (#862):
 
-- **Postgres:** LIKE's default escape character is the backslash, so escaping with a backslash
-  works today.
+```lisp
+(hyperion/list-db:fetch-page *db* state :select '(:id :name) :from '(:contacts)
+  :where (let ((q (hyperion/list:filter-value state :q)))
+           (and q (list :like :name (mnemosyne/query:like-contains q) :escape "\\"))))
+```
 
-  ```lisp
-  (defun like-contains (text)
-    "TEXT as a LIKE pattern that matches it anywhere, with \\, % and _ taken literally."
-    (with-output-to-string (out)
-      (write-char #\% out)
-      (loop for c across text
-            do (when (find c "\\%_") (write-char #\\ out))
-               (write-char c out))
-      (write-char #\% out)))
+With `:escape`, a `%`, `_` or backslash in the term matches only itself, on SQLite (which has
+no default escape character) and on Postgres alike. The escape character is bound as a
+parameter, like the pattern.
 
-  (hyperion/list-db:fetch-page *db* state :select '(:id :name) :from '(:contacts)
-    :where (let ((q (hyperion/list:filter-value state :q)))
-             (and q (list :ilike :name (like-contains q)))))
-  ```
-
-- **SQLite:** LIKE has no default escape character, so the escapes above are matched as
-  literal backslashes. Until mnemosyne can write `ESCAPE` (#862), a SQLite search treats
-  `%` and `_` in the term as wildcards. Keep `:max-length` short for a text filter used this
-  way.
+Case still differs: SQLite's LIKE ignores the case of ASCII letters and Postgres's does not.
+For the same matches on both, compare `(:lower :name)` with
+`(:lower (mnemosyne/query:like-contains q))`, keeping in mind that each database's LOWER folds
+its own set of characters. On Postgres alone, `:ilike` with the same `:escape` also works.
 
 ## Links
 
