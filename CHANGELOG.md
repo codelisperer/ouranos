@@ -1918,6 +1918,17 @@ its tag.
   started is logged as a warning, and the server keeps running. `hyperion/desktop` now declares
   `aion/windows` on Windows, which it already loaded through `hyperion/sidecar`.
 
+- **hyperion/server: `stop` called twice at the same time for a Hunchentoot or Woo server no
+  longer leaves the port accepting** (#502). The second call terminated the server's thread again
+  while the first call's shutdown was running. Under Hunchentoot that interrupted
+  `hunchentoot:stop` before it set the acceptor's shutdown flag, and the listener thread went on
+  accepting connections on the port with nothing left to stop it. `hyperion/dev:serve` with
+  `:block t` did this every time it was stopped with `unwatch` from another thread, because it
+  calls `unwatch` again when its wait ends; the second stop interrupted the first only when the
+  two happened close together. Now only the first `stop` of a server ends its thread, and a later
+  or concurrent `stop` waits for that to finish. The `:uv` server's `stop` is unchanged.
+
+
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
   native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
