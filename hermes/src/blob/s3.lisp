@@ -334,20 +334,58 @@ body that cannot be read becomes a DETAIL saying so (#796)."
   (handler-case (progn (%s3-request s bucket key :head) t)
     (blob-not-found () nil)))
 
+(defparameter +http-months+
+  '("Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec")
+  "Month names as an HTTP date writes them.")
+
+(defun %parse-http-date (text)
+  "An HTTP date as S3 sends Last-Modified (\"Wed, 21 Oct 2015 07:28:00 GMT\", RFC 7231's
+IMF-fixdate) as a universal time, or NIL when TEXT is not one."
+  (ignore-errors
+   (let* ((parts (remove "" (uiop:split-string text :separator " ") :test #'string=))
+          (day (parse-integer (second parts)))
+          (month (1+ (position (third parts) +http-months+ :test #'string=)))
+          (year (parse-integer (fourth parts)))
+          (hms (mapcar #'parse-integer (uiop:split-string (fifth parts) :separator ":"))))
+     (and (= 6 (length parts)) (string= "GMT" (sixth parts)) (= 3 (length hms))
+          (encode-universal-time (third hms) (second hms) (first hms) day month year 0)))))
+
+(defun %meta-from-headers (key headers)
+  "The BLOB-META a HEAD or GET of KEY answered with HEADERS describes (#826)."
+  (flet ((hdr (name) (gethash name headers)))
+    (make-blob-meta key
+                    (or (ignore-errors (parse-integer (or (hdr "content-length") "0"))) 0)
+                    (hdr "content-type")
+                    ;; The ETag is the MD5 for a single-part upload and something else
+                    ;; entirely for a multipart one, so it is NOT our SHA-256 checksum.
+                    ;; Report the checksum PUT-BLOB recorded, or nothing: an object stored
+                    ;; before #810, or uploaded directly by a client, has none.
+                    (hdr "x-amz-meta-sha256")
+                    (let ((lm (hdr "last-modified"))) (and (stringp lm) (%parse-http-date lm)))
+                    (let ((etag (hdr "etag"))) (and etag (string-trim "\"" etag))))))
+
 (defmethod blob-metadata ((s s3-store) bucket key)
   (multiple-value-bind (body status headers) (%s3-request s bucket key :head)
     (declare (ignore body status))
-    (flet ((hdr (name) (gethash name headers)))
-      (make-blob-meta key
-                      (or (ignore-errors (parse-integer (or (hdr "content-length") "0"))) 0)
-                      (hdr "content-type")
-                      ;; The ETag is the MD5 for a single-part upload and something else
-                      ;; entirely for a multipart one, so it is NOT our SHA-256 checksum.
-                      ;; Report the checksum PUT-BLOB recorded, or nothing: an object stored
-                      ;; before #810, or uploaded directly by a client, has none.
-                      (hdr "x-amz-meta-sha256")
-                      nil
-                      (let ((etag (hdr "etag"))) (and etag (string-trim "\"" etag)))))))
+    (%meta-from-headers key headers)))
+
+(defun %if-match-headers (if-match)
+  "The If-Match header for IF-MATCH, an ETag with or without its quotes, or NIL."
+  (when if-match
+    (list (cons "if-match" (format nil "\"~A\"" (string-trim "\"" if-match))))))
+
+(defmethod open-blob ((s s3-store) bucket key &key if-match)
+  ;; One GET carrying If-Match, so the check and the read are the same request: S3 answers 412,
+  ;; and sends nothing, when the object's ETag is not IF-MATCH.
+  (multiple-value-bind (body status headers)
+      (handler-case (%s3-request s bucket key :get :want-stream t
+                                                   :extra-headers (%if-match-headers if-match))
+        (blob-backend-error (e)
+          (if (eql 412 (blob-backend-error-status e))
+              (error 'blob-precondition-failed :bucket bucket :key key)
+              (error e))))
+    (declare (ignore status))
+    (values body (%meta-from-headers key headers))))
 
 (defun %presign (&key method host path access-key secret-key session-token region
                       amz-date date expires-in headers query-params)
@@ -443,27 +481,36 @@ partNumber and uploadId, so a part URL cannot be pointed at another part or uplo
                                 acl-header)
                         expires-in content-length)))
 
-(defmethod read-blob-range ((s s3-store) bucket key &key (start 0) (length 512))
+(defmethod read-blob-range ((s s3-store) bucket key &key (start 0) (length 512) if-match)
   (if (zerop length)
       ;; No range asks for zero bytes, so ask whether the blob exists instead: a missing key
-      ;; signals BLOB-NOT-FOUND here as it does on every other store (#796).
-      (if (blob-exists-p s bucket key)
-          (make-array 0 :element-type '(unsigned-byte 8))
-          (error 'blob-not-found :bucket bucket :key key))
+      ;; signals BLOB-NOT-FOUND here as it does on every other store (#796). With IF-MATCH the
+      ;; HEAD's ETag is compared too (#826).
+      (if if-match
+          (progn (%check-if-match bucket key if-match (blob-meta-etag (blob-metadata s bucket key))
+                                  'blob-precondition-failed)
+                 (make-array 0 :element-type '(unsigned-byte 8)))
+          (if (blob-exists-p s bucket key)
+              (make-array 0 :element-type '(unsigned-byte 8))
+              (error 'blob-not-found :bucket bucket :key key)))
       (handler-case
           (multiple-value-bind (body status)
               (%s3-request s bucket key :get :want-stream t
-                           :extra-headers (list (cons "range" (format nil "bytes=~D-~D" start (+ start length -1)))))
+                           :extra-headers
+                           (cons (cons "range" (format nil "bytes=~D-~D" start (+ start length -1)))
+                                 (%if-match-headers if-match)))
             ;; 206 is the range. 200 means the store, or a proxy in front of it, ignored Range
             ;; and is sending the whole object, so skip to START and read only LENGTH bytes;
             ;; closing the stream then drops the rest unread (#796).
             (unwind-protect (%read-range body (if (= status 206) 0 start) length)
               (close body)))
         (blob-backend-error (e)
-          ;; 416: START is at or past the end, including any START on an empty object.
-          (if (eql 416 (blob-backend-error-status e))
-              (make-array 0 :element-type '(unsigned-byte 8))
-              (error e))))))
+          (case (blob-backend-error-status e)
+            ;; 416: START is at or past the end, including any START on an empty object.
+            (416 (make-array 0 :element-type '(unsigned-byte 8)))
+            ;; 412: the object no longer has the ETag IF-MATCH named (#826).
+            (412 (error 'blob-precondition-failed :bucket bucket :key key))
+            (t (error e)))))))
 
 ;;; --- listing ---------------------------------------------------------------
 

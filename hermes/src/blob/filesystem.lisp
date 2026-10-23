@@ -181,10 +181,21 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
   (error 'blob-unsupported :bucket bucket :key key
                            :operation "presigned uploads (proxy the upload through put-blob)"))
 
-(defmethod read-blob-range ((s filesystem-store) bucket key &key (start 0) (length 512))
+(defmethod open-blob ((s filesystem-store) bucket key &key if-match)
+  ;; The ETag is the sidecar's SHA-256 (#826). The check and the open are two steps, so a blob
+  ;; replaced between them is read as the newer version; this store is for development and
+  ;; single-box use, where a rename is the only writer.
+  (let ((meta (blob-metadata s bucket key)))
+    (%check-if-match bucket key if-match (blob-meta-etag meta) 'blob-precondition-failed)
+    (values (get-blob s bucket key) meta)))
+
+(defmethod read-blob-range ((s filesystem-store) bucket key &key (start 0) (length 512) if-match)
   (let ((path (%blob-path s bucket key "objects")))
     (unless (probe-file path)
       (error 'blob-not-found :bucket bucket :key key))
+    (when if-match
+      (%check-if-match bucket key if-match (blob-meta-etag (blob-metadata s bucket key))
+                       'blob-precondition-failed))
     (with-open-file (in path :element-type '(unsigned-byte 8))
       (let* ((size (file-length in))
              (from (min start size))

@@ -39,6 +39,8 @@
    #:telegram-message #:make-telegram-message #:telegram-message-p #:telegram-message-chat
    #:telegram-message-text #:telegram-message-parse-mode #:telegram-message-link-preview
    #:telegram-message-photo #:escape-markdown-v2 #:escape-telegram-html #:dev-last-telegram
+   #:facebook-post #:make-facebook-post #:facebook-post-p #:facebook-post-page
+   #:facebook-post-link #:facebook-post-message #:facebook-post-image-url #:dev-last-facebook
    ;; delivery result
    #:delivery-result #:make-delivery-result #:delivery-result-provider #:delivery-result-id
    #:delivery-result-status #:delivery-result-raw #:delivery-result-destination
@@ -48,12 +50,17 @@
    #:telegram-added-chat #:telegram-added-chat-p #:telegram-added-chat-id
    #:telegram-added-chat-type #:telegram-added-chat-title #:telegram-added-chat-status
    #:telegram-added-chat-date
+   #:facebook-provider #:facebook-page-health #:post-to-page
+   #:facebook-page #:facebook-page-p #:facebook-page-id #:facebook-page-name
+   #:facebook-page-token #:facebook-page-tasks #:facebook-page-can-post-p
+   #:facebook-connect-state #:facebook-connect-url #:facebook-connect-pages
    ;; backends + constructors
    #:sendgrid #:make-sendgrid #:twilio #:make-twilio #:telegram #:make-telegram
-   #:telegram-api-base #:dev-transport #:make-dev-transport
+   #:telegram-api-base #:facebook #:make-facebook #:facebook-app-id #:facebook-graph-base
+   #:facebook-dialog-base #:dev-transport #:make-dev-transport
    ;; provider selection from the environment
    #:register-impl #:email-provider-from-env #:sms-provider-from-env
-   #:telegram-provider-from-env #:send
+   #:telegram-provider-from-env #:facebook-provider-from-env #:send
    ;; conditions
    #:hermes-error #:configuration-error #:configuration-error-missing
    #:invalid-message #:invalid-message-problem
@@ -64,6 +71,10 @@
    #:telegram-chat-unreachable #:telegram-not-permitted
    #:telegram-chat-migrated #:telegram-chat-migrated-migrate-to-chat-id
    #:telegram-webhook-active
+   #:facebook-reconnect-required #:facebook-not-permitted #:facebook-page-not-found
+   #:facebook-link-not-public #:facebook-groups-unsupported #:facebook-groups-unsupported-page
+   #:facebook-connect-refused #:facebook-connect-refused-reason
+   #:facebook-connect-refused-detail
    #:version))
 
 (cl:defpackage #:hermes/inbound

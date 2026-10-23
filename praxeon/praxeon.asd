@@ -331,7 +331,9 @@
                              (:file "image-tests")
                              ;; #758: the Google provider, after image-tests, whose image helpers it uses
                              (:file "image-google-tests")
-                             (:file "web-page-tests"))))
+                             (:file "web-page-tests")
+                             ;; #827: untrusted content in a turn, using the stub reader pattern
+                             (:file "reader-guard-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

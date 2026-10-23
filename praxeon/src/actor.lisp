@@ -34,7 +34,17 @@ ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
   ;; CONFIRM (#531): NIL runs the means as usual. T holds every call until the user decides.
   ;; A function of the arguments holds the call too, and returns an estimate plist of what the
   ;; call will cost, such as (:credits 40), or NIL. See hold.lisp.
-  (confirm nil))
+  (confirm nil)
+  ;; #827. UNTRUSTED: the means brings content from outside the conversation into it (a web
+  ;; page, search results), so a call the model decides after it ran may have been steered by
+  ;; that content. REQUIRES-USER-INTENT: the means spends, writes or sends for the user, so it
+  ;; is refused in a turn once untrusted content has entered. ALLOW: NIL, or a function of the
+  ;; arguments and the agent that must return true for a call to run. MAX-PER-TURN: NIL, or
+  ;; how many calls may run in one turn. See %GUARD-REFUSAL in hold.lisp.
+  (untrusted nil)
+  (requires-user-intent nil)
+  (allow nil)
+  (max-per-turn nil))
 
 (defstruct (agent (:constructor make-agent))
   "A runtime agent.
@@ -91,6 +101,15 @@ client rendering `agent-history' still shows the whole conversation."
   (never-clear '() :type list)
   (result-index (make-hash-table :test #'equal))
   (cleared (make-hash-table :test #'equal))
+  ;; #827: the current turn's TURN-GUARD, and the user messages that did not come from the
+  ;; user (every task a coordinating agent delegated), which USER-TEXTS leaves out.
+  ;; TAINT-SCOPE says how long untrusted content keeps a turn untrusted. :TURN (the default):
+  ;; until the user's next message. :CONVERSATION: while the history sent to the model still
+  ;; holds a call whose result may be untrusted (the whole history, whether or not a budget
+  ;; trims what is sent), so a later turn starts untrusted too.
+  (guard nil)
+  (untrusted-inputs '() :type list)
+  (taint-scope :turn)
   (history '() :type list))               ; list of praxeon/llm messages
 
 (defvar *principal* nil
@@ -117,19 +136,192 @@ turn (#531).")
 (aion/dynamic:register-inheritable '*on-hold*)
 (aion/dynamic:register-inheritable '*hold-allowed*)
 
-(defun register-means (agent name description fn &key schema capability source confirm)
+(defun register-means (agent name description fn &key schema capability source confirm
+                                                       untrusted
+                                                       (requires-user-intent nil requires-user-intent-p)
+                                                       allow max-per-turn)
   "Register a means under NAME: a human DESCRIPTION, the FN performing it (a
 function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
 CAPABILITY string a caller must hold to see or use it (#90). SOURCE is NIL or a plist that
 names where the means comes from; the :TOOL-CALL and :TOOL-RESULT events carry it (#527).
 CONFIRM is NIL, T or a function of the arguments returning an estimate plist: a means with one
-is held until the user decides (#531, see RUN-TURN's :ON-HOLD). Returns NAME."
+is held until the user decides (#531, see RUN-TURN's :ON-HOLD).
+
+The rest guard a turn against instructions written into content the agent reads (#827):
+
+  UNTRUSTED             true for a means whose result comes from outside the conversation,
+                        such as a web page or search results. Once one has run in a turn,
+                        the turn counts as having read untrusted content.
+  REQUIRES-USER-INTENT  true for a means that spends, writes or sends for the user. A call
+                        the model makes after untrusted content entered the turn is refused,
+                        as not run, for the rest of the turn. It defaults to true when
+                        CONFIRM is given, because a means held for the user's confirmation is
+                        one that spends or writes, and an app that forgets this key must not
+                        leave a page able to ask for it. Pass NIL to have such a means held
+                        for confirmation after untrusted content instead of refused.
+  ALLOW                NIL, or a function of the call's arguments and the agent. A call runs
+                        only when it returns true; otherwise, or when it signals, the call is
+                        refused as not run.
+  MAX-PER-TURN          NIL, or a positive integer: how many calls of this means may run in
+                        one turn. Later calls are refused as not run.
+
+Returns NAME."
+  (unless (or (null allow) (functionp allow))
+    (error "REGISTER-MEANS's :ALLOW must be NIL or a function of the arguments and the agent, not ~S." allow))
+  (unless (or (null max-per-turn) (and (integerp max-per-turn) (plusp max-per-turn)))
+    (error "REGISTER-MEANS's :MAX-PER-TURN must be NIL or a positive integer, not ~S." max-per-turn))
   (setf (gethash name (agent-means agent))
         (make-means-entry :name name :description description
                           :schema schema :capability capability :fn fn :source source
-                          :confirm confirm))
+                          :confirm confirm :untrusted (and untrusted t)
+                          :requires-user-intent (if requires-user-intent-p
+                                                    (and requires-user-intent t)
+                                                    (and confirm t))
+                          :allow allow :max-per-turn max-per-turn))
   name)
+
+;;; --- untrusted content in a turn (#827) --------------------------------------------------
+;;; A turn's guard records whether untrusted content has entered the turn, how many calls of
+;;; each means have run, and the URLs this turn's searches returned before any untrusted
+;;; content entered. It is kept on the agent and keyed by the turn's user message, so a held
+;;; turn continued later keeps it. When the key does not match (a held turn continued on an
+;;; agent rebuilt from its history), the guard is rebuilt from the history in the safe
+;;; direction: every reader call in the turn counts as having run, and no URL is allowed.
+
+(defstruct (turn-guard (:constructor %make-turn-guard (key &optional untrusted)))
+  key
+  (untrusted nil)
+  (counts (make-hash-table :test #'equal))
+  (urls '() :type list))
+
+(defvar *current-guard* nil
+  "The guard of the turn whose call is running, or NIL outside a call.")
+(defvar *decided-after-untrusted* nil
+  "True while a call runs that the model decided after untrusted content entered its turn. A
+sub-turn started inside such a call, such as a delegated agent's, starts with untrusted
+content already present, and its task is not counted as the user's text.")
+(defparameter *read-result-means* "read-result"
+  "The name the result-reading means is registered under.")
+
+(defvar *delegated* nil
+  "True while REGISTER-AGENT-AS-MEANS runs a sub-agent's turn: the task that starts it was
+written by the coordinating model, not the user, so USER-TEXTS never counts it.")
+(defvar *outer-user-texts* '()
+  "While a delegated turn runs, the coordinating agent's USER-TEXTS, which USER-TEXTS of the
+sub-agent includes, so the sub-agent may open what the user asked the coordinator for.")
+(aion/dynamic:register-inheritable '*current-guard*)
+(aion/dynamic:register-inheritable '*decided-after-untrusted*)
+(aion/dynamic:register-inheritable '*delegated*)
+(aion/dynamic:register-inheritable '*outer-user-texts*)
+
+(defun %user-message-p (message)
+  "True for a message the user wrote: role user, content a string or text parts, no tool
+results."
+  (and (equal "user" (getf message :role))
+       (let ((content (getf message :content)))
+         (or (stringp content)
+             (and (consp content)
+                  (notany (lambda (p) (eq :tool-result (getf p :type))) content))))))
+
+(defun %message-text (message)
+  (let ((content (getf message :content)))
+    (if (stringp content)
+        content
+        (format nil "~{~A~^~%~}"
+                (loop for p in content
+                      when (and (eq :text (getf p :type)) (stringp (getf p :text)))
+                        collect (getf p :text))))))
+
+(defun user-texts (agent)
+  "The text of every message the user wrote in AGENT's history, oldest first. Tool results
+are left out, and so is every task a coordinating agent delegated to AGENT, because a model
+wrote it. While AGENT runs a delegated turn, the coordinator's own USER-TEXTS follow. An :ALLOW
+predicate uses this to tell what the user asked for from what a page, a tool or a model said."
+  (append (loop for m in (agent-history agent)
+                when (and (%user-message-p m)
+                          (not (member m (agent-untrusted-inputs agent) :test #'eq)))
+                  collect (%message-text m))
+          *outer-user-texts*))
+
+(defun %current-turn-messages (agent)
+  "The last user-written message in AGENT's history, and the messages after it."
+  (let* ((history (agent-history agent))
+         (start (position-if #'%user-message-p history :from-end t)))
+    (if start (nthcdr start history) '())))
+
+(defun %untrusted-call-p (agent part)
+  "True when PART, a :TOOL-USE part in AGENT's history, called a means whose result may be
+untrusted: one registered :UNTRUSTED, READ-RESULT, which can return any stored result, or one
+no longer registered, whose result cannot be judged."
+  (let ((entry (gethash (getf part :name) (agent-means agent))))
+    (or (null entry)
+        (means-entry-untrusted entry)
+        (equal (getf part :name) *read-result-means*))))
+
+(defun %tool-uses (messages)
+  "The :TOOL-USE parts of the assistant messages in MESSAGES, oldest first."
+  (loop for m in messages
+        for content = (getf m :content)
+        when (and (equal "assistant" (getf m :role)) (listp content))
+          append (remove :tool-use content :key (lambda (p) (getf p :type)) :test-not #'eq)))
+
+(defun %rebuild-guard (agent key messages)
+  (let ((guard (%make-turn-guard key (%history-untrusted-p agent))))
+    (dolist (p (%tool-uses (rest messages)))
+      (when (gethash (getf p :name) (agent-means agent))
+        (incf (gethash (getf p :name) (turn-guard-counts guard) 0)))
+      (when (%untrusted-call-p agent p)
+        (setf (turn-guard-untrusted guard) t)))
+    guard))
+
+(defun %history-untrusted-p (agent &optional (before (first (%current-turn-messages agent))))
+  "True when AGENT's taint scope is :CONVERSATION and its history, before the message BEFORE,
+holds a call whose result may be untrusted: that content is still sent to the model."
+  (let ((scope (agent-taint-scope agent)))
+    (unless (member scope '(:turn :conversation))
+      (error "praxeon/actor: :taint-scope must be :turn or :conversation, not ~S" scope))
+    (and (eq scope :conversation)
+         (some (lambda (p) (%untrusted-call-p agent p))
+               (%tool-uses (ldiff (agent-history agent)
+                                  (member before (agent-history agent) :test #'eq)))))))
+
+(defun %turn-guard (agent)
+  "AGENT's guard for its current turn, rebuilt from the history when the stored one belongs
+to another turn."
+  (let* ((messages (%current-turn-messages agent))
+         (key (first messages))
+         (guard (agent-guard agent)))
+    (if (and guard key (eq key (turn-guard-key guard)))
+        guard
+        (setf (agent-guard agent) (%rebuild-guard agent key messages)))))
+
+(defun turn-untrusted-p (agent)
+  "True when untrusted content has entered AGENT's current turn."
+  (turn-guard-untrusted (%turn-guard agent)))
+
+(defun turn-urls (agent)
+  "The URLs this turn's searches returned before any untrusted content entered the turn,
+oldest first. See NOTE-TURN-URLS."
+  (reverse (turn-guard-urls (%turn-guard agent))))
+
+(defun note-turn-urls (urls)
+  "Record URLS, strings, as returned by a search in the current turn. Called by a search
+means while it runs. They are recorded only when the model asked for the search before any
+untrusted content entered the turn: a page could otherwise make the model search for a
+phrase that only the attacker's page ranks for, and so add its own address to TURN-URLS.
+Outside a call, does nothing."
+  (when (and *current-guard* (not *decided-after-untrusted*))
+    (dolist (url urls)
+      (when (stringp url)
+        (push url (turn-guard-urls *current-guard*))))))
+
+(defun mark-untrusted ()
+  "Mark the current turn as having read untrusted content, from inside a running means whose
+result is untrusted only sometimes, such as a delegated agent that read a page. Outside a
+call, does nothing."
+  (when *current-guard*
+    (setf (turn-guard-untrusted *current-guard*) t)))
 
 (defun means-permitted-p (entry permit)
   "May a caller described by PERMIT use ENTRY?
@@ -195,9 +387,6 @@ capabilities existed, so existing agents are unchanged."
   "The most characters one `read-result' call returns. A larger range is refused with the
 number of characters it holds, so the agent asks for less; it is never cut, since what comes
 back must be the stored text exactly.")
-
-(defparameter *read-result-means* "read-result"
-  "The name the result-reading means is registered under.")
 
 (defparameter *stand-in-preview-lines* 5
   "How many first lines of a result its stand-in shows, within *STAND-IN-PREVIEW-CHARACTERS*.")
@@ -348,7 +537,12 @@ stand-in in place. Otherwise return MESSAGES unchanged."
       (if (null record)
           (format nil "No stored result has the handle ~S in this conversation." handle)
           (let ((text (res:stored-result-text record))
-                (search (arg "search")))
+                (search (arg "search"))
+                (source (gethash (res:stored-result-name record) (agent-means agent))))
+            ;; The stored text is what the means returned, so it is as untrusted as that means
+            ;; was, here in whatever turn reads it back (#827).
+            (when (or (null source) (means-entry-untrusted source))
+              (mark-untrusted))
             (cond
               ((and (stringp search) (plusp (length search)))
                (multiple-value-bind (found total)
@@ -705,7 +899,12 @@ CONTINUE-TURN."
 
 (defun %run-turn (agent user-input max-steps permit max-tokens)
   "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."
-  (%append-history agent (llm:msg "user" user-input))
+  (let ((message (llm:msg "user" user-input)))
+    (%append-history agent message)
+    (when *delegated*
+      (push message (agent-untrusted-inputs agent)))
+    (setf (agent-guard agent) (%make-turn-guard message (or *decided-after-untrusted*
+                                                            (%history-untrusted-p agent message)))))
   (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
 
 (defun %turn-loop (agent max-steps permit limit)
@@ -865,10 +1064,21 @@ acyclic to stay finite."
          ;; subtask that silently lost the permit would be a capability-bearing means becoming
          ;; unreachable one level down -- the same defect pre-publication issue 400 found in RUN-TURN, reached by
          ;; delegation instead of by the main loop.
-         (run-turn sub (or task "") :permit permit)))
+         ;; The task is the coordinating model's text, never the user's, and the sub-agent
+         ;; sees the coordinator's user texts instead (#827).
+         (multiple-value-prog1 (let ((*outer-user-texts* (user-texts coordinator))
+                                     (*delegated* t))
+                                 (run-turn sub (or task "") :permit permit))
+           ;; What the sub-agent read reaches the coordinator in its answer (#827).
+           (when (turn-untrusted-p sub)
+             (mark-untrusted)))))
      :schema (%string-arg-schema
               arg (format nil "A self-contained instruction for the ~A agent."
-                          (agent-name sub))))
+                          (agent-name sub)))
+     ;; A sub-agent that can read untrusted content makes this means untrusted, so a guard
+     ;; rebuilt from the coordinator's history counts a delegation as such a read.
+     :untrusted (loop for entry being the hash-values of (agent-means sub)
+                      thereis (means-entry-untrusted entry)))
     mname))
 
 (defun converse-repl (agent &key (stream *query-io*))

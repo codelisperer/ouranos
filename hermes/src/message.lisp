@@ -125,6 +125,57 @@ MAKE-TELEGRAM-MESSAGE."
       (bad "a :parse-mode of NIL, :HTML or :MARKDOWN-V2"))
     (unless (member link-preview '(:show :hide)) (bad "a :link-preview of :SHOW or :HIDE"))))
 
+;;; --- Facebook Page posts (#822) ---------------------------------------------
+
+(defun %facebook-page-id-p (page)
+  "True for a Facebook Page id: a positive integer, or a string of ASCII digits."
+  (or (and (integerp page) (plusp page))
+      (and (stringp page) (plusp (length page)) (<= (length page) 32)
+           (every (lambda (ch) (char<= #\0 ch #\9)) page))))
+
+(defun %facebook-group-address-p (page)
+  "True for something that names a Facebook Group rather than a Page: a URL with /groups/ in it,
+or a \"group:\" prefix. A numeric Group id cannot be told from a Page id here; Facebook refuses a
+post to one, which arrives as FACEBOOK-NOT-PERMITTED."
+  (and (stringp page)
+       (or (search "/groups/" (string-downcase page))
+           (and (>= (length page) 6) (string-equal "group:" page :end2 6)))))
+
+(defun %http-url-p (url)
+  "True for an http or https URL: a string starting with the scheme, with no space or control
+character."
+  (and (stringp url)
+       (or (and (> (length url) 8) (string-equal "https://" url :end2 8))
+           (and (> (length url) 7) (string-equal "http://" url :end2 7)))
+       (notany (lambda (ch) (<= (char-code ch) 32)) url)))
+
+(defstruct (facebook-post (:constructor %make-facebook-post (page link message image-url)))
+  "A post to a Facebook Page (#822). PAGE is the Page's id, as a string of digits. LINK is the
+URL the post shares, or NIL; Facebook builds the link card from the target page's Open Graph
+tags, and refuses the post when it cannot fetch LINK (a page behind a sign-in, or not public).
+MESSAGE is the post's text, or NIL. IMAGE-URL, when given, is an http(s) URL of a photo, and the
+post is made as a photo with MESSAGE and LINK as its caption. Built with MAKE-FACEBOOK-POST,
+which checks each of them."
+  page link message image-url)
+
+(defun make-facebook-post (&key page link message image-url)
+  "A FACEBOOK-POST, checked: PAGE is a Page id (a positive integer or a string of digits), LINK
+and IMAGE-URL are NIL or http(s) URLs, MESSAGE is NIL or a string, and LINK or MESSAGE is given.
+A PAGE that names a Facebook Group (a URL with /groups/ in it, or \"group:...\") signals
+FACEBOOK-GROUPS-UNSUPPORTED: Meta removed apps' access to Groups on 2024-04-22. Anything else
+that is wrong signals INVALID-MESSAGE, before anything is sent."
+  (flet ((bad (what) (error 'invalid-message :problem (format nil "it needs ~A" what))))
+    (when (%facebook-group-address-p page)
+      (error 'facebook-groups-unsupported :page page))
+    (unless (%facebook-page-id-p page)
+      (bad "a Facebook :page id (a positive integer or a string of digits)"))
+    (unless (or (null link) (%http-url-p link)) (bad "a :link that is an http or https URL"))
+    (unless (or (null image-url) (%http-url-p image-url))
+      (bad "an :image-url that is an http or https URL"))
+    (unless (or (null message) (stringp message)) (bad "a string :message"))
+    (unless (or link (plusp (length (or message "")))) (bad "a :link or a non-empty :message"))
+    (%make-facebook-post (princ-to-string page) link message image-url)))
+
 (defparameter +markdown-v2-special+ "\\_*[]()~`>#+-=|{}.!"
   "The characters Telegram's MarkdownV2 requires to be escaped with a backslash in ordinary
 text, the backslash itself included.")

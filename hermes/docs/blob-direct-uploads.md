@@ -30,13 +30,17 @@ for it. Smaller files can still go through `put-blob`.
 4. **The client tells the app the upload finished.** The app then checks it:
 
    ```lisp
-   (let ((meta (hermes/blob:blob-metadata store "media" key)))
-     (blob-meta-size meta) (blob-meta-content-type meta) (blob-meta-etag meta))
-   (hermes/blob:read-blob-range store "media" key :start 0 :length 16)  ; the magic bytes
+   (let* ((meta (hermes/blob:blob-metadata store "media" key))
+          (etag (blob-meta-etag meta)))
+     (blob-meta-size meta) (blob-meta-content-type meta)
+     (hermes/blob:read-blob-range store "media" key :start 0 :length 16   ; the magic bytes,
+                                  :if-match etag)                         ; of this version
+     ...)
    ```
 
    If the size or the real file type is not what was asked for, delete it with `delete-blob`.
-   Otherwise move it out of quarantine with `move-blob` (below) and record it.
+   Otherwise move it out of quarantine with `move-blob :if-match etag` (below) and record it, so
+   the object moved is the one checked (see "Reading the version you checked").
 
 ## What is enforced, and where
 
@@ -181,6 +185,42 @@ leaves the source where it is. Both return the destination's `blob-meta`.
   `blob-unsupported`; the app then copies through
   `get-blob` and `put-blob`. A store class an app defines itself gets `blob-unsupported` too,
   until it implements `copy-blob`.
+
+## Reading the version you checked: ETags and if-match
+
+The checks in step 4 are only worth something if the bytes you later serve or move are the bytes
+you checked. A presigned PUT URL stays valid until it expires, so the client can upload again,
+with the same size and different content, after you checked it (#826).
+
+- **Record the ETag when you check.** `blob-metadata` returns it as `blob-meta-etag`, and so does
+  `open-blob`, which returns the stream and the blob's `blob-meta` together (its size, content
+  type, `Last-Modified` time and checksum as well).
+- **Pass it back as `:if-match`.** `open-blob`, `with-blob-stream` (`:if-match`, and `:meta` to
+  bind the metadata), `read-blob-range`, `copy-blob` and `move-blob` all take it. A blob that no
+  longer has that ETag signals `blob-precondition-failed` (status 412) and nothing is read;
+  `blob-source-changed`, the same failure for a copy or move, is a subclass of it, so one handler
+  catches both. On S3 the check and the read are one request (the GET carries `If-Match`).
+
+  ```lisp
+  (let ((etag (blob-meta-etag (hermes/blob:blob-metadata store "media" key))))
+    ;; ... check the first bytes, record ETAG with the row ...
+    (hermes/blob:with-blob-stream (in store "media" key :if-match etag)
+      (serve in)))
+  ```
+- **An ETag is not a content hash.** S3's ETag is the MD5 of the bytes only for a single-part,
+  unencrypted upload; a multipart upload's ETag is a hash of the parts' hashes with `-N` after it,
+  and a KMS-encrypted object's is neither. Compare ETags as strings, and never recompute one from
+  the bytes. hermes's own checksum of the content is `blob-meta-checksum`, which S3 keeps only
+  for blobs written with `put-blob` (#810). On the filesystem store the ETag is the blob's SHA-256
+  checksum, and the check and the open are two steps, so it is not atomic either: a blob replaced
+  between them is read as the newer version. That store is for development and a single box.
+- **`get-blob` is unchanged.** It shipped with three arguments, and CLOS requires every method to
+  accept every keyword its generic function declares, so a keyword added to it would break an
+  app's own store class. `open-blob` is the read with `:if-match`. A store class that implements
+  `get-blob` and `blob-metadata` but not `open-blob` gets a default `open-blob` that checks the
+  ETag with `blob-metadata` and then opens the stream with `get-blob`. That is not atomic: a blob
+  replaced between the two calls is read as the newer version. `with-blob-stream` without
+  `:if-match` or `:meta` still calls `get-blob`, so such a store class needs nothing new.
 
 ## On the filesystem store
 

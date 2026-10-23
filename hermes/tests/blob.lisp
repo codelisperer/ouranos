@@ -2081,3 +2081,148 @@ source instead, before any copy is sent."
     (is (and (typep c 'b:blob-backend-error) (not (typep c 'b:blob-source-changed))) "~S" c)
     (is (equal "src.txt" (and (typep c 'b:blob-error) (b:blob-error-key c))))
     (is (null (calls-of calls :put)) "no copy was sent")))
+
+;;; === 18. ETags and If-Match on reads (#826) ====================================
+
+(test an-app-store-with-only-a-three-argument-get-blob-still-reads-through-with-blob-stream
+  "The compatibility promise: GET-BLOB keeps its three arguments, and WITH-BLOB-STREAM without
+:IF-MATCH or :META still calls it, so a store class an app defined before #826 keeps working.
+GET-ONLY-STORE's only method is (b:get-blob (s bucket key)), with no keywords."
+  (with-temp-store (inner)
+    (put-string inner "media" "a.txt" "hello")
+    (let ((store (make-instance 'get-only-store :inner inner)))
+      (is (string= "hello"
+                   (b:with-blob-stream (in store "media" "a.txt")
+                     (map 'string #'code-char
+                          (let ((buf (make-array 5 :element-type '(unsigned-byte 8))))
+                            (subseq buf 0 (read-sequence buf in)))))))
+      (is (equalp (octets "ell") (b:read-blob-range store "media" "a.txt" :start 1 :length 3))
+          "and READ-BLOB-RANGE without :IF-MATCH reads through it too"))))
+
+(defclass get-and-head-store (get-only-store) ()
+  (:documentation "An app's store with GET-BLOB and BLOB-METADATA but no OPEN-BLOB, for the default
+OPEN-BLOB method."))
+
+(defmethod b:blob-metadata ((s get-and-head-store) bucket key)
+  (b:blob-metadata (get-only-inner s) bucket key))
+
+(test the-default-open-blob-checks-the-etag-through-blob-metadata
+  "Not atomic, as its docstring says, but the same condition as the stores that implement it."
+  (with-temp-store (inner)
+    (let* ((sum (b:blob-meta-checksum (put-string inner "media" "a.txt" "hello")))
+           (store (make-instance 'get-and-head-store :inner inner)))
+      (signals b:blob-precondition-failed
+        (b:with-blob-stream (in store "media" "a.txt" :if-match "stale") (read-byte in)))
+      (is (eql 104 (b:with-blob-stream (in store "media" "a.txt" :if-match sum) (read-byte in)))
+          "the control: the right ETag reads (104 is #\\h)")
+      (is (equalp (octets "he") (b:read-blob-range store "media" "a.txt" :length 2 :if-match sum)))
+      (signals b:blob-precondition-failed (b:read-blob-range store "media" "a.txt" :length 2 :if-match "stale")))))
+
+(test filesystem-open-blob-returns-the-metadata-and-honours-if-match
+  (with-temp-store (store)
+    (let* ((put (put-string store "media" "a.txt" "hello" :content-type "text/plain"))
+           (sum (b:blob-meta-checksum put)))
+      (multiple-value-bind (in meta) (b:open-blob store "media" "a.txt")
+        (unwind-protect
+             (progn (is (eql 104 (read-byte in)))
+                    (is (equal sum (b:blob-meta-etag meta)) "the ETag is the checksum")
+                    (is (= 5 (b:blob-meta-size meta)))
+                    (is (equal "text/plain" (b:blob-meta-content-type meta)))
+                    (is (integerp (b:blob-meta-last-modified meta))))
+          (close in)))
+      (let ((ran nil))
+        (signals b:blob-precondition-failed
+          (b:with-blob-stream (in store "media" "a.txt" :if-match "stale")
+            (setf ran t) (read-byte in)))
+        (is (not ran) "the body does not run when the ETag does not match"))
+      (is (equal sum (b:with-blob-stream (in store "media" "a.txt" :meta m :if-match (format nil "\"~A\"" sum))
+                       (b:blob-meta-etag m)))
+          ":META binds the metadata, and a quoted ETag matches")
+      (is (equalp (octets "ell") (b:read-blob-range store "media" "a.txt" :start 1 :length 3 :if-match sum)))
+      (signals b:blob-precondition-failed (b:read-blob-range store "media" "a.txt" :length 3 :if-match "stale"))
+      (signals b:blob-not-found (b:open-blob store "media" "missing.txt")))))
+
+(defparameter +get-headers+
+  (header-table "content-length" "5" "content-type" "text/plain" "etag" "\"abc123\""
+                "last-modified" "Wed, 21 Oct 2015 07:28:00 GMT" "x-amz-meta-sha256" "0123abcd"))
+
+(defun %get-answer (&key (status 200) (headers +get-headers+) (data "hello"))
+  "An ANSWER for a GET or HEAD of a blob: a body stream over DATA with HEADERS, or STATUS as a
+BLOB-BACKEND-ERROR."
+  (lambda (method key query)
+    (declare (ignore method query))
+    (if (= status 200)
+        (list (make-instance 'counting-octet-stream :data (octets data)) 200 headers)
+        (error 'b:blob-backend-error :bucket "media" :key key :status status))))
+
+(test s3-open-blob-sends-if-match-and-reads-the-metadata-from-the-answer
+  (dolist (given '("abc123" "\"abc123\""))
+    (multiple-value-bind (result calls)
+        (call-with-scripted-s3 (%get-answer)
+                               (lambda () (multiple-value-list (b:open-blob (test-s3-store) "media" "a.txt" :if-match given))))
+      (destructuring-bind (in meta) result
+        (is (eql 104 (read-byte in)))
+        (is (equal "abc123" (b:blob-meta-etag meta)))
+        (is (= 5 (b:blob-meta-size meta)))
+        (is (equal "0123abcd" (b:blob-meta-checksum meta)))
+        (is (eql (encode-universal-time 0 28 7 21 10 2015 0) (b:blob-meta-last-modified meta))
+            "Last-Modified is parsed"))
+      (is (equal '(:get) (mapcar (lambda (c) (getf c :method)) calls)) "one request: the GET itself")
+      (is (equal "\"abc123\"" (extra (first calls) "if-match")) "~S is sent quoted" given)))
+  (multiple-value-bind (result calls)
+      (call-with-scripted-s3 (%get-answer) (lambda () (b:open-blob (test-s3-store) "media" "a.txt")))
+    (declare (ignore result))
+    (is (null (extra (first calls) "if-match")) "the control: no If-Match without :if-match")))
+
+(test s3-reads-signal-precondition-failed-on-412
+  (let ((c (handler-case (progn (call-with-scripted-s3 (%get-answer :status 412)
+                                                       (lambda () (b:open-blob (test-s3-store) "media" "a.txt" :if-match "old")))
+                                nil)
+             (error (c) c))))
+    (is (typep c 'b:blob-precondition-failed) "~S" c)
+    (is (typep c 'b:blob-backend-error) "a BLOB-BACKEND-ERROR handler still catches it")
+    (is (equal "a.txt" (b:blob-error-key c)))
+    (is (eql 412 (b:blob-backend-error-status c))))
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (%get-answer :status 412)
+                             (lambda () (handler-case (b:read-blob-range (test-s3-store) "media" "a.txt" :length 4 :if-match "old")
+                                          (error (c) c))))
+    (is (typep c 'b:blob-precondition-failed) "~S" c)
+    (is (equal "bytes=0-3" (extra (first calls) "range")))
+    (is (equal "\"old\"" (extra (first calls) "if-match")) "the range and the condition go together"))
+  (is (typep (handler-case (call-with-scripted-s3 (%get-answer)
+                                                  (lambda () (b:read-blob-range (test-s3-store) "media" "a.txt" :length 0 :if-match "old")))
+               (error (c) c))
+             'b:blob-precondition-failed)
+      "a zero-length read compares the HEAD's ETag")
+  (is (equalp #() (call-with-scripted-s3 (%get-answer)
+                                         (lambda () (b:read-blob-range (test-s3-store) "media" "a.txt" :length 0 :if-match "abc123"))))
+      "the control: the right ETag reads"))
+
+(test blob-source-changed-is-a-precondition-failure
+  "One handler catches a changed blob on a read and on a copy (#826)."
+  (is (subtypep 'b:blob-source-changed 'b:blob-precondition-failed))
+  (is (subtypep 'b:blob-precondition-failed 'b:blob-backend-error))
+  (is (not (subtypep 'b:blob-precondition-failed 'b:blob-source-changed))))
+
+(test s3-blob-metadata-parses-last-modified
+  (is (eql (encode-universal-time 0 28 7 21 10 2015 0)
+           (b:blob-meta-last-modified
+            (call-with-scripted-s3 (%get-answer) (lambda () (b:blob-metadata (test-s3-store) "media" "a.txt"))))))
+  (is (null (b::%parse-http-date "yesterday")))
+  (is (null (b::%parse-http-date "Wed, 21 Foo 2015 07:28:00 GMT")))
+  (is (null (b::%parse-http-date "Wed, 21 Oct 2015 07:28:00 PST")) "only GMT, as HTTP requires"))
+
+(test reads-refuse-a-malformed-if-match-before-any-request
+  (with-temp-store (fs)
+    (dolist (store (list fs (test-s3-store)))
+      (dolist (bad (list "" (format nil "e~Ctag" #\Linefeed) 42))
+        (multiple-value-bind (result calls)
+            (call-with-scripted-s3 (%get-answer)
+                                   (lambda ()
+                                     (list (handler-case (progn (b:open-blob store "media" "a.txt" :if-match bad) nil)
+                                             (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c)))
+                                           (handler-case (progn (b:read-blob-range store "media" "a.txt" :if-match bad) nil)
+                                             (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c))))))
+          (is (equal '("if-match" "if-match") result) "~S on ~A" bad (b:store-name store))
+          (is (null calls)))))))
