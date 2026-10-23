@@ -463,6 +463,22 @@ its tag.
 
 ### Added
 
+- **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
+  version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns
+  the stream and the blob's `blob-meta` (ETag, size, content type, `Last-Modified`, checksum);
+  `with-blob-stream` takes `:if-match` and `:meta` (a variable bound to that `blob-meta`), and
+  `read-blob-range` takes `:if-match`. A blob that no longer has the ETag signals the new
+  `blob-precondition-failed` (a `blob-backend-error`, status 412) and nothing is read; on S3 the
+  GET carries `If-Match`, so the check and the read are one request. `blob-source-changed` is now
+  a subclass of `blob-precondition-failed`, so one handler catches a changed blob on a read and
+  on a copy. On S3, `blob-metadata` now fills `blob-meta-last-modified` from `Last-Modified`,
+  where it was NIL. `get-blob` keeps its three arguments, because a keyword added to it would
+  break an app's own store class; a store class without `open-blob` gets a default that checks
+  the ETag through `blob-metadata` before `get-blob`, which is not atomic, and `with-blob-stream`
+  without `:if-match` or `:meta` still calls `get-blob`. An ETag is not a content hash for a
+  multipart or KMS-encrypted object: compare it, never recompute it. See "Reading the version you
+  checked" in `hermes/docs/blob-direct-uploads.md`.
+
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
   page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
