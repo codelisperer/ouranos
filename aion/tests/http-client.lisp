@@ -689,3 +689,78 @@ since binding 80 or 443 in a test needs privileges."
   (is (equal (http::%origin (quri:uri "https://example.com/"))
              (http::%origin (quri:uri "https://example.com:443/x")))
       "the default port and the same port written out are one origin"))
+
+;;; --- a request prints without its secrets (#844) ---------------------------------
+
+(defparameter +printed-secrets+ '("Bearer SECRET-auth-111" "SECRET-goog-222" "SECRET-api-333"
+                                  "session=SECRET-cookie-444"))
+
+(defun %secret-request (&rest args)
+  (apply #'http:make-request
+         :method :post
+         :headers (list (cons "authorization" "Bearer SECRET-auth-111")
+                        (cons "x-goog-api-key" "SECRET-goog-222")
+                        (cons "x-api-key" "SECRET-api-333")
+                        (cons "cookie" "session=SECRET-cookie-444")
+                        (cons "X-Custom-Token" "SECRET-custom-555"))
+         args))
+
+(defun %printings (object)
+  "OBJECT printed every way a log line, an error report or a debugger prints it."
+  (list (prin1-to-string object) (princ-to-string object)
+        (format nil "~A ~S" object object) (format nil "~A" (list object))
+        (let ((*print-escape* nil)) (prin1-to-string object))))
+
+(defun %leaked (text)
+  (remove-if-not (lambda (s) (search s text))
+                 '("SECRET-auth-111" "SECRET-goog-222" "SECRET-api-333" "SECRET-cookie-444"
+                   "SECRET-custom-555" "SECRET-query-666" "SECRET-pass-777" "SECRET-body-888")))
+
+(test a-printed-request-hides-every-header-value
+  "Every header's value is hidden, not only known ones: X-Custom-Token stands for a provider's own
+key header. The names stay, so a reader can see which headers were sent."
+  (let ((req (%secret-request :url "https://api.example.com/v1/images")))
+    (dolist (text (%printings req))
+      (is (null (%leaked text)) "~S in ~A" (%leaked text) text)
+      (is (search "authorization=<hidden>" text) "~A" text)
+      (is (search "x-goog-api-key=<hidden>" text) "~A" text)
+      (is (search "X-Custom-Token=<hidden>" text) "~A" text)
+      (is (search "https://api.example.com/v1/images" text) "the URL is shown: ~A" text)
+      (is (search "POST" text)))))
+
+(test a-printed-request-hides-query-values-the-user-part-and-the-body
+  (let ((req (%secret-request :url "https://user:SECRET-pass-777@api.example.com/v1/x?key=SECRET-query-666&model=fast"
+                              :content "{\"prompt\":\"SECRET-body-888\"}")))
+    (dolist (text (%printings req))
+      (is (null (%leaked text)) "~S in ~A" (%leaked text) text)
+      (is (search "https://<hidden>@api.example.com/v1/x?key=<hidden>&model=<hidden>" text) "~A" text)
+      (is (search "body: 28 characters" text) "the body's size, not the body: ~A" text)))
+  (is (search "body: 3 bytes" (prin1-to-string (http:make-request :url "https://x.example" :content (make-array 3 :element-type '(unsigned-byte 8))))))
+  (is (search "body: 2 fields" (prin1-to-string (http:make-request :url "https://x.example" :content '(("a" . "SECRET-body-888") ("b" . "2"))))))
+  (is (null (%leaked (prin1-to-string (http:make-request :url "https://x.example" :content '(("a" . "SECRET-body-888")))))))
+  (is (string= "#<AION/HTTP-CLIENT:REQUEST GET https://x.example>"
+               (let ((*package* (find-package :cl-user))) (prin1-to-string (http:make-request :url "https://x.example"))))
+      "the control: a request with nothing to hide prints its method and URL"))
+
+(defun %fail-holding (req)
+  "Signal while REQ is this frame's argument, as SEND-REQUEST's frames hold it while a request is
+sent."
+  (declare (optimize (debug 2)))
+  (when (http:request-p req)
+    (error "the transport failed"))
+  req)
+
+(test a-backtrace-through-a-frame-holding-a-request-shows-no-secret
+  "A debugger or a logged backtrace prints each frame's arguments; a request among them used to
+print with its headers."
+  (let ((trace (with-output-to-string (out)
+                 (handler-case
+                     (handler-bind ((error (lambda (c) (declare (ignore c))
+                                             (sb-debug:print-backtrace :stream out :count 30))))
+                       (%fail-holding (%secret-request :url "https://api.example.com/v1/x?key=SECRET-query-666")))
+                   (error () nil)))))
+    (is (search "%FAIL-HOLDING" trace) "the frame is in the backtrace")
+    (is (search "REQUEST POST" trace)
+        "precondition: the request is printed in it, so the next check is not vacuous: ~A"
+        (subseq trace 0 (min 600 (length trace))))
+    (is (null (%leaked trace)) "~S in the backtrace" (%leaked trace))))

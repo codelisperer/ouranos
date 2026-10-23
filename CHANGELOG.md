@@ -1479,6 +1479,14 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: a `request` prints without its secrets** (#844). It printed every slot, so a
+  backtrace or a debugger that showed a request on the stack showed its headers, an
+  `authorization` or `x-goog-api-key` value among them, and its body. It now prints its method,
+  its URL with each query value and any user and password replaced by `<hidden>`, each header's
+  name with its value replaced by `<hidden>`, and the body's size. Every header value is hidden,
+  not only known ones. Code that read a request's printed form for its headers should read
+  `request-headers` instead.
+
 - **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
   - A refusal whose `description` is not a string is reported with its class and the response
     body as detail. Before, it signalled a `type-error`.
