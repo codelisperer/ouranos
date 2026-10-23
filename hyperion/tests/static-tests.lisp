@@ -288,6 +288,24 @@ other systems."
       (setf (fdefinition 'static::%darwin-open-flags)
             (lambda () (logandc2 (funcall real) static::+o-nofollow-any+))))))
 
+(defun %open-report (path)
+  "What macOS's steps give for PATH, the path the response was asked for, as a string for a
+control's failure message: the truename, lstat's file type, the flags %DARWIN-OPEN-FLAGS
+gives now, the open's result and errno, and F_GETPATH of what it opened. Elsewhere, the
+truename alone."
+  (let ((native (ignore-errors (sb-ext:native-namestring (truename path)))))
+    #-darwin (format nil "truename ~S" native)
+    #+darwin
+    (multiple-value-bind (ok dev ino mode) (and native (sb-unix:unix-lstat native))
+      (declare (ignore dev ino))
+      (let ((flags (static::%darwin-open-flags)))
+        (multiple-value-bind (fd errno) (and native (sb-unix:unix-open native flags 0))
+          (unwind-protect
+               (format nil "truename ~S, lstat ~:[failed~;type #o~O~], flags #x~X, open ~:[failed, errno ~D~;fd~*~], F_GETPATH ~S"
+                       native ok (and ok (logand mode sb-unix:s-ifmt)) flags fd errno
+                       (and fd (ignore-errors (static::%fd-path fd))))
+            (when fd (sb-unix:unix-close fd))))))))
+
 (defun %restore-macos-open-flags ()
   #+darwin
   (when *macos-open-flags*
@@ -349,8 +367,8 @@ closes."
                             (text (and r (%body-text (third r)))))
                        (if control
                            (is (equal "outside the root" text)
-                               "control (~:[elsewhere~;backslash sibling~]): without the handle check the outside file is served"
-                               sibling)
+                               "control (~:[elsewhere~;backslash sibling~]): without the handle check the outside file is served; got ~S; ~A"
+                               sibling text (%open-report (merge-pathnames "sub/page.txt" root)))
                            (is (null r) "a file outside the root (~:[elsewhere~;backslash sibling~]) was served: ~S"
                                sibling text))))
                 (setf (fdefinition 'static::%open-inside) open-inside
@@ -578,7 +596,8 @@ made to accept anything, the same swap serves the outside file."
                         (text (and r (%body-text (third r)))))
                    (if control
                        (is (equal "outside the root" text)
-                           "control: without the containment check the outside file is served")
+                           "control: without the containment check the outside file is served; got ~S; ~A"
+                           text (%open-report page))
                        (is (null r) "the outside file was served: ~S" text))))
             (setf (fdefinition 'static::%open-inside) open-inside
                   (fdefinition 'static::%path-inside-p) path-inside-p)
