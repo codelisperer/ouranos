@@ -43,12 +43,16 @@ that hides which scripts it is about.")
                ;; To COMPUTE a fixture's sha256 rather than hand-write one. A hand-written
                ;; hash is a second copy of a fact, and the test would then be checking that
                ;; two hand-written things agree (pre-publication issue 466).
-               "ironclad")
+               "ironclad"
+               ;; A local HTTP server standing in for the GitHub API in check-upstream's
+               ;; --online test (the hub's review of #738).
+               (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests"
                 :serial t
                 :components ((:file "checkers") (:file "dump-image") (:file "carry-natives")
                              (:file "windows-launcher") (:file "lazy-natives")
                              (:file "windows-installer-swap") (:file "bundle-sources")
-                             (:file "tree-natives") (:file "release-settings"))))
+                             (:file "tree-natives") (:file "release-settings")
+                             (:file "release-file-readers") (:file "with-mode"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))

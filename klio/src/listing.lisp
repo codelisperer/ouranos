@@ -7,6 +7,10 @@
 ;;;; every path SITE-PATHS lists and writes what comes back. So the hosted site and the exported
 ;;;; one cannot disagree about what lives where.
 ;;;;
+;;;; COLLECTION LISTINGS ARE OFF UNLESS A SITE NAMES THEM (#557). A collection named in the
+;;;; :COLLECTIONS option gets a listing at /<name>/, paginated like the others; one that is not
+;;;; named has no listing page, and reaches a page only through a theme's call to COLLECTION.
+;;;;
 ;;;; THE URLS ARE DEFAULTS A SITE CAN CHANGE, in SITE-OPTIONS: /tags/<tag>/, /page/2/,
 ;;;; /feed.xml, /atom.xml and /search.json. A listing's first page is its bare URL, and page N is
 ;;;; that URL plus page/N/. A SEARCH-PATH of NIL means the site has no search.json (#556).
@@ -22,7 +26,7 @@
 (defstruct (site-options (:constructor %make-site-options) (:copier nil))
   "Everything SITE-APP and EXPORT-SITE take besides the site. Made by %OPTIONS from their
 keyword arguments."
-  page-theme index-theme not-found tag-theme
+  page-theme index-theme not-found tag-theme collection-theme (collections '())
   per-page base-url feed-title feed-collection (feed-limit 20)
   (tags-prefix "tags") (page-segment "page")
   (rss-path "feed.xml") (atom-path "atom.xml") (search-path "search.json"))
@@ -96,6 +100,35 @@ under the current SITE-OPTIONS. For a theme's previous and next links."
 (defun tag-url (tag)
   "The URL of TAG's listing, its first page."
   (page-url 1 tag))
+
+(defun %collection-name (entry)
+  "The collection name of a :COLLECTIONS entry, a name or (name . ordering), without slashes at
+either end."
+  (string-trim "/" (if (consp entry) (first entry) entry)))
+
+(defun %collection-ordering (entry)
+  "The ordering keywords of a :COLLECTIONS entry, as COLLECTION takes them: :SORT-BY, :ORDER and
+:THEN-BY. NIL for an entry that is a bare name."
+  (and (consp entry) (rest entry)))
+
+(defun collection-url (name &optional (page 1))
+  "The URL of page PAGE of the listing of collection NAME, which the :COLLECTIONS option must
+name for the page to exist (#557)."
+  (concatenate 'string "/" (%listing-path (string-trim "/" name) page)))
+
+(defun %collection-documents (tree entry now)
+  "The documents of the collection ENTRY names, in ENTRY's order, as TREE-COLLECTION gives them."
+  (apply #'tree-collection tree (%collection-name entry) :now now (%collection-ordering entry)))
+
+(defun %collection-listing-at (path)
+  "When PATH is a page of a listed collection's listing, (values ENTRY PAGE); NIL otherwise. A
+path under the collection that is not a listing page, such as roles/a, is a document's."
+  (dolist (entry (site-options-collections *site-options*) nil)
+    (let ((base (concatenate 'string (%collection-name entry) "/")))
+      (when (and (>= (length path) (length base))
+                 (string= base path :end2 (length base)))
+        (let ((page (%parse-listing (subseq path (length base)))))
+          (when page (return (values entry page))))))))
 
 ;;; --- feeds -----------------------------------------------------------------------
 
@@ -240,6 +273,11 @@ of :HTML, :RSS, :ATOM or :JSON, or NIL when there is none. Reads *SITE-OPTIONS*.
       (index-page
        (let ((html (%listing site readable index-page (site-options-index-theme o))))
          (and html (values :html html))))
+      ((%collection-listing-at path)
+       (multiple-value-bind (entry page) (%collection-listing-at path)
+         (let ((html (%listing site (%collection-documents tree entry now) page
+                               (site-options-collection-theme o) (%collection-name entry))))
+           (and html (values :html html)))))
       ((and (> (length path) (length tags-base)) (string= tags-base path :end2 (length tags-base)))
        (let* ((rest (subseq path (length tags-base)))
               (slash (position #\/ rest))
@@ -268,6 +306,10 @@ of :HTML, :RSS, :ATOM or :JSON, or NIL when there is none. Reads *SITE-OPTIONS*.
            append (loop for page from 1 to (%page-count (length documents) per-page)
                         collect (%listing-path (format nil "~A/~A" (site-options-tags-prefix o) slug)
                                                page)))
+     (loop for entry in (site-options-collections o)
+           append (loop with count = (length (%collection-documents tree entry now))
+                        for page from 1 to (%page-count count per-page)
+                        collect (%listing-path (%collection-name entry) page)))
      (when (site-options-base-url o)
        (list (site-options-rss-path o) (site-options-atom-path o)))
      (when (site-options-search-path o)

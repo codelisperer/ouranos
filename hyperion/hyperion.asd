@@ -38,6 +38,7 @@
   :version "0.0.0"
   :depends-on ("coalton"
                "hyperion/http1"                       ; the reason-phrase table (#372); Coalton only
+               "hyperion/sidecar"                    ; dev:serve and dev:watch start the app's dev sidecars (#700)
                "aion/log"                             ; neutral logging facade (leftward dep
                "aion/dynamic"   ; carries the request context across a thread (#158))
                "aion/interceptor"                     ; the typed pipeline (pre-publication issue 177; was a file here)
@@ -105,6 +106,7 @@
                               :components ((:file "cldr-plurals")))  ; GENERATED, pinned
                              (:file "plural")   ; CLDR operand model + rule evaluator
                              (:file "i18n")     ; locale dictionaries + negotiation
+                             (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
@@ -232,10 +234,11 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; clack for clackup and its release directory, whose test fixtures the cases read;
-  ;; dexador is the client Clack's own suite uses, and usocket finds a free port as it does.
-  ;; All three are already in the tree.
-  :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "clack" "dexador" "usocket"
-               "fiveam")
+  ;; dexador is the client Clack's own suite uses, and usocket finds a free port as it does;
+  ;; those three were already in the tree. aion/uv for uv-error, which tells a taken port
+  ;; from other listen failures (#519).
+  :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "aion/uv" "clack" "dexador"
+               "usocket" "fiveam")
   :serial t
   :components ((:file "tests/clack-handler-uv-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/clack-handler-uv/tests :run-tests)))
@@ -305,6 +308,25 @@
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
+(defsystem "hyperion/sidecar"
+  :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; aion/windows on Windows starts each sidecar suspended in a kill-on-close job object with no
+  ;; console window (#700). Nothing here depends on hyperion, so hyperion can depend on this.
+  :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows"))
+  :components ((:file "src/sidecar"))
+  :in-order-to ((test-op (test-op "hyperion/sidecar/tests"))))
+
+(defsystem "hyperion/sidecar/tests"
+  :description "Tests for hyperion/sidecar. Each sidecar is a child SBCL started with --eval."
+  :depends-on ("hyperion/sidecar" "hyperion" "hyperion/test-ports" "aion/secret" "aion/log" "log4cl" "fiveam"
+               "clack-handler-hunchentoot"
+               ;; On Windows, for WIN32-ERROR, which the no-job test signals.
+               (:feature :win32 "aion/windows"))
+  :components ((:file "tests/sidecar-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/sidecar/tests :run-tests)))
+
 (defsystem "hyperion/test-ports"
   :description "Test support: a candidate port for a test server, and a retry when it is taken."
   :author "Bob <eternal.recursion@proton.me>"
@@ -328,7 +350,8 @@
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
                (:require "sb-bsd-sockets"))
   :serial t
-  :components ((:file "tests/assets-tests"))
+  :components ((:file "tests/assets-tests")
+               (:file "tests/htmx-smoke-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
 ;;; Durable session store, backed by mnemosyne. A separate system so hyperion core keeps
@@ -355,7 +378,7 @@
   :description "Run a Hyperion app as a native desktop window (out-of-process OS webview)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "aion/platform" "aion/log" (:require "sb-bsd-sockets"))
+  :depends-on ("hyperion" "hyperion/sidecar" "aion/platform" "aion/log" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "src/desktop")))
 
@@ -463,7 +486,7 @@
   :description "A mnemosyne-backed backend for hyperion/session's STORE protocol (durable sessions)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "mnemosyne")
+  :depends-on ("hyperion" "mnemosyne" "aion/log")
   :serial t
   :components ((:file "src/session-db"))
   :in-order-to ((test-op (test-op "hyperion/session-db/tests"))))
@@ -523,20 +546,23 @@
   :description "A mnemosyne-backed identity store: users, PBKDF2 passwords, temp-password flag, roles."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "mnemosyne" "ironclad")
+  :depends-on ("hyperion" "mnemosyne" "ironclad"
+               "aion/random")                         ; #690: email and reset tokens
   :serial t
-  :components ((:file "src/auth-db"))
+  :components ((:file "src/auth-db")
+               (:file "src/auth-email"))  ; #690: confirmation, change of address, reset
   :in-order-to ((test-op (test-op "hyperion/auth-db/tests"))))
 
 (defsystem "hyperion/auth-db/tests"
   :description "Integration tests for the identity store (SQLite, and Postgres when MNEMOSYNE_TEST_PG_URL is set)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/auth-db" "mnemosyne" "fiveam" "bordeaux-threads" "aion/test-threads")  ; auth-db-tests.lisp calls mnemosyne: directly
+  :depends-on ("hyperion/auth-db" "hyperion" "mnemosyne" "fiveam" "bordeaux-threads" "aion/test-threads")  ; auth-db-tests.lisp calls mnemosyne: directly; auth-email-tests.lisp hyperion/session
   ;; The Postgres tests (#371) run when MNEMOSYNE_TEST_PG_URL is set and skip, saying so, when it
   ;; is not; the rest of the suite is in-memory and file SQLite.
   :serial t
-  :components ((:file "tests/auth-db-tests"))
+  :components ((:file "tests/auth-db-tests")
+               (:file "tests/auth-email-tests"))  ; #690
   :perform (test-op (o c) (uiop:symbol-call :hyperion/auth-db/tests :run-tests)))
 
 ;;; Example apps (like praxeon's elise/chat-rbt) -- each a runnable, buildable proof
@@ -663,5 +689,6 @@
                              (:file "logging-tests")
                              (:file "import-tests")
                              (:file "markdown-tests")
-                             (:file "html-attributes-tests"))))
+                             (:file "html-attributes-tests")
+                             (:file "page-meta-tests"))))  ; after i18n-tests, whose %ATTR-P it uses
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))

@@ -73,6 +73,15 @@ resolved to (:LOOPBACK, :PRIVATE, :LINK-LOCAL and so on). ADDRESS is that addres
                      (too-many-redirects-limit c) (too-many-redirects-url c))))
   (:documentation "FETCH-PUBLIC was redirected more than its MAX-REDIRECTS times."))
 
+(define-condition fetch-deadline-exceeded (http-error)
+  ((url :initarg :url :reader fetch-deadline-exceeded-url)
+   (deadline :initarg :deadline :reader fetch-deadline-exceeded-deadline))
+  (:report (lambda (c s)
+             (format s "fetch-public: ~A did not finish within its deadline of ~A seconds"
+                     (fetch-deadline-exceeded-url c) (fetch-deadline-exceeded-deadline c))))
+  (:documentation "FETCH-PUBLIC did not finish within its DEADLINE (#807). URL is the hop it was
+on. A body cut short by the deadline is never returned as a response."))
+
 ;;; --- the values -----------------------------------------------------------
 
 (defstruct (request (:constructor make-request (&key (method :get) url
@@ -175,6 +184,51 @@ what matter; this accessor's job is to always produce something printable."
             (sb-ext:octets-to-string (response-bytes response)
                                      :external-format '(:utf-8 :replacement #\ufffd)))))
 
+(defun %printable-url (url)
+  "URL as a request prints it (#844): the scheme, host and path as given, a user and password
+before the host replaced by <hidden>, and each query parameter's value replaced by <hidden>, its
+name kept. A query value is often a key (?key=...), and a user part is a password."
+  (if (not (stringp url))
+      (princ-to-string url)
+      (let* ((query-at (position #\? url))
+             (base (subseq url 0 (or query-at (length url))))
+             (scheme-end (search "://" base))
+             (authority-start (if scheme-end (+ scheme-end 3) 0))
+             (authority-end (or (position #\/ base :start authority-start) (length base)))
+             (at (position #\@ base :start authority-start :end authority-end :from-end t))
+             (base (if at
+                       (concatenate 'string (subseq base 0 authority-start)
+                                    "<hidden>" (subseq base at))
+                       base)))
+        (if (null query-at)
+            base
+            (format nil "~A?~{~A~^&~}" base
+                    (loop for pair in (uiop:split-string (subseq url (1+ query-at)) :separator "&")
+                          for eq = (position #\= pair)
+                          when (plusp (length pair))
+                            collect (if eq (format nil "~A=<hidden>" (subseq pair 0 eq)) pair)))))))
+
+(defmethod print-object ((r request) stream)
+  "The method, the URL with its secrets hidden, the header names with every value replaced by
+<hidden>, and the body's size -- never a header value or the body (#844).
+
+A request is on the stack while it is sent, so a backtrace or a debugger prints it whenever a
+condition escapes then. Its headers carry credentials (authorization, x-goog-api-key, x-api-key,
+cookie) and its body can hold one or the user's data, so the default structure printer put them
+in every such backtrace. Every header's value is hidden, not a list of known names: a provider's
+own key header is not on any list."
+  (print-unreadable-object (r stream :type t)
+    (format stream "~A ~A" (request-method r) (%printable-url (request-url r)))
+    (when (request-headers r)
+      (format stream " headers: ~{~A=<hidden>~^, ~}"
+              (mapcar (lambda (h) (if (consp h) (car h) "?")) (request-headers r))))
+    (let ((content (request-content r)))
+      (cond ((null content))
+            ((stringp content) (format stream " body: ~D character~:P" (length content)))
+            ((vectorp content) (format stream " body: ~D byte~:P" (length content)))
+            ((listp content) (format stream " body: ~D field~:P" (length content)))
+            (t (format stream " body: a ~(~A~)" (type-of content)))))))
+
 (defmethod print-object ((r response) stream)
   "Status and a byte COUNT -- never the body.
 
@@ -228,6 +282,41 @@ was."
   (let ((v (header-value headers "content-length")))
     (and (stringp v) (ignore-errors (parse-integer v)))))
 
+;;; --- the deadline watch of FETCH-PUBLIC (#807) ---------------------------------
+
+(defstruct (%watch (:constructor %make-watch ()))
+  "The socket a FETCH-PUBLIC with a deadline is using, and whether its deadline has passed.
+Every field is read and written with LOCK held."
+  (lock (sb-thread:make-mutex :name "fetch-public deadline"))
+  (socket nil)
+  (fired nil))
+
+(defvar *%watch* nil
+  "The deadline watch of the FETCH-PUBLIC running in this thread, or NIL.")
+
+(defun %lend-socket (socket)
+  "Hand SOCKET to the running fetch's deadline watch, so the deadline can shut it down. When the
+deadline has already passed, shut it down now; the fetch then reports the deadline."
+  (let ((w *%watch*))
+    (when w
+      (sb-thread:with-mutex ((%watch-lock w))
+        (if (%watch-fired w)
+            (ignore-errors (usocket:socket-shutdown socket :io))
+            (setf (%watch-socket w) socket))))))
+
+(defun %take-back-socket ()
+  "Take the socket away from the running fetch's deadline watch. Called before every close: a
+closed socket keeps its descriptor number, and a shutdown after the close could reach whatever
+reused that number."
+  (let ((w *%watch*))
+    (when w
+      (sb-thread:with-mutex ((%watch-lock w))
+        (setf (%watch-socket w) nil)))))
+
+(defun %close-body (body)
+  (%take-back-socket)
+  (ignore-errors (close body)))
+
 (defun %read-capped (body limit url)
   "BODY as octets, reading at most LIMIT of them. BODY is a stream (closed here) or a vector.
 Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
@@ -241,7 +330,7 @@ Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
                     (end (read-sequence buffer body)))
                (when (> end limit) (too-large))
                (subseq buffer 0 end))
-          (ignore-errors (close body)))
+          (%close-body body))
         (let ((octets (%as-octets body)))
           (when (> (length octets) limit) (too-large))
           octets))))
@@ -278,7 +367,7 @@ has no response to hand back, so it signals HTTP-ERROR directly."
     (flet ((response (status headers body)
              (let ((declared (and limit (%content-length headers))))
                (when (and declared (> declared limit))
-                 (when (streamp body) (ignore-errors (close body)))
+                 (when (streamp body) (%close-body body))
                  (error 'response-too-large
                         :limit limit
                         :detail (format nil "~A declares a body of ~D bytes, over the limit of ~D"

@@ -242,6 +242,14 @@ browser is attached to). Backends sit behind a small `store` protocol;
 `make-memory-store` is the in-memory default and `hyperion/session-db` is the DB-backed one.
 Nickname it: `(:local-nicknames (#:session #:hyperion/session))`.
 
+**On Postgres, make the DB store over the app's pool:** `(make-db-store pool :dialect
+:postgres)`, the same pool given to `hyperion/db-connection:wrap-connection`. Each store
+operation then borrows a connection, and when Postgres has ended that connection (SQLSTATE
+57P01, at a provider's maintenance or a restart), the operation runs once more on a new
+connection (#636). A store made over one connection can do the same only when it is given the
+backend that connection came from, `:backend`; without it, every later session lookup fails
+until the process restarts.
+
 **Changes are written back by `wrap-session`.** A DB-backed store hands out a fresh copy of the
 session on every request, so `wrap-session` writes the session back through `store-save`
 after the handler whenever the data bag changed (`session-set`, `session-del`,
@@ -474,6 +482,60 @@ Opt-in, so existing code is unaffected. Checked on `create-user`, `grant-role` *
 `revoke-role` — a typo on the way out is the worse direction, since you believe you removed
 a role and did not.
 
+### Confirming an address, changing it, and resetting a password (#690)
+
+The store owns the tokens, the checks and the writes. It sends no mail, because hyperion cannot
+depend on `hermes`: every function that creates a token returns it with the address it is for,
+and the app mails a link carrying it. The app also renders every page. The store needs the
+column and tables in `docs/migrations.md` section 5, or `:ensure t`.
+
+```lisp
+;; Sign-up, or "resend the confirmation":
+(multiple-value-bind (token email) (auth:issue-confirmation *auth* user-id)
+  (mail email (link "/confirm" token)))
+(auth:confirm-email *auth* token)                   ; => USER, now (auth:email-confirmed-p user)
+
+;; Change of address, from a form that asks for the current password:
+(multiple-value-bind (token new old) (auth:request-email-change *auth* user-id new-email
+                                                                :password current-password)
+  (mail new (link "/confirm-change" token))
+  (mail old "A change of address was requested for your account."))
+(multiple-value-bind (user old revert) (auth:confirm-email-change *auth* token)
+  (mail old (link "/revert-change" revert))         ; "your address was changed; undo it here"
+  (session:end-sessions sessions :user-id (auth:user-id user) :except current-session)
+  (session:rotate-session sessions current-session))
+(auth:revert-email-change *auth* revert sessions)   ; restores the old address, ends every session
+
+;; Password reset. Show the same page whether or not ISSUE-PASSWORD-RESET found an account.
+(multiple-value-bind (token user) (auth:issue-password-reset *auth* email)
+  (when token (mail (auth:user-email user) (link "/reset" token))))
+(auth:reset-password *auth* token new-password)
+```
+
+- **Unconfirmed is a state, not a refusal.** `email-confirmed-p` reports it, and the app decides
+  what an unconfirmed account may do.
+- **A token works once, for one purpose, and for the address it was sent to.** Everything else
+  signals `invalid-token`. Its reason (`:unknown`, `:used`, `:expired`, `:superseded`) is for
+  the log; show the visitor the same page for all four. Lifetimes are 24 hours for a
+  confirmation or a change, 1 hour for a reset and 7 days for a revert, set with
+  `:confirm-token-seconds`, `:reset-token-seconds` and `:revert-token-seconds`.
+- **A user is sent at most 5 tokens of one purpose an hour** (`:token-limit`, `:token-window`);
+  the sixth signals `too-many-tokens` with the seconds to wait. This limits mail to one
+  account. Limit the routes by address as well, as in `docs/rate-limit.md`: a change request
+  refused with `duplicate-email` tells the signed-in user that the address has an account.
+- **A change of address cancels the user's unused confirmation, change and reset tokens**, so a
+  link mailed to the old address stops working. It does not cancel the revert link. Whoever
+  changed the address could otherwise change it again to cancel the link the owner was sent.
+  A revert cancels the revert link it uses and every revert link sent after it, and keeps the
+  older ones, so a hijacker who uses their own revert link cannot cancel the owner's.
+- **`request-email-change` requires the current password**, so a session someone else has taken
+  over cannot start a change. Pass `:password :skip` for an account that signs in without one.
+- **`set-email` is the operator path.** It changes the address at once, requires `:actor`,
+  and leaves the address unconfirmed unless `:confirmed t`; call `issue-confirmation`
+  afterwards to have the new address prove itself.
+- `email-history` returns the recorded confirmations and changes, with the actor, oldest first.
+  `prune-email-tokens` deletes expired tokens; run it from a scheduled job.
+
 ## Request logging (`hyperion/logging`)
 
 `server:start` wraps your app in request logging by default (`:log nil` opts out). Each
@@ -552,28 +614,81 @@ Do not trust a proxy you do not run or pay for. A hop count is right only when e
 reaches the app through that many proxies. If the app can also be reached directly, use
 `:cidrs`, so that a direct request's forwarded headers are ignored.
 
+## Link previews (`hyperion/page-meta`, #821)
+
+A link pasted into a chat or a social network shows a preview card only when the page's
+`<head>` carries Open Graph and Twitter-card tags with absolute URLs. Set the site once at
+startup, then call `meta-tags` in the layout's head:
+
+```lisp
+(setf hyperion/page-meta:*site*
+      (hyperion/page-meta:make-site :name "Example News"
+                                    :origin "https://example.com" ; or HYPERION_PUBLIC_ORIGIN
+                                    :image "/static/card.png" :image-width 1200 :image-height 630
+                                    :image-alt "The Example News logo"
+                                    :twitter "@examplenews"))
+
+(defun layout (meta body)
+  (spin:with-html-string
+    (:html (:head (:title (getf meta :title))
+                  (apply #'hyperion/page-meta:meta-tags meta))
+           (:body (:raw body)))))
+
+(layout (list :title "Rates rise" :description "The bank raised its rate today."
+              :url "/news/rates" :type :article :image "/img/rates.jpg" :visibility :public
+              :locale locale :published-time (get-universal-time) :author "A. Writer")
+        body)
+```
+
+- Every URL is made absolute from the site's origin, never from the request's Host header,
+  which the client chooses. A path starting with `/` is joined to the origin. An absolute URL
+  must be https; anything else signals `page-meta-error`.
+- The canonical `:url` must be on the site's own origin, and its query and fragment are
+  dropped, because a query often carries a token such as a reset link's. Pass
+  `:keep-query t` for a page whose query is part of its identity. An image may be on another
+  https host, such as a CDN.
+- The description is plain text: markup is not removed, so pass the page's summary as text,
+  not its HTML. It is cut to 200 characters on a word boundary. `:locale` takes what
+  `i18n:resolve-locale` returns, and becomes `og:locale` (`:en-gb` is `en_GB`).
+- A page with no image uses the site's fallback image. An image URL presigned with an
+  expiry is replaced by the fallback too, because a crawler keeps the card longer than the
+  URL lasts; serve card images from a stable public URL.
+- `:visibility` is required, so a layout cannot forget to say that a page is private. A
+  public page passes `:visibility :public`. A page that needs sign-in passes
+  `:visibility :private`, and one kept out of search
+  engines passes `:noindex`. Either gets `robots noindex` and the site's name and fallback
+  image, and nothing from its own title, description, URL, image or `:site-name`.
+- `page-meta` returns the tags as a list of `(kind name value)` for a test or a layout that
+  writes its own markup.
+
 ## Static files + HTTP caching (`hyperion/static`)
 
 `file-response` maps a URL path onto a file under a root directory, refusing `..`
-traversal and inferring the content type from the extension. The body is a **pathname**,
-which is the Clack contract for a file, and `file-response` deliberately sets no
-`Content-Length` — the backend does, because the backend is what knows how it will send the
-file.
+traversal and inferring the content type from the extension. The body is the **open file
+stream** of the file it checked, not a pathname (#314). `file-response` opens the file, asks
+the operating system which file the open handle actually refers to, and serves it only when
+that path is still under the root. A directory swapped for a symbolic link between the
+check and the open therefore cannot make it serve a file outside the root. `file-response`
+sets no `Content-Length`; the server takes it from the open stream.
 
-**What each backend does with it differs, and it is worth knowing which you are on.** Woo and
-Hunchentoot `sendfile(2)` it. The native `:uv` server declares `Content-Length` from the file
-and copies it to the socket in bounded pieces (`hyperion/server-uv:*file-chunk-bytes*`,
-64 KiB), so a large download costs one piece of memory rather than the whole file — it does
-not hold the file in the image, and it does not use `sendfile` either (pre-publication issue 313; `sendfile` on
-`:uv` removes the copy through user space and is PLANNED, a separate change from the bounded
-memory).
+**What each backend does with it differs, and it is worth knowing which you are on.** The
+native `:uv` server declares `Content-Length` from the stream and copies it to the socket in
+bounded pieces (`hyperion/server-uv:*file-chunk-bytes*`, 64 KiB), so a large download costs
+one piece of memory rather than the whole file. It does not use `sendfile` (pre-publication
+issue 313; `sendfile` on `:uv` is PLANNED). On Clack backends, `hyperion:wrap-streaming-body`
+turns the stream into a writer loop of 64 KiB pieces with `Content-Length` taken from the
+stream: Hunchentoot sends that length, and Woo sends the file chunked, without
+`Content-Length`. Every server closes the stream after the response. A `HEAD` request that
+reaches `file-response` directly gets the file's length and no body, and the server closes the
+stream. A `HEAD` request answered through `hyperion/router`'s GET route has its body removed
+by the router, which closes the stream; that response carries no file length, as before.
 
 ```lisp
 (static:file-response #p"/srv/app/resources/public/" (getf env :path-info))
 ;; => (200 (:content-type "text/css" :etag "\"8f3e9a1-4d2\""
 ;;          :last-modified "Sun, 26 Jul 2026 21:14:03 GMT"
 ;;          :cache-control "public, max-age=3600")
-;;     #P"/srv/app/resources/public/app.css")
+;;     #<SB-SYS:FD-STREAM for "file /srv/app/resources/public/app.css" {…}>)
 ```
 
 Every response carries **cache validators** and a **policy**, because without them a

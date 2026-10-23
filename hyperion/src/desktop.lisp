@@ -14,6 +14,7 @@
   (:use #:cl)
   (:local-nicknames (#:platform #:aion/platform)
                     (#:csrf #:hyperion/csrf)
+                    (#:sidecar #:hyperion/sidecar)
                     (#:log #:aion/log))
   (:documentation
    "Run a Hyperion app as a native desktop window: boot the server in-process on a free
@@ -79,7 +80,8 @@ at the implementation."
   (platform:executable-directory))
 
 (defun shipped-image-p ()
-  "True when this image is a shipped build of an app, and NIL in a developer's REPL (#416).
+  "True when this image is a shipped build of an app, and NIL in a developer's REPL (#416) and
+under bin/cons, which bootstrap.lisp dumps as a development runner (#703).
 
 A shipped build is one dumped file on Linux; on macOS, a launcher, the runtime `sbcl' and
 `sbcl.core' in `<name>.app/Contents/MacOS'; on Windows, `<name>.exe', `sbcl-runtime.exe' and
@@ -314,6 +316,16 @@ anyway and would warn about being given a count."
         ((eq server :uv) 1)
         (t nil)))
 
+(defun %start-sidecars (names handler)
+  "Start the sidecars NAMES for RUN-APP with HANDLER's port, and return their set; NIL when there
+are none, and NIL with a warning in a shipped image, which never starts a sidecar (#700)."
+  (cond ((null names) nil)
+        ((shipped-image-p)
+         (log:warn "hyperion/desktop: sidecars are for development, so a shipped image does not start them"
+                   :count (length names))
+         nil)
+        (t (sidecar:start-sidecars names :port (and handler (hyperion/server:handler-port handler))))))
+
 (defun run-app (app &key (title "App") (width 1200) (height 800)
                          (backend :embedded)
                          (port :auto)
@@ -322,7 +334,7 @@ anyway and would warn about being given a count."
                          (request-guard :same-origin)
                          (launcher (default-launcher))
                          icon placement-file (workers nil workers-p) (loops nil loops-p)
-                         on-ready on-close)
+                         on-ready on-close sidecars)
   "Run a Hyperion APP as a native desktop window, blocking until the window closes.
 See hyperion/docs/desktop.md.
 
@@ -366,6 +378,10 @@ LOOPS -- the number of event loops the embedded server runs, passed to HYPERION/
   Pass :LOOPS NIL for :uv's own default. Windows runs one loop whatever is asked. On other
   servers it defaults to NIL.
 ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits.
+SIDECARS -- a list of names declared with HYPERION/SIDECAR:DEFINE-SIDECAR (#700). They start
+  once the embedded server is listening, with its port for \"{port}\", and before ON-READY; they
+  stop after ON-CLOSE. A shipped image ignores them, with a warning, so a desktop build cannot
+  start one.
 
 The window and the server end together. REQUEST-CLOSE, from any thread, closes the window,
 and RUN-APP then stops the server and returns. If RUN-APP is left any other way, including the
@@ -383,8 +399,11 @@ process exiting from another thread, it stops the launcher on the way out (#355)
          (setf *remote-backend* (second backend))
          (%start-embedded app port server request-guard workers loops))
         (t (error "hyperion/desktop: unrecognized :backend ~S" backend)))
+    (let ((set nil))
     (unwind-protect
          (progn
+           ;; Inside the UNWIND-PROTECT, so a sidecar that cannot start still stops the server.
+           (setf set (%start-sidecars sidecars handler))
            (when on-ready (funcall on-ready url))
            (ecase shell
              (:webview
@@ -402,6 +421,9 @@ process exiting from another thread, it stops the launcher on the way out (#355)
              (:browser
               (open-in-browser url)
               (%wait-for-interrupt))))
-      (when on-close (funcall on-close))
-      (when handler (ignore-errors (hyperion/server:stop handler))))
+      ;; A nested UNWIND-PROTECT, so an ON-CLOSE that signals or exits non-locally still stops
+      ;; the sidecars and the server (#708's review).
+      (unwind-protect (when on-close (funcall on-close))
+        (when set (ignore-errors (sidecar:stop-sidecars set)))
+        (when handler (ignore-errors (hyperion/server:stop handler))))))
     url))

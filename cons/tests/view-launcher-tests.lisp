@@ -15,9 +15,9 @@
   :description "scripts/view-launcher.lisp, shared by bootstrap and the gate (#13)." :in all)
 (in-suite view-launcher)
 
-(defun %tree-root ()
-  "The monorepo root: the directory holding cons/."
-  (merge-pathnames "../" (asdf:system-source-directory :cons)))
+;;; %TREE-ROOT, the monorepo root, is check-compile-tests.lisp's, which cons.asd loads before
+;;; this file. This file defined its own too, which replaced that one with the same value spelled
+;;; another way, and #577's check found it.
 
 (defun %load-view-launcher ()
   "Load scripts/view-launcher.lisp -- the file bootstrap.lisp and verify-tree.lisp load by path."

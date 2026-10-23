@@ -51,10 +51,21 @@ compact plain-text summary suitable to feed back as tool context."
                          i (gethash "title" r "") (gethash "url" r "")
                          (%truncate (gethash "content" r "") 240)))))))
 
+(defun %result-urls (parsed &key (max *max-results*))
+  "The url fields of the first MAX results in Tavily's parsed JSON: the addresses the summary
+lists, never anything taken from a snippet."
+  (let ((results (gethash "results" parsed)))
+    (when (vectorp results)
+      (loop for r across results
+            for i from 1 to max
+            for url = (and (hash-table-p r) (gethash "url" r))
+            when (stringp url) collect url))))
+
 (defun tavily-search (query &key (max-results *max-results*))
   "Search the web via Tavily for QUERY; return a compact text summary (a
-synthesized answer plus a few sources). Signals on HTTP/parse failure so the
-ACT restart protocol (retry / substitute / abandon) applies."
+synthesized answer plus a few sources) and, as a second value, the url fields of the
+sources listed. Signals on HTTP/parse failure so the ACT restart protocol (retry /
+substitute / abandon) applies."
   ;; Build the request JSON by hand to keep booleans unambiguous; jzon:stringify
   ;; handles escaping the string values (api key, query).
   (let* ((body (format nil "{\"api_key\":~A,\"query\":~A,\"max_results\":~D,\"include_answer\":true,\"search_depth\":\"basic\"}"
@@ -67,7 +78,9 @@ ACT restart protocol (retry / substitute / abandon) applies."
                                     :headers '(("content-type" . "application/json"))
                                     :content body)
                  (list (http:ensure-2xx "tavily"))))))
-    (%format-results (jzon:parse resp) :max max-results)))
+    (let ((parsed (jzon:parse resp)))
+      (values (%format-results parsed :max max-results)
+              (%result-urls parsed :max max-results)))))
 
 (defun %schema ()
   "The JSON input-schema for the means: a single required string, QUERY."
@@ -88,10 +101,22 @@ ACT restart protocol (retry / substitute / abandon) applies."
 or reference in the user's message. Returns a short summary with source links. Use
 it when understanding the user depends on facts you are unsure of.")
 
-(defun register (agent &key (name "web-search"))
+(defun register (agent &key (name "web-search") (max-per-turn 3) (search #'tavily-search))
   "Register the web-search Means on AGENT under NAME. The effect reads the \"query\"
-argument from the tool call and runs TAVILY-SEARCH. Returns NAME."
+argument from the tool call and runs SEARCH, TAVILY-SEARCH by default: a function of the
+query that returns the text for the model and, as a second value, the result URLs. Returns
+NAME.
+
+Search results are untrusted content (#827): a snippet can carry instructions, so once a
+search has run in a turn, a means registered with :REQUIRES-USER-INTENT is refused for the
+rest of it. The result URLs are recorded with ACTOR:NOTE-TURN-URLS for a reader's :ALLOW
+predicate, such as PRAXEON/WEB-PAGE:USER-OR-SEARCH-URLS, but only for a search the model
+asked for before any untrusted content entered the turn. MAX-PER-TURN, 3 by default or NIL
+for no limit, bounds the searches in one turn."
   (actor:register-means
    agent name *description*
-   (lambda (args) (tavily-search (gethash "query" args)))
-   :schema (%schema)))
+   (lambda (args)
+     (multiple-value-bind (text urls) (funcall search (gethash "query" args))
+       (actor:note-turn-urls urls)
+       text))
+   :schema (%schema) :untrusted t :max-per-turn max-per-turn))

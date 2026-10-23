@@ -35,8 +35,9 @@
 "
   "~A is replaced by the defect, an unescaped quote pair, or by nothing.")
 
-(defun %run-check-compile (dir)
-  "Run scripts/check-compile.lisp on the fixture system in DIR. (values EXIT-CODE OUTPUT)."
+(defun %run-check-compile (dir &rest more-dirs)
+  "Run scripts/check-compile.lisp on the fixture system in DIR, with DIR and MORE-DIRS in the
+source registry. (values EXIT-CODE OUTPUT)."
   (multiple-value-bind (out err code)
       (uiop:run-program
        (list (namestring sb-ext:*runtime-pathname*) "--script"
@@ -44,8 +45,10 @@
              "check-compile-fixture")
        :directory (%tree-root)
        :output :string :error-output :output :ignore-error-status t
-       :environment (cons (format nil "CL_SOURCE_REGISTRY=~A//~A" (uiop:native-namestring dir)
-                                  (uiop:inter-directory-separator))
+       :environment (cons (format nil "CL_SOURCE_REGISTRY=~{~A//~A~}"
+                                  (loop for d in (cons dir more-dirs)
+                                        collect (uiop:native-namestring d)
+                                        collect (uiop:inter-directory-separator)))
                           (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
                                      (sb-ext:posix-environ))))
     (declare (ignore err))
@@ -88,3 +91,99 @@ sends this tree's fasls to a new directory every run, so the second run must fai
           (second (%run-check-compile dir)))
       (is (= 1 first) "the first run exited ~D" first)
       (is (= 1 second) "the second run exited ~D: a cache hid the warning" second))))
+
+;;; --- a function defined in two files (#577) -------------------------------------------------
+;;;
+;;; #568 defined %PROBE-REPORT in scripts/tests/release-settings.lisp, which replaced the one in
+;;; windows-launcher.lisp loaded before it; SBCL's redefinition warning is a style-warning, so
+;;; nothing failed until four tests did on Windows. check-compile.lisp now fails such a system,
+;;; through scripts/redefinitions.lisp, as the gate does.
+
+(defparameter +two-file-asd+
+  "(defsystem \"check-compile-fixture\" :serial t :components ((:file \"a\") (:file \"b\")))
+")
+
+(defmacro %with-two-file-fixture ((dir a-source b-source) &body body)
+  "A fresh DIR holding the two-file fixture system, its files a.lisp and b.lisp holding
+A-SOURCE and B-SOURCE after a shared package definition."
+  `(tempdir:with-temporary-directory (,dir "check-compile-redef")
+     (with-open-file (out (merge-pathnames "check-compile-fixture.asd" ,dir) :direction :output)
+       (write-string +two-file-asd+ out))
+     (with-open-file (out (merge-pathnames "a.lisp" ,dir) :direction :output)
+       (format out "(defpackage #:check-compile-fixture (:use #:cl))~%(in-package #:check-compile-fixture)~%~A~%" ,a-source))
+     (with-open-file (out (merge-pathnames "b.lisp" ,dir) :direction :output)
+       (format out "(in-package #:check-compile-fixture)~%~A~%" ,b-source))
+     ,@body))
+
+(test a-function-defined-in-two-files-fails-the-system
+  "%PROBE-REPORT's case: b.lisp defines a function a.lisp already defined, with other arguments.
+The system compiles and loads, and the script fails it, naming the function and both files."
+  (%with-two-file-fixture (dir "(defun helper (program args) (list program args))"
+                               "(defun helper (bundle) (list bundle))")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "FAIL    check-compile-fixture" output) "no FAIL line for the fixture:~%~A" output)
+      (is (search "CHECK-COMPILE-FIXTURE::HELPER" output) "the report does not name the function:~%~A" output)
+      (is (and (search "a.lisp" output) (search "b.lisp" output))
+          "the report does not name both files:~%~A" output))))
+
+(test the-same-two-files-with-different-names-pass
+  "The control for the test above: the same two files, with b.lisp's function renamed."
+  (%with-two-file-fixture (dir "(defun helper (program args) (list program args))"
+                               "(defun other-helper (bundle) (list bundle))")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output))))
+
+(test a-function-defined-twice-in-one-file-is-left-to-the-compiler
+  "Within one file SBCL's compiler already fails the system: compiling a file that defines a
+function twice gives the WARNING \"Duplicate definition for HELPER found in one file\", which
+the gate fails on. So #577 reports only definitions in two different files, and a duplicate in
+one file is reported once, by the compiler, not again as a redefinition."
+  (%with-two-file-fixture (dir "(defun helper () 1)
+(defun helper () 2)"
+                               "(defun other-helper () 3)")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "Duplicate definition for HELPER found in one file" output)
+          "the compiler's warning is the reason:~%~A" output)
+      (is (not (search "defined a second time in another file" output))
+          "and it is not also reported as a redefinition:~%~A" output))))
+
+(test one-file-reached-by-two-spellings-is-not-reported
+  "b.lisp loads a.lisp again by another spelling of its path, sub/../a.lisp, so HELPER is
+redefined from what SBCL records as a different source pathname. It is the same file, and the
+script compares files by truename, so nothing is reported and the system passes."
+  (%with-two-file-fixture (dir "(defun helper () 1)"
+                               "(load (merge-pathnames \"sub/../a.lisp\" (asdf:system-source-directory \"check-compile-fixture\")))")
+    (ensure-directories-exist (merge-pathnames "sub/" dir))
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output)
+      (is (not (search "CHECK-COMPILE-FIXTURE::HELPER" output))
+          "one file was reported as two:~%~A" output))))
+
+(test a-dependency-defining-a-function-in-two-files-is-not-reported
+  "Only the checked code counts. Here the checked system depends on a system in another
+temporary directory, outside this tree and outside the checked system's own directory, whose
+two files both define HELPER. The script loads the dependency inside the same handler, and must
+not fail the checked system for what the dependency does."
+  (tempdir:with-temporary-directory (dep "check-compile-dep")
+    (with-open-file (out (merge-pathnames "check-compile-dep.asd" dep) :direction :output)
+      (write-string "(defsystem \"check-compile-dep\" :serial t :components ((:file \"a\") (:file \"b\")))
+" out))
+    (with-open-file (out (merge-pathnames "a.lisp" dep) :direction :output)
+      (format out "(defpackage #:check-compile-dep (:use #:cl))~%(in-package #:check-compile-dep)~%(defun helper (program args) (list program args))~%"))
+    (with-open-file (out (merge-pathnames "b.lisp" dep) :direction :output)
+      (format out "(in-package #:check-compile-dep)~%(defun helper (bundle) (list bundle))~%"))
+    (tempdir:with-temporary-directory (dir "check-compile-redef")
+      (with-open-file (out (merge-pathnames "check-compile-fixture.asd" dir) :direction :output)
+        (write-string "(defsystem \"check-compile-fixture\" :depends-on (\"check-compile-dep\") :components ((:file \"fixture\")))
+" out))
+      (with-open-file (out (merge-pathnames "fixture.lisp" dir) :direction :output)
+        (format out "(defpackage #:check-compile-fixture (:use #:cl))~%(in-package #:check-compile-fixture)~%(defun answer () 42)~%"))
+      (multiple-value-bind (code output) (%run-check-compile dir dep)
+        (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+        (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output)
+        (is (not (search "CHECK-COMPILE-DEP::HELPER" output))
+            "the dependency's redefinition was reported:~%~A" output)))))

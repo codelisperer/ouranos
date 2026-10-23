@@ -165,25 +165,29 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/tls/tests :run-tests)))
 
 (defsystem "aion/libgit"
-  :description "Local git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, and a diff between two revisions."
+  :description "Git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, a diff between two revisions, and fetch, fast-forward pull and push."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi"
-               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/platform"   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/secret")    ; a credential's token may be a secret (#429)
   :serial t
   :components ((:module "src/libgit"
                 :serial t
                 :components ((:file "packages")
                              (:file "ffi")
                              (:file "library")
-                             (:file "repository"))))
+                             (:file "repository")
+                             (:file "remote"))))
   :in-order-to ((test-op (test-op "aion/libgit/tests"))))
 
 (defsystem "aion/libgit/tests"
   :description "Tests for aion/libgit. Requires a built libgit2 (scripts/build-libgit2.lisp), and the git command, which checks what libgit2 wrote."
   :depends-on ("aion/libgit" "aion/fs" "fiveam" (:feature :unix (:require :sb-posix))
-               "aion/platform")   ; the tests bind *search-source-tree* (#429, #472)
+               "aion/platform"   ; the tests bind *search-source-tree* (#429, #472)
+               "aion/secret"     ; a credential whose token is a secret
+               "aion/test-http")   ; the server on 127.0.0.1 the remote tests talk to
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -312,6 +316,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "client")
+                             (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
                              (:file "fetch"))))
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
@@ -429,7 +434,9 @@
                              (:file "ffi")
                              (:file "conditions")
                              (:file "string")
-                             (:file "handle"))))
+                             (:file "handle")
+                             (:file "job")
+                             (:file "process"))))
   :in-order-to ((test-op (test-op "aion/windows/tests"))))
 
 (defsystem "aion/windows/tests"
@@ -442,7 +449,9 @@
                              (:file "layout-tests")
                              (:file "string-tests")
                              (:file "conditions-tests")
-                             (:file "file-tests"))))
+                             (:file "file-tests")
+                             (:file "job-tests")
+                             (:file "process-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :aion/windows/tests :run-tests)))
 
 (defsystem "aion/windows/registry"
@@ -534,6 +543,51 @@
                 :serial t
                 :components ((:file "pool"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/pool/tests :run-tests)))
+
+(defsystem "aion/schedule"
+  :description "Named jobs on interval, daily and weekly schedules, run once per slot across instances through a lease, with a run log (#689)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; aion/tz for local-time schedules across daylight-saving changes; aion/pool to run jobs
+  ;; off the driver thread; aion/clock for run ids; aion/log for start, finish and failure.
+  ;; The store is a protocol: the in-memory store is here, the database one is mnemosyne/jobs.
+  :depends-on ("aion/tz" "aion/pool" "aion/clock" "aion/log")
+  :serial t
+  :components ((:module "src/schedule"
+                :serial t
+                :components ((:file "packages")
+                             (:file "schedule")
+                             (:file "store")
+                             (:file "scheduler"))))
+  :in-order-to ((test-op (test-op "aion/schedule/tests"))))
+
+(defsystem "aion/schedule/tests"
+  :description "Tests for aion/schedule: next due times across daylight-saving changes, and the scheduler on a manual clock over the in-memory store."
+  :depends-on ("aion/schedule" "aion/tz" "fiveam" "aion/test-threads")
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                ;; store-checks: the store protocol's contract as a function over a store
+                ;; constructor, which mnemosyne/jobs/tests runs against its database store.
+                :components ((:file "schedule-store-checks")
+                             (:file "schedule"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/schedule/tests :run-tests)))
+
+(defsystem "aion/schedule/uv"
+  :description "Drives an aion/schedule scheduler from a libuv timer on a loop of its own (#689). Requires a built libuv (scripts/build-libuv.lisp)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("aion/schedule" "aion/uv" "aion/log")
+  :components ((:file "src/schedule/uv/uv"))
+  :in-order-to ((test-op (test-op "aion/schedule/uv/tests"))))
+
+(defsystem "aion/schedule/uv/tests"
+  :description "Tests for aion/schedule/uv. Requires a built libuv (scripts/build-libuv.lisp)."
+  :depends-on ("aion/schedule/uv" "aion/schedule" "aion/uv" "fiveam")  ; the tests stand in for aion/uv:make-timer
+  :components ((:file "tests/schedule-uv"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
 
 (defsystem "aion/interceptor"
   :description "A typed, protocol-agnostic interceptor pipeline over a context (Coalton)."
@@ -818,4 +872,9 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "all"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/tests :run-tests)))
+  ;; RUN-TESTS prints four FiveAM reports and returns NIL if any failed. That value used to be
+  ;; dropped, so a failing sub-suite still exited 0 (#605). Signalling makes the exit code say
+  ;; so, independently of the gate reading every report's Fail line.
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/tests :run-tests)
+               (error "aion/tests: a sub-suite failed; the FiveAM reports above say which"))))

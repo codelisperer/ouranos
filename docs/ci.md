@@ -141,13 +141,13 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 `coalton.pin` — one set for CI and dev machines both.
 
 - **Linux** — the official SBCL binary tarball at the pinned version. That pin sets a
-  **glibc floor**: SBCL 2.6.8's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
+  **glibc floor**: SBCL 2.6.9's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
   (2.35) does not have, so the matrix runs `ubuntu-24.04` and binaries produced here need
   glibc 2.39+. Lowering that means building SBCL from source.
 - **macOS** — **Homebrew, not the pin.** Upstream publishes no macOS SBCL binaries, so
   there is nothing to pin to and the machine gets whatever brew carries.
   `setup.sh --check` passes on the mismatch deliberately: it checks *presence*, not
-  equality. `macos-14` is arm64, which is precisely why the Linux leg matters.
+  equality. `macos-26` is arm64, which is precisely why the Linux leg matters.
 - **Windows** — the official MSI at the pinned version.
 
 ## The two caches, and why one has no fallback

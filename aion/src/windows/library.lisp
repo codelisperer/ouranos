@@ -30,7 +30,8 @@
 (cffi:define-foreign-library oleaut32 (:windows "oleaut32.dll"))
 ;; user32 is here for the STA MESSAGE PUMP, not for any UI: MsgWaitForMultipleObjects and
 ;; the PeekMessage/DispatchMessage trio live there, and an apartment that does not pump
-;; deadlocks the moment an out-of-process server calls back into it.
+;; deadlocks the moment an out-of-process server calls back into it. hades/notify also calls
+;; MessageBoxW from it, for a notice shown before an app has a window (#819).
 (cffi:define-foreign-library user32   (:windows "user32.dll"))
 ;; advapi32 for Credential Manager (CredWriteW, CredReadW, CredDeleteW, CredFree), which
 ;; hades/credentials is built on (#357).

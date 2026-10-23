@@ -59,6 +59,7 @@
                              (:file "event")        ; client<->framework progress contract
                              (:file "praxeology")   ; Coalton-typed core ontology
                              (:file "conditions")   ; recoverable-failure protocol
+                             (:file "source")       ; outside text as quoted source (#757)
                              (:file "context")      ; budgeted context (Kairos seed)
                              (:file "results")      ; tool results outside the prompt (#319)
                              (:file "memory")       ; observational memory (pre-publication issue 60)
@@ -68,6 +69,7 @@
                              (:file "structured")   ; forced tool calls (pre-publication issue 416)
                              (:file "distil")       ; window -> observations (pre-publication issue 452)
                              (:file "prompt")       ; what is SENT: trim + placement (pre-publication issue 402)
+                             (:file "observe")      ; distil a thread off the request path (#317)
                              (:file "turn")         ; a turn as a value (interceptor context)
                              (:file "ceiling")      ; cost/rate ceiling as pipeline stages
                              (:file "actor")        ; the deliberate/act loop
@@ -188,12 +190,14 @@
   :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))
 
 (defsystem "praxeon/mcp"
-  :description "Agents that use the tools an MCP server offers, over Streamable HTTP (#527)."
+  :description "Agents that use the tools an MCP server offers, over Streamable HTTP or stdio (#527)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; cl-base64 for the specification's encoding of header values that are not plain ASCII.
   ;; Everything here is already in the tree; see docs/dependencies.md.
-  :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64")
+  ;; aion/windows on Windows only, for the job object each local server runs in (#599).
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64"
+               (:feature :win32 "aion/windows"))
   :serial t
   :components ((:module "src/mcp"
                 :serial t
@@ -201,6 +205,7 @@
                              (:file "wire")
                              (:file "task-store")
                              (:file "client")
+                             (:file "stdio")
                              (:file "resources")
                              (:file "prompts")
                              (:file "tasks"))))
@@ -209,11 +214,18 @@
 (defsystem "praxeon/mcp/tests"
   :description "Tests for praxeon/mcp, against MCP servers of both eras run in the test image."
   ;; aion/oauth/tests for its test authorization server, which the OAuth path here runs against.
+  ;; aion/log and log4cl, which aion/log is built on, for the stdio tests, which check what is
+  ;; logged and put the log's setup back afterwards. tests/mcp-stdio-server.lisp is the local
+  ;; server those tests start as a child process; it is never loaded here.
   :depends-on ("praxeon/mcp" "praxeon" "fiveam" "aion/test-http" "aion/test-threads" "aion/dynamic"
-               "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret"
-               "com.inuoe.jzon" "cl-base64")
+               "aion/http-client" "aion/oauth" "aion/oauth/tests" "aion/secret" "aion/log"
+               "log4cl" "com.inuoe.jzon" "cl-base64"
+               ;; On Windows, for WIN32-ERROR, which the job-object tests signal (#599).
+               (:feature :win32 "aion/windows"))
   :serial t
-  :components ((:file "tests/mcp-tests"))
+  :components ((:file "tests/mcp-tests")
+               (:file "tests/mcp-stdio-tests")
+               (:static-file "tests/mcp-stdio-server.lisp"))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
 
 (defsystem "praxeon/web-search"
@@ -224,6 +236,31 @@
                "aion/http-client")   ; web-search.lisp calls http:send-request directly
   :serial t
   :components ((:file "src/web-search")))
+
+;;; A read-web-page Means (#757): open a URL the user gives and read its text, through Tavily's
+;;; /extract when there is a key and otherwise through aion/http-client's FETCH-PUBLIC.
+(defsystem "praxeon/web-page"
+  :description "A read-web-page Means for Praxeon agents, with address checks and quoted output."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon" "quri"
+               "plump")              ; the page's readable text, as hyperion/import parses HTML
+  :serial t
+  :components ((:file "src/web-page")))
+
+;;; An image-generation Means behind a neutral protocol, with OpenAI's Image API as its first
+;;; provider (#758). Opt-in: an app registers it with REGISTER-OPENAI-IMAGE, which registers
+;;; nothing when there is no key.
+(defsystem "praxeon/image"
+  :description "A generate-image Means for Praxeon agents, behind a neutral image protocol."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon"
+               "cl-base64"            ; the provider sends each image as base64
+               "aion/random")         ; the multipart boundary of an edit, from the OS generator
+  :serial t
+  :components ((:file "src/image")
+               (:file "src/image-google")))  ; Google's Gemini API as a second provider (#758)
 
 ;;; A general one-shot translation capability (any agent): translate text between
 ;;; languages via a possibly-different, translation-tuned model. Elise uses it to
@@ -276,12 +313,27 @@
 (defsystem "praxeon/tests"
   :description "Test suite for Praxeon."
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
+               "log4cl"               ; the #807 test puts the log's setup back after capturing it
+               "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
+               "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
+               "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
                "fiveam"
-               "aion/test-threads")   ; the #531 tests continue a held turn on another thread
+               "aion/test-threads"    ; the #531 tests continue a held turn on another thread
+               ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
+               ;; contrib, declared because it otherwise arrives only through usocket.
+               (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests"
                 :serial t
-                :components ((:file "praxeon-tests"))))
+                :components ((:file "praxeon-tests")
+                             ;; #758: in the PRAXEON suite, after praxeon-tests, whose
+                             ;; %SERVE-REPLIES and scripted provider it uses
+                             (:file "image-tests")
+                             ;; #758: the Google provider, after image-tests, whose image helpers it uses
+                             (:file "image-google-tests")
+                             (:file "web-page-tests")
+                             ;; #827: untrusted content in a turn, using the stub reader pattern
+                             (:file "reader-guard-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

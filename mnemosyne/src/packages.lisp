@@ -176,8 +176,10 @@
            #:exec #:query #:with-transaction
            #:db-error #:db-error-message #:db-error-cause
            ;; the connection pool (#325)
-           #:pool #:poolp #:make-pool #:close-pool #:pool-size
+           #:pool #:poolp #:make-pool #:close-pool #:pool-size #:pool-backend
            #:pool-open-count #:pool-idle-count
+           ;; telling a lost connection from a failed statement (#636)
+           #:connection-open-p
            #:*checkout-timeout-seconds* #:*idle-check-seconds*
            #:pool-exhausted #:pool-exhausted-pool #:pool-closed #:pool-closed-pool))
 

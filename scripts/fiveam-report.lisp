@@ -35,7 +35,8 @@
 
 (defpackage #:ouranos-fiveam-report
   (:use #:cl)
-  (:export #:failure-details #:skip-reasons #:rule-line-p))
+  (:export #:failure-details #:skip-reasons #:rule-line-p #:fail-counts
+           #:every-report-passed-p #:print-failure-details #:count-checks))
 
 (in-package #:ouranos-fiveam-report)
 
@@ -59,8 +60,12 @@ width. Requiring dashes and only dashes is the property; the exact width is not.
   (string-trim '(#\Space #\Tab #\Return) line))
 
 (defun failure-details (output)
-  "WHICH checks failed, not merely that some did: every line of FiveAM's `Failure Details:'
-block, entry rules included, interior blank lines preserved.
+  "WHICH checks failed, not merely that some did: every line of every FiveAM `Failure Details:'
+block in OUTPUT, in order, entry rules included, interior blank lines preserved.
+
+EVERY BLOCK, NOT THE FIRST (#616). A test op that prints several reports, as aion/tests does,
+prints one block per failing report; reading only the first named one sub-suite's failures
+when two had failed.
 
 READ TO THE STRUCTURE, NOT TO THE FIRST BLANK LINE. Each entry is wrapped in a rule, so a
 blank line inside one is part of a reason and a blank line outside one is the end of the
@@ -68,23 +73,41 @@ block. That distinction is the entire content of pre-publication issue 448: with
 written without a reason string hides itself and everything after it.
 
 STOPS ON ANYTHING UNEXPECTED rather than reading on. A non-blank line outside an entry is not
-a shape this knows, and consuming it would put arbitrary output into a failure report."
-  (let ((lines (%lines-after output "Failure Details:"))
-        (collected '())
+a shape this knows, and consuming it would put arbitrary output into a failure report.
+
+A BLOCK STARTS ONLY AT A HEADER LINE: a line that is `Failure Details:' and nothing else, read
+outside any block. A failure reason that mentions the words, or a header-like line inside an
+entry, does not start one (Copilot's review of #617)."
+  (let ((lines (uiop:split-string output :separator '(#\Newline)))
+        (details '()))
+    (loop while lines
+          do (if (string= "Failure Details:" (%clean (first lines)))
+                 (multiple-value-bind (block rest) (%one-failure-block (rest lines))
+                   (setf details (append details block)
+                         lines rest))
+                 (pop lines)))
+    details))
+
+(defun %one-failure-block (lines)
+  "The entries of one `Failure Details:' block, read from LINES, the lines after its header, and,
+as a second value, the lines after the block. See FAILURE-DETAILS."
+  (let ((collected '())
         (inside nil)
         (seen nil))
-    (dolist (line lines (nreverse collected))
-      (let ((trimmed (%clean line)))
-        (cond
-          ((rule-line-p line)
-           (setf inside (not inside) seen t)
-           (push trimmed collected))
-          (inside (push trimmed collected))
-          ((zerop (length trimmed))
-           ;; The blank line FiveAM prints after the last entry. Before the first rule there
-           ;; is nothing to end, so a stray blank there is not the terminator.
-           (when seen (return (nreverse collected))))
-          (t (return (nreverse collected))))))))
+    (loop for tail on lines
+          for line = (first tail)
+          for trimmed = (%clean line)
+          do (cond
+               ((rule-line-p line)
+                (setf inside (not inside) seen t)
+                (push trimmed collected))
+               (inside (push trimmed collected))
+               ((zerop (length trimmed))
+                ;; The blank line FiveAM prints after the last entry. Before the first rule there
+                ;; is nothing to end, so a stray blank there is not the terminator.
+                (when seen (return-from %one-failure-block (values (nreverse collected) (rest tail)))))
+               (t (return-from %one-failure-block (values (nreverse collected) tail)))))
+    (values (nreverse collected) '())))
 
 (defun skip-reasons (output)
   "The reasons under FiveAM's `Skip Details:' block, so the gate can say WHAT did not run
@@ -103,3 +126,59 @@ line; if that ever stops being true this needs the same treatment as the block a
         (if (zerop (length trimmed))
             (return (nreverse collected))
             (push trimmed collected))))))
+
+(defun fail-counts (output)
+  "The N of every `Fail: N' line FiveAM printed in OUTPUT, in order: one per report.
+
+A test op prints more than one report when it runs more than one suite, calls RUN! more than
+once, or calls RUN and EXPLAIN! itself (#605)."
+  (loop for line in (uiop:split-string output :separator '(#\Newline))
+        for text = (%clean line)
+        for n = (and (uiop:string-prefix-p "Fail: " text)
+                     (parse-integer text :start 6 :junk-allowed t))
+        when n collect n))
+
+(defun every-report-passed-p (output)
+  "True when OUTPUT holds at least one FiveAM report and every one of them has `Fail: 0'.
+
+The gate used to ask whether `Fail: 0 ( 0%)' appeared anywhere, which is true of an output
+holding one passing report and one failing one; with the child exiting 0, such a suite was
+reported ok (#605). An output with no `Fail:' line at all is not a pass here, and the gate
+reports it before asking this: as NO-RUN when it also has no `Did N checks.' line."
+  (let ((counts (fail-counts output)))
+    (and counts (every #'zerop counts) t)))
+
+(defun print-failure-details (output &optional (stream *standard-output*))
+  "Print each line FAILURE-DETAILS finds in OUTPUT to STREAM, indented to sit under the gate's
+FAIL line, and return how many there were.
+
+Used by both of the gate's FAIL branches: a suite that exited 0 with failing checks, and one
+whose child exited non-zero. The second includes a suite that ran its checks and then
+signalled because some failed, as aion/tests does since #605; without this, its failures were
+reported only as the error that ended the child, not as the checks that failed."
+  (let ((details (failure-details output)))
+    (format stream "~{          ~a~%~}" details)
+    (length details)))
+
+(defun count-checks (output)
+  "Sum the check count of every FiveAM report in OUTPUT. Returns NIL if there was none at all,
+which means the suite never ran, not that it ran and found nothing.
+
+FiveAM prints `Did N checks.', and `Did 1 check.' for a report with one check. The gate
+counted only the first form until #607, so a one-check report was left out of the total, and
+a suite whose only report had one check read as NO-RUN."
+  (let ((total nil) (start 0))
+    (loop
+      (let ((p (search "Did " output :start2 start)))
+        (unless p (return))
+        (let* ((numstart (+ p 4))
+               (numend (position-if-not #'digit-char-p output :start numstart)))
+          (when (and numend (> numend numstart)
+                     (some (lambda (tail)
+                             (string= tail output :start2 numend
+                                                  :end2 (min (length output) (+ numend (length tail)))))
+                           '(" checks" " check.")))
+            (setf total (+ (or total 0)
+                           (parse-integer output :start numstart :end numend)))))
+        (setf start (1+ p))))
+    total))

@@ -64,17 +64,34 @@ refused, and sign the user out. The default method locks within this process; a 
 by several instances overrides it with a lock they share, such as a database row lock."))
 
 (defvar *refresh-locks* (make-hash-table :test #'equal)
-  "KEY -> mutex, for the default CALL-WITH-REFRESH-LOCK.")
+  "KEY -> (mutex . count), for the default CALL-WITH-REFRESH-LOCK. COUNT is the number of calls
+holding or waiting for the mutex, and an entry is removed when it falls to zero (#542).")
 
 (defvar *refresh-locks-lock* (sb-thread:make-mutex :name "aion/oauth refresh locks"))
 
 (defmethod call-with-refresh-lock ((store store) key thunk)
-  (let ((lock (sb-thread:with-mutex (*refresh-locks-lock*)
-                (or (gethash key *refresh-locks*)
-                    (setf (gethash key *refresh-locks*)
-                          (sb-thread:make-mutex :name "aion/oauth refresh"))))))
-    (sb-thread:with-recursive-lock (lock)
-      (funcall thunk))))
+  "Hold KEY's mutex from *REFRESH-LOCKS* while THUNK runs. The entry's count goes up under
+*REFRESH-LOCKS-LOCK* before the call waits for the mutex, and down under it after the mutex is
+released; the entry is removed when the count reaches zero (#542).
+
+AN ENTRY IS NEVER REMOVED WHILE A CALL IS WAITING FOR ITS MUTEX. If it were, the next call for
+KEY would create a second mutex and run beside the waiting one, which is the overlap this lock
+exists to prevent. A call that already holds the mutex enters again (it is taken with
+WITH-RECURSIVE-LOCK), and counts once more, so the inner call's release does not remove it."
+  (let ((entry nil))
+    (unwind-protect
+         (progn
+           (sb-thread:with-mutex (*refresh-locks-lock*)
+             (setf entry (or (gethash key *refresh-locks*)
+                             (setf (gethash key *refresh-locks*)
+                                   (cons (sb-thread:make-mutex :name "aion/oauth refresh") 0))))
+             (incf (cdr entry)))
+           (sb-thread:with-recursive-lock ((car entry))
+             (funcall thunk)))
+      (when entry
+        (sb-thread:with-mutex (*refresh-locks-lock*)
+          (when (zerop (decf (cdr entry)))
+            (remhash key *refresh-locks*)))))))
 
 (defclass memory-store (store)
   ((tokens :initform (make-hash-table :test #'equal))

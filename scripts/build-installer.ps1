@@ -31,6 +31,23 @@
 .PARAMETER Check
   Report whether this machine can build an installer, and exit.
 
+.PARAMETER Describe
+  Check the bundle, print the product, version and executable the installer would be built
+  for, one "key value" line each, and exit without building it. Needs no packager.
+
+.PARAMETER RequireWebView2
+  Stop the build when the WebView2 bootstrapper cannot be downloaded or fails its signature
+  check, instead of building an installer without it. desktop-release.yml passes it, so a
+  release installer always carries the bootstrapper (#736).
+
+.NOTES
+  The bundle's RELEASE file. build-desktop-app.lisp writes RELEASE into the bundle when it is
+  given --product, --display-name or --default-channel (#408). When RELEASE names a product or
+  a version, it must be the one the bundle directory's name gives, or the build stops: the
+  product is the HKCU\Software\<name> key that hyperion/update reads, and an installer built
+  under another name installs a second copy beside the first. RELEASE's display-name is not
+  used here; on Windows one name is both the registry key and what the user sees.
+
 .EXAMPLE
   .\scripts\build-installer.ps1 -Check
 .EXAMPLE
@@ -55,8 +72,10 @@ param(
   [string]$SignTool,
   [string]$Icon,
   [switch]$Check,
-  [switch]$NoWebView2      # skip embedding the WebView2 bootstrapper (smaller, but a
+  [switch]$Describe,
+  [switch]$NoWebView2,     # skip embedding the WebView2 bootstrapper (smaller, but a
                            # machine without the runtime gets no window)
+  [switch]$RequireWebView2 # fail rather than build without the bootstrapper (#736)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,9 +148,9 @@ if ($Check) {
   Write-Host "       fix: winget install NSIS.NSIS   |   choco install nsis -y" -ForegroundColor DarkGray
   exit 1
 }
-if ($Format -eq 'nsis' -and -not $makensis) { Die "makensis not found. Install NSIS: winget install NSIS.NSIS (or choco install nsis -y), then re-run." }
+if ($Format -eq 'nsis' -and -not $makensis -and -not $Describe) { Die "makensis not found. Install NSIS: winget install NSIS.NSIS (or choco install nsis -y), then re-run." }
 $iscc = $null
-if ($Format -eq 'inno') {
+if ($Format -eq 'inno' -and -not $Describe) {
   $iscc = Find-Iscc
   if (-not $iscc) { Die "ISCC.exe not found. Install Inno Setup: winget install JRSoftware.InnoSetup, then re-run." }
 }
@@ -151,6 +170,22 @@ if ($leaf -notmatch '^(?<app>.+)-(?<ver>\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-(?<os>
 $app = $matches['app']; $version = $matches['ver']
 if ($matches['os'] -ne 'windows') { Die "bundle '$leaf' is for $($matches['os']), not windows" }
 
+# RELEASE, when build-desktop-app.lisp wrote one: see .NOTES above (#408).
+$release = @{}
+$releaseFile = Join-Path $BundleDir 'RELEASE'
+if (Test-Path -LiteralPath $releaseFile -PathType Leaf) {
+  foreach ($line in Get-Content -LiteralPath $releaseFile) {
+    $space = $line.IndexOf(' ')
+    if ($space -gt 0) { $release[$line.Substring(0, $space)] = $line.Substring($space + 1) }
+  }
+}
+if ($release['product'] -and $release['product'] -cne $app) {
+  Die "the bundle's RELEASE names the product '$($release['product'])', but the directory '$leaf' is named for '$app'. The installer would register the app under a name its updater does not look for. Rebuild with build-desktop-app.lisp, whose --product must equal --name, rather than renaming the directory."
+}
+if ($release['version'] -and $release['version'] -cne $version) {
+  Die "the bundle's RELEASE names the version '$($release['version'])', but the directory '$leaf' names '$version'. Rebuild with build-desktop-app.lisp rather than renaming the directory."
+}
+
 $exe = "$app.exe"
 if (-not (Test-Path (Join-Path $BundleDir $exe))) { Die "bundle has no $exe" }
 # The launcher's layout is sbcl-runtime.exe and sbcl.core beside $exe (#98); a one-file image has
@@ -163,6 +198,13 @@ if ($hasCore -ne $hasRuntime) {
 }
 if (-not (Test-Path (Join-Path $BundleDir 'hyperion-view.exe'))) {
   Write-Host "WARNING: bundle has no hyperion-view.exe -- the installed app will not open a window." -ForegroundColor Yellow
+}
+
+if ($Describe) {
+  Write-Output "product $app"
+  Write-Output "version $version"
+  Write-Output "exe $exe"
+  exit 0
 }
 
 if (-not $Out) { $Out = Join-Path (Split-Path -Parent $BundleDir) "$app-$version-setup.exe" }
@@ -179,24 +221,29 @@ $viversion = ($parts[0..3] -join '.')
 # ~2 MB Evergreen *bootstrapper* (Tauri's "embedBootstrapper" mode): the installer then
 # repairs a machine that lacks the runtime, with no third-party NSIS plugin and no
 # install-time download of the bootstrapper itself. Fetched once at build time and cached.
+#
+# CHECKED BY SIGNATURE, EVERY BUILD (#736). The fwlink has no version and Microsoft replaces the
+# file behind it, so a sha256 pin would break the build whenever Microsoft ships a new one.
+# check-webview2-bootstrapper.ps1 requires a Valid Authenticode signature from O=Microsoft
+# Corporation, and prints the file's version and sha256. It runs on a cached copy as well as a
+# fresh download, and a copy that fails is deleted so the next build fetches again. Without
+# -RequireWebView2 a failure leaves the installer without the bootstrapper, with a warning, as
+# before; with it, the build stops.
 $wv2Args = @()
+if ($NoWebView2 -and $RequireWebView2) { Die "-NoWebView2 and -RequireWebView2 ask for opposite things" }
 if (-not $NoWebView2) {
-  $cache = Join-Path $Here 'installers\.cache'
-  $boot = Join-Path $cache 'MicrosoftEdgeWebview2Setup.exe'
-  if (-not (Test-Path $boot)) {
-    Info "fetching the WebView2 Evergreen bootstrapper (once; cached)"
-    New-Item -ItemType Directory -Force -Path $cache | Out-Null
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-    try {
-      Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
-        -OutFile $boot -UseBasicParsing -MaximumRedirection 10
-    } catch {
-      Remove-Item $boot -Force -ErrorAction SilentlyContinue
-      Write-Host "WARNING: could not fetch the WebView2 bootstrapper ($($_.Exception.Message))." -ForegroundColor Yellow
-      Write-Host "         Building without it; use -NoWebView2 to make that explicit." -ForegroundColor DarkGray
-    }
+  $boot = Join-Path (Join-Path $Here 'installers\.cache') 'MicrosoftEdgeWebview2Setup.exe'
+  # Fetches when there is no cached copy, checks either way, and deletes a copy that fails.
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Here 'check-webview2-bootstrapper.ps1') $boot -Fetch
+  $wv2Status = $LASTEXITCODE
+  if ($wv2Status -eq 0) {
+    $wv2Args = @("/DWV2BOOTSTRAPPER=$boot") ; Note "WebView2 bootstrapper: embedded"
+  } elseif ($RequireWebView2) {
+    Die "no WebView2 bootstrapper that passes its signature check (check-webview2-bootstrapper.ps1 exited $wv2Status), and -RequireWebView2 was given"
+  } else {
+    Write-Host "WARNING: no WebView2 bootstrapper that passes its signature check (exit $wv2Status)." -ForegroundColor Yellow
+    Write-Host "         Building without it; use -NoWebView2 to make that explicit." -ForegroundColor DarkGray
   }
-  if (Test-Path $boot) { $wv2Args = @("/DWV2BOOTSTRAPPER=$boot") ; Note "WebView2 bootstrapper: embedded" }
 } else {
   Note "WebView2 bootstrapper: skipped (-NoWebView2)"
 }

@@ -205,6 +205,243 @@ request is the one the caller sees (#587)."
       (%task-event :task-input-refused task :methods methods)
       (%announce client task now))))
 
+(defun %input-entries (object)
+  "Each entry of the inputRequests in OBJECT, a task the server sent, as (KEY METHOD PARAMS), or
+NIL when there are none. KEY, METHOD and PARAMS are as the server sent them, unchecked."
+  (let ((requests (gethash "inputRequests" object)))
+    (and (hash-table-p requests)
+         (loop for key being the hash-keys of requests using (hash-value request)
+               collect (list key
+                             (and (hash-table-p request) (gethash "method" request))
+                             (and (hash-table-p request) (gethash "params" request)))))))
+
+(defun %elicitation-mode (params)
+  "The mode of an elicitation/create request with PARAMS: :FORM, also when the mode is absent,
+as the elicitation page requires of a client, :URL, or NIL for any other value."
+  (let ((mode (and (hash-table-p params) (gethash "mode" params))))
+    (cond ((or (null mode) (equal mode "form")) :form)
+          ((equal mode "url") :url))))
+
+(defun %answerable-p (connection entry)
+  "Whether ENTRY, as %INPUT-ENTRIES gives it, is an input request the app can be asked: an
+elicitation/create in a mode CONNECTION declared, under a string key, with a string message and
+the field its mode requires: a requestedSchema object in form mode, a string url in url mode
+(2026-07-28, \"Elicitation\"). A request without it is malformed, and is refused like a request
+this client did not declare, rather than reaching the app with NIL (Copilot's review of #627)."
+  (destructuring-bind (key method params) entry
+    (and (stringp key) (plusp (length key))
+         (equal method "elicitation/create")
+         (hash-table-p params)
+         (stringp (gethash "message" params))
+         (let ((mode (%elicitation-mode params)))
+           (and (member mode (connection-elicitation connection))
+                (ecase mode
+                  (:form (hash-table-p (gethash "requestedSchema" params)))
+                  (:url (stringp (gethash "url" params))))))
+         t)))
+
+(defun %with-input-answered (inputs key)
+  "INPUTS, a task's TASK-INPUTS, with KEY marked answered. A new list of new entries: the entries
+are never changed in place, because the memory store's copies of a task share them (Copilot's
+review of #627)."
+  (mapcar (lambda (input)
+            (if (equal (first input) key)
+                (list (first input) (second input) t)
+                input))
+          inputs))
+
+(defun %answer-problem (mode action content)
+  "Why ACTION and CONTENT cannot answer an elicitation request in MODE, as a sentence, or NIL when
+they can (2026-07-28, \"Elicitation\", Response Actions): ACTION is :ACCEPT, :DECLINE or :CANCEL;
+CONTENT is a hash table, given only with :ACCEPT, required for :ACCEPT in form mode, and never
+given in url mode."
+  (cond ((not (member action '(:accept :decline :cancel)))
+         (format nil "the action is :accept, :decline or :cancel, not ~S" action))
+        ((and content (not (eq action :accept)))
+         "content is given only with :accept")
+        ((and content (not (hash-table-p content)))
+         "content is a JSON object, as a hash table")
+        ((and content (eq mode :url))
+         "an answer to a url-mode request carries no content")
+        ((and (eq action :accept) (null content) (eq mode :form))
+         "an :accept to a form-mode request carries the submitted content")))
+
+(defun %elicit-result (action content)
+  "The ElicitResult for ACTION, :ACCEPT, :DECLINE or :CANCEL, with CONTENT, a JSON object, when
+given."
+  (let ((result (%object "action" (string-downcase (symbol-name action)))))
+    (when content (setf (gethash "content" result) content))
+    result))
+
+(defun %send-input-responses (client task responses)
+  "Send tasks/update for TASK with RESPONSES, an InputResponses object, for the task's own
+principal. A tool error signals, as from a call."
+  (%request client "tasks/update"
+            (%object "taskId" (task-id task) "inputResponses" responses)
+            :principal (task-principal task)))
+
+(defun %take-input (client task object now)
+  "TASK asks for input, as OBJECT, its tasks/get reply, says. When every request in it is one
+the app can be asked (%ANSWERABLE-P), tell the app of each key not shown before with a
+:TASK-INPUT-REQUIRED event, answer cancel to each key still asked that the app has not answered
+within the connection's INPUT-TIMEOUT, with a :TASK-INPUT-EXPIRED event, and keep the task
+waiting. Otherwise the request is one this client did not declare, and the task is cancelled
+as before (%REFUSE-INPUT). A task past its deadline expires.
+
+The events for new keys are sent before the record is saved, so an observer that signals leaves
+the keys unrecorded and the next poll tells the app again: a question is shown at least once. The
+key's first-seen time is then the time of that next poll, so an observer that signals on every
+poll resets it each time, and the key's INPUT-TIMEOUT never passes: only the task's deadline
+bounds the wait (the hub's review of #627).
+
+SEVERAL POLLERS ON ONE STORE (#642). Each poller decides whether a key is new from its own copy of
+the task, which DUE-TASKS returned, and the store has no operation that records a key only if no
+other poller has. Two pollers whose polls overlap can each send :TASK-INPUT-REQUIRED for the same
+key, which the at-least-once promise above already allows, and later each answer it cancel, with
+:TASK-INPUT-EXPIRED, so the server gets the same cancel twice. Both send the same answer, and the
+Tasks extension says a server SHOULD ignore a response for a key that is no longer outstanding, so a
+server that follows it ignores the second; one that does not gets the same cancel twice. An app that wants each event once runs one
+poller per store. A store operation that claims a key could make it exact later, as an optional
+generic, so that stores written by apps keep working.
+The message, schema and URL in the event come from the server and are untrusted (#563)."
+  (let* ((connection (client-connection client))
+         (entries (%input-entries object)))
+    (cond
+      ((%past-deadline-p task now)
+       (%expire client task nil now))
+      ((or (null entries)
+           (notevery (lambda (entry) (%answerable-p connection entry)) entries))
+       (%refuse-input client task object now))
+      (t
+       (let ((new (remove-if (lambda (entry)
+                               (assoc (first entry) (task-inputs task) :test #'equal))
+                             entries)))
+         ;; Recorded on this copy of the task before the events, so an observer can answer a key
+         ;; from inside the event; saved to the store only after them, so an observer that
+         ;; signals leaves the keys unsaved and the next poll shows them again.
+         (setf (task-inputs task)
+               (append (task-inputs task)
+                       (mapcar (lambda (entry) (list (first entry) now nil)) new)))
+         (dolist (entry new)
+           (destructuring-bind (key method params) entry
+             (declare (ignore method))
+             (let ((mode (%elicitation-mode params)))
+               (%task-event :task-input-required task
+                            :input-key key :mode mode :message (gethash "message" params)
+                            :schema (and (eq mode :form) (gethash "requestedSchema" params))
+                            :url (and (eq mode :url) (gethash "url" params))
+                            :task task)))))
+       (dolist (input (task-inputs task))
+         (destructuring-bind (key seen answered) input
+           (when (and (not answered)
+                      (assoc key entries :test #'equal)
+                      (>= (- now seen) (connection-input-timeout connection)))
+             (handler-case
+                 (progn
+                   (%send-input-responses client task (%object key (%elicit-result :cancel nil)))
+                   (setf (task-inputs task) (%with-input-answered (task-inputs task) key))
+                   (log:info "praxeon/mcp: task input not answered in time, answered cancel"
+                             :connection (task-connection task) :key (task-key task))
+                   (%task-event :task-input-expired task :input-key key))
+               (cnd:tool-error-result ()
+                 (log:info "praxeon/mcp: answering an expired task input failed"
+                           :connection (task-connection task) :key (task-key task)))))))
+       (update-task (client-task-store client) task)
+       nil))))
+
+;;; --- input requests on an ordinary call (#626) ----------------------------------------------
+
+(defun %ask-handler (client method entry principal)
+  "The ElicitResult the connection's ON-ELICITATION handler gives for ENTRY, an elicitation
+request %ANSWERABLE-P accepted, on a METHOD call for PRINCIPAL. A handler that signals is not
+caught. An answer %ANSWER-PROBLEM refuses fails the call as not run, naming the key."
+  (destructuring-bind (key method-name params) entry
+    (declare (ignore method-name))
+    (let* ((connection (client-connection client))
+           (mode (%elicitation-mode params)))
+      (multiple-value-bind (action content)
+          (funcall (connection-on-elicitation connection)
+                   (list :key key :mode mode :message (gethash "message" params)
+                         :schema (and (eq mode :form) (gethash "requestedSchema" params))
+                         :url (and (eq mode :url) (gethash "url" params))
+                         :method method :connection (connection-name connection)
+                         :principal principal))
+        (let ((problem (%answer-problem mode action content)))
+          (when problem
+            (%request-failed client "the app's answer to its input request ~S could not be sent: ~A."
+                             (list key problem) :outcome :not-run)))
+        (%elicit-result action content)))))
+
+(defun %request-answering-input (client method params &rest request-arguments
+                                 &key principal &allow-other-keys)
+  "%REQUEST METHOD with PARAMS, answering an input_required result through the connection's
+ON-ELICITATION handler (#626), for tools/call, resources/read and prompts/get, which are the
+requests the 2026-07-28 revision's \"Multi Round-Trip Requests\" lets a server answer so.
+
+Without a handler, an input_required result fails the call as not run, as before. A server on a
+legacy revision never sends one. With one, every inputRequests entry must be one the app can be asked
+(%ANSWERABLE-P): an elicitation in a declared mode, well formed. Any other entry fails the call as
+not run, because an ordinary call has nothing to cancel. The handler is called once per entry, in
+key order, and the request is sent again with params that are PARAMS plus inputResponses, the
+answers, and requestState, echoed exactly when the result had one and absent when it had none
+(MRTR client requirements 1 to 4). A result with requestState and no inputRequests is sent again
+at once, without the handler. Each round starts from PARAMS, so the answers of one round go only
+with its retry. After the connection's INPUT-ROUNDS retries, a call still input_required fails as
+not run: a server may keep asking (server requirement 8)."
+  (let* ((connection (client-connection client))
+         ;; Not checked against the era: it is not known before the first exchange, and a
+         ;; server on a legacy revision never answers input_required.
+         (answering (and (connection-on-elicitation connection)
+                         (member method '("tools/call" "resources/read" "prompts/get") :test #'equal))))
+    (unless answering
+      (return-from %request-answering-input (apply #'%request client method params request-arguments)))
+    (let ((sent params))
+      ;; Each round returns the result, signals, or sends again; the last round never sends
+      ;; again, so the loop has no result form and the failure is signalled once, below (#676).
+      (dotimes (round (1+ (connection-input-rounds connection)))
+        (let ((result (let ((*answering-input* t))
+                        (apply #'%request client method sent request-arguments))))
+          (unless (equal "input_required" (%get result "resultType"))
+            (return-from %request-answering-input result))
+          (when (= round (connection-input-rounds connection))
+            (%request-failed client "it kept asking for input after ~D answers, so the call was not completed."
+                             (list (connection-input-rounds connection)) :outcome :not-run))
+          ;; inputRequests present but not an object is malformed: refused at once, rather than
+          ;; read as no requests and, with a string requestState, sent again up to the cap (the
+          ;; hub's review of #643).
+          (multiple-value-bind (requests present) (gethash "inputRequests" result)
+            (when (and present (not (hash-table-p requests)))
+              (%request-failed client "its inputRequests was not an object, so the call could not be answered."
+                               '() :outcome :not-run)))
+          (let* ((entries (sort (%input-entries result) #'string< :key (lambda (e) (princ-to-string (first e)))))
+                 (state (multiple-value-bind (value present) (gethash "requestState" result)
+                          ;; requestState is an optional string, echoed exactly when present, so a
+                          ;; present one that is not a string cannot be echoed: the call fails rather
+                          ;; than retrying without it (Copilot's review of #643).
+                          (when (and present (not (stringp value)))
+                            (%request-failed client "its requestState was not a string, so the call could not be sent again."
+                                             '() :outcome :not-run))
+                          value))
+                 (next (%copy params)))
+            (unless (or entries (stringp state))
+              (%request-failed client "it asked for input without saying what, so the call was not completed."
+                               '() :outcome :not-run))
+            (dolist (entry entries)
+              (unless (%answerable-p connection entry)
+                (%request-failed client "the server asked for input this client does not provide."
+                                 '() :outcome :not-run)))
+            (when entries
+              (let ((responses (%object)))
+                (dolist (entry entries)
+                  (setf (gethash (first entry) responses) (%ask-handler client method entry principal)))
+                (setf (gethash "inputResponses" next) responses)))
+            (when (stringp state)
+              (setf (gethash "requestState" next) state))
+            (log:info "praxeon/mcp: answered an input request, sending the call again"
+                      :connection (connection-name connection) :method method
+                      :requests (length entries) :round (1+ round))
+            (setf sent next)))))))
+
 (defun %record-while-unwinding (task what record)
   "Call RECORD, a function that writes TASK to the store while the stack unwinds for another
 reason. A store error would replace that reason, so it is logged, with WHAT, instead; the task
@@ -326,7 +563,7 @@ and returned without a poll."
                   (format nil "The background task on the connection ~A was cancelled by the server."
                           connection)
                   now))
-        ((equal status "input_required") (%refuse-input client task object now))
+        ((equal status "input_required") (%take-input client task object now))
         ((%past-deadline-p task now)
          (%expire client task nil now))
         (t
@@ -373,6 +610,71 @@ TASK must belong to CLIENT's connection; otherwise this signals an error and sen
                                (task-connection task))
                        now)))
     (first (%deliver client (and done (list done))))))
+
+(defun answer-task-input (client task input-key action &key content (now (get-universal-time)))
+  "Answer the input request INPUT-KEY of TASK, which a :TASK-INPUT-REQUIRED event named, with
+ACTION: :ACCEPT, :DECLINE or :CANCEL (2026-07-28, \"Elicitation\", Response Actions). CONTENT is
+the submitted data, a JSON object as a hash table: an :ACCEPT to a form-mode request must carry
+it, and an answer to a url-mode request carries none. Returns T. NOW is the time, by default the
+current one.
+
+It asks the server first, with tasks/get, whether INPUT-KEY is still outstanding: the event's
+TASK is a copy taken when the key was shown, and since then the task may have finished, or the
+key been answered cancel by the connection's INPUT-TIMEOUT. Only when the server still lists
+INPUT-KEY, in a task still input_required, is tasks/update sent with the ElicitResult, for the
+task's own principal. The key is then marked answered on TASK, so the same object does not answer
+it twice. The task store is not written: the server dropping the key is what ends the request,
+and writing TASK, an older copy, could undo what later polls recorded (Copilot's review of #627).
+A request that fails signals as a call does, and nothing more is sent.
+
+THE TIME LIMIT. A key shown at least the connection's INPUT-TIMEOUT ago is refused here, before
+anything is sent, because POLL-TASKS answers such a key cancel. The tasks/get check narrows the
+window in which the two cross, but does not close it: a poll can answer cancel between this
+function's tasks/get and its tasks/update, and the server then takes whichever arrives first. An
+app that answers close to the limit can lose the answer to the cancel (the hub's review of #627).
+
+TASK is the task object the event carried: the task store has no lookup by key, so the app keeps
+it until it answers. AFTER AN APP RESTART an unanswered key is not asked again, because it is
+recorded as shown; it is answered cancel when the connection's INPUT-TIMEOUT passes. Answering
+across a restart would need a lookup by key, which an optional task-store generic whose default
+method returns NIL could add later, so that stores written by apps keep working (#563).
+
+Signals an error, and sends no answer, when TASK belongs to another connection, is finished, or
+has no outstanding request INPUT-KEY, here or on the server, when the key was shown at least
+INPUT-TIMEOUT ago, when ACTION is not one of the three, or when CONTENT is not a hash table, is
+given with another action than :ACCEPT, is given for a url-mode request, or is missing from an
+:ACCEPT to a form-mode request. The server checks CONTENT against its requestedSchema."
+  (%own-task client task "answer-task-input")
+  (flet ((refuse (control arguments)
+           (error "praxeon/mcp: answer-task-input: ~?; no answer was sent." control arguments)))
+    (let ((input (assoc input-key (task-inputs task) :test #'equal)))
+      (when (task-outcome task)
+        (refuse "the task ~A has finished" (list (task-key task))))
+      (unless (and input (not (third input)))
+        (refuse "~S is not an outstanding input request of the task ~A"
+                (list input-key (task-key task))))
+      (when (>= (- now (second input))
+                (connection-input-timeout (client-connection client)))
+        (refuse "~S was shown ~D seconds ago, and a poll answers it cancel after ~D"
+                (list input-key (- now (second input))
+                      (connection-input-timeout (client-connection client)))))
+      (let ((problem (%answer-problem nil action content)))
+        (when problem (refuse "~A" (list problem)))))
+    (let* ((current (%request client "tasks/get" (%object "taskId" (task-id task))
+                              :principal (task-principal task)))
+           (entry (and (hash-table-p current)
+                       (equal "input_required" (gethash "status" current))
+                       (assoc input-key (%input-entries current) :test #'equal))))
+      (unless entry
+        (refuse "~S is no longer outstanding on the server for the task ~A"
+                (list input-key (task-key task))))
+      (let ((problem (%answer-problem (%elicitation-mode (third entry)) action content)))
+        (when problem (refuse "~A (the request ~S)" (list problem input-key)))))
+    (%send-input-responses client task (%object input-key (%elicit-result action content)))
+    (setf (task-inputs task) (%with-input-answered (task-inputs task) input-key))
+    (log:info "praxeon/mcp: task input answered" :connection (task-connection task)
+                                                 :key (task-key task) :action action)
+    t))
 
 (defun task-report (finished)
   "Text for a later turn that gives the model FINISHED's result. It names the tool and says that

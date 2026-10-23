@@ -19,7 +19,7 @@
 ;;; --- what a row should hold ------------------------------------------------
 
 (defstruct (blob-meta (:constructor make-blob-meta (key size content-type checksum
-                                                   &optional last-modified)))
+                                                   &optional last-modified etag)))
   "Everything about a blob EXCEPT its bytes -- i.e. exactly what belongs in a database
 row. The bytes are referenced by (bucket, KEY) and never embedded.
 
@@ -29,7 +29,38 @@ PUT-BLOB, so it costs nothing extra and is available to store alongside the row.
   (size 0 :type (or null integer))
   (content-type nil :type (or null string))
   (checksum nil :type (or null string))
-  (last-modified nil :type (or null integer)))
+  (last-modified nil :type (or null integer))
+  ;; The provider's entity tag, without its quotes, where the backend has one: S3's ETag,
+  ;; which is the MD5 of a single-part upload and not a content hash for a multipart one.
+  ;; On the filesystem store it is the SHA-256 checksum when the blob has a sidecar, and NIL
+  ;; when it has none (#826). For checking a browser's upload after the fact (#770).
+  (etag nil :type (or null string)))
+
+(defstruct (upload-target (:constructor make-upload-target (url method headers expires-in
+                                                            &optional content-length)))
+  "Where and how a client uploads one blob directly to the store, returned by UPLOAD-URL (#770).
+
+URL is presigned and stops working after EXPIRES-IN seconds. METHOD is the HTTP method, \"PUT\".
+HEADERS is an alist of (name . value) the client MUST send exactly as given, or the provider
+refuses the request; it holds Content-Type when one was signed. CONTENT-LENGTH, when non-NIL,
+is the exact size the URL was signed for: a browser sets that header itself from the body, and
+the provider refuses a body of any other length.
+
+A presigned URL is a credential. Do not log it or store it."
+  (url nil :type string)
+  (method "PUT" :type string)
+  (headers nil :type list)
+  (expires-in 0 :type integer)
+  (content-length nil :type (or null integer)))
+
+(defmethod print-object ((target upload-target) stream)
+  ;; The default structure printer prints every slot, so a log line, a condition report with
+  ;; ~A or a backtrace would carry the whole presigned URL and its signature. Print the method,
+  ;; expiry and size only; the URL is read with UPLOAD-TARGET-URL where it is needed.
+  (print-unreadable-object (target stream :type t :identity t)
+    (format stream "~A expires-in ~D~@[ content-length ~D~]"
+            (upload-target-method target) (upload-target-expires-in target)
+            (upload-target-content-length target))))
 
 ;;; --- the store protocol ----------------------------------------------------
 
@@ -39,19 +70,49 @@ PUT-BLOB, so it costs nothing extra and is available to store alongside the row.
 (defgeneric store-name (store)
   (:documentation "A short backend name, for logs and errors."))
 
-(defgeneric put-blob (store bucket key stream &key content-type metadata)
+(defgeneric put-blob (store bucket key stream &key content-type metadata &allow-other-keys)
   (:documentation
    "Stream the bytes of STREAM (an octet input stream) into STORE at BUCKET/KEY.
 
 Returns a BLOB-META describing what was written. Overwrites an existing blob. METADATA is
-an alist of string->string carried alongside the object where the backend supports it.
+an alist of string->string carried alongside the object where the backend supports it. The
+name \"sha256\", in any case, is reserved for the checksum the store records, and a malformed
+entry signals BLOB-INVALID-METADATA (#810).
+
+CACHE-CONTROL, a string such as \"public, max-age=86400\", is the Cache-Control header the
+object is served with (#830). The S3 store stores it with the object. The filesystem store
+accepts it and does nothing with it, because whatever serves its directory sets its own
+headers. A value with a control character signals BLOB-INVALID-METADATA.
+
+The generic takes &ALLOW-OTHER-KEYS so that a store class an app wrote against v0.1.7, whose
+method accepts only CONTENT-TYPE and METADATA, still loads (CLHS 7.6.4) and can be called with
+:CACHE-CONTROL. Such a method receives the argument and drops it; the object is stored without a
+Cache-Control header until the method names CACHE-CONTROL and passes it on.
 
 The stream is consumed but NOT closed -- the caller opened it and owns it."))
 
 (defgeneric get-blob (store bucket key)
   (:documentation
    "An octet input stream over the blob at BUCKET/KEY. The CALLER MUST CLOSE IT; prefer
-WITH-BLOB-STREAM, which cannot leak it. Signals BLOB-NOT-FOUND if there is no such blob."))
+WITH-BLOB-STREAM, which cannot leak it. Signals BLOB-NOT-FOUND if there is no such blob.
+OPEN-BLOB is the same read with the blob's metadata, and an :IF-MATCH condition (#826)."))
+
+(defgeneric open-blob (store bucket key &key if-match)
+  (:documentation
+   "An octet input stream over the blob at BUCKET/KEY, and its BLOB-META, as two values (#826).
+The CALLER MUST CLOSE the stream; prefer WITH-BLOB-STREAM with :IF-MATCH or :META.
+
+IF-MATCH is an ETag the caller recorded earlier, from BLOB-META-ETAG, with or without its quotes.
+When given, the read happens only if the blob still has that ETag, and otherwise signals
+BLOB-PRECONDITION-FAILED with nothing read. On S3 the check and the read are one request (the GET
+carries If-Match), so the bytes are the version named. Compare ETags as strings and never
+recompute one: S3's ETag is not a content hash for a multipart or KMS-encrypted object. On the
+filesystem store the ETag is the blob's SHA-256 checksum, and the check and the open are two
+steps, so that store's read is not atomic. Signals BLOB-NOT-FOUND if there is no such blob.
+
+This is a new generic rather than a keyword on GET-BLOB because GET-BLOB shipped with exactly
+three arguments: CLOS requires every method to accept every keyword its generic function
+declares, so a keyword added there would make an app's own GET-BLOB methods an error."))
 
 (defgeneric delete-blob (store bucket key)
   (:documentation
@@ -73,6 +134,134 @@ EXPIRES-IN is seconds; when non-NIL the URL is SIGNED and stops working when it 
 When NIL the store must be configured public, and the URL is permanent and unauthenticated
 -- so NIL is a decision about the blob, not a convenience default, and a store with no
 public base URL signals BLOB-UNSUPPORTED rather than inventing one."))
+
+(defgeneric upload-url (store bucket key &key expires-in content-type content-length max-bytes)
+  (:documentation
+   "An UPLOAD-TARGET a client can use to upload the blob at BUCKET/KEY straight to the store,
+without the bytes passing through this process (#770).
+
+EXPIRES-IN is required: seconds, from 1 to 604800 (seven days, SigV4's limit). Keep it short.
+CONTENT-TYPE, when given, is signed, so the client cannot store the object under another type.
+CONTENT-LENGTH, when given, is signed, so the provider refuses a body of any other size. It is
+the size the client declares for its file before uploading.
+MAX-BYTES is the largest upload this URL may carry. It needs CONTENT-LENGTH, because a single
+presigned PUT can be held to an exact size but not to a range; a CONTENT-LENGTH over it, or a
+MAX-BYTES with no CONTENT-LENGTH, signals BLOB-UPLOAD-REFUSED rather than signing.
+An S3 store made with :UPLOAD-ACL :PRIVATE also signs `x-amz-acl: private' and puts it in the
+target's HEADERS, for a bucket that honours ACLs (#796); see MAKE-S3-STORE.
+
+KEY should be chosen by the server, never taken from the client, and one URL should serve one
+upload. Check the result with BLOB-METADATA and READ-BLOB-RANGE before trusting it.
+A store that cannot presign signals BLOB-UNSUPPORTED, and the caller proxies with PUT-BLOB."))
+
+(defgeneric read-blob-range (store bucket key &key start length if-match)
+  (:documentation
+   "An octet vector of at most LENGTH bytes (default 512) of the blob at BUCKET/KEY, from byte
+START (default 0). Shorter when the blob ends sooner; empty when START is at or past its end.
+For checking what a client uploaded by its first bytes, without fetching the whole object
+(#770). IF-MATCH is as for OPEN-BLOB: the range is read only from the version with that ETag,
+and otherwise BLOB-PRECONDITION-FAILED is signalled (#826). Signals BLOB-NOT-FOUND."))
+
+(defgeneric put-bucket-cors (store bucket &key origins methods allowed-headers max-age-seconds expose-headers)
+  (:documentation
+   "Set BUCKET's CORS rule so a browser on one of ORIGINS can upload to it directly (#770).
+
+ORIGINS is a list of origins such as (\"https://app.example.com\"); each may hold one `*'.
+METHODS defaults to (\"PUT\"), ALLOWED-HEADERS to (\"Content-Type\" \"x-amz-acl\"), every header
+UPLOAD-URL's target can tell the client to send, and MAX-AGE-SECONDS to 3000.
+EXPOSE-HEADERS lists response headers a browser script may read; a multipart upload from a
+browser needs (\"ETag\"), because the client completes the upload with each part's ETag.
+This REPLACES the bucket's whole CORS configuration, as the S3 API does; a bucket that needs
+other rules too should have them set by whoever owns it. Returns T."))
+
+(defgeneric check-bucket-cors (store bucket origin &key method headers)
+  (:documentation
+   "Whether BUCKET's CORS rules let a browser on ORIGIN send METHOD (default \"PUT\") with HEADERS
+(default: the headers UPLOAD-URL's target carries on this store, \"Content-Type\" and, on an S3
+store made with :UPLOAD-ACL :PRIVATE, \"x-amz-acl\") (#770). A browser upload that fails for
+this reason reaches the app only as a network error, so this is the diagnostic: call it when
+an upload never arrives.
+
+Returns one of :ALLOWED, :NO-CORS-CONFIGURATION, :ORIGIN-NOT-ALLOWED, :METHOD-NOT-ALLOWED or
+:HEADER-NOT-ALLOWED, the last three naming the first test that no rule passes."))
+
+;;; Multipart uploads (#770): for a file over the 5 GB a single PUT can carry, or an upload that
+;;; must resume after a dropped connection. The server starts the upload, hands the client one
+;;; presigned URL per part, and completes it with the parts' ETags. Each part but the last must
+;;; be at least 5 MiB; the provider refuses to complete an upload that breaks that.
+
+(defgeneric start-multipart-upload (store bucket key &key content-type)
+  (:documentation
+   "Start a multipart upload of BUCKET/KEY and return its upload id, a string. CONTENT-TYPE is the
+completed object's type. An upload that is never completed or aborted keeps its parts, and the
+provider bills for them, so pair every start with a COMPLETE- or ABORT-MULTIPART-UPLOAD."))
+
+(defgeneric multipart-part-url (store bucket key upload-id part-number &key expires-in content-length)
+  (:documentation
+   "An UPLOAD-TARGET for part PART-NUMBER (1 to 10000) of UPLOAD-ID. The part number and upload id
+are signed into the URL. CONTENT-LENGTH, when given, is signed, so the provider refuses a part
+of any other size. EXPIRES-IN is required, as for UPLOAD-URL. The client keeps the ETag header
+of each part's response for COMPLETE-MULTIPART-UPLOAD."))
+
+(defgeneric complete-multipart-upload (store bucket key upload-id parts)
+  (:documentation
+   "Join the parts of UPLOAD-ID into the object at BUCKET/KEY. PARTS is a list of
+(part-number . etag), the ETag as the part's response gave it. Returns T. Check the result with
+BLOB-METADATA and READ-BLOB-RANGE, as for a single upload."))
+
+(defgeneric abort-multipart-upload (store bucket key upload-id)
+  (:documentation
+   "Abandon UPLOAD-ID and free its parts. Idempotent: an upload already gone is aborted."))
+
+(defgeneric list-multipart-parts (store bucket key upload-id)
+  (:documentation
+   "The parts of UPLOAD-ID uploaded so far, as a list of (part-number etag size), in order, for
+resuming an upload: the client uploads only the parts that are missing."))
+
+(defgeneric copy-blob (store src-bucket src-key dst-bucket dst-key
+                       &key content-type metadata if-match)
+  (:documentation
+   "Copy the blob at SRC-BUCKET/SRC-KEY to DST-BUCKET/DST-KEY inside STORE, without the bytes
+passing through this process (#804). Returns the destination's BLOB-META. Overwrites an existing
+destination, as PUT-BLOB does.
+
+With neither CONTENT-TYPE nor METADATA, the copy keeps the source's content type, metadata and
+checksum. CONTENT-TYPE replaces the content type; METADATA replaces the app's metadata, and is
+checked as PUT-BLOB checks it (\"sha256\" is reserved). The checksum is kept either way.
+
+When source and destination are the same, a copy with no changes returns the blob's BLOB-META
+and copies nothing; with changes it rewrites the content type or metadata in place.
+
+IF-MATCH is the source's ETag as the app read it when it checked the blob (BLOB-META-ETAG, with or
+without its quotes). When given, the copy happens only if the source still has that ETag, and
+otherwise signals BLOB-SOURCE-CHANGED with nothing copied, so the bytes copied are the bytes the
+app checked (#826). On the filesystem store the ETag is the blob's SHA-256 checksum.
+
+A missing source signals BLOB-NOT-FOUND naming the source. On S3 a source that changes while it
+is being copied signals BLOB-SOURCE-CHANGED. A store that cannot copy server-side signals
+BLOB-UNSUPPORTED, and the caller copies through GET-BLOB and PUT-BLOB. On an S3 store made with
+:UPLOAD-ACL :PRIVATE the copy is sent with `x-amz-acl: private'; otherwise it gets the bucket's
+default ACL, because S3 never copies an object's ACL."))
+
+(defgeneric move-blob (store src-bucket src-key dst-bucket dst-key
+                       &key content-type metadata if-match)
+  (:documentation
+   "COPY-BLOB, then DELETE-BLOB on the source (#804). Returns the destination's BLOB-META.
+
+NOT ATOMIC on S3, which has no rename: if the copy succeeds and the delete fails, the
+destination holds the blob AND the source is still there, and the delete's own condition is
+signalled, normally BLOB-BACKEND-ERROR naming the source. A delete the store refuses (S3 answers
+403, which DELETE-BLOB cannot tell from a missing key) is found by checking that the source is
+gone afterwards, and signals BLOB-BACKEND-ERROR naming the source too. Retrying the move is safe,
+because a copy overwrites. A quarantine sweep must expect a source left behind this way. If the
+copy fails, nothing was deleted. On the filesystem store a move is a rename within one root.
+
+The delete is unconditional: if the source is replaced between the copy and the delete, the newer
+object is deleted and the older one is at the destination. That is harmless for a quarantine
+prefix nothing else writes to, but not for a key other writers use.
+
+When source and destination are the same, it returns the blob's BLOB-META and deletes nothing.
+IF-MATCH is checked as COPY-BLOB checks it, and a mismatch deletes nothing."))
 
 (defgeneric list-blobs (store bucket &key prefix)
   (:documentation
@@ -105,9 +294,49 @@ passes through."
                       (k:blob-key-fault-message key)
                       "a blob key must be a string"))))
 
-(defmethod put-blob :before ((s store) bucket key stream &key content-type metadata)
-  (declare (ignore stream content-type metadata))
-  (%check-key bucket key))
+(defun %token-char-p (char)
+  "True for a character allowed in an HTTP header name: RFC 7230's tchar, ASCII letters, digits
+and !#$%&'*+-.^_`|~."
+  (or (char<= #\a char #\z) (char<= #\A char #\Z) (char<= #\0 char #\9)
+      (find char "!#$%&'*+-.^_`|~")))
+
+(defun %check-metadata (bucket key metadata)
+  "Signal BLOB-INVALID-METADATA unless METADATA is an alist of usable string names to string
+values (#810). Names and values become x-amz-meta-* headers on S3, so a name must be an HTTP
+header token and a value printable ASCII: S3 expects anything else RFC 2047-encoded, and a raw
+non-ASCII value can break the request's signature. Two names that differ only in case would be
+the same header, and \"sha256\" is reserved for the checksum the store records."
+  (unless (listp metadata)
+    (error 'blob-invalid-metadata :bucket bucket :key key :fault "metadata must be an alist"))
+  (let ((seen '()))
+    (dolist (entry metadata)
+      (unless (and (consp entry) (stringp (car entry)) (stringp (cdr entry)))
+        (error 'blob-invalid-metadata :bucket bucket :key key
+                                      :fault "each entry must be a (name . value) pair of strings"))
+      (destructuring-bind (name . value) entry
+        (flet ((refuse (fault)
+                 (error 'blob-invalid-metadata :bucket bucket :key key :name name :fault fault)))
+          (cond ((zerop (length name)) (refuse "a name may not be empty"))
+                ((notevery #'%token-char-p name)
+                 (refuse "a name must be an HTTP token: ASCII letters, digits, !#$%&'*+-.^_`|~"))
+                ((string-equal name "sha256")
+                 (refuse "the name sha256 is reserved for the checksum the store records"))
+                ((member name seen :test #'string-equal)
+                 (refuse "two names differ only in case, and would be the same header"))
+                ((notevery (lambda (c) (<= 32 (char-code c) 126)) value)
+                 (refuse "a value must be printable ASCII")))
+          (push name seen))))))
+
+(defmethod put-blob :before ((s store) bucket key stream &key content-type metadata cache-control)
+  (declare (ignore stream content-type))
+  (%check-key bucket key)
+  (%check-metadata bucket key metadata)
+  ;; A header value: a CR or LF in it would start another header (#830).
+  (unless (or (null cache-control)
+              (and (stringp cache-control) (plusp (length cache-control))
+                   (notany #'%control-char-p cache-control)))
+    (error 'blob-invalid-metadata :bucket bucket :key key :name "Cache-Control"
+                                  :fault "Cache-Control must be a non-empty string without control characters")))
 
 (defmethod get-blob :before ((s store) bucket key) (%check-key bucket key))
 (defmethod delete-blob :before ((s store) bucket key) (%check-key bucket key))
@@ -118,9 +347,158 @@ passes through."
   (declare (ignore expires-in))
   (%check-key bucket key))
 
+(defconstant +max-presign-seconds+ 604800
+  "Seven days, the longest expiry SigV4 accepts.")
+
+(defun %control-char-p (char)
+  "True for an ASCII control character, CR, LF and tab included."
+  (let ((code (char-code char)))
+    (or (< code 32) (= code 127))))
+
+(defmethod upload-url :before ((s store) bucket key &key expires-in content-type content-length max-bytes)
+  (%check-key bucket key)
+  (unless (and (integerp expires-in) (<= 1 expires-in +max-presign-seconds+))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-expiry))
+  ;; A CR or LF in a header value would let the value start a second header, and the client
+  ;; is told to send these headers exactly as given. Refuse it rather than sign it.
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-type))
+  (when (and content-length (not (and (integerp content-length) (>= content-length 0))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-length))
+  (when (and max-bytes (not (and (integerp max-bytes) (>= max-bytes 0))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-max-bytes))
+  (when max-bytes
+    (cond ((null content-length)
+           (error 'blob-upload-refused :bucket bucket :key key :reason :content-length-required
+                                       :limit max-bytes))
+          ((> content-length max-bytes)
+           (error 'blob-upload-refused :bucket bucket :key key :reason :too-large
+                                       :size content-length :limit max-bytes)))))
+
+(defun %check-if-match-value (bucket key if-match)
+  "Signal BLOB-INVALID-METADATA unless IF-MATCH is NIL or an ETag: a non-empty printable ASCII
+string, which goes into a request header on S3."
+  (when (and if-match
+             (not (and (stringp if-match)
+                       (plusp (length (string-trim "\"" if-match)))
+                       (every (lambda (c) (<= 32 (char-code c) 126)) if-match))))
+    (error 'blob-invalid-metadata
+           :bucket bucket :key key :name "if-match"
+           :fault "if-match must be an ETag: a non-empty printable ASCII string")))
+
+(defmethod open-blob :before ((s store) bucket key &key if-match)
+  (%check-key bucket key)
+  (%check-if-match-value bucket key if-match))
+
+(defmethod read-blob-range :before ((s store) bucket key &key (start 0) (length 512) if-match)
+  (%check-key bucket key)
+  (%check-if-match-value bucket key if-match)
+  (unless (and (integerp start) (>= start 0) (integerp length) (>= length 0))
+    (error 'type-error :datum (list start length) :expected-type '(integer 0))))
+
+(defmethod put-bucket-cors :before ((s store) bucket &key origins methods allowed-headers max-age-seconds expose-headers)
+  (declare (ignore methods allowed-headers expose-headers))
+  (%check-bucket bucket)
+  (unless (and origins (listp origins) (every (lambda (o) (and (stringp o) (plusp (length o)))) origins))
+    (error 'type-error :datum origins :expected-type '(cons string list)))
+  (when (and max-age-seconds (not (and (integerp max-age-seconds) (>= max-age-seconds 0))))
+    (error 'type-error :datum max-age-seconds :expected-type '(integer 0))))
+
+(defmethod check-bucket-cors :before ((s store) bucket origin &key method headers)
+  (declare (ignore method headers))
+  (%check-bucket bucket)
+  (check-type origin string))
+
+(defun %check-upload-id (bucket key upload-id)
+  (unless (and (stringp upload-id) (plusp (length upload-id)))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-upload-id)))
+
+(defmethod start-multipart-upload :before ((s store) bucket key &key content-type)
+  (%check-key bucket key)
+  ;; The same check as UPLOAD-URL's: the content type goes into a request header (#796).
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-type)))
+
+(defmethod multipart-part-url :before ((s store) bucket key upload-id part-number &key expires-in content-length)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id)
+  (unless (and (integerp part-number) (<= 1 part-number 10000))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-part-number))
+  (unless (and (integerp expires-in) (<= 1 expires-in +max-presign-seconds+))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-expiry))
+  (when (and content-length (not (and (integerp content-length) (>= content-length 0))))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-content-length)))
+
+(defmethod complete-multipart-upload :before ((s store) bucket key upload-id parts)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id)
+  (unless (and parts (every (lambda (p) (and (consp p) (integerp (car p)) (<= 1 (car p) 10000)
+                                             (stringp (cdr p)) (plusp (length (cdr p)))))
+                            parts))
+    (error 'blob-upload-refused :bucket bucket :key key :reason :bad-parts)))
+
+(defmethod abort-multipart-upload :before ((s store) bucket key upload-id)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id))
+
+(defmethod list-multipart-parts :before ((s store) bucket key upload-id)
+  (%check-key bucket key)
+  (%check-upload-id bucket key upload-id))
+
 (defmethod list-blobs :before ((s store) bucket &key prefix)
   (declare (ignore prefix))
   (%check-bucket bucket))
+
+(defun %etag= (a b)
+  "True if A and B are the same ETag, ignoring the quotes around either."
+  (and a b (string= (string-trim "\"" a) (string-trim "\"" b))))
+
+(defun %check-if-match (bucket key if-match etag &optional (condition 'blob-source-changed))
+  "Signal CONDITION (BLOB-SOURCE-CHANGED for a copy, BLOB-PRECONDITION-FAILED for a read) for
+BUCKET/KEY when IF-MATCH is given and is not ETAG, the blob's ETag now. A blob with no ETag
+matches nothing (#826)."
+  (when (and if-match (not (%etag= if-match etag)))
+    (error condition :bucket bucket :key key)))
+
+(defun %check-copy (src-bucket src-key dst-bucket dst-key content-type metadata
+                    &optional if-match)
+  "The checks COPY-BLOB and MOVE-BLOB share: both locations, the content type as UPLOAD-URL checks
+it, and the metadata as PUT-BLOB checks it."
+  (%check-key src-bucket src-key)
+  (%check-key dst-bucket dst-key)
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-invalid-metadata
+           :bucket dst-bucket :key dst-key
+           :fault "the content type is empty, not a string, or holds a control character"))
+  (%check-metadata dst-bucket dst-key metadata)
+  ;; The ETag goes into a request header on S3.
+  (when (and if-match
+             (not (and (stringp if-match)
+                       (plusp (length (string-trim "\"" if-match)))
+                       (every (lambda (c) (<= 32 (char-code c) 126)) if-match))))
+    (error 'blob-invalid-metadata
+           :bucket src-bucket :key src-key :name "if-match"
+           :fault "if-match must be an ETag: a non-empty printable ASCII string")))
+
+(defmethod copy-blob :before ((s store) src-bucket src-key dst-bucket dst-key
+                              &key content-type metadata if-match)
+  (%check-copy src-bucket src-key dst-bucket dst-key content-type metadata if-match))
+
+(defmethod move-blob :before ((s store) src-bucket src-key dst-bucket dst-key
+                              &key content-type metadata if-match)
+  (%check-copy src-bucket src-key dst-bucket dst-key content-type metadata if-match))
+
+(defun %same-location-p (src-bucket src-key dst-bucket dst-key)
+  (and (string= src-bucket dst-bucket) (string= src-key dst-key)))
 
 ;;; --- streaming + digest, implemented once ----------------------------------
 
@@ -148,17 +526,102 @@ READ-SEQUENCE-the-whole-thing version."
     (values total (ironclad:byte-array-to-hex-string
                    (ironclad:produce-digest digest)))))
 
-(defmacro with-blob-stream ((var store bucket key) &body body)
+(defmacro with-blob-stream ((var store bucket key &key (if-match nil if-match-p) meta) &body body)
   "Bind VAR to an octet input stream over BUCKET/KEY for the duration of BODY, closing it
 however BODY leaves.
 
 GET-BLOB hands back a live stream, and an app that forgets to close it leaks a file
 descriptor per view -- which shows up as a server that dies under load rather than as a
-bug at the call site. Prefer this."
-  (let ((s (gensym "STREAM")))
-    `(let ((,s (get-blob ,store ,bucket ,key)))
-       (unwind-protect (let ((,var ,s)) ,@body)
-         (close ,s)))))
+bug at the call site. Prefer this.
+
+With IF-MATCH (an ETag form) or META (a variable to bind to the blob's BLOB-META), the stream
+comes from OPEN-BLOB, and a blob that no longer has the ETag signals BLOB-PRECONDITION-FAILED
+before BODY runs (#826). Without either, it comes from GET-BLOB exactly as before, so an app's
+own store class that implements only GET-BLOB keeps working."
+  (let ((s (gensym "STREAM")) (m (gensym "META")))
+    (if (or if-match-p meta)
+        `(multiple-value-bind (,s ,m) (open-blob ,store ,bucket ,key :if-match ,if-match)
+           (declare (ignorable ,m))
+           (unwind-protect (let ((,var ,s) ,@(when meta `((,meta ,m)))) ,@body)
+             (close ,s)))
+        `(let ((,s (get-blob ,store ,bucket ,key)))
+           (unwind-protect (let ((,var ,s)) ,@body)
+             (close ,s))))))
+
+;;; --- defaults for a store that does not implement an operation --------------
+;;;
+;;; An app can define its own STORE subclass. Without these, calling UPLOAD-URL or
+;;; READ-BLOB-RANGE on one signals NO-APPLICABLE-METHOD instead of what the docstrings promise.
+
+(defmethod copy-blob ((s store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  (declare (ignore src-key dst-bucket dst-key content-type metadata if-match))
+  (error 'blob-unsupported :bucket src-bucket
+                           :operation "server-side copy (copy through get-blob and put-blob)"))
+
+(defmethod move-blob ((s store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  ;; Any store that can copy can move: copy, then delete the source. The filesystem store
+  ;; overrides this with a rename. The order matters: the source is deleted only once the
+  ;; destination exists, so a failure leaves two copies, never none.
+  (if (%same-location-p src-bucket src-key dst-bucket dst-key)
+      (if (or content-type metadata)
+          (copy-blob s src-bucket src-key dst-bucket dst-key
+                     :content-type content-type :metadata metadata :if-match if-match)
+          (let ((meta (blob-metadata s src-bucket src-key)))
+            (%check-if-match src-bucket src-key if-match (blob-meta-etag meta))
+            meta))
+      (let ((meta (copy-blob s src-bucket src-key dst-bucket dst-key
+                             :content-type content-type :metadata metadata :if-match if-match)))
+        (delete-blob s src-bucket src-key)
+        ;; DELETE-BLOB is idempotent and folds S3's 403 into "already gone", so a role without
+        ;; s3:DeleteObject would make the move look done with the source left behind. Check.
+        (when (blob-exists-p s src-bucket src-key)
+          (error 'blob-backend-error
+                 :bucket src-bucket :key src-key
+                 :detail (concatenate 'string "the source was copied but not deleted: "
+                                      "the delete was refused, or the source was written again")))
+        meta)))
+
+(defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes)
+  (declare (ignore expires-in content-type content-length max-bytes))
+  (error 'blob-unsupported :bucket bucket :key key
+                           :operation "presigned uploads (proxy the upload through put-blob)"))
+
+(defun %read-range (in start length)
+  "At most LENGTH octets of the octet input stream IN, from byte START. Skips START bytes in
+bounded chunks and then reads only LENGTH, so a long stream is never held in memory."
+  (let ((skip (make-array (min start +copy-buffer-size+) :element-type '(unsigned-byte 8)))
+        (remaining start))
+    (loop while (plusp remaining)
+          do (let ((n (read-sequence skip in :end (min remaining (length skip)))))
+               (when (zerop n) (return))
+               (decf remaining n)))
+    (let ((buffer (make-array length :element-type '(unsigned-byte 8))))
+      ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
+      (subseq buffer 0 (read-sequence buffer in)))))
+
+(defmethod read-blob-range ((s store) bucket key &key (start 0) (length 512) if-match)
+  ;; Reads through GET-BLOB, or OPEN-BLOB when IF-MATCH is given.
+  (if if-match
+      (with-blob-stream (in s bucket key :if-match if-match)
+        (%read-range in start length))
+      (with-blob-stream (in s bucket key)
+        (%read-range in start length))))
+
+(defmethod open-blob ((s store) bucket key &key if-match)
+  "The default, for a store class that implements GET-BLOB but not OPEN-BLOB.
+
+NOT ATOMIC: with IF-MATCH it reads the blob's metadata, checks the ETag, and only then opens the
+stream with GET-BLOB, so a blob replaced between those two calls is read as the newer version.
+A store class whose provider can make the read conditional should implement OPEN-BLOB itself, as
+the S3 and filesystem stores do. A mismatch signals BLOB-PRECONDITION-FAILED, as there. Without
+IF-MATCH the metadata is not read, and the second value is NIL."
+  (if if-match
+      (let ((meta (blob-metadata s bucket key)))
+        (%check-if-match bucket key if-match (blob-meta-etag meta) 'blob-precondition-failed)
+        (values (get-blob s bucket key) meta))
+      (values (get-blob s bucket key) nil)))
 
 ;;; --- the registry + environment selection ----------------------------------
 ;;;

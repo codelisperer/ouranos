@@ -124,6 +124,12 @@
 (load (merge-pathnames "compile-warnings.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; A function defined in one file and again in another (#577): the child's form runs inside
+;;; ouranos-redefinitions:call-reporting-redefinitions, which prints a line for each, and the
+;;; system fails. Split out so scripts/check-compile.lisp applies the same rule.
+(load (merge-pathnames "redefinitions.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; Each `caught ERROR' in a child's output (#263). Split out for the same reason, so the
 ;;; control in cons/tests/caught-errors-tests.lisp exercises the function the gate calls.
 (load (merge-pathnames "caught-errors.lisp"
@@ -144,7 +150,7 @@
     :aion :aion/csv :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
-    :hades :hades/single-instance :hades/credentials
+    :hades :hades/single-instance :hades/credentials :hades/notify
     ;; aux systems -- these hold real code and were previously never compiled here,
     ;; so a change to any of them could break unnoticed. praxeon/web is the case that
     ;; exposed it: a refactor landed in praxeon/src/web.lisp and a green run of this
@@ -164,6 +170,10 @@
     :praxeon/retrieval
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
+    ;; The job scheduler and its database store (#689).
+    :aion/schedule :mnemosyne/jobs
+    ;; Dev sidecars (#700).
+    :hyperion/sidecar
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
     :praxeon/elise :praxeon/chat-rbt
     :hyperion/examples/active-search :hyperion/examples/active-search-db
@@ -180,6 +190,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
 (defparameter +test-systems+
   '(:aion/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
+    :hades/notify/tests
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
@@ -211,9 +222,16 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The MCP client (#527), registered in the commit that adds it. Its MCP servers run on
     ;; 127.0.0.1 in the test image, so it runs on every leg with no network.
     :praxeon/mcp/tests
+    ;; Dev sidecars (#700). It was left out of the pull request's first commit, and its first CI run
+    ;; reported the same total as main; registered here so that it runs. Each sidecar is a child SBCL,
+    ;; so it needs nothing installed.
+    :hyperion/sidecar/tests
     ;; The OAuth client and its routes (#527 part 2), registered in the commit that adds them.
     ;; Their authorization server runs on 127.0.0.1 in the test image.
     :aion/oauth/tests :hyperion/oauth/tests
+    ;; The job scheduler (#689) and its database store, registered in the commit that adds
+    ;; them. The store's suite runs on SQLite everywhere and on Postgres where the gate has it.
+    :aion/schedule/tests :mnemosyne/jobs/tests
     ;; The gate's own checkers, tested against trees built to break them (#163). Here
     ;; rather than in the +CHECKERS+ block because that block must not move the check
     ;; count, and a fix for "nothing attests these work" that produces no number would be
@@ -285,14 +303,17 @@ decision someone made, not an accident -- which is the difference that matters."
     ;; see ADR-0015 and the commentary in hyperion/src/http1/packages.lisp.
     :hyperion/server-uv
     ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
-    :hyperion/clack-handler-uv)
+    :hyperion/clack-handler-uv
+    ;; The scheduler's libuv driver (#689).
+    :aion/schedule/uv)
   "The libuv-backed systems. Absent from +SYSTEMS+ because they need
 scripts/build-libuv.lisp to have run first, so on a machine without it their absence is
 not evidence of anything.")
 
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
-    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests)
+    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
+    :aion/schedule/uv/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)
@@ -708,6 +729,8 @@ surfaces -- it just is not confused with a failing test."
      "the Coalton that LOADS is the pinned one")
     ("check-assets.lisp" () nil
      "vendored browser assets still hash to ASSETS.pin")
+    ("check-upstream.lisp" () nil
+     "every pinned version has an entry in upstream.sexp, and every entry finds its pin (#716)")
     ("check-deps.lisp" () t
      "docs/dependencies.md's rows and Headline counts match the .asd files (#118)")
     ("check-asd-collisions.lisp" () nil
@@ -850,21 +873,9 @@ storage engine and have nothing to say here."
 ;;; --- counting -------------------------------------------------------------
 
 (defun count-checks (output)
-  "Sum every `Did N checks.` FiveAM emits in OUTPUT. Returns NIL if it emitted none at
-all -- which means the suite never ran, not that it ran and found nothing."
-  (let ((total nil) (start 0))
-    (loop
-      (let ((p (search "Did " output :start2 start)))
-        (unless p (return))
-        (let* ((numstart (+ p 4))
-               (numend (position-if-not #'digit-char-p output :start numstart)))
-          (when (and numend (> numend numstart)
-                     (string= " checks" output :start2 numend
-                                               :end2 (min (length output) (+ numend 7))))
-            (setf total (+ (or total 0)
-                           (parse-integer output :start numstart :end numend)))))
-        (setf start (1+ p))))
-    total))
+  "The sum of every FiveAM report's check count in OUTPUT, or NIL if there was none. See
+OURANOS-FIVEAM-REPORT:COUNT-CHECKS, which also counts `Did 1 check.' (#607)."
+  (ouranos-fiveam-report:count-checks output))
 
 (defun count-skips (output)
   "Sum every `Skip: N` FiveAM emits in OUTPUT; 0 if none.
@@ -896,10 +907,6 @@ in a total (pre-publication issue 168)."
 ;;; discarded, so the one machine that could see the failure was the one that threw the
 ;;; detail away. A gate whose job is to say what to fix must carry the finding out with it --
 ;;; all of it.
-
-(defun failure-details (output)
-  "WHICH checks failed, not merely that some did. See scripts/fiveam-report.lisp."
-  (ouranos-fiveam-report:failure-details output))
 
 (defun skip-reasons (output)
   "The reasons under FiveAM's `Skip Details:` block, so the gate can say WHAT did not run
@@ -952,6 +959,15 @@ fallback for a child that died without printing a condition at all."
 
 (defvar *caught-errors* '()
   "(LABEL . COUNT) for every child whose output had a `caught ERROR', newest first.")
+
+(defun report-redefinitions (system redefined)
+  "Print and fail SYSTEM for REDEFINED, the lines REDEFINITIONS-IN found in its child's output
+(#577). Called after the child's other outcome is reported rather than instead of it, so a
+failing or warning system with a redefinition reports both, and a suite's checks still count."
+  (when redefined
+    (format t "  REDEF   ~a~%~{          ~a~%~}" system redefined)
+    (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
+          system (length redefined) redefined)))
 
 (defun report-caught-errors (label output)
   "Print OUTPUT's `caught ERROR's under LABEL, record them, and fail the run for them."
@@ -1100,8 +1116,11 @@ let this run claim `view' while the five assertions skipped."
     ;; variable matches constructor name" warning that quickload passed and a consuming
     ;; app's plain ASDF build rejected. See docs/coalton-patterns.md 8a/8b.
     (multiple-value-bind (code out)
-        (run-checked (format nil "(asdf:load-system :~(~a~))" s) s)
-      (let ((warned (ouranos-compile-warnings:warnings-in out)))
+        (run-checked (ouranos-redefinitions:wrap-form (format nil "(asdf:load-system :~(~a~))" s)
+                                                      (format nil "(list ~S)" (namestring *root*)))
+                     s)
+      (let ((warned (ouranos-compile-warnings:warnings-in out))
+            (redefined (ouranos-redefinitions:redefinitions-in out)))
         (cond
           ((not (zerop code))
            (format t "  FAIL    ~a~%~a~%" s (failure-excerpt out 6))
@@ -1111,6 +1130,7 @@ let this run claim `view' while the five assertions skipped."
            (format t "  WARN    ~a~%~{          ~a~%~}" s warned)
            (fail "~a compiled with ~D warning~:P" s (length warned)))
           (t (format t "  ok      ~a~%" s)))
+        (report-redefinitions s redefined)
         (report-caught-errors (format nil "load ~(~a~)" s) out))))
 
   (format t "~%========== SUITES (each in its own image) ==========~%")
@@ -1118,12 +1138,25 @@ let this run claim `view' while the five assertions skipped."
   (let ((grand 0))
     (dolist (s (all-test-systems))
       (multiple-value-bind (code text)
-          (run-checked (format nil "(asdf:test-system :~(~a~))" s) s)
+          (run-checked (ouranos-redefinitions:wrap-form (format nil "(asdf:test-system :~(~a~))" s)
+                                                        (format nil "(list ~S)" (namestring *root*)))
+                       s)
         (let ((n (count-checks text))
-              (empty-reason (cdr (assoc s +known-empty+))))
+              (empty-reason (cdr (assoc s +known-empty+)))
+              (redefined (ouranos-redefinitions:redefinitions-in text)))
+          ;; A suite whose output holds more than one FiveAM report is named, with each
+          ;; report's Fail count, so a reader can see what the verdict below was judged on (#605).
+          (let ((fails (ouranos-fiveam-report:fail-counts text)))
+            (when (> (length fails) 1)
+              (format t "  REPORTS ~a~34t~D FiveAM reports, Fail: ~{~D~^, ~} (child exited ~a)~%"
+                      s (length fails) fails code)))
           (cond
             ((not (zerop code))
-             (format t "  FAIL    ~a  (child exited ~a)~%~a~%" s code (failure-excerpt text 6))
+             (format t "  FAIL    ~a  (child exited ~a)~%" s code)
+             ;; Which checks failed, when the child ran some before it ended: aion/tests now
+             ;; signals after a failing report (#605). Then why the child ended.
+             (ouranos-fiveam-report:print-failure-details text)
+             (format t "~a~%" (failure-excerpt text 6))
              (fail "~a" (or (ouranos-failure-origin:report-origin text s *root*)
                             (format nil "~a errored in a clean image" s))))
             ((null n)
@@ -1134,11 +1167,13 @@ let this run claim `view' while the five assertions skipped."
                  (format t "  empty   ~a  -- known: ~a~%" s empty-reason)
                  (progn (format t "  NO-RUN  ~a  -- 0 checks~%" s)
                         (fail "~a ran ZERO checks" s))))
-            ((and (search "Fail: 0 ( 0%)" text) (ouranos-compile-warnings:warnings-in text))
+            ;; Every report must say Fail: 0, not just one of them (#605).
+            ((and (ouranos-fiveam-report:every-report-passed-p text)
+                  (ouranos-compile-warnings:warnings-in text))
              (incf grand n)
              (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n (ouranos-compile-warnings:warnings-in text))
              (fail "~a compiled with ~D warning~:P" s (length (ouranos-compile-warnings:warnings-in text))))
-            ((search "Fail: 0 ( 0%)" text)
+            ((ouranos-fiveam-report:every-report-passed-p text)
              (incf grand n)
              (let ((skipped (count-skips text)))
                (if (zerop skipped)
@@ -1147,12 +1182,11 @@ let this run claim `view' while the five assertions skipped."
                    (format t "  ok      ~a~34t~a checks (~D skipped)~%~{          skip: ~a~%~}"
                            s n skipped (skip-reasons text)))))
             (t (incf grand n)
-               (let ((details (failure-details text)))
-                 (format t "  FAIL    ~a~34t~a checks, some failing~%~{          ~a~%~}"
-                         s n details)
-                 (unless details
-                   (format t "~a~%" (failure-excerpt text 8))))
-               (fail "~a had failing checks" s))))
+               (format t "  FAIL    ~a~34t~a checks, some failing~%" s n)
+               (when (zerop (ouranos-fiveam-report:print-failure-details text))
+                 (format t "~a~%" (failure-excerpt text 8)))
+               (fail "~a had failing checks" s)))
+          (report-redefinitions s redefined))
         ;; Per-backend coverage, INDEPENDENT of pass/fail above (pre-publication issue 176). A suite can be
         ;; entirely green and still have exercised one storage engine -- that is the exact
         ;; shape of the defect this clause exists to catch, so it is checked separately

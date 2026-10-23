@@ -297,6 +297,41 @@ from a backend, not from a connection."
                "with it, the dead connection is replaced and the query answers")
           (is* (= 1 (conn:pool-open-count pool))))))))
 
+(test connection-open-p-tells-a-lost-connection-from-a-failed-statement
+  ;; #636: a statement that fails on a working connection leaves it open; once the server has
+  ;; ended the connection (57P01), the failure that finds it out leaves it closed, and so does
+  ;; every later one. A SQLite connection always reads as open.
+  (with-each-pool-backend (backend)
+    (let ((c (conn:connect backend)))
+      (unwind-protect
+           (progn
+             (ignore-errors (conn:query c "SELECT * FROM no_such_table_636"))
+             (is* (conn:connection-open-p c) "a failed statement leaves the connection open")
+             (when (%postgres-p)
+               (let ((pid (second (first (conn:query c "SELECT pg_backend_pid() AS pid"))))
+                     (other (conn:connect backend)))
+                 (unwind-protect (conn:query other "SELECT pg_terminate_backend(?)" pid)
+                   (conn:disconnect other))
+                 (sleep 0.2)
+                 (is* (conn:connection-open-p c)
+                      "control: the client cannot know before it next uses the connection")
+                 (is* (typep (nth-value 1 (ignore-errors (conn:query c "SELECT 1 AS one"))) 'conn:db-error)
+                      "precondition: the next statement fails")
+                 (is* (not (conn:connection-open-p c)) "after that failure it reads as closed")
+                 (ignore-errors (conn:query c "SELECT 1 AS one"))
+                 (is* (not (conn:connection-open-p c)) "and after the next one too"))))
+        (ignore-errors (conn:disconnect c))))))
+
+(test connection-open-p-reads-a-connection-without-a-handle-as-closed
+  ;; #675: a NIL handle, or one whose read signals, is not a working connection, so the session
+  ;; store must replace it after a DB-ERROR rather than keep it. No database is needed.
+  (is (not (conn:connection-open-p (make-instance 'dbi.driver:dbi-connection :handle nil)))
+       "a NIL handle reads as closed")
+  (let ((unbound (make-instance 'dbi.driver:dbi-connection)))
+    (is (typep (nth-value 1 (ignore-errors (dbi:connection-handle unbound))) 'error)
+         "precondition: reading the unset handle signals")
+    (is (not (conn:connection-open-p unbound)) "an unreadable handle reads as closed")))
+
 (test with-connection-still-opens-and-closes-a-connection-for-a-backend
   (with-each-pool-backend (backend)
     (let ((lent nil))
@@ -323,3 +358,37 @@ from a backend, not from a connection."
            (is (= 0 (conn:pool-open-count pool)) "the slot of the failed connect was given back"))
       (conn:close-pool pool)
       (ignore-errors (delete-file file)))))
+
+(test an-immediate-sqlite-transaction-that-reads-first-waits-for-the-write-lock
+  ;; #653. One connection holds a write transaction on a SQLite file for 1 s. Another opens a
+  ;; transaction that reads, then writes. Begun deferred, its upgrade to a writer fails with BUSY
+  ;; at once, without the busy timeout. Begun IMMEDIATE, it waits for the lock and succeeds.
+  (let ((file (format nil "~Ammn-immediate-~36R.db" (namestring (uiop:temporary-directory))
+                      (random (expt 2 40) (make-random-state t)))))
+    (unwind-protect
+         (let ((backend (be:make-sqlite file)))
+           (conn:with-connection (c backend) (conn:exec c "CREATE TABLE t (n INTEGER)"))
+           (flet ((reader-writer (immediate)
+                    (let* ((holder (bt:make-thread
+                                    (lambda ()
+                                      (conn:with-connection (c backend)
+                                        (conn:with-transaction (c)
+                                          (conn:exec c "INSERT INTO t VALUES (1)")
+                                          (sleep 1))))))
+                           (result (progn
+                                     (sleep 0.2)
+                                     (handler-case
+                                         (conn:with-connection (c backend)
+                                           (conn:with-transaction (c :immediate immediate)
+                                             (conn:query c "SELECT count(*) AS n FROM t")
+                                             (conn:exec c "INSERT INTO t VALUES (2)"))
+                                           :written)
+                                       (conn:db-error (e) e)))))
+                      (bt:join-thread holder)
+                      result)))
+             (is* (typep (reader-writer nil) 'conn:db-error)
+                  "control: begun deferred, the read-then-write transaction fails behind the writer")
+             (is* (eq :written (reader-writer t))
+                  "begun IMMEDIATE, it waits for the writer and succeeds")))
+      (dolist (suffix '("" "-journal" "-wal" "-shm"))
+        (let ((f (probe-file (concatenate 'string file suffix)))) (when f (delete-file f)))))))
