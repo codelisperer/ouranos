@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
+  `file-response` and `make-static-handler` now:
+  - **refuse a FIFO, a device or a socket under the static root** with a 404, without reading
+    from it. Before, a request for a FIFO blocked until something wrote to it, which under
+    `server-uv` stopped the event loop, and a request for a device file ran the device's open.
+    On Windows the names Windows opens as devices in any directory (`con`, `nul.txt`, `com1`,
+    and the rest) are refused the same way;
+  - **serve files from a root the server can search but not read** (mode `0111`). Before, every
+    file there was refused;
+  - **serve files from a Windows root reached through a junction, a `subst` drive or a mapped
+    drive**, and on macOS a file that is also hard-linked from outside the root. Before, both
+    were refused with a 404;
+  - **take `ETag` and `Last-Modified` from the file that is sent**, read from its open handle.
+    Before, a file replaced with one of the same size just after the open could be sent with
+    the replacement's time, so a later request could get a 304 for bytes it never had.
+
+  `hyperion/static:file-etag` returns NIL for a file that is not a regular file, and on Linux
+  and macOS it reads the size and time with `stat` instead of opening the file.
+
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
   Items go into the default collection of whichever program provides the Secret Service on the
@@ -593,6 +612,27 @@ its tag.
 
 ### Added
 
+- **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
+  opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
+  :select t)` selects the item in its folder: `explorer.exe /select,"<path>"` on Windows,
+  `open -R` on macOS, and on Linux the `org.freedesktop.FileManager1` `ShowItems` call through
+  `dbus-send`, falling back to `xdg-open` on the folder. Without `:select` it opens the
+  directory, or the directory holding a file, with `ShellExecuteW` on Windows and `xdg-open` on
+  Linux; on macOS it always uses `open -R`, because `open` on an app bundle launches it. A string
+  path is read as a native file name, so `[`, `*` and `?` are ordinary characters.
+  `(hades/open:open-url url)` takes http and https URLs made of the characters RFC 3986 allows,
+  opens them with `ShellExecuteW` on Windows, and signals `unsupported-url` for anything else.
+  Both return `:opened`, or `:not-available` with `:no-display`, `:no-program` or `:failed`, and
+  neither waits for the program. A missing path signals `path-not-found`. New systems
+  `hades/open` and `hades/program`; `hades` loads both. `hades/program:find-program` searches
+  only the absolute directories on `PATH`.
+- **aion/windows: `system-windows-directory` and `shell-open`** (#820).
+  `(aion/windows:system-windows-directory)` returns the Windows directory from
+  `GetSystemWindowsDirectoryW`, not from the `SystemRoot` environment variable.
+  `(aion/windows:shell-open target)` opens a URL or file with the program registered for it
+  through `ShellExecuteW` and the `open` verb, with no command line and no shell, and returns `t`
+  when it started. It does not check the target; `hades/open:open-url` does. `aion/windows` now
+  loads `shell32.dll`.
 - **aion/libsecret: a Linux-only binding of libsecret for the Secret Service** (#357). The raw
   calls are in `aion/libsecret/ffi`; `aion/libsecret` has `load-libsecret` (T, or NIL and the
   reason), `with-libsecret-lock`, `with-schema`, `with-attributes`, `make-secret-value`,
@@ -1816,6 +1856,20 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **hyperion/desktop: the `:browser` shell opens its URL with no shell on Windows, and opens
+  only http and https URLs** (#851). `run-app` with `:shell :browser` ran `cmd /c start "" URL`
+  on Windows. cmd reads the rest of its command line as a command of its own, and SBCL quotes
+  an argument only when it holds a space or a double quote, so in a URL such as
+  `http://127.0.0.1:8080/?a=1&b=2` the text after `&` ran as a second command. The URL now goes
+  to ShellExecuteW through `aion/windows:shell-open`, with no command line. On macOS and Linux it
+  was already one argument to `open` or `xdg-open`. On every platform the shell now refuses a
+  URL that is not http or https, or that holds a character RFC 3986 does not allow, such as a
+  space, `"`, `<`, `>`, `\`, `^`, `|`, `{`, `}` or the backtick, by signalling the new
+  `hyperion/desktop:unsupported-browser-url` (reader `unsupported-browser-url-url`), whose report
+  leaves the URL out. This is the rule `hades/open:open-url` uses. A browser that cannot be
+  started is logged as a warning, and the server keeps running. `hyperion/desktop` now declares
+  `aion/windows` on Windows, which it already loaded through `hyperion/sidecar`.
 
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a

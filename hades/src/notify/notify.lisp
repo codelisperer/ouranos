@@ -54,23 +54,6 @@ be passed in a program argument at all."
   (let ((value (funcall getenv name)))
     (and value (plusp (length value)))))
 
-#-win32
-(defun %find-program (name &optional (path (uiop:getenv "PATH")))
-  "The first regular, executable file called NAME in the directories of PATH, or NIL."
-  (loop for dir in (uiop:split-string (or path "") :separator ":")
-        for file = (concatenate 'string dir "/" name)
-        when (and (plusp (length dir))
-                  (handler-case
-                      (and (sb-posix:s-isreg (sb-posix:stat-mode (sb-posix:stat file)))
-                           (progn (sb-posix:access file sb-posix:x-ok) t))
-                    (sb-posix:syscall-error () nil)))
-          return file))
-
-#+win32
-(defun %find-program (name &optional path)
-  (declare (ignore name path))
-  nil)
-
 (defun %session-id ()
   "The Windows session this process runs in, or NIL when it is not known or not Windows."
   #+win32
@@ -108,7 +91,8 @@ be passed in a program argument at all."
         message))
 
 (defun %plan (title message level &key (backend *notify-backend*) (platform (%platform))
-                                       (getenv #'uiop:getenv) (find-program #'%find-program)
+                                       (getenv #'uiop:getenv)
+                                       (find-program #'hades/program:find-program)
                                        (session-id #'%session-id))
   "What NOTIFY-USER will do, without doing it. Returns one of:
 
@@ -187,7 +171,9 @@ GETENV, FIND-PROGRAM and SESSION-ID are the process's own unless a test passes o
     (destructuring-bind (kind &rest details) plan
       (ecase kind
         (:stderr (fallback (first details)))
-        (:message-box (if (%message-box title message level) (values :native nil) (fallback :failed)))
+        (:message-box (if (%message-box title message level)
+                          (values :native nil)
+                          (fallback :failed)))
         (:program (if (%run-dialog (first details) (second details))
                       (values :native nil)
                       (fallback :failed)))))))

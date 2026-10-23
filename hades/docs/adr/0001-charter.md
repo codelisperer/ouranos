@@ -220,3 +220,12 @@ or neither program), it writes the notice to standard error and returns `:stderr
 reason, never `:native`. That is the contract the Consequences section asks of any notification
 facade: a call that can say the notice was not shown, rather than one that returns normally
 having done nothing. So it is a **facade**. Toast-style notifications remain platform-scoped.
+
+## Addendum, 2026-10-23: showing a path in the file manager (#820)
+
+`hades/open:reveal-path` and `open-url` are a **facade**. Every supported desktop has a file
+manager that can open a folder and select an item in it (Explorer, Finder, and on Linux any file
+manager that implements `org.freedesktop.FileManager1`, with `xdg-open` on the folder when none
+does), and a default browser. A Linux machine with no display, or with no `xdg-open`, has neither
+at that moment, and both functions return `:not-available` with the reason there, never
+`:opened`.
