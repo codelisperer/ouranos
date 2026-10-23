@@ -448,9 +448,12 @@ of /srv/public, not a file inside it.")
 namestring, with or without a trailing separator), and is not ROOT itself. The character after
 ROOT must be one of +PATH-SEPARATORS+."
   (let ((dir (string-right-trim +path-separators+ root)))
+    ;; A boolean, not FIND's character: SBCL derived the character return type and checked
+    ;; callers in this file against it, which a stub returning T in a test tripped (#870).
     (and (> (length path) (1+ (length dir)))
          (#+win32 string-equal #-win32 string= dir path :end2 (length dir))
-         (find (char path (length dir)) +path-separators+))))
+         (find (char path (length dir)) +path-separators+)
+         t)))
 
 (defvar *after-open-hook* nil
   "For tests: a function of no arguments called after the file is opened and before its

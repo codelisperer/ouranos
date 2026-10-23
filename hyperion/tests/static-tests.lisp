@@ -288,23 +288,21 @@ other systems."
       (setf (fdefinition 'static::%darwin-open-flags)
             (lambda () (logandc2 (funcall real) static::+o-nofollow-any+))))))
 
-(defun %open-report (path)
-  "What macOS's steps give for PATH, the path the response was asked for, as a string for a
-control's failure message: the truename, lstat's file type, the flags %DARWIN-OPEN-FLAGS
-gives now, the open's result and errno, and F_GETPATH of what it opened. Elsewhere, the
-truename alone."
-  (let ((native (ignore-errors (sb-ext:native-namestring (truename path)))))
-    #-darwin (format nil "truename ~S" native)
+(defun %open-report (native)
+  "What macOS's steps give for NATIVE, the path as the response used it (no link resolved), as
+a string for a control's failure message: lstat's file type, the flags %DARWIN-OPEN-FLAGS gives
+now, the open's result and errno, and F_GETPATH of what it opened. Elsewhere, lstat's type."
+  (multiple-value-bind (ok dev ino mode) (sb-unix:unix-lstat native)
+    (declare (ignore dev ino))
+    #-darwin (format nil "~A: lstat ~:[failed~;type #o~O~]" native ok (and ok (logand mode sb-unix:s-ifmt)))
     #+darwin
-    (multiple-value-bind (ok dev ino mode) (and native (sb-unix:unix-lstat native))
-      (declare (ignore dev ino))
-      (let ((flags (static::%darwin-open-flags)))
-        (multiple-value-bind (fd errno) (and native (sb-unix:unix-open native flags 0))
-          (unwind-protect
-               (format nil "truename ~S, lstat ~:[failed~;type #o~O~], flags #x~X, open ~:[failed, errno ~D~;fd~*~], F_GETPATH ~S"
-                       native ok (and ok (logand mode sb-unix:s-ifmt)) flags fd errno
-                       (and fd (ignore-errors (static::%fd-path fd))))
-            (when fd (sb-unix:unix-close fd))))))))
+    (let ((flags (static::%darwin-open-flags)))
+      (multiple-value-bind (fd errno) (sb-unix:unix-open native flags 0)
+        (unwind-protect
+             (format nil "~A: lstat ~:[failed~;type #o~O~], flags #x~X, open ~:[failed, errno ~D~;fd~*~], F_GETPATH ~S"
+                     native ok (and ok (logand mode sb-unix:s-ifmt)) flags fd errno
+                     (and fd (ignore-errors (static::%fd-path fd))))
+          (when fd (sb-unix:unix-close fd)))))))
 
 (defun %restore-macos-open-flags ()
   #+darwin
@@ -368,7 +366,8 @@ closes."
                        (if control
                            (is (equal "outside the root" text)
                                "control (~:[elsewhere~;backslash sibling~]): without the handle check the outside file is served; got ~S; ~A"
-                               sibling text (%open-report (merge-pathnames "sub/page.txt" root)))
+                               sibling text (%open-report (sb-ext:native-namestring
+                                                           (merge-pathnames "sub/page.txt" (truename root)))))
                            (is (null r) "a file outside the root (~:[elsewhere~;backslash sibling~]) was served: ~S"
                                sibling text))))
                 (setf (fdefinition 'static::%open-inside) open-inside
@@ -592,13 +591,30 @@ made to accept anything, the same swap serves the outside file."
                  (when control
                    (setf (fdefinition 'static::%path-inside-p) (constantly t))
                    (%allow-links-on-macos))
-                 (let* ((r (static:file-response root "/page.txt"))
+                 (let* ((native (sb-ext:native-namestring (merge-pathnames "page.txt" (truename root))))
+                        (r (static:file-response root "/page.txt"))
                         (text (and r (%body-text (third r)))))
-                   (if control
-                       (is (equal "outside the root" text)
-                           "control: without the containment check the outside file is served; got ~S; ~A"
-                           text (%open-report page))
-                       (is (null r) "the outside file was served: ~S" text))))
+                   (cond
+                     ((not control)
+                      (is (null r) "the outside file was served: ~S" text))
+                     ;; On macOS a third layer refuses this swap before the containment check:
+                     ;; lstat sees that the requested file is now a link. So the control checks
+                     ;; the setup the real assertion relies on, and that lstat is the layer that
+                     ;; refused, rather than switching layers off until the file leaks.
+                     #+darwin
+                     (t
+                      (multiple-value-bind (ok dev ino mode) (sb-unix:unix-lstat native)
+                        (declare (ignore dev ino))
+                        (is (and ok (= (logand mode sb-unix:s-ifmt) sb-unix:s-iflnk))
+                            "control: the requested file is a link after the swap: ~A" (%open-report native)))
+                      (is (not (uiop:subpathp (truename page) (truename root)))
+                          "control: the link resolves outside the root")
+                      (is (null r) "control: refused by lstat, the layer that sees the link"))
+                     #-darwin
+                     (t
+                      (is (equal "outside the root" text)
+                          "control: without the containment check the outside file is served; got ~S; ~A"
+                          text (%open-report native))))))
             (setf (fdefinition 'static::%open-inside) open-inside
                   (fdefinition 'static::%path-inside-p) path-inside-p)
             (%restore-macos-open-flags)))))))
