@@ -256,7 +256,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon"
-               "cl-base64")           ; the provider sends each image as base64
+               "cl-base64"            ; the provider sends each image as base64
+               "aion/random")         ; the multipart boundary of an edit, from the OS generator
   :serial t
   :components ((:file "src/image")))
 

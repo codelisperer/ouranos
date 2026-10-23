@@ -625,9 +625,31 @@ its tag.
   with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
   `:size` and `:quality`, and `:input-tokens`, `:output-tokens` and `:cost` only when the
   provider reports them (`:cost` is absent, never 0, when not reported). A refused or failed
-  request emits no `:image-usage`. `generate-image` calls a provider outside a turn. `praxeon/llm` now exports
-  `request-failure`, the #719 mapping of a failed HTTP request to `provider-request-failed`.
-  Generating from a reference image is not supported yet.
+  request emits no `:image-usage`. `generate-image` calls a provider outside a turn.
+  `praxeon/llm` now exports `request-failure`, the #719 mapping of a failed HTTP request to
+  `provider-request-failed`.
+
+- **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
+  three). `praxeon/image:generate-image` takes `:references`, a list of up to 16
+  `reference-image`s (`*max-references*`), and `:mask`. Make each with
+  `praxeon/image:make-reference-image`, which reads the media type from the file's bytes and
+  signals `praxeon/image:image-input-invalid` (a `tool-error-result`, outcome `:not-run`) for a
+  file that is not PNG, JPEG or WebP, is empty, or is over 50 MB (`*max-reference-bytes*`). A
+  mask must be a PNG with an alpha channel, the size of the first reference, which must be a PNG
+  too; one that is not is refused before any request. With references the OpenAI provider posts
+  `multipart/form-data` to `/images/edits`. A variation is an edit whose prompt asks for one,
+  because `/images/variations` served only DALL-E. In a turn, `register` and
+  `register-openai-image` take `:resolve-reference`, a function from a reference string the
+  model gives to a `reference-image` or NIL, and `:max-references` (default 4); only then does
+  the schema offer `reference_images`. A reference named twice is resolved and sent once. An
+  unknown reference, too many, a resolver result that is not a `reference-image`, or a file that
+  is not an image is a `:not-run` error result. One request's reference images and mask may come
+  to at most 64 MB (`*max-reference-total-bytes*`). The provider is sent file names praxeon
+  makes (`image-1.png`, `mask.png`); `reference-image-name` only labels refusals.
+  `:image-usage` carries `:references`, the number of reference images, for an edit. New
+  exports: `image-request-references`, `image-request-mask`, `reference-image-octets`,
+  `reference-image-media-type`, `reference-image-name`, `*max-reference-total-bytes*`,
+  `openai-image-edit-body`, `edit-body-fields`, `edit-body-files`.
 
 - **hyperion/sidecar: dev sidecars, helper programs such as the Stripe CLI's webhook forwarder
   that start and stop with the dev server** (#700). Declare one with
